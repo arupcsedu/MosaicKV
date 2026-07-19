@@ -1,0 +1,33 @@
+FROM python:3.11.15-slim-bookworm
+
+LABEL org.opencontainers.image.title="MosaicKV SGLang backend"
+LABEL org.mosaickv.python="3.11.15"
+LABEL org.mosaickv.cuda.runtime="12.8/12.9"
+LABEL org.mosaickv.cuda.minimum-driver="525"
+LABEL org.mosaickv.support-status="unverified-until-gpu-smoke"
+
+ENV PYTHONNOUSERSITE=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    XDG_CACHE_HOME=/var/cache/mosaickv/xdg \
+    HF_HOME=/var/cache/mosaickv/huggingface \
+    HF_HUB_CACHE=/var/cache/mosaickv/huggingface/hub \
+    HF_DATASETS_CACHE=/var/cache/mosaickv/datasets \
+    TRANSFORMERS_CACHE=/var/cache/mosaickv/transformers \
+    TORCH_HOME=/var/cache/mosaickv/torch \
+    SGLANG_CACHE_DIR=/var/cache/mosaickv/sglang
+
+WORKDIR /opt/MosaicKV
+COPY mosaickv/env/sglang/requirements.lock /tmp/mosaickv-requirements.lock
+RUN python -m pip install --no-cache-dir -r /tmp/mosaickv-requirements.lock
+
+COPY mosaickv /opt/MosaicKV/mosaickv
+WORKDIR /opt/MosaicKV/mosaickv
+RUN python -m pip install --no-cache-dir --no-deps --editable . \
+    && python -m pip check \
+    && useradd --create-home --uid 10001 mosaickv \
+    && mkdir -p /var/cache/mosaickv \
+    && chown -R mosaickv:mosaickv /var/cache/mosaickv /opt/MosaicKV
+
+VOLUME ["/var/cache/mosaickv"]
+USER mosaickv
+CMD ["python", "scripts/verify_envs.py", "--environment", "sglang", "--require-cuda"]

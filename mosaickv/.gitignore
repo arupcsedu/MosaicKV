@@ -1,0 +1,11 @@
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+__pycache__/
+*.egg-info/
+build/
+dist/
+.coverage
+htmlcov/
+run_artifacts/
+slurm-*.out

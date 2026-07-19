@@ -1,0 +1,41 @@
+FROM pytorch/pytorch:2.11.0-cuda13.0-cudnn9-devel
+
+LABEL org.opencontainers.image.title="MosaicKV Hugging Face reference"
+LABEL org.mosaickv.python="3.11"
+LABEL org.mosaickv.cuda.runtime="13.0"
+LABEL org.mosaickv.cuda.minimum-driver="580"
+LABEL org.mosaickv.support-status="unverified-until-gpu-smoke"
+
+ENV PYTHONNOUSERSITE=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    CUDA_HOME=/usr/local/cuda \
+    MAX_JOBS=4 \
+    XDG_CACHE_HOME=/var/cache/mosaickv/xdg \
+    HF_HOME=/var/cache/mosaickv/huggingface \
+    HF_HUB_CACHE=/var/cache/mosaickv/huggingface/hub \
+    HF_DATASETS_CACHE=/var/cache/mosaickv/datasets \
+    TRANSFORMERS_CACHE=/var/cache/mosaickv/transformers \
+    TORCH_HOME=/var/cache/mosaickv/torch
+
+WORKDIR /opt/MosaicKV
+COPY mosaickv/env/hf/requirements.lock /tmp/mosaickv-requirements.lock
+
+# FlashAttention-2 imports torch while generating its source-build metadata.
+RUN python -c 'import sys; raise SystemExit(sys.version_info[:2] != (3, 11))' \
+    && python -m pip install --no-cache-dir \
+        'torch==2.11.0' 'packaging==26.2' 'psutil==7.2.2' \
+        'ninja==1.13.0' 'wheel==0.47.0' \
+    && python -m pip install --no-cache-dir --no-build-isolation \
+        -r /tmp/mosaickv-requirements.lock
+
+COPY mosaickv /opt/MosaicKV/mosaickv
+WORKDIR /opt/MosaicKV/mosaickv
+RUN python -m pip install --no-cache-dir --no-deps --editable . \
+    && python -m pip check \
+    && useradd --create-home --uid 10001 mosaickv \
+    && mkdir -p /var/cache/mosaickv \
+    && chown -R mosaickv:mosaickv /var/cache/mosaickv /opt/MosaicKV
+
+VOLUME ["/var/cache/mosaickv"]
+USER mosaickv
+CMD ["python", "scripts/verify_envs.py", "--environment", "hf", "--require-cuda"]

@@ -1,0 +1,9 @@
+# vLLM serving and backend-integration environment.
+# Target: CPython 3.11, Linux x86_64, NVIDIA GPU compute capability >= 7.0.
+# CUDA: vLLM 0.11.2 and PyTorch 2.9.0 wheels are compiled for CUDA 12.8;
+# Linux driver >= 525 is required. Standalone FlashAttention-2 is intentionally excluded.
+
+--index-url https://pypi.org/simple
+
+numpy==2.2.6
+vllm==0.11.2

@@ -1,0 +1,58 @@
+schema_version = 1
+
+[model]
+id = "synthetic/smoke"
+revision = "schema-v1"
+precision = "fp32"
+
+[dataset]
+id = "synthetic/smoke"
+revision = "schema-v1"
+split = "validation"
+
+[execution]
+backend = "synthetic"
+attention_implementation = "numpy"
+seed = 0
+deterministic_algorithms = true
+
+[generation]
+max_new_tokens = 32
+do_sample = false
+temperature = 0.0
+top_p = 1.0
+output_length_policy = "fixed_max_new_tokens"
+
+[cache]
+budget_value = 64
+budget_unit = "retained_slots"
+retention_ratio = 1.0
+block_size = 16
+accounting_spec_sha = "60915ac01ad35843c4de56620864145d5b81b973a3bfec03fb322d5e4f6ff695"
+
+[forecasting]
+enabled = true
+horizon = 4
+candidates = 4
+
+[graph]
+enabled = true
+max_neighbors = 8
+min_edge_weight = 0.0
+
+[selection]
+enabled = true
+algorithm = "lazy_greedy"
+
+[prototypes]
+enabled = true
+group_size = 4
+
+[residual]
+enabled = true
+rank = 8
+
+[repair]
+enabled = true
+uncertainty_threshold = 0.5
+max_blocks_per_step = 2

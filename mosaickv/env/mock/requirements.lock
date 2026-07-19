@@ -1,0 +1,27 @@
+# CPU-only development/mock environment. This environment cannot establish GPU,
+# Hugging Face model, vLLM, or SGLang support.
+# Target: CPython 3.11, platform independent where wheels are available.
+# Every external package used by mosaickv[dev] is exactly pinned.
+
+PyYAML==6.0.3
+Pygments==2.20.0
+cfgv==3.5.0
+distlib==0.4.3
+filelock==3.31.0
+identify==2.6.19
+iniconfig==2.3.0
+librt==0.13.0
+mypy==1.20.2
+mypy_extensions==1.1.0
+nodeenv==1.10.0
+numpy==2.4.6
+packaging==26.2
+pathspec==1.1.1
+platformdirs==4.10.1
+pluggy==1.6.0
+pre_commit==4.6.0
+pytest==9.1.1
+python-discovery==1.4.4
+ruff==0.15.22
+typing_extensions==4.16.0
+virtualenv==21.6.1

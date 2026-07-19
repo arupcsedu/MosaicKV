@@ -1,0 +1,4 @@
+{"sample_id":"ci-blue","prompt":"What color is represented by this synthetic RGB pixel?","references":["blue"],"pixel_rgb":[0,0,255]}
+{"sample_id":"ci-green","prompt":"What color is represented by this synthetic RGB pixel?","references":["green"],"pixel_rgb":[0,255,0]}
+{"sample_id":"ci-red","prompt":"What color is represented by this synthetic RGB pixel?","references":["red"],"pixel_rgb":[255,0,0]}
+{"sample_id":"ci-white","prompt":"What color is represented by this synthetic RGB pixel?","references":["white"],"pixel_rgb":[255,255,255]}

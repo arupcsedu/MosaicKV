@@ -1,0 +1,12 @@
+# SGLang serving and backend-integration environment.
+# Target: CPython 3.11, Linux x86_64, NVIDIA GPU compute capability > 7.5.
+# CUDA: SGLang 0.5.10.post1, PyTorch 2.9.1, and sglang-kernel 0.4.1 use
+# CUDA 12.8/12.9-era wheels; Linux driver >= 525 is required.
+# Standalone FlashAttention-2 is intentionally excluded. Upstream SGLang requires
+# FlashAttention-4, which is a distinct package and is retained in the resolved lock.
+
+--index-url https://pypi.org/simple
+--extra-index-url https://pypi.ngc.nvidia.com
+
+numpy==2.3.5
+sglang==0.5.10.post1

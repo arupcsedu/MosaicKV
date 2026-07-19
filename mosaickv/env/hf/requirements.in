@@ -1,0 +1,20 @@
+# Hugging Face eager reference and quality-evaluation environment.
+# Target: CPython 3.11, Linux x86_64, NVIDIA Ampere/Ada/Hopper.
+# CUDA: PyTorch 2.11.0 CUDA 13.0 runtime; Linux driver >= 580.
+# FlashAttention-2 is source-built and requires a CUDA >= 12.0 development toolkit.
+
+--index-url https://pypi.org/simple
+
+accelerate==1.13.0
+av==15.1.0
+datasets==4.8.4
+decord==0.6.0
+flash-attn==2.8.3.post1
+lmms-eval==0.7.2
+ninja==1.13.0
+numpy==2.4.6
+qwen-vl-utils==0.0.14
+torch==2.11.0
+torchvision==0.26.0
+transformers==4.57.6
+wheel==0.47.0
