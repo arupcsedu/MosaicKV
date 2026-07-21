@@ -53,3 +53,14 @@ table and does not establish model or backend support.
   expose the locked `nvidia-cuda-nvrtc-cu12` library directory through the
   common cache/environment bootstrap. No model code or inference math is
   changed by either compatibility fix.
+- Clean-tree Slurm environment smoke job `17182570` at commit `a107364`
+  completed successfully on an NVIDIA A100-SXM4-80GB. All 243 pins and every
+  configured HF, vLLM, SGLang, evaluation, and native-kernel import passed;
+  the patch and patched-target hashes matched; the locked NVRTC library was
+  loader-visible; and the synchronized CUDA 12.4 matrix multiplication passed.
+  The verifier reported `status: support_verified` with an empty error list.
+- The first code-quality job `17182781` did not run any checks because
+  `scripts/check.sh` resolved `src`, `tests`, and `scripts` from the repository
+  root rather than the package root. This is a harness path bug, not a test
+  result; the script now changes to its computed project root before invoking
+  Ruff, MyPy, or pytest.

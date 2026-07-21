@@ -5,6 +5,7 @@ PROJECT_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 # shellcheck source=cache_env.sh
 source "${PROJECT_ROOT}/scripts/cache_env.sh"
 "${PROJECT_ROOT}/scripts/assert_clean_worktree.sh"
+cd "${PROJECT_ROOT}"
 
 PYTHON_BIN=${PYTHON_BIN:-/scratch/djy8hg/env/mosaickv/bin/python}
 
