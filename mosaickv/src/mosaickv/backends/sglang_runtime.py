@@ -33,7 +33,7 @@ from mosaickv.config import RunConfig
 from mosaickv.evaluation.model import EvaluationRequest, GenerationMetrics, ModelGeneration
 from mosaickv.types import JsonObject, Precision
 
-_AUDITED_SGLANG_VERSION = "0.5.10.post1"
+_AUDITED_SGLANG_VERSION = "0.4.3.post4"
 _SUPPORTED_MODELS = {
     "Qwen/Qwen2.5-VL-3B-Instruct",
     "Qwen/Qwen2.5-VL-7B-Instruct",
@@ -71,7 +71,7 @@ def native_integration_capability(sglang_version: str) -> NativeIntegrationCapab
         supported=False,
         feature="whole_block_selection_with_original_logical_and_mrope_positions",
         reason_code=(
-            "audited_0_5_10_post1_missing_atomic_sparse_request_cache_hook"
+            "audited_0_4_3_post4_missing_atomic_sparse_request_cache_hook"
             if sglang_version == _AUDITED_SGLANG_VERSION
             else "unaudited_sglang_version"
         ),
@@ -81,7 +81,7 @@ def native_integration_capability(sglang_version: str) -> NativeIntegrationCapab
             "sglang.srt.mem_cache.memory_pool.ReqToTokenPool.req_to_token",
             "sglang.srt.mem_cache.memory_pool.MHATokenToKVPool.set_kv_buffer",
             "sglang.srt.mem_cache.radix_cache.RadixCache.cache_finished_req",
-            "sglang.srt.model_executor.forward_batch_info.ForwardBatch.mrope_positions",
+            "sglang.srt.model_executor.forward_batch_info.ForwardBatch",
             "sglang.srt.layers.attention.base_attn_backend.AttentionBackend",
         ),
     )
@@ -113,7 +113,6 @@ class SGLangRuntimeOptions:
     enable_mosaickv: bool = False
     port: int = 0
     startup_timeout_seconds: float = 1800.0
-    page_size: int = 1
 
     def __post_init__(self) -> None:
         if self.tensor_parallel_size < 1:
@@ -128,8 +127,6 @@ class SGLangRuntimeOptions:
             raise ValueError("port must be in [0, 65535]")
         if not math.isfinite(self.startup_timeout_seconds) or self.startup_timeout_seconds <= 0:
             raise ValueError("startup_timeout_seconds must be finite and > 0")
-        if self.page_size < 1:
-            raise ValueError("page_size must be >= 1")
 
 
 @dataclass(frozen=True, slots=True)
@@ -293,24 +290,16 @@ def build_server_command(
         str(options.tensor_parallel_size),
         "--mem-fraction-static",
         str(options.mem_fraction_static),
-        "--page-size",
-        str(options.page_size),
         "--stream-interval",
         "1",
         "--random-seed",
         str(config.execution.seed),
         "--attention-backend",
         config.execution.attention_implementation,
-        "--model-impl",
-        "sglang",
-        "--disable-fast-image-processor",
-        "--enable-multimodal",
-        "--enable-deterministic-inference",
         "--enable-metrics",
         "--enable-cache-report",
         "--disable-overlap-schedule",
         "--disable-cuda-graph",
-        "--skip-server-warmup",
     ]
     if options.context_length is not None:
         command.extend(("--context-length", str(options.context_length)))
@@ -580,7 +569,10 @@ class SGLangHTTPTrialRunner:
             raise
         internal_states = server_info.get("internal_states", [])
         memory_usage: JsonObject | None = None
-        if (
+        if isinstance(server_info.get("memory_usage"), Mapping):
+            raw_memory = cast("Mapping[str, Any]", server_info["memory_usage"])
+            memory_usage = cast("JsonObject", dict(raw_memory))
+        elif (
             isinstance(internal_states, list)
             and internal_states
             and isinstance(internal_states[0], Mapping)
@@ -602,8 +594,7 @@ class SGLangHTTPTrialRunner:
             "deterministic_inference": True,
             "overlap_schedule": False,
             "cuda_graph": False,
-            "server_warmup": "skipped",
-            "page_size": options.page_size,
+            "server_warmup": "built_in_health_check_completed_before_ready",
             "tensor_parallel_size": options.tensor_parallel_size,
             "mem_fraction_static": options.mem_fraction_static,
             "context_length": options.context_length,
@@ -682,11 +673,12 @@ class SGLangHTTPTrialRunner:
             {
                 "rid": request_id,
                 "stream": True,
+                "return_logprob": True,
+                "top_logprobs_num": 0,
                 "sampling_params": {
                     "max_new_tokens": max_new_tokens,
                     "temperature": 0.0,
                     "top_p": 1.0,
-                    "sampling_seed": seed,
                     # The explicit HF loop is pure greedy decoding with no
                     # repetition/presence/frequency transform and always runs
                     # the configured fixed output length, including past EOS.
@@ -720,7 +712,23 @@ class SGLangHTTPTrialRunner:
                         raise SGLangRuntimeError(f"SGLang request failed: {event['error']}")
                     raw_ids = event.get("output_ids")
                     if not isinstance(raw_ids, list):
-                        raise SGLangRuntimeError("SGLang stream event omitted output_ids")
+                        meta = event.get("meta_info")
+                        logprobs = (
+                            meta.get("output_token_logprobs")
+                            if isinstance(meta, Mapping)
+                            else None
+                        )
+                        if not isinstance(logprobs, list):
+                            raise SGLangRuntimeError(
+                                "SGLang stream event omitted output token IDs"
+                            )
+                        raw_ids = []
+                        for entry in logprobs:
+                            if not isinstance(entry, (list, tuple)) or len(entry) < 2:
+                                raise SGLangRuntimeError(
+                                    "SGLang output_token_logprobs has an invalid entry"
+                                )
+                            raw_ids.append(int(entry[1]))
                     current_ids = tuple(int(value) for value in raw_ids)
                     if current_ids[: len(token_ids)] != token_ids:
                         raise SGLangRuntimeError("SGLang cumulative output IDs changed in flight")
@@ -913,10 +921,6 @@ class SGLangFullKVModel:
             raise SGLangRuntimeError(
                 "the audited active-KV byte contract currently supports tp_size=1 only"
             )
-        if options.page_size != 1:
-            raise SGLangRuntimeError(
-                "the audited FullKV byte contract requires page_size=1 to avoid padding"
-            )
         if config.model.id not in _SUPPORTED_MODELS:
             known = ", ".join(sorted(_SUPPORTED_MODELS))
             raise LookupError(f"unsupported SGLang multimodal model; known: {known}")
@@ -1008,7 +1012,7 @@ class SGLangFullKVModel:
                 "max_new_tokens": cast("int", generation["max_new_tokens"]),
                 "temperature": 0.0,
                 "top_p": 1.0,
-                "sampling_seed": cast("int", generation["seed"]),
+                "server_random_seed": cast("int", generation["seed"]),
                 "repetition_penalty": 1.0,
                 "presence_penalty": 0.0,
                 "frequency_penalty": 0.0,
@@ -1021,7 +1025,7 @@ class SGLangFullKVModel:
                 "prefix_cache_gauge": "Prometheus sglang:cache_hit_rate",
                 "cached_token_counter": "Prometheus sglang:cached_tokens_total delta",
                 "encoder_cache": (
-                    "repeat-request timing probe only; SGLang 0.5.10.post1 exposes no "
+                    "repeat-request timing probe only; SGLang 0.4.3.post4 exposes no "
                     "per-request multimodal encoder-cache hit counter"
                 ),
                 "active_kv_bytes": (

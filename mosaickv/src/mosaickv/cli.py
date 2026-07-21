@@ -372,7 +372,6 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate_parser.add_argument("--vllm-max-model-len", type=int)
     evaluate_parser.add_argument("--sglang-context-length", type=int, default=4096)
     evaluate_parser.add_argument("--sglang-mem-fraction-static", type=float, default=0.8)
-    evaluate_parser.add_argument("--sglang-page-size", type=int, default=1)
     evaluate_parser.add_argument("--sglang-port", type=int, default=0)
     evaluate_parser.add_argument("--sglang-startup-timeout", type=float, default=1800.0)
     evaluate_parser.add_argument(

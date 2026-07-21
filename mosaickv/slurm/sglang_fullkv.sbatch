@@ -12,7 +12,7 @@
 
 set -euo pipefail
 
-# SGLang 0.5.10 JIT kernels include C++20 standard-library headers.  The
+# SGLang 0.4.3.post4 JIT kernels include C++20 standard-library headers.  The
 # cluster default GCC 8.5 does not provide them; load the audited compiler
 # before spawning the server.  An override remains explicit in the job env.
 module load "${MOSAICKV_GCC_MODULE:-gcc/11.4.0}"
@@ -69,7 +69,6 @@ ARGS=(
   --cache-probe-repeats "${MOSAICKV_CACHE_PROBE_REPEATS:-2}"
   --sglang-mem-fraction-static "${MOSAICKV_SGLANG_MEM_FRACTION_STATIC:-0.8}"
   --sglang-context-length "${MOSAICKV_SGLANG_CONTEXT_LENGTH:-4096}"
-  --sglang-page-size "${MOSAICKV_SGLANG_PAGE_SIZE:-1}"
   --tensor-parallel-size "${MOSAICKV_TENSOR_PARALLEL_SIZE:-1}"
   --json
 )

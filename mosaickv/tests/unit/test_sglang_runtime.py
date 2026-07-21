@@ -93,10 +93,10 @@ def _trial(request_id: str, *, cached: int) -> SGLangTrialMeasurement:
 
 class _Runner:
     def __init__(self) -> None:
-        self.sglang_version = "0.5.10.post1"
+        self.sglang_version = "0.4.3.post4"
         self.cache_geometry = KVCacheGeometry(2, 2, 4, 2)
         self.engine_metadata: JsonObject = {
-            "sglang_version": "0.5.10.post1",
+            "sglang_version": "0.4.3.post4",
             "cuda_graph": False,
             "overlap_schedule": False,
         }
@@ -154,15 +154,21 @@ def test_correctness_server_command_disables_optimizations_and_records_revision(
     options = SGLangRuntimeOptions()
     command = build_server_command(config, options, model_source=config.model.id, port=30123)
     for required in (
-        "--enable-deterministic-inference",
         "--disable-overlap-schedule",
         "--disable-cuda-graph",
-        "--skip-server-warmup",
-        "--disable-fast-image-processor",
         "--enable-metrics",
         "--enable-cache-report",
     ):
         assert required in command
+    for unsupported in (
+        "--enable-deterministic-inference",
+        "--skip-server-warmup",
+        "--disable-fast-image-processor",
+        "--model-impl",
+        "--page-size",
+        "--enable-multimodal",
+    ):
+        assert unsupported not in command
     assert command[command.index("--attention-backend") + 1] == "triton"
     assert command[command.index("--revision") + 1] == config.model.revision
 
@@ -233,11 +239,11 @@ def test_request_isolation_rechecks_anchor_after_distinct_input(tmp_path: Path) 
 
 
 def test_native_feature_is_explicitly_unsupported_for_installed_version() -> None:
-    capability = native_integration_capability("0.5.10.post1")
+    capability = native_integration_capability("0.4.3.post4")
     assert not capability.supported
     assert capability.reason_code.endswith("missing_atomic_sparse_request_cache_hook")
     with pytest.raises(NativeMosaicKVUnsupported, match="No simulated MosaicKV row"):
-        require_native_mosaickv_support(enabled=True, sglang_version="0.5.10.post1")
+        require_native_mosaickv_support(enabled=True, sglang_version="0.4.3.post4")
 
 
 @pytest.mark.parametrize(
@@ -249,7 +255,6 @@ def test_native_feature_is_explicitly_unsupported_for_installed_version() -> Non
         ({"cache_probe_repeats": 0}, "cache_probe_repeats"),
         ({"port": 70000}, "port"),
         ({"startup_timeout_seconds": 0}, "startup_timeout_seconds"),
-        ({"page_size": 0}, "page_size"),
     ),
 )
 def test_runtime_options_validate(kwargs: dict[str, object], message: str) -> None:

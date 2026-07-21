@@ -87,7 +87,7 @@ def _validate_trace(
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--trace", type=Path)
-    parser.add_argument("--vllm-version", default="0.11.2")
+    parser.add_argument("--vllm-version", default="0.7.2")
     parser.add_argument("--require-gpu-measurements", action="store_true")
     args = parser.parse_args()
     payload: dict[str, object] = {

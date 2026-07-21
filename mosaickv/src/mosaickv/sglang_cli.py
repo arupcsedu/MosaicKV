@@ -137,10 +137,9 @@ def run_sglang_evaluation(args: argparse.Namespace, config: RunConfig) -> tuple[
         enable_mosaickv=bool(args.enable_mosaickv),
         port=int(args.sglang_port),
         startup_timeout_seconds=float(args.sglang_startup_timeout),
-        page_size=int(args.sglang_page_size),
     )
     if options.enable_mosaickv:
-        require_native_mosaickv_support(enabled=True, sglang_version="0.5.10.post1")
+        require_native_mosaickv_support(enabled=True, sglang_version="0.4.3.post4")
     if not config.method.is_full_cache or config.cache.retention_ratio != 1.0:
         raise ValueError(
             "SGLang Stage A supports only --method full_kv --retention-ratio 1.0; "
@@ -236,7 +235,6 @@ def run_sglang_evaluation(args: argparse.Namespace, config: RunConfig) -> tuple[
             "server_warmup": engine.get("server_warmup", "unavailable"),
             "deterministic_inference": engine.get("deterministic_inference", "unavailable"),
             "server_command": engine.get("server_command", []),
-            "sglang_page_size": engine.get("page_size", "unavailable"),
             "model_source": engine.get("model_source", "unavailable"),
             "model_revision": engine.get("model_revision", "unavailable"),
         },
@@ -259,7 +257,7 @@ def run_sglang_evaluation(args: argparse.Namespace, config: RunConfig) -> tuple[
     return (0 if failed == 0 else 1), summary
 
 
-def native_capability_payload(sglang_version: str = "0.5.10.post1") -> JsonObject:
+def native_capability_payload(sglang_version: str = "0.4.3.post4") -> JsonObject:
     """Expose the Stage B verdict to tests, scripts, and diagnostics."""
 
     return native_integration_capability(sglang_version).to_json_object()

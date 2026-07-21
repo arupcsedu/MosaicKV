@@ -37,14 +37,25 @@ def _validate_trace(
     if not isinstance(command, list):
         raise ValueError("trace omitted exact server command")
     for required in (
-        "--enable-deterministic-inference",
         "--disable-overlap-schedule",
         "--disable-cuda-graph",
-        "--skip-server-warmup",
-        "--disable-fast-image-processor",
+        "--enable-metrics",
+        "--enable-cache-report",
     ):
         if required not in command:
             raise ValueError(f"correctness server command omitted {required}")
+    for unsupported in (
+        "--enable-deterministic-inference",
+        "--skip-server-warmup",
+        "--disable-fast-image-processor",
+        "--model-impl",
+        "--page-size",
+        "--enable-multimodal",
+    ):
+        if unsupported in command:
+            raise ValueError(f"server command contains unsupported flag {unsupported}")
+    if engine.get("server_warmup") != "built_in_health_check_completed_before_ready":
+        raise ValueError("trace must record SGLang's mandatory health-check warmup")
     geometry = engine.get("kv_cache_geometry")
     if not isinstance(geometry, dict):
         raise ValueError("trace omitted KV cache geometry")
@@ -132,7 +143,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--trace", type=Path, action="append", default=[])
     parser.add_argument("--results-jsonl", type=Path)
-    parser.add_argument("--sglang-version", default="0.5.10.post1")
+    parser.add_argument("--sglang-version", default="0.4.3.post4")
     parser.add_argument("--require-gpu-measurements", action="store_true")
     args = parser.parse_args()
     validations = [

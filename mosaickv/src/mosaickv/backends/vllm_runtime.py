@@ -27,7 +27,7 @@ from mosaickv.evaluation.messages import MultimodalMessage
 from mosaickv.evaluation.model import EvaluationRequest, GenerationMetrics, ModelGeneration
 from mosaickv.types import JsonObject, Precision
 
-_AUDITED_VLLM_VERSION = "0.11.2"
+_AUDITED_VLLM_VERSION = "0.7.2"
 _SUPPORTED_MODELS: dict[str, bool] = {
     "Qwen/Qwen2.5-VL-3B-Instruct": True,
     "Qwen/Qwen2.5-VL-7B-Instruct": True,
@@ -67,17 +67,17 @@ def native_integration_capability(vllm_version: str) -> NativeIntegrationCapabil
         supported=False,
         feature="whole_block_selection_with_original_logical_positions",
         reason_code=(
-            "audited_0_11_2_missing_sparse_logical_block_table_hook"
+            "audited_0_7_2_missing_sparse_logical_block_table_hook"
             if vllm_version == _AUDITED_VLLM_VERSION
             else "unaudited_vllm_version"
         ),
         blocker_document="docs/vllm_native_blocker.md",
         inspected_symbols=(
-            "vllm.v1.worker.gpu_model_runner.GPUModelRunner._prepare_inputs",
-            "vllm.v1.worker.block_table.BlockTable.compute_slot_mapping",
-            "vllm.v1.core.kv_cache_manager.KVCacheManager.allocate_slots",
-            "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend.get_kv_cache_shape",
-            "vllm.distributed.kv_transfer.kv_connector.v1.base.KVConnectorBase_V1",
+            "vllm.engine.async_llm_engine.AsyncLLMEngine.generate",
+            "vllm.worker.model_runner.ModelRunner.prepare_model_input",
+            "vllm.core.block_manager.SelfAttnBlockSpaceManager",
+            "vllm.worker.cache_engine.CacheEngine",
+            "vllm.attention.backends.abstract.AttentionBackend",
         ),
     )
 
@@ -422,10 +422,6 @@ class VLLMTrialRunner(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class _StatSnapshot:
-    prefix_queries: int = 0
-    prefix_hits: int = 0
-    mm_queries: int = 0
-    mm_hits: int = 0
     ttfts: tuple[float, ...] = ()
     itls: tuple[float, ...] = ()
     prefill_seconds: tuple[float, ...] = ()
@@ -441,40 +437,20 @@ class _VLLMStatCollector:
         with self._lock:
             self._snapshot = _StatSnapshot()
 
-    def record(self, scheduler: Any, iteration: Any, mm_cache: Any) -> None:
+    def record_v0(self, stats: Any) -> None:
+        """Record the public vLLM 0.7.2 ``Stats`` payload."""
+
         with self._lock:
             current = self._snapshot
-            prefix_queries = current.prefix_queries
-            prefix_hits = current.prefix_hits
-            mm_queries = current.mm_queries
-            mm_hits = current.mm_hits
-            ttfts = list(current.ttfts)
-            itls = list(current.itls)
-            prefills = list(current.prefill_seconds)
-            decodes = list(current.decode_seconds)
-            if scheduler is not None:
-                prefix = getattr(scheduler, "prefix_cache_stats", None)
-                if prefix is not None:
-                    prefix_queries += int(getattr(prefix, "queries", 0))
-                    prefix_hits += int(getattr(prefix, "hits", 0))
-            if mm_cache is not None:
-                mm_queries += int(getattr(mm_cache, "queries", 0))
-                mm_hits += int(getattr(mm_cache, "hits", 0))
-            if iteration is not None:
-                ttfts.extend(float(value) for value in iteration.time_to_first_tokens_iter)
-                itls.extend(float(value) for value in iteration.inter_token_latencies_iter)
-                for finished in iteration.finished_requests:
-                    prefills.append(float(finished.prefill_time))
-                    decodes.append(float(finished.decode_time))
             self._snapshot = _StatSnapshot(
-                prefix_queries,
-                prefix_hits,
-                mm_queries,
-                mm_hits,
-                tuple(ttfts),
-                tuple(itls),
-                tuple(prefills),
-                tuple(decodes),
+                ttfts=current.ttfts
+                + tuple(float(value) for value in stats.time_to_first_tokens_iter),
+                itls=current.itls
+                + tuple(float(value) for value in stats.time_per_output_tokens_iter),
+                prefill_seconds=current.prefill_seconds
+                + tuple(float(value) for value in stats.time_prefill_requests),
+                decode_seconds=current.decode_seconds
+                + tuple(float(value) for value in stats.time_decode_requests),
             )
 
     def snapshot(self) -> _StatSnapshot:
@@ -483,29 +459,34 @@ class _VLLMStatCollector:
 
 
 class _VLLMStatLogger:
-    """vLLM 0.11.2 custom stat-logger interface; explicitly version-pinned."""
+    """Minimal vLLM 0.7.2 ``StatLoggerBase``-compatible collector."""
 
     def __init__(self, collector: _VLLMStatCollector) -> None:
         self.collector = collector
 
-    def record(
-        self,
-        scheduler_stats: Any,
-        iteration_stats: Any,
-        mm_cache_stats: Any = None,
-        engine_idx: int = 0,
-    ) -> None:
-        del engine_idx
-        self.collector.record(scheduler_stats, iteration_stats, mm_cache_stats)
+    def log(self, stats: Any) -> None:
+        self.collector.record_v0(stats)
 
-    def log_engine_initialized(self) -> None:
+    def info(self, type: str, obj: Any) -> None:
+        del type, obj
+
+
+def _vllm_mm_cache_snapshot() -> tuple[int, int] | None:
+    """Read the audited vLLM 0.7.2 preprocessing-cache counters.
+
+    This private boundary is deliberately version-gated by the engine startup
+    check.  It is measurement-only and never mutates the cache.
+    """
+
+    try:
+        from vllm.multimodal import MULTIMODAL_REGISTRY
+
+        processing_cache = MULTIMODAL_REGISTRY._processing_cache  # noqa: SLF001
+        cache = processing_cache._cache  # noqa: SLF001
+        cache_info = cache.stat()
+        return int(cache_info.total), int(cache_info.hits)
+    except (AttributeError, ImportError, TypeError, ValueError):
         return None
-
-    def log(self) -> None:
-        return None
-
-    def record_sleep_state(self, is_awake: int, level: int) -> None:
-        del is_awake, level
 
 
 def _descendant_pids(root: int) -> set[int]:
@@ -612,7 +593,7 @@ def _generation_int(generation: Mapping[str, object], name: str) -> int:
 
 
 class AsyncVLLMTrialRunner:
-    """Persistent public AsyncLLMEngine streaming wrapper for vLLM 0.11.2."""
+    """Persistent public AsyncLLMEngine streaming wrapper for vLLM 0.7.2."""
 
     def __init__(
         self,
@@ -654,9 +635,7 @@ class AsyncVLLMTrialRunner:
             import vllm
             from vllm import AsyncEngineArgs, AsyncLLMEngine
         except ImportError as error:
-            raise VLLMRuntimeError(
-                "vLLM backend requires the separately pinned vllm environment"
-            ) from error
+            raise VLLMRuntimeError("vLLM backend requires the common environment") from error
         self.vllm_version = str(vllm.__version__)
         if self.vllm_version != _AUDITED_VLLM_VERSION:
             raise VLLMRuntimeError(
@@ -688,7 +667,8 @@ class AsyncVLLMTrialRunner:
             "block_size": self.config.cache.block_size,
             "enable_prefix_caching": True,
             "enforce_eager": True,
-            "disable_log_stats": True,
+            "disable_log_stats": False,
+            "disable_log_requests": True,
         }
         if self._model_source == self.config.model.id:
             kwargs["revision"] = self.config.model.revision
@@ -699,14 +679,11 @@ class AsyncVLLMTrialRunner:
             kwargs["max_model_len"] = self.options.max_model_len
         engine_args = AsyncEngineArgs(**kwargs)
 
-        def stat_logger_factory(_vllm_config: Any, _engine_index: int) -> _VLLMStatLogger:
-            return _VLLMStatLogger(self._collector)
-
-        # vLLM's stat-logger extension changes shape between audited releases;
-        # the exact runtime version gate above owns compatibility validation.
+        engine_config = engine_args.create_engine_config()
         engine = AsyncLLMEngine.from_engine_args(
             engine_args,
-            stat_loggers=cast("Any", [stat_logger_factory]),
+            engine_config=engine_config,
+            stat_loggers=cast("Any", {"mosaickv": _VLLMStatLogger(self._collector)}),
         )
         self.engine_metadata = {
             "vllm_version": self.vllm_version,
@@ -745,6 +722,7 @@ class AsyncVLLMTrialRunner:
             skip_special_tokens=True,
         )
         self._collector.reset()
+        mm_cache_before = _vllm_mm_cache_snapshot()
         memory = _GPUMemorySampler()
         memory.start()
         started = time.perf_counter()
@@ -780,11 +758,34 @@ class AsyncVLLMTrialRunner:
         decode = max(0.0, token_times[-1] - token_times[0]) if len(token_times) > 1 else None
         generated = len(token_ids)
         stats = self._collector.snapshot()
+        mm_cache_after = _vllm_mm_cache_snapshot()
+        mm_queries: int | None = None
+        mm_hits: int | None = None
+        if mm_cache_before is not None and mm_cache_after is not None:
+            mm_queries = max(0, mm_cache_after[0] - mm_cache_before[0])
+            mm_hits = max(0, mm_cache_after[1] - mm_cache_before[1])
         prefix_rate: float | None = None
         if cached_tokens is not None and prompt_tokens is not None and prompt_tokens > 0:
             prefix_rate = cached_tokens / prompt_tokens
-        mm_rate = stats.mm_hits / stats.mm_queries if stats.mm_queries else None
-        metrics_ttft = getattr(output_metrics, "first_token_latency", None)
+        mm_rate = (
+            mm_hits / mm_queries
+            if mm_queries is not None and mm_queries > 0 and mm_hits is not None
+            else None
+        )
+        metrics_ttft: float | None = None
+        metrics_prefill: float | None = None
+        metrics_decode: float | None = None
+        if output_metrics is not None:
+            arrival = getattr(output_metrics, "arrival_time", None)
+            scheduled = getattr(output_metrics, "first_scheduled_time", None)
+            first_token = getattr(output_metrics, "first_token_time", None)
+            completed = getattr(output_metrics, "finished_time", None)
+            if arrival is not None and first_token is not None:
+                metrics_ttft = max(0.0, float(first_token) - float(arrival))
+            if scheduled is not None and first_token is not None:
+                metrics_prefill = max(0.0, float(first_token) - float(scheduled))
+            if first_token is not None and completed is not None:
+                metrics_decode = max(0.0, float(completed) - float(first_token))
         return VLLMTrialMeasurement(
             request_id=request_id,
             answer="".join(text_parts),
@@ -802,13 +803,13 @@ class AsyncVLLMTrialRunner:
             ),
             num_cached_tokens=cached_tokens,
             prefix_cache_hit_rate=prefix_rate,
-            mm_cache_queries=stats.mm_queries,
-            mm_cache_hits=stats.mm_hits,
+            mm_cache_queries=mm_queries,
+            mm_cache_hits=mm_hits,
             mm_cache_hit_rate=mm_rate,
-            engine_prefill_seconds=_one_or_none(stats.prefill_seconds),
-            engine_decode_seconds=_one_or_none(stats.decode_seconds),
+            engine_prefill_seconds=_one_or_none(stats.prefill_seconds) or metrics_prefill,
+            engine_decode_seconds=_one_or_none(stats.decode_seconds) or metrics_decode,
             engine_ttft_seconds=(
-                float(metrics_ttft) if metrics_ttft is not None else _one_or_none(stats.ttfts)
+                metrics_ttft if metrics_ttft is not None else _one_or_none(stats.ttfts)
             ),
             engine_inter_token_latencies_seconds=stats.itls,
             gpu_memory_source=memory.source,
@@ -839,7 +840,10 @@ class AsyncVLLMTrialRunner:
 
     async def _shutdown_async(self) -> None:
         if self._engine is not None:
-            self._engine.shutdown()
+            self._engine.shutdown_background_loop()
+            executor = getattr(getattr(self._engine, "engine", None), "model_executor", None)
+            if executor is not None and hasattr(executor, "shutdown"):
+                executor.shutdown()
         # vLLM's synchronous shutdown schedules cancellation of its asyncio
         # handlers. Give those cancellations a loop turn, then await every
         # remaining handler before stopping the owned event loop.
@@ -1021,9 +1025,12 @@ class VLLMFullKVModel:
             "trials": [trial.to_json_object() for trial in trials],
             "cache_measurement": {
                 "prefix_cache": "RequestOutput.num_cached_tokens",
-                "multimodal_preprocessor_cache": "custom StatLogger MultiModalCacheStats",
+                "multimodal_preprocessor_cache": (
+                    "vllm.multimodal.MULTIMODAL_REGISTRY._processing_cache._cache.stat() "
+                    "per-request counter deltas (audited vLLM 0.7.2 private API)"
+                ),
                 "encoder_output_cache": (
-                    "repeat-request timing probe only; vLLM 0.11.2 exposes no per-request "
+                    "repeat-request timing probe only; vLLM 0.7.2 exposes no per-request "
                     "encoder-output-cache hit counter"
                 ),
             },

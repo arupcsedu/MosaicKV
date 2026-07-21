@@ -144,7 +144,7 @@ def run_vllm_evaluation(args: argparse.Namespace, config: RunConfig) -> tuple[in
     if options.enable_mosaickv:
         require_native_mosaickv_support(
             enabled=True,
-            vllm_version="0.11.2",
+            vllm_version="0.7.2",
             enforce_eager=True,
             attention_backend=config.execution.attention_implementation,
         )
@@ -265,7 +265,7 @@ def run_vllm_evaluation(args: argparse.Namespace, config: RunConfig) -> tuple[in
     return (0 if failed == 0 else 1), summary
 
 
-def native_capability_payload(vllm_version: str = "0.11.2") -> JsonObject:
+def native_capability_payload(vllm_version: str = "0.7.2") -> JsonObject:
     """Expose the Stage B verdict to tests, scripts, and diagnostics."""
 
     return native_integration_capability(vllm_version).to_json_object()

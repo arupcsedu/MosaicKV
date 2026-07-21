@@ -80,9 +80,9 @@ def _trial(request_id: str, *, cached: int, mm_hit: int) -> VLLMTrialMeasurement
 
 class _Runner:
     def __init__(self) -> None:
-        self.vllm_version = "0.11.2"
+        self.vllm_version = "0.7.2"
         self.engine_metadata: JsonObject = {
-            "vllm_version": "0.11.2",
+            "vllm_version": "0.7.2",
             "cuda_graph": False,
         }
         self.calls = 0
@@ -222,13 +222,13 @@ def test_fullkv_wrapper_writes_raw_trials_and_uses_first_measurement(tmp_path: P
 
 
 def test_native_feature_is_explicitly_unsupported_for_installed_version() -> None:
-    capability = native_integration_capability("0.11.2")
+    capability = native_integration_capability("0.7.2")
     assert not capability.supported
-    assert capability.reason_code == "audited_0_11_2_missing_sparse_logical_block_table_hook"
+    assert capability.reason_code == "audited_0_7_2_missing_sparse_logical_block_table_hook"
     with pytest.raises(NativeMosaicKVUnsupported, match="No simulated MosaicKV row"):
         require_native_mosaickv_support(
             enabled=True,
-            vllm_version="0.11.2",
+            vllm_version="0.7.2",
             enforce_eager=True,
             attention_backend="eager",
         )
