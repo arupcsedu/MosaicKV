@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.metadata
 import json
 import os
 import re
@@ -99,6 +100,15 @@ def test_mock_verifier_passes_without_cuda(tmp_path: Path) -> None:
             "TMPDIR": str(cache_root / "tmp"),
         }
     )
+    mock_lock = tmp_path / "mock.requirements.lock"
+    mock_lock.write_text(
+        "\n".join(
+            f"{name}=={importlib.metadata.version(name)}"
+            for name in ("mosaickv", "numpy", "pytest")
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     completed = subprocess.run(
         [
             sys.executable,
@@ -106,7 +116,7 @@ def test_mock_verifier_passes_without_cuda(tmp_path: Path) -> None:
             "--environment",
             "mock",
             "--lock",
-            str(project_root / "env" / "mock" / "requirements.lock"),
+            str(mock_lock),
         ],
         check=False,
         capture_output=True,

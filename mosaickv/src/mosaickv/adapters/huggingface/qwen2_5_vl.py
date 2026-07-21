@@ -74,7 +74,9 @@ class Qwen25VLAdapter(HuggingFaceMultimodalAdapter):
         return cls(model, processor)
 
     def _language_layers(self) -> Sequence[Any]:
-        return cast("Sequence[Any]", self.model.model.language_model.layers)
+        core = self.model.model
+        language_model = getattr(core, "language_model", core)
+        return cast("Sequence[Any]", language_model.layers)
 
     def _image_token_id(self) -> int | None:
         return int(self.model.config.image_token_id)
@@ -95,6 +97,8 @@ class Qwen25VLAdapter(HuggingFaceMultimodalAdapter):
     def _capture_model_state(self, output: Any) -> dict[str, Any]:
         rope_deltas = getattr(output, "rope_deltas", None)
         if rope_deltas is None:
+            rope_deltas = getattr(self.model, "rope_deltas", None)
+        if rope_deltas is None:
             rope_deltas = getattr(self.model.model, "rope_deltas", None)
         if rope_deltas is None:
             raise RuntimeError("Qwen2.5-VL prefill did not produce rope_deltas")
@@ -104,7 +108,10 @@ class Qwen25VLAdapter(HuggingFaceMultimodalAdapter):
         rope_deltas = state.model_state.get("rope_deltas")
         if rope_deltas is None:
             raise RuntimeError("Qwen2.5-VL decode state is missing rope_deltas")
-        self.model.model.rope_deltas = rope_deltas
+        if hasattr(self.model, "rope_deltas"):
+            self.model.rope_deltas = rope_deltas
+        else:
+            self.model.model.rope_deltas = rope_deltas
 
 
 __all__ = ["Qwen25VLAdapter"]

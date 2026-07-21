@@ -67,10 +67,16 @@ class LlavaOneVisionAdapter(HuggingFaceMultimodalAdapter):
         return cast("Sequence[Any]", self.model.model.language_model.layers)
 
     def _image_token_id(self) -> int | None:
-        return int(self.model.config.image_token_id)
+        value = getattr(self.model.config, "image_token_id", None)
+        if value is None:
+            value = getattr(self.model.config, "image_token_index", None)
+        return int(value) if value is not None else None
 
     def _video_token_id(self) -> int | None:
-        return int(self.model.config.video_token_id)
+        value = getattr(self.model.config, "video_token_id", None)
+        if value is None:
+            value = getattr(self.model.config, "video_token_index", None)
+        return int(value) if value is not None else None
 
     def _processor_kwargs(
         self, prompt: str, images: Sequence[Any], videos: Sequence[Any]

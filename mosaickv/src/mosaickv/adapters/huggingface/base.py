@@ -308,6 +308,8 @@ class HuggingFaceMultimodalAdapter(ABC):
         if vision is None:
             vision = getattr(root, "visual", None)
         if vision is None:
+            vision = getattr(self.model, "visual", None)
+        if vision is None:
             vision = getattr(self.model, "vision_model", None)
 
         projector = getattr(root, "multi_modal_projector", None)
@@ -319,6 +321,8 @@ class HuggingFaceMultimodalAdapter(ABC):
         language_model = getattr(root, "language_model", None)
         if language_model is None:
             language_model = getattr(self.model, "language_model", None)
+        if language_model is None and hasattr(root, "layers"):
+            language_model = root
         if language_model is None:
             raise RuntimeError("adapter cannot locate the language-model module for profiling")
         return AdapterProfilingModules(
