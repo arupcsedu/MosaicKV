@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import Any, Self, cast
+from typing import Any, Self
 
 from mosaickv.adapters.huggingface.base import HuggingFaceMultimodalAdapter, validate_hf_revision
 from mosaickv.adapters.huggingface.types import (
@@ -67,7 +67,7 @@ class Llava15Adapter(HuggingFaceMultimodalAdapter):
         return cls(model, processor)
 
     def _language_layers(self) -> Sequence[Any]:
-        return cast("Sequence[Any]", self.model.model.language_model.layers)
+        return self._standard_language_layers()
 
     def _image_token_id(self) -> int | None:
         value = getattr(self.model.config, "image_token_id", None)

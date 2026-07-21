@@ -217,6 +217,27 @@ class HuggingFaceMultimodalAdapter(ABC):
     def _language_layers(self) -> Sequence[Any]:
         """Return decoder layers in execution order."""
 
+    def _standard_language_layers(self) -> Sequence[Any]:
+        """Locate decoder layers across supported Transformers wrapper layouts."""
+
+        pending = [self.model]
+        visited: set[int] = set()
+        while pending:
+            candidate = pending.pop(0)
+            if candidate is None or id(candidate) in visited:
+                continue
+            visited.add(id(candidate))
+            layers = getattr(candidate, "layers", None)
+            if layers is not None:
+                return cast("Sequence[Any]", layers)
+            pending.extend(
+                (
+                    getattr(candidate, "language_model", None),
+                    getattr(candidate, "model", None),
+                )
+            )
+        raise RuntimeError("adapter cannot locate language-model decoder layers")
+
     @abstractmethod
     def _image_token_id(self) -> int | None:
         """Return the expanded image-context token ID, if present."""

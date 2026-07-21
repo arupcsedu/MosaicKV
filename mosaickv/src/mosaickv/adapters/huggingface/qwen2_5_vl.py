@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import Any, Self, cast
+from typing import Any, Self
 
 from mosaickv.adapters.huggingface.base import HuggingFaceMultimodalAdapter, validate_hf_revision
 from mosaickv.adapters.huggingface.types import (
@@ -74,9 +74,26 @@ class Qwen25VLAdapter(HuggingFaceMultimodalAdapter):
         return cls(model, processor)
 
     def _language_layers(self) -> Sequence[Any]:
-        core = self.model.model
-        language_model = getattr(core, "language_model", core)
-        return cast("Sequence[Any]", language_model.layers)
+        return self._standard_language_layers()
+
+    def _prefill_forward(self, forward_inputs: dict[str, Any]) -> Any:
+        # Transformers 4.49's monolithic Qwen2.5-VL wrapper always computes
+        # full logits and does not yet accept the later logits_to_keep option.
+        selected = dict(forward_inputs)
+        selected.pop("logits_to_keep", None)
+        return self.model(**selected)
+
+    def _decode_forward(
+        self, token_id: Any, state: DecodeState, attention_mask: Any, cache_position: Any
+    ) -> Any:
+        return self.model(
+            input_ids=token_id,
+            attention_mask=attention_mask,
+            past_key_values=state.past_key_values,
+            cache_position=cache_position,
+            use_cache=True,
+            return_dict=True,
+        )
 
     def _image_token_id(self) -> int | None:
         return int(self.model.config.image_token_id)
