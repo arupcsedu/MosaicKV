@@ -33,7 +33,7 @@ cuda-python==12.6.2.post1
 dataproperty==1.1.1
 datasets==4.8.4
 decorator==5.3.1
-decord==0.6.0
+decord2==3.4.0
 defusedxml==0.7.1
 depyf==0.18.0
 dill==0.4.1

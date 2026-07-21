@@ -18,3 +18,11 @@ table and does not establish model or backend support.
 - Corrective action: version a 300-second uv HTTP timeout, ten retries, and
   four concurrent downloads for host and container setup, then resume from the
   scratch cache.
+- Second synchronization attempt: all locked packages downloaded and installed,
+  then both `pip check` and `uv pip check` rejected `decord==0.6.0` because its
+  installed wheel is tagged `cp36-cp36m-manylinux2010_x86_64`, not CPython
+  3.11. Imports and support remained unverified at this boundary.
+- Corrective action: do not waive the checker. Replace SGLang's legacy video
+  extra with an explicit SRT dependency set and `decord2==3.4.0`, whose wheel is
+  tagged `cp311-cp311-manylinux_2_28_x86_64` and provides SGLang's imported
+  `decord` module API.

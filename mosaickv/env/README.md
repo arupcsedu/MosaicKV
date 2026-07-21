@@ -29,6 +29,15 @@ environment: vLLM 0.11.0 requires `outlines-core==0.2.11`, whereas SGLang
 `env/hf`, `env/vllm`, `env/sglang`, and `env/mock` files are retained only
 for historical auditability. They must not drive a new run.
 
+The common input spells out SGLang's SRT dependency set instead of activating
+the legacy `srt` extra. That extra requires `decord==0.6.0`, whose only Linux
+wheel is tagged for CPython 3.6 and fails both pip and uv platform checks under
+Python 3.11. The lock uses `decord2==3.4.0`, which provides the same `decord`
+module API used by SGLang (`VideoReader` and `cpu`) in a CPython 3.11,
+manylinux 2.28 wheel. This is an environment compatibility decision, not an
+algorithm change, and video support remains unverified until a video smoke
+passes.
+
 Standalone FlashAttention-2 is intentionally absent from the common lock. HF
 correctness starts with eager attention. vLLM and SGLang use the kernels pinned
 by their own dependency graph. Do not claim SDPA, FlashAttention-2, vLLM, or
