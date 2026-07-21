@@ -1,0 +1,28 @@
+{
+  "artifacts": {
+    "hf_manifest": "/sfs/weka/scratch/djy8hg/runs/mosaickv/sglang-fullkv-parity-final/hf-reference/hf-fullkv-sglang-parity-17160104/manifest.json",
+    "hf_manifest_sha256": "d5fd5b5a0a2bb516e346168024ae9d0d4f19116cfa7d24c2f19ef7e3581441aa",
+    "hf_trace": "/sfs/weka/scratch/djy8hg/runs/mosaickv/sglang-fullkv-parity-final/hf-reference/traces/hf-fullkv-sglang-parity-17160104/8a39448ed93fe8f3.json",
+    "hf_trace_sha256": "f736b1408c4bf162a9281a7be21a54af9710e3daed5faa7f46ff8c0e916e8159",
+    "sglang_manifest": "/sfs/weka/scratch/djy8hg/runs/mosaickv/sglang-fullkv-parity-final/sglang-fullkv-17160103/manifest.json",
+    "sglang_manifest_sha256": "057084d0e30b551b478739aba7f126741403124f3d1294cf61a5ec1e7041b0a3",
+    "sglang_trace": "/sfs/weka/scratch/djy8hg/runs/mosaickv/sglang-fullkv-parity-final/traces/sglang-fullkv-17160103/ci-white-3452da706ebc.json",
+    "sglang_trace_sha256": "6db8d8bb8f43ae7a193bf54ec4662a655a78d157a92b966557f557f32d3ecb3e"
+  },
+  "checks": {
+    "decoded_text": false,
+    "generation_parameters": true,
+    "input_hashes": true,
+    "model": true,
+    "sample_id": true,
+    "token_ids": false
+  },
+  "comparison": "hf_fullkv_vs_sglang_fullkv",
+  "generated_tokens": {
+    "hf": 16,
+    "sglang": 16
+  },
+  "schema_version": 1,
+  "status": "failed",
+  "token_agreement": 0.0
+}

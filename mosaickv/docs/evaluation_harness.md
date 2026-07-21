@@ -103,7 +103,7 @@ model. It validates orchestration only and is never a measured benchmark result.
 
 ```bash
 cd /scratch/djy8hg/workdir/MosaicKV
-/scratch/djy8hg/env/mosaickv_dev/bin/mosaickv evaluate \
+/scratch/djy8hg/env/mosaickv/bin/mosaickv evaluate \
   --task synthetic_ci \
   --run-id synthetic-ci-001 \
   --raw-output /scratch/djy8hg/results/mosaickv/synthetic-ci-001/raw.jsonl \

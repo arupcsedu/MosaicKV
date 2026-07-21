@@ -194,7 +194,10 @@ def _software_provenance(backend: Backend, gpu_count: int, driver: str) -> JsonO
         "cuda": _torch_cuda_version() if gpu_count > 0 and uses_torch else "not_used",
         "driver": driver if gpu_count > 0 else "not_used",
         "pytorch": _version("torch") if uses_torch else "not_used",
-        "transformers": _version("transformers") if backend == Backend.HUGGINGFACE else "not_used",
+        # Both pinned engine backends use Transformers for checkpoint config,
+        # tokenization, and multimodal processor construction even though they
+        # do not use the Transformers generation loop.
+        "transformers": _version("transformers") if uses_torch else "not_used",
         "vllm": _version("vllm") if backend == Backend.VLLM else "not_used",
         "sglang": _version("sglang") if backend == Backend.SGLANG else "not_used",
         "python": platform.python_version(),
@@ -222,10 +225,27 @@ class RunManifestWriter:
         *,
         run_id: str | None = None,
         started_at_utc: str | None = None,
+        execution_metadata: JsonObject | None = None,
+        attention_implementation_override: str | None = None,
     ) -> JsonObject:
         source = _source_provenance(self.repo_root)
         source["config_sha"] = config_sha256(config)
+        lock_path = self.repo_root / "mosaickv" / "env" / "common" / "requirements.lock"
+        if not lock_path.is_file():
+            raise ManifestError(f"common environment lock is missing: {lock_path}")
         gpu_type, gpu_count, driver = _nvidia_hardware()
+        execution: JsonObject = {
+            "backend": config.execution.backend.value,
+            "attention_implementation": (
+                attention_implementation_override or config.execution.attention_implementation
+            ),
+            "seed": config.execution.seed,
+            "deterministic_algorithms": config.execution.deterministic_algorithms,
+        }
+        for key, value in (execution_metadata or {}).items():
+            if key in execution:
+                raise ManifestError(f"execution metadata cannot replace required field: {key}")
+            execution[key] = value
         return {
             "schema_version": 1,
             "run_id": run_id or uuid.uuid4().hex,
@@ -244,12 +264,7 @@ class RunManifestWriter:
             },
             "software": _software_provenance(config.execution.backend, gpu_count, driver),
             "hardware": {"gpu_type": gpu_type, "gpu_count": gpu_count},
-            "execution": {
-                "backend": config.execution.backend.value,
-                "attention_implementation": config.execution.attention_implementation,
-                "seed": config.execution.seed,
-                "deterministic_algorithms": config.execution.deterministic_algorithms,
-            },
+            "execution": execution,
             "inputs": cast("JsonObject", asdict(inputs)),
             "generation": {
                 "parameters_sha": _generation_sha(config),
@@ -264,6 +279,10 @@ class RunManifestWriter:
             "artifacts": cast("JsonObject", asdict(artifacts)),
             "resolved_config": canonical_config(config),
             "environment": {
+                "name": "common",
+                "lock_path": str(lock_path.relative_to(self.repo_root)),
+                "lock_sha256": sha256_bytes(lock_path.read_bytes()),
+                "cache_root": os.environ.get("MOSAICKV_CACHE_ROOT", "not_set"),
                 "platform": platform.platform(),
                 "hostname": platform.node(),
                 "python_executable": sys.executable,
@@ -284,6 +303,8 @@ class RunManifestWriter:
         *,
         run_id: str | None = None,
         started_at_utc: str | None = None,
+        execution_metadata: JsonObject | None = None,
+        attention_implementation_override: str | None = None,
     ) -> Path:
         """Write a new manifest atomically and refuse to overwrite an artifact."""
 
@@ -298,6 +319,8 @@ class RunManifestWriter:
             artifacts,
             run_id=run_id,
             started_at_utc=started_at_utc,
+            execution_metadata=execution_metadata,
+            attention_implementation_override=attention_implementation_override,
         )
         serialized = json.dumps(manifest, sort_keys=True, indent=2, ensure_ascii=False) + "\n"
         temporary_name: str | None = None

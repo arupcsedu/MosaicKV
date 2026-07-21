@@ -1,23 +1,36 @@
 # Backend capability matrix
 
-Audit date: 2026-07-19. “Native safe API” means a documented, supported engine
+> Common-environment reset (2026-07-21): the source/API findings below remain
+> version-specific historical evidence for Transformers 4.57.6, vLLM 0.11.2,
+> and SGLang 0.5.10.post1. Current execution uses the common lock
+> (Transformers 4.49.0, vLLM 0.7.2, SGLang 0.4.3.post1) and is **unsupported**
+> until its installed source is re-audited and its clean-tree gates pass. Do
+> not transfer a support claim or source line number across these versions.
+
+Audit date: 2026-07-20. “Native safe API” means a documented, supported engine
 extension point whose ownership and synchronization rules permit MosaicKV to
 operate without patching scheduler/runner internals. Merely being able to reach
 a tensor from Python is not sufficient.
 
 ## Verdict
 
-Hugging Face eager execution is the only viable first reference because the
-caller owns the model forward pass and returned cache. The installed vLLM and
-SGLang sources prove that both engines internally represent the data MosaicKV
-would need, but neither public API exposes the complete contract. A production
-integration will require version-pinned backend changes plus correctness tests;
-it cannot be implemented as an ordinary `LLM.generate` or `Engine.generate`
-plugin.
+Hugging Face eager execution is the only viable first cache-modification
+reference because the caller owns the model forward pass and returned cache.
+Measured vLLM FullKV is executable and GPU-verified for pinned Qwen2.5-VL-3B,
+but this does not expose a mutation hook. The correctness-first SGLang FullKV
+HTTP wrapper is GPU-verified for pinned Qwen2.5-VL-3B/7B in the isolated
+SGLang 0.5.10.post1 environment. Its controlled HF eager output comparison did
+not establish token parity, so optimized SGLang settings remain disabled. The
+installed vLLM and SGLang sources prove that both engines internally
+represent the data MosaicKV would need, while neither public API exposes the
+complete contract. A native integration requires version-pinned backend
+changes plus correctness tests; it cannot be implemented as an ordinary
+`LLM.generate` or `Engine.generate` plugin.
 
-The vLLM/SGLang source below is installed under the broken prefix
-`/scratch/djy8hg/env/drc_rag_bench_env/lib/python3.11/site-packages`. It is
-valid for source inspection only: Python in that prefix cannot start.
+The SGLang source below was checked in the functional pinned prefix
+`/scratch/djy8hg/env/mosaickv/lib/python3.11/site-packages`; it is
+byte-identical for the cited files to the originally audited broken source
+prefix. Runtime execution uses only the functional pinned prefix.
 
 ## Required-operation matrix
 
@@ -150,6 +163,17 @@ nodes. It does not expose arbitrary MosaicKV per-layer block selection,
 prototype/residual values, preserved custom logical positions, or
 uncertainty-triggered decode repair through the public engine. It is therefore
 not a native solution to the requested contract.
+
+### Measurement-only boundary and Stage B verdict
+
+The Stage A wrapper uses only `/generate`, `/server_info`, and `/metrics`. It
+records deterministic streaming latency, Radix cached-token observations,
+process-tree GPU memory, exact server arguments, and model-derived logical KV
+bytes without presenting those observations as a mutation API. The native
+feature flag fails before server launch for `0.5.10.post1`; no HF-side
+selection is replayed and labeled native. The inspected structures, missing
+atomic hook, proposed upstream interface, and request-leakage risks are listed
+in [the SGLang native blocker](sglang_native_blocker.md).
 
 ## Integration consequence
 

@@ -1,18 +1,20 @@
 # Published-baseline feasibility
 
-Audit date: 2026-07-19. Official repositories were inspected remotely without
-checking code into MosaicKV or changing an environment. If adopted later,
-official code must be placed under `third_party/`, pinned to the exact commit,
-and retain its license and attribution. Any paper-faithful implementation must
-be named `*_reimpl` and must never be described as official code.
+Audit date: 2026-07-19; LOOK-M and PrefixKV pins updated locally on 2026-07-20.
+Both official repositories are unmodified submodules under `third_party/` at
+their audited commits. PrefixKV was validated in separate environments under
+`/scratch/djy8hg/env`; the default project environment was not changed. External code must
+remain under `third_party/`, pinned to an exact commit, and retain its license
+and attribution. Any paper-faithful implementation must be named `*_reimpl`
+and must never be described as official code.
 
 ## Summary
 
 | Baseline | Official implementation | Exact audit pin | Directly runnable in current environment | Models supplied by authors | License | Feasibility |
 |---|---|---|---|---|---|---|
 | LOOK-M | Yes, but repository says code is still being organized | `SUSTechBruce/LOOK-M@ecf0f51a9c416c2d85e47faf2638502f01a6d748` | **Unsupported** | Original/vendored LLaVA 1.5 7B/13B; MobileVLM V2 3B/7B; Yi-VL 6B; older InternVL Chat ViT-6B/Vicuna-7B configs | MIT | Run only in an isolated legacy environment; substantial adaptation risk |
-| PrefixKV | Yes | `THU-MIG/PrefixKV@597f1ab032704951550f93bcc8a23f1454b80aa4` | **Unsupported** | Vendored LLaVA 1.5, with 7B documented and 7B/13B prefix configs present | MIT | Run official code in an isolated legacy environment; adaptation required for HF-converted or Qwen models |
-| VL-Cache | No official code located for arXiv:2410.23317/ICLR 2025 | paper v1, 2024-10-29 | **Unsupported** | Paper evaluates LLaVA-v1.6-Mistral-7B and LLaVA-v1.6-34B | Paper: CC BY-NC-SA 4.0; no software license exists | Only a clearly labeled `vl_cache_reimpl` is possible unless authors release code |
+| PrefixKV | Yes | `THU-MIG/PrefixKV@597f1ab032704951550f93bcc8a23f1454b80aa4` | Separate parity environment only | Vendored LLaVA 1.5, with 7B documented and 7B/13B prefix configs present | MIT | One controlled legacy LLaVA-1.5-7B parity diagnostic passed; HF-converted or Qwen models still require `prefixkv_reimpl` |
+| VL-Cache | No official code located for arXiv:2410.23317/ICLR 2025 | paper v1, 2024-10-29 | Local eager-HF `vl_cache_reimpl`; paper-model reproduction not yet run | Paper evaluates LLaVA-v1.6-Mistral-7B and LLaVA-v1.6-34B | Paper: CC BY-NC-SA 4.0; no software license exists | Formula/budget/leakage tests pass; no official parity is possible unless authors release code |
 
 The similarly named 2025 paper/repository “VLCache: Computing 2% Vision Tokens
 and Reusing 98%” is a different work and is not implementation evidence for
@@ -74,11 +76,13 @@ calling the result official would invalidate paper fidelity.
 ### License and decision
 
 The pinned [license](https://github.com/SUSTechBruce/LOOK-M/blob/ecf0f51a9c416c2d85e47faf2638502f01a6d748/LICENSE)
-is MIT, copyright 2024 Bruce.wan. Feasibility is **conditional**: preserve the
-official code unchanged under `third_party/LOOK-M`, patch only through a small
-MosaicKV-side launcher where possible, and report results as official LOOK-M
-only on authors' supported checkpoints/configuration. A port to the HF
-conversion or another model is a distinct `look_m_reimpl` result.
+is MIT, copyright 2024 Bruce.wan. Feasibility is **conditional**: the official
+code is preserved unchanged under `third_party/LOOK-M`; portability changes
+live as isolated patches under `third_party/patches/LOOK-M`. Report results as
+official LOOK-M only on the authors' supported checkpoint/configuration. The
+paper-equation port to the HF conversion is the distinct `lookm_reimpl` method
+documented in [`docs/baselines/lookm_spec.md`](baselines/lookm_spec.md), never
+official code.
 
 ## PrefixKV
 
@@ -134,6 +138,19 @@ LLaVA environment. A modern Transformers or different-model port must be named
 `prefixkv_reimpl`, and any offline prefix calibration must use a declared,
 non-test calibration split to avoid leakage.
 
+The local [PrefixKV specification](baselines/prefixkv_spec.md) now documents
+the paper equations, the upstream forget-ratio versus retained-ratio
+conversion, exact source APIs, and reimplementation decisions. The unified
+`prefixkv_reimpl` can load or generate an offline layer profile, enforces
+calibration/evaluation disjointness for native profiles, maintains per-layer
+ratios during decode, and uses the common cache/metric interface. Qwen2.5-VL
+and other non-LLaVA runs are labeled `generalized_prefixkv_reimpl`. A
+one-sample controlled legacy LLaVA experiment has now run in a separate pinned
+parity environment with 100% agreement over 16 generated tokens. Its exact
+budget, byte, PPL, ROUGE, and latency observations—and its non-canonical
+dirty-worktree status—are recorded in the
+[parity report](baselines/prefixkv_parity_report.md).
+
 ## VL-Cache
 
 ### Availability
@@ -172,17 +189,26 @@ providing attribution and observing the paper license for copied/adapted
 content; project counsel should decide any distribution questions. It must not
 be called official VL-Cache code.
 
+The local `vl_cache_reimpl` is now implemented in the common eager-HF cache
+interface. Its equation-to-code map, ambiguity log, calibration leakage guard,
+formula tests, structural sensitivity analysis, and current non-reproduction
+status are documented in [the implementation specification](baselines/vl_cache_spec.md).
+No official code parity is possible because no author implementation was found.
+
 ## Recommended baseline execution order
 
 1. Implement simple in-tree full-cache, recent-only, uniform block, and random
    baselines under the common HF harness.
-2. Reproduce PrefixKV official LLaVA-1.5-7B in its isolated Python 3.8-era
-   environment, preserving its model and configuration.
+2. Repeat the completed PrefixKV official LLaVA-1.5-7B parity diagnostic from
+   a clean SHA with warmups and repeated timing trials.
 3. Reproduce LOOK-M official LLaVA-1.5-7B in a separate pinned environment;
    treat its absolute path and vendored-model assumptions as known risks.
-4. Only then create `prefixkv_reimpl`, `look_m_reimpl`, or `vl_cache_reimpl`
-   adapters for identical-model comparisons. Never merge official and reimpl
+4. Use the implemented `prefixkv_reimpl`, `lookm_reimpl`, and
+   `vl_cache_reimpl` only for identical-model comparisons. Never merge official and reimpl
    rows or compare them under unequal prompts, media, tokenization, generation,
    output length, cache budget, precision, or backend configuration.
 
-No baseline code or packages were added during this audit.
+LOOK-M/PrefixKV source and their local `*_reimpl` code were added after the
+original audit. PrefixKV's strict official-vs-reimplementation controls have
+been satisfied in an isolated environment; LOOK-M remains unmeasured. No
+package in the default project environment was changed.

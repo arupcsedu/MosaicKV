@@ -49,6 +49,11 @@ class ModelGeneration:
 
     answer: str
     metrics: GenerationMetrics = GenerationMetrics()
+    effective_method: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.effective_method is not None and not self.effective_method.strip():
+            raise ValueError("effective_method must be non-empty when present")
 
 
 class LocalEvaluationModel(Protocol):

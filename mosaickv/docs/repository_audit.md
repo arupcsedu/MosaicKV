@@ -1,5 +1,40 @@
 # Repository and environment audit
 
+> Common-environment reset (2026-07-21): the old backend-specific virtual
+> environments are no longer valid inputs. Their shared base Python now has an
+> empty standard-library `encodings` directory and cannot start. A fresh,
+> self-contained CPython 3.11 prefix was created at
+> `/scratch/djy8hg/env/mosaickv` with bootstrap tooling only; the resolver-checked
+> common lock pins Torch 2.5.1, Transformers 4.49.0, vLLM 0.7.2, SGLang
+> 0.4.3.post1, and lmms-eval 0.7.2. No current backend support is claimed until
+> that lock is installed and passes clean-tree CPU, CUDA, model, and container
+> gates. All caches and temporary files are rooted at
+> `/scratch/djy8hg/cache/mosaickv`. The older addenda below are historical
+> dirty-worktree diagnostics only.
+
+> Historical scope: this records the non-mutating audit snapshot taken before
+> the dedicated MosaicKV HF environment and later GPU gates were created. For
+> the verified post-audit eager HF execution status, see
+> [the unified runtime validation record](huggingface_runtime.md). The source
+> and serving-backend conclusions below remain the audit evidence for their
+> pinned versions.
+
+> Post-audit addendum (2026-07-20): `/scratch/djy8hg/env/mosaickv` now
+> contains the exact 159-distribution vLLM 0.11.2 lock and passed imports plus
+> CUDA 12.8 matrix multiplication on an A100. Qwen2.5-VL-3B FullKV job
+> `17158441` completed and matched all 16 tokens from controlled HF job
+> `17158501`. This does not change the audit's native-cache-API finding; see
+> [the vLLM validation record](vllm_backend.md).
+
+> Post-audit SGLang addendum (2026-07-20):
+> `/scratch/djy8hg/env/mosaickv` contains the pinned 175-distribution
+> SGLang 0.5.10.post1 lock and passed imports plus a CUDA 12.8 matrix
+> multiplication on an A100-SXM4-80GB. Stage A FullKV jobs loaded the pinned
+> Qwen2.5-VL-3B and 7B checkpoints and passed deterministic repeat,
+> active-byte, Radix telemetry, GPU-memory, and request-isolation checks. The
+> controlled 3B HF/SGLang output comparison did not pass token parity; native
+> MosaicKV remains unsupported. See [the SGLang record](sglang_backend.md).
+
 Audit date: 2026-07-19 (America/New_York). This is a read-only snapshot. No
 package was installed, removed, or upgraded, no model weights were downloaded,
 and neither AAFLOW nor its environments were modified.
@@ -48,6 +83,11 @@ third-party checkout, configuration tree, or experiment runner yet. This audit
 does not implement MosaicKV.
 
 ## AAFLOW and AAFLOW+ reuse assessment
+
+No AAFLOW or AAFLOW+ source was copied or imported into MosaicKV. The entries
+below identify patterns considered during the original audit, not runtime
+dependencies or code reuse. The enforceable boundary is documented in
+[AAFLOW isolation](aaflow_isolation.md).
 
 The adjacent repository `/scratch/djy8hg/workdir/AAFLOW` is on `aaflow-dev` at
 `52671a14365b3e767b549664f6e4e345a4a133ff`. It has pre-existing tracked and

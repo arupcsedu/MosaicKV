@@ -8,12 +8,17 @@ from __future__ import annotations
 
 import importlib
 import json
-from collections.abc import Mapping
+import os
+import re
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from importlib.metadata import PackageNotFoundError, version
+from importlib.resources import files
 from numbers import Real
 from pathlib import Path
 from typing import Any, cast
+from unittest.mock import patch
 
 from mosaickv.evaluation.messages import MediaItem, MediaKind, build_multimodal_messages
 from mosaickv.evaluation.model import (
@@ -79,6 +84,76 @@ def _require_lmms_version() -> None:
         raise LmmsEvalUnavailable(
             f"lmms-eval {_LMMS_EVAL_VERSION} is required, but {installed} is installed"
         )
+
+
+@contextmanager
+def _pinned_dataset_revision(dataset_id: str, revision: str) -> Iterator[None]:
+    """Inject one immutable Hub revision into lmms-eval's dataset load.
+
+    lmms-eval 0.7.2 constructs and downloads a task inside
+    ``get_task_dict``.  Its MMStar YAML does not pin ``dataset_kwargs``.  The
+    scoped patch targets only the audited dataset ID and leaves every other
+    ``datasets.load_dataset`` call unchanged.
+    """
+
+    if re.fullmatch(r"[0-9a-f]{40,64}", revision) is None:
+        raise ValueError("dataset revision must be a 40-64 character lowercase commit SHA")
+    datasets_module = _require_module("datasets")
+    original = datasets_module.load_dataset
+    observed = 0
+
+    def pinned(path: object, *args: object, **kwargs: object) -> object:
+        nonlocal observed
+        if str(path) == dataset_id:
+            configured = kwargs.get("revision")
+            if configured is not None and configured != revision:
+                raise ValueError(
+                    f"lmms task requested dataset revision {configured!r}, expected {revision!r}"
+                )
+            kwargs["revision"] = revision
+            if kwargs.get("token") is True and not os.environ.get("HF_TOKEN"):
+                # The audited dataset is public.  lmms-eval's legacy template
+                # uses token=True, which newer Hub clients interpret as
+                # "require a locally persisted login".  Never create/read a
+                # token file; use HF_TOKEN when present and anonymous access
+                # otherwise.
+                kwargs["token"] = False
+            observed += 1
+        return original(path, *args, **kwargs)
+
+    with patch.object(datasets_module, "load_dataset", pinned):
+        yield
+    if observed == 0:
+        raise RuntimeError(f"lmms task did not load its declared dataset {dataset_id!r}")
+
+
+@contextmanager
+def _lmms_template_compatibility() -> Iterator[None]:
+    """Redirect known missing lmms-eval 0.7.2 wheel templates to pinned copies."""
+
+    lmms_utils = _require_module("lmms_eval.utils")
+    original = lmms_utils.load_yaml_config
+    compatibility_root = files("mosaickv.evaluation.lmms_compat")
+
+    def load_yaml_config(*args: object, **kwargs: object) -> object:
+        yaml_path = kwargs.get("yaml_path")
+        positional = list(args)
+        if yaml_path is None and positional:
+            yaml_path = positional[0]
+        if yaml_path is not None:
+            requested = Path(str(yaml_path))
+            if not requested.is_file() and requested.name == "_default_template_yaml":
+                replacement = compatibility_root.joinpath(requested.parent.name, requested.name)
+                if replacement.is_file():
+                    if positional:
+                        positional[0] = str(replacement)
+                    else:
+                        kwargs["yaml_path"] = str(replacement)
+                    kwargs.setdefault("yaml_dir", str(requested.parent))
+        return original(*positional, **kwargs)
+
+    with patch.object(lmms_utils, "load_yaml_config", load_yaml_config):
+        yield
 
 
 def _flatten_visuals(value: object) -> tuple[object, ...]:
@@ -276,14 +351,36 @@ def prepare_seeded_lmms_tasks(
     subset_size: int,
     excluded: frozenset[str] = frozenset(),
     model_name: str | None = None,
-) -> tuple[tuple[object, ...], tuple[PreparedLmmsSample, ...], tuple[str, ...]]:
+    dataset_revisions: Mapping[str, str] | None = None,
+) -> tuple[tuple[object, ...], tuple[PreparedLmmsSample, ...], tuple[str, ...], object]:
     """Load lmms task objects and replace their eval splits with seeded subsets."""
 
     _require_lmms_version()
     if subset_size < 1:
         raise ValueError("subset_size must be >= 1")
     tasks_module = _require_module("lmms_eval.tasks")
-    manager = tasks_module.TaskManager(verbosity="ERROR", model_name=model_name)
+    tasks_root = Path(tasks_module.__file__).resolve().parent
+    include_paths: set[str] = set()
+    for spec in specs:
+        task_name = spec.development_lmms_task
+        if task_name is None:
+            raise ValueError(f"task {spec.name!r} is not an lmms-eval task")
+        task_directory = tasks_root / task_name.split("_", maxsplit=1)[0]
+        if not task_directory.is_dir():
+            raise RuntimeError(
+                f"lmms-eval task directory is unavailable for {task_name!r}: {task_directory}"
+            )
+        include_paths.add(str(task_directory))
+    # Index only requested task families.  Besides being substantially faster,
+    # this isolates evaluation from packaging defects in unrelated task YAMLs
+    # (lmms-eval 0.7.2's CV-Bench wheel omits an included template file).
+    with _lmms_template_compatibility():
+        manager = tasks_module.TaskManager(
+            verbosity="ERROR",
+            include_path=sorted(include_paths),
+            include_defaults=False,
+            model_name=model_name,
+        )
     selected_tasks: list[object] = []
     prepared: list[PreparedLmmsSample] = []
     selected_ids: list[str] = []
@@ -291,7 +388,22 @@ def prepare_seeded_lmms_tasks(
         task_name = spec.development_lmms_task
         if task_name is None:
             raise ValueError(f"task {spec.name!r} is not an lmms-eval task")
-        loaded = tasks_module.get_task_dict([task_name], task_manager=manager, task_type="simple")
+        revision = None if dataset_revisions is None else dataset_revisions.get(spec.dataset_id)
+        if dataset_revisions is not None and revision is None:
+            raise ValueError(f"no immutable revision supplied for dataset {spec.dataset_id!r}")
+        if revision is None:
+            with _lmms_template_compatibility():
+                loaded = tasks_module.get_task_dict(
+                    [task_name], task_manager=manager, task_type="simple"
+                )
+        else:
+            with (
+                _lmms_template_compatibility(),
+                _pinned_dataset_revision(spec.dataset_id, revision),
+            ):
+                loaded = tasks_module.get_task_dict(
+                    [task_name], task_manager=manager, task_type="simple"
+                )
         task = loaded[task_name]
         if isinstance(task, tuple):
             task = task[-1]
@@ -307,7 +419,7 @@ def prepare_seeded_lmms_tasks(
             selected_tasks.append(subset_task)
             prepared.extend(task_samples)
         selected_ids.extend(task_selected_ids)
-    return tuple(selected_tasks), tuple(prepared), tuple(selected_ids)
+    return tuple(selected_tasks), tuple(prepared), tuple(selected_ids), manager
 
 
 def _extract_answer(sample: dict[str, object]) -> str:
@@ -349,6 +461,7 @@ def run_lmms_development_evaluation(
     subset_size: int,
     parquet_output: str | Path | None = None,
     registry: TaskRegistry | None = None,
+    dataset_revision: str | None = None,
 ) -> JsonObject:
     """Run deterministic development subsets through lmms-eval scoring."""
 
@@ -363,12 +476,17 @@ def run_lmms_development_evaluation(
             raise ValueError(f"model {model.model_id!r} does not support task {spec.name!r} video")
     store = JsonlResultStore(raw_output)
     prior_ids = store.completed_sample_ids(run_id)
-    task_objects, prepared, selected_ids = prepare_seeded_lmms_tasks(
+    task_objects, prepared, selected_ids, task_manager = prepare_seeded_lmms_tasks(
         specs,
         seed=seed,
         subset_size=subset_size,
         excluded=prior_ids,
         model_name=model.model_id,
+        dataset_revisions=(
+            None
+            if dataset_revision is None
+            else {spec.dataset_id: dataset_revision for spec in specs}
+        ),
     )
     spec_by_lmms = {cast("str", spec.development_lmms_task): spec for spec in specs}
     expected = {sample.sample_id: sample for sample in prepared}
@@ -382,6 +500,7 @@ def run_lmms_development_evaluation(
             result = evaluator.simple_evaluate(
                 model=adapter,
                 tasks=list(task_objects),
+                task_manager=task_manager,
                 num_fewshot=0,
                 batch_size=1,
                 limit=None,
@@ -427,7 +546,7 @@ def run_lmms_development_evaluation(
                         task=spec.name,
                         model=model.model_id,
                         backend=model.backend,
-                        method=model.method,
+                        method=capture.generation.effective_method or model.method,
                         retention_ratio=model.retention_ratio,
                         answer=answer,
                         reference=prepared_sample.reference,
@@ -442,7 +561,11 @@ def run_lmms_development_evaluation(
                         task=spec.name,
                         model=model.model_id,
                         backend=model.backend,
-                        method=model.method,
+                        method=(
+                            model.method
+                            if capture is None or capture.generation is None
+                            else capture.generation.effective_method or model.method
+                        ),
                         retention_ratio=model.retention_ratio,
                         answer=(
                             None
@@ -473,7 +596,11 @@ def run_lmms_development_evaluation(
                 task=prepared_sample.public_task,
                 model=model.model_id,
                 backend=model.backend,
-                method=model.method,
+                method=(
+                    model.method
+                    if capture is None or capture.generation is None
+                    else capture.generation.effective_method or model.method
+                ),
                 retention_ratio=model.retention_ratio,
                 answer=(
                     None
@@ -503,6 +630,9 @@ def run_lmms_development_evaluation(
         "raw_output": str(Path(raw_output).resolve()),
         "parquet_output": parquet_path,
         "lmms_eval_version": _LMMS_EVAL_VERSION,
+        "dataset_revisions": {
+            spec.dataset_id: dataset_revision for spec in specs if dataset_revision is not None
+        },
         "lmms_error": lmms_error,
         "nondeterministic_scoring_tasks": [
             spec.name for spec in specs if not spec.scoring_deterministic

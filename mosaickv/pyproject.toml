@@ -17,7 +17,7 @@ classifiers = [
   "Programming Language :: Python :: 3.11",
   "Typing :: Typed",
 ]
-dependencies = ["numpy>=1.26,<3"]
+dependencies = ["numpy>=1.26,<3", "PyYAML==6.0.3"]
 
 [project.optional-dependencies]
 dev = [
@@ -43,12 +43,16 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "mosaickv.evaluation.data" = ["*.jsonl"]
+"mosaickv.evaluation.lmms_compat" = ["mmstar/*"]
 
 [tool.pytest.ini_options]
 addopts = "-ra --strict-config --strict-markers"
 testpaths = ["tests"]
 markers = [
   "gpu: requires a CUDA-capable Slurm allocation",
+  "hf: requires the common environment's Hugging Face stack",
+  "vllm: requires the common environment's vLLM stack",
+  "sglang: requires the common environment's SGLang stack",
   "integration: exercises installed CLI entry points",
 ]
 
@@ -72,5 +76,23 @@ show_error_codes = true
 warn_unreachable = true
 
 [[tool.mypy.overrides]]
-module = ["numpy", "numpy.*", "pyarrow", "pyarrow.*", "torch", "torch.*"]
+module = [
+  "numpy",
+  "numpy.*",
+  "PIL",
+  "PIL.*",
+  "pyarrow",
+  "pyarrow.*",
+  "torch",
+  "torch.*",
+  "transformers",
+  "transformers.*",
+  "huggingface_hub",
+  "huggingface_hub.*",
+  "httpx",
+  "httpx.*",
+  "vllm",
+  "vllm.*",
+  "yaml",
+]
 ignore_missing_imports = true

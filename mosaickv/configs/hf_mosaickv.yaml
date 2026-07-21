@@ -1,0 +1,84 @@
+schema_version: 1
+method: mosaickv_full
+
+model:
+  id: Qwen/Qwen2.5-VL-3B-Instruct
+  revision: 66285546d2b821cf421d4f5eb2576359d3770cd3
+  precision: bf16
+
+dataset:
+  id: mosaickv/synthetic-ci
+  revision: schema-v1
+  split: test
+
+execution:
+  backend: huggingface
+  attention_implementation: eager
+  seed: 0
+  deterministic_algorithms: true
+
+generation:
+  max_new_tokens: 16
+  do_sample: false
+  temperature: 0.0
+  top_p: 1.0
+  output_length_policy: fixed_max_new_tokens
+
+cache:
+  # The retention ratio supplies the normal cardinality target. This upper
+  # bound must still cover the full source cache for retention-ratio 1.0 runs.
+  budget_value: 2147483647
+  budget_unit: blocks
+  retention_ratio: 0.5
+  block_size: 16
+  accounting_spec_sha: 60915ac01ad35843c4de56620864145d5b81b973a3bfec03fb322d5e4f6ff695
+
+forecasting:
+  enabled: true
+  mode: hybrid
+  prompt_window: 16
+  draft_steps: 4
+  centroid_count: 4
+  covariance: diagonal
+  low_memory_centroids: true
+  centroid_iterations: 4
+
+graph:
+  enabled: true
+  max_neighbors: 8
+  min_edge_weight: 0.0
+  similarity_chunk_size: 256
+
+utility:
+  lambda_q: 1.0
+  lambda_v: 0.25
+  lambda_o: 0.25
+
+selection:
+  enabled: true
+  algorithm: lazy_greedy
+  lambda_g: -0.25
+  lambda_m: -0.25
+  stop_on_nonpositive_gain: true
+  exhaustive_max_nodes: 20
+
+prototypes:
+  enabled: true
+  group_size: 4
+  max_position_span: 128
+  min_anchor_weight: 0.0
+  allowed_modality_pairs: [text:text, image:image, video:video]
+
+residual:
+  enabled: true
+  rank: 8
+  storage_dtype: lossless
+  require_pinned_memory: true
+
+repair:
+  enabled: true
+  policy: entropy_or_prototype_risk
+  entropy_threshold: 0.5
+  prototype_risk_threshold: 0.25
+  max_blocks_per_step: 2
+  evaluation_only: false

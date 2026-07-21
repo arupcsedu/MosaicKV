@@ -2,7 +2,7 @@
 
 ## Purpose and status vocabulary
 
-This plan sequences the work needed to turn the MosaicKV design into a defensible research system and AAAI 2027 artifact. It does not claim that any algorithm, integration, experiment, or result has been implemented. All milestones below are **planned** as of the creation of this document.
+This plan sequences the work needed to turn the MosaicKV design into a defensible research system and AAAI 2027 artifact. The Hugging Face reference, backend-independent mechanisms, and eager exact-selection runtime are in progress; they do not establish real-checkpoint support or paper results. No milestone status implies an experimental result.
 
 Milestone status must be one of:
 
@@ -13,17 +13,17 @@ Milestone status must be one of:
 
 ## Milestone overview
 
-| Phase | Milestone | Initial status | Depends on |
+| Phase | Milestone | Current status | Depends on |
 |---|---|---|---|
-| A | Hugging Face full-cache reference | planned | governance documents |
-| B | MosaicKV core | planned | A |
-| C | correctness tests | planned | A, B |
-| D | simple baselines | planned | A, C |
-| E | published baselines | planned | A, C, D |
+| A | Hugging Face full-cache reference | in_progress | governance documents |
+| B | MosaicKV core | in_progress | A |
+| C | correctness tests | in_progress | A, B |
+| D | simple baselines | in_progress | A, C |
+| E | published baselines | in_progress | A, C, D |
 | F | quality evaluation | planned | C, D, E |
 | G | systems evaluation | planned | C, F |
-| H | vLLM integration | planned | C, G |
-| I | SGLang integration | planned | C, G |
+| H | vLLM integration | blocked | C, G |
+| I | SGLang integration | blocked | C, G |
 | J | artifact packaging | planned | A-I |
 
 Statuses are governance metadata, not empirical results. Update them only with links to tests, manifests, or artifacts that support the change.
@@ -31,6 +31,21 @@ Statuses are governance metadata, not empirical results. Update them only with l
 ## A. Hugging Face full-cache reference
 
 **Goal:** establish a minimal, auditable full-cache reference path against which every compressed and backend-specific path is compared.
+
+**Current evidence:** eager explicit prefill/token-decode adapters, typed cache
+extraction/reinjection, q-projection capture, the transformation-free FullKV
+runner, synchronized CUDA phase measurement, raw per-trial storage, and
+no-download architecture tests are implemented in
+[the adapter package](src/mosaickv/adapters/huggingface),
+[the FullKV implementation](src/mosaickv/fullkv.py), and
+[the measurement package](src/mosaickv/measurements). The protocol is documented
+in [the adapter guide](docs/huggingface_adapters.md) and
+[FullKV reference guide](docs/fullkv_reference.md). This phase remains
+`in_progress`. Pinned Qwen2.5-VL-3B and LLaVA-1.5-7B one-image integration
+and unified 16-token retention-1 numerical parity gates passed on an A100.
+The development records remain non-canonical, and the other registered
+checkpoint/precision combinations have not passed. See
+[the unified runtime validation record](docs/huggingface_runtime.md).
 
 **Deliverables**
 
@@ -50,6 +65,33 @@ Statuses are governance metadata, not empirical results. Update them only with l
 ## B. MosaicKV core
 
 **Goal:** implement the backend-independent MosaicKV algorithm without fusing it prematurely into an inference engine.
+
+**Current evidence:** typed full/exact/prototype/residual state containers,
+fixed-size per-layer/per-KV-head blockization, logical-position tracking,
+storage accounting, membership invariants, lossless 100%-retention
+reinjection, prompt-window/draft/hybrid future-query forecasting, sparse
+cross-modal evidence graph construction, value-aware block utility, and
+mandatory-first budgeted selection, conservative RoPE-gated prototype
+construction, indexed CPU residual storage, and a backend-independent
+uncertainty-guided repair controller are implemented in
+[the cache-state module](src/mosaickv/cache_state.py) and documented in
+[the cache-state guide](docs/cache_state.md), with forecasting in
+[the forecasting package](src/mosaickv/forecasting) and
+[forecasting guide](docs/future_query_forecasting.md), with graph construction in
+[the graph package](src/mosaickv/graph) and
+[evidence-graph guide](docs/evidence_graph.md), with utility and selection in
+[the selection package](src/mosaickv/selection) and
+[utility/selection guide](docs/block_utility_and_selection.md), with tier
+construction in [the prototype and residual packages](src/mosaickv/prototypes)
+and [three-tier guide](docs/three_tier_cache.md), with repair in
+[the repair package](src/mosaickv/repair) and
+[decode-time repair guide](docs/decode_time_repair.md). This phase remains
+`in_progress`: the unified eager runtime performs compact exact-selection
+decoding while preserving original logical positions. Current post-RoPE
+adapters still fail closed from prototype merging to exact selection, so
+real-model prototype and repair support remains unavailable until adapter
+mutation and parity gates pass. See
+[the unified HF runtime guide](docs/huggingface_runtime.md).
 
 **Deliverables**
 
@@ -72,6 +114,18 @@ Statuses are governance metadata, not empirical results. Update them only with l
 
 **Goal:** establish correctness before performance optimization or broad evaluation.
 
+**Current evidence:** CPU planner tests cover all method labels, budgets,
+retention-1 reconstruction, safety fallbacks, and monotonic active storage.
+No-download tests use real randomly initialized LLaVA-1.5, Qwen2.5-VL, and
+LLaVA-OneVision Transformers architectures to exercise compact eager decoding,
+trace completeness, and FullKV token parity. Pinned Qwen2.5-VL-3B and
+LLaVA-1.5-7B single-example gates plus a pinned 20-example MMStar development
+run validate the integrated execution, scoring, and artifact paths. This phase
+also has passing unified retention-1 numerical-tolerance records for the pinned
+Qwen2.5-VL-3B and LLaVA-1.5-7B eager configurations. It remains `in_progress`
+until every configuration claimed as supported has a canonical registered
+fixture; OneVision/InternVL checkpoints and non-eager attention are not covered.
+
 **Deliverables**
 
 - Unit tests for forecasting, graph construction, utility, selection, tier conversion, and repair.
@@ -91,13 +145,20 @@ Statuses are governance metadata, not empirical results. Update them only with l
 
 **Goal:** provide transparent, locally implemented reference policies before adding published systems.
 
-**Candidate baselines**
+**Implemented scope**
 
-- Full cache.
-- Uniform or fixed-stride retention.
-- Recency-only retention.
-- Random retention with recorded seeds.
-- Attention-score or magnitude-based retention where model access permits.
+- `full_kv`: transformation-free full cache.
+- `random_kv`: seeded random exact-block retention.
+- `uniform_kv`: fair retained-cost allocation by layer, KV head, and modality.
+- `prompt_attention_topk`: prompt-window eager-attention block ranking.
+- `value_topk`: within-layer/head value-novelty block ranking.
+
+All compressed policies retain exact blocks only and share FullKV blockization, mandatory-token
+handling, cache packing, explicit decoding, timing, and byte accounting. Their contract and
+configuration are documented in [the simple baseline guide](docs/simple_baselines.md), with unit
+coverage in [the baseline tests](tests/unit/test_baselines.py) and no-download runtime coverage in
+[the tiny HF integration tests](tests/integration/test_hf_tiny_models.py). This phase remains
+`in_progress` pending a pinned clean-SHA real-checkpoint parity and budget sweep.
 
 **Exit criteria**
 
@@ -109,6 +170,43 @@ Statuses are governance metadata, not empirical results. Update them only with l
 ## E. Published baselines
 
 **Goal:** evaluate relevant published KV-cache compression approaches with verifiable provenance and fair adaptations to multimodal workloads.
+
+**Current evidence:** official LOOK-M is pinned as an unmodified submodule at
+`ecf0f51a9c416c2d85e47faf2638502f01a6d748` with its MIT license. The
+paper-equation `lookm_reimpl` implements text-prior scoring, recent/top-N
+selection, cosine pivot assignment, and averaged/pivotal/weighted KV merging
+through the shared eager HF cache and metrics runtime. The exact specification,
+official-source differences, model assumptions, and labeling rules are in
+[the LOOK-M specification](docs/baselines/lookm_spec.md). A strict artifact
+comparator rejects unequal checkpoints, samples, tokenization, generation,
+precision, and backend controls. The current
+[parity report](docs/baselines/lookm_parity_report.md) contains no numerical
+row because the official original-LLaVA checkpoint/runtime and the cached HF
+conversion do not satisfy those controls. A standalone LLaVA-HF synthetic
+`lookm_reimpl` smoke passed on the reserved A100 path with complete artifacts,
+but its dirty-source manifest correctly makes it non-canonical and it is not an
+official parity result. Official PrefixKV is also pinned, unmodified, at
+`597f1ab032704951550f93bcc8a23f1454b80aa4` with its MIT license. The shared
+runtime now contains `prefixkv_reimpl`: eager prompt-attention importance,
+adaptive offline profiles, exact global per-layer budgets, protected boundary
+tokens, fixed-distance decode eviction, strict calibration/evaluation
+separation, LLaVA/generalized labeling, and a controlled parity artifact
+comparator. See the [PrefixKV specification](docs/baselines/prefixkv_spec.md)
+and [execution status](docs/baselines/prefixkv_parity_report.md). The official
+legacy-checkpoint run now satisfies the identical model, tokenizer, prompt,
+media, profile, generation, budget, precision, backend, hardware, and seed
+controls. Its strict comparator reports 100% agreement for 16 generated tokens
+and documents upstream's one-position global-budget undershoot. The run is a
+dirty-worktree, single-trial development diagnostic rather than a paper result.
+The ICLR `vl_cache_reimpl` now applies relative-threshold post-vision sparsity,
+prompt-adaptive layer allocation, and accumulated post-vision Top-K through the
+same exact-cache packer. Its [specification](docs/baselines/vl_cache_spec.md)
+maps equations to code, isolates rounding/GQA/recency decisions, enforces
+calibration/evaluation ID disjointness, and records a structural sensitivity
+grid. Formula, budget, determinism, leakage, and tensor-level retention-one
+tests pass; paper-model task and Triton latency trends remain unmeasured.
+LOOK-M official parity, clean repeated PrefixKV measurements, and VL-Cache
+paper-model trend runs keep this phase `in_progress`.
 
 **Deliverables**
 
@@ -165,6 +263,17 @@ Statuses are governance metadata, not empirical results. Update them only with l
 
 **Goal:** integrate MosaicKV into a pinned vLLM revision while preserving the validated core semantics.
 
+**Current evidence:** the pinned vLLM 0.11.2 Stage A FullKV wrapper streams
+token outputs and records per-trial TTFT, ITL, throughput, latency, GPU process
+memory, prefix-cache hits, and multimodal preprocessor-cache behavior through
+the common evaluation/manifest path. Model registration covers Qwen2.5-VL,
+LLaVA-1.5, and LLaVA-OneVision. Stage B is blocked: the installed scheduler and
+runner expose no atomic sparse-logical-block commit that preserves original
+positions. `--enable-mosaickv` therefore fails before loading weights and emits
+no simulated result. The exact source boundary and proposed upstream API are
+recorded in [the native blocker](docs/vllm_native_blocker.md). The Stage A GPU
+acceptance command remains required before runtime support is claimed.
+
 **Deliverables**
 
 - A thin, documented adapter to the selected vLLM cache and scheduler interfaces.
@@ -182,6 +291,22 @@ Statuses are governance metadata, not empirical results. Update them only with l
 ## I. SGLang integration
 
 **Goal:** integrate MosaicKV into a pinned SGLang revision while preserving the validated core semantics.
+
+**Current evidence:** a version-pinned SGLang 0.5.10.post1 Stage A wrapper
+launches Qwen2.5-VL through the common evaluation path with deterministic
+Triton attention, one-token streaming, no overlap schedule, no CUDA graph, and
+no server warmup. Raw trials preserve TTFT, token intervals, throughput,
+process-tree GPU memory, Radix cached-token counters, Prometheus cache gauges,
+exact server arguments, and logical active-KV byte accounting. The isolated
+environment and both Qwen2.5-VL-3B/7B Stage A checkpoint GPU gates passed with
+deterministic repeated tokens, exact byte accounting, Radix/GPU telemetry, and
+an A-B-A request-isolation probe. Controlled HF eager token parity did not
+pass, so optimized SGLang settings remain disabled. Stage B is blocked because
+the installed public and internal APIs do
+not offer an atomic request-scoped commit for KV allocator ownership,
+`ReqToTokenPool`, Radix nodes, logical positions, and Qwen mRoPE positions.
+`--enable-mosaickv` fails before server launch and never emits simulated native
+rows. See [the SGLang native blocker](docs/sglang_native_blocker.md).
 
 **Deliverables**
 

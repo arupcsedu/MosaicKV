@@ -1,0 +1,6 @@
+[submodule "third_party/LOOK-M"]
+	path = third_party/LOOK-M
+	url = https://github.com/SUSTechBruce/LOOK-M.git
+[submodule "third_party/PrefixKV"]
+	path = third_party/PrefixKV
+	url = https://github.com/THU-MIG/PrefixKV.git

@@ -1,0 +1,28 @@
+{
+  "artifacts": {
+    "hf_manifest": "/sfs/weka/scratch/djy8hg/runs/mosaickv/vllm-fullkv/hf-reference/hf-fullkv-parity-17158501/manifest.json",
+    "hf_manifest_sha256": "1b31c412897206a30f210ac9f5d8f46352c1a2b111d03e7f54ac38ae60878c81",
+    "hf_trace": "/sfs/weka/scratch/djy8hg/runs/mosaickv/vllm-fullkv/hf-reference/traces/hf-fullkv-parity-17158501/8cc36e0701c9921e.json",
+    "hf_trace_sha256": "cd4b2c1457e05d35c1a64d087e13c419ca84145e7e4207f076da7199f8f5373f",
+    "vllm_manifest": "/sfs/weka/scratch/djy8hg/runs/mosaickv/vllm-fullkv/vllm-fullkv-17158441/manifest.json",
+    "vllm_manifest_sha256": "51fc8ab7577d76329a85678a8859f792f49e30178e1332a5eba1acaf1cbcc420",
+    "vllm_trace": "/sfs/weka/scratch/djy8hg/runs/mosaickv/vllm-fullkv/traces/vllm-fullkv-17158441/ci-red-7fb7e52384d6.json",
+    "vllm_trace_sha256": "b36a43647d74d439c81f181c1a95fc163f015fa0f863098f7acbb7d9843423bb"
+  },
+  "checks": {
+    "decoded_text": true,
+    "generation_parameters": true,
+    "input_hashes": true,
+    "model": true,
+    "sample_id": true,
+    "token_ids": true
+  },
+  "comparison": "hf_fullkv_vs_vllm_fullkv",
+  "generated_tokens": {
+    "hf": 16,
+    "vllm": 16
+  },
+  "schema_version": 1,
+  "status": "passed",
+  "token_agreement": 1.0
+}

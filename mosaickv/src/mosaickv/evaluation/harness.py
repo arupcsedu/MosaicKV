@@ -100,7 +100,7 @@ class EvaluationHarness:
                     task=task.name,
                     model=model.model_id,
                     backend=model.backend,
-                    method=model.method,
+                    method=generation.effective_method or model.method,
                     retention_ratio=model.retention_ratio,
                     answer=generation.answer,
                     reference=sample.canonical_reference(),

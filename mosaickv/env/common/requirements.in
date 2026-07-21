@@ -1,0 +1,26 @@
+--index-url https://pypi.org/simple
+
+# One CPython 3.11 / CUDA 12.4 stack shared by the HF, vLLM, SGLang,
+# evaluation, and development paths. SGLang 0.4.3.post1's SRT extra explicitly
+# supports vLLM 0.6.4.post1 through 0.7.2; vLLM 0.7.2 is the newest release in
+# that declared intersection. requirements.lock is authoritative.
+accelerate==1.13.0
+datasets==4.8.4
+cuda-python==12.6.2.post1
+flashinfer-python==0.2.3
+lmms-eval==0.7.2
+mypy==1.20.2
+pre-commit==4.6.0
+pyarrow==25.0.0
+pytest==9.0.2
+qwen-vl-utils==0.0.14
+ruff==0.15.4
+sgl-kernel==0.1.0
+sglang[srt]==0.4.3.post1
+torch==2.5.1
+torchaudio==2.5.1
+torchvision==0.20.1
+torchao==0.7.0
+transformers==4.49.0
+uv==0.11.29
+vllm==0.7.2

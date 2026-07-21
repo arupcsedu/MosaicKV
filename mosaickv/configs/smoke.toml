@@ -32,27 +32,49 @@ accounting_spec_sha = "60915ac01ad35843c4de56620864145d5b81b973a3bfec03fb322d5e4
 
 [forecasting]
 enabled = true
-horizon = 4
-candidates = 4
+mode = "hybrid"
+prompt_window = 16
+draft_steps = 4
+centroid_count = 4
+covariance = "diagonal"
+low_memory_centroids = true
+centroid_iterations = 4
 
 [graph]
 enabled = true
 max_neighbors = 8
 min_edge_weight = 0.0
 
+[utility]
+lambda_q = 1.0
+lambda_v = 0.25
+lambda_o = 0.25
+
 [selection]
 enabled = true
 algorithm = "lazy_greedy"
+lambda_g = -0.25
+lambda_m = -0.25
+stop_on_nonpositive_gain = true
+exhaustive_max_nodes = 20
 
 [prototypes]
 enabled = true
 group_size = 4
+max_position_span = 128
+min_anchor_weight = 0.0
+allowed_modality_pairs = ["text:text", "image:image", "video:video"]
 
 [residual]
 enabled = true
 rank = 8
+storage_dtype = "lossless"
+require_pinned_memory = true
 
 [repair]
 enabled = true
-uncertainty_threshold = 0.5
+policy = "entropy_or_prototype_risk"
+entropy_threshold = 0.5
+prototype_risk_threshold = 0.25
 max_blocks_per_step = 2
+evaluation_only = false

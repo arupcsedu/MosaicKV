@@ -6,6 +6,7 @@ from typing import cast
 
 import pytest
 
+import mosaickv.manifest as manifest_module
 from mosaickv.config import synthetic_smoke_config
 from mosaickv.manifest import (
     ArtifactProvenance,
@@ -14,7 +15,7 @@ from mosaickv.manifest import (
     RunManifestWriter,
     sha256_text,
 )
-from mosaickv.types import JsonObject, MeasurementType
+from mosaickv.types import Backend, JsonObject, MeasurementType
 
 
 def _inputs() -> InputProvenance:
@@ -91,3 +92,42 @@ def test_manifest_writer_is_atomic_and_refuses_overwrite(tmp_path: Path) -> None
 def test_manifest_rejects_non_sha_input() -> None:
     with pytest.raises(ManifestError, match=r"inputs\.prompt_set_sha"):
         InputProvenance("not-a-sha", *(sha256_text(str(index)) for index in range(3)))
+
+
+def test_manifest_records_engine_execution_metadata() -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    manifest = RunManifestWriter(repo_root).build(
+        synthetic_smoke_config(),
+        MeasurementType.VALIDATION_SMOKE,
+        _inputs(),
+        _artifacts(),
+        execution_metadata={
+            "engine_execution_mode": "eager",
+            "attention_backend_configuration": "auto",
+        },
+        attention_implementation_override="vllm_auto",
+    )
+    execution = cast("JsonObject", manifest["execution"])
+    assert execution["engine_execution_mode"] == "eager"
+    assert execution["attention_backend_configuration"] == "auto"
+    assert execution["attention_implementation"] == "vllm_auto"
+    with pytest.raises(ManifestError, match="cannot replace required field"):
+        RunManifestWriter(repo_root).build(
+            synthetic_smoke_config(),
+            MeasurementType.VALIDATION_SMOKE,
+            _inputs(),
+            _artifacts(),
+            execution_metadata={"seed": 999},
+        )
+
+
+def test_vllm_manifest_records_transformers_version(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        manifest_module,
+        "_version",
+        lambda name: {"torch": "2.9.0", "transformers": "4.57.6"}.get(name, "not_installed"),
+    )
+    software = manifest_module._software_provenance(Backend.VLLM, 1, "595.71.05")
+    assert software["transformers"] == "4.57.6"

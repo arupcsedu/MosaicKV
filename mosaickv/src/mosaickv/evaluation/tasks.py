@@ -83,6 +83,8 @@ class TaskRegistry:
         self._tasks[task.name] = task
 
     def resolve(self, name: str) -> TaskSpec:
+        if name == "synthetic_smoke":
+            name = "synthetic_ci"
         try:
             return self._tasks[name]
         except KeyError as error:

@@ -81,3 +81,24 @@ def test_factory_returns_an_lmms_subclass_without_global_registration(
     adapter = lmms_adapter.create_lmms_model_adapter(InspectingModel(), run_id="run-1")
     assert isinstance(adapter, FakeLmmsBase)
     assert hasattr(adapter, "mosaickv_bridge")
+
+
+def test_dataset_revision_scope_injects_exact_sha(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[object, dict[str, object]]] = []
+
+    def load_dataset(path: object, **kwargs: object) -> object:
+        calls.append((path, kwargs))
+        return object()
+
+    datasets_module = SimpleNamespace(load_dataset=load_dataset)
+    monkeypatch.setattr(lmms_adapter, "_require_module", lambda _name: datasets_module)
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    revision = "a" * 40
+
+    with lmms_adapter._pinned_dataset_revision("owner/dataset", revision):
+        datasets_module.load_dataset("owner/dataset", split="test", token=True)
+        datasets_module.load_dataset("owner/other", split="test")
+
+    assert calls[0][1]["revision"] == revision
+    assert calls[0][1]["token"] is False
+    assert "revision" not in calls[1][1]

@@ -1,22 +1,28 @@
 # Development environment
 
-The audited development environment is isolated at
-`/scratch/djy8hg/env/mosaickv_dev`. It was created from Python 3.11.15 without
-system site packages. The runtime dependency is NumPy; PyTorch, Transformers,
-vLLM, SGLang, FlashAttention, and lmms-eval are optional diagnostics and are not
-installed or imported during ordinary smoke tests.
+HF, vLLM, SGLang, evaluation, and development share the exact common
+environment at `/scratch/djy8hg/env/mosaickv`. Do not install into a
+backend-specific prefix.
 
-From the MosaicKV repository root:
+From the repository root, after committing the intended source and lock:
 
 ```bash
-/scratch/djy8hg/env/mosaickv_dev/bin/python -m pip install -e 'mosaickv[dev]'
-/scratch/djy8hg/env/mosaickv_dev/bin/mosaickv doctor
-/scratch/djy8hg/env/mosaickv_dev/bin/mosaickv smoke
+source mosaickv/scripts/cache_env.sh
+mosaickv/scripts/assert_clean_worktree.sh
+mosaickv/scripts/create_envs.sh --sync common
+
+/scratch/djy8hg/env/mosaickv/bin/mosaickv doctor
+/scratch/djy8hg/env/mosaickv/bin/mosaickv smoke
 cd mosaickv
-/scratch/djy8hg/env/mosaickv_dev/bin/python -m pytest
-PYTHON_BIN=/scratch/djy8hg/env/mosaickv_dev/bin/python ./scripts/check.sh
+PYTHON_BIN=/scratch/djy8hg/env/mosaickv/bin/python ./scripts/check.sh
 ```
 
-`evaluate` and `benchmark` are strict configuration preflights. They return
-`status: not_run` until the corresponding research milestones and correctness
-gates are implemented; they do not emit fabricated measurements.
+`cache_env.sh` covers pip, uv, model, dataset, compiler, backend, and temporary
+caches and rejects a cache root inside home. The default is
+`/scratch/djy8hg/cache/mosaickv`. `HF_TOKEN`, when needed, is inherited from
+the process environment and is never written by these scripts.
+
+The common lock is resolver-consistent, but support is not established by an
+install. Run the import-only verifier, then `slurm/env_smoke.sbatch` on a GPU,
+then model/backend parity. Preserve failures. Canonical validation requires a
+clean worktree; dirty-tree checks are exploratory.

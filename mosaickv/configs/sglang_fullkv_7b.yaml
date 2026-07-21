@@ -1,0 +1,77 @@
+schema_version: 1
+method: full_kv
+
+model:
+  id: Qwen/Qwen2.5-VL-7B-Instruct
+  revision: cc594898137f460bfe9f0759e9844b3ce807cfb5
+  precision: bf16
+
+dataset:
+  id: mosaickv/synthetic-ci
+  revision: schema-v1
+  split: test
+
+execution:
+  backend: sglang
+  attention_implementation: triton
+  seed: 0
+  deterministic_algorithms: true
+
+generation:
+  max_new_tokens: 16
+  do_sample: false
+  temperature: 0.0
+  top_p: 1.0
+  output_length_policy: fixed_max_new_tokens
+
+cache:
+  budget_value: 2147483647
+  budget_unit: blocks
+  retention_ratio: 1.0
+  block_size: 16
+  accounting_spec_sha: 60915ac01ad35843c4de56620864145d5b81b973a3bfec03fb322d5e4f6ff695
+
+forecasting:
+  enabled: false
+  mode: prompt_window
+  prompt_window: 16
+  draft_steps: 0
+  centroid_count: 4
+  covariance: diagonal
+  low_memory_centroids: true
+  centroid_iterations: 4
+
+graph:
+  enabled: false
+  max_neighbors: 8
+  min_edge_weight: 0.0
+  similarity_chunk_size: 256
+
+selection:
+  enabled: false
+  algorithm: lazy_greedy
+  lambda_g: -0.25
+  lambda_m: -0.25
+  stop_on_nonpositive_gain: true
+  exhaustive_max_nodes: 20
+
+prototypes:
+  enabled: false
+  group_size: 4
+  max_position_span: 128
+  min_anchor_weight: 0.0
+  allowed_modality_pairs: [text:text, image:image, video:video]
+
+residual:
+  enabled: false
+  rank: 8
+  storage_dtype: lossless
+  require_pinned_memory: false
+
+repair:
+  enabled: false
+  policy: none
+  entropy_threshold: 0.5
+  prototype_risk_threshold: 0.25
+  max_blocks_per_step: 0
+  evaluation_only: false

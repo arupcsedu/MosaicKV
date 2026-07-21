@@ -1,0 +1,36 @@
+diff --git a/LLaVA-mix_merge_v1/llava/model/kv_token_merge/modify_llama.py b/LLaVA-mix_merge_v1/llava/model/kv_token_merge/modify_llama.py
+--- a/LLaVA-mix_merge_v1/llava/model/kv_token_merge/modify_llama.py
++++ b/LLaVA-mix_merge_v1/llava/model/kv_token_merge/modify_llama.py
+@@ -18,8 +18,6 @@ from transformers.models.llama.modeling_llama import (
+     LlamaRotaryEmbedding,
+     # apply_rotary_pos_emb,
+ )
+-import sys
+-sys.path.append('/users/PAS2473/brucewan666/Efficient_LLMs/LLaVA-mix_merge/llava/model/kv_token_merge')
+ from .v433_modeling_llama import LlamaForCausalLM
+ import types
+ from .v433_modeling_llama import LlamaRotaryEmbedding, LlamaLinearScalingRotaryEmbedding, LlamaDynamicNTKScalingRotaryEmbedding, LlamaAttention, LlamaDecoderLayer, LlamaModel, logger
+diff --git a/workers/model_workers.py b/workers/model_workers.py
+--- a/workers/model_workers.py
++++ b/workers/model_workers.py
+@@ -1,5 +1,7 @@
+ from workers.baseworker import *
++import os
+ import sys
++from pathlib import Path
+ from PIL import Image
+ import torch
+ 
+@@ -7,7 +9,11 @@ import torch
+ 
+ class LLaVA(BaseWorker):
+     def init_components(self, config):
+-        sys.path.insert(0, '/users/PAS2473/brucewan666/LOOK-M/LLaVA-mix_merge_v1')
++        llava_path = os.environ.get(
++            "LOOKM_LLAVA_PATH",
++            str(Path(__file__).resolve().parents[1] / "LLaVA-mix_merge_v1"),
++        )
++        sys.path.insert(0, llava_path)
+         from llava.model.builder import load_pretrained_model
+         from llava.conversation import conv_templates, SeparatorStyle
+         from llava.constants import DEFAULT_IMAGE_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN

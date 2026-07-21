@@ -17,21 +17,31 @@ from typing import Any
 
 LOCK_PATTERN = re.compile(r"^([A-Za-z0-9_.-]+)==([^;\s]+)$")
 CACHE_VARIABLES = (
+    "PIP_CACHE_DIR",
+    "UV_CACHE_DIR",
     "HF_HOME",
     "HF_HUB_CACHE",
+    "HF_ASSETS_CACHE",
     "HF_DATASETS_CACHE",
     "TRANSFORMERS_CACHE",
     "XDG_CACHE_HOME",
     "TORCH_HOME",
+    "TORCHINDUCTOR_CACHE_DIR",
+    "TRITON_CACHE_DIR",
+    "NUMBA_CACHE_DIR",
+    "CUDA_CACHE_PATH",
+    "FLASHINFER_WORKSPACE_BASE",
+    "VLLM_CACHE_ROOT",
+    "SGLANG_CACHE_DIR",
+    "PRE_COMMIT_HOME",
+    "MPLCONFIGDIR",
+    "WANDB_CACHE_DIR",
+    "WANDB_DATA_DIR",
+    "RAY_TMPDIR",
+    "TMPDIR",
 )
-PROFILE_CACHE_VARIABLE = {
-    "hf": None,
-    "vllm": "VLLM_CACHE_ROOT",
-    "sglang": "SGLANG_CACHE_DIR",
-    "mock": None,
-}
 PROFILE_IMPORTS = {
-    "hf": (
+    "common": (
         "mosaickv",
         "numpy",
         "torch",
@@ -39,7 +49,6 @@ PROFILE_IMPORTS = {
         "transformers",
         "accelerate",
         "datasets",
-        "flash_attn",
         "lmms_eval",
         "qwen_vl_utils",
         "av",
@@ -49,39 +58,22 @@ PROFILE_IMPORTS = {
         "sentencepiece",
         "safetensors",
         "tokenizers",
-    ),
-    "vllm": (
-        "mosaickv",
-        "numpy",
-        "torch",
-        "torchvision",
-        "transformers",
-        "vllm",
-        "vllm.entrypoints.llm",
-        "flashinfer",
-        "xformers",
-        "ray",
-        "fastapi",
-        "cv2",
-        "PIL",
-        "sentencepiece",
-    ),
-    "sglang": (
-        "mosaickv",
-        "numpy",
-        "torch",
-        "torchvision",
-        "transformers",
-        "sglang",
-        "sglang.srt.entrypoints.engine",
-        "flashinfer",
-        "flash_attn",
-        "fastapi",
-        "PIL",
-        "sentencepiece",
+        "pyarrow",
+        "yaml",
     ),
     "mock": ("mosaickv", "numpy", "pytest"),
 }
+COMMON_GPU_IMPORTS = (
+    "vllm",
+    "vllm.entrypoints.llm",
+    "sglang",
+    "sglang.srt.entrypoints.engine",
+    "flashinfer",
+    "sgl_kernel",
+    "xformers",
+    "ray",
+    "fastapi",
+)
 
 
 def normalize_distribution(name: str) -> str:
@@ -127,12 +119,15 @@ def verify_pins(pins: dict[str, str]) -> tuple[dict[str, str], list[str]]:
     return installed, errors
 
 
-def verify_imports(profile: str) -> tuple[list[str], list[str]]:
+def verify_imports(profile: str, require_cuda: bool) -> tuple[list[str], list[str]]:
     """Import the complete backend/evaluation smoke surface for a profile."""
 
     imported: list[str] = []
     errors: list[str] = []
-    for module_name in PROFILE_IMPORTS[profile]:
+    module_names = list(PROFILE_IMPORTS[profile])
+    if profile == "common" and require_cuda:
+        module_names.extend(COMMON_GPU_IMPORTS)
+    for module_name in module_names:
         try:
             importlib.import_module(module_name)
         except BaseException as error:  # imports may raise native loader errors
@@ -155,9 +150,6 @@ def verify_cache_policy(profile: str) -> tuple[dict[str, str], list[str]]:
 
     home = Path.home().resolve()
     names = list(CACHE_VARIABLES)
-    profile_variable = PROFILE_CACHE_VARIABLE[profile]
-    if profile_variable is not None:
-        names.append(profile_variable)
     values: dict[str, str] = {}
     errors: list[str] = []
     for name in names:
@@ -173,6 +165,8 @@ def verify_cache_policy(profile: str) -> tuple[dict[str, str], list[str]]:
         values[name] = str(resolved)
         if is_within(resolved, home):
             errors.append(f"cache path is inside home: {name}={resolved}")
+    if os.environ.get("PIP_CONFIG_FILE") != "/dev/null":
+        errors.append("PIP_CONFIG_FILE must be /dev/null to ignore user-level pip config")
     return values, errors
 
 
@@ -237,23 +231,16 @@ def cuda_smoke(profile: str, require_cuda: bool) -> tuple[dict[str, Any], list[s
     torch.cuda.synchronize(device)
     report["matmul_passed"] = True
 
-    build_major = int(str(torch.version.cuda).split(".", maxsplit=1)[0])
-    minimum_driver = 580 if profile == "hf" else 525
+    minimum_driver = 525
     actual_driver = driver_major(str(report["driver"]))
-    if profile == "hf" and build_major != 13:
-        errors.append(f"HF lock requires a CUDA 13.x torch build, got {torch.version.cuda}")
-    if profile in {"vllm", "sglang"} and str(torch.version.cuda) != "12.8":
-        errors.append(f"{profile} lock requires a CUDA 12.8 torch build, got {torch.version.cuda}")
+    if profile == "common" and str(torch.version.cuda) != "12.4":
+        errors.append(f"common lock requires a CUDA 12.4 torch build, got {torch.version.cuda}")
     if actual_driver is None or actual_driver < minimum_driver:
         errors.append(
             f"{profile} requires NVIDIA driver major >= {minimum_driver}, got {report['driver']}"
         )
-    if profile == "hf" and capability[0] not in {8, 9}:
-        errors.append(f"FlashAttention-2 profile requires Ampere/Ada/Hopper, got SM {capability}")
-    if profile == "vllm" and capability < (7, 0):
-        errors.append(f"vLLM requires compute capability >= 7.0, got SM {capability}")
-    if profile == "sglang" and capability < (8, 0):
-        errors.append(f"SGLang lock requires compute capability >= 8.0, got SM {capability}")
+    if profile == "common" and capability < (8, 0):
+        errors.append(f"common backend lock requires compute capability >= 8.0, got SM {capability}")
     return report, errors
 
 
@@ -282,7 +269,7 @@ def main() -> int:
         return 2
 
     installed, pin_errors = verify_pins(pins)
-    imported, import_errors = verify_imports(profile)
+    imported, import_errors = verify_imports(profile, bool(args.require_cuda))
     cache_paths, cache_errors = verify_cache_policy(profile)
     try:
         cuda, cuda_errors = cuda_smoke(profile, bool(args.require_cuda))

@@ -1,5 +1,12 @@
 # Model capability matrix
 
+> Common-environment reset (2026-07-21): every model/backend combination is
+> currently **unverified** in the new common lock (Transformers 4.49.0, vLLM
+> 0.7.2, SGLang 0.4.3.post1). The successful/failed runs below used older,
+> separate environments and a dirty worktree. They are historical diagnostics,
+> not paper-eligible support evidence. Re-run source registration, exact
+> revision loading, and parity before changing this status.
+
 Audit date: 2026-07-19. Model revisions are immutable SHAs and must be used in
 all experiments. This document separates three facts that are often conflated:
 
@@ -8,9 +15,31 @@ all experiments. This document separates three facts that are often conflated:
 2. **modality support**: the checkpoint and processor define that input type;
 3. **load verified**: the exact weights were loaded in the audited environment.
 
-No requested checkpoint had complete local weights and no GPU was visible on
-the login node, so **load verified is unsupported for every row**. A source
-support mark is not an experimental result.
+At the audit instant, no requested checkpoint had complete local weights and
+no GPU was visible on the login node, so **load verified was unsupported for
+every row**. A source support mark is not an experimental result. A later
+2026-07-19 addendum, after creating a separate environment and running Slurm
+gates, verified exact-revision HF eager loads for Qwen2.5-VL-3B and
+LLaVA-1.5-7B only. That first load gate did not verify their vLLM/SGLang paths
+or unified retention-1 behavior. Later jobs `17115048` and `17115049` verified
+16-token eager retention-1 parity against FullKV for those two exact
+revisions. OneVision, InternVL, Qwen2.5-VL-7B, non-eager attention, and serving
+backend parity remain unsupported; see
+[the unified runtime validation record](huggingface_runtime.md).
+
+A 2026-07-20 serving addendum supersedes the vLLM part of that statement for
+Qwen2.5-VL-3B only. The separately locked vLLM 0.11.2 environment passed all
+159 pins/imports and a CUDA smoke on one A100. Slurm job `17158441` loaded the
+pinned 3B checkpoint and completed measured FullKV inference; controlled HF
+job `17158501` matched its 16 token IDs exactly. Other requested vLLM models
+remain runtime-unverified.
+
+A 2026-07-20 SGLang addendum verified Stage A FullKV loads for both pinned
+Qwen2.5-VL-3B and 7B checkpoints in the separate SGLang 0.5.10.post1 lock on
+one A100 80GB. This establishes serving execution, deterministic repeats,
+request isolation, and accounting—not HF/SGLang token parity and not native
+MosaicKV cache mutation. The controlled 3B HF comparison failed token parity,
+so no optimized SGLang profile is supported.
 
 ## Pinned checkpoints
 
@@ -37,9 +66,9 @@ the environment can actually load it now.
 
 | Model | HF Transformers 4.57.6 | vLLM 0.11.2 source | SGLang 0.5.10.post1 source | Current exact-revision load |
 |---|---|---|---|---|
-| LLaVA 1.5 7B | **Source-supported, native** `LlavaForConditionalGeneration` | **Source-supported** | **Source-supported** | **Unsupported**: weights absent; no GPU; serving env broken |
-| Qwen2.5-VL 3B | **Source-supported, native** `Qwen2_5_VLForConditionalGeneration` | **Source-supported** | **Source-supported** | **Unsupported**: weights absent; no GPU; serving env broken |
-| Qwen2.5-VL 7B | **Source-supported, native** (same class) | **Source-supported** | **Source-supported** | **Unsupported**: cached ref only, no snapshot/weights; no GPU; serving env broken |
+| LLaVA 1.5 7B | **Source-supported, native** `LlavaForConditionalGeneration` | **Source-supported** | **Source-supported** | HF eager verified; vLLM/SGLang runtime unverified |
+| Qwen2.5-VL 3B | **Source-supported, native** `Qwen2_5_VLForConditionalGeneration` | **Source-supported** | **Stage A FullKV verified** | **HF eager, vLLM FullKV, and SGLang FullKV loads verified** at the pinned revision; HF/SGLang token parity failed |
+| Qwen2.5-VL 7B | **Source-supported, native** (same class) | **Source-supported** | **Stage A FullKV verified** | **SGLang FullKV load verified** at the pinned revision; HF/vLLM paths remain unverified |
 | InternVL2.5 4B | **Source-supported only through checkpoint remote code** with `trust_remote_code=True`; not a native class for this `internvl_chat` config | **Source-supported** | **Source-supported** | **Unsupported**: remote code/weights absent; no GPU; serving env broken |
 | LLaVA-OneVision 0.5B | **Source-supported, native** `LlavaOnevisionForConditionalGeneration` | **Source-supported** | **Unsupported**: no `LlavaOnevisionForConditionalGeneration` registry/model implementation | **Unsupported** |
 
@@ -122,10 +151,11 @@ tensor reachability as supported injection.
 
 ## Minimal recommended model/backend matrix
 
-The detected general partition includes A100 80 GB GPUs, but the current
-software cannot execute this matrix until clean environments and pinned model
-snapshots exist. Once those prerequisites are satisfied, use the following
-smallest defensible progression:
+The detected partition includes A100 80 GB GPUs. Dedicated HF, vLLM, and
+SGLang environments now exist. Qwen2.5-VL-3B and LLaVA-1.5 are HF-verified;
+Qwen2.5-VL-3B is vLLM FullKV-verified; and Qwen2.5-VL-3B/7B are SGLang
+FullKV-verified. OneVision, InternVL, and clean canonical runs still need their
+prerequisites. Use the following smallest defensible progression:
 
 | Purpose | Model | Backend | Hardware target | Rationale |
 |---|---|---|---|---|
@@ -133,7 +163,8 @@ smallest defensible progression:
 | Primary algorithm/quality bring-up | Qwen2.5-VL 3B | HF eager | 1× A100 80 GB | Full requested modalities, GQA cache, M-RoPE, and native source hooks. |
 | Cross-family and published-baseline bridge | LLaVA 1.5 7B | HF eager; official baselines in isolated legacy envs | 1× A100 80 GB | Llama/MHA cache and closest checkpoint family to LOOK-M/PrefixKV. Do not equate HF conversion with their vendored model. |
 | Scaling check | Qwen2.5-VL 7B | HF eager | 1× A100 80 GB | Same architecture at larger scale; add only after 3B correctness. |
-| Systems prototype | Qwen2.5-VL 3B | separately pinned vLLM, then SGLang | 1× A100 80 GB | Both installed source trees have the architecture and image/video processors; backend hooks still require implementation. |
+| Systems reference | Qwen2.5-VL 3B | pinned vLLM FullKV | 1× A100 80 GB | FullKV measurement and HF output parity are verified; native cache mutation remains unsupported. |
+| Systems reference | Qwen2.5-VL 3B and 7B | pinned SGLang FullKV | 1× A100 80 GB | FullKV serving, deterministic repeats, accounting, and isolation are verified; HF token parity and native cache mutation remain unsupported. |
 
 InternVL2.5 4B is valuable as a later remote-code architecture test, but it is
 not minimal: it introduces custom checkpoint code and a distinct image tiling

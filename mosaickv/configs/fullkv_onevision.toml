@@ -1,0 +1,82 @@
+schema_version = 1
+
+[model]
+id = "llava-hf/llava-onevision-qwen2-0.5b-ov-hf"
+revision = "74dd0bf867a4cda7950c17663794267c60cf4b40"
+precision = "bf16"
+
+[dataset]
+id = "local/fullkv-workload"
+# Replace this placeholder with an immutable revision or content checksum.
+revision = "replace-with-immutable-workload-revision"
+split = "test"
+
+[execution]
+backend = "huggingface"
+attention_implementation = "eager"
+seed = 0
+deterministic_algorithms = true
+
+[generation]
+max_new_tokens = 16
+do_sample = false
+temperature = 0.0
+top_p = 1.0
+output_length_policy = "fixed_max_new_tokens"
+
+[cache]
+# Replace this template value with the preregistered comparison budget.
+budget_value = 1048576
+budget_unit = "retained_slots"
+retention_ratio = 1.0
+block_size = 16
+accounting_spec_sha = "60915ac01ad35843c4de56620864145d5b81b973a3bfec03fb322d5e4f6ff695"
+
+[forecasting]
+enabled = false
+mode = "hybrid"
+prompt_window = 16
+draft_steps = 4
+centroid_count = 4
+covariance = "diagonal"
+low_memory_centroids = true
+centroid_iterations = 4
+
+[graph]
+enabled = false
+max_neighbors = 8
+min_edge_weight = 0.0
+
+[utility]
+lambda_q = 1.0
+lambda_v = 0.25
+lambda_o = 0.25
+
+[selection]
+enabled = false
+algorithm = "lazy_greedy"
+lambda_g = -0.25
+lambda_m = -0.25
+stop_on_nonpositive_gain = true
+exhaustive_max_nodes = 20
+
+[prototypes]
+enabled = false
+group_size = 4
+max_position_span = 128
+min_anchor_weight = 0.0
+allowed_modality_pairs = ["text:text", "image:image", "video:video"]
+
+[residual]
+enabled = false
+rank = 8
+storage_dtype = "lossless"
+require_pinned_memory = true
+
+[repair]
+enabled = false
+policy = "none"
+entropy_threshold = 0.5
+prototype_risk_threshold = 0.25
+max_blocks_per_step = 0
+evaluation_only = false

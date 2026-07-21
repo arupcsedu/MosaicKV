@@ -21,6 +21,7 @@ from mosaickv.evaluation.tasks import (
     load_synthetic_samples,
     select_samples,
 )
+from mosaickv.fullkv_cli import add_fullkv_subcommands
 from mosaickv.logging import configure_logging, get_logger
 from mosaickv.manifest import (
     ArtifactProvenance,
@@ -31,7 +32,7 @@ from mosaickv.manifest import (
     sha256_text,
 )
 from mosaickv.smoke import run_cpu_smoke
-from mosaickv.types import JsonObject, MeasurementType
+from mosaickv.types import JsonObject, MeasurementType, MosaicKVMethod
 
 
 def _emit(payload: JsonObject, *, compact: bool) -> None:
@@ -143,6 +144,27 @@ def _evaluate_command(args: argparse.Namespace) -> int:
             compact=bool(args.json),
         )
         return 0
+    from mosaickv.hf_cli import resolve_hf_config, run_hf_evaluation
+    from mosaickv.sglang_cli import resolve_sglang_config, run_sglang_evaluation
+    from mosaickv.vllm_cli import resolve_vllm_config, run_vllm_evaluation
+
+    sglang_config = resolve_sglang_config(args)
+    if sglang_config is not None:
+        status, payload = run_sglang_evaluation(args, sglang_config)
+        _emit(payload, compact=bool(args.json))
+        return status
+
+    vllm_config = resolve_vllm_config(args)
+    if vllm_config is not None:
+        status, payload = run_vllm_evaluation(args, vllm_config)
+        _emit(payload, compact=bool(args.json))
+        return status
+
+    hf_config = resolve_hf_config(args)
+    if hf_config is not None:
+        status, payload = run_hf_evaluation(args, hf_config)
+        _emit(payload, compact=bool(args.json))
+        return status
     task_name = cast("str | None", args.task)
     config_path = cast("str | None", args.config)
     if task_name is None:
@@ -151,7 +173,7 @@ def _evaluate_command(args: argparse.Namespace) -> int:
         return _preflight_command(args)
     if config_path is not None:
         raise ValueError("--task and --config cannot be used together")
-    if task_name != "synthetic_ci":
+    if task_name not in {"synthetic_ci", "synthetic_smoke"}:
         task = registry.resolve(task_name)
         raise ValueError(
             f"task {task.name!r} requires a local model object and the lmms-eval Python API; "
@@ -161,7 +183,9 @@ def _evaluate_command(args: argparse.Namespace) -> int:
     raw_output = cast("str | None", args.raw_output)
     manifest = cast("str | None", args.manifest)
     if run_id is None or raw_output is None or manifest is None:
-        raise ValueError("synthetic_ci requires --run-id, --raw-output, and --manifest")
+        raise ValueError(
+            "synthetic_ci/synthetic_smoke requires --run-id, --raw-output, and --manifest"
+        )
     manifest_path = str(Path(manifest).resolve())
     samples = load_synthetic_samples()
     selected = select_samples(
@@ -272,6 +296,91 @@ def build_parser() -> argparse.ArgumentParser:
     )
     evaluate_parser.add_argument("--config")
     evaluate_parser.add_argument("--task")
+    evaluate_parser.add_argument("--model")
+    evaluate_parser.add_argument("--model-revision")
+    evaluate_parser.add_argument("--dataset-revision")
+    evaluate_parser.add_argument(
+        "--backend", default="hf", choices=["hf", "huggingface", "vllm", "sglang"]
+    )
+    evaluate_parser.add_argument("--attention-backend", default="eager")
+    evaluate_parser.add_argument(
+        "--method",
+        default="full_kv",
+        choices=[method.value for method in MosaicKVMethod],
+    )
+    evaluate_parser.add_argument("--retention-ratio", type=float, default=1.0)
+    evaluate_parser.add_argument("--cache-budget", type=int, default=2_147_483_647)
+    evaluate_parser.add_argument(
+        "--budget-unit", default="blocks", choices=["blocks", "retained_slots", "bytes"]
+    )
+    evaluate_parser.add_argument("--block-size", type=int, default=16)
+    evaluate_parser.add_argument(
+        "--forecast",
+        default="hybrid",
+        choices=["prompt_window", "draft_rollout", "hybrid"],
+    )
+    evaluate_parser.add_argument("--prompt-window", type=int, default=16)
+    evaluate_parser.add_argument("--draft-tokens", type=int, default=4)
+    evaluate_parser.add_argument("--forecast-centroids", type=int, default=4)
+    evaluate_parser.add_argument("--lookm-recent-ratio", type=float, default=0.1)
+    evaluate_parser.add_argument("--lookm-important-ratio", type=float, default=0.1)
+    evaluate_parser.add_argument(
+        "--lookm-merge-strategy",
+        default="pivotal",
+        choices=["averaged", "pivotal", "weighted"],
+    )
+    evaluate_parser.add_argument(
+        "--prefixkv-profile-mode",
+        default="offline_profile",
+        choices=["offline_profile", "fixed_global"],
+    )
+    evaluate_parser.add_argument("--prefixkv-profile")
+    evaluate_parser.add_argument("--prefixkv-start-size", type=int, default=1)
+    evaluate_parser.add_argument("--prefixkv-protect-size", type=int, default=1)
+    evaluate_parser.add_argument("--prefixkv-eviction-distance", type=int, default=-25)
+    evaluate_parser.add_argument("--vl-cache-sparsity-threshold", type=float, default=0.01)
+    evaluate_parser.add_argument("--vl-cache-min-layer-retention", type=float, default=0.01)
+    evaluate_parser.add_argument("--vl-cache-max-layer-retention", type=float, default=1.0)
+    evaluate_parser.add_argument("--vl-cache-recent-window-fraction", type=float, default=0.1)
+    evaluate_parser.add_argument("--vl-cache-max-post-vision-queries", type=int)
+    evaluate_parser.add_argument(
+        "--repair-policy",
+        default="entropy_or_prototype_risk",
+        choices=[
+            "none",
+            "entropy",
+            "prototype_risk",
+            "entropy_or_prototype_risk",
+            "oracle",
+        ],
+    )
+    evaluate_parser.add_argument("--entropy-threshold", type=float, default=0.5)
+    evaluate_parser.add_argument("--prototype-risk-threshold", type=float, default=0.25)
+    evaluate_parser.add_argument("--repair-blocks", type=int, default=2)
+    evaluate_parser.add_argument("--max-new-tokens", type=int, default=16)
+    evaluate_parser.add_argument("--precision", default="bf16", choices=["fp32", "fp16", "bf16"])
+    evaluate_parser.add_argument("--output-dir", default="runs")
+    evaluate_parser.add_argument("--trace-directory")
+    evaluate_parser.add_argument("--local-files-only", action="store_true")
+    evaluate_parser.add_argument(
+        "--enable-mosaickv",
+        action="store_true",
+        help="request a fail-closed experimental native serving-backend integration",
+    )
+    evaluate_parser.add_argument("--tensor-parallel-size", type=int, default=1)
+    evaluate_parser.add_argument("--gpu-memory-utilization", type=float, default=0.9)
+    evaluate_parser.add_argument("--vllm-max-model-len", type=int)
+    evaluate_parser.add_argument("--sglang-context-length", type=int, default=4096)
+    evaluate_parser.add_argument("--sglang-mem-fraction-static", type=float, default=0.8)
+    evaluate_parser.add_argument("--sglang-page-size", type=int, default=1)
+    evaluate_parser.add_argument("--sglang-port", type=int, default=0)
+    evaluate_parser.add_argument("--sglang-startup-timeout", type=float, default=1800.0)
+    evaluate_parser.add_argument(
+        "--cache-probe-repeats",
+        type=int,
+        default=2,
+        help="repeat each identical request to measure prefix/multimodal cache behavior",
+    )
     evaluate_parser.add_argument("--list-tasks", action="store_true")
     evaluate_parser.add_argument("--run-id")
     evaluate_parser.add_argument("--raw-output")
@@ -288,6 +397,7 @@ def build_parser() -> argparse.ArgumentParser:
     benchmark_parser.add_argument("--config", required=True)
     benchmark_parser.add_argument("--json", action="store_true", help="emit compact JSON")
     benchmark_parser.set_defaults(handler=_preflight_command)
+    add_fullkv_subcommands(subparsers)
     return parser
 
 
@@ -302,7 +412,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         logger.info("command started", extra={"event": "command_started", "command": args.command})
         return handler(args)
-    except (ConfigurationError, ManifestError, LookupError, ValueError, OSError) as error:
+    except (
+        ConfigurationError,
+        ManifestError,
+        LookupError,
+        OSError,
+        RuntimeError,
+        ValueError,
+    ) as error:
         logger.error(
             "command failed",
             extra={"event": "command_failed", "command": args.command, "error": str(error)},

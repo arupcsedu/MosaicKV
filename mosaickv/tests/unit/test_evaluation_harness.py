@@ -21,6 +21,16 @@ class CountingModel(SyntheticColorModel):
         return super().generate(request)
 
 
+class EffectiveMethodModel(SyntheticColorModel):
+    def generate(self, request: EvaluationRequest) -> ModelGeneration:
+        generated = super().generate(request)
+        return ModelGeneration(
+            generated.answer,
+            generated.metrics,
+            effective_method="mosaickv_full__mosaickv_exact_safety_fallback",
+        )
+
+
 def test_synthetic_task_completes_and_resumes_on_cpu(tmp_path: Path) -> None:
     model = CountingModel()
     raw = tmp_path / "raw.jsonl"
@@ -91,3 +101,19 @@ def test_synthetic_scores_are_deterministic(tmp_path: Path) -> None:
         )
         scores.append([row.task_score for row in load_jsonl(raw)])
     assert scores[0] == scores[1] == [1.0, 1.0]
+
+
+def test_result_records_effective_method_instead_of_requested_fallback(tmp_path: Path) -> None:
+    raw = tmp_path / "raw.jsonl"
+    EvaluationHarness().run(
+        run_id="effective-method-ci",
+        task_name="synthetic_ci",
+        samples=load_synthetic_samples(),
+        model=EffectiveMethodModel(),
+        raw_output=raw,
+        manifest_path=str(tmp_path / "manifest.json"),
+        seed=0,
+        subset_size=1,
+    )
+
+    assert load_jsonl(raw)[0].method == "mosaickv_full__mosaickv_exact_safety_fallback"

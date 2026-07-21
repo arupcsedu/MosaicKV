@@ -40,6 +40,12 @@ software:
   vllm: <version/commit or not_used>
   sglang: <version/commit or not_used>
 
+environment:
+  name: common
+  lock_path: mosaickv/env/common/requirements.lock
+  lock_sha256: <SHA-256 of exact common lock>
+  cache_root: </scratch path outside home>
+
 hardware:
   gpu_type: <exact accelerator model or not_used>
   gpu_count: <integer>
@@ -62,7 +68,7 @@ generation:
 
 cache:
   budget_value: <number>
-  budget_unit: <retained_slots|bytes|other>
+  budget_unit: <blocks|retained_slots|bytes|other>
   retention_ratio: <number or not_applicable>
   accounting_spec_sha: <SHA-256 of accounting specification>
 
@@ -157,6 +163,21 @@ Keep quality and systems configurations paired. Measure on otherwise idle, ident
 Official external source belongs under `third_party/<baseline>/` at a pinned commit SHA with license and attribution intact. Record upstream URL, paper citation, commit, installation steps, local patch hash, model/backend compatibility, and the exact invoked entry point.
 
 Local paper-faithful implementations must be named `<method>_reimpl`. Their manifests use `baseline_reimpl_measured`, and their documentation must state that they are not official. Preserve a decision log for paper ambiguities and tests used to validate the interpretation.
+
+Offline baseline calibration is separate from evaluation. A PrefixKV profile
+must record model/dataset revisions, calibration split, seed, sorted sample
+IDs, and a profile digest. Native profile generation and evaluation must abort
+on any sample-ID intersection. An upstream profile without calibration IDs may
+be used for source inspection or a clearly marked parity diagnostic, but not a
+paper result claiming verified disjointness.
+
+The controlled PrefixKV LLaVA parity runner records the native profile and
+the raw list consumed by official code, both sample-set digests, the empty
+calibration/evaluation intersection, the complete parity-environment freeze,
+and synchronized CUDA-event timing. Its Slurm entry point sets
+`CUBLAS_WORKSPACE_CONFIG=:4096:8`. A comparable dirty-worktree diagnostic is
+useful implementation evidence, but it remains ineligible for a paper table
+until repeated from a clean SHA with the systems-measurement protocol above.
 
 ## Artifact lineage and retention
 

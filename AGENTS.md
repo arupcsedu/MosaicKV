@@ -84,6 +84,22 @@ Do not vendor model weights, datasets, or code whose license does not permit red
 ## Engineering workflow
 
 - Inspect relevant code, configuration, tests, and repository status before editing.
+- Use only the common environment at `/scratch/djy8hg/env/mosaickv` for HF,
+  vLLM, SGLang, evaluation, and development runs. Backend-specific legacy
+  environments are historical evidence, not valid run environments.
+- Source `mosaickv/scripts/cache_env.sh` before any setup, test, model access,
+  server, container, or evaluation command. Every cache and temporary path
+  must be rooted outside home, normally under
+  `/scratch/djy8hg/cache/mosaickv`. Never persist `HF_TOKEN`.
+- Canonical validation, benchmark, parity, and paper-result runs require a
+  clean tracked and untracked worktree. Run
+  `mosaickv/scripts/assert_clean_worktree.sh` first. A dirty-tree run is
+  exploratory even when its patch is preserved.
+- Do not import AAFLOW through a sibling checkout, `PYTHONPATH`, or dynamic
+  path mutation. MosaicKV currently has no AAFLOW runtime dependency. If code
+  is intentionally reused later, isolate it under a pinned and licensed
+  `third_party/` checkout or a clearly attributed MosaicKV compatibility
+  namespace, and import it through MosaicKV's package boundary.
 - Keep algorithm logic, backend adapters, evaluation code, and result presentation separable.
 - Put all behavior-affecting choices in versioned configuration; do not rely on hidden notebook state or unrecorded environment variables.
 - Derive the config SHA from the canonical resolved configuration, not merely its filename.
@@ -93,4 +109,4 @@ Do not vendor model weights, datasets, or code whose license does not permit red
 - Do not commit secrets, access tokens, private dataset contents, generated model weights, or large untracked artifacts.
 - Preserve unrelated user changes and keep changes within the requested scope.
 
-The repository currently includes governance and research-infrastructure scaffolding only. Do not infer implemented MosaicKV mechanisms or measured performance from plans, namespace placeholders, configuration fields, or design descriptions.
+The repository contains governance, research infrastructure, and partial MosaicKV mechanism implementations. Verify implementation and correctness evidence in source and tests; do not infer completion or measured performance from plans, namespace placeholders, configuration fields, or design descriptions.
