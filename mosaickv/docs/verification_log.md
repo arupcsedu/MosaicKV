@@ -64,3 +64,19 @@ table and does not establish model or backend support.
   root rather than the package root. This is a harness path bug, not a test
   result; the script now changes to its computed project root before invoking
   Ruff, MyPy, or pytest.
+- After correcting the check scope, formatting debt, and locked-Transformers
+  adapter compatibility, clean-tree Slurm job `17183703` passed Ruff lint,
+  Ruff format, strict MyPy over 83 production files, and pytest with 270
+  passed and one explicitly skipped model-download gate. Targeted job
+  `17183668` separately passed all 29 affected HF/environment tests.
+- Slurm job `17183814` ran the installed CLI from clean commit `fc40534`.
+  `mosaickv doctor` reported the common Python 3.11.15 environment, CUDA 12.4,
+  NVIDIA driver 595.71.05, one A100-SXM4-80GB, and importable HF, vLLM, and
+  SGLang stacks without loading weights. `mosaickv smoke` passed the synthetic
+  100%-retention check with exact equivalence and zero maximum absolute error.
+- Docker execution is platform-blocked. Job `17183762` found no Docker,
+  Podman, or nerdctl binary and no Docker socket on the compute node. Job
+  `17183814` found no subuid/subgid allocation, `fuse-overlayfs`, or
+  `slirp4netns`, so a private rootless daemon is also unavailable. Apptainer is
+  installed but was not mislabeled as Docker evidence. See
+  `docs/docker_verification.md`; no Docker support claim is made.

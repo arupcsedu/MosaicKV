@@ -54,8 +54,9 @@ mosaickv/scripts/create_envs.sh --sync common
 
 The common lock uses Torch 2.5.1/CUDA 12.4, Transformers 4.49.0, vLLM 0.7.2,
 and SGLang 0.4.3.post4. It is resolver-consistent but remains unverified until
-the clean-tree import, CUDA, model, and backend parity gates pass. Standalone
-FlashAttention-2 is not installed or claimed.
+the clean-tree gates pass. The bounded package-import and CUDA smoke passed on
+an A100; model/backend parity and native Docker remain separate, unpassed
+gates. Standalone FlashAttention-2 is not installed or claimed.
 
 Run `evaluate --config mosaickv/configs/smoke.toml` for the CPU preflight, or use `configs/hf_mosaickv.yaml` and a task to execute the unified HF runtime. Model caches must be outside the home directory.
 
@@ -64,6 +65,9 @@ The common lock, cache policy, local/Slurm setup, and Docker commands are
 documented in [environment setup](env/README.md). Creating or synchronizing the
 environment is always an explicit clean-tree action. Earlier backend-specific
 environment records are historical and cannot support a paper result.
+The current cluster's native-Docker blocker and the commands required on a
+Docker-capable host are recorded in
+[Docker verification status](docs/docker_verification.md).
 The [evaluation harness](docs/evaluation_harness.md) documents deterministic development
 subsets, the local-model protocol, lmms-eval scoring ownership, result fields, and resume/merge
 semantics.
