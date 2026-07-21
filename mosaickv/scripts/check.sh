@@ -17,5 +17,5 @@ CHECK_PATHS=(
 
 "${PYTHON_BIN}" -m ruff check "${CHECK_PATHS[@]}"
 "${PYTHON_BIN}" -m ruff format --check "${CHECK_PATHS[@]}"
-"${PYTHON_BIN}" -m mypy "${CHECK_PATHS[@]}"
+"${PYTHON_BIN}" -m mypy
 "${PYTHON_BIN}" -m pytest -q
