@@ -48,6 +48,19 @@ export WANDB_DATA_DIR="${MOSAICKV_CACHE_ROOT}/wandb/data"
 export RAY_TMPDIR="${MOSAICKV_CACHE_ROOT}/ray"
 export TMPDIR="${MOSAICKV_CACHE_ROOT}/tmp"
 
+# The PyTorch CUDA wheels keep NVRTC in the environment's site-packages tree.
+# Native SGLang kernels use the dynamic loader directly, so expose that exact
+# locked library without depending on a cluster-wide CUDA module.
+MOSAICKV_ENV_DIR=${MOSAICKV_ENV_DIR:-${VIRTUAL_ENV:-/scratch/djy8hg/env/mosaickv}}
+MOSAICKV_NVRTC_LIB="${MOSAICKV_ENV_DIR}/lib/python3.11/site-packages/nvidia/cuda_nvrtc/lib"
+export MOSAICKV_ENV_DIR
+if [[ -d "${MOSAICKV_NVRTC_LIB}" ]]; then
+  case ":${LD_LIBRARY_PATH:-}:" in
+    *":${MOSAICKV_NVRTC_LIB}:"*) ;;
+    *) export LD_LIBRARY_PATH="${MOSAICKV_NVRTC_LIB}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" ;;
+  esac
+fi
+
 # A value of "0" is truthy to pip. Remove an inherited setting so the explicit
 # scratch cache above is honored even on hosts with unusual shell profiles.
 unset PIP_NO_CACHE_DIR

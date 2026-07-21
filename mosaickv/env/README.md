@@ -7,8 +7,9 @@ SGLang, evaluation, and development paths:
 /scratch/djy8hg/env/mosaickv
 ```
 
-The authoritative inputs are `env/common/requirements.in` and
-`env/common/requirements.lock`. The lock contains every direct and transitive
+The authoritative inputs are `env/common/requirements.in`,
+`env/common/requirements.lock`, and the version-specific patch under
+`env/patches/`. The lock contains every direct and transitive
 Python distribution as an exact `name==version` pin for Linux x86_64. It was
 resolved with uv for a manylinux 2.28 target. The core intersection is:
 
@@ -37,6 +38,19 @@ module API used by SGLang (`VideoReader` and `cpu`) in a CPython 3.11,
 manylinux 2.28 wheel. This is an environment compatibility decision, not an
 algorithm change, and video support remains unverified until a video smoke
 passes.
+
+SGLang 0.4.3.post4 predates Transformers' native Qwen2.5-VL registration. Its
+bundled compatibility config uses the same class name, so Transformers 4.49
+rejects the SGLang processor registration unless `exist_ok=True` is passed.
+`scripts/apply_env_patches.sh` applies the two-argument registration patch only
+to exactly SGLang 0.4.3.post4, recognizes an already-patched source, and fails
+closed on any other source state. The patch SHA and patched target SHA are
+verified before support can be claimed and the patch SHA is stored in every run
+manifest. This does not change inference math.
+
+The PyTorch lock already includes `nvidia-cuda-nvrtc-cu12==12.4.127`.
+`cache_env.sh` adds that wheel's exact library directory to `LD_LIBRARY_PATH`
+so `sgl_kernel` does not depend on an unrecorded cluster CUDA module.
 
 Standalone FlashAttention-2 is intentionally absent from the common lock. HF
 correctness starts with eager attention. vLLM and SGLang use the kernels pinned

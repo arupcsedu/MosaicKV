@@ -9,7 +9,8 @@ A run is paper-eligible only when all of the following are true:
 1. `mosaickv/scripts/assert_clean_worktree.sh` succeeds immediately before the
    run;
 2. `/scratch/djy8hg/env/mosaickv` exactly matches
-   `env/common/requirements.lock`;
+   `env/common/requirements.lock` and every versioned patch in `env/patches/`
+   is verified as applied exactly once;
 3. `mosaickv/scripts/cache_env.sh` is sourced and every reported cache path is
    outside the user's home directory;
 4. the manifest records the clean git SHA, common-lock SHA, resolved config
@@ -30,7 +31,8 @@ packages. Changes to dependencies require this order:
 
 1. edit `env/common/requirements.in`;
 2. resolve and review the candidate lock under the scratch cache;
-3. commit the input, lock, setup code, and documentation;
+3. commit the input, lock, any version-specific patch, setup code, and
+   documentation;
 4. confirm the worktree is clean;
 5. run `create_envs.sh --sync common`;
 6. run the bounded import and CUDA smoke through Slurm;

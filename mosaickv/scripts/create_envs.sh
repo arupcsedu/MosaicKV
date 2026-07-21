@@ -73,6 +73,7 @@ fi
   --python "${ENV_PYTHON}" \
   --cache-dir "${UV_CACHE_DIR}" \
   "${LOCK_FILE}"
+"${PROJECT_ROOT}/scripts/apply_env_patches.sh" "${ENV_DIR}"
 "${ENV_DIR}/bin/uv" pip install \
   --python "${ENV_PYTHON}" \
   --cache-dir "${UV_CACHE_DIR}" \

@@ -76,6 +76,14 @@ COMMON_GPU_IMPORTS = (
     "ray",
     "fastapi",
 )
+SGLANG_PATCH_RELATIVE_PATH = Path(
+    "env/patches/sglang-0.4.3.post4-transformers-4.49.patch"
+)
+SGLANG_PATCH_TARGET = Path("sglang/srt/configs/qwen2_5_vl_config.py")
+SGLANG_PATCH_MARKERS = (
+    "Qwen2_5_VLConfig, None, Qwen2_5_VLImageProcessor, None, exist_ok=True",
+    "Qwen2_5_VLConfig, Qwen2_5_VLProcessor, exist_ok=True",
+)
 
 
 def normalize_distribution(name: str) -> str:
@@ -119,6 +127,84 @@ def verify_pins(pins: dict[str, str]) -> tuple[dict[str, str], list[str]]:
         if actual != expected:
             errors.append(f"version mismatch: {name} locked={expected} installed={actual}")
     return installed, errors
+
+
+def verify_environment_patches(
+    profile: str,
+    project_root: Path,
+) -> tuple[dict[str, Any], list[str]]:
+    """Verify exact source state for the versioned environment compatibility patch."""
+
+    if profile != "common":
+        return {}, []
+    errors: list[str] = []
+    patch_path = project_root / SGLANG_PATCH_RELATIVE_PATH
+    report: dict[str, Any] = {
+        "sglang_transformers_compat": {
+            "patch_path": str(patch_path),
+            "status": "failed",
+        }
+    }
+    patch_report = report["sglang_transformers_compat"]
+    assert isinstance(patch_report, dict)
+    if not patch_path.is_file():
+        errors.append(f"environment patch is missing: {patch_path}")
+        return report, errors
+    patch_report["patch_sha256"] = hashlib.sha256(patch_path.read_bytes()).hexdigest()
+    try:
+        distribution = importlib.metadata.distribution("sglang")
+    except importlib.metadata.PackageNotFoundError:
+        errors.append("cannot verify environment patch: sglang is not installed")
+        return report, errors
+    target = Path(distribution.locate_file(SGLANG_PATCH_TARGET)).resolve()
+    patch_report["target"] = str(target)
+    if not target.is_file():
+        errors.append(f"environment patch target is missing: {target}")
+        return report, errors
+    source = target.read_text(encoding="utf-8")
+    missing = [marker for marker in SGLANG_PATCH_MARKERS if source.count(marker) != 1]
+    if missing:
+        errors.append(
+            "environment patch is not applied exactly once: "
+            + ", ".join(repr(marker) for marker in missing)
+        )
+        return report, errors
+    patch_report["target_sha256"] = hashlib.sha256(target.read_bytes()).hexdigest()
+    patch_report["status"] = "applied"
+    return report, errors
+
+
+def verify_native_library_paths(profile: str) -> tuple[dict[str, Any], list[str]]:
+    """Verify that wheel-provided native CUDA libraries are loader-visible."""
+
+    if profile != "common":
+        return {}, []
+    expected = (
+        Path(sys.prefix)
+        / "lib"
+        / f"python{sys.version_info.major}.{sys.version_info.minor}"
+        / "site-packages"
+        / "nvidia"
+        / "cuda_nvrtc"
+        / "lib"
+    ).resolve()
+    loader_paths = [
+        Path(item).resolve(strict=False)
+        for item in os.environ.get("LD_LIBRARY_PATH", "").split(":")
+        if item
+    ]
+    report: dict[str, Any] = {
+        "expected_nvrtc_directory": str(expected),
+        "ld_library_path": [str(path) for path in loader_paths],
+        "libnvrtc_present": (expected / "libnvrtc.so.12").is_file(),
+        "loader_visible": expected in loader_paths,
+    }
+    errors: list[str] = []
+    if not report["libnvrtc_present"]:
+        errors.append(f"locked NVRTC library is missing: {expected / 'libnvrtc.so.12'}")
+    if not report["loader_visible"]:
+        errors.append(f"locked NVRTC directory is absent from LD_LIBRARY_PATH: {expected}")
+    return report, errors
 
 
 def _import_in_bounded_subprocess(
@@ -328,6 +414,8 @@ def main() -> int:
         return 2
 
     installed, pin_errors = verify_pins(pins)
+    environment_patches, patch_errors = verify_environment_patches(profile, project_root)
+    native_libraries, native_library_errors = verify_native_library_paths(profile)
     imported, import_errors, import_durations = verify_imports(
         profile,
         bool(args.require_cuda),
@@ -340,6 +428,8 @@ def main() -> int:
         cuda = {"required": bool(args.require_cuda), "matmul_passed": False}
         cuda_errors = [f"CUDA smoke failed: {type(error).__name__}: {error}"]
     errors.extend(pin_errors)
+    errors.extend(patch_errors)
+    errors.extend(native_library_errors)
     errors.extend(import_errors)
     errors.extend(cache_errors)
     errors.extend(cuda_errors)
@@ -376,6 +466,8 @@ def main() -> int:
         "imported_modules": imported,
         "import_durations_seconds": import_durations,
         "import_timeout_seconds": float(args.import_timeout_seconds),
+        "environment_patches": environment_patches,
+        "native_libraries": native_libraries,
         "cache_paths": cache_paths,
         "hf_token_present": bool(os.environ.get("HF_TOKEN")),
         "cuda": cuda,

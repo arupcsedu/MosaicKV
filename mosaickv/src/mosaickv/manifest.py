@@ -233,6 +233,15 @@ class RunManifestWriter:
         lock_path = self.repo_root / "mosaickv" / "env" / "common" / "requirements.lock"
         if not lock_path.is_file():
             raise ManifestError(f"common environment lock is missing: {lock_path}")
+        patch_path = (
+            self.repo_root
+            / "mosaickv"
+            / "env"
+            / "patches"
+            / "sglang-0.4.3.post4-transformers-4.49.patch"
+        )
+        if not patch_path.is_file():
+            raise ManifestError(f"common environment patch is missing: {patch_path}")
         gpu_type, gpu_count, driver = _nvidia_hardware()
         execution: JsonObject = {
             "backend": config.execution.backend.value,
@@ -282,6 +291,12 @@ class RunManifestWriter:
                 "name": "common",
                 "lock_path": str(lock_path.relative_to(self.repo_root)),
                 "lock_sha256": sha256_bytes(lock_path.read_bytes()),
+                "patches": {
+                    "sglang_transformers_compat": {
+                        "path": str(patch_path.relative_to(self.repo_root)),
+                        "sha256": sha256_bytes(patch_path.read_bytes()),
+                    }
+                },
                 "cache_root": os.environ.get("MOSAICKV_CACHE_ROOT", "not_set"),
                 "platform": platform.platform(),
                 "hostname": platform.node(),

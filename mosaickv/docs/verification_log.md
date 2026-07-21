@@ -40,3 +40,16 @@ table and does not establish model or backend support.
   compatibility helper locally, and isolate each verifier import behind a
   hard deadline. Environment creation no longer starts heavyweight imports on
   the login node; the clean-tree Slurm smoke owns that verification gate.
+- Environment synchronization job `17182039` at clean commit `8d45645`
+  completed in five seconds. It installed SGLang 0.4.3.post4 and `pip check`
+  reported no broken requirements.
+- Bounded Slurm smoke job `17182181` completed rather than hanging. All module
+  imports were individually bounded and the CUDA matrix multiplication passed,
+  but support remained failed for two reasons: SGLang's compatibility config
+  attempted to register a processor class name already native to Transformers
+  4.49, and `sgl_kernel` could not locate the wheel-provided `libnvrtc.so.12`.
+- Corrective action: add a fail-closed, versioned SGLang registration patch
+  using the public `exist_ok=True` parameter, verify and manifest its SHA, and
+  expose the locked `nvidia-cuda-nvrtc-cu12` library directory through the
+  common cache/environment bootstrap. No model code or inference math is
+  changed by either compatibility fix.

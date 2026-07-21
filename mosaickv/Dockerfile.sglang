@@ -12,6 +12,8 @@ LABEL org.mosaickv.support-status="unverified-until-clean-gpu-smoke"
 ENV PYTHONNOUSERSITE=1 \
     PIP_CONFIG_FILE=/dev/null \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    VIRTUAL_ENV=/opt/mosaickv-venv \
+    MOSAICKV_ENV_DIR=/opt/mosaickv-venv \
     MOSAICKV_CACHE_ROOT=/scratch/djy8hg/cache/mosaickv \
     PIP_CACHE_DIR=/scratch/djy8hg/cache/mosaickv/pip \
     UV_CACHE_DIR=/scratch/djy8hg/cache/mosaickv/uv \
@@ -42,7 +44,7 @@ ENV PYTHONNOUSERSITE=1 \
 
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-       build-essential ffmpeg git libgl1 libglib2.0-0 libsm6 libxext6 \
+       build-essential ffmpeg git libgl1 libglib2.0-0 libsm6 libxext6 patch \
     && rm -rf /var/lib/apt/lists/* \
     && python -m venv /opt/mosaickv-venv \
     && mkdir -p /scratch/djy8hg/cache/mosaickv/tmp
@@ -58,6 +60,7 @@ COPY mosaickv /opt/MosaicKV/mosaickv
 WORKDIR /opt/MosaicKV/mosaickv
 RUN uv pip install --python /opt/mosaickv-venv/bin/python \
       --cache-dir /scratch/djy8hg/cache/mosaickv/uv --no-deps --editable . \
+    && scripts/apply_env_patches.sh /opt/mosaickv-venv \
     && uv pip check --python /opt/mosaickv-venv/bin/python \
     && useradd --create-home --uid 10001 mosaickv \
     && chown -R mosaickv:mosaickv /scratch/djy8hg/cache/mosaickv /opt/MosaicKV

@@ -53,6 +53,22 @@ def test_backend_stacks_share_one_declared_intersection() -> None:
     assert (common["vllm"], common["sglang"]) == ("0.7.2", "0.4.3.post4")
 
 
+def test_common_environment_patch_is_versioned_and_applied_by_all_builds() -> None:
+    project_root = _project_root()
+    patch = project_root / "env" / "patches" / (
+        "sglang-0.4.3.post4-transformers-4.49.patch"
+    )
+    assert patch.is_file()
+    patch_text = patch.read_text(encoding="utf-8")
+    assert patch_text.count("exist_ok=True") == 2
+    setup_text = (project_root / "scripts" / "create_envs.sh").read_text(encoding="utf-8")
+    assert "apply_env_patches.sh" in setup_text
+    for name in ("Dockerfile", "Dockerfile.hf", "Dockerfile.vllm", "Dockerfile.sglang"):
+        dockerfile = (project_root / name).read_text(encoding="utf-8")
+        assert "scripts/apply_env_patches.sh /opt/mosaickv-venv" in dockerfile
+        assert "MOSAICKV_ENV_DIR=/opt/mosaickv-venv" in dockerfile
+
+
 def test_mock_verifier_passes_without_cuda(tmp_path: Path) -> None:
     project_root = _project_root()
     cache_root = tmp_path / "cache"
