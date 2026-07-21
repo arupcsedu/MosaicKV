@@ -48,6 +48,11 @@ Docker entry points source the same policy. The Docker runtime mounts the host
 scratch cache at the identical absolute path, avoiding path-dependent manifests
 and accidental downloads into a container user's home.
 
+Shared-filesystem/network setup uses a 300-second uv HTTP timeout, ten retries,
+and four concurrent downloads. These values affect installation reliability,
+not runtime measurements, and are versioned here because container and host
+setup must behave alike.
+
 ## Containers
 
 The canonical `mosaickv/Dockerfile` and the three legacy-named Dockerfiles all
