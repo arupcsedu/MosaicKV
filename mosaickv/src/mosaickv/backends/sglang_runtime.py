@@ -657,7 +657,7 @@ class SGLangHTTPTrialRunner:
     def _metrics(self) -> str:
         response = self._client.get("/metrics", timeout=30.0)
         response.raise_for_status()
-        return cast("str", response.text)
+        return response.text
 
     def run(
         self,

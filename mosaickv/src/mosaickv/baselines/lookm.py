@@ -295,7 +295,7 @@ def _cosine_matrix(evicted: Any, conserved: Any) -> np.ndarray[Any, Any]:
     else:
         evicted_array = _to_numpy(evicted)
         conserved_array = _to_numpy(conserved)
-        epsilon = np.finfo(evicted_array.dtype).eps
+        epsilon = float(np.finfo(evicted_array.dtype).eps)
         evicted_norm = np.maximum(np.linalg.norm(evicted_array, axis=-1, keepdims=True), epsilon)
         conserved_norm = np.maximum(
             np.linalg.norm(conserved_array, axis=-1, keepdims=True), epsilon
@@ -338,6 +338,7 @@ def _merge_payload(
             pivotal = (members + pivot) / 2
             merged = (pivot + _sum_sequence(pivotal)) / (len(source_offsets) + 1)
         else:
+            weights: Any
             if hasattr(members, "detach"):
                 import torch
 

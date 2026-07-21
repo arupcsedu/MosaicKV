@@ -154,7 +154,7 @@ def verify_environment_patches(
     except importlib.metadata.PackageNotFoundError:
         errors.append("cannot verify environment patch: sglang is not installed")
         return report, errors
-    target = Path(distribution.locate_file(SGLANG_PATCH_TARGET)).resolve()
+    target = Path(str(distribution.locate_file(SGLANG_PATCH_TARGET))).resolve()
     patch_report["target"] = str(target)
     if not target.is_file():
         errors.append(f"environment patch target is missing: {target}")

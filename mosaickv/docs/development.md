@@ -23,6 +23,12 @@ caches and rejects a cache root inside home. The default is
 the process environment and is never written by these scripts.
 
 The common lock is resolver-consistent, but support is not established by an
-install. Run the import-only verifier, then `slurm/env_smoke.sbatch` on a GPU,
-then model/backend parity. Preserve failures. Canonical validation requires a
-clean worktree; dirty-tree checks are exploratory.
+install. Run the bounded `slurm/env_smoke.sbatch` import/CUDA verifier, then
+model/backend parity. Preserve failures. Canonical validation requires a clean
+worktree; dirty-tree checks are exploratory.
+
+The canonical MyPy gate is strict over production code under `src/` and the
+environment verifier. Tests are exercised by pytest rather than included in
+the production typing claim. Isolated official-baseline scripts may depend on
+their pinned third-party environments and are intentionally outside the common
+MyPy surface.

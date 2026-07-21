@@ -63,7 +63,7 @@ def _encode_torch(tensor: Any, storage_dtype: ResidualStorageDType) -> tuple[Any
 
 def _encode_numpy(
     tensor: Any, storage_dtype: ResidualStorageDType
-) -> tuple[np.ndarray, float | None]:
+) -> tuple[np.ndarray[Any, Any], float | None]:
     source = np.asarray(tensor)
     scale: float | None = None
     if storage_dtype is ResidualStorageDType.LOSSLESS:

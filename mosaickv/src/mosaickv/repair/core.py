@@ -62,7 +62,7 @@ def _softmax(logits: Any) -> np.ndarray[Any, Any]:
     values = _logit_vector(logits)
     shifted = values - float(np.max(values))
     weights = np.exp(shifted)
-    return weights / float(np.sum(weights))
+    return cast("np.ndarray[Any, Any]", weights / float(np.sum(weights)))
 
 
 def normalized_next_token_entropy(logits: Any) -> float:

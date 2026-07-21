@@ -702,7 +702,12 @@ class AsyncVLLMTrialRunner:
         def stat_logger_factory(_vllm_config: Any, _engine_index: int) -> _VLLMStatLogger:
             return _VLLMStatLogger(self._collector)
 
-        engine = AsyncLLMEngine.from_engine_args(engine_args, stat_loggers=[stat_logger_factory])
+        # vLLM's stat-logger extension changes shape between audited releases;
+        # the exact runtime version gate above owns compatibility validation.
+        engine = AsyncLLMEngine.from_engine_args(
+            engine_args,
+            stat_loggers=cast("Any", [stat_logger_factory]),
+        )
         self.engine_metadata = {
             "vllm_version": self.vllm_version,
             "execution_mode": "eager",

@@ -15,24 +15,24 @@ from mosaickv.forecasting import QueryForecast
 HeadId = tuple[int, int]
 
 
-def _to_numpy(value: Any) -> np.ndarray:
+def _to_numpy(value: Any) -> np.ndarray[Any, Any]:
     if hasattr(value, "detach"):
         value = value.detach().float().cpu().numpy()
     return np.asarray(value, dtype=np.float64)
 
 
-def _normalize_rows(value: np.ndarray) -> np.ndarray:
+def _normalize_rows(value: np.ndarray[Any, Any]) -> np.ndarray[Any, Any]:
     if value.ndim != 2:
         raise ValueError("diagnostic query arrays must be rank two")
     norms = np.linalg.norm(value, axis=-1)
     nonzero = norms > 0
     if not np.any(nonzero):
         raise ValueError("diagnostic query arrays contain no nonzero vectors")
-    normalized: np.ndarray = value[nonzero] / norms[nonzero, None]
+    normalized: np.ndarray[Any, Any] = value[nonzero] / norms[nonzero, None]
     return normalized
 
 
-def _rankdata(values: np.ndarray) -> np.ndarray:
+def _rankdata(values: np.ndarray[Any, Any]) -> np.ndarray[Any, Any]:
     order = np.argsort(values, kind="mergesort")
     ranks = np.empty(len(values), dtype=np.float64)
     start = 0
@@ -45,7 +45,7 @@ def _rankdata(values: np.ndarray) -> np.ndarray:
     return ranks
 
 
-def _spearman(first: np.ndarray, second: np.ndarray) -> float:
+def _spearman(first: np.ndarray[Any, Any], second: np.ndarray[Any, Any]) -> float:
     if first.shape != second.shape or first.ndim != 1 or not len(first):
         raise ValueError("attention rankings must be aligned non-empty vectors")
     first_rank = _rankdata(first)
@@ -146,7 +146,9 @@ class ForecastQualityDiagnostics:
 
 
 def _selected_blocks(
-    attention: np.ndarray, block_positions: tuple[tuple[int, ...], ...], count: int
+    attention: np.ndarray[Any, Any],
+    block_positions: tuple[tuple[int, ...], ...],
+    count: int,
 ) -> tuple[int, ...]:
     utilities = [float(attention[list(positions)].sum()) for positions in block_positions]
     return tuple(
