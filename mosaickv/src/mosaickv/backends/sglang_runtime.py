@@ -118,9 +118,7 @@ class SGLangRuntimeOptions:
     def __post_init__(self) -> None:
         if self.tensor_parallel_size < 1:
             raise ValueError("tensor_parallel_size must be >= 1")
-        if not math.isfinite(self.mem_fraction_static) or not (
-            0 < self.mem_fraction_static < 1
-        ):
+        if not math.isfinite(self.mem_fraction_static) or not (0 < self.mem_fraction_static < 1):
             raise ValueError("mem_fraction_static must be finite and in (0, 1)")
         if self.context_length is not None and self.context_length < 2:
             raise ValueError("context_length must be >= 2 or null")
@@ -179,9 +177,7 @@ def kv_cache_geometry(model_config: Any, precision: Precision) -> KVCacheGeometr
     layers = int(config.num_hidden_layers)
     attention_heads = int(config.num_attention_heads)
     kv_heads = int(getattr(config, "num_key_value_heads", attention_heads))
-    head_dim = int(
-        getattr(config, "head_dim", int(config.hidden_size) // attention_heads)
-    )
+    head_dim = int(getattr(config, "head_dim", int(config.hidden_size) // attention_heads))
     dtype_bytes = {
         Precision.FP16: 2,
         Precision.BF16: 2,
@@ -561,9 +557,7 @@ class SGLangHTTPTrialRunner:
         # neither activates nor mutates the environment.
         interpreter_bin = str(Path(sys.executable).parent)
         environment["PATH"] = os.pathsep.join(
-            part
-            for part in (interpreter_bin, environment.get("PATH", ""))
-            if part
+            part for part in (interpreter_bin, environment.get("PATH", "")) if part
         )
         self._process = subprocess.Popen(
             self._command,
@@ -649,8 +643,7 @@ class SGLangHTTPTrialRunner:
                 last_error = f"{type(error).__name__}: {error}"
             time.sleep(0.25)
         raise SGLangRuntimeError(
-            f"SGLang startup timed out after {timeout_seconds}s ({last_error}):\n"
-            f"{self._log_tail()}"
+            f"SGLang startup timed out after {timeout_seconds}s ({last_error}):\n{self._log_tail()}"
         )
 
     def _get_json(self, path: str) -> JsonObject:
@@ -801,13 +794,9 @@ class SGLangHTTPTrialRunner:
             server_e2e_latency_seconds=_float_or_none(meta.get("e2e_latency")),
             server_prefill_seconds=server_prefill,
             server_queue_seconds=_float_or_none(meta.get("queue_time")),
-            prometheus_cache_hit_rate=_metric_last(
-                after_metrics, "sglang:cache_hit_rate"
-            ),
+            prometheus_cache_hit_rate=_metric_last(after_metrics, "sglang:cache_hit_rate"),
             prometheus_cached_tokens_delta=cached_delta,
-            prometheus_generation_throughput=_metric_last(
-                after_metrics, "sglang:gen_throughput"
-            ),
+            prometheus_generation_throughput=_metric_last(after_metrics, "sglang:gen_throughput"),
             prometheus_token_usage=_metric_last(after_metrics, "sglang:token_usage"),
             gpu_memory_source=memory.source,
             gpu_memory_baseline_bytes=memory.baseline_bytes,
@@ -855,8 +844,7 @@ def _atomic_json(path: Path, payload: JsonObject) -> None:
 
 def _safe_trace_name(sample_id: str) -> str:
     readable = "".join(
-        character if character.isalnum() or character in "-_" else "_"
-        for character in sample_id
+        character if character.isalnum() or character in "-_" else "_" for character in sample_id
     )
     digest = hashlib.sha256(sample_id.encode("utf-8")).hexdigest()[:12]
     return f"{readable[:80]}-{digest}.json"
@@ -891,14 +879,17 @@ class SGLangFullKVModel:
         self.trace_directory = Path(trace_directory)
         self.generation = dict(generation)
         self.cache_probe_repeats = cache_probe_repeats
-        self._isolation_anchor: tuple[
-            PreparedSGLangPrompt,
-            dict[str, object],
-            tuple[int, ...],
-            Path,
-            str,
-            str,
-        ] | None = None
+        self._isolation_anchor: (
+            tuple[
+                PreparedSGLangPrompt,
+                dict[str, object],
+                tuple[int, ...],
+                Path,
+                str,
+                str,
+            ]
+            | None
+        ) = None
         self._observed_input_fingerprints: set[tuple[str, str]] = set()
 
     @classmethod
@@ -1047,9 +1038,7 @@ class SGLangFullKVModel:
         }
         trace_path = self.trace_directory / request.run_id / _safe_trace_name(request.sample_id)
         _atomic_json(trace_path, trace)
-        self._observed_input_fingerprints.add(
-            (prepared.prompt_sha256, prepared.media_sha256)
-        )
+        self._observed_input_fingerprints.add((prepared.prompt_sha256, prepared.media_sha256))
         if self._isolation_anchor is None:
             self._isolation_anchor = (
                 prepared,
@@ -1099,9 +1088,7 @@ class SGLangFullKVModel:
         isolation = cast("dict[str, object]", trace["request_isolation"])
         isolation["post_intervening_request_probe"] = {
             "performed": True,
-            "intervening_distinct_input_fingerprints": (
-                len(self._observed_input_fingerprints) - 1
-            ),
+            "intervening_distinct_input_fingerprints": (len(self._observed_input_fingerprints) - 1),
             "request_id": request_id,
             "token_ids_match_anchor": tokens_match,
             "anchor_token_ids": list(expected_tokens),

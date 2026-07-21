@@ -92,9 +92,7 @@ class PrefixKVOfflineProfile:
             if not str(getattr(self, name)).strip():
                 raise PrefixKVReimplementationError(f"profile.{name} must be non-empty")
         if not 0 < self.target_retention_ratio <= 1:
-            raise PrefixKVReimplementationError(
-                "profile.target_retention_ratio must be in (0, 1]"
-            )
+            raise PrefixKVReimplementationError("profile.target_retention_ratio must be in (0, 1]")
         _finite_ratios(self.layer_forget_ratios, "profile.layer_forget_ratios")
         if self.start_size < 0 or self.protect_size < 1:
             raise PrefixKVReimplementationError(
@@ -252,8 +250,7 @@ class PrefixKVOfflineProfile:
         if declared is not None and declared != profile.profile_sha256:
             raise PrefixKVReimplementationError("profile_sha256 does not match profile content")
         declared_retention = tuple(
-            float(value)
-            for value in cast("list[float | int]", payload["layer_retention_ratios"])
+            float(value) for value in cast("list[float | int]", payload["layer_retention_ratios"])
         )
         if any(
             not math.isclose(actual, expected_value, rel_tol=0, abs_tol=1e-12)
@@ -386,9 +383,10 @@ def _bounded_apportion(
         raise PrefixKVReimplementationError(
             f"target layer budget {target} is outside mandatory bounds [{sum(lower)}, {sum(upper)}]"
         )
-    clipped = tuple(min(float(high), max(float(low), value)) for value, low, high in zip(
-        desired, lower, upper, strict=True
-    ))
+    clipped = tuple(
+        min(float(high), max(float(low), value))
+        for value, low, high in zip(desired, lower, upper, strict=True)
+    )
     if target <= sum(clipped):
         base = tuple(float(value) for value in lower)
         span = tuple(value - low for value, low in zip(clipped, lower, strict=True))
@@ -441,9 +439,7 @@ def search_prefixkv_layer_sizes(
     for scores in layer_scores:
         ranked = np.sort(np.asarray(scores, dtype=np.float64))[::-1]
         total = float(ranked.sum())
-        normalized = (
-            np.full_like(ranked, 1.0 / len(ranked)) if total <= 0 else ranked / total
-        )
+        normalized = np.full_like(ranked, 1.0 / len(ranked)) if total <= 0 else ranked / total
         cumulative.append(np.cumsum(normalized))
 
     def sizes(threshold: float) -> tuple[int, ...]:
@@ -465,9 +461,7 @@ def search_prefixkv_layer_sizes(
         else:
             return current
     closest = min(candidates, key=lambda value: (abs(sum(value) - target), value))
-    return _bounded_apportion(
-        tuple(float(value) for value in closest), lower, lengths, target
-    )
+    return _bounded_apportion(tuple(float(value) for value in closest), lower, lengths, target)
 
 
 def generate_prefixkv_profile(
@@ -494,8 +488,7 @@ def generate_prefixkv_profile(
     overlap = set(sample_ids).intersection(evaluation_sample_ids)
     if overlap:
         raise PrefixKVReimplementationError(
-            "PrefixKV calibration and evaluation samples overlap: "
-            + ", ".join(sorted(overlap)[:5])
+            "PrefixKV calibration and evaluation samples overlap: " + ", ".join(sorted(overlap)[:5])
         )
     layer_count = len(observations[0].layer_scores)
     if any(len(observation.layer_scores) != layer_count for observation in observations):
@@ -554,9 +547,7 @@ class PrefixKVLayerState:
             raise PrefixKVReimplementationError("PrefixKV layer identity/length is invalid")
         if self.retained_positions != len(self.selected_physical_positions):
             raise PrefixKVReimplementationError("PrefixKV retained layer count is inconsistent")
-        if self.selected_physical_positions != tuple(
-            sorted(set(self.selected_physical_positions))
-        ):
+        if self.selected_physical_positions != tuple(sorted(set(self.selected_physical_positions))):
             raise PrefixKVReimplementationError(
                 "PrefixKV selected positions must be sorted and unique"
             )
@@ -686,8 +677,7 @@ def _select_positions(
     length = len(scores)
     protected = tuple(
         sorted(
-            set(range(min(start_size, length)))
-            | set(range(max(0, length - protect_size), length))
+            set(range(min(start_size, length))) | set(range(max(0, length - protect_size), length))
         )
     )
     remaining = retained - len(protected)
@@ -779,9 +769,10 @@ def build_prefixkv_reimpl_plan(
         _layer_bytes_per_position(full_state, layer) for layer in range(layer_count)
     )
     if cache_config.budget_unit is BudgetUnit.BYTES:
-        while sum(
-            count * size for count, size in zip(retained, bytes_per_position, strict=True)
-        ) > cache_config.budget_value:
+        while (
+            sum(count * size for count, size in zip(retained, bytes_per_position, strict=True))
+            > cache_config.budget_value
+        ):
             candidates = [layer for layer in range(layer_count) if retained[layer] > lower[layer]]
             if not candidates:
                 raise PrefixKVReimplementationError(
@@ -802,12 +793,9 @@ def build_prefixkv_reimpl_plan(
         else tuple(tuple(0.0 for _ in range(length)) for length in lengths)
     )
     if len(scores) != layer_count or any(
-        len(layer_scores) != length
-        for layer_scores, length in zip(scores, lengths, strict=True)
+        len(layer_scores) != length for layer_scores, length in zip(scores, lengths, strict=True)
     ):
-        raise PrefixKVReimplementationError(
-            "PrefixKV attention/cache layer shapes do not match"
-        )
+        raise PrefixKVReimplementationError("PrefixKV attention/cache layer shapes do not match")
     layer_states: list[PrefixKVLayerState] = []
     for layer_index, (layer_scores, count, position_bytes) in enumerate(
         zip(scores, retained, bytes_per_position, strict=True)
@@ -840,8 +828,7 @@ def build_prefixkv_reimpl_plan(
             )
         )
     active_slots = sum(
-        state.retained_positions * full_state.layers[state.layer].kv_heads
-        for state in layer_states
+        state.retained_positions * full_state.layers[state.layer].kv_heads for state in layer_states
     )
     retained_bytes = sum(state.retained_bytes for state in layer_states)
     if cache_config.budget_unit is BudgetUnit.BLOCKS and active_slots > cache_config.budget_value:

@@ -55,9 +55,7 @@ def test_backend_stacks_share_one_declared_intersection() -> None:
 
 def test_common_environment_patch_is_versioned_and_applied_by_all_builds() -> None:
     project_root = _project_root()
-    patch = project_root / "env" / "patches" / (
-        "sglang-0.4.3.post4-transformers-4.49.patch"
-    )
+    patch = project_root / "env" / "patches" / ("sglang-0.4.3.post4-transformers-4.49.patch")
     assert patch.is_file()
     patch_text = patch.read_text(encoding="utf-8")
     assert patch_text.count("exist_ok=True") == 2

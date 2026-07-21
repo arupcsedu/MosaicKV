@@ -156,9 +156,7 @@ def main() -> int:
             for line in args.results_jsonl.read_text(encoding="utf-8").splitlines()
             if line.strip()
         ]
-        by_sample = {
-            str(row["sample_id"]): row for row in result_rows if isinstance(row, dict)
-        }
+        by_sample = {str(row["sample_id"]): row for row in result_rows if isinstance(row, dict)}
         if set(sample_ids) != set(by_sample):
             raise ValueError("trace and result sample IDs differ")
         for sample_id in sample_ids:
@@ -171,9 +169,7 @@ def main() -> int:
         ):
             raise ValueError("multi-input run omitted the request-isolation A-B-A probe")
     payload = {
-        "native_capability": native_integration_capability(
-            args.sglang_version
-        ).to_json_object(),
+        "native_capability": native_integration_capability(args.sglang_version).to_json_object(),
         "stage_a": validations,
         "request_isolation": {
             "unique_session_free_requests": True,

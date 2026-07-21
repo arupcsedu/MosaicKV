@@ -827,9 +827,7 @@ class VLCacheConfig:
 
     def __post_init__(self) -> None:
         if not math.isfinite(self.sparsity_threshold) or not 0 < self.sparsity_threshold < 1:
-            raise ConfigurationError(
-                "vl_cache.sparsity_threshold must be finite and in (0, 1)"
-            )
+            raise ConfigurationError("vl_cache.sparsity_threshold must be finite and in (0, 1)")
         for name in ("min_layer_retention", "max_layer_retention"):
             value = getattr(self, name)
             if not math.isfinite(value) or not 0 < value <= 1:
@@ -841,9 +839,7 @@ class VLCacheConfig:
         if not math.isfinite(self.recent_window_fraction) or not (
             0 <= self.recent_window_fraction <= 1
         ):
-            raise ConfigurationError(
-                "vl_cache.recent_window_fraction must be finite and in [0, 1]"
-            )
+            raise ConfigurationError("vl_cache.recent_window_fraction must be finite and in [0, 1]")
         if self.max_post_vision_queries is not None and self.max_post_vision_queries < 1:
             raise ConfigurationError("vl_cache.max_post_vision_queries must be >= 1 or null")
         if len(self.calibration_sample_ids) != len(set(self.calibration_sample_ids)):
@@ -899,18 +895,14 @@ class VLCacheConfig:
             sparsity_threshold=_float(data, "sparsity_threshold", 0.01, "vl_cache"),
             min_layer_retention=_float(data, "min_layer_retention", 0.01, "vl_cache"),
             max_layer_retention=_float(data, "max_layer_retention", 1.0, "vl_cache"),
-            recent_window_fraction=_float(
-                data, "recent_window_fraction", 0.1, "vl_cache"
-            ),
+            recent_window_fraction=_float(data, "recent_window_fraction", 0.1, "vl_cache"),
             max_post_vision_queries=_optional_int(
                 data, "max_post_vision_queries", None, "vl_cache"
             ),
             calibration_dataset_id=metadata["calibration_dataset_id"],
             calibration_dataset_revision=metadata["calibration_dataset_revision"],
             calibration_split=metadata["calibration_split"],
-            calibration_sample_ids=_string_tuple(
-                data, "calibration_sample_ids", (), "vl_cache"
-            ),
+            calibration_sample_ids=_string_tuple(data, "calibration_sample_ids", (), "vl_cache"),
         )
 
 
@@ -1065,9 +1057,7 @@ class RunConfig:
             raise ConfigurationError("lookm.enabled=true is reserved for method='lookm_reimpl'")
         if self.method.is_prefixkv_reimplementation:
             if not self.prefixkv.enabled:
-                raise ConfigurationError(
-                    "method='prefixkv_reimpl' requires prefixkv.enabled=true"
-                )
+                raise ConfigurationError("method='prefixkv_reimpl' requires prefixkv.enabled=true")
             if self.cache.block_size != 1:
                 raise ConfigurationError(
                     "method='prefixkv_reimpl' requires cache.block_size=1 for token selection"
@@ -1100,9 +1090,7 @@ class RunConfig:
             )
         if self.method.is_vl_cache_reimplementation:
             if not self.vl_cache.enabled:
-                raise ConfigurationError(
-                    "method='vl_cache_reimpl' requires vl_cache.enabled=true"
-                )
+                raise ConfigurationError("method='vl_cache_reimpl' requires vl_cache.enabled=true")
             if self.cache.block_size != 1:
                 raise ConfigurationError(
                     "method='vl_cache_reimpl' requires cache.block_size=1 for token/head selection"

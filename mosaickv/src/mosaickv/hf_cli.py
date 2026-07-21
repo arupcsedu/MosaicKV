@@ -164,9 +164,7 @@ def _direct_config(args: argparse.Namespace) -> RunConfig:
             enabled=method.is_prefixkv_reimplementation,
             profile_mode=PrefixKVProfileMode(str(args.prefixkv_profile_mode)),
             profile_path=(
-                str(args.prefixkv_profile)
-                if args.prefixkv_profile is not None
-                else None
+                str(args.prefixkv_profile) if args.prefixkv_profile is not None else None
             ),
             start_size=int(args.prefixkv_start_size),
             protect_size=int(args.prefixkv_protect_size),

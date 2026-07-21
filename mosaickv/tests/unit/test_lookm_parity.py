@@ -54,9 +54,7 @@ def _artifact(implementation: str) -> LookMParityArtifact:
         executable_git_sha="f" * 40,
         config_sha256="1" * 64,
         manifest_path="/artifact/manifest.json",
-        measurement_type=(
-            "baseline_official_measured" if official else "baseline_reimpl_measured"
-        ),
+        measurement_type=("baseline_official_measured" if official else "baseline_reimpl_measured"),
         controls=_controls(),
         samples=(
             LookMSampleObservation(

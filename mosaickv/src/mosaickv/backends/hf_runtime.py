@@ -163,9 +163,7 @@ def _cache_payload_bytes(
         layers = tuple((layer.key, layer.value) for layer in cache.layers)
     else:
         layers, _source_kind = adapter._legacy_layers(cache)
-    return sum(
-        tensor_storage_bytes(key) + tensor_storage_bytes(value) for key, value in layers
-    )
+    return sum(tensor_storage_bytes(key) + tensor_storage_bytes(value) for key, value in layers)
 
 
 def _to_numpy(value: Any) -> np.ndarray[Any, Any]:
@@ -1730,6 +1728,7 @@ class HuggingFaceMosaicKVModel:
                     raise HuggingFaceRuntimeError("decode logits contain NaN or infinity")
                 if repair_state is None:
                     if prefixkv_plan is not None:
+
                         def maintain_prefix(
                             output: Any = provisional,
                             current_step: int = step_index,
@@ -1860,9 +1859,7 @@ class HuggingFaceMosaicKVModel:
                     ),
                     "hard_active_kv_budget_bytes": (
                         min(
-                            math.ceil(
-                                source_prefill_kv_bytes * self.config.cache.retention_ratio
-                            ),
+                            math.ceil(source_prefill_kv_bytes * self.config.cache.retention_ratio),
                             self.config.cache.budget_value,
                         )
                         if self.config.cache.budget_unit is BudgetUnit.BYTES

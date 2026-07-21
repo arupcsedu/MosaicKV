@@ -197,15 +197,9 @@ class LookMCompressionPlan:
                     "kv_head": head.kv_head,
                     "text_prior_value": head.text_prior_value,
                     "source_position_count": len(head.cumulative_attention_scores),
-                    "cumulative_attention_score_sum": sum(
-                        head.cumulative_attention_scores
-                    ),
-                    "cumulative_attention_score_min": min(
-                        head.cumulative_attention_scores
-                    ),
-                    "cumulative_attention_score_max": max(
-                        head.cumulative_attention_scores
-                    ),
+                    "cumulative_attention_score_sum": sum(head.cumulative_attention_scores),
+                    "cumulative_attention_score_min": min(head.cumulative_attention_scores),
+                    "cumulative_attention_score_max": max(head.cumulative_attention_scores),
                     "cumulative_attention_scores_sha256": _float_tuple_sha256(
                         head.cumulative_attention_scores
                     ),
@@ -251,9 +245,7 @@ def _assignment_sha256(assignments: tuple[LookMAssignment, ...]) -> str:
                 dtype="<i8",
             ).tobytes(order="C")
         )
-        digest.update(
-            np.asarray((assignment.cosine_similarity,), dtype="<f8").tobytes(order="C")
-        )
+        digest.update(np.asarray((assignment.cosine_similarity,), dtype="<f8").tobytes(order="C"))
     return digest.hexdigest()
 
 

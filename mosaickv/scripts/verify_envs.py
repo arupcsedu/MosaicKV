@@ -76,9 +76,7 @@ COMMON_GPU_IMPORTS = (
     "ray",
     "fastapi",
 )
-SGLANG_PATCH_RELATIVE_PATH = Path(
-    "env/patches/sglang-0.4.3.post4-transformers-4.49.patch"
-)
+SGLANG_PATCH_RELATIVE_PATH = Path("env/patches/sglang-0.4.3.post4-transformers-4.49.patch")
 SGLANG_PATCH_TARGET = Path("sglang/srt/configs/qwen2_5_vl_config.py")
 SGLANG_PATCH_MARKERS = (
     "Qwen2_5_VLConfig, None, Qwen2_5_VLImageProcessor, None, exist_ok=True",

@@ -123,9 +123,7 @@ def test_prepare_prompt_reuses_chat_boundary_and_makes_media_json_safe() -> None
     messages = build_multimodal_messages(
         "What color?", (MediaItem(MediaKind.IMAGE, b"image-bytes"),)
     )
-    prepared = prepare_sglang_prompt(
-        _Processor(), "Qwen/Qwen2.5-VL-3B-Instruct", messages
-    )
+    prepared = prepare_sglang_prompt(_Processor(), "Qwen/Qwen2.5-VL-3B-Instruct", messages)
 
     assert prepared.rendered_text == "user:<image>What color?|assistant:"
     assert prepared.request_payload["modalities"] == ["image"]
@@ -183,9 +181,7 @@ def test_fullkv_wrapper_writes_trials_and_exact_active_bytes(tmp_path: Path) -> 
         run_id="run",
         sample_id="sample/one",
         task="synthetic_smoke",
-        messages=build_multimodal_messages(
-            "What color?", (MediaItem(MediaKind.IMAGE, b"image"),)
-        ),
+        messages=build_multimodal_messages("What color?", (MediaItem(MediaKind.IMAGE, b"image"),)),
         generation_kwargs={},
     )
 

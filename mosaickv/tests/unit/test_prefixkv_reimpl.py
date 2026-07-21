@@ -33,9 +33,7 @@ from mosaickv.types import BudgetUnit, PrefixKVProfileMode
 def _state(*, layers: int = 2, sequence: int = 6, heads: int = 1) -> FullKVState:
     payloads = []
     for layer in range(layers):
-        key = np.arange(heads * sequence * 2, dtype=np.float32).reshape(
-            1, heads, sequence, 2
-        )
+        key = np.arange(heads * sequence * 2, dtype=np.float32).reshape(1, heads, sequence, 2)
         key = key + 100 * layer
         value = key + 1
         payloads.append((key, value))
@@ -182,12 +180,8 @@ def test_global_prefix_search_respects_protected_tokens_and_exact_sum() -> None:
 
 
 def test_attention_pooling_matches_official_dtype_operation_order() -> None:
-    attention = np.asarray(
-        [[[[0.1000, 0.2000]], [[0.1001, 0.1999]]]], dtype=np.float16
-    )
-    expected = (
-        attention.mean(axis=1).astype(np.float32).sum(axis=-2, dtype=np.float32)[0]
-    )
+    attention = np.asarray([[[[0.1000, 0.2000]], [[0.1001, 0.1999]]]], dtype=np.float16)
+    expected = attention.mean(axis=1).astype(np.float32).sum(axis=-2, dtype=np.float32)[0]
     scores = prefixkv_attention_scores((attention,))
     assert np.array_equal(np.asarray(scores[0], dtype=np.float32), expected)
 

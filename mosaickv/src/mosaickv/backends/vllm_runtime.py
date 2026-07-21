@@ -366,10 +366,7 @@ def _runtime_complete_snapshot(snapshot: Path) -> bool:
         return len(shard_names) > 0 and all(
             (snapshot / shard_name).is_file() for shard_name in shard_names
         )
-    return any(
-        (snapshot / name).is_file()
-        for name in ("model.safetensors", "pytorch_model.bin")
-    )
+    return any((snapshot / name).is_file() for name in ("model.safetensors", "pytorch_model.bin"))
 
 
 @dataclass(frozen=True, slots=True)

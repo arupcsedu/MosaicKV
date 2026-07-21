@@ -201,12 +201,9 @@ class LookMParityArtifact:
 
     def __post_init__(self) -> None:
         if self.implementation not in {"official_lookm", "lookm_reimpl"}:
-            raise LookMParityError(
-                "implementation must be 'official_lookm' or 'lookm_reimpl'"
-            )
+            raise LookMParityError("implementation must be 'official_lookm' or 'lookm_reimpl'")
         if len(self.official_repository_sha) != 40 or any(
-            character not in "0123456789abcdef"
-            for character in self.official_repository_sha
+            character not in "0123456789abcdef" for character in self.official_repository_sha
         ):
             raise LookMParityError("official_repository_sha must be a lowercase git SHA")
         if not self.executable_git_sha.strip() or not self.manifest_path.strip():
@@ -254,9 +251,7 @@ class LookMParityArtifact:
             config_sha256=str(data["config_sha256"]),
             manifest_path=str(data["manifest_path"]),
             measurement_type=str(data["measurement_type"]),
-            controls=LookMParityControls.from_json_object(
-                cast("JsonObject", data["controls"])
-            ),
+            controls=LookMParityControls.from_json_object(cast("JsonObject", data["controls"])),
             samples=tuple(
                 LookMSampleObservation.from_json_object(item)
                 for item in cast("list[JsonObject]", data["samples"])

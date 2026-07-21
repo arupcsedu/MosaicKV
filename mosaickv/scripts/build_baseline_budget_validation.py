@@ -141,9 +141,7 @@ def _full_state(mandatory: tuple[int, ...]) -> FullKVState:
 def _attention() -> tuple[np.ndarray[Any, Any], ...]:
     result: list[np.ndarray[Any, Any]] = []
     for layer in range(_LAYERS):
-        tensor = np.zeros(
-            (1, _KV_HEADS, _SEQUENCE_LENGTH, _SEQUENCE_LENGTH), dtype=np.float32
-        )
+        tensor = np.zeros((1, _KV_HEADS, _SEQUENCE_LENGTH, _SEQUENCE_LENGTH), dtype=np.float32)
         for head in range(_KV_HEADS):
             for query in range(_SEQUENCE_LENGTH):
                 if layer == 0:
@@ -215,30 +213,22 @@ def _packed_bytes(
     selected: dict[tuple[int, int], tuple[int, ...]],
 ) -> int:
     capacity = max(map(len, selected.values()))
-    return sum(
-        capacity * layer.byte_size // layer.sequence_length for layer in full_state.layers
-    )
+    return sum(capacity * layer.byte_size // layer.sequence_length for layer in full_state.layers)
 
 
 def _simple_positions(plan: Any) -> dict[tuple[int, int], tuple[int, ...]]:
     result: dict[tuple[int, int], list[int]] = {}
     for block in plan.selection.selected_blocks:
-        result.setdefault((block.layer, block.kv_head), []).extend(
-            block.physical_cache_indices
-        )
+        result.setdefault((block.layer, block.kv_head), []).extend(block.physical_cache_indices)
     return {identity: tuple(sorted(values)) for identity, values in result.items()}
 
 
 def _mosaic_positions(plan: Any) -> dict[tuple[int, int], tuple[int, ...]]:
     result: dict[tuple[int, int], list[int]] = {}
     for block in plan.construction.state.exact.blocks:
-        result.setdefault((block.layer, block.kv_head), []).extend(
-            block.physical_cache_indices
-        )
+        result.setdefault((block.layer, block.kv_head), []).extend(block.physical_cache_indices)
     for record in plan.construction.prototypes:
-        result.setdefault((record.layer, record.kv_head), []).append(
-            record.anchor_logical_position
-        )
+        result.setdefault((record.layer, record.kv_head), []).append(record.anchor_logical_position)
     return {identity: tuple(sorted(values)) for identity, values in result.items()}
 
 
@@ -318,17 +308,13 @@ def _validate_method(method: MosaicKVMethod, ratio: float) -> BudgetValidationRo
         logical_bytes = plan.selection.active_bytes
         packed_bytes = _packed_bytes(source_state, _simple_positions(plan))
         effective = (
-            f"{method.value}__retention_one_exact"
-            if plan.state.is_retention_one
-            else method.value
+            f"{method.value}__retention_one_exact" if plan.state.is_retention_one else method.value
         )
         exercised = ratio < 1.0
     elif method.is_lookm_reimplementation:
         recent_ratio = ratio / 2
         mandatory_count = math.floor(_SEQUENCE_LENGTH * recent_ratio + 1e-12)
-        full_state = _full_state(
-            tuple(range(_SEQUENCE_LENGTH - mandatory_count, _SEQUENCE_LENGTH))
-        )
+        full_state = _full_state(tuple(range(_SEQUENCE_LENGTH - mandatory_count, _SEQUENCE_LENGTH)))
         plan = build_lookm_reimpl_plan(
             full_state,
             _attention(),
@@ -341,8 +327,7 @@ def _validate_method(method: MosaicKVMethod, ratio: float) -> BudgetValidationRo
             CacheConfig(slot_budget, BudgetUnit.BLOCKS, ratio, 1),
         )
         selected = {
-            (head.layer, head.kv_head): head.selected_physical_positions
-            for head in plan.heads
+            (head.layer, head.kv_head): head.selected_physical_positions for head in plan.heads
         }
         logical_bytes = plan.active_bytes
         packed_bytes = _packed_bytes(full_state, selected)

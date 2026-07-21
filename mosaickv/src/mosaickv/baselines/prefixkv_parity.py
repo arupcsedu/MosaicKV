@@ -84,9 +84,7 @@ class PrefixKVParityControls:
             rel_tol=0,
             abs_tol=1e-12,
         ):
-            raise PrefixKVParityError(
-                "official_forget_ratio must equal one minus retention_ratio"
-            )
+            raise PrefixKVParityError("official_forget_ratio must equal one minus retention_ratio")
         if self.seed < 0:
             raise PrefixKVParityError("controls.seed must be nonnegative")
         if self.cache_budget_value < 1:
@@ -206,9 +204,7 @@ class PrefixKVParityArtifact:
             config_sha256=str(data["config_sha256"]),
             manifest_path=str(data["manifest_path"]),
             measurement_type=str(data["measurement_type"]),
-            controls=PrefixKVParityControls.from_json_object(
-                cast("JsonObject", data["controls"])
-            ),
+            controls=PrefixKVParityControls.from_json_object(cast("JsonObject", data["controls"])),
             samples=tuple(
                 PrefixKVSampleObservation.from_json_object(cast("JsonObject", sample))
                 for sample in data["samples"]
@@ -229,11 +225,7 @@ def prefixkv_control_mismatches(
 
 def _token_agreement(first: tuple[int, ...], second: tuple[int, ...]) -> float:
     length = max(len(first), len(second))
-    return (
-        1.0
-        if length == 0
-        else sum(a == b for a, b in zip(first, second, strict=False)) / length
-    )
+    return 1.0 if length == 0 else sum(a == b for a, b in zip(first, second, strict=False)) / length
 
 
 def compare_prefixkv_artifacts(
@@ -277,8 +269,7 @@ def compare_prefixkv_artifacts(
                 ),
                 "official_per_layer_cache_sizes": list(first.per_layer_cache_sizes),
                 "reimpl_per_layer_cache_sizes": list(second.per_layer_cache_sizes),
-                "retained_byte_delta": second.total_retained_bytes
-                - first.total_retained_bytes,
+                "retained_byte_delta": second.total_retained_bytes - first.total_retained_bytes,
                 "actual_active_kv_byte_delta": second.actual_active_kv_bytes
                 - first.actual_active_kv_bytes,
                 "perplexity_delta": (

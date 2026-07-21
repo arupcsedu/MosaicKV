@@ -37,8 +37,7 @@ def _observations(path: Path) -> tuple[PrefixKVCalibrationObservation, ...]:
             PrefixKVCalibrationObservation(
                 sample_id=str(payload["sample_id"]),
                 layer_scores=tuple(
-                    tuple(float(score) for score in layer)
-                    for layer in payload["layer_scores"]
+                    tuple(float(score) for score in layer) for layer in payload["layer_scores"]
                 ),
             )
         )
