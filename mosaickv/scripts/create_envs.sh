@@ -78,8 +78,6 @@ fi
   --cache-dir "${UV_CACHE_DIR}" \
   --no-deps --editable "${PROJECT_ROOT}"
 "${ENV_PYTHON}" -m pip check
-"${ENV_PYTHON}" "${PROJECT_ROOT}/scripts/verify_envs.py" \
-  --environment common --lock "${LOCK_FILE}"
 
-printf 'Common environment synchronized at %s. GPU support remains unverified until '
-printf 'the clean-tree Slurm CUDA smoke passes.\n'
+printf 'Common environment synchronized at %s. Imports and GPU support remain ' "${ENV_DIR}"
+printf 'unverified until the clean-tree Slurm environment smoke passes.\n'

@@ -33,7 +33,7 @@ packages. Changes to dependencies require this order:
 3. commit the input, lock, setup code, and documentation;
 4. confirm the worktree is clean;
 5. run `create_envs.sh --sync common`;
-6. run import/CPU checks, then Slurm CUDA checks;
+6. run the bounded import and CUDA smoke through Slurm;
 7. record verification evidence in a follow-up commit.
 
 A successful resolution or install is not a support claim. Failed import,
@@ -52,6 +52,10 @@ Shared-filesystem/network setup uses a 300-second uv HTTP timeout, ten retries,
 and four concurrent downloads. These values affect installation reliability,
 not runtime measurements, and are versioned here because container and host
 setup must behave alike.
+
+Environment verification imports each module in an isolated subprocess with a
+hard wall-clock deadline. Run the complete import/backend surface through
+Slurm; do not use a login node for heavyweight backend imports.
 
 ## Containers
 

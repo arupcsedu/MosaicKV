@@ -2,7 +2,7 @@
 
 > Common-environment reset (2026-07-21): every model/backend combination is
 > currently **unverified** in the new common lock (Transformers 4.49.0, vLLM
-> 0.7.2, SGLang 0.4.3.post1). The successful/failed runs below used older,
+> 0.7.2, SGLang 0.4.3.post4). The successful/failed runs below used older,
 > separate environments and a dirty worktree. They are historical diagnostics,
 > not paper-eligible support evidence. Re-run source registration, exact
 > revision loading, and parity before changing this status.

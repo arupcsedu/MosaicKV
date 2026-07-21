@@ -50,7 +50,7 @@ def test_backend_stacks_share_one_declared_intersection() -> None:
     env_root = _project_root() / "env"
     common = _pins(env_root / "common" / "requirements.lock")
     assert (common["torch"], common["transformers"]) == ("2.5.1", "4.49.0")
-    assert (common["vllm"], common["sglang"]) == ("0.7.2", "0.4.3.post1")
+    assert (common["vllm"], common["sglang"]) == ("0.7.2", "0.4.3.post4")
 
 
 def test_mock_verifier_passes_without_cuda(tmp_path: Path) -> None:

@@ -26,3 +26,17 @@ table and does not establish model or backend support.
   extra with an explicit SRT dependency set and `decord2==3.4.0`, whose wheel is
   tagged `cp311-cp311-manylinux_2_28_x86_64` and provides SGLang's imported
   `decord` module API.
+- Third synchronization attempt: exact package synchronization and `pip check`
+  passed. The unbounded import verifier then made no progress for about 49
+  minutes on the login node and was terminated. No import or backend support
+  claim was made from that attempt.
+- Slurm environment smoke job `17181271` at clean commit `aef4457` ran on one
+  NVIDIA A100-SXM4-80GB. All 243 pins matched, cache paths resolved under
+  `/scratch/djy8hg/cache/mosaickv`, and the CUDA 12.4 matrix multiplication
+  passed. The job failed because SGLang 0.4.3.post1 imported
+  `is_valid_list_of_images` from a Transformers 4.49.0 module that no longer
+  exports it.
+- Corrective action: pin SGLang 0.4.3.post4, whose upstream source defines the
+  compatibility helper locally, and isolate each verifier import behind a
+  hard deadline. Environment creation no longer starts heavyweight imports on
+  the login node; the clean-tree Slurm smoke owns that verification gate.

@@ -3,7 +3,7 @@
 > Common-environment reset (2026-07-21): the source/API findings below remain
 > version-specific historical evidence for Transformers 4.57.6, vLLM 0.11.2,
 > and SGLang 0.5.10.post1. Current execution uses the common lock
-> (Transformers 4.49.0, vLLM 0.7.2, SGLang 0.4.3.post1) and is **unsupported**
+> (Transformers 4.49.0, vLLM 0.7.2, SGLang 0.4.3.post4) and is **unsupported**
 > until its installed source is re-audited and its clean-tree gates pass. Do
 > not transfer a support claim or source line number across these versions.
 

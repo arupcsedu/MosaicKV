@@ -10,8 +10,10 @@ import importlib.metadata
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -119,22 +121,70 @@ def verify_pins(pins: dict[str, str]) -> tuple[dict[str, str], list[str]]:
     return installed, errors
 
 
-def verify_imports(profile: str, require_cuda: bool) -> tuple[list[str], list[str]]:
-    """Import the complete backend/evaluation smoke surface for a profile."""
+def _import_in_bounded_subprocess(
+    module_name: str,
+    timeout_seconds: float,
+) -> tuple[bool, str, float]:
+    """Import one module in an isolated process with a hard wall-clock deadline."""
+
+    command = [
+        sys.executable,
+        "-c",
+        "import importlib, sys; importlib.import_module(sys.argv[1])",
+        module_name,
+    ]
+    started = time.monotonic()
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=timeout_seconds)
+    except subprocess.TimeoutExpired:
+        os.killpg(process.pid, signal.SIGTERM)
+        try:
+            stdout, stderr = process.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            os.killpg(process.pid, signal.SIGKILL)
+            stdout, stderr = process.communicate()
+        elapsed = time.monotonic() - started
+        return False, f"timed out after {timeout_seconds:g}s", elapsed
+
+    elapsed = time.monotonic() - started
+    if process.returncode == 0:
+        return True, "", elapsed
+    detail = stderr.strip() or stdout.strip() or f"exit status {process.returncode}"
+    return False, detail, elapsed
+
+
+def verify_imports(
+    profile: str,
+    require_cuda: bool,
+    timeout_seconds: float,
+) -> tuple[list[str], list[str], dict[str, float]]:
+    """Import the complete smoke surface with an independent deadline per module."""
 
     imported: list[str] = []
     errors: list[str] = []
+    durations: dict[str, float] = {}
     module_names = list(PROFILE_IMPORTS[profile])
     if profile == "common" and require_cuda:
         module_names.extend(COMMON_GPU_IMPORTS)
     for module_name in module_names:
-        try:
-            importlib.import_module(module_name)
-        except BaseException as error:  # imports may raise native loader errors
-            errors.append(f"import failed: {module_name}: {type(error).__name__}: {error}")
-        else:
+        print(f"verifying_import={module_name}", file=sys.stderr, flush=True)
+        succeeded, detail, elapsed = _import_in_bounded_subprocess(
+            module_name,
+            timeout_seconds,
+        )
+        durations[module_name] = round(elapsed, 6)
+        if succeeded:
             imported.append(module_name)
-    return imported, errors
+        else:
+            errors.append(f"import failed: {module_name}: {detail}")
+    return imported, errors, durations
 
 
 def is_within(path: Path, parent: Path) -> bool:
@@ -249,12 +299,21 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--environment", required=True, choices=sorted(PROFILE_IMPORTS))
     parser.add_argument("--lock", type=Path)
     parser.add_argument("--require-cuda", action="store_true")
+    parser.add_argument(
+        "--import-timeout-seconds",
+        type=float,
+        default=120.0,
+        help="hard wall-clock deadline for each isolated module import (default: 120)",
+    )
     return parser
 
 
 def main() -> int:
     args = build_parser().parse_args()
     profile = str(args.environment)
+    if args.import_timeout_seconds <= 0:
+        print(json.dumps({"status": "error", "error": "import timeout must be positive"}))
+        return 2
     if profile == "mock" and args.require_cuda:
         print(json.dumps({"status": "error", "error": "mock profile cannot require CUDA"}))
         return 2
@@ -269,7 +328,11 @@ def main() -> int:
         return 2
 
     installed, pin_errors = verify_pins(pins)
-    imported, import_errors = verify_imports(profile, bool(args.require_cuda))
+    imported, import_errors, import_durations = verify_imports(
+        profile,
+        bool(args.require_cuda),
+        float(args.import_timeout_seconds),
+    )
     cache_paths, cache_errors = verify_cache_policy(profile)
     try:
         cuda, cuda_errors = cuda_smoke(profile, bool(args.require_cuda))
@@ -311,6 +374,8 @@ def main() -> int:
         "locked_distribution_count": len(pins),
         "verified_distribution_count": len(installed),
         "imported_modules": imported,
+        "import_durations_seconds": import_durations,
+        "import_timeout_seconds": float(args.import_timeout_seconds),
         "cache_paths": cache_paths,
         "hf_token_present": bool(os.environ.get("HF_TOKEN")),
         "cuda": cuda,

@@ -6,7 +6,7 @@
 > self-contained CPython 3.11 prefix was created at
 > `/scratch/djy8hg/env/mosaickv` with bootstrap tooling only; the resolver-checked
 > common lock pins Torch 2.5.1, Transformers 4.49.0, vLLM 0.7.2, SGLang
-> 0.4.3.post1, and lmms-eval 0.7.2. No current backend support is claimed until
+> 0.4.3.post4, and lmms-eval 0.7.2. No current backend support is claimed until
 > that lock is installed and passes clean-tree CPU, CUDA, model, and container
 > gates. All caches and temporary files are rooted at
 > `/scratch/djy8hg/cache/mosaickv`. The older addenda below are historical

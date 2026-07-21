@@ -53,7 +53,7 @@ mosaickv/scripts/create_envs.sh --sync common
 ```
 
 The common lock uses Torch 2.5.1/CUDA 12.4, Transformers 4.49.0, vLLM 0.7.2,
-and SGLang 0.4.3.post1. It is resolver-consistent but remains unverified until
+and SGLang 0.4.3.post4. It is resolver-consistent but remains unverified until
 the clean-tree import, CUDA, model, and backend parity gates pass. Standalone
 FlashAttention-2 is not installed or claimed.
 

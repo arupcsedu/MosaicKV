@@ -1,7 +1,7 @@
 --index-url https://pypi.org/simple
 
 # One CPython 3.11 / CUDA 12.4 stack shared by the HF, vLLM, SGLang,
-# evaluation, and development paths. SGLang 0.4.3.post1's SRT extra explicitly
+# evaluation, and development paths. SGLang 0.4.3.post4's SRT extra explicitly
 # supports vLLM 0.6.4.post1 through 0.7.2; vLLM 0.7.2 is the newest release in
 # that declared intersection. requirements.lock is authoritative.
 accelerate==1.13.0
@@ -33,7 +33,7 @@ pyzmq==27.1.0
 qwen-vl-utils==0.0.14
 ruff==0.15.4
 sgl-kernel==0.1.0
-sglang==0.4.3.post1
+sglang==0.4.3.post4
 torch==2.5.1
 torchaudio==2.5.1
 torchvision==0.20.1

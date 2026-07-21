@@ -18,10 +18,10 @@ resolved with uv for a manylinux 2.28 target. The core intersection is:
 | PyTorch / CUDA wheel runtime | 2.5.1 / CUDA 12.4 |
 | Transformers | 4.49.0 |
 | vLLM | 0.7.2 |
-| SGLang | 0.4.3.post1 |
+| SGLang | 0.4.3.post4 |
 | lmms-eval | 0.7.2 |
 
-SGLang 0.4.3.post1 declares its SRT dependency as
+SGLang 0.4.3.post4 declares its SRT dependency as
 `vllm>=0.6.4.post1,<=0.7.2`; 0.7.2 is therefore the newest vLLM in that
 published intersection. Newer previously audited releases cannot share an
 environment: vLLM 0.11.0 requires `outlines-core==0.2.11`, whereas SGLang
@@ -83,6 +83,8 @@ mosaickv/scripts/create_envs.sh --sync common
 For a new prefix, omit `--sync`. The script uses micromamba when available,
 otherwise a healthy CPython 3.11, then reconciles the exact lock with uv and
 installs MosaicKV editable without dependency resolution. An import-only check
+is deliberately not run by the setup script: on this cluster, imports of native
+backend stacks belong in the bounded Slurm smoke. A successful synchronization
 does not establish GPU/backend support.
 
 Regenerate and compare the lock with:
@@ -94,8 +96,9 @@ mosaickv/scripts/lock_common_env.sh
 ## Slurm verification
 
 The GPU smoke never installs packages or loads model weights. It verifies all
-locked distributions, imports the GPU backend surfaces, checks that all cache
-paths are outside home, and runs a tiny synchronized CUDA matrix multiply:
+locked distributions, imports every module in an isolated subprocess with a
+120-second per-import deadline, checks that all cache paths are outside home,
+and runs a tiny synchronized CUDA matrix multiply:
 
 ```bash
 sbatch --reservation=bi_fox_dgx mosaickv/slurm/env_smoke.sbatch
