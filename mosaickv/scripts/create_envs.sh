@@ -10,7 +10,6 @@ SYNC_EXISTING=false
 
 usage() {
   printf 'Usage: %s [--sync] common\n' "$0" >&2
-  printf 'The legacy hf/vllm/sglang/mock names are aliases for common.\n' >&2
 }
 
 if [[ "${1:-}" == "--sync" ]]; then
@@ -21,10 +20,10 @@ if [[ $# -ne 1 ]]; then
   usage
   exit 2
 fi
-case "$1" in
-  common|all|hf|vllm|sglang|mock) ;;
-  *) usage; exit 2 ;;
-esac
+if [[ "$1" != "common" ]]; then
+  usage
+  exit 2
+fi
 
 # shellcheck source=cache_env.sh
 source "${PROJECT_ROOT}/scripts/cache_env.sh"

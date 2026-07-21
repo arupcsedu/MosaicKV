@@ -179,34 +179,28 @@ through the shared eager HF cache and metrics runtime. The exact specification,
 official-source differences, model assumptions, and labeling rules are in
 [the LOOK-M specification](docs/baselines/lookm_spec.md). A strict artifact
 comparator rejects unequal checkpoints, samples, tokenization, generation,
-precision, and backend controls. The current
-[parity report](docs/baselines/lookm_parity_report.md) contains no numerical
-row because the official original-LLaVA checkpoint/runtime and the cached HF
-conversion do not satisfy those controls. A standalone LLaVA-HF synthetic
-`lookm_reimpl` smoke passed on the reserved A100 path with complete artifacts,
-but its dirty-source manifest correctly makes it non-canonical and it is not an
-official parity result. Official PrefixKV is also pinned, unmodified, at
+precision, and backend controls. Official LOOK-M execution is disabled under
+the common-environment policy; `lookm_reimpl` remains separately labeled. See
+the [parity boundary](docs/baselines/lookm_parity_report.md). Official PrefixKV
+is also pinned, unmodified, at
 `597f1ab032704951550f93bcc8a23f1454b80aa4` with its MIT license. The shared
 runtime now contains `prefixkv_reimpl`: eager prompt-attention importance,
 adaptive offline profiles, exact global per-layer budgets, protected boundary
 tokens, fixed-distance decode eviction, strict calibration/evaluation
 separation, LLaVA/generalized labeling, and a controlled parity artifact
 comparator. See the [PrefixKV specification](docs/baselines/prefixkv_spec.md)
-and [execution status](docs/baselines/prefixkv_parity_report.md). The official
-legacy-checkpoint run now satisfies the identical model, tokenizer, prompt,
-media, profile, generation, budget, precision, backend, hardware, and seed
-controls. Its strict comparator reports 100% agreement for 16 generated tokens
-and documents upstream's one-position global-budget undershoot. The run is a
-dirty-worktree, single-trial development diagnostic rather than a paper result.
+and [execution status](docs/baselines/prefixkv_parity_report.md). Official
+PrefixKV execution is disabled under the common-environment policy;
+`prefixkv_reimpl` remains separately labeled.
 The ICLR `vl_cache_reimpl` now applies relative-threshold post-vision sparsity,
 prompt-adaptive layer allocation, and accumulated post-vision Top-K through the
 same exact-cache packer. Its [specification](docs/baselines/vl_cache_spec.md)
 maps equations to code, isolates rounding/GQA/recency decisions, enforces
 calibration/evaluation ID disjointness, and records a structural sensitivity
 grid. Formula, budget, determinism, leakage, and tensor-level retention-one
-tests pass; paper-model task and Triton latency trends remain unmeasured.
-LOOK-M official parity, clean repeated PrefixKV measurements, and VL-Cache
-paper-model trend runs keep this phase `in_progress`.
+tests pass; paper-model task and Triton latency trends remain unmeasured. Clean
+common-lock reimplementation measurements and VL-Cache paper-model trend runs
+keep this phase `in_progress`.
 
 **Deliverables**
 
@@ -263,16 +257,14 @@ paper-model trend runs keep this phase `in_progress`.
 
 **Goal:** integrate MosaicKV into a pinned vLLM revision while preserving the validated core semantics.
 
-**Current evidence:** the pinned vLLM 0.11.2 Stage A FullKV wrapper streams
-token outputs and records per-trial TTFT, ITL, throughput, latency, GPU process
-memory, prefix-cache hits, and multimodal preprocessor-cache behavior through
-the common evaluation/manifest path. Model registration covers Qwen2.5-VL,
-LLaVA-1.5, and LLaVA-OneVision. Stage B is blocked: the installed scheduler and
-runner expose no atomic sparse-logical-block commit that preserves original
-positions. `--enable-mosaickv` therefore fails before loading weights and emits
-no simulated result. The exact source boundary and proposed upstream API are
-recorded in [the native blocker](docs/vllm_native_blocker.md). The Stage A GPU
-acceptance command remains required before runtime support is claimed.
+**Current evidence:** the common environment imports vLLM 0.7.2 and passes the
+CUDA smoke. The measurement wrapper has not been ported to this API version or
+passed pinned-checkpoint FullKV/HF parity, so Stage A is unsupported. Stage B
+is blocked because the installed public API exposes no atomic
+sparse-logical-block commit that preserves original positions.
+`--enable-mosaickv` remains fail-closed and emits no simulated result. The
+source boundary and proposed upstream API are recorded in
+[the native blocker](docs/vllm_native_blocker.md).
 
 **Deliverables**
 
@@ -292,21 +284,15 @@ acceptance command remains required before runtime support is claimed.
 
 **Goal:** integrate MosaicKV into a pinned SGLang revision while preserving the validated core semantics.
 
-**Current evidence:** a version-pinned SGLang 0.5.10.post1 Stage A wrapper
-launches Qwen2.5-VL through the common evaluation path with deterministic
-Triton attention, one-token streaming, no overlap schedule, no CUDA graph, and
-no server warmup. Raw trials preserve TTFT, token intervals, throughput,
-process-tree GPU memory, Radix cached-token counters, Prometheus cache gauges,
-exact server arguments, and logical active-KV byte accounting. The isolated
-environment and both Qwen2.5-VL-3B/7B Stage A checkpoint GPU gates passed with
-deterministic repeated tokens, exact byte accounting, Radix/GPU telemetry, and
-an A-B-A request-isolation probe. Controlled HF eager token parity did not
-pass, so optimized SGLang settings remain disabled. Stage B is blocked because
-the installed public and internal APIs do
-not offer an atomic request-scoped commit for KV allocator ownership,
-`ReqToTokenPool`, Radix nodes, logical positions, and Qwen mRoPE positions.
-`--enable-mosaickv` fails before server launch and never emits simulated native
-rows. See [the SGLang native blocker](docs/sglang_native_blocker.md).
+**Current evidence:** the common environment imports SGLang 0.4.3.post4 and
+its native-kernel surfaces and passes the CUDA smoke. The server wrapper has not
+been ported to this API version or passed pinned-checkpoint FullKV/HF parity,
+so Stage A and optimized profiles are unsupported. Stage B is blocked because
+the installed public API does not offer an atomic request-scoped commit for KV
+allocator ownership, `ReqToTokenPool`, Radix nodes, logical positions, and
+Qwen mRoPE positions. The feature gate remains fail-closed and never emits
+simulated native rows. See
+[the SGLang native blocker](docs/sglang_native_blocker.md).
 
 **Deliverables**
 

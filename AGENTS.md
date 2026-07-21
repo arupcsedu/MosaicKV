@@ -85,8 +85,7 @@ Do not vendor model weights, datasets, or code whose license does not permit red
 
 - Inspect relevant code, configuration, tests, and repository status before editing.
 - Use only the common environment at `/scratch/djy8hg/env/mosaickv` for HF,
-  vLLM, SGLang, evaluation, and development runs. Backend-specific legacy
-  environments are historical evidence, not valid run environments.
+  vLLM, SGLang, evaluation, and development runs.
 - Source `mosaickv/scripts/cache_env.sh` before any setup, test, model access,
   server, container, or evaluation command. Every cache and temporary path
   must be rooted outside home, normally under

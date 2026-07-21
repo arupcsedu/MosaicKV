@@ -4,8 +4,7 @@ Status: **blocked by cluster platform; no Docker run is claimed**.
 
 ## What is container-ready
 
-`Dockerfile`, `Dockerfile.hf`, `Dockerfile.vllm`, and `Dockerfile.sglang` are
-identical aliases for one common image. They:
+The canonical `mosaickv/Dockerfile` builds one common image. It:
 
 - use PyTorch 2.5.1 with CUDA 12.4;
 - install all 243 exact common-lock distributions into

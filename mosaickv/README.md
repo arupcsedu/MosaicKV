@@ -11,31 +11,29 @@ MosaicKV is a training-free multimodal KV-cache compression research system for 
 
 ## Project status
 
-The repository now contains the installable research infrastructure and a unified eager Hugging Face runtime: strict configuration, provenance manifests, structured logging, static model inspection, environment diagnostics, an lmms-eval adapter, append-only evaluation storage, explicit prefill/token-decode adapters, FullKV, five simple exact-cache baselines, and local `lookm_reimpl`, `prefixkv_reimpl`, and ICLR `vl_cache_reimpl` published-baseline implementations. `vl_cache_reimpl` implements post-vision attention scoring, relative-threshold sparsity, prompt-adaptive layer budgets, exact-only selection, leakage-safe ambiguity calibration, and structural sensitivity diagnostics; it is distinct from the later recurring-image VLCache system and is not official author code. The runtime also contains MosaicKV forecasting, sparse graph construction, utility and selection, conservative prototype/residual tiers, and decode-time repair. PrefixKV includes leakage-checked offline profiles, exact global layer-budget apportionment, prompt-attention selection shared across KV heads, and fixed-distance decode eviction; non-LLaVA uses are labeled `generalized_prefixkv_reimpl`. The runtime implements compact exact-cache decoding with original logical positions and per-layer/head validity masks. Registered HF adapters expose post-RoPE cached keys, so prototype/full requests are deliberately and visibly downgraded to exact-selection safety fallbacks. Pinned Qwen2.5-VL-3B, LLaVA-1.5-7B, their unified retention-1 equivalence checks, and a 20-example MMStar integration gate have passed on an A100 with eager attention. Their inspected development artifacts are non-canonical because they came from a dirty worktree. See the [unified runtime guide](docs/huggingface_runtime.md) for the exact validation record and limitations. Official LOOK-M and PrefixKV are pinned as unmodified submodules. LOOK-M's controlled LLaVA run remains blocked by unequal legacy-checkpoint/backend assets. PrefixKV now has a strictly controlled one-sample legacy LLaVA-1.5-7B diagnostic: official and reimplementation outputs agree for all 16 generated tokens, while the report records the upstream one-position budget undershoot. The dirty-worktree, single-trial run is not paper eligible. The VL-Cache implementation currently has formula, budget, leakage, and tensor-level retention-one validation but no paper-model task/latency reproduction. This repository currently reports **no paper-eligible measured experimental results**; clean repeated baseline sweeps, OneVision/InternVL checkpoint parity, and all non-eager backends remain open correctness gates.
+The repository contains installable research infrastructure and a unified eager
+Hugging Face runtime: strict configuration, provenance manifests, structured
+logging, model inspection, environment diagnostics, an lmms-eval adapter,
+append-only evaluation storage, explicit prefill/token decode, FullKV, simple
+exact-cache baselines, and local `lookm_reimpl`, `prefixkv_reimpl`, and
+`vl_cache_reimpl` methods. It also contains forecasting, sparse graph
+construction, block utility and selection, conservative cache tiers, and
+decode-time repair. Registered HF adapters expose post-RoPE cached keys, so
+unsafe prototype merging fails closed to exact selection.
 
-The historical vLLM 0.11.2 Stage A wrapper routed FullKV multimodal inference
-through the common evaluation harness and preserves raw streaming, cache, and
-GPU-memory trials. Its Qwen2.5-VL-3B GPU acceptance gate passed on an A100, and
-a controlled HF eager comparison matched all 16 generated token IDs; both runs
-are non-canonical dirty-worktree validation evidence. Native Stage B remains
-explicitly unsupported because vLLM exposes no safe sparse logical-block commit;
-`--enable-mosaickv` fails before model loading and never simulates a native row.
-The remaining sequence covers quality and systems evaluation, a future upstream
-vLLM cache interface, SGLang integration, and artifact packaging. Qwen2.5-VL-7B,
-LLaVA, and OneVision remain source-registered but not vLLM runtime-verified.
+The common lock, package imports, CUDA smoke, static checks, unit tests, and
+synthetic 100%-retention equivalence gate pass. Pretrained-checkpoint parity,
+dataset progression, vLLM serving, and SGLang serving have not yet passed under
+the common lock. Official LOOK-M and PrefixKV source is pinned for inspection,
+but official execution is disabled; only the explicitly labeled
+reimplementations belong to the common runtime. This repository currently
+reports **no paper-eligible measured experimental results**.
 
-The historical SGLang 0.5.10.post1 Stage A wrapper used the same standardized
-messages through a correctness-first HTTP server profile and records TTFT,
-per-token decode intervals, throughput, GPU memory, Radix prefix-cache
-telemetry, exact server arguments, model revision, and exact logical active-KV
-bytes. Its isolated environment and Qwen2.5-VL-3B/7B Stage A GPU gates passed
-on an A100, including deterministic repeats and an A-B-A request-isolation
-probe. Controlled 3B output parity with HF eager did not pass, so no optimized
-SGLang profile or cross-backend latency comparison is enabled. Stage B is
-deliberately fail-closed: the audited
-SGLang scheduler exposes no atomic request-scoped operation that can update KV
-ownership, Radix entries, request mappings, and Qwen multimodal RoPE positions
-together, so no simulated native rows are emitted.
+The common environment imports the installed vLLM and SGLang stacks and passes
+the CUDA smoke. Their repository measurement wrappers have not yet passed a
+model-serving parity gate with the versions in the common lock, so no current
+vLLM or SGLang FullKV result is supported. Native MosaicKV integration remains
+fail-closed and produces no simulated native rows.
 
 ## Development quick start
 
@@ -63,8 +61,7 @@ Run `evaluate --config mosaickv/configs/smoke.toml` for the CPU preflight, or us
 See [development instructions](docs/development.md) and [GPU diagnostics](slurm/README.md) for local checks and the non-downloading Slurm doctor job.
 The common lock, cache policy, local/Slurm setup, and Docker commands are
 documented in [environment setup](env/README.md). Creating or synchronizing the
-environment is always an explicit clean-tree action. Earlier backend-specific
-environment records are historical and cannot support a paper result.
+environment is always an explicit clean-tree action.
 The current cluster's native-Docker blocker and the commands required on a
 Docker-capable host are recorded in
 [Docker verification status](docs/docker_verification.md).
@@ -101,8 +98,8 @@ semantics.
 - [Three-tier cache construction](docs/three_tier_cache.md) — exact anchors, conservative RoPE gates, weighted prototypes, pinned CPU residuals, layouts, and diagnostics.
 - [Decode-time residual repair](docs/decode_time_repair.md) — entropy/risk triggers, evaluation-only oracle isolation, asynchronous restoration, one-pass re-decode, persistent promotion, and budget eviction.
 - [Unified Hugging Face runtime](docs/huggingface_runtime.md) — method orchestration, packed-cache masks, safety fallbacks, YAML/CLI usage, traces, and validation progression.
-- [vLLM backend](docs/vllm_backend.md) and [native blocker](docs/vllm_native_blocker.md) — measured FullKV streaming/cache telemetry, supported model registrations, fail-closed feature flag, and the missing upstream sparse-position interface.
-- [SGLang backend](docs/sglang_backend.md) and [native blocker](docs/sglang_native_blocker.md) — correctness-first FullKV server measurements, Radix cache telemetry, exact KV-byte accounting, request isolation, and the missing atomic sparse-cache interface.
+- [vLLM backend](docs/vllm_backend.md) and [native blocker](docs/vllm_native_blocker.md) — common-lock status, installed-source boundary, fail-closed feature flag, and the missing upstream sparse-position interface.
+- [SGLang backend](docs/sglang_backend.md) and [native blocker](docs/sglang_native_blocker.md) — common-lock status, installed-source boundary, and the missing atomic sparse-cache interface.
 - [Simple baselines](docs/simple_baselines.md) — exact-only policies, common budgets, deterministic allocation, traces, and configuration.
 - [LOOK-M specification](docs/baselines/lookm_spec.md) and [parity report](docs/baselines/lookm_parity_report.md) — pinned official source, paper equations, source deviations, unified `lookm_reimpl`, and current comparison blockers.
 - [PrefixKV specification](docs/baselines/prefixkv_spec.md) and [parity report](docs/baselines/prefixkv_parity_report.md) — adaptive layer profiles, ratio conventions, fixed-distance decoding, strict leakage checks, unified `prefixkv_reimpl`, and the completed non-canonical official LLaVA parity diagnostic.

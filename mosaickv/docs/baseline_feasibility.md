@@ -2,18 +2,18 @@
 
 Audit date: 2026-07-19; LOOK-M and PrefixKV pins updated locally on 2026-07-20.
 Both official repositories are unmodified submodules under `third_party/` at
-their audited commits. PrefixKV was validated in separate environments under
-`/scratch/djy8hg/env`; the default project environment was not changed. External code must
-remain under `third_party/`, pinned to an exact commit, and retain its license
-and attribution. Any paper-faithful implementation must be named `*_reimpl`
-and must never be described as official code.
+their audited commits. The common MosaicKV environment is the only supported
+execution environment. External code must remain under `third_party/`, pinned
+to an exact commit, and retain its license and attribution. Any paper-faithful
+implementation must be named `*_reimpl` and must never be described as
+official code.
 
 ## Summary
 
 | Baseline | Official implementation | Exact audit pin | Directly runnable in current environment | Models supplied by authors | License | Feasibility |
 |---|---|---|---|---|---|---|
-| LOOK-M | Yes, but repository says code is still being organized | `SUSTechBruce/LOOK-M@ecf0f51a9c416c2d85e47faf2638502f01a6d748` | **Unsupported** | Original/vendored LLaVA 1.5 7B/13B; MobileVLM V2 3B/7B; Yi-VL 6B; older InternVL Chat ViT-6B/Vicuna-7B configs | MIT | Run only in an isolated legacy environment; substantial adaptation risk |
-| PrefixKV | Yes | `THU-MIG/PrefixKV@597f1ab032704951550f93bcc8a23f1454b80aa4` | Separate parity environment only | Vendored LLaVA 1.5, with 7B documented and 7B/13B prefix configs present | MIT | One controlled legacy LLaVA-1.5-7B parity diagnostic passed; HF-converted or Qwen models still require `prefixkv_reimpl` |
+| LOOK-M | Yes, but repository says code is still being organized | `SUSTechBruce/LOOK-M@ecf0f51a9c416c2d85e47faf2638502f01a6d748` | **Unsupported** | Original/vendored LLaVA 1.5 7B/13B; MobileVLM V2 3B/7B; Yi-VL 6B; older InternVL Chat ViT-6B/Vicuna-7B configs | MIT | Use `lookm_reimpl` in the common runtime; official execution is not enabled |
+| PrefixKV | Yes | `THU-MIG/PrefixKV@597f1ab032704951550f93bcc8a23f1454b80aa4` | **Unsupported** | Vendored LLaVA 1.5, with 7B documented and 7B/13B prefix configs present | MIT | Use `prefixkv_reimpl` in the common runtime; official execution is not enabled |
 | VL-Cache | No official code located for arXiv:2410.23317/ICLR 2025 | paper v1, 2024-10-29 | Local eager-HF `vl_cache_reimpl`; paper-model reproduction not yet run | Paper evaluates LLaVA-v1.6-Mistral-7B and LLaVA-v1.6-34B | Paper: CC BY-NC-SA 4.0; no software license exists | Formula/budget/leakage tests pass; no official parity is possible unless authors release code |
 
 The similarly named 2025 paper/repository “VLCache: Computing 2% Vision Tokens
@@ -68,10 +68,11 @@ pins, among many packages:
 | triton | `2.1.0` |
 
 Python is not pinned in the repository. These versions conflict materially
-with the functioning audited stack (torch 2.11.0, transformers 4.57.6,
-accelerate 1.13.0, datasets 4.8.4 and CUDA-13 PyTorch build). The official
-baseline must therefore have its own locked environment; changing versions and
-calling the result official would invalidate paper fidelity.
+with the common stack (torch 2.5.1, transformers 4.49.0, accelerate 1.13.0,
+datasets 4.1.1, and CUDA 12.4). Official LOOK-M execution is therefore
+unsupported under the single-environment policy. Changing its dependencies
+and calling the result official would invalidate paper fidelity; use the
+separately labeled `lookm_reimpl` path.
 
 ### License and decision
 
@@ -133,10 +134,10 @@ isolated.
 ### License and decision
 
 The pinned [license](https://github.com/THU-MIG/PrefixKV/blob/597f1ab032704951550f93bcc8a23f1454b80aa4/LICENSE)
-is MIT, copyright 2024 Zuyan Liu. Feasibility is **conditional** in its official
-LLaVA environment. A modern Transformers or different-model port must be named
-`prefixkv_reimpl`, and any offline prefix calibration must use a declared,
-non-test calibration split to avoid leakage.
+is MIT, copyright 2024 Zuyan Liu. Official execution is unsupported in the
+common environment. A modern Transformers or different-model port must be
+named `prefixkv_reimpl`, and any offline prefix calibration must use a
+declared, non-test calibration split to avoid leakage.
 
 The local [PrefixKV specification](baselines/prefixkv_spec.md) now documents
 the paper equations, the upstream forget-ratio versus retained-ratio
@@ -144,12 +145,8 @@ conversion, exact source APIs, and reimplementation decisions. The unified
 `prefixkv_reimpl` can load or generate an offline layer profile, enforces
 calibration/evaluation disjointness for native profiles, maintains per-layer
 ratios during decode, and uses the common cache/metric interface. Qwen2.5-VL
-and other non-LLaVA runs are labeled `generalized_prefixkv_reimpl`. A
-one-sample controlled legacy LLaVA experiment has now run in a separate pinned
-parity environment with 100% agreement over 16 generated tokens. Its exact
-budget, byte, PPL, ROUGE, and latency observations—and its non-canonical
-dirty-worktree status—are recorded in the
-[parity report](baselines/prefixkv_parity_report.md).
+and other non-LLaVA runs are labeled `generalized_prefixkv_reimpl`. Official
+parity is not an active execution path under the single-environment policy.
 
 ## VL-Cache
 
@@ -199,16 +196,13 @@ No official code parity is possible because no author implementation was found.
 
 1. Implement simple in-tree full-cache, recent-only, uniform block, and random
    baselines under the common HF harness.
-2. Repeat the completed PrefixKV official LLaVA-1.5-7B parity diagnostic from
-   a clean SHA with warmups and repeated timing trials.
-3. Reproduce LOOK-M official LLaVA-1.5-7B in a separate pinned environment;
-   treat its absolute path and vendored-model assumptions as known risks.
-4. Use the implemented `prefixkv_reimpl`, `lookm_reimpl`, and
+2. Validate `prefixkv_reimpl`, `lookm_reimpl`, and `vl_cache_reimpl` from a
+   clean SHA with the common environment.
+3. Use the implemented `prefixkv_reimpl`, `lookm_reimpl`, and
    `vl_cache_reimpl` only for identical-model comparisons. Never merge official and reimpl
    rows or compare them under unequal prompts, media, tokenization, generation,
    output length, cache budget, precision, or backend configuration.
 
 LOOK-M/PrefixKV source and their local `*_reimpl` code were added after the
-original audit. PrefixKV's strict official-vs-reimplementation controls have
-been satisfied in an isolated environment; LOOK-M remains unmeasured. No
-package in the default project environment was changed.
+original audit. Official execution is disabled in the common environment;
+LOOK-M remains unmeasured and prior diagnostics are not paper-eligible.

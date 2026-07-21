@@ -1,8 +1,7 @@
 # Development environment
 
-HF, vLLM, SGLang, evaluation, and development share the exact common
-environment at `/scratch/djy8hg/env/mosaickv`. Do not install into a
-backend-specific prefix.
+HF, vLLM, SGLang, evaluation, and development use the exact common environment
+at `/scratch/djy8hg/env/mosaickv`.
 
 From the repository root, after committing the intended source and lock:
 
@@ -29,6 +28,6 @@ worktree; dirty-tree checks are exploratory.
 
 The canonical MyPy gate is strict over production code under `src/` and the
 environment verifier. Tests are exercised by pytest rather than included in
-the production typing claim. Isolated official-baseline scripts may depend on
-their pinned third-party environments and are intentionally outside the common
-MyPy surface.
+the production typing claim. Official baseline source remains available for
+inspection, but only common-runtime `*_reimpl` methods belong to the supported
+development path.

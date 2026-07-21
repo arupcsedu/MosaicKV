@@ -154,39 +154,17 @@ sbatch slurm/hf_runtime_progression.sbatch
 Later gates must not be reported as passed when an earlier job fails. The tiny suite is synthetic
 validation, not a paper result.
 
-## Verified integration gates
+## Current integration gates
 
-The following July 19, 2026 A100-SXM4-80GB runs were inspected after completion. They validate
-the runtime plumbing at the dirty development worktree recorded by each manifest; they are not
-canonical paper results and must not be copied into a measured-results table.
+The common environment uses Python 3.11.15, PyTorch 2.5.1/CUDA 12.4, and
+Transformers 4.49.0. Its lock/import/CUDA smoke and the no-download adapter
+tests pass. The synthetic 100%-retention smoke reports exact equivalence and
+zero maximum absolute error. Standalone FlashAttention-2 is not installed.
 
-- Slurm job `17114353` passed the no-download tiny LLaVA-1.5, Qwen2.5-VL, and
-  LLaVA-OneVision architecture gate for all three method labels, retention monotonicity, trace
-  completeness, and 16-token retention-1 parity.
-- Slurm job `17114476` completed the pinned Qwen2.5-VL-3B one-image/one-prompt gate. Its raw row,
-  Parquet aggregate, trace, and manifest are under
-  `/scratch/djy8hg/runs/mosaickv/hf-runtime/qwen3b/655bcb0ce8014ecb85df4443a4b66085`.
-- Slurm job `17114491` completed the pinned LLaVA-1.5-7B one-image/one-prompt gate. Its artifacts
-  are under
-  `/scratch/djy8hg/runs/mosaickv/hf-runtime/llava15/d360de0537f04165b07dc6b2851d7a53`.
-- Slurm job `17114628` completed 20 deterministic MMStar examples at revision
-  `bc98d668301da7b14f648724866e57302778ab27`: 20 unique completed raw rows, 20 Parquet rows,
-  and 20 matching complete traces. Its artifacts are under
-  `/scratch/djy8hg/runs/mosaickv/hf-runtime/mmstar-dev20/f65b7cb4d37146d48eabe20385c37ee8`.
-- Slurm job `17115048` passed the post-integration Qwen2.5-VL-3B retention-1 gate against
-  untouched FullKV for 16 greedy tokens, with token agreement `1.0` and maximum logit difference
-  `0.0`. The validation record is
-  `/scratch/djy8hg/runs/mosaickv/hf-runtime/qwen3b-retention-one-17115048.json`.
-- Slurm job `17115049` passed the corresponding LLaVA-1.5-7B retention-1 gate with the same
-  16-token agreement and maximum logit difference. The validation record is
-  `/scratch/djy8hg/runs/mosaickv/hf-runtime/llava15-retention-one-17115049.json`.
-
-The dedicated environment used Python 3.11, PyTorch 2.11.0+cu130, Transformers 4.57.6,
-Accelerate 1.13.0, Datasets 4.8.4, and lmms-eval 0.7.2. `pip check` passed. FlashAttention-2 is
-not installed because its source build did not pass on the login node; no FlashAttention support
-is claimed. All gates above used eager attention. Qwen2.5-VL and LLaVA-1.5 expose post-RoPE
-cached keys, so their `mosaickv_full` traces explicitly record the exact-selection safety fallback,
-with no prototypes or residual promotion.
+No pretrained checkpoint or 20-example dataset progression has been accepted
+under this common lock. Those stages remain unsupported until rerun from a
+clean commit. Qwen2.5-VL and LLaVA-1.5 expose post-RoPE cached keys, so
+prototype merging remains a safety fallback to exact selection.
 
 The lmms-eval route constrains task discovery to the requested task family, delegates MMStar
 answer processing and aggregation to the installed official functions, and pins the dataset load

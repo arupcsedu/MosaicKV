@@ -54,6 +54,22 @@ def test_backend_stacks_share_one_declared_intersection() -> None:
     assert (common["vllm"], common["sglang"]) == ("0.7.2", "0.4.3.post4")
 
 
+def test_environment_installer_rejects_retired_profile_names() -> None:
+    project_root = _project_root()
+    installer = project_root / "scripts" / "create_envs.sh"
+    for profile in ("all", "hf", "vllm", "sglang", "mock"):
+        completed = subprocess.run(
+            [str(installer), profile],
+            cwd=project_root,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        assert completed.returncode == 2
+        assert "[--sync] common" in completed.stderr
+        assert "alias" not in completed.stderr.lower()
+
+
 def test_common_environment_patch_is_versioned_and_applied_by_all_builds() -> None:
     project_root = _project_root()
     patch = project_root / "env" / "patches" / ("sglang-0.4.3.post4-transformers-4.49.patch")

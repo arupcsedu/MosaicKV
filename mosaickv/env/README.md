@@ -23,12 +23,9 @@ resolved with uv for a manylinux 2.28 target. The core intersection is:
 | lmms-eval | 0.7.2 |
 
 SGLang 0.4.3.post4 declares its SRT dependency as
-`vllm>=0.6.4.post1,<=0.7.2`; 0.7.2 is therefore the newest vLLM in that
-published intersection. Newer previously audited releases cannot share an
-environment: vLLM 0.11.0 requires `outlines-core==0.2.11`, whereas SGLang
-0.5.5's `outlines==0.1.11` requires `outlines-core==0.1.26`. The old
-`env/hf`, `env/vllm`, `env/sglang`, and `env/mock` files are retained only
-for historical auditability. They must not drive a new run.
+`vllm>=0.6.4.post1,<=0.7.2`; the common lock therefore uses vLLM 0.7.2.
+`env/common` is the only documented installation source and `common` is the
+only documented argument to the setup script.
 
 The common input spells out SGLang's SRT dependency set instead of activating
 the legacy `srt` extra. That extra requires `decord==0.6.0`, whose only Linux
@@ -53,9 +50,9 @@ The PyTorch lock already includes `nvidia-cuda-nvrtc-cu12==12.4.127`.
 so `sgl_kernel` does not depend on an unrecorded cluster CUDA module.
 
 Standalone FlashAttention-2 is intentionally absent from the common lock. HF
-correctness starts with eager attention. vLLM and SGLang use the kernels pinned
-by their own dependency graph. Do not claim SDPA, FlashAttention-2, vLLM, or
-SGLang support until the relevant clean-tree smoke passes.
+correctness starts with eager attention. vLLM and SGLang use the kernels in the
+common dependency graph. Do not claim SDPA, FlashAttention-2, vLLM, or SGLang
+support until the relevant clean-tree smoke passes.
 
 ## Cache policy
 
@@ -124,8 +121,7 @@ remains a separate gate.
 
 ## Docker
 
-All four Dockerfile entry points use the same common lock; the backend-named
-files are compatibility aliases, not different environments:
+The canonical Dockerfile uses the common lock:
 
 ```bash
 GIT_SHA=$(git rev-parse HEAD)

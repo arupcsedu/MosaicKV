@@ -17,8 +17,8 @@ averaging incompatible rotary phases. Eager attention is the sole enabled implem
 constructing an adapter around SDPA or FlashAttention-2 fails before execution.
 
 The package remains importable without PyTorch. Loading an adapter is an
-explicit operation in the separate HF environment and requires an immutable
-model revision. No adapter import downloads a model.
+explicit operation in the common environment and requires an immutable model
+revision. No adapter import downloads a model.
 
 ## Public contract
 
@@ -146,37 +146,8 @@ needed, is inherited only through the environment and is never written by the
 test or job script.
 
 Checkpoint acceptance remains unsupported until this command passes for an
-audited revision and its complete validation record is preserved. Source
-implementation, tiny architecture parity, and checkpoint acceptance are
-separate evidence levels.
-
-On 2026-07-19, Slurm job `17096861` completed the no-download FP32 architecture
-gate on one NVIDIA A100-SXM4-80GB with Torch 2.11.0 and Transformers 4.57.6.
-For all three native architecture classes, both 16-token comparisons recorded
-token agreement `1.0` and maximum absolute logit difference `0.0`. This is a
-`validation_smoke` result from randomly initialized tiny configurations, run
-from a dirty worktree whose base git SHA and patch SHA are present in the job
-record. It is not checkpoint acceptance, a model-quality result, or a paper
-result. No audited checkpoint weights were present for that job.
-
-Slurm job `17104011` subsequently repeated the tiny architecture suite after
-the backend-independent cache-state integration. Its third gate blockized,
-gathered, and reconstructed each cache through `MosaicKVState`; all three
-architectures again recorded 16/16 token agreement and maximum absolute logit
-difference `0.0`. Pinned 0.5B LLaVA-OneVision job `17103946` downloaded the
-audited revision but stopped before inference because the borrowed environment
-does not contain `torchvision`, which its `AutoVideoProcessor` requires. That
-failed setup is not checkpoint acceptance; the lockfile-specified HF
-environment must pass its import smoke before the checkpoint gate is rerun.
-
-Later unified-runtime gates used the dedicated `/scratch/djy8hg/env/mosaickv`
-environment. Slurm job `17114476` loaded the exact Qwen2.5-VL-3B revision and
-completed one image/prompt, and job `17114491` did the same for the exact
-LLaVA-1.5-7B revision. Job `17114628` then completed 20 pinned MMStar examples
-with Qwen2.5-VL-3B. Post-integration jobs `17115048` and `17115049` additionally
-passed unified 16-token retention-1 parity against untouched FullKV for the
-exact Qwen2.5-VL-3B and LLaVA-1.5-7B revisions, respectively. LLaVA-OneVision
-and optional InternVL checkpoint acceptance remain unsupported. All records
-from these development runs identify a dirty worktree and are non-canonical;
-the full evidence paths and limitations are listed in
-[the unified runtime guide](huggingface_runtime.md).
+audited revision in the common environment and its complete validation record
+is preserved. Source implementation, tiny architecture parity, and checkpoint
+acceptance are separate evidence levels. The current common-lock test gate
+passed all 29 affected adapter/environment tests without downloading weights;
+this validates package compatibility only, not checkpoint acceptance.

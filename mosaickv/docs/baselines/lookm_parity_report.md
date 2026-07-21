@@ -91,22 +91,15 @@ and is excluded from paper results and from every numerical parity comparison.
 
 These cells are status labels, not numeric experimental observations.
 
-## Required path to a valid parity row
+## Current parity boundary
 
-1. Materialize an immutable sample/media set and record its SHA-256 manifest.
-2. Materialize one immutable LLaVA-1.5-7B checkpoint usable by both executables,
-   or construct and validate a deterministic conversion whose tensor hashes,
-   tokenizer output, prompt embeddings, and FullKV generated tokens match.
-3. Create the official legacy environment from its pinned requirements and
-   record a successful import/CUDA smoke manifest. Do not retrofit the primary
-   HF environment and still call it official.
-4. Apply any portability/instrumentation changes only from an isolated patch
-   under `third_party/patches/LOOK-M`; record the patch SHA in the official
-   manifest.
-5. Run both methods on the same reserved GPU allocation with identical power,
-   clock, concurrency, warmup, and repetition controls.
-6. Export `official_lookm` and `lookm_reimpl` artifact JSON and run the strict
-   comparator above.
+Official LOOK-M requires a dependency stack that is incompatible with the
+single common environment. Official execution is therefore disabled and no
+official parity row can be produced under the current policy. The pinned
+source remains available for algorithm and license inspection only.
 
-Until all six steps pass, paper tables must place official-source results and
-reimplementation results in separate, explicitly non-comparable sections.
+`lookm_reimpl` may be evaluated through the common runtime when its model,
+prompt, media, tokenization, generation, budget, precision, backend, warmup,
+and measurement controls match the comparison methods. It must never be
+labeled official LOOK-M. Paper tables must keep any externally reported
+official results separate from common-runtime reimplementation results.

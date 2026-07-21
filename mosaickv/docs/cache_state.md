@@ -65,17 +65,7 @@ The constructor and residual representation are documented in
 
 The CPU suite performs a deterministic randomized property sweep over layer
 counts, KV-head counts, tensor widths, sequence lengths, modality layouts, and
-block sizes. The Hugging Face GPU smoke gate runs 16-token greedy parity after
-round-tripping the full cache through these core structures. A passing tiny
-architecture test validates runtime mechanics only; checkpoint support still
-requires the pinned-checkpoint gate documented in the adapter guide.
-
-On 2026-07-19, Slurm job `17104011` completed this core 100%-retention gate on
-one NVIDIA A100-SXM4-80GB with Torch 2.11.0+cu130 and Transformers 4.57.6.
-LLaVA-1.5, Qwen2.5-VL, and LLaVA-OneVision tiny random architecture instances
-each recorded 16/16 token agreement and maximum absolute logit difference
-`0.0`. This is no-download runtime-mechanics evidence from random weights, not
-checkpoint acceptance or an experimental result. A separate pinned 0.5B
-LLaVA-OneVision attempt (`17103946`) stopped before inference because the
-available borrowed environment lacks its required `torchvision` dependency;
-no checkpoint-support claim is made from that failed run.
+block sizes. The synthetic common-environment smoke passed exact 100%-retention
+equivalence with zero maximum absolute error. This validates runtime mechanics
+only; checkpoint support still requires the pinned-checkpoint gate documented
+in the adapter guide.

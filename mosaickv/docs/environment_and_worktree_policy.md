@@ -17,17 +17,15 @@ A run is paper-eligible only when all of the following are true:
    SHA, and all provenance required by `AGENTS.md`; and
 5. the relevant CPU, CUDA, model, and backend parity gates pass from that SHA.
 
-All result files produced before this policy was introduced, including runs
-from the old backend-specific environments or a dirty worktree, are
-exploratory. They may diagnose behavior but must not be copied into a measured
-paper table. Re-run them from a clean common-environment commit.
+Results from a dirty worktree are exploratory. They may diagnose behavior but
+must not be copied into a measured paper table. Re-run them from a clean
+common-environment commit.
 
 ## Environment lifecycle
 
-There is one backend environment: `/scratch/djy8hg/env/mosaickv`. The
-backend-specific names accepted by `create_envs.sh` are deprecated aliases and
-resolve to this same prefix. Ordinary run jobs never install or upgrade
-packages. Changes to dependencies require this order:
+There is one environment: `/scratch/djy8hg/env/mosaickv`. The only documented
+setup target is `common`. Ordinary run jobs never install or upgrade packages.
+Changes to dependencies require this order:
 
 1. edit `env/common/requirements.in`;
 2. resolve and review the candidate lock under the scratch cache;
@@ -61,8 +59,8 @@ Slurm; do not use a login node for heavyweight backend imports.
 
 ## Containers
 
-The canonical `mosaickv/Dockerfile` and the three legacy-named Dockerfiles all
-install `env/common/requirements.lock` into `/opt/mosaickv-venv`. An image is
+The canonical `mosaickv/Dockerfile` installs
+`env/common/requirements.lock` into `/opt/mosaickv-venv`. An image is
 identified by its digest and the clean git SHA supplied as
 `MOSAICKV_GIT_SHA`. Container verification must preserve both the CPU-safe
 `docker run` output and, on a GPU host, the output with

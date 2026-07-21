@@ -91,17 +91,8 @@ attention values. This is explicit because supported adapters capture pre-RoPE
 `q_proj` outputs while their caches store post-RoPE keys; the diagnostic API
 does not silently dot incompatible representations.
 
-The unit suite covers every mode, strict zero-window/zero-rollout rules, GQA
-mapping, diagonal and full covariance, both centroid algorithms, draft-cache
-mutation isolation, reproducibility, oracle namespace isolation, and all four
-diagnostics. The Slurm adapter smoke additionally exercises the hybrid path on
-the LLaVA-1.5, Qwen2.5-VL, and LLaVA-OneVision architecture classes.
-
-On 2026-07-19, Slurm job `17106231` completed that hybrid smoke on one NVIDIA
-A100-SXM4-80GB with Torch 2.11.0+cu130 and Transformers 4.57.6. For all three
-tiny random architecture instances, it recorded an unchanged original cache,
-reproducible centroids and weights, exact equality between three draft-query
-steps and the isolated FullKV oracle, and CUDA-event timings for every overhead
-component listed above. This is `validation_smoke` runtime evidence from random
-weights, not pretrained-checkpoint acceptance, a quality result, or a paper
-result.
+The common-environment unit suite covers every mode, strict
+zero-window/zero-rollout rules, GQA mapping, diagonal and full covariance, both
+centroid algorithms, draft-cache mutation isolation, reproducibility, oracle
+namespace isolation, and all four diagnostics. Pretrained-checkpoint forecast
+quality remains unsupported until a clean pinned-checkpoint gate passes.
