@@ -1,0 +1,52 @@
+matrix_schema_version: 1
+matrix_revision: 1
+capability_catalog_version: common-env-2026-07-21-v1
+experiment_id: repair
+description: Residual-repair experiment matrix, blocked until prototype and repair adapter gates pass.
+enabled: false
+
+axes:
+  models: [llava_1_5_7b, qwen2_5_vl_3b, qwen2_5_vl_7b, llava_onevision_7b_optional]
+  backends: [hf_eager, hf_sdpa, hf_flash_attention_2, vllm, sglang]
+  methods: [full_kv, random_kv, prompt_attention_topk, lookm_reimpl, prefixkv_reimpl, vl_cache_reimpl, mosaickv_exact, mosaickv_proto, mosaickv_full]
+  tasks: [mmstar, mmvet, textvqa, docvqa, chartqa, videomme]
+  retention_ratios: [1.0, 0.8, 0.6, 0.4, 0.2, 0.1, 0.05]
+  output_lengths: [32, 64, 128]
+  selection_seeds: [17, 29, 43]
+
+generation:
+  deterministic: true
+  do_sample: false
+  temperature: 0.0
+  top_p: 1.0
+  output_length_policy: fixed_max_new_tokens
+
+performance:
+  warmups: 5
+  timed_repetitions: 20
+
+comparison:
+  primary_budget: active_kv_bytes
+  nominal_retention_only_for_scheduling: true
+  require_realized_byte_match_before_aggregation: true
+
+run:
+  output_root: /scratch/djy8hg/runs/mosaickv/experiments/repair
+  cache_root: /scratch/djy8hg/cache/mosaickv
+  subset_size: 100
+  measurement_mode: repair_quality
+  resume: true
+
+sweeps: []
+
+blocked:
+  - scope:
+      methods: [mosaickv_proto, mosaickv_full]
+      backends: [hf_eager]
+    reason: Every registered adapter declares supports_prototype_merge=false and supports_residual_repair=false.
+  - scope:
+      backends: [hf_sdpa, hf_flash_attention_2, vllm, sglang]
+    reason: Repair requires cache replacement and logical-position correctness unavailable on these paths.
+  - scope:
+      models: [llava_onevision_7b_optional]
+    reason: The optional model has no exact registered adapter.

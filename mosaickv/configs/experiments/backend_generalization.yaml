@@ -1,0 +1,76 @@
+matrix_schema_version: 1
+matrix_revision: 1
+capability_catalog_version: common-env-2026-07-21-v1
+experiment_id: backend_generalization
+description: HF eager anchor rows plus explicitly blocked serving/attention backend generalization cells.
+enabled: true
+
+axes:
+  models: [llava_1_5_7b, qwen2_5_vl_3b, qwen2_5_vl_7b, llava_onevision_7b_optional]
+  backends: [hf_eager, hf_sdpa, hf_flash_attention_2, vllm, sglang]
+  methods: [full_kv, random_kv, prompt_attention_topk, lookm_reimpl, prefixkv_reimpl, vl_cache_reimpl, mosaickv_exact, mosaickv_proto, mosaickv_full]
+  tasks: [mmstar, mmvet, textvqa, docvqa, chartqa, videomme]
+  retention_ratios: [1.0, 0.8, 0.6, 0.4, 0.2, 0.1, 0.05]
+  output_lengths: [32, 64, 128]
+  selection_seeds: [17, 29, 43]
+
+generation:
+  deterministic: true
+  do_sample: false
+  temperature: 0.0
+  top_p: 1.0
+  output_length_policy: fixed_max_new_tokens
+
+performance:
+  warmups: 5
+  timed_repetitions: 20
+
+comparison:
+  primary_budget: active_kv_bytes
+  nominal_retention_only_for_scheduling: true
+  require_realized_byte_match_before_aggregation: true
+
+run:
+  output_root: /scratch/djy8hg/runs/mosaickv/experiments/backend_generalization
+  cache_root: /scratch/djy8hg/cache/mosaickv
+  subset_size: 20
+  measurement_mode: backend_generalization_quality
+  resume: true
+
+sweeps:
+  - name: hf_eager_full_anchor
+    models: [llava_1_5_7b, qwen2_5_vl_3b, qwen2_5_vl_7b]
+    backends: [hf_eager]
+    methods: [full_kv]
+    tasks: [mmstar]
+    retention_ratios: [1.0]
+    output_lengths: [64]
+    selection_seeds: [17, 29, 43]
+    subset_size: 20
+    variant: hf_eager_anchor
+  - name: hf_eager_mosaickv_exact_anchor
+    models: [llava_1_5_7b, qwen2_5_vl_3b, qwen2_5_vl_7b]
+    backends: [hf_eager]
+    methods: [mosaickv_exact]
+    tasks: [mmstar]
+    retention_ratios: [1.0, 0.4]
+    output_lengths: [64]
+    selection_seeds: [17, 29, 43]
+    subset_size: 20
+    variant: hf_eager_anchor
+
+blocked:
+  - scope:
+      backends: [hf_sdpa, hf_flash_attention_2]
+    reason: The HF adapters explicitly reject these attention implementations pending eager parity.
+  - scope:
+      backends: [vllm, sglang]
+      methods: [full_kv]
+    reason: Serving FullKV rows remain blocked until exact common-lock model serving and HF token parity pass.
+  - scope:
+      backends: [vllm, sglang]
+      methods: [random_kv, prompt_attention_topk, lookm_reimpl, prefixkv_reimpl, vl_cache_reimpl, mosaickv_exact, mosaickv_proto, mosaickv_full]
+    reason: Native serving cache selection/mutation is unavailable; simulated native rows are forbidden.
+  - scope:
+      models: [llava_onevision_7b_optional]
+    reason: Optional checkpoint is not registered by the exact runtime adapter registry.

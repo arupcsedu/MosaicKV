@@ -1,0 +1,89 @@
+matrix_schema_version: 1
+matrix_revision: 1
+capability_catalog_version: common-env-2026-07-21-v1
+experiment_id: ablations
+description: HF eager MosaicKV-exact component ablations with identical prompts and byte-accounting rules.
+enabled: true
+
+axes:
+  models: [llava_1_5_7b, qwen2_5_vl_3b, qwen2_5_vl_7b, llava_onevision_7b_optional]
+  backends: [hf_eager, hf_sdpa, hf_flash_attention_2, vllm, sglang]
+  methods: [full_kv, random_kv, prompt_attention_topk, lookm_reimpl, prefixkv_reimpl, vl_cache_reimpl, mosaickv_exact, mosaickv_proto, mosaickv_full]
+  tasks: [mmstar, mmvet, textvqa, docvqa, chartqa, videomme]
+  retention_ratios: [1.0, 0.8, 0.6, 0.4, 0.2, 0.1, 0.05]
+  output_lengths: [32, 64, 128]
+  selection_seeds: [17, 29, 43]
+
+generation:
+  deterministic: true
+  do_sample: false
+  temperature: 0.0
+  top_p: 1.0
+  output_length_policy: fixed_max_new_tokens
+
+performance:
+  warmups: 5
+  timed_repetitions: 20
+
+comparison:
+  primary_budget: active_kv_bytes
+  nominal_retention_only_for_scheduling: true
+  require_realized_byte_match_before_aggregation: true
+
+run:
+  output_root: /scratch/djy8hg/runs/mosaickv/experiments/ablations
+  cache_root: /scratch/djy8hg/cache/mosaickv
+  subset_size: 100
+  measurement_mode: ablation_quality
+  resume: true
+
+sweeps:
+  - &ablation_base
+    name: full_exact_pipeline
+    models: [qwen2_5_vl_3b]
+    backends: [hf_eager]
+    methods: [mosaickv_exact]
+    tasks: [mmstar, chartqa]
+    retention_ratios: [0.4, 0.2]
+    output_lengths: [64]
+    selection_seeds: [17, 29, 43]
+    subset_size: 100
+    variant: full_exact_pipeline
+  - <<: *ablation_base
+    name: prompt_only_forecast
+    variant: prompt_only_forecast
+    overrides:
+      forecasting:
+        mode: prompt_window
+        draft_steps: 0
+  - <<: *ablation_base
+    name: no_evidence_graph
+    variant: no_evidence_graph
+    overrides:
+      graph:
+        enabled: false
+  - <<: *ablation_base
+    name: no_graph_or_modality_coverage
+    variant: no_graph_or_modality_coverage
+    overrides:
+      selection:
+        lambda_g: 0.0
+        lambda_m: 0.0
+  - <<: *ablation_base
+    name: attention_only_local_utility
+    variant: attention_only_local_utility
+    overrides:
+      utility:
+        lambda_v: 0.0
+        lambda_o: 0.0
+
+blocked:
+  - scope:
+      methods: [mosaickv_proto, mosaickv_full]
+    reason: Prototype and repair ablations are blocked until adapter correctness gates pass.
+  - scope:
+      backends: [hf_sdpa, hf_flash_attention_2, vllm, sglang]
+    reason: Ablations must not confound component removal with an unvalidated backend change.
+  - scope:
+      models: [llava_onevision_7b_optional]
+    reason: The optional model lacks a registered exact adapter.
