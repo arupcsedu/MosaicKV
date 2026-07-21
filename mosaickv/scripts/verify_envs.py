@@ -376,7 +376,9 @@ def cuda_smoke(profile: str, require_cuda: bool) -> tuple[dict[str, Any], list[s
             f"{profile} requires NVIDIA driver major >= {minimum_driver}, got {report['driver']}"
         )
     if profile == "common" and capability < (8, 0):
-        errors.append(f"common backend lock requires compute capability >= 8.0, got SM {capability}")
+        errors.append(
+            f"common backend lock requires compute capability >= 8.0, got SM {capability}"
+        )
     return report, errors
 
 
