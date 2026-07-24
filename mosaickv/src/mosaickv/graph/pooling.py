@@ -86,6 +86,70 @@ def _mean_feature_vector(
     return result
 
 
+def _token_feature_matrix(
+    value: np.ndarray[Any, np.dtype[np.float32]],
+    *,
+    sequence_axis: int,
+    head_axis: int | None,
+) -> np.ndarray[Any, np.dtype[np.float32]]:
+    """Canonicalize one staged layer without copying once per cache block.
+
+    The returned shape is ``[heads, sequence, reductions, features]`` when a
+    head axis exists and ``[sequence, reductions, features]`` otherwise.
+    Batch is retained in ``reductions`` so block pooling performs the same
+    joint batch/position mean as the scalar reference implementation.
+    """
+
+    array = np.asarray(value, dtype=np.float32)
+    rank = int(array.ndim)
+    sequence = _normalize_axis(sequence_axis, rank, "sequence")
+    head = None if head_axis is None else _normalize_axis(head_axis, rank, "head")
+    if head == sequence:
+        raise ValueError("head and sequence axes must differ")
+    reductions = () if rank < 3 or 0 in {sequence, head} else (0,)
+    excluded = {sequence, *reductions}
+    if head is not None:
+        excluded.add(head)
+    features = tuple(axis for axis in range(rank) if axis not in excluded)
+    leading = (sequence,) if head is None else (head, sequence)
+    transposed = np.transpose(array, (*leading, *reductions, *features))
+    reduction_size = int(np.prod([array.shape[axis] for axis in reductions])) or 1
+    feature_size = int(np.prod([array.shape[axis] for axis in features])) or 1
+    if head is None:
+        return np.asarray(
+            transposed.reshape(array.shape[sequence], reduction_size, feature_size),
+            dtype=np.float32,
+        )
+    return np.asarray(
+        transposed.reshape(
+            array.shape[head],
+            array.shape[sequence],
+            reduction_size,
+            feature_size,
+        ),
+        dtype=np.float32,
+    )
+
+
+def _pool_token_features(
+    matrix: np.ndarray[Any, np.dtype[np.float32]],
+    *,
+    positions: tuple[int, ...],
+    head: int | None,
+) -> np.ndarray[Any, np.dtype[np.float32]]:
+    sequence_length = int(matrix.shape[0] if head is None else matrix.shape[1])
+    if max(positions) >= sequence_length:
+        raise ValueError("graph block position lies outside descriptor source tensor")
+    if head is not None and (head < 0 or head >= matrix.shape[0]):
+        raise ValueError("graph block KV head lies outside descriptor source tensor")
+    source = matrix if head is None else matrix[head]
+    selected = source[np.asarray(positions, dtype=np.intp)]
+    pooled = selected.reshape(-1, selected.shape[-1]).mean(axis=0, dtype=np.float32)
+    result = np.asarray(pooled, dtype=np.float32)
+    result.setflags(write=False)
+    return result
+
+
 def _unit(value: np.ndarray[Any, np.dtype[np.float32]]) -> np.ndarray[Any, np.dtype[np.float32]]:
     norm = float(np.linalg.norm(value))
     result = value.copy() if norm == 0 else value / norm
@@ -132,32 +196,47 @@ def pool_block_descriptors(
         key_source = _as_numpy_float(layer.key)
         value_source = _as_numpy_float(layer.value)
         hidden_source = None if hidden is None else _as_numpy_float(hidden[layer_index])
+        key_tokens = _token_feature_matrix(
+            key_source,
+            sequence_axis=layer.key_sequence_dimension,
+            head_axis=layer.key_head_dimension,
+        )
+        value_tokens = _token_feature_matrix(
+            value_source,
+            sequence_axis=layer.value_sequence_dimension,
+            head_axis=layer.value_head_dimension,
+        )
+        hidden_tokens = (
+            None
+            if hidden_source is None
+            else _token_feature_matrix(
+                hidden_source,
+                sequence_axis=hidden_sequence_dimension,
+                head_axis=None,
+            )
+        )
+        hidden_by_positions: dict[tuple[int, ...], np.ndarray[Any, np.dtype[np.float32]]] = {}
         for node_id, block in blocks_by_layer[layer_index]:
-            key = _mean_feature_vector(
-                key_source,
+            key = _pool_token_features(
+                key_tokens,
                 positions=block.physical_cache_indices,
-                sequence_axis=layer.key_sequence_dimension,
-                head_axis=layer.key_head_dimension,
                 head=block.kv_head,
             )
-            value = _mean_feature_vector(
-                value_source,
+            value = _pool_token_features(
+                value_tokens,
                 positions=block.physical_cache_indices,
-                sequence_axis=layer.value_sequence_dimension,
-                head_axis=layer.value_head_dimension,
                 head=block.kv_head,
             )
-            pooled_hidden = (
-                None
-                if hidden_source is None
-                else _mean_feature_vector(
-                    hidden_source,
-                    positions=block.physical_cache_indices,
-                    sequence_axis=hidden_sequence_dimension,
-                    head_axis=None,
-                    head=None,
-                )
-            )
+            pooled_hidden = None
+            if hidden_tokens is not None:
+                pooled_hidden = hidden_by_positions.get(block.physical_cache_indices)
+                if pooled_hidden is None:
+                    pooled_hidden = _pool_token_features(
+                        hidden_tokens,
+                        positions=block.physical_cache_indices,
+                        head=None,
+                    )
+                    hidden_by_positions[block.physical_cache_indices] = pooled_hidden
             semantic_parts = [_unit(key), _unit(value)]
             if pooled_hidden is not None:
                 semantic_parts.append(_unit(pooled_hidden))

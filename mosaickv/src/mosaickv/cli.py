@@ -387,6 +387,25 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate_parser.add_argument("--manifest")
     evaluate_parser.add_argument("--seed", type=int, default=0)
     evaluate_parser.add_argument("--subset-size", type=int)
+    evaluate_parser.add_argument(
+        "--full-dataset",
+        action="store_true",
+        help="evaluate the complete pinned task split instead of the 20-example default",
+    )
+    evaluate_parser.add_argument(
+        "--sample-offset",
+        type=int,
+        default=0,
+        help="skip this many examples in deterministic sample order before taking the subset",
+    )
+    evaluate_parser.add_argument(
+        "--sample-id-file",
+        help="immutable JSON sample shard; cannot be combined with subset/offset selection",
+    )
+    evaluate_parser.add_argument(
+        "--sample-id-file-sha",
+        help="required SHA-256 of --sample-id-file",
+    )
     evaluate_parser.add_argument("--json", action="store_true", help="emit compact JSON")
     evaluate_parser.set_defaults(handler=_evaluate_command)
 

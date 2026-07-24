@@ -714,14 +714,10 @@ class SGLangHTTPTrialRunner:
                     if not isinstance(raw_ids, list):
                         meta = event.get("meta_info")
                         logprobs = (
-                            meta.get("output_token_logprobs")
-                            if isinstance(meta, Mapping)
-                            else None
+                            meta.get("output_token_logprobs") if isinstance(meta, Mapping) else None
                         )
                         if not isinstance(logprobs, list):
-                            raise SGLangRuntimeError(
-                                "SGLang stream event omitted output token IDs"
-                            )
+                            raise SGLangRuntimeError("SGLang stream event omitted output token IDs")
                         raw_ids = []
                         for entry in logprobs:
                             if not isinstance(entry, (list, tuple)) or len(entry) < 2:

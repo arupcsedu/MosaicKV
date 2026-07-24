@@ -183,6 +183,14 @@ down to a complete KV-head group. Fractional desired counts are
 `beta_l * m`. Lower bounds are `max(1, floor(min_beta * m))`; upper bounds are
 `floor(max_beta * m)`. Bounded apportionment realizes the exact feasible target.
 
+The unified dense HF comparison also accepts `budget_unit=bytes`. This is a
+backend realization rule, not a paper equation: the target is quantized to one
+physical prompt capacity, the paper-derived layer ratios are uniformly scaled
+when their maximum would exceed that capacity, and remaining dense slots are
+masked padding. The trace records logical payload, physical payload, and
+padding separately. This preserves the layer ordering induced by Algorithm 1
+while preventing hidden physical-memory budget overruns.
+
 For each layer/head, mandatory and recent positions are selected first. The
 remaining positions are ordered by `(-s_j, physical_position)`. Selected K and
 V positions are passed unchanged through the common `pack_runtime_payloads`
@@ -231,6 +239,7 @@ quality. Selection is deterministic.
 | Per-layer Top-K | `_select_positions` | Paper behavior plus deterministic tie rule |
 | 10% recent window in Section 5 | `_select_positions` | Chosen paper-experiment interpretation |
 | Integer global budget | `_bounded_apportion` | Implementation decision |
+| Dense physical-byte capacity | `physical_prompt_capacity` | HF backend implementation decision |
 | GQA query-to-KV-head mapping | `post_vision_attention_statistics` | Implementation decision |
 | Exact K/V extraction | `vl_cache_runtime_payloads` | Common-runtime implementation |
 | Selection/byte/provenance trace | `VLCacheCompressionPlan.trace` | Reproducibility implementation |
@@ -273,6 +282,7 @@ mosaickv evaluate \
   --output-dir /scratch/djy8hg/runs/vl_cache_reimpl
 ```
 
-Direct flags require `--method vl_cache_reimpl --block-size 1
---budget-unit blocks`. Eager attention is mandatory until an audited fused
+Direct flags require `--method vl_cache_reimpl --block-size 1` and accept
+`--budget-unit blocks` for paper-structural diagnostics or `--budget-unit
+bytes` for the dense physical-byte comparison path. Eager attention is mandatory until an audited fused
 statistics kernel and its correctness parity tests exist.

@@ -198,8 +198,10 @@ def _software_provenance(backend: Backend, gpu_count: int, driver: str) -> JsonO
         # tokenization, and multimodal processor construction even though they
         # do not use the Transformers generation loop.
         "transformers": _version("transformers") if uses_torch else "not_used",
-        "vllm": _version("vllm") if backend == Backend.VLLM else "not_used",
-        "sglang": _version("sglang") if backend == Backend.SGLANG else "not_used",
+        # AGENTS.md requires every experimental row to record the installed
+        # engine versions, even when that row uses a different backend.
+        "vllm": _version("vllm"),
+        "sglang": _version("sglang"),
         "python": platform.python_version(),
         "numpy": _version("numpy"),
     }

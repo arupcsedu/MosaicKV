@@ -239,7 +239,13 @@ class InternVL25Adapter(HuggingFaceMultimodalAdapter):
         return self.model.language_model(**selected)
 
     def _decode_forward(
-        self, token_id: Any, state: DecodeState, attention_mask: Any, cache_position: Any
+        self,
+        token_id: Any,
+        state: DecodeState,
+        attention_mask: Any,
+        cache_position: Any,
+        *,
+        output_attentions: bool = False,
     ) -> Any:
         return self.model.language_model(
             input_ids=token_id,
@@ -248,6 +254,7 @@ class InternVL25Adapter(HuggingFaceMultimodalAdapter):
             cache_position=cache_position,
             use_cache=True,
             return_dict=True,
+            output_attentions=output_attentions,
             logits_to_keep=1,
         )
 

@@ -91,6 +91,34 @@ def test_fixed_global_budget_sums_exactly_and_selection_is_deterministic() -> No
     assert len(records) == first.active_slots
 
 
+def test_fixed_global_physical_byte_capacity_is_exact() -> None:
+    state = _state(heads=2)
+    capacity = 3
+    bytes_per_dense_position = state.active_bytes // 6
+    plan = build_prefixkv_reimpl_plan(
+        state,
+        _attention(),
+        PrefixKVConfig(
+            enabled=True,
+            profile_mode=PrefixKVProfileMode.FIXED_GLOBAL,
+            start_size=1,
+            protect_size=1,
+        ),
+        CacheConfig(
+            bytes_per_dense_position * capacity,
+            BudgetUnit.BYTES,
+            0.5,
+            1,
+        ),
+        model_id="Qwen/Qwen2.5-VL-3B-Instruct",
+        model_revision="a" * 40,
+        physical_prompt_capacity=capacity,
+    )
+
+    assert plan.layer_cache_sizes == (capacity, capacity)
+    assert plan.retained_bytes == bytes_per_dense_position * capacity
+
+
 def test_offline_profile_controls_adaptive_layer_sizes(tmp_path: Path) -> None:
     profile = PrefixKVOfflineProfile(
         model_id="llava-hf/llava-1.5-7b-hf",

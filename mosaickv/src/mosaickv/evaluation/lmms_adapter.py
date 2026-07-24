@@ -17,6 +17,7 @@ from importlib.metadata import PackageNotFoundError, version
 from importlib.resources import files
 from numbers import Real
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import patch
 
@@ -142,8 +143,17 @@ def _lmms_template_compatibility() -> Iterator[None]:
             yaml_path = positional[0]
         if yaml_path is not None:
             requested = Path(str(yaml_path))
-            if not requested.is_file() and requested.name == "_default_template_yaml":
-                replacement = compatibility_root.joinpath(requested.parent.name, requested.name)
+            missing_templates = {
+                "_default_template_yaml",
+                "_default_template_textvqa_yaml",
+                "_default_template_docvqa_yaml",
+            }
+            if not requested.is_file() and requested.name in missing_templates:
+                normalized = requested.resolve(strict=False)
+                replacement = compatibility_root.joinpath(
+                    normalized.parent.name,
+                    normalized.name,
+                )
                 if replacement.is_file():
                     if positional:
                         positional[0] = str(replacement)
@@ -309,7 +319,9 @@ def _prepare_task(
     public_task: str,
     lmms_task: str,
     seed: int,
-    subset_size: int,
+    subset_size: int | None,
+    sample_offset: int,
+    explicit_sample_ids: tuple[str, ...] | None,
     excluded: frozenset[str],
 ) -> tuple[Any | None, tuple[PreparedLmmsSample, ...], tuple[str, ...]]:
     split = task.config.test_split or task.config.validation_split
@@ -317,7 +329,24 @@ def _prepare_task(
         raise ValueError(f"lmms task {lmms_task!r} has no test or validation split")
     dataset = task.dataset[split]
     source_ids = _source_ids(dataset, public_task)
-    selected_ids = deterministic_sample_ids(source_ids, seed=seed, subset_size=subset_size)
+    if explicit_sample_ids is None:
+        selected_ids = deterministic_sample_ids(
+            source_ids,
+            seed=seed,
+            subset_size=subset_size,
+            offset=sample_offset,
+        )
+    else:
+        if subset_size is not None or sample_offset:
+            raise ValueError(
+                "explicit_sample_ids cannot be combined with subset_size or sample_offset"
+            )
+        if len(explicit_sample_ids) != len(set(explicit_sample_ids)):
+            raise ValueError("explicit_sample_ids cannot contain duplicates")
+        unknown = sorted(set(explicit_sample_ids) - set(source_ids))
+        if unknown:
+            raise ValueError(f"explicit sample IDs are absent from the pinned split: {unknown[:5]}")
+        selected_ids = explicit_sample_ids
     index_by_id = {sample_id: index for index, sample_id in enumerate(source_ids)}
     pending_ids = tuple(sample_id for sample_id in selected_ids if sample_id not in excluded)
     if not pending_ids:
@@ -348,7 +377,9 @@ def prepare_seeded_lmms_tasks(
     specs: tuple[TaskSpec, ...],
     *,
     seed: int,
-    subset_size: int,
+    subset_size: int | None,
+    sample_offset: int = 0,
+    explicit_sample_ids: tuple[str, ...] | None = None,
     excluded: frozenset[str] = frozenset(),
     model_name: str | None = None,
     dataset_revisions: Mapping[str, str] | None = None,
@@ -356,8 +387,10 @@ def prepare_seeded_lmms_tasks(
     """Load lmms task objects and replace their eval splits with seeded subsets."""
 
     _require_lmms_version()
-    if subset_size < 1:
+    if subset_size is not None and subset_size < 1:
         raise ValueError("subset_size must be >= 1")
+    if sample_offset < 0:
+        raise ValueError("sample_offset must be >= 0")
     tasks_module = _require_module("lmms_eval.tasks")
     tasks_root = Path(tasks_module.__file__).resolve().parent
     include_paths: set[str] = set()
@@ -413,6 +446,8 @@ def prepare_seeded_lmms_tasks(
             lmms_task=task_name,
             seed=seed,
             subset_size=subset_size,
+            sample_offset=sample_offset,
+            explicit_sample_ids=explicit_sample_ids,
             excluded=excluded,
         )
         if subset_task is not None:
@@ -450,6 +485,15 @@ def _extract_preserved_id(sample: dict[str, object], lmms_task: str) -> str:
     return f"{lmms_task}:{sample.get('doc_id')}"
 
 
+def _lmms_cli_args(raw_output: str | Path) -> SimpleNamespace:
+    """Route task-owned submissions beside the run artifact, never into cwd."""
+
+    return SimpleNamespace(
+        output_path=str(Path(raw_output).resolve().parent),
+        process_with_media=True,
+    )
+
+
 def run_lmms_development_evaluation(
     *,
     run_id: str,
@@ -458,7 +502,9 @@ def run_lmms_development_evaluation(
     raw_output: str | Path,
     manifest_path: str,
     seed: int,
-    subset_size: int,
+    subset_size: int | None,
+    sample_offset: int = 0,
+    explicit_sample_ids: tuple[str, ...] | None = None,
     parquet_output: str | Path | None = None,
     registry: TaskRegistry | None = None,
     dataset_revision: str | None = None,
@@ -480,6 +526,8 @@ def run_lmms_development_evaluation(
         specs,
         seed=seed,
         subset_size=subset_size,
+        sample_offset=sample_offset,
+        explicit_sample_ids=explicit_sample_ids,
         excluded=prior_ids,
         model_name=model.model_id,
         dataset_revisions=(
@@ -511,6 +559,11 @@ def run_lmms_development_evaluation(
                 torch_random_seed=seed,
                 fewshot_random_seed=seed,
                 repeats=1,
+                # lmms-eval task aggregators otherwise default to a
+                # cwd-relative ``submissions/`` directory, which dirties the
+                # source tree during canonical runs. Keep every auxiliary
+                # output beside this immutable run's raw artifact on scratch.
+                cli_args=_lmms_cli_args(raw_output),
             )
             if not isinstance(result, dict) or not isinstance(result.get("samples"), dict):
                 raise RuntimeError("lmms-eval returned no per-sample results")
@@ -626,6 +679,7 @@ def run_lmms_development_evaluation(
         "run_id": run_id,
         "tasks": list(task_names),
         "selected_samples": len(selected_ids),
+        "sample_offset": sample_offset,
         "resumed_samples": len(set(selected_ids) & prior_ids),
         "raw_output": str(Path(raw_output).resolve()),
         "parquet_output": parquet_path,

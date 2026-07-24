@@ -188,6 +188,7 @@ class SelectionReason(StrEnum):
     BUDGET_EXHAUSTED = "budget_exhausted"
     NONPOSITIVE_MARGINAL_GAIN = "nonpositive_marginal_gain"
     NOT_SELECTED_LOWER_GAIN = "not_selected_lower_gain"
+    DENSE_CACHE_CAPACITY = "dense_cache_capacity"
 
 
 @dataclass(frozen=True, slots=True)

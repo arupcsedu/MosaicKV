@@ -265,6 +265,30 @@ def test_byte_budget_never_exceeds_hard_limit_for_variable_size_blocks() -> None
     )
 
 
+def test_dense_cache_position_limit_is_enforced_and_recorded() -> None:
+    full = _full((Modality.TEXT,) * 6, mandatory=(5,))
+    _graph, _utilities, objective = _utilities_and_objective(
+        full,
+        selection_config=SelectionConfig(
+            lambda_g=-0.5,
+            lambda_m=-0.25,
+            stop_on_nonpositive_gain=False,
+        ),
+    )
+
+    result = lazy_greedy_select(
+        objective,
+        SelectionBudget(6, BudgetUnit.BLOCKS),
+        position_limits={(0, 0): 2},
+    )
+
+    assert len(result.selected_node_ids) == 2
+    assert 5 in result.selected_node_ids
+    assert any(
+        decision.reason is SelectionReason.DENSE_CACHE_CAPACITY for decision in result.decisions
+    )
+
+
 def test_mandatory_blocks_that_exceed_budget_fail_closed() -> None:
     full = _full((Modality.TEXT,) * 3, mandatory=(0, 1))
     _graph, _utilities, objective = _utilities_and_objective(full)

@@ -186,6 +186,27 @@ def test_byte_budget_never_exceeds_the_shared_exact_limit() -> None:
     assert result.active_bytes <= block_bytes * 8
 
 
+def test_random_byte_baseline_obeys_dense_per_head_capacity() -> None:
+    key = np.arange(2 * 6 * 3, dtype=np.float32).reshape(1, 2, 6, 3)
+    full = FullKVState.from_tensors(
+        ((key, key + 1),),
+        block_size=1,
+        mandatory_logical_positions=(5,),
+    )
+    bytes_per_position = full.active_bytes // 6
+    plan = build_exact_baseline_plan(
+        full,
+        MosaicKVMethod.RANDOM_KV,
+        CacheConfig(bytes_per_position * 3, BudgetUnit.BYTES, 0.5, 1),
+        seed=7,
+        position_limits={(0, 0): 3, (0, 1): 3},
+    )
+
+    counts = Counter((block.layer, block.kv_head) for block in plan.selection.selected_blocks)
+    assert counts == {(0, 0): 3, (0, 1): 3}
+    assert plan.selection.active_bytes == bytes_per_position * 3
+
+
 @pytest.mark.parametrize("method", COMPRESSED_BASELINES)
 def test_every_baseline_retention_one_reconstructs_full_cache(method: MosaicKVMethod) -> None:
     full = _full()

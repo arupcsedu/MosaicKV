@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import heapq
+from collections import defaultdict
+from collections.abc import Mapping
 
 from mosaickv.selection.objective import BudgetedObjective
 from mosaickv.selection.types import (
@@ -90,8 +92,16 @@ def _entry(
 def lazy_greedy_select(
     objective: BudgetedObjective,
     budget: SelectionBudget,
+    *,
+    position_limits: Mapping[tuple[int, int], int] | None = None,
 ) -> SelectionResult:
-    """Select mandatory blocks, then maximize cached marginal-gain density."""
+    """Select mandatory blocks, then maximize cached marginal-gain density.
+
+    ``position_limits`` is the fail-closed constraint used by dense HF cache
+    materialization.  A dense cache pays for the maximum retained length in
+    every layer/KV head; limiting each identity prevents a logical selection
+    from silently exceeding the declared physical byte budget.
+    """
 
     if not objective.is_submodular:
         raise ValueError("lazy greedy requires a submodular objective coefficient configuration")
@@ -106,17 +116,28 @@ def lazy_greedy_select(
         )
 
     selected: set[int] = set()
+    selected_positions: defaultdict[tuple[int, int], int] = defaultdict(int)
+    constrained: set[int] = set()
     incremental = objective.incremental_state()
     selection_order: list[int] = []
     decisions: dict[int, SelectionDecision] = {}
     spent = 0
     for node_id in mandatory:
+        block = graph.nodes[node_id].block
+        identity = (block.layer, block.kv_head)
+        limit = None if position_limits is None else position_limits.get(identity)
+        if limit is not None and selected_positions[identity] + block.position_count > limit:
+            raise InfeasibleSelectionBudgetError(
+                "mandatory exact blocks exceed the dense cache capacity: "
+                f"layer={block.layer}, kv_head={block.kv_head}, limit={limit}"
+            )
         gain = incremental.select(node_id)
         cost = costs[node_id]
         rank = len(selection_order)
         selected.add(node_id)
         selection_order.append(node_id)
         spent += cost
+        selected_positions[identity] += block.position_count
         decisions[node_id] = SelectionDecision(
             node_id=node_id,
             selected=True,
@@ -141,6 +162,12 @@ def lazy_greedy_select(
     while heap and spent < budget.value:
         _negative_density, _negative_gain, cost, node_id, cached_version, gain = heapq.heappop(heap)
         heap_pops += 1
+        block = graph.nodes[node_id].block
+        identity = (block.layer, block.kv_head)
+        limit = None if position_limits is None else position_limits.get(identity)
+        if limit is not None and selected_positions[identity] + block.position_count > limit:
+            constrained.add(node_id)
+            continue
         if cost > budget.value - spent:
             continue
         if cached_version != state_version:
@@ -155,6 +182,7 @@ def lazy_greedy_select(
         selected.add(node_id)
         selection_order.append(node_id)
         spent += cost
+        selected_positions[identity] += block.position_count
         decisions[node_id] = SelectionDecision(
             node_id=node_id,
             selected=True,
@@ -173,7 +201,14 @@ def lazy_greedy_select(
             continue
         gain = incremental.marginal_gain(node_id)
         cost = costs[node_id]
-        if cost > remaining:
+        block = graph.nodes[node_id].block
+        identity = (block.layer, block.kv_head)
+        limit = None if position_limits is None else position_limits.get(identity)
+        if node_id in constrained or (
+            limit is not None and selected_positions[identity] + block.position_count > limit
+        ):
+            reason = SelectionReason.DENSE_CACHE_CAPACITY
+        elif cost > remaining:
             reason = SelectionReason.BUDGET_EXHAUSTED
         elif objective.config.stop_on_nonpositive_gain and gain <= 0:
             reason = SelectionReason.NONPOSITIVE_MARGINAL_GAIN

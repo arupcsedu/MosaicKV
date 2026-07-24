@@ -4,9 +4,24 @@ from dataclasses import replace
 
 import numpy as np
 import pytest
+import torch
 
-from mosaickv.adapters.huggingface import AdapterCapabilities, CachedKeyState, QueryVectorState
+from mosaickv.adapters.huggingface import (
+    AdapterCapabilities,
+    CachedKeyState,
+    CacheLayerSnapshot,
+    CacheSnapshot,
+    DecodeState,
+    QueryVectorState,
+)
 from mosaickv.backends import build_compression_plan
+from mosaickv.backends.hf_runtime import (
+    _attention_output_error,
+    _attention_outputs,
+    _compact_trace_records,
+    _dense_physical_cache_budget,
+    _logit_kl,
+)
 from mosaickv.cache_state import FullKVState
 from mosaickv.config import (
     CacheConfig,
@@ -143,3 +158,139 @@ def test_retention_one_is_exact_and_active_bytes_are_monotonic() -> None:
             assert not plan.construction.prototypes
             assert not plan.construction.residual_storage.payloads
     assert active == sorted(active)
+
+
+def test_dense_physical_byte_budget_quantizes_and_constrains_selection() -> None:
+    full = _full()
+    config = replace(
+        _config(MosaicKVMethod.MOSAICKV_EXACT, 0.25),
+        cache=CacheConfig(full.active_bytes // 4, BudgetUnit.BYTES, 0.25, 1),
+    )
+    dense = _dense_physical_cache_budget(full, config)
+
+    assert dense is not None
+    assert dense.prompt_capacity == 2
+    assert dense.target_bytes == full.active_bytes // 4
+    plan = build_compression_plan(
+        full,
+        _forecast(),
+        {node_id: float(8 - node_id) for node_id in range(8)},
+        _capabilities(safe=False),
+        replace(config, cache=replace(config.cache, budget_value=dense.target_bytes)),
+        position_limits=dense.position_limits,
+    )
+    assert plan.selection.selected_node_ids == (0, 7)
+    assert plan.selection.active_bytes == dense.target_bytes
+
+
+def test_dense_physical_byte_budget_supports_fixed_multitoken_blocks() -> None:
+    key = np.arange(16 * 4, dtype=np.float32).reshape(1, 1, 16, 4) + 1
+    full = FullKVState.from_tensors(
+        ((key, np.flip(key, axis=-1).copy()),),
+        block_size=4,
+        mandatory_logical_positions=(15,),
+        cached_key_state=CachedKeyState.NOT_APPLICABLE,
+    )
+    config = replace(
+        _config(MosaicKVMethod.MOSAICKV_EXACT, 0.5),
+        cache=CacheConfig(full.active_bytes, BudgetUnit.BYTES, 0.5, 4),
+    )
+
+    dense = _dense_physical_cache_budget(full, config)
+
+    assert dense is not None
+    assert dense.prompt_capacity == 8
+    assert dense.target_bytes == full.active_bytes // 2
+    assert dense.position_limits == {(0, 0): 8}
+
+
+def test_fidelity_formulas_match_known_attention_and_logit_patterns() -> None:
+    values = torch.tensor([[[[1.0, 0.0], [0.0, 2.0]]]])
+    snapshot = CacheSnapshot(
+        (CacheLayerSnapshot(values.clone(), values, -2),),
+        tuple,
+        "legacy_tuple",
+        2,
+        CachedKeyState.NOT_APPLICABLE,
+    )
+
+    class Adapter:
+        @staticmethod
+        def extract_past_key_values(value: object, *, clone: bool = True) -> object:
+            del clone
+            return value
+
+    state = DecodeState(snapshot, torch.ones((1, 2)), 2, 2, 2, ())
+    output = _attention_outputs(
+        Adapter(),
+        (torch.tensor([[[[0.25, 0.75]]]]),),
+        state,
+    )
+    assert torch.allclose(output[0], torch.tensor([[[0.25, 1.5]]]))
+    assert _attention_output_error(output, output) == pytest.approx(0.0)
+
+    reference = torch.tensor([[3.0, 1.0, -2.0]])
+    assert _logit_kl(reference, reference) == pytest.approx(0.0)
+    assert _logit_kl(reference, torch.tensor([[1.0, 3.0, -2.0]])) > 0
+
+
+def test_fidelity_attention_accepts_installed_dynamic_cache_protocol() -> None:
+    values = torch.tensor([[[[1.0, 0.0], [0.0, 2.0]]]])
+
+    class DynamicCacheLike:
+        def to_legacy_cache(self) -> tuple[tuple[torch.Tensor, torch.Tensor], ...]:
+            return ((values.clone(), values),)
+
+    class Adapter:
+        @staticmethod
+        def extract_past_key_values(value: object, *, clone: bool = True) -> object:
+            assert clone is False
+            return value
+
+        @staticmethod
+        def _legacy_layers(
+            cache: DynamicCacheLike,
+        ) -> tuple[tuple[tuple[torch.Tensor, torch.Tensor], ...], str]:
+            return cache.to_legacy_cache(), "cache_object"
+
+        @staticmethod
+        def _cache_sequence_dimension(_value: torch.Tensor) -> int:
+            return -2
+
+    state = DecodeState(DynamicCacheLike(), torch.ones((1, 2)), 2, 2, 2, ())
+    output = _attention_outputs(
+        Adapter(),
+        (torch.tensor([[[[0.25, 0.75]]]]),),
+        state,
+    )
+
+    assert torch.allclose(output[0], torch.tensor([[[0.25, 1.5]]]))
+
+
+def test_compact_trace_preserves_counts_hashes_and_generated_tokens() -> None:
+    payload = {
+        "selected_blocks": [{"node_id": 2}, {"node_id": 7}],
+        "graph_edges": [{"source": 2, "target": 7}],
+        "packed_slots": [{"slot": 0}],
+        "forecast_statistics": {"heads": [{"layer": 0, "kv_head": 0}]},
+        "generated_token_ids": [4, 5, 6],
+        "repair_events": [{"triggered": False}],
+    }
+
+    _compact_trace_records(payload)  # type: ignore[arg-type]
+
+    for key, count in (
+        ("selected_blocks", 2),
+        ("graph_edges", 1),
+        ("packed_slots", 1),
+    ):
+        summary = payload[key]
+        assert isinstance(summary, dict)
+        assert summary["storage"] == "omitted_non_diagnostic"
+        assert summary["record_count"] == count
+        assert len(summary["sha256"]) == 64
+    forecast = payload["forecast_statistics"]
+    assert isinstance(forecast, dict)
+    assert forecast["heads"]["record_count"] == 1
+    assert payload["generated_token_ids"] == [4, 5, 6]
+    assert payload["repair_events"] == [{"triggered": False}]

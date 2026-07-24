@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from os import PathLike, fspath
 from typing import Any, Self
 
 from mosaickv.adapters.huggingface.base import HuggingFaceMultimodalAdapter, validate_hf_revision
@@ -41,6 +42,13 @@ class Qwen25VLAdapter(HuggingFaceMultimodalAdapter):
             "eager attention is the only correctness-gated implementation",
         ),
     )
+    # Installed lmms-eval 0.7.2 Qwen2.5-VL image and frame-count defaults.
+    # Eager attention cannot fit its 1,605,632-pixel video-frame ceiling on an
+    # 80 GiB A100, so video frames use Qwen's documented 128-token minimum.
+    _MIN_PIXELS = 256 * 28 * 28
+    _MAX_PIXELS = 1_605_632
+    _MAX_VIDEO_FRAMES = 32
+    _VIDEO_FRAME_PIXELS = 128 * 28 * 28
 
     @classmethod
     def from_pretrained(
@@ -68,6 +76,8 @@ class Qwen25VLAdapter(HuggingFaceMultimodalAdapter):
         # default. Pin the checkpoint-compatible slow path so HF, vLLM, and
         # SGLang do not silently compare different media preprocessing.
         selected_processor_kwargs.setdefault("use_fast", False)
+        selected_processor_kwargs.setdefault("min_pixels", cls._MIN_PIXELS)
+        selected_processor_kwargs.setdefault("max_pixels", cls._MAX_PIXELS)
         processor = AutoProcessor.from_pretrained(
             model_id, revision=revision, **selected_processor_kwargs
         )
@@ -84,7 +94,13 @@ class Qwen25VLAdapter(HuggingFaceMultimodalAdapter):
         return self.model(**selected)
 
     def _decode_forward(
-        self, token_id: Any, state: DecodeState, attention_mask: Any, cache_position: Any
+        self,
+        token_id: Any,
+        state: DecodeState,
+        attention_mask: Any,
+        cache_position: Any,
+        *,
+        output_attentions: bool = False,
     ) -> Any:
         return self.model(
             input_ids=token_id,
@@ -93,6 +109,7 @@ class Qwen25VLAdapter(HuggingFaceMultimodalAdapter):
             cache_position=cache_position,
             use_cache=True,
             return_dict=True,
+            output_attentions=output_attentions,
         )
 
     def _image_token_id(self) -> int | None:
@@ -108,7 +125,37 @@ class Qwen25VLAdapter(HuggingFaceMultimodalAdapter):
         if images:
             kwargs["images"] = list(images)
         if videos:
-            kwargs["videos"] = list(videos)
+            path_videos = [isinstance(video, str | PathLike) for video in videos]
+            if any(path_videos) and not all(path_videos):
+                raise ValueError("Qwen2.5-VL does not accept mixed video paths and decoded videos")
+            if all(path_videos):
+                from qwen_vl_utils import fetch_video  # type: ignore[import-untyped]
+
+                decoded: list[Any] = []
+                for video in videos:
+                    frames, _sample_fps = fetch_video(
+                        {
+                            "type": "video",
+                            "video": fspath(video),
+                            "min_pixels": self._VIDEO_FRAME_PIXELS,
+                            "max_pixels": self._VIDEO_FRAME_PIXELS,
+                        },
+                        return_video_sample_fps=True,
+                    )
+                    if int(frames.shape[0]) > self._MAX_VIDEO_FRAMES:
+                        import numpy as np
+
+                        indices = np.linspace(
+                            0,
+                            int(frames.shape[0]) - 1,
+                            self._MAX_VIDEO_FRAMES,
+                            dtype=int,
+                        )
+                        frames = frames[np.unique(indices)]
+                    decoded.append(frames)
+                kwargs["videos"] = decoded
+            else:
+                kwargs["videos"] = list(videos)
         return kwargs
 
     def _capture_model_state(self, output: Any) -> dict[str, Any]:

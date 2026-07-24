@@ -137,7 +137,7 @@ def default_task_registry() -> TaskRegistry:
                 "lmms-lab/textvqa",
                 "validation",
                 "textvqa_val",
-                "textvqa_val_lite",
+                "textvqa_val",
                 "exact_match",
                 image,
                 "lmms_eval",
@@ -148,7 +148,7 @@ def default_task_registry() -> TaskRegistry:
                 "lmms-lab/DocVQA",
                 "validation",
                 "docvqa_val",
-                "docvqa_val_lite",
+                "docvqa_val",
                 "anls",
                 image,
                 "lmms_eval",
@@ -159,7 +159,7 @@ def default_task_registry() -> TaskRegistry:
                 "lmms-lab/ChartQA",
                 "test",
                 "chartqa",
-                "chartqa_lite",
+                "chartqa",
                 "relaxed_overall",
                 image,
                 "lmms_eval",
@@ -197,6 +197,7 @@ def deterministic_sample_ids(
     *,
     seed: int,
     subset_size: int | None,
+    offset: int = 0,
 ) -> tuple[str, ...]:
     """Select a stable subset using SHA-256 ordering, independent of input order."""
 
@@ -206,14 +207,15 @@ def deterministic_sample_ids(
         raise ValueError("sample IDs must be unique before selection")
     if subset_size is not None and subset_size < 1:
         raise ValueError("subset_size must be >= 1 when provided")
+    if offset < 0:
+        raise ValueError("offset must be >= 0")
 
     def key(sample_id: str) -> tuple[bytes, str]:
         payload = f"mosaickv-subset-v1\0{seed}\0{sample_id}".encode()
         return hashlib.sha256(payload).digest(), sample_id
 
     ordered = sorted(sample_ids, key=key)
-    if subset_size is not None:
-        ordered = ordered[: min(subset_size, len(ordered))]
+    ordered = ordered[offset:] if subset_size is None else ordered[offset : offset + subset_size]
     return tuple(ordered)
 
 

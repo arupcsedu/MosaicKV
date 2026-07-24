@@ -573,6 +573,7 @@ class HuggingFaceMultimodalAdapter(ABC):
         forward_inputs.update(
             use_cache=True,
             return_dict=True,
+            output_attentions=capture_attentions,
             cache_position=cache_position,
             logits_to_keep=1,
         )
@@ -676,7 +677,13 @@ class HuggingFaceMultimodalAdapter(ABC):
                         layer_masks,
                     )
                 )
-            output = self._decode_forward(token_id, state, attention_mask, cache_position)
+            output = self._decode_forward(
+                token_id,
+                state,
+                attention_mask,
+                cache_position,
+                output_attentions=capture_attentions,
+            )
         query_vectors = QueryVectors(()) if query_capture is None else query_capture.result()
         attention_weights = () if attention_capture is None else attention_capture.result()
         logits = output.logits[:, -1, :]
@@ -757,7 +764,13 @@ class HuggingFaceMultimodalAdapter(ABC):
         return tuple(result)
 
     def _decode_forward(
-        self, token_id: Any, state: DecodeState, attention_mask: Any, cache_position: Any
+        self,
+        token_id: Any,
+        state: DecodeState,
+        attention_mask: Any,
+        cache_position: Any,
+        *,
+        output_attentions: bool = False,
     ) -> Any:
         return self.model(
             input_ids=token_id,
@@ -766,6 +779,7 @@ class HuggingFaceMultimodalAdapter(ABC):
             cache_position=cache_position,
             use_cache=True,
             return_dict=True,
+            output_attentions=output_attentions,
             logits_to_keep=1,
         )
 

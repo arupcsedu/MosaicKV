@@ -2,8 +2,8 @@
 #SBATCH --job-name=mosaickv-array
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task=37
-#SBATCH --mem=0
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=128G
 #SBATCH --time=04:00:00
 #SBATCH --partition=bii-gpu
 #SBATCH --reservation=bi_fox_dgx
@@ -61,6 +61,8 @@ for key in (
     "measurement_mode",
     "warmups",
     "timed_repetitions",
+    "sample_id_file",
+    "sample_id_file_sha",
 ):
     value = row.get(key)
     sys.stdout.write(("" if value is None else str(value)) + "\0")
@@ -76,6 +78,8 @@ SUBSET_SIZE=${JOB_FIELDS[5]}
 MEASUREMENT_MODE=${JOB_FIELDS[6]}
 WARMUPS=${JOB_FIELDS[7]}
 TIMED_REPETITIONS=${JOB_FIELDS[8]}
+SAMPLE_ID_FILE=${JOB_FIELDS[9]}
+SAMPLE_ID_FILE_SHA=${JOB_FIELDS[10]}
 
 if [[ "${MEASUREMENT_MODE}" == microbenchmark ]]; then
   if (( WARMUPS < 5 || TIMED_REPETITIONS < 20 )); then
@@ -103,6 +107,13 @@ ARGS=(
 )
 if [[ -n "${SUBSET_SIZE}" ]]; then
   ARGS+=(--subset-size "${SUBSET_SIZE}")
+fi
+if [[ -n "${SAMPLE_ID_FILE}" ]]; then
+  if [[ -z "${SAMPLE_ID_FILE_SHA}" ]]; then
+    printf 'sample_id_file is missing sample_id_file_sha\n' >&2
+    exit 2
+  fi
+  ARGS+=(--sample-id-file "${SAMPLE_ID_FILE}" --sample-id-file-sha "${SAMPLE_ID_FILE_SHA}")
 fi
 
 cd "${PROJECT_ROOT}"

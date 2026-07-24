@@ -1,0 +1,138 @@
+matrix_schema_version: 1
+matrix_revision: 1
+capability_catalog_version: common-env-2026-07-21-v1
+experiment_id: implementation_validation
+description: Predeclared 33-job implementation-quality gate for paired, byte-matched HF eager FullKV, simple baselines, LOOK-M on LLaVA, and MosaicKV exact selection.
+enabled: true
+
+axes:
+  models: [llava_1_5_7b, qwen2_5_vl_3b, qwen2_5_vl_7b, llava_onevision_7b_optional]
+  backends: [hf_eager, hf_sdpa, hf_flash_attention_2, vllm, sglang]
+  methods: [full_kv, random_kv, prompt_attention_topk, lookm_reimpl, prefixkv_reimpl, vl_cache_reimpl, mosaickv_exact, mosaickv_proto, mosaickv_full]
+  tasks: [mmstar, mmvet, textvqa, docvqa, chartqa, videomme]
+  retention_ratios: [1.0, 0.8, 0.6, 0.4, 0.2, 0.1, 0.05]
+  output_lengths: [32, 64, 128]
+  selection_seeds: [17, 29, 43]
+
+generation:
+  deterministic: true
+  do_sample: false
+  temperature: 0.0
+  top_p: 1.0
+  output_length_policy: fixed_max_new_tokens
+
+performance:
+  warmups: 5
+  timed_repetitions: 20
+
+comparison:
+  primary_budget: active_kv_bytes
+  nominal_retention_only_for_scheduling: true
+  require_realized_byte_match_before_aggregation: true
+
+run:
+  output_root: /scratch/djy8hg/runs/mosaickv/experiments/implementation_validation
+  cache_root: /scratch/djy8hg/cache/mosaickv
+  subset_size: 20
+  measurement_mode: implementation_validation
+  resume: true
+
+sweeps:
+  - name: llava_mmstar_full_reference
+    models: [llava_1_5_7b]
+    backends: [hf_eager]
+    methods: [full_kv]
+    tasks: [mmstar]
+    retention_ratios: [1.0]
+    output_lengths: [32]
+    selection_seeds: [17]
+    subset_size: 10
+    variant: full_reference
+  - name: llava_mmstar_identity
+    models: [llava_1_5_7b]
+    backends: [hf_eager]
+    methods: [random_kv, prompt_attention_topk, lookm_reimpl, mosaickv_exact]
+    tasks: [mmstar]
+    retention_ratios: [1.0]
+    output_lengths: [32]
+    selection_seeds: [17]
+    subset_size: 10
+    variant: retention_one_identity_gate
+  - name: llava_mmstar_random_compressed
+    models: [llava_1_5_7b]
+    backends: [hf_eager]
+    methods: [random_kv]
+    tasks: [mmstar]
+    retention_ratios: [0.4, 0.2]
+    output_lengths: [32]
+    selection_seeds: [17]
+    subset_size: 10
+    variant: fixed_seed_random_signal
+  - name: llava_mmstar_deterministic_compressed
+    models: [llava_1_5_7b]
+    backends: [hf_eager]
+    methods: [prompt_attention_topk, lookm_reimpl, mosaickv_exact]
+    tasks: [mmstar]
+    retention_ratios: [0.4, 0.2]
+    output_lengths: [32]
+    selection_seeds: [17]
+    subset_size: 10
+    variant: deterministic_compressor_signal
+  - name: qwen3_image_full_reference
+    models: [qwen2_5_vl_3b]
+    backends: [hf_eager]
+    methods: [full_kv]
+    tasks: [mmstar, docvqa]
+    retention_ratios: [1.0]
+    output_lengths: [32]
+    selection_seeds: [17]
+    subset_size: 20
+    variant: full_reference
+  - name: qwen3_image_identity
+    models: [qwen2_5_vl_3b]
+    backends: [hf_eager]
+    methods: [random_kv, prompt_attention_topk, mosaickv_exact]
+    tasks: [mmstar, docvqa]
+    retention_ratios: [1.0]
+    output_lengths: [32]
+    selection_seeds: [17]
+    subset_size: 20
+    variant: retention_one_identity_gate
+  - name: qwen3_image_random_compressed
+    models: [qwen2_5_vl_3b]
+    backends: [hf_eager]
+    methods: [random_kv]
+    tasks: [mmstar, docvqa]
+    retention_ratios: [0.4, 0.2]
+    output_lengths: [32]
+    selection_seeds: [17]
+    subset_size: 20
+    variant: fixed_seed_random_signal
+  - name: qwen3_image_deterministic_compressed
+    models: [qwen2_5_vl_3b]
+    backends: [hf_eager]
+    methods: [prompt_attention_topk, mosaickv_exact]
+    tasks: [mmstar, docvqa]
+    retention_ratios: [0.4, 0.2]
+    output_lengths: [32]
+    selection_seeds: [17]
+    subset_size: 20
+    variant: deterministic_compressor_signal
+
+blocked:
+  - scope:
+      backends: [hf_sdpa, hf_flash_attention_2, vllm, sglang]
+    reason: This implementation gate uses only the HF eager mutable-cache path that passed the current correctness gate.
+  - scope:
+      methods: [mosaickv_proto, mosaickv_full]
+    reason: Registered adapters currently disable prototype merging and residual repair; this gate validates mosaickv_exact only.
+  - scope:
+      methods: [prefixkv_reimpl]
+    reason: A paper-eligible immutable offline profile and disjoint calibration IDs are not available for this short gate.
+  - scope:
+      methods: [vl_cache_reimpl]
+    reason: Pinned disjoint calibration and checkpoint-specific retention-one parity are not available for this short gate.
+  - scope:
+      models: [qwen2_5_vl_3b]
+      methods: [lookm_reimpl]
+    reason: LOOK-M is restricted to its supported LLaVA path in this gate.

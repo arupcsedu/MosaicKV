@@ -522,6 +522,8 @@ def build_vl_cache_reimpl_plan(
     attention_weights: tuple[Any, ...],
     vl_cache_config: VLCacheConfig,
     cache_config: CacheConfig,
+    *,
+    physical_prompt_capacity: int | None = None,
 ) -> VLCacheCompressionPlan:
     """Apply the paper equations and exact-only Top-K cache selection."""
 
@@ -529,8 +531,10 @@ def build_vl_cache_reimpl_plan(
         raise VLCacheReimplementationError("vl_cache_reimpl requires vl_cache.enabled=true")
     if full_state.block_size != 1 or cache_config.block_size != 1:
         raise VLCacheReimplementationError("vl_cache_reimpl requires cache.block_size=1")
-    if cache_config.budget_unit is not BudgetUnit.BLOCKS:
-        raise VLCacheReimplementationError("vl_cache_reimpl supports block budgets only")
+    if cache_config.budget_unit not in {BudgetUnit.BLOCKS, BudgetUnit.BYTES}:
+        raise VLCacheReimplementationError(
+            "vl_cache_reimpl supports block or physical-byte budgets"
+        )
     lengths = tuple(layer.sequence_length for layer in full_state.layers)
     kv_heads = tuple(layer.kv_heads for layer in full_state.layers)
     if len(set(lengths)) != 1 or len(set(kv_heads)) != 1:
@@ -556,9 +560,16 @@ def build_vl_cache_reimpl_plan(
     heads_per_layer = kv_heads[0]
     source_slots = len(full_state.blocks)
     ratio_target_slots = math.floor(source_slots * cache_config.retention_ratio + 1e-12)
-    target_slots = min(source_slots, ratio_target_slots, cache_config.budget_value)
+    target_slots = min(source_slots, ratio_target_slots)
+    if cache_config.budget_unit is BudgetUnit.BLOCKS:
+        target_slots = min(target_slots, cache_config.budget_value)
     if cache_config.retention_ratio == 1.0:
-        if cache_config.budget_value < source_slots:
+        required_budget = (
+            source_slots
+            if cache_config.budget_unit is BudgetUnit.BLOCKS
+            else full_state.active_bytes
+        )
+        if cache_config.budget_value < required_budget:
             raise VLCacheReimplementationError(
                 "VL-Cache retention 1.0 requires cache.budget_value to cover the full cache"
             )
@@ -589,8 +600,40 @@ def build_vl_cache_reimpl_plan(
             min(length, max(low, math.floor(vl_cache_config.max_layer_retention * length + 1e-12)))
             for length, low in zip(lengths, lower, strict=True)
         )
+        desired = tuple(
+            ratio * length for ratio, length in zip(clipped_ratios, lengths, strict=True)
+        )
+        if physical_prompt_capacity is not None:
+            if physical_prompt_capacity < 1:
+                raise VLCacheReimplementationError("physical_prompt_capacity must be positive")
+            upper = tuple(min(high, physical_prompt_capacity) for high in upper)
+            if any(low > high for low, high in zip(lower, upper, strict=True)):
+                raise VLCacheReimplementationError(
+                    "VL-Cache mandatory/recent positions exceed the dense physical capacity"
+                )
+            maximum_desired = max(desired)
+            scale = (
+                1.0
+                if maximum_desired <= physical_prompt_capacity
+                else physical_prompt_capacity / maximum_desired
+            )
+            desired = tuple(value * scale for value in desired)
+            target_positions = max(
+                sum(lower),
+                min(
+                    target_positions,
+                    sum(upper),
+                    math.floor(sum(desired) + 1e-12),
+                ),
+            )
+            # Dense HF storage is charged at ``physical_prompt_capacity`` for
+            # every layer/head even when the paper's adaptive allocation uses
+            # fewer logical positions in a sparse layer.  Keep the plan's
+            # logical target consistent with the scaled apportionment; the
+            # common packer separately records the larger physical byte cost.
+            target_slots = target_positions * heads_per_layer
         retained_by_layer = _bounded_apportion(
-            tuple(ratio * length for ratio, length in zip(clipped_ratios, lengths, strict=True)),
+            desired,
             lower,
             upper,
             target_positions,
@@ -655,6 +698,8 @@ def build_vl_cache_reimpl_plan(
             )
         )
     active_slots = sum(head.retained_positions for layer in layers for head in layer.heads)
+    if cache_config.budget_unit is BudgetUnit.BYTES and retained_bytes > cache_config.budget_value:
+        raise VLCacheReimplementationError("VL-Cache retained bytes exceed cache.budget_value")
     return VLCacheCompressionPlan(
         full_state,
         vl_cache_config,

@@ -166,3 +166,28 @@ def test_disabled_matrices_expand_to_no_jobs() -> None:
         matrix = load_experiment_matrix(_matrix_root() / name)
         assert not matrix.enabled
         assert expand_experiment_matrix(matrix) == ()
+
+
+def test_main_quality_uses_only_supported_deterministic_strata() -> None:
+    matrix = load_experiment_matrix(_matrix_root() / "main_quality.yaml")
+    runs = expand_experiment_matrix(matrix)
+
+    assert len(runs) == 532
+    assert {run.config.generation.max_new_tokens for run in runs} == {128}
+    assert "mmvet" not in {run.task_key for run in runs}
+    assert {run.config.method.value for run in runs} == {
+        "full_kv",
+        "random_kv",
+        "prompt_attention_topk",
+        "lookm_reimpl",
+        "mosaickv_exact",
+    }
+    assert {run.selection_seed for run in runs if run.config.method.value == "random_kv"} == {
+        17,
+        29,
+        43,
+    }
+    assert {run.selection_seed for run in runs if run.config.method.value != "random_kv"} == {17}
+    for run in runs:
+        expected_block_size = 1 if run.config.method.value == "lookm_reimpl" else 16
+        assert run.config.cache.block_size == expected_block_size

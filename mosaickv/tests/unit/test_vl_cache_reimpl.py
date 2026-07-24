@@ -104,6 +104,28 @@ def test_denser_layer_receives_more_budget_and_hard_total_is_exact() -> None:
     assert all(record["tier"] == "vl_cache_reimpl_exact" for record in records)
 
 
+def test_physical_byte_capacity_scales_layer_adaptation_without_overflow() -> None:
+    state = _state(heads=2)
+    bytes_per_dense_position = state.active_bytes // 6
+    capacity = 3
+    plan = build_vl_cache_reimpl_plan(
+        state,
+        _attention(query_heads=4),
+        _config(sparsity_threshold=0.1),
+        CacheConfig(
+            bytes_per_dense_position * capacity,
+            BudgetUnit.BYTES,
+            0.5,
+            1,
+        ),
+        physical_prompt_capacity=capacity,
+    )
+
+    assert max(layer.retained_positions_per_head for layer in plan.layers) <= capacity
+    assert plan.retained_bytes <= bytes_per_dense_position * capacity
+    assert plan.layers[0].retained_positions_per_head >= plan.layers[1].retained_positions_per_head
+
+
 def test_retention_one_is_an_exact_no_transformation_path() -> None:
     state = _state(heads=2)
     plan = build_vl_cache_reimpl_plan(

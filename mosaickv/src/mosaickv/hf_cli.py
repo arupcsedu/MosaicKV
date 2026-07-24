@@ -11,7 +11,11 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
 
-from mosaickv.adapters.huggingface import audited_model_revision, load_hf_adapter
+from mosaickv.adapters.huggingface import (
+    HuggingFaceMultimodalAdapter,
+    audited_model_revision,
+    load_hf_adapter,
+)
 from mosaickv.backends import HuggingFaceMosaicKVModel
 from mosaickv.config import (
     CacheConfig,
@@ -208,7 +212,11 @@ def _model_kwargs(config: RunConfig, *, local_files_only: bool) -> dict[str, Any
         raise ValueError("the HF runtime supports model precision fp32, fp16, or bf16")
     kwargs: dict[str, Any] = {
         "attn_implementation": config.execution.attention_implementation,
-        "dtype": dtype,
+        # The common MosaicKV lock pins Transformers 4.49.0.  Its
+        # ``from_pretrained`` path accepts ``torch_dtype``; the shorter
+        # ``dtype`` spelling is a later API and is forwarded to the model
+        # constructor by 4.49, where it fails before weights are loaded.
+        "torch_dtype": dtype,
         "local_files_only": local_files_only,
         "low_cpu_mem_usage": True,
     }
@@ -268,7 +276,57 @@ def _input_provenance(config: RunConfig, task_name: str, raw_path: Path) -> Inpu
     )
 
 
-def run_hf_evaluation(args: argparse.Namespace, config: RunConfig) -> tuple[int, JsonObject]:
+def _load_sample_id_file(
+    path_value: str | None,
+    expected_sha: str | None,
+    *,
+    task_name: str,
+    config: RunConfig,
+) -> tuple[str, ...] | None:
+    if path_value is None:
+        if expected_sha is not None:
+            raise ValueError("--sample-id-file-sha requires --sample-id-file")
+        return None
+    if expected_sha is None:
+        raise ValueError("--sample-id-file requires --sample-id-file-sha")
+    path = Path(path_value).resolve()
+    payload = path.read_bytes()
+    actual_sha = sha256_bytes(payload)
+    if actual_sha != expected_sha:
+        raise ValueError(
+            f"sample ID file SHA mismatch: expected {expected_sha}, observed {actual_sha}"
+        )
+    value = json.loads(payload)
+    if not isinstance(value, dict) or value.get("schema_version") != 1:
+        raise ValueError("sample ID file must be a schema-version-1 JSON object")
+    expected = {
+        "task": task_name,
+        "dataset_id": config.dataset.id,
+        "dataset_revision": config.dataset.revision,
+        "split": config.dataset.split,
+    }
+    mismatched = [key for key, item in expected.items() if value.get(key) != item]
+    if mismatched:
+        raise ValueError(f"sample ID file identity mismatch: {', '.join(mismatched)}")
+    raw_ids = value.get("sample_ids")
+    if (
+        not isinstance(raw_ids, list)
+        or not raw_ids
+        or not all(isinstance(sample_id, str) and sample_id.strip() for sample_id in raw_ids)
+    ):
+        raise ValueError("sample ID file requires a non-empty sample_ids string array")
+    sample_ids = tuple(cast("list[str]", raw_ids))
+    if len(sample_ids) != len(set(sample_ids)):
+        raise ValueError("sample ID file contains duplicate sample IDs")
+    return sample_ids
+
+
+def run_hf_evaluation(
+    args: argparse.Namespace,
+    config: RunConfig,
+    *,
+    adapter: HuggingFaceMultimodalAdapter | None = None,
+) -> tuple[int, JsonObject]:
     """Load one pinned model and execute local or lmms-eval samples."""
 
     if config.execution.attention_implementation != "eager":
@@ -308,23 +366,29 @@ def run_hf_evaluation(args: argparse.Namespace, config: RunConfig) -> tuple[int,
         Path(args.trace_directory).resolve() if args.trace_directory else output_root / "traces"
     )
     run_root.mkdir(parents=True, exist_ok=True)
+    full_dataset = bool(getattr(args, "full_dataset", False))
+    sample_offset = int(getattr(args, "sample_offset", 0))
+    explicit_sample_ids = _load_sample_id_file(
+        cast("str | None", getattr(args, "sample_id_file", None)),
+        cast("str | None", getattr(args, "sample_id_file_sha", None)),
+        task_name=task_name,
+        config=config,
+    )
+    if full_dataset and args.subset_size is not None:
+        raise ValueError("--full-dataset and --subset-size are mutually exclusive")
+    if explicit_sample_ids is not None and (
+        full_dataset or args.subset_size is not None or sample_offset
+    ):
+        raise ValueError(
+            "--sample-id-file cannot be combined with --full-dataset, --subset-size, "
+            "or --sample-offset"
+        )
+    if sample_offset < 0:
+        raise ValueError("--sample-offset must be >= 0")
     if manifest_path.exists():
         rows = JsonlResultStore(raw_path).results(run_id=run_id)
         if not rows:
             raise ManifestError("an immutable manifest exists but the run has no completed rows")
-        expected = (
-            min(
-                int(args.subset_size or len(load_synthetic_samples())),
-                len(load_synthetic_samples()),
-            )
-            if task.local_scorer is not None
-            else int(args.subset_size or 20)
-        )
-        if len(rows) != expected:
-            raise ManifestError(
-                "an immutable manifest exists but its terminal sample count does not match "
-                f"the requested subset ({len(rows)} != {expected})"
-            )
         recorded = json.loads(manifest_path.read_text(encoding="utf-8"))
         if (
             recorded.get("run_id") != run_id
@@ -352,13 +416,24 @@ def run_hf_evaluation(args: argparse.Namespace, config: RunConfig) -> tuple[int,
             },
         )
 
-    adapter = load_hf_adapter(
+    selected_adapter = adapter or load_hf_adapter(
         config.model.id,
         revision=config.model.revision,
         model_kwargs=_model_kwargs(config, local_files_only=bool(args.local_files_only)),
         processor_kwargs={"local_files_only": bool(args.local_files_only)},
     )
-    runtime = HuggingFaceMosaicKVModel(adapter, config, trace_directory=trace_root)
+    loaded_model_id = str(getattr(selected_adapter.model.config, "_name_or_path", ""))
+    cached_repository = f"models--{config.model.id.replace('/', '--')}"
+    loaded_path = Path(loaded_model_id)
+    is_pinned_cached_snapshot = (
+        loaded_path.name == config.model.revision and cached_repository in loaded_path.parts
+    )
+    if loaded_model_id and loaded_model_id != config.model.id and not is_pinned_cached_snapshot:
+        raise ValueError(
+            "reused HF adapter model does not match the resolved run config: "
+            f"{loaded_model_id!r} != {config.model.id!r}"
+        )
+    runtime = HuggingFaceMosaicKVModel(selected_adapter, config, trace_directory=trace_root)
     if task.local_scorer is not None:
         summary: JsonObject = (
             EvaluationHarness(registry)
@@ -376,7 +451,9 @@ def run_hf_evaluation(args: argparse.Namespace, config: RunConfig) -> tuple[int,
             .to_json_object()
         )
     else:
-        subset_size = int(args.subset_size or 20)
+        subset_size = (
+            None if full_dataset or explicit_sample_ids is not None else int(args.subset_size or 20)
+        )
         summary = run_lmms_development_evaluation(
             run_id=run_id,
             task_names=(task_name,),
@@ -385,6 +462,8 @@ def run_hf_evaluation(args: argparse.Namespace, config: RunConfig) -> tuple[int,
             manifest_path=str(manifest_path),
             seed=config.execution.seed,
             subset_size=subset_size,
+            sample_offset=sample_offset,
+            explicit_sample_ids=explicit_sample_ids,
             parquet_output=parquet_path,
             registry=registry,
             dataset_revision=config.dataset.revision,

@@ -238,6 +238,57 @@ class GenerationConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class FidelityDiagnosticsConfig:
+    """Evaluation-only paired FullKV diagnostics for a fixed sample ledger."""
+
+    enabled: bool = False
+    sample_ids: tuple[str, ...] = ()
+    sample_ledger_sha: str | None = None
+
+    def __post_init__(self) -> None:
+        if len(self.sample_ids) != len(set(self.sample_ids)):
+            raise ConfigurationError("diagnostics.sample_ids cannot contain duplicates")
+        if any(not sample_id.strip() for sample_id in self.sample_ids):
+            raise ConfigurationError("diagnostics.sample_ids must be non-empty strings")
+        if self.enabled and not self.sample_ids:
+            raise ConfigurationError(
+                "diagnostics.sample_ids must be non-empty when diagnostics are enabled"
+            )
+        if not self.enabled and (self.sample_ids or self.sample_ledger_sha is not None):
+            raise ConfigurationError(
+                "diagnostics sample provenance requires diagnostics.enabled=true"
+            )
+        if self.enabled:
+            value = self.sample_ledger_sha
+            if (
+                value is None
+                or len(value) != 64
+                or any(character not in "0123456789abcdef" for character in value)
+            ):
+                raise ConfigurationError(
+                    "diagnostics.sample_ledger_sha must be a lowercase SHA-256 digest"
+                )
+
+    @classmethod
+    def from_mapping(cls, value: object) -> FidelityDiagnosticsConfig:
+        data = _mapping(value, "diagnostics")
+        _reject_unknown(data, {"enabled", "sample_ids", "sample_ledger_sha"}, "diagnostics")
+        raw_ids = data.get("sample_ids", ())
+        if not isinstance(raw_ids, list | tuple) or not all(
+            isinstance(sample_id, str) for sample_id in raw_ids
+        ):
+            raise ConfigurationError("diagnostics.sample_ids must be a string array")
+        raw_sha = data.get("sample_ledger_sha")
+        if raw_sha is not None and not isinstance(raw_sha, str):
+            raise ConfigurationError("diagnostics.sample_ledger_sha must be a string or null")
+        return cls(
+            enabled=_bool(data, "enabled", False, "diagnostics"),
+            sample_ids=tuple(cast("list[str] | tuple[str, ...]", raw_ids)),
+            sample_ledger_sha=raw_sha,
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class CacheConfig:
     """Cache budget and block layout."""
 
@@ -966,6 +1017,7 @@ class RunConfig:
     execution: ExecutionConfig
     generation: GenerationConfig
     cache: CacheConfig
+    diagnostics: FidelityDiagnosticsConfig = field(default_factory=FidelityDiagnosticsConfig)
     method: MosaicKVMethod = MosaicKVMethod.FULLKV
     forecasting: ForecastingConfig = field(default_factory=ForecastingConfig)
     graph: GraphConfig = field(default_factory=GraphConfig)
@@ -1095,9 +1147,9 @@ class RunConfig:
                 raise ConfigurationError(
                     "method='vl_cache_reimpl' requires cache.block_size=1 for token/head selection"
                 )
-            if self.cache.budget_unit is not BudgetUnit.BLOCKS:
+            if self.cache.budget_unit not in {BudgetUnit.BLOCKS, BudgetUnit.BYTES}:
                 raise ConfigurationError(
-                    "method='vl_cache_reimpl' requires cache.budget_unit='blocks'"
+                    "method='vl_cache_reimpl' requires cache.budget_unit='blocks' or 'bytes'"
                 )
             enabled = []
             if self.forecasting.enabled:
@@ -1132,6 +1184,7 @@ class RunConfig:
             "execution",
             "generation",
             "cache",
+            "diagnostics",
             "method",
             "forecasting",
             "graph",
@@ -1155,6 +1208,7 @@ class RunConfig:
             execution=ExecutionConfig.from_mapping(data["execution"]),
             generation=GenerationConfig.from_mapping(data["generation"]),
             cache=CacheConfig.from_mapping(data["cache"]),
+            diagnostics=FidelityDiagnosticsConfig.from_mapping(data.get("diagnostics", {})),
             method=_enum(
                 MosaicKVMethod,
                 data.get("method", MosaicKVMethod.FULLKV.value),

@@ -105,6 +105,27 @@ def test_pooling_supports_feature_before_sequence_cache_layout() -> None:
     assert np.array_equal(nodes[1].pooled_value, value[0, 0, :, 2:].mean(axis=1))
 
 
+def test_vectorized_pooling_preserves_batch_head_and_partial_block_means() -> None:
+    key = np.arange(2 * 3 * 5 * 4, dtype=np.float32).reshape(2, 3, 5, 4)
+    value = (key + 100).copy()
+    full = FullKVState.from_tensors(((key, value),), block_size=3)
+
+    nodes = pool_block_descriptors(full)
+
+    assert len(nodes) == 6
+    for node in nodes:
+        positions = node.block.physical_cache_indices
+        head = node.block.kv_head
+        assert np.array_equal(
+            node.pooled_key,
+            key[:, head, positions, :].reshape(-1, key.shape[-1]).mean(axis=0),
+        )
+        assert np.array_equal(
+            node.pooled_value,
+            value[:, head, positions, :].reshape(-1, value.shape[-1]).mean(axis=0),
+        )
+
+
 def test_synthetic_chart_has_spatial_and_cross_modal_connections() -> None:
     full = _full_state((Modality.TEXT, Modality.IMAGE, Modality.IMAGE, Modality.TEXT))
     metadata = {

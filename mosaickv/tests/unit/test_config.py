@@ -8,6 +8,7 @@ import pytest
 from mosaickv.config import (
     CacheConfig,
     ConfigurationError,
+    FidelityDiagnosticsConfig,
     ForecastingConfig,
     LookMConfig,
     PrefixKVConfig,
@@ -35,6 +36,23 @@ def test_smoke_config_is_stable_and_valid() -> None:
     assert config.execution.seed == 7
     assert len(config_sha256(config)) == 64
     assert canonical_config_json(config) == canonical_config_json(config)
+
+
+def test_fidelity_diagnostic_ledger_is_strict_and_hashed() -> None:
+    config = FidelityDiagnosticsConfig(
+        enabled=True,
+        sample_ids=("task:1", "task:2"),
+        sample_ledger_sha="a" * 64,
+    )
+    assert config.enabled
+    with pytest.raises(ConfigurationError, match="cannot contain duplicates"):
+        FidelityDiagnosticsConfig(
+            enabled=True,
+            sample_ids=("task:1", "task:1"),
+            sample_ledger_sha="a" * 64,
+        )
+    with pytest.raises(ConfigurationError, match="sample_ledger_sha"):
+        FidelityDiagnosticsConfig(enabled=True, sample_ids=("task:1",))
 
 
 @pytest.mark.parametrize("ratio", [0.0, -0.1, 1.1])

@@ -23,6 +23,7 @@ class BaselineSelectionReason(StrEnum):
     PROMPT_ATTENTION_TOPK = "prompt_attention_topk"
     VALUE_NOVELTY_TOPK = "value_novelty_topk"
     BUDGET_EXHAUSTED = "budget_exhausted"
+    DENSE_CACHE_CAPACITY = "dense_cache_capacity"
 
 
 @dataclass(frozen=True, slots=True)

@@ -27,9 +27,9 @@ unrecognized per-sample metric, the sample is recorded as failed.
 |---|---|---|---|---|---|
 | `mmstar` | `mmstar` | `Lin-Chen/MMStar` | `average` | image | lmms-eval |
 | `mmvet` | `mmvet` | `lmms-lab/MMVet` | `gpt_eval_score` | image | lmms-eval external judge |
-| `textvqa` | `textvqa_val_lite` | lmms-eval lite task | `exact_match` | image | lmms-eval |
-| `docvqa` | `docvqa_val_lite` | lmms-eval lite task | `anls` | image | lmms-eval |
-| `chartqa` | `chartqa_lite` | lmms-eval lite task | `relaxed_overall` | image | lmms-eval |
+| `textvqa` | `textvqa_val` | deterministic subset of pinned TextVQA | `exact_match` | image | lmms-eval |
+| `docvqa` | `docvqa_val` | deterministic subset of pinned DocVQA | `anls` | image | lmms-eval |
+| `chartqa` | `chartqa` | deterministic subset of pinned ChartQA | `relaxed_overall` | image | lmms-eval |
 | `video_mme` | `videomme` | `lmms-lab/Video-MME` | `videomme_perception_score` | video | lmms-eval |
 | `synthetic_ci` | not applicable | packaged local fixture | `exact_match` | synthetic RGB tuple | MosaicKV CI only |
 

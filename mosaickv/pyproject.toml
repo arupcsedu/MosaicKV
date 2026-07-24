@@ -43,7 +43,7 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "mosaickv.evaluation.data" = ["*.jsonl"]
-"mosaickv.evaluation.lmms_compat" = ["mmstar/*"]
+"mosaickv.evaluation.lmms_compat" = ["mmstar/*", "textvqa/*", "docvqa/*", "videomme/*"]
 
 [tool.pytest.ini_options]
 addopts = "-ra --strict-config --strict-markers"

@@ -481,8 +481,8 @@ def _vllm_mm_cache_snapshot() -> tuple[int, int] | None:
     try:
         from vllm.multimodal import MULTIMODAL_REGISTRY
 
-        processing_cache = MULTIMODAL_REGISTRY._processing_cache  # noqa: SLF001
-        cache = processing_cache._cache  # noqa: SLF001
+        processing_cache = MULTIMODAL_REGISTRY._processing_cache
+        cache = processing_cache._cache
         cache_info = cache.stat()
         return int(cache_info.total), int(cache_info.hits)
     except (AttributeError, ImportError, TypeError, ValueError):

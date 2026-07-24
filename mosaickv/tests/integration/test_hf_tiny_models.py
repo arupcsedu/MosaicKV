@@ -367,6 +367,33 @@ def test_tiny_architecture_full_cache_and_reinjection_parity(builder: Any) -> No
 @pytest.mark.hf
 @pytest.mark.integration
 @pytest.mark.parametrize("builder", [_llava, _qwen, _onevision])
+def test_tiny_architecture_exposes_eager_attention_probabilities(builder: Any) -> None:
+    torch.manual_seed(0)
+    adapter = builder()
+    prepared = adapter.prepare_inputs([{"role": "user", "content": "tiny prompt"}])
+
+    prefill = adapter.prefill(
+        prepared,
+        capture_queries=False,
+        capture_attentions=True,
+        attention_query_window=2,
+    )
+    assert len(prefill.attention_weights) == len(adapter._language_layers())
+    assert all(int(attention.shape[-2]) == 2 for attention in prefill.attention_weights)
+
+    decoded = adapter.decode_one_token(
+        prefill.next_token_id,
+        prefill.state,
+        capture_queries=False,
+        capture_attentions=True,
+    )
+    assert len(decoded.attention_weights) == len(adapter._language_layers())
+    assert all(int(attention.shape[-2]) == 1 for attention in decoded.attention_weights)
+
+
+@pytest.mark.hf
+@pytest.mark.integration
+@pytest.mark.parametrize("builder", [_llava, _qwen, _onevision])
 def test_tiny_architecture_hybrid_forecast_is_isolated_and_reproducible(
     builder: Any,
 ) -> None:
@@ -494,6 +521,12 @@ def test_unified_runtime_retention_one_matches_fullkv_and_bytes_are_monotonic(
             trace = json.loads(trace_path.read_text(encoding="utf-8"))
             assert trace["generated_token_ids"] == full_trace["generated_token_ids"]
             assert generated.answer == full_generation.answer
+            assert generated.metrics.compression_time == 0.0
+            assert trace["tier_mode"] == "retention_one"
+            assert trace["selection_provenance"] == "retention_one_identity_no_selection"
+            assert trace["graph_diagnostics"] == {"status": "not_used_by_retention_one_identity"}
+            assert trace["forecast_statistics"] == {"status": "not_used_by_retention_one_identity"}
+            assert trace["packed_slots"] == []
     assert active_bytes == sorted(active_bytes)
 
 

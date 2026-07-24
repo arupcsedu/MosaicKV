@@ -813,8 +813,11 @@ def _base_config(
     )
     residual_enabled = method is MosaicKVMethod.MOSAICKV_FULL
     repair_enabled = residual_enabled
-    paper_reimplementation = method.is_published_reimplementation
-    block_size = 1 if paper_reimplementation else 16
+    # The common exact-block stratum uses the declared MosaicKV block size.
+    # Paper-faithful token methods retain their native granularity and are
+    # labeled as a separate stratum even though comparisons use realized bytes.
+    block_size = 1 if method.is_published_reimplementation else 16
+    budget_unit = BudgetUnit.BLOCKS if method.is_lookm_reimplementation else BudgetUnit.BYTES
     forecasting = (
         ForecastingConfig(
             enabled=True,
@@ -839,7 +842,7 @@ def _base_config(
         generation=GenerationConfig(max_new_tokens=output_length),
         cache=CacheConfig(
             budget_value=2_147_483_647,
-            budget_unit=BudgetUnit.BLOCKS,
+            budget_unit=budget_unit,
             retention_ratio=retention_ratio,
             block_size=block_size,
             accounting_spec_sha=ACCOUNTING_SPEC_SHA,
@@ -1139,6 +1142,34 @@ def _validate_expanded_row(row: Mapping[str, Any], expected_index: int) -> tuple
     home = Path.home().resolve()
     if output_root == home or home in output_root.parents:
         raise ExperimentMatrixError("expanded output root must be outside home")
+    sample_file_value = row.get("sample_id_file")
+    sample_file_sha = row.get("sample_id_file_sha")
+    if sample_file_value is not None:
+        sample_file = Path(str(sample_file_value)).resolve()
+        if not sample_file.is_file():
+            raise ExperimentMatrixError(f"sample ID file does not exist: {sample_file}")
+        if (
+            not isinstance(sample_file_sha, str)
+            or _sha256_bytes(sample_file.read_bytes()) != sample_file_sha
+        ):
+            raise ExperimentMatrixError(f"sample ID file SHA mismatch: {sample_file}")
+        sample_permissions = stat.S_IMODE(sample_file.stat().st_mode)
+        if sample_permissions & (stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH):
+            raise ExperimentMatrixError(f"sample ID file is writable: {sample_file}")
+        sample_payload = json.loads(sample_file.read_text(encoding="utf-8"))
+        if (
+            not isinstance(sample_payload, dict)
+            or sample_payload.get("schema_version") != 1
+            or sample_payload.get("task") != task.task_name
+            or sample_payload.get("dataset_id") != task.dataset_id
+            or sample_payload.get("dataset_revision") != task.revision
+            or sample_payload.get("split") != task.split
+            or not isinstance(sample_payload.get("sample_ids"), list)
+            or not sample_payload["sample_ids"]
+        ):
+            raise ExperimentMatrixError(f"sample ID file identity is invalid: {sample_file}")
+    elif sample_file_sha is not None:
+        raise ExperimentMatrixError("sample_id_file_sha requires sample_id_file")
     return run_id, config_path
 
 

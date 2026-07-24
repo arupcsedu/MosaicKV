@@ -71,6 +71,7 @@ def _finalize(
     selected_reason: BaselineSelectionReason,
     seed: int,
     score_provenance: str,
+    position_limits: Mapping[tuple[int, int], int] | None = None,
 ) -> BaselineSelectionResult:
     node_count = len(full_state.blocks)
     if set(scores) != set(range(node_count)):
@@ -86,7 +87,21 @@ def _finalize(
         raise InfeasibleBaselineBudgetError("mandatory exact blocks exceed baseline budget")
     selection_order = list(mandatory)
     selected = set(mandatory)
+    selected_positions: dict[tuple[int, int], int] = defaultdict(int)
+    for node_id in mandatory:
+        block = full_state.blocks[node_id]
+        identity = (block.layer, block.kv_head)
+        selected_positions[identity] += block.position_count
+    if position_limits is not None:
+        for identity, count in selected_positions.items():
+            if count > position_limits.get(identity, 0):
+                raise InfeasibleBaselineBudgetError(
+                    "mandatory exact blocks exceed the dense cache capacity: "
+                    f"layer={identity[0]}, kv_head={identity[1]}, "
+                    f"required={count}, limit={position_limits.get(identity, 0)}"
+                )
     reason_by_id = {node_id: BaselineSelectionReason.MANDATORY_EXACT for node_id in mandatory}
+    capacity_rejected: set[int] = set()
     candidate_reason = (
         BaselineSelectionReason.RETENTION_ONE_EXACT
         if budget.value == _source_cost(full_state, budget.unit)
@@ -95,11 +110,18 @@ def _finalize(
     for node_id in order:
         if node_id in selected:
             continue
+        block = full_state.blocks[node_id]
+        identity = (block.layer, block.kv_head)
+        limit = None if position_limits is None else position_limits.get(identity)
+        if limit is not None and selected_positions[identity] + block.position_count > limit:
+            capacity_rejected.add(node_id)
+            continue
         cost = costs[node_id]
         if cost <= budget.value - spent:
             selected.add(node_id)
             selection_order.append(node_id)
             spent += cost
+            selected_positions[identity] += block.position_count
             reason_by_id[node_id] = candidate_reason
     rank_by_id = {node_id: rank for rank, node_id in enumerate(selection_order)}
     decisions = tuple(
@@ -109,7 +131,14 @@ def _finalize(
             selection_rank=rank_by_id.get(node_id),
             score=float(scores[node_id]),
             cost=costs[node_id],
-            reason=reason_by_id.get(node_id, BaselineSelectionReason.BUDGET_EXHAUSTED),
+            reason=reason_by_id.get(
+                node_id,
+                (
+                    BaselineSelectionReason.DENSE_CACHE_CAPACITY
+                    if node_id in capacity_rejected
+                    else BaselineSelectionReason.BUDGET_EXHAUSTED
+                ),
+            ),
             stratum=_stratum(block),
         )
         for node_id, block in enumerate(full_state.blocks)
@@ -161,6 +190,7 @@ def _select_uniform(
     budget: SelectionBudget,
     *,
     seed: int,
+    position_limits: Mapping[tuple[int, int], int] | None = None,
 ) -> BaselineSelectionResult:
     groups: dict[BaselineStratum, list[int]] = defaultdict(list)
     for node_id, block in enumerate(full_state.blocks):
@@ -185,13 +215,43 @@ def _select_uniform(
     }
     selection_order = list(sorted(mandatory))
     selected = set(mandatory)
+    selected_positions: dict[tuple[int, int], int] = defaultdict(int)
+    for node_id in mandatory:
+        block = full_state.blocks[node_id]
+        selected_positions[(block.layer, block.kv_head)] += block.position_count
+    if position_limits is not None and any(
+        count > position_limits.get(identity, 0) for identity, count in selected_positions.items()
+    ):
+        raise InfeasibleBaselineBudgetError(
+            "mandatory exact blocks exceed the dense cache capacity"
+        )
     score_at_selection = {node_id: 1.0 for node_id in mandatory}
     while spent < budget.value:
         remaining = budget.value - spent
         viable = [
             group
             for group, queue in queues.items()
-            if any(costs[node_id] <= remaining for node_id in queue)
+            if any(
+                costs[node_id] <= remaining
+                and (
+                    position_limits is None
+                    or selected_positions[
+                        (
+                            full_state.blocks[node_id].layer,
+                            full_state.blocks[node_id].kv_head,
+                        )
+                    ]
+                    + full_state.blocks[node_id].position_count
+                    <= position_limits.get(
+                        (
+                            full_state.blocks[node_id].layer,
+                            full_state.blocks[node_id].kv_head,
+                        ),
+                        0,
+                    )
+                )
+                for node_id in queue
+            )
         ]
         if not viable:
             break
@@ -206,7 +266,26 @@ def _select_uniform(
         )
         queue = queues[group]
         candidate_index = next(
-            index for index, node_id in enumerate(queue) if costs[node_id] <= remaining
+            index
+            for index, node_id in enumerate(queue)
+            if costs[node_id] <= remaining
+            and (
+                position_limits is None
+                or selected_positions[
+                    (
+                        full_state.blocks[node_id].layer,
+                        full_state.blocks[node_id].kv_head,
+                    )
+                ]
+                + full_state.blocks[node_id].position_count
+                <= position_limits.get(
+                    (
+                        full_state.blocks[node_id].layer,
+                        full_state.blocks[node_id].kv_head,
+                    ),
+                    0,
+                )
+            )
         )
         node_id = queue.pop(candidate_index)
         fraction_before = selected_cost[group] / source_cost[group]
@@ -214,6 +293,8 @@ def _select_uniform(
         selection_order.append(node_id)
         spent += costs[node_id]
         selected_cost[group] += costs[node_id]
+        block = full_state.blocks[node_id]
+        selected_positions[(block.layer, block.kv_head)] += block.position_count
         score_at_selection[node_id] = 1.0 - fraction_before
     scores = {
         node_id: score_at_selection.get(
@@ -235,6 +316,7 @@ def _select_uniform(
         selected_reason=BaselineSelectionReason.UNIFORM_STRATUM,
         seed=seed,
         score_provenance="fair_retained_cost_fraction_by_layer_kv_head_modality_v1",
+        position_limits=position_limits,
     )
 
 
@@ -286,6 +368,7 @@ def select_exact_baseline(
     seed: int,
     prompt_attention_by_node: Mapping[int, float] | None = None,
     value_chunk_size: int = 256,
+    position_limits: Mapping[tuple[int, int], int] | None = None,
 ) -> BaselineSelectionResult:
     """Select one exact-only simple baseline under a shared hard budget."""
 
@@ -304,9 +387,15 @@ def select_exact_baseline(
             selected_reason=BaselineSelectionReason.RANDOM_SEEDED,
             seed=seed,
             score_provenance=f"python_mt19937_shuffle_v1:seed={seed}",
+            position_limits=position_limits,
         )
     if method is MosaicKVMethod.UNIFORM_KV:
-        return _select_uniform(full_state, budget, seed=seed)
+        return _select_uniform(
+            full_state,
+            budget,
+            seed=seed,
+            position_limits=position_limits,
+        )
     if method is MosaicKVMethod.PROMPT_ATTENTION_TOPK:
         if prompt_attention_by_node is None:
             raise ValueError("prompt_attention_topk requires per-node prompt attention mass")
@@ -325,6 +414,7 @@ def select_exact_baseline(
             selected_reason=BaselineSelectionReason.PROMPT_ATTENTION_TOPK,
             seed=seed,
             score_provenance="eager_prompt_window_attention_mass_v1",
+            position_limits=position_limits,
         )
     if method is MosaicKVMethod.VALUE_TOPK:
         scores = value_novelty_scores(full_state, chunk_size=value_chunk_size)
@@ -338,6 +428,7 @@ def select_exact_baseline(
             selected_reason=BaselineSelectionReason.VALUE_NOVELTY_TOPK,
             seed=seed,
             score_provenance="nearest_value_cosine_novelty_same_layer_kv_head_v1",
+            position_limits=position_limits,
         )
     raise ValueError(f"method is not an exact compressed baseline: {method.value}")
 
@@ -350,6 +441,7 @@ def build_exact_baseline_plan(
     seed: int,
     prompt_attention_by_node: Mapping[int, float] | None = None,
     value_chunk_size: int = 256,
+    position_limits: Mapping[tuple[int, int], int] | None = None,
 ) -> BaselineCompressionPlan:
     """Build an exact-only plan without prototypes, residuals, or repair."""
 
@@ -362,6 +454,7 @@ def build_exact_baseline_plan(
         seed=seed,
         prompt_attention_by_node=prompt_attention_by_node,
         value_chunk_size=value_chunk_size,
+        position_limits=position_limits,
     )
     selection_seconds = time.perf_counter() - started
     tier_started = time.perf_counter()

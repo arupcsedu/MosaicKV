@@ -707,6 +707,7 @@ def build_prefixkv_reimpl_plan(
     model_id: str,
     model_revision: str,
     profile: PrefixKVOfflineProfile | None = None,
+    physical_prompt_capacity: int | None = None,
 ) -> PrefixKVCompressionPlan:
     """Select per-layer top-importance positions under one exact global budget."""
 
@@ -764,7 +765,31 @@ def build_prefixkv_reimpl_plan(
         if profile is not None:
             raise PrefixKVReimplementationError("fixed-global PrefixKV cannot consume a profile")
         desired = tuple(length * cache_config.retention_ratio for length in lengths)
-    retained = list(_bounded_apportion(desired, lower, lengths, target_positions))
+    upper = lengths
+    if physical_prompt_capacity is not None:
+        if physical_prompt_capacity < 1:
+            raise PrefixKVReimplementationError("physical_prompt_capacity must be positive")
+        upper = tuple(min(length, physical_prompt_capacity) for length in lengths)
+        if any(low > high for low, high in zip(lower, upper, strict=True)):
+            raise PrefixKVReimplementationError(
+                "PrefixKV protected positions exceed the dense physical capacity"
+            )
+        maximum_desired = max(desired)
+        scale = (
+            1.0
+            if maximum_desired <= physical_prompt_capacity
+            else physical_prompt_capacity / maximum_desired
+        )
+        desired = tuple(value * scale for value in desired)
+        target_positions = max(
+            sum(lower),
+            min(
+                target_positions,
+                sum(upper),
+                math.floor(sum(desired) + 1e-12),
+            ),
+        )
+    retained = list(_bounded_apportion(desired, lower, upper, target_positions))
     bytes_per_position = tuple(
         _layer_bytes_per_position(full_state, layer) for layer in range(layer_count)
     )

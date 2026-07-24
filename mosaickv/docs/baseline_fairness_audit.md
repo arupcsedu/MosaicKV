@@ -1,27 +1,27 @@
 # Baseline fairness audit
 
-Audit date: 2026-07-20. Scope: the unified Hugging Face eager runtime and the
+Audit date: 2026-07-21. Scope: the unified Hugging Face eager runtime and the
 nine requested method labels. This is a source, configuration, trace, and
 structural-accounting audit. It is not a benchmark result.
 
 ## Verdict
 
-**The repository is not yet ready for a scientifically fair nine-method
-comparison.** The methods share the same model adapter, message builder, decode
-loop, and eager backend, but the current experiment configurations do not share
-an active-KV byte budget, mandatory-token policy, block granularity, warmup
-protocol, or fully verifiable input-content identity. No current result set may
-be presented as a complete baseline comparison.
+**The failed revision-4 pilot is not a scientifically fair comparison.** It is
+preserved as a diagnostic. The replacement revision-5 HF pilot uses token-sized
+blocks and an explicit dense physical-byte planner, but it remains ineligible
+until its clean GPU invariant gate passes. Different paper-mandated mandatory
+policies and unsupported method/model combinations remain disclosed rather
+than silently normalized.
 
-The main failure is the distinction between selected payload and physical HF
-cache storage. The planners enforce a logical block/slot/byte budget, while
-[`pack_runtime_payloads`](../src/mosaickv/backends/hf_runtime.py#L751) pads every
-layer and KV head to the largest selected head length. The padded tensor is the
-active device cache and therefore controls the primary comparison budget. A
-nominal token or block retention ratio is not an acceptable substitute.
+The revision-4 failure exposed the distinction between selected payload and
+physical HF cache storage. The replacement path quantizes the requested byte
+budget to a representable dense prompt capacity, constrains selection per
+layer/KV head, and pads every method to that same measured capacity. The
+finalizer independently checks the physical tensor bytes in every sample trace.
+A nominal token or block retention ratio is still not an acceptable substitute.
 
-The audit made four narrow correctness fixes without changing any scoring,
-selection, merge, or repair algorithm:
+The initial audit made four narrow correctness fixes without changing any
+scoring, selection, merge, or repair algorithm:
 
 1. the HF entry point now enables PyTorch deterministic algorithms and seeds
    CPU and CUDA from the recorded seed;
@@ -31,6 +31,10 @@ selection, merge, or repair algorithm:
    safety fallback is not reported as `mosaickv_proto` or `mosaickv_full`; and
 4. new traces distinguish source prefill bytes, logical active payload bytes,
    padded physical prefill bytes, padding bytes, and final post-decode bytes.
+
+Revision 5 additionally adds a dense physical-byte planner and makes a blocked
+finalizer return a nonzero process status, so Slurm cannot report a critically
+failed invariant gate as a successful job.
 
 Existing immutable runs are not rewritten. Their result rows retain their old
 requested-method labels and their traces remain the authoritative evidence of
@@ -48,9 +52,9 @@ packed_prefill_active_kv_bytes == B
 `packed_prefill_active_kv_bytes` is the sum of `numel * element_size` for every
 physical K and V tensor immediately after compression/packing and before the
 first decode step. It includes padding required by the actual backend layout.
-It excludes CPU residual storage, which must be reported separately. The final
-`active_kv_bytes` includes decode-time cache growth and is comparable only when
-generated-token counts are also identical.
+It excludes CPU residual storage, which must be reported separately. The
+trace-only `final_active_kv_bytes` includes decode-time cache growth and is
+comparable only when generated-token counts are also identical.
 
 The following fields have deliberately different meanings:
 
@@ -60,7 +64,8 @@ The following fields have deliberately different meanings:
 | `logical_prefill_active_kv_bytes` | Selected exact/prototype/merged payload before backend padding | Algorithm diagnostic only |
 | `packed_prefill_active_kv_bytes` | Physical device K/V tensor after packing | **Primary comparison budget** |
 | `packed_padding_kv_bytes` | Physical minus logical prefill payload | Backend-layout overhead |
-| `active_kv_bytes` | Physical K/V after the fixed decode | End-state memory diagnostic |
+| `active_kv_bytes` | Physical K/V immediately after packing and before decode | **Primary result-schema budget field** |
+| `final_active_kv_bytes` | Physical K/V after fixed-length decoding | Trace-only end-state diagnostic |
 | `residual_kv_bytes` | Separate CPU residual payload | Report separately and include in total-storage analyses |
 
 FullKV is a quality reference at its natural full-cache budget. It cannot be a
@@ -76,12 +81,20 @@ budget-matched compressed systems point at `B < source_prefill_kv_bytes`.
 | Prompt text | The harness deterministically selects sample IDs and constructs messages once per request. | Not auditable from current manifests: the fields named `prompt_set_sha` and `media_set_sha` are derived from sample ID/reference selection, not prompt/media content ([`_input_provenance`](../src/mosaickv/hf_cli.py#L252)). |
 | Output length | The shared loop executes exactly `max_new_tokens`; non-fixed output policies now fail closed. | Pass for new unified-runtime runs using the same generation config SHA. |
 | Deterministic decoding | Runtime rejects sampling and nonzero temperature; CLI now calls `torch.use_deterministic_algorithms`, `manual_seed`, and `cuda.manual_seed_all`. | Pass for new runs, subject to deterministic-kernel availability. Old unified runs recorded the flag without enforcing it globally. |
-| Active KV byte budget | Logical planners enforce their configured unit; new traces record physical packed bytes. | **Fail.** Existing configs mostly use blocks, and head/layer padding can exceed the logical budget substantially. |
+| Active KV byte budget | Revision 5 uses byte configs, token blocks, per-head dense limits, and one pack-time capacity. | Implemented; acceptance remains conditional on the clean GPU trace-level equality gate. |
 | Mandatory tokens | Simple baselines, VL-Cache, and MosaicKV protect the terminal prompt token; LOOK-M protects its recent window; PrefixKV protects start and tail positions. | **Not identical by design.** Preserve these paper-derived rules and report their byte cost; do not call them identical. |
 | Block granularity | LOOK-M, PrefixKV, and VL-Cache require `block_size=1`; simple baselines and MosaicKV are configurable and existing MosaicKV runs use 16. | **Fail for existing runs.** A cross-method token-level stratum must set all applicable methods to block size 1. A block-16 MosaicKV stratum must exclude token methods or label the granularity difference. |
 | Attention backend | `HuggingFaceMosaicKVModel` rejects anything except eager attention. | Pass inside the unified HF runtime. vLLM, SGLang, SDPA, and FlashAttention-2 are unsupported for this comparison. |
 | Warmup count | The evaluation harness performs no warmups; the dedicated FullKV benchmark defaults to one warmup and five trials ([`FullKVBenchmarkConfig`](../src/mosaickv/fullkv.py#L31)). | **Fail for systems comparisons.** Warmup count is not in `RunConfig` or the unified manifest. |
 | Measurement protocol | Unified phases use synchronized CUDA events when the exemplar is CUDA ([`_timed`](../src/mosaickv/backends/hf_runtime.py#L137)); the total is a host clock. Dedicated FullKV uses a different repeated-trial CUDA-event protocol. | **Fail for paper latency comparisons.** Use one repeated-trial runner for every method before comparing latency. |
+
+The version-3 main-quality matrix does not claim to be the nine-method
+token-level stratum described below. It uses block size 16 for FullKV, the
+simple exact-block baselines, and `mosaickv_exact`, while `lookm_reimpl`
+retains its paper-faithful token granularity in a separately labeled stratum.
+Every derived row records block size, and comparisons use realized physical
+KV bytes. The granularity difference remains a disclosed design distinction;
+it is not evidence that LOOK-M and MosaicKV used identical selection units.
 
 Required attention/query capture is method work, not an unfair perturbation to
 hide: FullKV needs neither, prompt-attention methods need attention, and
@@ -98,7 +111,7 @@ separately.
 | `prompt_attention_topk` | Exact blocks ranked by prompt-window attention | Terminal prompt token | Configurable blocks; block/slot/byte logical budget | Same caveat as random; attention capture is required method overhead |
 | `lookm_reimpl` | Paper text-prior selection and KV merge | Whole LOOK-M recent window | Token blocks; block budget only | LLaVA-1.5 reimplementation stratum only; byte-match by realized packed storage |
 | `prefixkv_reimpl` | Layer-wise positions from a profile or fixed-global allocation | Configured start and protected tail | Token blocks; logical block or byte budget | Layer-adaptive profiles can incur large HF padding; calibration provenance is mandatory |
-| `vl_cache_reimpl` | Layer-adaptive exact positions from post-vision attention sparsity | Terminal token plus configured recent fraction | Token blocks; block budget only | Paper equations retained, but physical layer padding can violate a nominal ratio |
+| `vl_cache_reimpl` | Layer-adaptive exact positions from post-vision attention sparsity | Terminal token plus configured recent fraction | Token blocks; block or dense physical-byte budget | Paper ratios are uniformly scaled when necessary to fit the dense capacity; the trace records padding. |
 | `mosaickv_exact` | Forecast, graph, utility, exact selection | Terminal prompt token | Configurable blocks; block/slot/byte logical budget | Eligible only after packed bytes are exactly matched |
 | `mosaickv_proto` | Exact plus prototypes when adapter declares safe merging | Terminal prompt token | Configurable blocks; logical active budget | Unsupported as a prototype method on every current post-RoPE adapter; executes an explicitly labeled exact fallback |
 | `mosaickv_full` | Exact, prototypes, CPU residuals, repair when supported | Terminal prompt token; promoted blocks persist | Configurable blocks; logical active budget | Unsupported as the full method on every current adapter; executes an explicitly labeled exact fallback with no repair |
@@ -204,10 +217,10 @@ merging or residual repair below 1.0.
 
 ## Remaining threats to fair comparison
 
-1. **No byte-budget-aware physical planner.** Selection budgets do not account
-   for the global padding capacity imposed by the HF cache packer. Until fixed,
-   run a pilot, read `packed_prefill_active_kv_bytes`, and reject or retarget
-   the row before evaluation. Do not round methods into coarse ratio buckets.
+1. **Physical planner still needs GPU acceptance.** The dense physical-byte
+   planner is implemented, but only a clean revision-5 pilot can establish that
+   every model-produced cache obeys it. The finalizer rejects any mismatch in
+   `packed_prefill_active_kv_bytes`; do not round mismatches into ratio buckets.
 2. **Input hashes are not content hashes.** Current HF manifest prompt/media
    hashes encode the selected IDs and references, while preprocessing and
    tokenization hashes encode labels plus model identity. Preserve canonical

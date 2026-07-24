@@ -97,6 +97,16 @@ class RuntimePhaseTimings:
 
 
 @dataclass(frozen=True, slots=True)
+class FidelityDiagnostic:
+    """Evaluation-only comparison against an isolated FullKV decode."""
+
+    token_agreement: float
+    sequence_agreement: bool
+    logit_kl: float
+    attention_output_error: float
+
+
+@dataclass(frozen=True, slots=True)
 class MosaicKVCompressionPlan:
     """All inspectable algorithm outputs produced from one full prefill."""
 
@@ -124,6 +134,85 @@ class PackedRuntimeCache:
     prompt_capacity: int
     prototype_slots: tuple[tuple[int, int, int, int], ...]
     slot_records: tuple[JsonObject, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class DensePhysicalCacheBudget:
+    """Representable physical prefill budget for the dense HF cache layout."""
+
+    source_bytes: int
+    target_bytes: int
+    prompt_capacity: int
+    position_limits: Mapping[tuple[int, int], int]
+
+
+def _dense_physical_cache_budget(
+    full_state: FullKVState,
+    config: RunConfig,
+) -> DensePhysicalCacheBudget | None:
+    """Quantize a byte budget to one shared dense prompt capacity.
+
+    The eager HF cache has one physical sequence dimension shared by all
+    layers and KV heads.  A logical byte sum is therefore not a physical
+    budget.  A shared per-identity position capacity makes the materialized
+    tensor size predictable and auditable before selection, including for
+    fixed blocks larger than one token.
+    """
+
+    if config.cache.budget_unit is not BudgetUnit.BYTES:
+        return None
+    if full_state.block_size != config.cache.block_size:
+        raise HuggingFaceRuntimeError("runtime and FullKV block sizes disagree")
+    lengths = {layer.sequence_length for layer in full_state.layers}
+    if len(lengths) != 1:
+        raise HuggingFaceRuntimeError(
+            "dense HF physical-byte budgeting requires a uniform source sequence length"
+        )
+    source_length = next(iter(lengths))
+    bytes_per_identity: dict[tuple[int, int], int] = {}
+    for block in full_state.blocks:
+        if block.byte_size % block.position_count:
+            raise HuggingFaceRuntimeError("KV block bytes are not divisible by its positions")
+        identity = (block.layer, block.kv_head)
+        bytes_per_token = block.byte_size // block.position_count
+        previous = bytes_per_identity.setdefault(identity, bytes_per_token)
+        if previous != bytes_per_token:
+            raise HuggingFaceRuntimeError("KV bytes per token vary within one layer/head identity")
+    bytes_per_position = sum(bytes_per_identity.values())
+    source_bytes = bytes_per_position * source_length
+    if source_bytes != full_state.active_bytes:
+        raise HuggingFaceRuntimeError(
+            "dense HF byte accounting does not reconstruct the FullKV tensor storage"
+        )
+    requested = min(
+        math.ceil(source_bytes * config.cache.retention_ratio),
+        config.cache.budget_value,
+    )
+    prompt_capacity = requested // bytes_per_position
+    if config.cache.retention_ratio == 1.0:
+        prompt_capacity = source_length
+    if prompt_capacity < 1:
+        raise HuggingFaceRuntimeError(
+            "physical byte budget cannot represent one KV position per layer/head"
+        )
+    prompt_capacity = min(prompt_capacity, source_length)
+    target_bytes = prompt_capacity * bytes_per_position
+    limits = {identity: prompt_capacity for identity in bytes_per_identity}
+    mandatory_counts: dict[tuple[int, int], int] = {identity: 0 for identity in bytes_per_identity}
+    for block in full_state.blocks:
+        if block.mandatory:
+            mandatory_counts[(block.layer, block.kv_head)] += block.position_count
+    violations = {
+        identity: count for identity, count in mandatory_counts.items() if count > prompt_capacity
+    }
+    if violations:
+        identity, count = min(violations.items())
+        raise HuggingFaceRuntimeError(
+            "physical byte budget is below mandatory per-head capacity: "
+            f"layer={identity[0]}, kv_head={identity[1]}, "
+            f"required={count}, capacity={prompt_capacity}"
+        )
+    return DensePhysicalCacheBudget(source_bytes, target_bytes, prompt_capacity, limits)
 
 
 def _torch() -> Any:
@@ -310,10 +399,15 @@ def _selection(
     unit: BudgetUnit,
     *,
     retention_one: bool,
+    position_limits: Mapping[tuple[int, int], int] | None = None,
 ) -> SelectionResult:
     if retention_one:
         return select_all_exact(objective, SelectionBudget(value, unit))
-    return lazy_greedy_select(objective, SelectionBudget(value, unit))
+    return lazy_greedy_select(
+        objective,
+        SelectionBudget(value, unit),
+        position_limits=position_limits,
+    )
 
 
 def _exact_construction(
@@ -341,6 +435,7 @@ def _prototype_construction(
     capabilities: AdapterCapabilities,
     config: RunConfig,
     target: int,
+    position_limits: Mapping[tuple[int, int], int] | None,
 ) -> tuple[SelectionResult, ThreeTierCacheConstruction, float, float]:
     """Reserve active capacity for prototypes with bounded deterministic search."""
 
@@ -352,7 +447,13 @@ def _prototype_construction(
         config.method is MosaicKVMethod.MOSAICKV_FULL and not capabilities.supports_residual_repair
     ):
         started = time.perf_counter()
-        selection = _selection(objective, target, unit, retention_one=False)
+        selection = _selection(
+            objective,
+            target,
+            unit,
+            retention_one=False,
+            position_limits=position_limits,
+        )
         selection_seconds += time.perf_counter() - started
         started = time.perf_counter()
         construction = construct_three_tier_cache(
@@ -381,7 +482,13 @@ def _prototype_construction(
     last_selection: SelectionResult | None = None
     for exact_budget in candidates:
         started = time.perf_counter()
-        candidate = _selection(objective, exact_budget, unit, retention_one=False)
+        candidate = _selection(
+            objective,
+            exact_budget,
+            unit,
+            retention_one=False,
+            position_limits=position_limits,
+        )
         candidate = replace(candidate, budget=SelectionBudget(target, unit))
         selection_seconds += time.perf_counter() - started
         last_selection = candidate
@@ -405,7 +512,13 @@ def _prototype_construction(
     if last_selection is None:  # pragma: no cover - target always gives one candidate
         raise HuggingFaceRuntimeError("prototype selection search produced no candidate")
     started = time.perf_counter()
-    fallback = _selection(objective, target, unit, retention_one=False)
+    fallback = _selection(
+        objective,
+        target,
+        unit,
+        retention_one=False,
+        position_limits=position_limits,
+    )
     selection_seconds += time.perf_counter() - started
     started = time.perf_counter()
     construction = _exact_construction(full_state, graph, fallback, capabilities, config)
@@ -419,6 +532,8 @@ def build_compression_plan(
     forecast_attention_by_node: Mapping[int, float],
     capabilities: AdapterCapabilities,
     config: RunConfig,
+    *,
+    position_limits: Mapping[tuple[int, int], int] | None = None,
 ) -> MosaicKVCompressionPlan:
     """Run graph, utility, selection, and tier construction for one prefill."""
 
@@ -464,6 +579,7 @@ def build_compression_plan(
             target,
             config.cache.budget_unit,
             retention_one=False,
+            position_limits=position_limits,
         )
         selection_seconds = time.perf_counter() - selection_started
         tier_started = time.perf_counter()
@@ -476,6 +592,7 @@ def build_compression_plan(
             capabilities,
             config,
             target,
+            position_limits,
         )
         selection_seconds = utility_seconds + selector_seconds
         tier_started = None
@@ -760,13 +877,22 @@ def pack_runtime_payloads(
     *,
     tail_snapshot: CacheSnapshot | None = None,
     old_prompt_capacity: int | None = None,
+    physical_prompt_capacity: int | None = None,
 ) -> PackedRuntimeCache:
     """Pack algorithm-owned head payloads through the common HF cache interface."""
 
     torch = _torch()
-    prompt_capacity = max((len(items) for items in payloads.values()), default=0)
-    if prompt_capacity < 1:
+    selected_capacity = max((len(items) for items in payloads.values()), default=0)
+    if selected_capacity < 1:
         raise HuggingFaceRuntimeError("packed runtime cache has no active prompt slots")
+    prompt_capacity = (
+        selected_capacity if physical_prompt_capacity is None else physical_prompt_capacity
+    )
+    if prompt_capacity < selected_capacity:
+        raise HuggingFaceRuntimeError(
+            "selected cache exceeds the dense physical prompt capacity: "
+            f"selected={selected_capacity}, capacity={prompt_capacity}"
+        )
     if tail_snapshot is not None and old_prompt_capacity is None:
         raise ValueError("tail packing requires the previous prompt capacity")
     layers: list[CacheLayerSnapshot] = []
@@ -866,6 +992,7 @@ def pack_runtime_cache(
     *,
     tail_snapshot: CacheSnapshot | None = None,
     old_prompt_capacity: int | None = None,
+    physical_prompt_capacity: int | None = None,
 ) -> PackedRuntimeCache:
     """Pack MosaicKV/simple-baseline tiers through the common HF interface."""
 
@@ -882,6 +1009,7 @@ def pack_runtime_cache(
         slot_records,
         tail_snapshot=tail_snapshot,
         old_prompt_capacity=old_prompt_capacity,
+        physical_prompt_capacity=physical_prompt_capacity,
     )
 
 
@@ -1058,6 +1186,144 @@ def _clone_decode_state(adapter: HuggingFaceMultimodalAdapter, state: DecodeStat
         state.next_decode_position,
         state.modality_map,
         cloned_model_state,
+    )
+
+
+def _attention_outputs(
+    adapter: HuggingFaceMultimodalAdapter,
+    attention_weights: Sequence[Any],
+    state: DecodeState,
+) -> tuple[Any, ...]:
+    """Reconstruct pre-output-projection attention vectors from measured weights and V."""
+
+    torch = _torch()
+    live_cache = adapter.extract_past_key_values(state.past_key_values, clone=False)
+    if isinstance(live_cache, CacheSnapshot):
+        layers = tuple((layer.value, layer.sequence_dimension) for layer in live_cache.layers)
+    else:
+        legacy, _source_kind = adapter._legacy_layers(live_cache)
+        layers = tuple((value, adapter._cache_sequence_dimension(value)) for _key, value in legacy)
+    if len(attention_weights) != len(layers):
+        raise HuggingFaceRuntimeError("attention/cache layer counts differ in fidelity diagnostic")
+    outputs: list[Any] = []
+    for layer_index, (attention, (value, sequence_dimension)) in enumerate(
+        zip(attention_weights, layers, strict=True)
+    ):
+        if attention is None:
+            raise HuggingFaceRuntimeError(
+                f"layer {layer_index} did not expose eager attention weights"
+            )
+        probabilities = attention.detach().float()
+        values = value.detach().float().movedim(sequence_dimension, -2)
+        if probabilities.ndim != 4 or values.ndim != 4:
+            raise HuggingFaceRuntimeError("fidelity diagnostic requires rank-four attention and V")
+        query_heads = int(probabilities.shape[1])
+        kv_heads = int(values.shape[-3])
+        if kv_heads < 1 or query_heads % kv_heads:
+            raise HuggingFaceRuntimeError("query/KV heads are incompatible in fidelity diagnostic")
+        sequence = min(int(probabilities.shape[-1]), int(values.shape[-2]))
+        if sequence < 1:
+            raise HuggingFaceRuntimeError("fidelity diagnostic received an empty cache")
+        expanded_values = values[..., -sequence:, :].repeat_interleave(
+            query_heads // kv_heads,
+            dim=1,
+        )
+        outputs.append(
+            torch.matmul(probabilities[..., -1:, -sequence:], expanded_values).squeeze(-2)
+        )
+    return tuple(outputs)
+
+
+def _attention_output_error(reference: Sequence[Any], candidate: Sequence[Any]) -> float:
+    torch = _torch()
+    if len(reference) != len(candidate) or not reference:
+        raise HuggingFaceRuntimeError("attention-output diagnostic layer counts differ")
+    numerator = torch.zeros((), dtype=torch.float64, device=reference[0].device)
+    denominator = torch.zeros((), dtype=torch.float64, device=reference[0].device)
+    for left, right in zip(reference, candidate, strict=True):
+        if left.shape != right.shape:
+            raise HuggingFaceRuntimeError("attention-output diagnostic shapes differ")
+        delta = left.double() - right.double()
+        numerator = numerator + torch.sum(delta * delta)
+        denominator = denominator + torch.sum(left.double() * left.double())
+    return float(torch.sqrt(numerator / denominator.clamp_min(1e-24)).item())
+
+
+def _logit_kl(reference_logits: Any, candidate_logits: Any) -> float:
+    torch = _torch()
+    reference = reference_logits.detach().float()
+    candidate = candidate_logits.detach().float()
+    if reference.shape != candidate.shape:
+        raise HuggingFaceRuntimeError("logit shapes differ in fidelity diagnostic")
+    reference_log_probability = torch.log_softmax(reference, dim=-1)
+    candidate_log_probability = torch.log_softmax(candidate, dim=-1)
+    divergence = torch.sum(
+        reference_log_probability.exp() * (reference_log_probability - candidate_log_probability),
+        dim=-1,
+    ).mean()
+    return max(0.0, float(divergence.item()))
+
+
+def _run_fidelity_diagnostic(
+    adapter: HuggingFaceMultimodalAdapter,
+    prefill: PrefillOutput,
+    candidate_state: DecodeState,
+    *,
+    max_new_tokens: int,
+) -> FidelityDiagnostic:
+    """Decode isolated greedy FullKV/candidate trajectories without a second prefill."""
+
+    torch = _torch()
+    reference_state = _clone_decode_state(adapter, prefill.state)
+    compressed_state = _clone_decode_state(adapter, candidate_state)
+    reference_token = prefill.next_token_id.detach().clone()
+    candidate_token = prefill.next_token_id.detach().clone()
+    reference_tokens = [reference_token]
+    candidate_tokens = [candidate_token]
+    divergences: list[float] = []
+    attention_errors: list[float] = []
+    for _step in range(1, max_new_tokens):
+        reference_output = adapter.decode_one_token(
+            reference_token,
+            reference_state,
+            capture_queries=False,
+            capture_attentions=True,
+        )
+        candidate_output = adapter.decode_one_token(
+            candidate_token,
+            compressed_state,
+            capture_queries=False,
+            capture_attentions=True,
+        )
+        divergences.append(_logit_kl(reference_output.logits, candidate_output.logits))
+        attention_errors.append(
+            _attention_output_error(
+                _attention_outputs(
+                    adapter,
+                    reference_output.attention_weights,
+                    reference_output.state,
+                ),
+                _attention_outputs(
+                    adapter,
+                    candidate_output.attention_weights,
+                    candidate_output.state,
+                ),
+            )
+        )
+        reference_state = reference_output.state
+        compressed_state = candidate_output.state
+        reference_token = reference_output.next_token_id
+        candidate_token = candidate_output.next_token_id
+        reference_tokens.append(reference_token)
+        candidate_tokens.append(candidate_token)
+    reference_ids = torch.cat(reference_tokens, dim=-1).detach().reshape(-1)
+    candidate_ids = torch.cat(candidate_tokens, dim=-1).detach().reshape(-1)
+    agreement = float((reference_ids == candidate_ids).float().mean().item())
+    return FidelityDiagnostic(
+        token_agreement=agreement,
+        sequence_agreement=bool(torch.equal(reference_ids, candidate_ids)),
+        logit_kl=float(np.mean(divergences)) if divergences else 0.0,
+        attention_output_error=float(np.mean(attention_errors)) if attention_errors else 0.0,
     )
 
 
@@ -1355,6 +1621,52 @@ def _write_trace(path: Path, payload: JsonObject) -> None:
         raise
 
 
+_COMPACT_TRACE_LIST_KEYS = frozenset(
+    {
+        "graph_edges",
+        "heads",
+        "layers",
+        "packed_slots",
+        "prototypes",
+        "selected_blocks",
+    }
+)
+
+
+def _compact_trace_records(payload: JsonObject) -> None:
+    """Replace large debug catalogs with deterministic audit summaries.
+
+    Main-quality rows outside the fixed diagnostic subset retain hashes and
+    counts rather than materializing petabytes of repeated graph/slot records.
+    Diagnostic rows keep the complete debug payload.
+    """
+
+    for key, value in tuple(payload.items()):
+        if key in _COMPACT_TRACE_LIST_KEYS and isinstance(value, list):
+            digest = hashlib.sha256()
+            for record in value:
+                digest.update(
+                    json.dumps(
+                        record,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        ensure_ascii=False,
+                    ).encode("utf-8")
+                )
+                digest.update(b"\n")
+            payload[key] = {
+                "storage": "omitted_non_diagnostic",
+                "record_count": len(value),
+                "sha256": digest.hexdigest(),
+            }
+        elif isinstance(value, dict) and key in {
+            "forecast_statistics",
+            "prefixkv",
+            "vl_cache",
+        }:
+            _compact_trace_records(value)
+
+
 class HuggingFaceMosaicKVModel:
     """Local-evaluation model integrating all MosaicKV stages around one HF adapter."""
 
@@ -1404,7 +1716,19 @@ class HuggingFaceMosaicKVModel:
         identity = hashlib.sha256(f"{request.run_id}\0{request.sample_id}".encode()).hexdigest()[
             :16
         ]
-        return self.trace_directory / request.run_id / f"{identity}.json"
+        base = self.trace_directory / request.run_id / f"{identity}.json"
+        if not base.exists():
+            return base
+        # A process may be interrupted after its trace is committed but before
+        # lmms-eval appends the scored JSONL row. Preserve that immutable trace
+        # and allocate an auditable retry path instead of failing resume or
+        # overwriting measured evidence.
+        attempt = 1
+        while True:
+            candidate = base.with_name(f"{identity}-attempt-{attempt:03d}.json")
+            if not candidate.exists():
+                return candidate
+            attempt += 1
 
     def generate(self, request: EvaluationRequest) -> ModelGeneration:
         """Run one explicit prefill/compress/decode request and always write a trace."""
@@ -1438,7 +1762,8 @@ class HuggingFaceMosaicKVModel:
                 torch.cuda.reset_peak_memory_stats(self.adapter.device)
             method = self.config.method
             is_full_cache = method.is_full_cache
-            needs_prompt_attention = (
+            retention_one_identity = not is_full_cache and self.config.cache.retention_ratio == 1.0
+            needs_prompt_attention = not retention_one_identity and (
                 method.is_mosaickv
                 or method is MosaicKVMethod.PROMPT_ATTENTION_TOPK
                 or method.is_published_reimplementation
@@ -1448,7 +1773,7 @@ class HuggingFaceMosaicKVModel:
                 prepared.model_inputs["input_ids"],
                 lambda: self.adapter.prefill(
                     prepared,
-                    capture_queries=method.is_mosaickv,
+                    capture_queries=method.is_mosaickv and not retention_one_identity,
                     capture_attentions=needs_prompt_attention,
                     attention_query_window=(
                         None
@@ -1475,13 +1800,14 @@ class HuggingFaceMosaicKVModel:
             tier_seconds = 0.0
             packing_seconds = 0.0
             repair_state: RepairCacheState | None = None
+            dense_budget: DensePhysicalCacheBudget | None = None
             plan: MosaicKVCompressionPlan | None = None
             baseline_plan: BaselineCompressionPlan | None = None
             lookm_plan: LookMCompressionPlan | None = None
             prefixkv_plan: PrefixKVCompressionPlan | None = None
             vl_cache_plan: VLCacheCompressionPlan | None = None
             state = prefill.state
-            if not is_full_cache:
+            if not is_full_cache and not retention_one_identity:
                 snapshot = self.adapter.extract_past_key_values(prefill.state.past_key_values)
                 input_ids = prepared.model_inputs["input_ids"]
                 recent_count = (
@@ -1520,6 +1846,18 @@ class HuggingFaceMosaicKVModel:
                     next_decode_position=prefill.state.next_decode_position,
                     mandatory_logical_positions=mandatory_positions,
                 )
+                dense_budget = _dense_physical_cache_budget(full_state, self.config)
+                planning_config = (
+                    self.config
+                    if dense_budget is None
+                    else replace(
+                        self.config,
+                        cache=replace(
+                            self.config.cache,
+                            budget_value=dense_budget.target_bytes,
+                        ),
+                    )
+                )
                 if method.is_mosaickv:
                     forecast, rollout = forecast_with_rollout(
                         self.adapter,
@@ -1539,7 +1877,10 @@ class HuggingFaceMosaicKVModel:
                         forecast,
                         attention,
                         self.adapter.capabilities,
-                        self.config,
+                        planning_config,
+                        position_limits=(
+                            None if dense_budget is None else dense_budget.position_limits
+                        ),
                     )
                     graph_seconds = plan.graph_seconds
                     selection_seconds = plan.selection_seconds
@@ -1564,7 +1905,10 @@ class HuggingFaceMosaicKVModel:
                     baseline_plan = build_exact_baseline_plan(
                         full_state,
                         method,
-                        self.config.cache,
+                        planning_config.cache,
+                        position_limits=(
+                            None if dense_budget is None else dense_budget.position_limits
+                        ),
                         seed=self.config.execution.seed,
                         prompt_attention_by_node=prompt_attention,
                         value_chunk_size=self.config.graph.similarity_chunk_size,
@@ -1581,7 +1925,7 @@ class HuggingFaceMosaicKVModel:
                             full_state,
                             prefill.attention_weights,
                             self.config.lookm,
-                            self.config.cache,
+                            planning_config.cache,
                         ),
                     )
                     packed_state = None
@@ -1594,7 +1938,10 @@ class HuggingFaceMosaicKVModel:
                             full_state,
                             prefill.attention_weights,
                             self.config.vl_cache,
-                            self.config.cache,
+                            planning_config.cache,
+                            physical_prompt_capacity=(
+                                None if dense_budget is None else dense_budget.prompt_capacity
+                            ),
                         ),
                     )
                     packed_state = None
@@ -1607,10 +1954,13 @@ class HuggingFaceMosaicKVModel:
                             full_state,
                             prefill.attention_weights,
                             self.config.prefixkv,
-                            self.config.cache,
+                            planning_config.cache,
                             model_id=self.config.model.id,
                             model_revision=self.config.model.revision,
                             profile=self._prefixkv_profile,
+                            physical_prompt_capacity=(
+                                None if dense_budget is None else dense_budget.prompt_capacity
+                            ),
                         ),
                     )
                     packed_state = None
@@ -1627,6 +1977,9 @@ class HuggingFaceMosaicKVModel:
                             full_state,
                             lookm_payloads,
                             lookm_slots,
+                            physical_prompt_capacity=(
+                                None if dense_budget is None else dense_budget.prompt_capacity
+                            ),
                         ),
                     )
                 elif prefixkv_plan is not None:
@@ -1638,6 +1991,9 @@ class HuggingFaceMosaicKVModel:
                             full_state,
                             prefixkv_payloads,
                             prefixkv_slots,
+                            physical_prompt_capacity=(
+                                None if dense_budget is None else dense_budget.prompt_capacity
+                            ),
                         ),
                     )
                 elif vl_cache_plan is not None:
@@ -1649,6 +2005,9 @@ class HuggingFaceMosaicKVModel:
                             full_state,
                             vl_cache_payloads,
                             vl_cache_slots,
+                            physical_prompt_capacity=(
+                                None if dense_budget is None else dense_budget.prompt_capacity
+                            ),
                         ),
                     )
                 else:
@@ -1662,6 +2021,9 @@ class HuggingFaceMosaicKVModel:
                             packed_state,
                             prototype_records,
                             tuple(record.prototype_id for record in prototype_records),
+                            physical_prompt_capacity=(
+                                None if dense_budget is None else dense_budget.prompt_capacity
+                            ),
                         ),
                     )
                 state = _state_from_packed(self.adapter, prefill.state, packed)
@@ -1685,6 +2047,27 @@ class HuggingFaceMosaicKVModel:
                 elif vl_cache_plan is not None:
                     trace.update(_vl_cache_plan_trace(vl_cache_plan))
                 trace["packed_slots"] = list(packed.slot_records)
+            elif retention_one_identity:
+                trace.update(
+                    {
+                        "requested_method": method.value,
+                        "effective_method": f"{method.value}__retention_one_exact",
+                        "tier_mode": "retention_one",
+                        "tier_reason": (
+                            "retention 1.0 reuses the untouched FullKV state; no "
+                            "forecast, graph, selection, packing, prototype, residual, "
+                            "quantization, offload, or repair operation was run"
+                        ),
+                        "selected_blocks": [],
+                        "prototypes": [],
+                        "graph_edges": [],
+                        "graph_diagnostics": {"status": "not_used_by_retention_one_identity"},
+                        "forecast_statistics": {"status": "not_used_by_retention_one_identity"},
+                        "baseline_seed": self.config.execution.seed,
+                        "selection_provenance": "retention_one_identity_no_selection",
+                        "packed_slots": [],
+                    }
+                )
             else:
                 trace.update(
                     {
@@ -1702,6 +2085,56 @@ class HuggingFaceMosaicKVModel:
                         "packed_slots": [],
                     }
                 )
+
+            fixed_diagnostic_sample = (
+                self.config.diagnostics.enabled
+                and request.sample_id in self.config.diagnostics.sample_ids
+            )
+            if self.config.diagnostics.enabled and not fixed_diagnostic_sample:
+                _compact_trace_records(trace)
+                trace["trace_detail"] = "compact_non_diagnostic"
+            else:
+                trace["trace_detail"] = "full_debug"
+
+            fidelity: FidelityDiagnostic | None = None
+            fidelity_seconds = 0.0
+            if (
+                self.config.diagnostics.enabled
+                and request.sample_id in self.config.diagnostics.sample_ids
+            ):
+                fidelity, fidelity_seconds = _timed(
+                    prefill.logits,
+                    lambda: _run_fidelity_diagnostic(
+                        self.adapter,
+                        prefill,
+                        state,
+                        max_new_tokens=self.config.generation.max_new_tokens,
+                    ),
+                )
+                if (
+                    torch.cuda.is_available()
+                    and getattr(self.adapter.device, "type", "cpu") == "cuda"
+                ):
+                    torch.cuda.synchronize(self.adapter.device)
+                    torch.cuda.reset_peak_memory_stats(self.adapter.device)
+                trace["fidelity_diagnostic"] = {
+                    "status": "completed",
+                    "sample_ledger_sha": self.config.diagnostics.sample_ledger_sha,
+                    "token_agreement": fidelity.token_agreement,
+                    "sequence_agreement": fidelity.sequence_agreement,
+                    "logit_kl": fidelity.logit_kl,
+                    "attention_output_error": fidelity.attention_output_error,
+                    "overhead_seconds": fidelity_seconds,
+                    "trajectory": "independent_deterministic_greedy",
+                    "attention_output_definition": "pre_output_projection_weighted_value",
+                }
+            elif self.config.diagnostics.enabled:
+                trace["fidelity_diagnostic"] = {
+                    "status": "not_in_fixed_subset",
+                    "sample_ledger_sha": self.config.diagnostics.sample_ledger_sha,
+                }
+            else:
+                trace["fidelity_diagnostic"] = {"status": "disabled"}
 
             tokens = [prefill.next_token_id]
             token = prefill.next_token_id
@@ -1826,7 +2259,7 @@ class HuggingFaceMosaicKVModel:
                 for key, value in self.adapter._legacy_layers(live_cache)[0]
             )
             residual_bytes = 0 if repair_state is None else repair_state.residual_storage.cpu_bytes
-            total_seconds = time.perf_counter() - started
+            total_seconds = max(0.0, time.perf_counter() - started - fidelity_seconds)
             repair_transfer = sum(event.transfer_time_ms for event in repair_events) / 1000.0
             repair_redecode = sum(event.re_decode_time_ms for event in repair_events) / 1000.0
             timings = RuntimePhaseTimings(
@@ -1858,14 +2291,10 @@ class HuggingFaceMosaicKVModel:
                         packed_prefill_active_kv_bytes - logical_prefill_active_kv_bytes
                     ),
                     "hard_active_kv_budget_bytes": (
-                        min(
-                            math.ceil(source_prefill_kv_bytes * self.config.cache.retention_ratio),
-                            self.config.cache.budget_value,
-                        )
-                        if self.config.cache.budget_unit is BudgetUnit.BYTES
-                        else None
+                        None if dense_budget is None else dense_budget.target_bytes
                     ),
-                    "active_kv_bytes": active_bytes,
+                    "active_kv_bytes": packed_prefill_active_kv_bytes,
+                    "final_active_kv_bytes": active_bytes,
                     "residual_kv_bytes": residual_bytes,
                     "trace_path": str(trace_path.resolve()),
                 }
@@ -1894,11 +2323,16 @@ class HuggingFaceMosaicKVModel:
                     decode_time=decode_seconds,
                     end_to_end_time=total_seconds,
                     generated_tokens=int(token_ids.numel()),
-                    active_kv_bytes=active_bytes,
+                    active_kv_bytes=packed_prefill_active_kv_bytes,
                     residual_kv_bytes=residual_bytes,
                     peak_gpu_memory=peak_memory,
                     repair_count=sum(event.triggered for event in repair_events),
                     repaired_bytes=sum(event.restored_bytes for event in repair_events),
+                    token_agreement=(None if fidelity is None else fidelity.token_agreement),
+                    logit_kl=None if fidelity is None else fidelity.logit_kl,
+                    attention_output_error=(
+                        None if fidelity is None else fidelity.attention_output_error
+                    ),
                 ),
                 effective_method=effective_method,
             )

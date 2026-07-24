@@ -23,7 +23,9 @@ def test_registry_routes_public_scoring_to_lmms_eval() -> None:
         "textvqa",
         "video_mme",
     }
-    assert registry.resolve("textvqa").development_lmms_task == "textvqa_val_lite"
+    assert registry.resolve("textvqa").development_lmms_task == "textvqa_val"
+    assert registry.resolve("docvqa").development_lmms_task == "docvqa_val"
+    assert registry.resolve("chartqa").development_lmms_task == "chartqa"
     assert registry.resolve("video_mme").requires_video is True
     with pytest.raises(RuntimeError, match="lmms_eval"):
         registry.resolve("chartqa").score_local("1", ("1",))
@@ -36,6 +38,18 @@ def test_deterministic_selection_is_order_independent() -> None:
     assert first == second
     assert len(first) == len(set(first)) == 3
     assert first != deterministic_sample_ids(ids, seed=92, subset_size=3)
+
+
+def test_deterministic_selection_offsets_form_disjoint_shards() -> None:
+    ids = tuple(f"sample-{index}" for index in range(11))
+    full = deterministic_sample_ids(ids, seed=17, subset_size=None)
+    shards = tuple(
+        deterministic_sample_ids(ids, seed=17, subset_size=4, offset=offset) for offset in (0, 4, 8)
+    )
+    assert tuple(sample_id for shard in shards for sample_id in shard) == full
+    assert [len(shard) for shard in shards] == [4, 4, 3]
+    with pytest.raises(ValueError, match="offset"):
+        deterministic_sample_ids(ids, seed=17, subset_size=4, offset=-1)
 
 
 def test_sample_selection_rejects_duplicate_ids() -> None:

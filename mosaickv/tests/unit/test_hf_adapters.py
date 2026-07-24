@@ -158,6 +158,49 @@ def test_runtime_registry_is_fail_closed() -> None:
         runtime_adapter_class("unreviewed/model")
 
 
+def test_qwen_video_paths_use_pinned_qwen_vision_preprocessing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[dict[str, Any], bool]] = []
+
+    def fetch_video(
+        value: dict[str, Any], *, return_video_sample_fps: bool
+    ) -> tuple[np.ndarray[Any, Any], float]:
+        calls.append((value, return_video_sample_fps))
+        return np.zeros((40, 3, 4, 4), dtype=np.float32), 2.0
+
+    fake_qwen_utils = types.ModuleType("qwen_vl_utils")
+    fake_qwen_utils.fetch_video = fetch_video  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "qwen_vl_utils", fake_qwen_utils)
+
+    kwargs = Qwen25VLAdapter._processor_kwargs(
+        types.SimpleNamespace(
+            _MIN_PIXELS=Qwen25VLAdapter._MIN_PIXELS,
+            _MAX_PIXELS=Qwen25VLAdapter._MAX_PIXELS,
+            _MAX_VIDEO_FRAMES=Qwen25VLAdapter._MAX_VIDEO_FRAMES,
+            _VIDEO_FRAME_PIXELS=Qwen25VLAdapter._VIDEO_FRAME_PIXELS,
+        ),
+        "prompt",
+        (),
+        (Path("/scratch/djy8hg/cache/mosaickv/video.mp4"),),
+    )
+
+    assert calls == [
+        (
+            {
+                "type": "video",
+                "video": "/scratch/djy8hg/cache/mosaickv/video.mp4",
+                "min_pixels": Qwen25VLAdapter._VIDEO_FRAME_PIXELS,
+                "max_pixels": Qwen25VLAdapter._VIDEO_FRAME_PIXELS,
+            },
+            True,
+        )
+    ]
+    assert len(kwargs["videos"]) == 1
+    assert kwargs["videos"][0].shape == (32, 3, 4, 4)
+    assert {"fps", "min_pixels", "max_pixels"}.isdisjoint(kwargs)
+
+
 def test_adapter_capability_metadata_records_rope_and_disabled_features() -> None:
     for adapter_type in (Llava15Adapter, Qwen25VLAdapter, LlavaOneVisionAdapter, InternVL25Adapter):
         capabilities = adapter_type.capabilities

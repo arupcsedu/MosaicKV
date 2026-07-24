@@ -1,8 +1,8 @@
 matrix_schema_version: 1
-matrix_revision: 1
+matrix_revision: 3
 capability_catalog_version: common-env-2026-07-21-v1
 experiment_id: main_quality
-description: Main byte-matched quality matrix over three pinned image/video-language models.
+description: Main byte-matched quality matrix; common block methods use block-16, while paper-faithful LOOK-M remains a separately labeled token-granularity stratum.
 enabled: true
 
 axes:
@@ -42,49 +42,88 @@ sweeps:
     models: [llava_1_5_7b]
     backends: [hf_eager]
     methods: [full_kv]
-    tasks: [mmstar, mmvet, textvqa, docvqa, chartqa]
+    tasks: [mmstar, textvqa, docvqa, chartqa]
     retention_ratios: [1.0]
-    output_lengths: [32, 64, 128]
-    selection_seeds: [17, 29, 43]
-    variant: full_reference
-  - name: llava_common_compressors
+    output_lengths: [128]
+    selection_seeds: [17]
+    variant: block16_full_reference
+  - name: llava_random
     models: [llava_1_5_7b]
     backends: [hf_eager]
-    methods: [random_kv, prompt_attention_topk, mosaickv_exact]
-    tasks: [mmstar, mmvet, textvqa, docvqa, chartqa]
+    methods: [random_kv]
+    tasks: [mmstar, textvqa, docvqa, chartqa]
     retention_ratios: [1.0, 0.8, 0.6, 0.4, 0.2, 0.1, 0.05]
-    output_lengths: [32, 64, 128]
+    output_lengths: [128]
     selection_seeds: [17, 29, 43]
-    variant: common_compressor
-  - name: llava_published_reimplementations
+    variant: block16_seeded_random_baseline
+  - name: llava_deterministic_compressors
+    models: [llava_1_5_7b]
+    backends: [hf_eager]
+    methods: [prompt_attention_topk]
+    tasks: [mmstar, textvqa, docvqa, chartqa]
+    retention_ratios: [1.0, 0.8, 0.6, 0.4, 0.2, 0.1, 0.05]
+    output_lengths: [128]
+    selection_seeds: [17]
+    variant: block16_deterministic_baseline
+  - name: llava_mosaickv_exact
+    models: [llava_1_5_7b]
+    backends: [hf_eager]
+    methods: [mosaickv_exact]
+    tasks: [mmstar, textvqa, docvqa, chartqa]
+    retention_ratios: [1.0, 0.8, 0.6, 0.4, 0.2, 0.1, 0.05]
+    output_lengths: [128]
+    selection_seeds: [17]
+    variant: block16_mosaickv_exact_deterministic_ties
+  - name: llava_lookm_reimplementation
     models: [llava_1_5_7b]
     backends: [hf_eager]
     methods: [lookm_reimpl]
-    tasks: [mmstar, mmvet, textvqa, docvqa, chartqa]
+    tasks: [mmstar, textvqa, docvqa, chartqa]
     retention_ratios: [1.0, 0.8, 0.6, 0.4, 0.2, 0.1, 0.05]
-    output_lengths: [32, 64, 128]
-    selection_seeds: [17, 29, 43]
+    output_lengths: [128]
+    selection_seeds: [17]
     variant: paper_reimplementation
   - name: qwen_full_reference
     models: [qwen2_5_vl_3b, qwen2_5_vl_7b]
     backends: [hf_eager]
     methods: [full_kv]
-    tasks: [mmstar, mmvet, textvqa, docvqa, chartqa, videomme]
+    tasks: [mmstar, textvqa, docvqa, chartqa, videomme]
     retention_ratios: [1.0]
-    output_lengths: [32, 64, 128]
-    selection_seeds: [17, 29, 43]
-    variant: full_reference
-  - name: qwen_common_compressors
+    output_lengths: [128]
+    selection_seeds: [17]
+    variant: block16_full_reference
+  - name: qwen_random
     models: [qwen2_5_vl_3b, qwen2_5_vl_7b]
     backends: [hf_eager]
-    methods: [random_kv, prompt_attention_topk, mosaickv_exact]
-    tasks: [mmstar, mmvet, textvqa, docvqa, chartqa, videomme]
+    methods: [random_kv]
+    tasks: [mmstar, textvqa, docvqa, chartqa, videomme]
     retention_ratios: [1.0, 0.8, 0.6, 0.4, 0.2, 0.1, 0.05]
-    output_lengths: [32, 64, 128]
+    output_lengths: [128]
     selection_seeds: [17, 29, 43]
-    variant: common_compressor
+    variant: block16_seeded_random_baseline
+  - name: qwen_deterministic_compressors
+    models: [qwen2_5_vl_3b, qwen2_5_vl_7b]
+    backends: [hf_eager]
+    methods: [prompt_attention_topk]
+    tasks: [mmstar, textvqa, docvqa, chartqa, videomme]
+    retention_ratios: [1.0, 0.8, 0.6, 0.4, 0.2, 0.1, 0.05]
+    output_lengths: [128]
+    selection_seeds: [17]
+    variant: block16_deterministic_baseline
+  - name: qwen_mosaickv_exact
+    models: [qwen2_5_vl_3b, qwen2_5_vl_7b]
+    backends: [hf_eager]
+    methods: [mosaickv_exact]
+    tasks: [mmstar, textvqa, docvqa, chartqa, videomme]
+    retention_ratios: [1.0, 0.8, 0.6, 0.4, 0.2, 0.1, 0.05]
+    output_lengths: [128]
+    selection_seeds: [17]
+    variant: block16_mosaickv_exact_deterministic_ties
 
 blocked:
+  - scope:
+      methods: [lookm_reimpl]
+    reason: LOOK-M is evaluated at its paper-faithful token granularity and must be labeled separately from the block-16 common-method stratum; comparisons still use realized active KV bytes.
   - scope:
       backends: [hf_sdpa, hf_flash_attention_2, vllm, sglang]
     reason: Only HF eager currently owns and exposes the mutable cache interface safely.
@@ -104,3 +143,6 @@ blocked:
       models: [llava_1_5_7b]
       tasks: [videomme]
     reason: LLaVA-1.5 is image-only in the registered adapter.
+  - scope:
+      tasks: [mmvet]
+    reason: MM-Vet scoring requires a nondeterministic external judge; no judge credential is available and deterministic paired scoring cannot be guaranteed.

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -102,3 +103,53 @@ def test_dataset_revision_scope_injects_exact_sha(monkeypatch: pytest.MonkeyPatc
     assert calls[0][1]["revision"] == revision
     assert calls[0][1]["token"] is False
     assert "revision" not in calls[1][1]
+
+
+@pytest.mark.parametrize(
+    ("family", "template"),
+    (
+        ("mmstar", "_default_template_yaml"),
+        ("textvqa", "_default_template_textvqa_yaml"),
+        ("docvqa", "_default_template_docvqa_yaml"),
+        ("videomme", "_default_template_yaml"),
+    ),
+)
+def test_missing_lmms_templates_use_packaged_compatibility_copy(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    family: str,
+    template: str,
+) -> None:
+    calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    def load_yaml_config(*args: object, **kwargs: object) -> object:
+        calls.append((args, kwargs))
+        return object()
+
+    lmms_utils = SimpleNamespace(load_yaml_config=load_yaml_config)
+    monkeypatch.setattr(lmms_adapter, "_require_module", lambda _name: lmms_utils)
+    requested = (
+        tmp_path / family / "reasoning" / ".." / template
+        if family == "docvqa"
+        else tmp_path / family / template
+    )
+
+    with lmms_adapter._lmms_template_compatibility():
+        lmms_utils.load_yaml_config(yaml_path=str(requested), yaml_dir=str(requested.parent))
+
+    replacement = Path(str(calls[0][1]["yaml_path"]))
+    assert replacement.is_file()
+    assert replacement.name == template
+    assert replacement.parent.name == family
+    assert calls[0][1]["yaml_dir"] == str(requested.parent)
+    assert f"lmms_eval.tasks.{family}.utils" in replacement.read_text(encoding="utf-8")
+
+
+def test_lmms_auxiliary_outputs_are_routed_beside_raw_artifact(tmp_path: Path) -> None:
+    raw_output = tmp_path / "run" / "results.jsonl"
+
+    args = lmms_adapter._lmms_cli_args(raw_output)
+
+    assert args.output_path == str(raw_output.parent.resolve())
+    assert args.process_with_media is True
+    assert not Path(args.output_path).is_relative_to(Path.cwd())
