@@ -94,7 +94,9 @@ class InternVL25Adapter(HuggingFaceMultimodalAdapter):
         model = AutoModel.from_pretrained(model_id, revision=revision, **selected_model_kwargs)
         tokenizer_kwargs = dict(processor_kwargs or {})
         tokenizer_kwargs["trust_remote_code"] = True
-        tokenizer = AutoTokenizer.from_pretrained(model_id, revision=revision, **tokenizer_kwargs)
+        tokenizer = AutoTokenizer.from_pretrained(  # type: ignore[no-untyped-call]
+            model_id, revision=revision, **tokenizer_kwargs
+        )
         return cls(model, tokenizer)
 
     def _language_layers(self) -> Sequence[Any]:

@@ -4,9 +4,13 @@
 
 `mosaickv.backends.HuggingFaceMosaicKVModel` connects one explicit HF prefill to forecasting,
 graph construction, block utility, lazy-greedy selection, tier construction, optional repair,
-and token-by-token decoding. The MosaicKV path never calls `model.generate()`. Only eager
-attention is enabled; SDPA and FlashAttention-2 remain blocked until separate correctness gates
-pass.
+and token-by-token decoding. The MosaicKV path never calls `model.generate()`.
+FullKV supports eager, SDPA, and FlashAttention-2 on adapters that declare the
+implementation. Compression prefill remains eager so measured prompt attention
+is explicit. A separately configured `decode_attention_implementation=sdpa`
+may switch an all-valid exact cache to SDPA after selection; padded per-head
+caches and repair fail closed. Both implementations are recorded in the config,
+manifest, and debug trace, so this is never silently labeled HF eager.
 
 The audited LLaVA-1.5, Qwen2.5-VL, LLaVA-OneVision, and optional InternVL adapters expose
 post-RoPE cached keys. Their capability records therefore set `supports_prototype_merge=false`
@@ -23,10 +27,12 @@ the real prototype and repair components with explicitly RoPE-free capability me
 ## Cache representation
 
 Exact selected K/V entries retain their original post-RoPE values. Each entry is ordered by its
-original logical position. HF cache tensors require a uniform physical sequence dimension, so
-shorter layer/head selections are zero-padded and accompanied by a checked boolean validity map.
-An eager-attention pre-hook converts that map to a per-query-head additive mask. The runtime keeps
-three lengths distinct:
+original logical position. For fixed-block exact selection, the byte target is quantized to a
+representable block-subset capacity and lazy greedy fills that capacity independently in every
+layer/head. This produces a dense, all-valid cache and avoids per-token mask construction.
+Methods whose algorithm requires unequal layer/head lengths are zero-padded and accompanied by a
+checked boolean validity map; an eager-attention pre-hook converts that map to a per-query-head
+additive mask. The runtime keeps three lengths distinct:
 
 - packed active cache length;
 - original/logical sequence length;
@@ -35,6 +41,27 @@ three lengths distinct:
 The next decode position is always the original logical position, not the packed index. Generated
 tokens are appended after the packed prompt, and each layer mask gains one valid slot per step.
 NaN/Inf checks cover prefill logits, decode logits, packed K/V tensors, and additive masks.
+The explicit loop grows attention masks and cache-position ranges in amortized device buffers,
+does not clone the live cache on ordinary decode steps, and reduces all per-token finite-logit
+flags once per sequence. A full cache clone remains mandatory only for a provisional repair step
+that may need rollback. Each trace records these policies and whether the packed cache was
+all-valid. For append-only no-repair paths, the runtime also preallocates the
+configured decode horizon and exposes occupied-prefix cache views, while
+logical positions continue to advance from the original prompt length.
+The ordinary no-hook path also avoids constructing an empty capture stack and
+advances the documented mutable `DecodeState` in place rather than allocating
+a state and dictionary copy at every token.
+
+Exact-only construction groups descriptors by layer/head and performs one
+vectorized gather per layer, instead of one device gather per selected token
+followed by thousands of small concatenations. Dense layer/head capacities are
+packed without a model-side mask; the bookkeeping mask remains available for
+byte and invariant checks. Controlled dirty-tree A100 job `17346904_2`
+completed five warmups and 20 trials at each bounded LLaVA-1.5 point. It
+confirmed that cache construction no longer projects beyond the time limit;
+for the short output-64 prompt, compression overhead outweighed decode savings.
+These exploratory measurements remain ineligible for paper tables until rerun
+from a clean commit.
 
 Retention ratio `1.0` selects every source block and bypasses prototypes, residual conversion,
 and repair. Because the selected set is uniquely determined, this path uses a deterministic
@@ -118,7 +145,11 @@ Each run produces append-only JSONL results, a Parquet aggregate, an immutable p
 manifest, and one JSON trace per attempted sample. A trace contains selected-block decisions,
 prototype records, sparse graph edges, forecast statistics, repair events, packed slots, generated
 token IDs, active/residual bytes, and a timing breakdown. Failed samples receive both a failed
-result row and a failed trace.
+result row and a failed trace. Non-diagnostic catalog records are hashed directly
+without first materializing full edge dictionaries. Trace construction and
+canonical hashing are excluded from inference latency for every method and are
+reported separately as `timing_breakdown.trace_instrumentation`; trace file I/O
+also occurs outside the inference boundary.
 
 ## Validation progression
 
@@ -156,15 +187,21 @@ validation, not a paper result.
 
 ## Current integration gates
 
-The common environment uses Python 3.11.15, PyTorch 2.5.1/CUDA 12.4, and
-Transformers 4.49.0. Its lock/import/CUDA smoke and the no-download adapter
-tests pass. The synthetic 100%-retention smoke reports exact equivalence and
-zero maximum absolute error. Standalone FlashAttention-2 is not installed.
+The common environment uses Python 3.11, PyTorch 2.8.0/CUDA 12.8, and
+Transformers 4.55.2. Exploratory A100 environment job `17347802` passed all
+251 exact pins, imports, CUDA matrix multiplication, and the specialized
+FlashAttention dense/varlen matrix. The synthetic 100%-retention smoke reports
+exact equivalence and zero maximum absolute error. The repository build is an
+explicitly patched inference-only SM80 multimodal wheel for the audited
+64/80/128 head dimensions; it does not claim general FlashAttention or
+training support. Qwen2.5-VL-3B SDPA job `17346718` and FlashAttention job
+`17348171` each passed 16-token ordinary/reinjection/retention-1 parity with
+maximum logit difference zero.
 
-No pretrained checkpoint or 20-example dataset progression has been accepted
-under this common lock. Those stages remain unsupported until rerun from a
-clean commit. Qwen2.5-VL and LLaVA-1.5 expose post-RoPE cached keys, so
-prototype merging remains a safety fallback to exact selection.
+No pretrained-checkpoint run is canonical while the current worktree is dirty,
+and no 20-example dataset progression has been accepted under this common
+lock. Qwen2.5-VL and LLaVA-1.5 expose post-RoPE cached keys, so prototype
+merging remains a safety fallback to exact selection.
 
 The lmms-eval route constrains task discovery to the requested task family, delegates MMStar
 answer processing and aggregation to the installed official functions, and pins the dataset load

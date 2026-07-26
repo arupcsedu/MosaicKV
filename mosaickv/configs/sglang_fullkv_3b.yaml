@@ -13,8 +13,8 @@ dataset:
 
 execution:
   backend: sglang
-  # SGLang deterministic inference supports RadixAttention with Triton here.
-  attention_implementation: triton
+  # Correctness-first reference. Triton is admitted only after token parity.
+  attention_implementation: torch_native
   seed: 0
   deterministic_algorithms: true
 

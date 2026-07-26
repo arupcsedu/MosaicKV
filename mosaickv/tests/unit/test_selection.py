@@ -169,6 +169,32 @@ def test_token_attention_is_aggregated_and_normalized_by_layer_and_head() -> Non
         )
 
 
+def test_value_signals_share_the_attention_l1_scale_within_each_head() -> None:
+    values = np.asarray(
+        [[1000.0, 0.0], [1.0, 0.0], [0.0, 2.0]],
+        dtype=np.float32,
+    )
+    full = _full((Modality.TEXT,) * 3, values=values)
+    graph = build_evidence_graph(
+        full,
+        _isolated_graph_config(semantic_weight=1.0, max_neighbors=2),
+    )
+
+    table = compute_block_utilities(
+        graph,
+        UtilityConfig(),
+        forecast_attention_by_node=(0.5, 0.3, 0.2),
+        attention_provenance="synthetic_rope_aware_fixture",
+        rope_aware=True,
+    )
+
+    assert sum(item.forecast_attention_probability for item in table.blocks) == pytest.approx(1.0)
+    assert sum(item.value_contribution for item in table.blocks) == pytest.approx(1.0)
+    assert sum(item.uniqueness for item in table.blocks) == pytest.approx(1.0)
+    assert all(0 <= item.value_contribution <= 1 for item in table.blocks)
+    assert all(0 <= item.uniqueness <= 1 for item in table.blocks)
+
+
 def test_lazy_greedy_is_deterministic_and_selects_mandatory_blocks_first() -> None:
     full = _full((Modality.TEXT,) * 5, mandatory=(2,))
     graph, _utilities, objective = _utilities_and_objective(full)
@@ -289,6 +315,90 @@ def test_dense_cache_position_limit_is_enforced_and_recorded() -> None:
     )
 
 
+def test_dense_selector_reserves_each_layer_head_stratum_before_global_greedy() -> None:
+    sequence = 8
+    key = np.arange(2 * sequence * 2, dtype=np.float32).reshape(1, 2, sequence, 2)
+    full = FullKVState.from_tensors(
+        ((key, key.copy()),),
+        modality_spans=(ModalitySpan(0, sequence, Modality.TEXT),),
+        block_size=1,
+        mandatory_logical_positions=(sequence - 1,),
+    )
+    graph = build_evidence_graph(full, _isolated_graph_config())
+    probabilities = {
+        node.node_id: (100.0 if node.block.kv_head == 0 else 1.0) for node in graph.nodes
+    }
+    utilities = compute_block_utilities(
+        graph,
+        UtilityConfig(lambda_v=0.0, lambda_o=0.0),
+        forecast_attention_by_node=probabilities,
+        attention_provenance="synthetic_rope_aware_fixture",
+        rope_aware=True,
+    )
+    objective = BudgetedObjective(
+        graph,
+        utilities,
+        SelectionConfig(
+            lambda_g=0.0,
+            lambda_m=0.0,
+            stop_on_nonpositive_gain=False,
+            minimum_stratum_fraction=0.5,
+        ),
+    )
+
+    result = lazy_greedy_select(
+        objective,
+        SelectionBudget(8, BudgetUnit.BLOCKS),
+        position_limits={(0, 0): 4, (0, 1): 4},
+    )
+
+    selected_per_head = {
+        head: sum(
+            graph.nodes[node_id].block.position_count
+            for node_id in result.selected_node_ids
+            if graph.nodes[node_id].block.kv_head == head
+        )
+        for head in (0, 1)
+    }
+    assert selected_per_head == {0: 4, 1: 4}
+    assert any(decision.reason is SelectionReason.STRATUM_RESERVE for decision in result.decisions)
+
+
+def test_dense_fill_removes_padding_even_after_nonpositive_stop() -> None:
+    sequence = 6
+    key = np.arange(2 * sequence * 2, dtype=np.float32).reshape(1, 2, sequence, 2)
+    full = FullKVState.from_tensors(
+        ((key, key.copy()),),
+        modality_spans=(ModalitySpan(0, sequence, Modality.TEXT),),
+        block_size=1,
+        mandatory_logical_positions=(sequence - 1,),
+    )
+    graph, utilities, _objective = _utilities_and_objective(full)
+    zero_utilities = replace(
+        utilities,
+        blocks=tuple(replace(item, local_utility=0.0) for item in utilities.blocks),
+        weights=UtilityConfig(lambda_q=0.0, lambda_v=0.0, lambda_o=0.0),
+    )
+    objective = BudgetedObjective(
+        graph,
+        zero_utilities,
+        SelectionConfig(lambda_g=0.0, lambda_m=0.0, stop_on_nonpositive_gain=True),
+    )
+
+    result = lazy_greedy_select(
+        objective,
+        SelectionBudget(6, BudgetUnit.BLOCKS),
+        position_limits={(0, 0): 3, (0, 1): 3},
+        fill_position_limits=True,
+    )
+
+    assert result.budget_spent == 6
+    assert (
+        sum(decision.reason is SelectionReason.DENSE_CACHE_FILL for decision in result.decisions)
+        == 4
+    )
+
+
 def test_mandatory_blocks_that_exceed_budget_fail_closed() -> None:
     full = _full((Modality.TEXT,) * 3, mandatory=(0, 1))
     _graph, _utilities, objective = _utilities_and_objective(full)
@@ -378,5 +488,7 @@ def test_selection_configuration_validation_is_strict() -> None:
         UtilityConfig(lambda_q=-1.0)
     with pytest.raises(ConfigurationError, match=r"selection\.lambda_g"):
         SelectionConfig(lambda_g=float("inf"))
+    with pytest.raises(ConfigurationError, match="minimum_stratum_fraction"):
+        SelectionConfig(minimum_stratum_fraction=1.1)
     with pytest.raises(ValueError, match="budget value"):
         SelectionBudget(0)

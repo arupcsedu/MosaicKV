@@ -116,14 +116,17 @@ def _validate_trace(
         raise ValueError("GPU cache validation requires two identical trials")
     probe = isolation.get("post_intervening_request_probe")
     probe_request_id: str | None = None
+    cold_request_id: str | None = None
     probe_verified = False
     if probe is not None:
         if not isinstance(probe, dict):
             raise ValueError("request-isolation probe must be an object")
         probe_request_id = str(probe.get("request_id"))
+        cold_request_id = str(probe.get("cold_distinct_request_id"))
         probe_verified = (
             probe.get("performed") is True
             and probe.get("token_ids_match_anchor") is True
+            and probe.get("warm_distinct_token_ids_match_cold") is True
             and int(probe.get("intervening_distinct_input_fingerprints", 0)) >= 1
         )
         if not probe_verified:
@@ -134,7 +137,11 @@ def _validate_trace(
         "generated_tokens": len(token_ids or ()),
         "deterministic_token_ids": True,
         "active_kv_accounting": True,
-        "request_ids": request_ids + ([probe_request_id] if probe_request_id else []),
+        "request_ids": (
+            request_ids
+            + ([probe_request_id] if probe_request_id else [])
+            + ([cold_request_id] if cold_request_id else [])
+        ),
         "isolation_probe_verified": probe_verified,
     }
 
@@ -143,7 +150,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--trace", type=Path, action="append", default=[])
     parser.add_argument("--results-jsonl", type=Path)
-    parser.add_argument("--sglang-version", default="0.4.3.post4")
+    parser.add_argument("--sglang-version", default="0.5.1.post3")
     parser.add_argument("--require-gpu-measurements", action="store_true")
     args = parser.parse_args()
     validations = [

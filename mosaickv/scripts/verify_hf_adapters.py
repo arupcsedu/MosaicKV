@@ -253,13 +253,15 @@ def provenance(config: dict[str, Any]) -> dict[str, Any]:
         "gpu_type": torch.cuda.get_device_name(0) if torch.cuda.is_available() else "not_used",
         "gpu_count": torch.cuda.device_count(),
         "backend": "huggingface",
-        "attention_implementation": "eager",
+        "attention_implementation": str(config.get("attention_implementation", "eager")),
         "seed": 0,
         "measurement_type": "validation_smoke",
     }
 
 
-def validate(adapter: Any, prepared: Any, *, tolerance: float) -> dict[str, Any]:
+def validate_cache_parity(adapter: Any, prepared: Any, *, tolerance: float) -> dict[str, Any]:
+    """Validate generation and lossless cache paths for one attention backend."""
+
     reference = compare_with_generate(adapter, prepared, max_new_tokens=16)
     reinjected = compare_cache_reinjection(adapter, prepared, max_new_tokens=16)
     mosaic_reinjected = compare_mosaickv_retention_one(
@@ -274,13 +276,27 @@ def validate(adapter: Any, prepared: Any, *, tolerance: float) -> dict[str, Any]
         or mosaic_reinjected.maximum_logit_difference > tolerance
     ):
         raise RuntimeError(f"MosaicKV state retention-1 reinjection failed: {mosaic_reinjected}")
-    forecasting = validate_forecasting(adapter, prepared)
     return {
         "generate_reference": asdict(reference),
         "retention_1_reinjection": asdict(reinjected),
         "mosaickv_state_retention_1": asdict(mosaic_reinjected),
-        "future_query_forecasting": forecasting,
     }
+
+
+def validate(adapter: Any, prepared: Any, *, tolerance: float) -> dict[str, Any]:
+    result = validate_cache_parity(adapter, prepared, tolerance=tolerance)
+    result["future_query_forecasting"] = validate_forecasting(adapter, prepared)
+    return result
+
+
+def _exact_equal(left: Any, right: Any) -> bool:
+    """Compare Torch or NumPy forecast payloads without changing devices."""
+
+    if isinstance(left, torch.Tensor) and isinstance(right, torch.Tensor):
+        return bool(torch.equal(left, right))
+    import numpy as np
+
+    return bool(np.array_equal(np.asarray(left), np.asarray(right)))
 
 
 def validate_forecasting(adapter: Any, prepared: Any) -> dict[str, Any]:
@@ -310,9 +326,9 @@ def validate_forecasting(adapter: Any, prepared: Any) -> dict[str, Any]:
     ):
         oracle_layer = oracle.query_layers[layer_index]
         for left, right in zip(first_layer, second_layer, strict=True):
-            if not torch.equal(left.normalized_centroids, right.normalized_centroids):
+            if not _exact_equal(left.normalized_centroids, right.normalized_centroids):
                 raise RuntimeError("hybrid forecast centroids are not reproducible")
-            if not torch.equal(left.forecast_weights, right.forecast_weights):
+            if not _exact_equal(left.forecast_weights, right.forecast_weights):
                 raise RuntimeError("hybrid forecast weights are not reproducible")
             if left.draft_query_samples is None:
                 raise RuntimeError("hybrid forecast did not retain draft query samples")
@@ -328,7 +344,7 @@ def validate_forecasting(adapter: Any, prepared: Any) -> dict[str, Any]:
                 .float()
                 .reshape(-1, oracle_layer.shape[-1])
             )
-            if not torch.equal(left.draft_query_samples, expected):
+            if not _exact_equal(left.draft_query_samples, expected):
                 raise RuntimeError("draft queries differ from deterministic FullKV oracle queries")
             head_count += 1
     return {
@@ -418,6 +434,7 @@ def run_tiny() -> dict[str, Any]:
     config = {
         "mode": "tiny_random_architectures",
         "models": ["LLaVA-1.5", "Qwen2.5-VL", "LLaVA-OneVision"],
+        "attention_implementation": "eager",
         "generation": {"do_sample": False, "max_new_tokens": 16},
         "retention_ratio": 1.0,
         "precision": "fp32",
@@ -478,6 +495,7 @@ def run_checkpoint(args: argparse.Namespace) -> dict[str, Any]:
     if revision != REVISIONS[model_id]:
         raise ValueError("checkpoint gate requires the audited immutable revision")
     tolerance = float(args.logit_atol)
+    attention_implementation = str(args.attention_implementation)
     cache_root = Path(args.cache_root)
     hub_cache = Path(os.environ.get("HF_HUB_CACHE", cache_root / "huggingface" / "hub"))
     adapter = load_hf_adapter(
@@ -488,6 +506,7 @@ def run_checkpoint(args: argparse.Namespace) -> dict[str, Any]:
             "device_map": "auto",
             "torch_dtype": "auto",
             "local_files_only": not args.allow_download,
+            "attn_implementation": attention_implementation,
         },
         processor_kwargs={
             "cache_dir": str(hub_cache),
@@ -502,7 +521,7 @@ def run_checkpoint(args: argparse.Namespace) -> dict[str, Any]:
         "revision": revision,
         "generation": {"do_sample": False, "max_new_tokens": 16},
         "retention_ratio": 1.0,
-        "attention_implementation": "eager",
+        "attention_implementation": attention_implementation,
         "precision": str(adapter.model.dtype),
         "logit_absolute_tolerance": tolerance,
     }
@@ -520,7 +539,11 @@ def run_checkpoint(args: argparse.Namespace) -> dict[str, Any]:
         ).hexdigest(),
         "output_length": 16,
         "cache_budget": {"retention_ratio": 1.0, "unit": "retained_slots"},
-        "results": validate(adapter, prepared, tolerance=tolerance),
+        "results": (
+            validate(adapter, prepared, tolerance=tolerance)
+            if attention_implementation == "eager"
+            else validate_cache_parity(adapter, prepared, tolerance=tolerance)
+        ),
     }
 
 
@@ -535,6 +558,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--allow-download", action="store_true")
     parser.add_argument("--internvl-pixel-values", type=Path)
     parser.add_argument("--logit-atol", type=float, default=1e-4)
+    parser.add_argument(
+        "--attention-implementation",
+        choices=("eager", "sdpa", "flash_attention_2"),
+        default="eager",
+    )
     return parser.parse_args()
 
 

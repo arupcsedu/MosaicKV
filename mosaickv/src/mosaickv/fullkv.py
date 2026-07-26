@@ -15,6 +15,7 @@ from mosaickv.evaluation.model import (
     GenerationMetrics,
     ModelGeneration,
 )
+from mosaickv.generation import decode_quality_output, terminal_token_ids
 from mosaickv.measurements.memory import active_kv_bytes, cache_tensors, cpu_residual_bytes
 from mosaickv.measurements.statistics import aggregate_trials
 from mosaickv.measurements.telemetry import capture_gpu_environment
@@ -96,6 +97,7 @@ class FullKV:
         self.adapter = adapter
         self.model_id = model_id
         self.model_revision = model_revision
+        self._terminal_token_ids = terminal_token_ids(adapter.model, adapter.processor)
 
     @staticmethod
     def _validate_generation(*, temperature: float, do_sample: bool) -> None:
@@ -103,23 +105,6 @@ class FullKV:
             raise ValueError("FullKV reference requires temperature=0")
         if do_sample:
             raise ValueError("FullKV reference requires do_sample=False")
-
-    @staticmethod
-    def _decode_answer(processor: Any, token_ids: Any) -> str:
-        decoder = getattr(processor, "batch_decode", None)
-        if decoder is None:
-            tokenizer = getattr(processor, "tokenizer", processor)
-            decoder = getattr(tokenizer, "batch_decode", None)
-        if decoder is None:
-            raise RuntimeError("processor/tokenizer does not provide batch_decode")
-        answers = decoder(
-            token_ids,
-            skip_special_tokens=True,
-            clean_up_tokenization_spaces=False,
-        )
-        if not answers:
-            raise RuntimeError("batch_decode returned no answer")
-        return str(answers[0])
 
     @staticmethod
     def _assert_device_resident_cache(cache: Any) -> None:
@@ -239,7 +224,14 @@ class FullKV:
             host_total_latency=host_total_seconds,
         )
         after = capture_gpu_environment(torch)
-        answer = self._decode_answer(self.adapter.processor, token_ids)
+        timed_token_ids = tuple(
+            int(value) for value in token_ids.detach().cpu().reshape(-1).tolist()
+        )
+        answer = decode_quality_output(
+            self.adapter.processor,
+            timed_token_ids,
+            self._terminal_token_ids,
+        ).text
         measurement = FullKVTrialMeasurement(
             run_id=run_id,
             sample_id=sample_id,
@@ -252,7 +244,7 @@ class FullKV:
             status="completed",
             error=None,
             answer=answer,
-            generated_token_ids=tuple(int(value) for value in token_ids.detach().cpu().reshape(-1)),
+            generated_token_ids=timed_token_ids,
             timings=timings,
             memory=memory,
             active_cache_length=state.active_cache_length,

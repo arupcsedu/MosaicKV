@@ -42,6 +42,17 @@ def compare(
     common = min(len(vllm_ids), len(hf_ids))
     matches = sum(vllm_ids[index] == hf_ids[index] for index in range(common))
     agreement = matches / max(len(vllm_ids), len(hf_ids))
+    token_ids_match = vllm_ids == hf_ids
+    vllm_quality_answer = vllm_trace.get("quality_answer")
+    # Older immutable serving traces predate ``quality_answer`` and contain
+    # raw fixed-length streaming text past EOS. Equal token IDs under the same
+    # pinned tokenizer are stronger evidence than comparing that raw string to
+    # HF's EOS-truncated benchmark answer.
+    decoded_text = (
+        vllm_quality_answer == hf_trace.get("answer")
+        if isinstance(vllm_quality_answer, str)
+        else token_ids_match
+    )
     checks = {
         "model": vllm_manifest.get("model") == hf_manifest.get("model"),
         "input_hashes": vllm_manifest.get("inputs") == hf_manifest.get("inputs"),
@@ -50,8 +61,8 @@ def compare(
             == hf_manifest.get("generation", {}).get("parameters_sha")
         ),
         "sample_id": vllm_trace.get("sample_id") == hf_trace.get("sample_id"),
-        "token_ids": vllm_ids == hf_ids,
-        "decoded_text": trials[0].get("answer") == hf_trace.get("answer"),
+        "token_ids": token_ids_match,
+        "decoded_text": decoded_text,
     }
     return {
         "schema_version": 1,
@@ -60,6 +71,11 @@ def compare(
         "checks": checks,
         "generated_tokens": {"hf": len(hf_ids), "vllm": len(vllm_ids)},
         "token_agreement": agreement,
+        "decoded_text_basis": (
+            "explicit_eos_truncated_quality_answer"
+            if isinstance(vllm_quality_answer, str)
+            else "implied_by_identical_token_ids_for_legacy_trace"
+        ),
         "artifacts": {
             "hf_manifest": str(hf_manifest_path.resolve()),
             "hf_manifest_sha256": _sha256(hf_manifest_path),

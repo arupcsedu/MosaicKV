@@ -146,14 +146,18 @@ class PooledBlockDescriptor:
 
         if self.node_id < 0:
             raise ValueError("graph node_id must be nonnegative")
-        vectors = (self.pooled_key, self.pooled_value, self.semantic_embedding)
-        if any(np.asarray(vector).ndim != 1 for vector in vectors):
+        vectors = tuple(
+            np.asarray(vector)
+            for vector in (self.pooled_key, self.pooled_value, self.semantic_embedding)
+        )
+        if any(vector.ndim != 1 for vector in vectors):
             raise ValueError("pooled block vectors must be one-dimensional")
-        if self.pooled_hidden_state is not None and np.asarray(self.pooled_hidden_state).ndim != 1:
+        hidden = None if self.pooled_hidden_state is None else np.asarray(self.pooled_hidden_state)
+        if hidden is not None and hidden.ndim != 1:
             raise ValueError("pooled hidden state must be one-dimensional")
-        if any(not bool(np.all(np.isfinite(np.asarray(vector)))) for vector in vectors):
+        if any(not bool(np.all(np.isfinite(vector))) for vector in vectors):
             raise ValueError("pooled block vectors must be finite")
-        if np.asarray(self.semantic_embedding).size == 0:
+        if vectors[-1].size == 0:
             raise ValueError("semantic_embedding cannot be empty")
 
     @property
@@ -226,6 +230,8 @@ class SparseEvidenceGraph:
     diagnostics: GraphDiagnostics
 
     def __post_init__(self) -> None:
+        import numpy as np
+
         if tuple(node.node_id for node in self.nodes) != tuple(range(len(self.nodes))):
             raise ValueError("graph node IDs must be contiguous and ordered")
         edge_count = len(self.row_indices)
@@ -233,16 +239,16 @@ class SparseEvidenceGraph:
             len(self.column_indices) == len(self.weights) == len(self.edge_types) == edge_count
         ):
             raise ValueError("COO edge arrays must align")
-        if any(index < 0 or index >= len(self.nodes) for index in self.row_indices):
+        rows = np.asarray(self.row_indices, dtype=np.int64)
+        columns = np.asarray(self.column_indices, dtype=np.int64)
+        weights = np.asarray(self.weights, dtype=np.float64)
+        if bool(np.any((rows < 0) | (rows >= len(self.nodes)))):
             raise ValueError("COO row index lies outside the node table")
-        if any(index < 0 or index >= len(self.nodes) for index in self.column_indices):
+        if bool(np.any((columns < 0) | (columns >= len(self.nodes)))):
             raise ValueError("COO column index lies outside the node table")
-        if any(
-            source == target
-            for source, target in zip(self.row_indices, self.column_indices, strict=True)
-        ):
+        if bool(np.any(rows == columns)):
             raise ValueError("self edges are not stored")
-        if any(weight <= 0 or not math.isfinite(weight) for weight in self.weights):
+        if bool(np.any(weights <= 0)) or not bool(np.all(np.isfinite(weights))):
             raise ValueError("stored graph weights must be finite and positive")
         identities = tuple(zip(self.row_indices, self.column_indices, self.edge_types, strict=True))
         if len(set(identities)) != edge_count:

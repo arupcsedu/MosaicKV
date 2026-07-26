@@ -13,8 +13,13 @@ The backend-independent three-tier constructor can consume adapter capability
 metadata, but all four adapters currently declare prototype merging and
 residual repair unsupported. Because their cached keys are post-RoPE, the
 constructor fails closed to selection-only exact cache state instead of
-averaging incompatible rotary phases. Eager attention is the sole enabled implementation;
-constructing an adapter around SDPA or FlashAttention-2 fails before execution.
+averaging incompatible rotary phases. LLaVA-1.5, Qwen2.5-VL, and
+LLaVA-OneVision accept eager, SDPA, and FlashAttention-2 for FullKV execution.
+Compression prefill remains eager because prompt-attention capture is not
+exposed by SDPA or FlashAttention-2. The runtime may explicitly switch an
+all-valid, no-repair exact cache to SDPA for decoding; arbitrary padded
+per-head masks remain eager-only.
+InternVL remains eager-only.
 
 The package remains importable without PyTorch. Loading an adapter is an
 explicit operation in the common environment and requires an immutable model
@@ -46,9 +51,9 @@ the untouched Hugging Face acceptance reference.
 - `logical_sequence_length`: original sequence positions represented so far;
 - `next_decode_position`: absolute cache position for the next input token.
 
-Compressed decoding currently fails closed when active and logical lengths
-differ. This prevents a future cache-selection implementation from silently
-using packed physical indices as logical positions.
+Compressed decoding uses explicit original positions when active and logical
+lengths differ. Padded per-head layouts require the owned eager additive-mask
+dispatcher; the hybrid SDPA decode gate rejects those layouts.
 
 ## Cache and query representation
 
@@ -77,8 +82,10 @@ language layer's `q_proj`; the captured tensors are reshaped to
 `q_proj_output_pre_rope`. Hooks are removed after each forward and never alter
 weights.
 
-Qwen2.5-VL's M-RoPE `rope_deltas` is copied into the decode state and restored
-before each token step. InternVL prefill uses its public multimodal wrapper, but
+Qwen2.5-VL's M-RoPE `rope_deltas` is copied into the prefill decode state and
+restored before each token step. Its immutable decoded position range is
+precomputed and reused instead of rebuilding three M-RoPE coordinates per
+token. InternVL prefill uses its public multimodal wrapper, but
 decode calls the wrapper's public `language_model`: the pinned remote
 `InternVLChatModel.forward` requires pixel inputs and reruns visual extraction,
 so it is not a valid token-decode entry point.
@@ -145,9 +152,10 @@ artifact produced by the exact pinned public preprocessing. `HF_TOKEN`, if
 needed, is inherited only through the environment and is never written by the
 test or job script.
 
-Checkpoint acceptance remains unsupported until this command passes for an
-audited revision in the common environment and its complete validation record
-is preserved. Source implementation, tiny architecture parity, and checkpoint
-acceptance are separate evidence levels. The current common-lock test gate
-passed all 29 affected adapter/environment tests without downloading weights;
-this validates package compatibility only, not checkpoint acceptance.
+Source implementation, tiny architecture parity, and checkpoint acceptance are
+separate evidence levels. The pinned Qwen2.5-VL-3B checkpoint passed the SDPA
+FullKV gate in exploratory Slurm job `17346718`: generation, reinjection, and
+retention-1 reconstruction each had 16/16 token agreement and maximum logit
+difference `0.0`. Its dirty-tree provenance makes this implementation evidence,
+not a canonical experimental row. Eager and FlashAttention-2 retain their own
+independent gates.

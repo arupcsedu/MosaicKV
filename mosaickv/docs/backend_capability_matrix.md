@@ -1,84 +1,78 @@
 # Backend capability matrix
 
-Audit target: the installed common environment at
-`/scratch/djy8hg/env/mosaickv` on 2026-07-21.
+Audit target: the common environment at `/scratch/djy8hg/env/mosaickv`,
+2026-07-25. A package import, a model-serving pass, token parity, and a native
+cache-mutation pass are separate evidence levels.
 
-| Component | Installed version | Package/CUDA smoke | Model-serving parity | Native MosaicKV |
+| Component | Installed version | Package state | FullKV model gate | Native MosaicKV |
 |---|---:|---|---|---|
-| Hugging Face Transformers | 4.49.0 | Passed | Checkpoint gate not rerun in common lock | Research eager path only |
-| vLLM | 0.7.2 | Passed | Unsupported | Unsupported |
-| SGLang | 0.4.3.post4 | Passed | Unsupported | Unsupported |
+| Hugging Face Transformers | 4.55.2 | Imports; CUDA smoke passed | Qwen2.5-VL-3B SDPA job `17346718` and FA2 job `17348171` passed 16-token ordinary/reinjection/retention-1 parity with maximum logit difference 0 | Exact selection owned by MosaicKV; prototype/repair fail closed for post-RoPE keys |
+| vLLM V1 | 0.10.2 | Imports and loads Qwen2.5-VL-3B | Job `17351185` passed Stage A and its report has exact 16/16 HF token parity | Unsupported |
+| SGLang | 0.5.1.post3 | Imports and launches Qwen2.5-VL-3B | Job `17351612` passed Stage A, request isolation, byte accounting, and exact 32/32 parity with the numerically corresponding HF-SDPA reference | Unsupported |
 
-Package import only establishes environment viability. It does not establish
-checkpoint loading, token parity, measurement correctness, or native cache
-mutation support.
+Rows remain non-canonical while the worktree is dirty. No pending or failed
+job is a support claim.
 
 ## Required-operation matrix
 
-| Required operation | Hugging Face eager | vLLM public API | SGLang public API |
+| Required operation | Hugging Face eager | vLLM 0.10.2 V1 | SGLang 0.5.1.post3 |
 |---|---|---|---|
-| Inspect KV after prefill | Supported through returned `past_key_values` | Unsupported | Unsupported |
-| Select whole KV blocks | Supported in the owned research adapter | Unsupported | Unsupported |
-| Inject modified KV | Supported through a model-compatible `Cache` | Unsupported | Unsupported |
-| Preserve original logical positions | Supported only with explicit tested position inputs | Unsupported | Unsupported |
-| Restore blocks during decode | Supported in the owned explicit decode loop | Unsupported | Unsupported |
+| Inspect KV after prefill | Supported through returned `past_key_values` | Unsupported request-scoped API | Unsupported request-scoped API |
+| Select whole KV blocks | Supported in the owned explicit loop | Unsupported atomic transaction | Unsupported atomic transaction |
+| Inject modified KV | Supported through a compatible HF cache object | Unsupported | Storage write exists, ownership transaction unsupported |
+| Preserve original logical positions | Explicit adapter state and position inputs | No sparse logical-position commit hook | No atomic mapping/position commit hook |
+| Restore blocks during decode | Owned explicit loop | Unsupported | Unsupported |
 
-“Unsupported” means no safe public API was found. Internal tensors or allocator
-methods are not treated as extension contracts.
+“Unsupported” means no safe installed API was found; direct tensor mutation is
+not treated as an integration contract.
 
 ## Hugging Face source boundary
 
-`transformers/cache_utils.py:341` defines `DynamicCache`, whose `update`
-starts at line 398. LLaVA passes `past_key_values` into its language model at
-`transformers/models/llava/modeling_llava.py:433` and returns them at line 474.
-LLaVA-OneVision does the same at
-`transformers/models/llava_onevision/modeling_llava_onevision.py:752` and line
-793.
+The adapter consumes the returned Transformers cache, explicitly controls
+prefill and one-token decode, and maintains active length, original logical
+length, and next decode position separately. Qwen2.5-VL, LLaVA-1.5, and
+LLaVA-OneVision declare eager, SDPA, and FlashAttention-2 for FullKV. Cache
+compression prefill remains eager because prompt-attention capture is not
+available safely in fused paths. An explicitly labeled eager-prefill/SDPA-decode
+exact path is now implemented; it is admitted only for all-valid caches without
+repair and records both implementations. Cached keys are
+post-RoPE, so phase-unaligned prototype construction is rejected.
 
-The Llama query projection is
-`transformers/models/llama/modeling_llama.py:245`; RoPE is applied at line 275
-before the cache update beginning at line 277. The Qwen2 query projection is
-`transformers/models/qwen2/modeling_qwen2.py:145`; RoPE is applied at line 167
-before the cache update. Qwen2.5-VL exposes `q_proj` at
-`transformers/models/qwen2_5_vl/modeling_qwen2_5_vl.py:732` and updates the
-cache after rotary processing. Thus the current adapters record cached keys as
-post-RoPE and fail closed on unsafe prototype averaging.
+## vLLM installed-source boundary
 
-## vLLM source boundary
+The audited V1 path uses:
 
-The public entry point is `vllm/entrypoints/llm.py:52`. `generate`, `chat`, and
-`encode` begin at lines 277, 620, and 756. None exposes post-prefill cache
-tensors or a request-scoped cache-mutation callback. Internal cache ownership
-is split between `vllm/worker/cache_engine.py:20` and
-`vllm/core/block_manager.py:21`. Their swap/copy operations do not provide a
-public transaction that also preserves logical positions and scheduler state.
+- `vllm/v1/worker/gpu_model_runner.py:155` — `GPUModelRunner`;
+- `gpu_model_runner.py:862` — `_prepare_inputs`;
+- `vllm/v1/core/kv_cache_manager.py:84` — `KVCacheManager`;
+- `vllm/v1/core/kv_cache_utils.py:159` — `KVCacheBlock`;
+- `vllm/v1/attention/backends/utils.py:37` — `CommonAttentionMetadata`; and
+- `vllm/v1/attention/backends/flash_attn.py:112` — `FlashAttentionMetadata`.
 
-Native selection, prototype replacement, and decode-time restoration are
-therefore unsupported for vLLM 0.7.2.
+These internal structures do not expose an atomic request-scoped callback
+between multimodal prefill and decode that can select sparse blocks, preserve
+logical/M-RoPE positions, update prefix ownership, and safely restore blocks.
+The measurement wrapper uses public generation plus read-only cache/timing
+telemetry. See `vllm_native_blocker.md`.
 
-## SGLang source boundary
+## SGLang installed-source boundary
 
-The public entry point is `sglang/srt/entrypoints/engine.py:73`, with
-`Engine.generate` at line 112. It has no post-prefill KV callback.
-`ReqToTokenPool` (`sglang/srt/mem_cache/memory_pool.py:46`),
-`TokenToKVPoolAllocator` (line 119), the layer KV buffers (abstract
-`set_kv_buffer` at line 109), and `RadixCache`
-(`sglang/srt/mem_cache/radix_cache.py:79`) have separate ownership rules.
-There is no public atomic operation that updates these structures together
-while preserving multimodal logical positions.
+The audited path uses:
 
-Native selection, prototype replacement, and decode-time restoration are
-therefore unsupported for SGLang 0.4.3.post4.
+- `sglang/srt/entrypoints/engine.py:89` and `:140` — `Engine.generate`;
+- `sglang/srt/mem_cache/memory_pool.py:50` — `ReqToTokenPool`;
+- `memory_pool.py:165` and `:372` — `MHATokenToKVPool.set_kv_buffer`;
+- `sglang/srt/mem_cache/allocator.py:118` — `TokenToKVPoolAllocator`;
+- `sglang/srt/mem_cache/radix_cache.py:120` — `RadixCache`;
+- `sglang/srt/model_executor/forward_batch_info.py:165` — `ForwardBatch`; and
+- `sglang/srt/layers/attention/base_attn_backend.py:14` — `AttentionBackend`.
+
+`set_kv_buffer` is a storage primitive, not an atomic transaction across
+request mappings, allocator ownership, Radix entries, scheduler state, and
+logical positions. See `sglang_native_blocker.md`.
 
 ## Execution rule
 
-Only the common environment may be used. The supported verification command
-does not load model weights:
-
-```bash
-source mosaickv/scripts/cache_env.sh
-sbatch --reservation=bi_fox_dgx mosaickv/slurm/env_smoke.sbatch
-```
-
-Backend support must remain unsupported until a clean-tree pinned-checkpoint
-run passes its backend-specific parity gate.
+Only the common environment may be used. Every cache path must remain below
+`/scratch/djy8hg`, and backend support requires a pinned-checkpoint GPU artifact
+plus the backend-specific parity report.

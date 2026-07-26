@@ -24,7 +24,7 @@ class LlavaOneVisionAdapter(HuggingFaceMultimodalAdapter):
     capabilities = AdapterCapabilities(
         model_family="llava_onevision",
         architectures=("LlavaOnevisionForConditionalGeneration",),
-        attention_implementations=("eager",),
+        attention_implementations=("eager", "sdpa", "flash_attention_2"),
         image=True,
         multi_image=True,
         video=True,
@@ -34,7 +34,7 @@ class LlavaOneVisionAdapter(HuggingFaceMultimodalAdapter):
         query_vector_state=QueryVectorState.Q_PROJ_PRE_ROPE,
         supports_prototype_merge=False,
         supports_residual_repair=False,
-        notes=("eager attention is the only correctness-gated implementation",),
+        notes=("SDPA and FlashAttention-2 are FullKV-only until compressed parity passes",),
     )
 
     @classmethod
@@ -46,19 +46,19 @@ class LlavaOneVisionAdapter(HuggingFaceMultimodalAdapter):
         model_kwargs: Mapping[str, Any] | None = None,
         processor_kwargs: Mapping[str, Any] | None = None,
     ) -> Self:
-        """Load a pinned LLaVA-OneVision checkpoint explicitly in eager mode."""
+        """Load a pinned LLaVA-OneVision checkpoint with an audited attention backend."""
 
         validate_hf_revision(revision)
         from transformers import AutoProcessor, LlavaOnevisionForConditionalGeneration
 
         selected_model_kwargs = dict(model_kwargs or {})
         attention = selected_model_kwargs.setdefault("attn_implementation", "eager")
-        if attention != "eager":
-            raise ValueError("LlavaOneVisionAdapter only supports attn_implementation='eager'")
+        if attention not in cls.capabilities.attention_implementations:
+            raise ValueError(f"unsupported LLaVA-OneVision attention implementation: {attention}")
         model = LlavaOnevisionForConditionalGeneration.from_pretrained(
             model_id, revision=revision, **selected_model_kwargs
         )
-        processor = AutoProcessor.from_pretrained(
+        processor = AutoProcessor.from_pretrained(  # type: ignore[no-untyped-call]
             model_id, revision=revision, **dict(processor_kwargs or {})
         )
         return cls(model, processor)

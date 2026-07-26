@@ -187,6 +187,68 @@ def _deterministic_spherical_kmeans(
 def _streaming_spherical(sources: Sequence[Any], centroid_count: int) -> tuple[Any, Any]:
     """Single-pass O(KD) auxiliary-memory spherical centroid approximation."""
 
+    if sources and _is_torch(sources[0]) and bool(getattr(sources[0], "is_cuda", False)):
+        # The scalar reference below calls ``item()`` for every query and every
+        # assignment.  On CUDA that creates thousands of device-wide
+        # synchronization points for a normal VLM.  Query windows are bounded
+        # and already materialized, so stage each source once and execute the
+        # identical deterministic online update on the host.  The returned
+        # centroids are intentionally host-resident: all current consumers use
+        # them for CPU graph/selection math, avoiding tiny H2D round trips.
+        import numpy as np
+
+        staged = tuple(
+            np.asarray(source.detach().float().cpu().numpy(), dtype=np.float32)
+            for source in sources
+        )
+        return _streaming_spherical(staged, centroid_count)
+
+    if sources and not _is_torch(sources[0]):
+        import numpy as np
+
+        feature_size = int(_shape(sources[0])[-1])
+        numpy_sums = np.empty((centroid_count, feature_size), dtype=np.float32)
+        numpy_centroids = np.empty((centroid_count, feature_size), dtype=np.float32)
+        numpy_counts = np.zeros(centroid_count, dtype=np.int64)
+        active = 0
+        for source in sources:
+            if int(_shape(source)[-1]) != feature_size:
+                raise ValueError("query sources must share one feature dimension")
+            for index in range(int(_shape(source)[0])):
+                row = source[index]
+                # Keep the scalar reference's two-dimensional norm call. NumPy
+                # may choose a different reduction kernel for a bare 1-D norm,
+                # which changes the last bit of the deterministic centroids.
+                norm = _row_norms(row.reshape(1, -1))[0]
+                norm_value = float(norm)
+                if not math.isfinite(norm_value):
+                    raise ValueError("query samples contain non-finite norms")
+                if norm_value == 0.0:
+                    continue
+                sample = row / norm
+                if active < centroid_count:
+                    numpy_sums[active] = sample
+                    numpy_centroids[active] = sample
+                    numpy_counts[active] = 1
+                    active += 1
+                    continue
+                similarities = numpy_centroids[:active] @ sample
+                assignment = _argmax(similarities)
+                updated = numpy_sums[assignment] + sample
+                numpy_sums[assignment] = updated
+                numpy_counts[assignment] += 1
+                # This call deliberately matches the original one-row
+                # normalization instead of using a numerically different 1-D
+                # shortcut.
+                numpy_centroids[assignment] = _normalize_rows(updated.reshape(1, -1))[0]
+        if active == 0:
+            raise ValueError("query samples contain no nonzero vector")
+        result = numpy_centroids[:active].copy()
+        return result, _weights(
+            tuple(int(value) for value in numpy_counts[:active]),
+            result,
+        )
+
     sums: list[Any] = []
     centroids: list[Any] = []
     counts: list[int] = []
@@ -214,6 +276,57 @@ def _streaming_spherical(sources: Sequence[Any], centroid_count: int) -> tuple[A
         raise ValueError("query samples contain no nonzero vector")
     result = _stack(centroids)
     return result, _weights(counts, result)
+
+
+def _layer_streaming_spherical(
+    layer: Sequence[_HeadSamples], centroid_count: int
+) -> tuple[tuple[Any, Any], ...]:
+    """Construct one layer's online centroids with one bounded CUDA staging copy.
+
+    Query samples are already split by KV head.  Copying every prompt/draft
+    slice to the host independently serialized four tiny transfers per layer
+    for Qwen2.5-VL.  All heads in one layer have the same sample geometry, so
+    stage that single layer as one tensor and preserve the exact per-head,
+    prompt-then-draft update order on NumPy.  Only one layer is materialized at
+    a time, retaining the low-memory bound with respect to model depth.
+    """
+
+    if not layer:
+        return ()
+    first_sources = layer[0].sources
+    cuda_sources = bool(
+        first_sources
+        and _is_torch(first_sources[0])
+        and getattr(first_sources[0], "is_cuda", False)
+    )
+    if not cuda_sources:
+        return tuple(_streaming_spherical(samples.sources, centroid_count) for samples in layer)
+    if any(
+        not samples.sources
+        or not all(
+            _is_torch(source) and bool(getattr(source, "is_cuda", False))
+            for source in samples.sources
+        )
+        for samples in layer
+    ):
+        raise ValueError("one forecast layer cannot mix CUDA and host query sources")
+    combined = tuple(_concat(samples.sources) for samples in layer)
+    geometry = _shape(combined[0])
+    if any(_shape(samples) != geometry for samples in combined):
+        # This is not expected for grouped-query attention, but the scalar
+        # implementation remains correct for adapters with uneven head groups.
+        return tuple(_streaming_spherical(samples.sources, centroid_count) for samples in layer)
+    import numpy as np
+    import torch
+
+    staged = np.asarray(
+        torch.stack(combined, dim=0).detach().float().cpu().numpy(),
+        dtype=np.float32,
+    )
+    return tuple(
+        _streaming_spherical((staged[head_index],), centroid_count)
+        for head_index in range(len(layer))
+    )
 
 
 def _measure(exemplar: Any, action: Callable[[], ResultT]) -> tuple[ResultT, float, int, str]:
@@ -373,16 +486,16 @@ def build_query_forecast(
 
     def construct_centroids() -> None:
         for layer in head_samples:
+            if config.low_memory_centroids:
+                centroids.append(list(_layer_streaming_spherical(layer, config.centroid_count)))
+                continue
             centroid_layer: list[tuple[Any, Any]] = []
             for samples in layer:
-                if config.low_memory_centroids:
-                    result = _streaming_spherical(samples.sources, config.centroid_count)
-                else:
-                    if samples.combined is None:  # pragma: no cover - guarded by config
-                        raise RuntimeError("exact centroids require materialized query samples")
-                    result = _deterministic_spherical_kmeans(
-                        samples.combined, config.centroid_count, config.centroid_iterations
-                    )
+                if samples.combined is None:  # pragma: no cover - guarded by config
+                    raise RuntimeError("exact centroids require materialized query samples")
+                result = _deterministic_spherical_kmeans(
+                    samples.combined, config.centroid_count, config.centroid_iterations
+                )
                 centroid_layer.append(result)
             centroids.append(centroid_layer)
 

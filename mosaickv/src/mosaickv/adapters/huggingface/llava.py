@@ -1,4 +1,4 @@
-"""Eager Hugging Face adapter for LLaVA-1.5."""
+"""Hugging Face adapter for LLaVA-1.5."""
 
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ class Llava15Adapter(HuggingFaceMultimodalAdapter):
     capabilities = AdapterCapabilities(
         model_family="llava_1_5",
         architectures=("LlavaForConditionalGeneration",),
-        attention_implementations=("eager",),
+        attention_implementations=("eager", "sdpa", "flash_attention_2"),
         image=True,
         multi_image=True,
         video=False,
@@ -35,7 +35,7 @@ class Llava15Adapter(HuggingFaceMultimodalAdapter):
         supports_prototype_merge=False,
         supports_residual_repair=False,
         notes=(
-            "eager attention is the only correctness-gated implementation",
+            "SDPA and FlashAttention-2 are FullKV-only until compressed parity passes",
             "prototype merge and residual repair remain disabled until correctness gates pass",
         ),
     )
@@ -49,19 +49,19 @@ class Llava15Adapter(HuggingFaceMultimodalAdapter):
         model_kwargs: Mapping[str, Any] | None = None,
         processor_kwargs: Mapping[str, Any] | None = None,
     ) -> Self:
-        """Load a pinned LLaVA checkpoint explicitly in eager mode."""
+        """Load a pinned LLaVA checkpoint with an audited attention backend."""
 
         validate_hf_revision(revision)
         from transformers import AutoProcessor, LlavaForConditionalGeneration
 
         selected_model_kwargs = dict(model_kwargs or {})
         attention = selected_model_kwargs.setdefault("attn_implementation", "eager")
-        if attention != "eager":
-            raise ValueError("Llava15Adapter only supports attn_implementation='eager'")
+        if attention not in cls.capabilities.attention_implementations:
+            raise ValueError(f"unsupported LLaVA attention implementation: {attention}")
         model = LlavaForConditionalGeneration.from_pretrained(
             model_id, revision=revision, **selected_model_kwargs
         )
-        processor = AutoProcessor.from_pretrained(
+        processor = AutoProcessor.from_pretrained(  # type: ignore[no-untyped-call]
             model_id, revision=revision, **dict(processor_kwargs or {})
         )
         return cls(model, processor)

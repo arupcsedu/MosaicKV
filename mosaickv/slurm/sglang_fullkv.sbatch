@@ -12,7 +12,7 @@
 
 set -euo pipefail
 
-# SGLang 0.4.3.post4 JIT kernels include C++20 standard-library headers.  The
+# SGLang JIT kernels include C++20 standard-library headers. The
 # cluster default GCC 8.5 does not provide them; load the audited compiler
 # before spawning the server.  An override remains explicit in the job env.
 module load "${MOSAICKV_GCC_MODULE:-gcc/11.4.0}"

@@ -88,9 +88,9 @@ def draft_kl_divergence(logits: Any, draft_distribution: Any | None) -> float | 
         raise ValueError("draft distribution vocabulary does not match provisional logits")
     if bool(np.any(draft < 0)) or float(np.sum(draft)) <= 0:
         raise ValueError("draft distribution must be nonnegative with positive total mass")
-    draft = draft / float(np.sum(draft))
+    normalized_draft = draft / float(np.sum(draft))
     epsilon = np.finfo(np.float64).tiny
-    safe_draft = np.maximum(draft, epsilon)
+    safe_draft = np.maximum(normalized_draft, epsilon)
     positive = provisional > 0
     return max(
         0.0,

@@ -150,6 +150,58 @@ def _pool_token_features(
     return result
 
 
+def _pool_token_feature_batch(
+    matrix: np.ndarray[Any, np.dtype[np.float32]],
+    *,
+    positions: tuple[tuple[int, ...], ...],
+    heads: tuple[int, ...] | None,
+) -> np.ndarray[Any, np.dtype[np.float32]]:
+    """Pool an equal-width block batch with the scalar reduction order.
+
+    Advanced indexing materializes ``[blocks, positions, reductions, features]``.
+    Reducing the flattened middle dimensions therefore performs the same
+    per-block float32 mean as :func:`_pool_token_features`, while avoiding one
+    Python/NumPy dispatch per cache block.  Callers group variable-width tail
+    blocks separately.
+    """
+
+    if not positions:
+        raise ValueError("graph pooling batch cannot be empty")
+    width = len(positions[0])
+    if width == 0 or any(len(item) != width for item in positions):
+        raise ValueError("graph pooling batches require one nonzero block width")
+    position_index = np.asarray(positions, dtype=np.intp)
+    if bool(np.any(position_index < 0)):
+        raise ValueError("graph block positions must be nonnegative")
+    sequence_length = int(matrix.shape[0] if heads is None else matrix.shape[1])
+    if int(position_index.max()) >= sequence_length:
+        raise ValueError("graph block position lies outside descriptor source tensor")
+    if heads is None:
+        selected = matrix[position_index]
+    else:
+        if len(heads) != len(positions):
+            raise ValueError("graph pooling heads and position rows must align")
+        head_index = np.asarray(heads, dtype=np.intp)
+        if bool(np.any(head_index < 0)) or int(head_index.max()) >= matrix.shape[0]:
+            raise ValueError("graph block KV head lies outside descriptor source tensor")
+        selected = matrix[head_index[:, None], position_index]
+    pooled = selected.reshape(len(positions), -1, selected.shape[-1]).mean(
+        axis=1,
+        dtype=np.float32,
+    )
+    return np.asarray(pooled, dtype=np.float32)
+
+
+def _readonly_row(
+    matrix: np.ndarray[Any, np.dtype[np.float32]], index: int
+) -> np.ndarray[Any, np.dtype[np.float32]]:
+    """Return one immutable, independently owned descriptor vector."""
+
+    result = np.asarray(matrix[index], dtype=np.float32).copy()
+    result.setflags(write=False)
+    return result
+
+
 def _unit(value: np.ndarray[Any, np.dtype[np.float32]]) -> np.ndarray[Any, np.dtype[np.float32]]:
     norm = float(np.linalg.norm(value))
     result = value.copy() if norm == 0 else value / norm
@@ -215,33 +267,57 @@ def pool_block_descriptors(
                 head_axis=None,
             )
         )
+        layer_blocks = blocks_by_layer[layer_index]
+        width_groups: dict[int, list[tuple[int, Any]]] = defaultdict(list)
+        for node_id, block in layer_blocks:
+            width_groups[len(block.physical_cache_indices)].append((node_id, block))
+        pooled_keys: dict[int, np.ndarray[Any, np.dtype[np.float32]]] = {}
+        pooled_values: dict[int, np.ndarray[Any, np.dtype[np.float32]]] = {}
         hidden_by_positions: dict[tuple[int, ...], np.ndarray[Any, np.dtype[np.float32]]] = {}
-        for node_id, block in blocks_by_layer[layer_index]:
-            key = _pool_token_features(
+        for group in width_groups.values():
+            positions = tuple(block.physical_cache_indices for _node_id, block in group)
+            heads = tuple(block.kv_head for _node_id, block in group)
+            key_batch = _pool_token_feature_batch(
                 key_tokens,
-                positions=block.physical_cache_indices,
-                head=block.kv_head,
+                positions=positions,
+                heads=heads,
             )
-            value = _pool_token_features(
+            value_batch = _pool_token_feature_batch(
                 value_tokens,
-                positions=block.physical_cache_indices,
-                head=block.kv_head,
+                positions=positions,
+                heads=heads,
             )
+            for batch_index, (node_id, _block) in enumerate(group):
+                pooled_keys[node_id] = _readonly_row(key_batch, batch_index)
+                pooled_values[node_id] = _readonly_row(value_batch, batch_index)
+            if hidden_tokens is not None:
+                unique_positions = tuple(dict.fromkeys(positions))
+                hidden_batch = _pool_token_feature_batch(
+                    hidden_tokens,
+                    positions=unique_positions,
+                    heads=None,
+                )
+                for batch_index, item_positions in enumerate(unique_positions):
+                    hidden_by_positions[item_positions] = _readonly_row(
+                        hidden_batch,
+                        batch_index,
+                    )
+        for node_id, block in layer_blocks:
+            key = pooled_keys[node_id]
+            value = pooled_values[node_id]
             pooled_hidden = None
             if hidden_tokens is not None:
-                pooled_hidden = hidden_by_positions.get(block.physical_cache_indices)
-                if pooled_hidden is None:
-                    pooled_hidden = _pool_token_features(
-                        hidden_tokens,
-                        positions=block.physical_cache_indices,
-                        head=None,
-                    )
-                    hidden_by_positions[block.physical_cache_indices] = pooled_hidden
+                pooled_hidden = hidden_by_positions[block.physical_cache_indices]
             semantic_parts = [_unit(key), _unit(value)]
             if pooled_hidden is not None:
                 semantic_parts.append(_unit(pooled_hidden))
             semantic = _unit(np.concatenate(semantic_parts).astype(np.float32, copy=False))
-            evidence = overrides.get(node_id, BlockEvidenceMetadata()).with_block_defaults(block)
+            override = overrides.get(node_id)
+            evidence = (
+                BlockEvidenceMetadata.from_block(block)
+                if override is None
+                else override.with_block_defaults(block)
+            )
             indexed_result.append(
                 (
                     node_id,

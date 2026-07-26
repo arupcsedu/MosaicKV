@@ -12,14 +12,21 @@ Negative and inconclusive outcomes must be retained.
 - Models: LLaVA-1.5-7B and Qwen2.5-VL-3B.
 - Paired slices: LLaVA/MMStar with 10 examples; Qwen/MMStar and Qwen/DocVQA
   with 20 examples each.
-- Maximum output length: 32 tokens. Any sample reaching the limit must be
-  flagged as potentially truncated rather than silently accepted.
+- Timed output length: exactly 32 greedy tokens for comparable systems cost.
+  The task-quality answer stops before the first model EOS/end-of-turn token;
+  traces retain both token counts and the complete fixed-length trajectory.
+  A sample with no terminal token that reaches 32 remains flagged as
+  potentially truncated.
 - Target retention ratios: `1.0`, `0.4`, and `0.2`.
 - All methods, including RandomKV, use seed 17 so deterministic subset
   selection yields exactly the same paired sample IDs. The later full
   experiment must use an explicit pinned sample ledger before varying the
   RandomKV selection seed.
 - Primary budget: realized active KV bytes, not nominal token retention.
+- `mosaickv_exact` uses budget-filling lazy greedy selection. A run fails if
+  useful logical KV bytes fall below the target by more than the unavoidable
+  fixed-block rounding gap. Logical bytes, packed bytes, and padding are all
+  retained in the debug trace.
 
 The exact matrix is
 `configs/experiments/implementation_validation.yaml`. It contains 33 jobs:

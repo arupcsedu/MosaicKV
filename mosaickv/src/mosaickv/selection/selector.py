@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import heapq
+import math
 from collections import defaultdict
 from collections.abc import Mapping
 
@@ -94,6 +95,7 @@ def lazy_greedy_select(
     budget: SelectionBudget,
     *,
     position_limits: Mapping[tuple[int, int], int] | None = None,
+    fill_position_limits: bool = False,
 ) -> SelectionResult:
     """Select mandatory blocks, then maximize cached marginal-gain density.
 
@@ -148,6 +150,51 @@ def lazy_greedy_select(
             reason=SelectionReason.MANDATORY_EXACT,
         )
 
+    if position_limits is not None and objective.config.minimum_stratum_fraction > 0:
+        groups: defaultdict[tuple[int, int], list[int]] = defaultdict(list)
+        for node in graph.nodes:
+            groups[(node.block.layer, node.block.kv_head)].append(node.node_id)
+        for identity in sorted(position_limits):
+            limit = position_limits[identity]
+            reserve = math.floor(limit * objective.config.minimum_stratum_fraction)
+            while selected_positions[identity] < reserve:
+                candidates: list[tuple[float, float, int, int, float]] = []
+                for node_id in groups.get(identity, ()):
+                    if node_id in selected:
+                        continue
+                    block = graph.nodes[node_id].block
+                    cost = costs[node_id]
+                    if selected_positions[identity] + block.position_count > limit:
+                        continue
+                    if cost > budget.value - spent:
+                        continue
+                    gain = incremental.marginal_gain(node_id)
+                    candidates.append((-gain / cost, -gain, cost, node_id, gain))
+                if not candidates:
+                    raise InfeasibleSelectionBudgetError(
+                        "configured per-stratum reserve cannot be represented within the "
+                        f"hard budget: identity={identity}, selected_positions="
+                        f"{selected_positions[identity]}, reserve={reserve}, limit={limit}, "
+                        f"remaining_budget={budget.value - spent}"
+                    )
+                _density, _negative_gain, cost, node_id, gain = min(candidates)
+                block = graph.nodes[node_id].block
+                gain = incremental.select(node_id)
+                rank = len(selection_order)
+                selected.add(node_id)
+                selection_order.append(node_id)
+                spent += cost
+                selected_positions[identity] += block.position_count
+                decisions[node_id] = SelectionDecision(
+                    node_id=node_id,
+                    selected=True,
+                    selection_rank=rank,
+                    marginal_gain=gain,
+                    marginal_gain_per_cost=gain / cost,
+                    cost=cost,
+                    reason=SelectionReason.STRATUM_RESERVE,
+                )
+
     heap: list[tuple[float, float, int, int, int, float]] = []
     state_version = len(selection_order)
     for node in graph.nodes:
@@ -193,6 +240,56 @@ def lazy_greedy_select(
             reason=SelectionReason.LAZY_GREEDY,
         )
         state_version += 1
+
+    if fill_position_limits:
+        if position_limits is None:
+            raise ValueError("dense-cache fill requires position_limits")
+        fill_groups: defaultdict[tuple[int, int], list[int]] = defaultdict(list)
+        for node in graph.nodes:
+            fill_groups[(node.block.layer, node.block.kv_head)].append(node.node_id)
+        for identity in sorted(position_limits):
+            limit = position_limits[identity]
+            while selected_positions[identity] < limit:
+                fill_candidates: list[tuple[float, float, int, int, float]] = []
+                for node_id in fill_groups.get(identity, ()):
+                    if node_id in selected:
+                        continue
+                    block = graph.nodes[node_id].block
+                    cost = costs[node_id]
+                    if selected_positions[identity] + block.position_count > limit:
+                        continue
+                    if cost > budget.value - spent:
+                        continue
+                    gain = incremental.marginal_gain(node_id)
+                    fill_candidates.append((-gain / cost, -gain, cost, node_id, gain))
+                if not fill_candidates:
+                    break
+                _density, _negative_gain, cost, node_id, _gain = min(fill_candidates)
+                block = graph.nodes[node_id].block
+                gain = incremental.select(node_id)
+                rank = len(selection_order)
+                selected.add(node_id)
+                selection_order.append(node_id)
+                spent += cost
+                selected_positions[identity] += block.position_count
+                decisions[node_id] = SelectionDecision(
+                    node_id=node_id,
+                    selected=True,
+                    selection_rank=rank,
+                    marginal_gain=gain,
+                    marginal_gain_per_cost=gain / cost,
+                    cost=cost,
+                    reason=SelectionReason.DENSE_CACHE_FILL,
+                )
+        incomplete = {
+            identity: (selected_positions[identity], limit)
+            for identity, limit in position_limits.items()
+            if selected_positions[identity] != limit
+        }
+        if incomplete:
+            raise InfeasibleSelectionBudgetError(
+                f"dense cache capacity could not be filled exactly: {incomplete}"
+            )
 
     remaining = budget.value - spent
     for node in graph.nodes:

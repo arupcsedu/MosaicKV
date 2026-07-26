@@ -55,6 +55,16 @@ class _Processor:
         assert not add_special_tokens
         return _Encoded()
 
+    def batch_decode(
+        self,
+        token_ids: Any,
+        *,
+        skip_special_tokens: bool,
+        clean_up_tokenization_spaces: bool,
+    ) -> list[str]:
+        del token_ids, skip_special_tokens, clean_up_tokenization_spaces
+        return ["blue"]
+
 
 def _trial(request_id: str, *, cached: int) -> SGLangTrialMeasurement:
     geometry = KVCacheGeometry(layers=2, kv_heads=2, head_dim=4, dtype_bytes=2)
@@ -93,14 +103,15 @@ def _trial(request_id: str, *, cached: int) -> SGLangTrialMeasurement:
 
 class _Runner:
     def __init__(self) -> None:
-        self.sglang_version = "0.4.3.post4"
+        self.sglang_version = "0.5.1.post3"
         self.cache_geometry = KVCacheGeometry(2, 2, 4, 2)
         self.engine_metadata: JsonObject = {
-            "sglang_version": "0.4.3.post4",
+            "sglang_version": "0.5.1.post3",
             "cuda_graph": False,
             "overlap_schedule": False,
         }
         self.calls = 0
+        self.flushes = 0
         self.closed = False
 
     def run(
@@ -117,6 +128,9 @@ class _Runner:
 
     def close(self) -> None:
         self.closed = True
+
+    def flush_cache(self) -> None:
+        self.flushes += 1
 
 
 def test_prepare_prompt_reuses_chat_boundary_and_makes_media_json_safe() -> None:
@@ -153,11 +167,17 @@ def test_correctness_server_command_disables_optimizations_and_records_revision(
     config = load_config(root / "configs" / "sglang_fullkv_3b.yaml")
     options = SGLangRuntimeOptions()
     command = build_server_command(config, options, model_source=config.model.id, port=30123)
+    assert command[:3] == (
+        command[0],
+        "-m",
+        "mosaickv.backends.sglang_server",
+    )
     for required in (
         "--disable-overlap-schedule",
         "--disable-cuda-graph",
         "--enable-metrics",
         "--enable-cache-report",
+        "--stream-output",
     ):
         assert required in command
     for unsupported in (
@@ -169,7 +189,7 @@ def test_correctness_server_command_disables_optimizations_and_records_revision(
         "--enable-multimodal",
     ):
         assert unsupported not in command
-    assert command[command.index("--attention-backend") + 1] == "triton"
+    assert command[command.index("--attention-backend") + 1] == "torch_native"
     assert command[command.index("--revision") + 1] == config.model.revision
 
 
@@ -201,6 +221,7 @@ def test_fullkv_wrapper_writes_trials_and_exact_active_bytes(tmp_path: Path) -> 
     payload = json.loads(traces[0].read_text(encoding="utf-8"))
     assert payload["measurement_type"] == "sglang_fullkv"
     assert payload["native_mosaickv"] is False
+    assert payload["quality_answer"] == "blue"
     assert payload["trials"][1]["cached_tokens"] == 8
     assert payload["request_isolation"]["session_params"] is None
 
@@ -234,16 +255,18 @@ def test_request_isolation_rechecks_anchor_after_distinct_input(tmp_path: Path) 
     probe = payload["request_isolation"]["post_intervening_request_probe"]
     assert probe["performed"] is True
     assert probe["token_ids_match_anchor"] is True
+    assert probe["warm_distinct_token_ids_match_cold"] is True
     assert probe["intervening_distinct_input_fingerprints"] == 1
-    assert runner.calls == 5
+    assert runner.calls == 6
+    assert runner.flushes == 1
 
 
 def test_native_feature_is_explicitly_unsupported_for_installed_version() -> None:
-    capability = native_integration_capability("0.4.3.post4")
+    capability = native_integration_capability("0.5.1.post3")
     assert not capability.supported
     assert capability.reason_code.endswith("missing_atomic_sparse_request_cache_hook")
     with pytest.raises(NativeMosaicKVUnsupported, match="No simulated MosaicKV row"):
-        require_native_mosaickv_support(enabled=True, sglang_version="0.4.3.post4")
+        require_native_mosaickv_support(enabled=True, sglang_version="0.5.1.post3")
 
 
 @pytest.mark.parametrize(

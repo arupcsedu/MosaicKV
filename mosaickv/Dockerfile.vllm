@@ -1,17 +1,19 @@
-FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-devel
+FROM pytorch/pytorch:2.8.0-cuda12.8-cudnn9-devel
 
 ARG MOSAICKV_GIT_SHA=unknown
 LABEL org.opencontainers.image.title="MosaicKV common runtime"
 LABEL org.opencontainers.image.revision="${MOSAICKV_GIT_SHA}"
 LABEL org.mosaickv.python="3.11"
-LABEL org.mosaickv.cuda.runtime="12.4"
-LABEL org.mosaickv.cuda.minimum-driver="525"
+LABEL org.mosaickv.cuda.runtime="12.8"
+LABEL org.mosaickv.cuda.minimum-driver="570"
 LABEL org.mosaickv.backends="hf,vllm,sglang"
 LABEL org.mosaickv.support-status="unverified-until-clean-gpu-smoke"
 
 ENV PYTHONNOUSERSITE=1 \
     PIP_CONFIG_FILE=/dev/null \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    FLASH_ATTENTION_FORCE_BUILD=TRUE \
+    MAX_JOBS=16 \
     VIRTUAL_ENV=/opt/mosaickv-venv \
     MOSAICKV_ENV_DIR=/opt/mosaickv-venv \
     MOSAICKV_CACHE_ROOT=/scratch/djy8hg/cache/mosaickv \
@@ -58,9 +60,14 @@ RUN python -m pip install 'uv==0.11.29' \
 
 COPY mosaickv /opt/MosaicKV/mosaickv
 WORKDIR /opt/MosaicKV/mosaickv
-RUN uv pip install --python /opt/mosaickv-venv/bin/python \
+RUN MOSAICKV_ENV=/opt/mosaickv-venv \
+      scripts/build_flash_attn_wheel.sh \
+      /scratch/djy8hg/cache/mosaickv/flash-attn-wheelhouse-source \
+    && uv pip install --python /opt/mosaickv-venv/bin/python \
+      --cache-dir /scratch/djy8hg/cache/mosaickv/uv --reinstall --no-deps \
+      /scratch/djy8hg/cache/mosaickv/flash-attn-wheelhouse-source/flash_attn-2.8.3-*.whl \
+    && uv pip install --python /opt/mosaickv-venv/bin/python \
       --cache-dir /scratch/djy8hg/cache/mosaickv/uv --no-deps --editable . \
-    && scripts/apply_env_patches.sh /opt/mosaickv-venv \
     && uv pip check --python /opt/mosaickv-venv/bin/python \
     && useradd --create-home --uid 10001 mosaickv \
     && chown -R mosaickv:mosaickv /scratch/djy8hg/cache/mosaickv /opt/MosaicKV

@@ -68,8 +68,8 @@ pins, among many packages:
 | triton | `2.1.0` |
 
 Python is not pinned in the repository. These versions conflict materially
-with the common stack (torch 2.5.1, transformers 4.49.0, accelerate 1.13.0,
-datasets 4.1.1, and CUDA 12.4). Official LOOK-M execution is therefore
+with the common stack (torch 2.8.0, transformers 4.55.2, accelerate 1.13.0,
+datasets 4.1.1, and CUDA 12.8). Official LOOK-M execution is therefore
 unsupported under the single-environment policy. Changing its dependencies
 and calling the result official would invalidate paper fidelity; use the
 separately labeled `lookm_reimpl` path.

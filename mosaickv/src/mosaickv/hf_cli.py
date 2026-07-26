@@ -134,7 +134,15 @@ def _direct_config(args: argparse.Namespace) -> RunConfig:
         model=ModelConfig(model_id, revision, Precision(str(args.precision))),
         dataset=DatasetConfig(task.dataset_id, str(dataset_revision), task.split),
         execution=ExecutionConfig(
-            Backend(backend), str(args.attention_backend), int(args.seed), True
+            Backend(backend),
+            str(args.attention_backend),
+            int(args.seed),
+            True,
+            (
+                str(args.decode_attention_backend)
+                if args.decode_attention_backend is not None
+                else None
+            ),
         ),
         generation=GenerationConfig(max_new_tokens=int(args.max_new_tokens)),
         cache=CacheConfig(
@@ -146,7 +154,10 @@ def _direct_config(args: argparse.Namespace) -> RunConfig:
         method=method,
         forecasting=forecasting,
         graph=GraphConfig(enabled=method.is_mosaickv),
-        selection=SelectionConfig(enabled=method.is_mosaickv),
+        selection=SelectionConfig(
+            enabled=method.is_mosaickv,
+            stop_on_nonpositive_gain=method is not MosaicKVMethod.MOSAICKV_EXACT,
+        ),
         prototypes=PrototypeConfig(enabled=prototype_enabled),
         residual=ResidualConfig(enabled=residual_enabled),
         repair=RepairConfig(
@@ -212,10 +223,8 @@ def _model_kwargs(config: RunConfig, *, local_files_only: bool) -> dict[str, Any
         raise ValueError("the HF runtime supports model precision fp32, fp16, or bf16")
     kwargs: dict[str, Any] = {
         "attn_implementation": config.execution.attention_implementation,
-        # The common MosaicKV lock pins Transformers 4.49.0.  Its
-        # ``from_pretrained`` path accepts ``torch_dtype``; the shorter
-        # ``dtype`` spelling is a later API and is forwarded to the model
-        # constructor by 4.49, where it fails before weights are loaded.
+        # Keep the established ``torch_dtype`` spelling for the audited
+        # Transformers 4.55.2 checkpoint loaders.
         "torch_dtype": dtype,
         "local_files_only": local_files_only,
         "low_cpu_mem_usage": True,
@@ -329,8 +338,11 @@ def run_hf_evaluation(
 ) -> tuple[int, JsonObject]:
     """Load one pinned model and execute local or lmms-eval samples."""
 
-    if config.execution.attention_implementation != "eager":
-        raise ValueError("only --attention-backend eager has passed the correctness gate")
+    if config.execution.attention_implementation != "eager" and not config.method.is_full_cache:
+        raise ValueError(
+            "compressed HF methods require --attention-backend eager; "
+            "SDPA and FlashAttention-2 are FullKV-only"
+        )
     if config.execution.deterministic_algorithms:
         os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
     import torch

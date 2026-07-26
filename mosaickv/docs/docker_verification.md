@@ -6,21 +6,29 @@ Status: **blocked by cluster platform; no Docker run is claimed**.
 
 The canonical `mosaickv/Dockerfile` builds one common image. It:
 
-- use PyTorch 2.5.1 with CUDA 12.4;
-- install all 243 exact common-lock distributions into
+- use PyTorch 2.8.0 with CUDA 12.8;
+- install all 251 exact common-lock distributions into
   `/opt/mosaickv-venv`;
-- apply and verify the versioned SGLang/Transformers compatibility patch;
-- expose the locked wheel-provided NVRTC library to native kernels;
+- source-build the pinned A100 multimodal inference subset (head dimensions
+  64/80/128) of
+  FlashAttention 2.8.3 against the image GLIBC/CUDA stack;
 - install MosaicKV editable without dependency resolution;
 - place pip, uv, Hugging Face, compiler, backend, and temporary caches under
   `/scratch/djy8hg/cache/mosaickv`; and
 - run `scripts/docker_smoke.sh` as a non-root user without loading model
   weights.
 
-The host common environment exercises the same lock, patch, cache bootstrap,
+The host common environment exercises the same lock, source-wheel build, cache bootstrap,
 verifier, doctor, and synthetic smoke used by the image entry point. This is
 useful compatibility evidence, but it is not a substitute for an actual image
 build and `docker run`.
+
+The FlashAttention wheel is deliberately specialized rather than a generic
+training wheel: SM80, FP16/BF16, audited head dimensions 64/80/128, forward
+only. The image's
+GPU verifier runs both dense and varlen kernels and rejects any image whose
+extension does not enforce that boundary. Model-level FlashAttention parity is
+still a separate gate.
 
 ## Platform evidence
 

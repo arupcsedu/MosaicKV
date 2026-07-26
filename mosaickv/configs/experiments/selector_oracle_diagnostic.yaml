@@ -1,0 +1,73 @@
+matrix_schema_version: 1
+matrix_revision: 1
+capability_catalog_version: common-env-2026-07-25-v2
+experiment_id: selector_oracle_diagnostic
+description: Evaluation-only FullKV oracle audit of the frozen selector-calibration winner on calibration IDs; oracle outputs cannot enter online selection.
+enabled: true
+
+axes:
+  models: [llava_1_5_7b, qwen2_5_vl_3b, qwen2_5_vl_7b, llava_onevision_7b_optional]
+  backends: [hf_eager, hf_sdpa, hf_flash_attention_2, vllm, sglang]
+  methods: [full_kv, random_kv, prompt_attention_topk, lookm_reimpl, prefixkv_reimpl, vl_cache_reimpl, mosaickv_exact, mosaickv_proto, mosaickv_full]
+  tasks: [mmstar, mmvet, textvqa, docvqa, chartqa, videomme]
+  retention_ratios: [1.0, 0.8, 0.6, 0.4, 0.2, 0.1, 0.05]
+  output_lengths: [32, 64, 128]
+  selection_seeds: [17, 29, 43]
+
+generation:
+  deterministic: true
+  do_sample: false
+  temperature: 0.0
+  top_p: 1.0
+  output_length_policy: fixed_max_new_tokens
+
+performance:
+  warmups: 5
+  timed_repetitions: 20
+
+comparison:
+  primary_budget: active_kv_bytes
+  nominal_retention_only_for_scheduling: true
+  require_realized_byte_match_before_aggregation: true
+
+run:
+  output_root: /scratch/djy8hg/runs/mosaickv/experiments/selector_oracle_diagnostic
+  cache_root: /scratch/djy8hg/cache/mosaickv
+  subset_size: 5
+  measurement_mode: exploratory_oracle_diagnostic
+  resume: true
+
+sweeps:
+  - name: frozen_winner_oracle
+    models: [qwen2_5_vl_3b]
+    backends: [hf_eager]
+    methods: [mosaickv_exact]
+    tasks: [docvqa]
+    retention_ratios: [0.2]
+    output_lengths: [32]
+    selection_seeds: [17]
+    subset_size: 5
+    variant: normalized_hybrid1_reserve0_oracle8
+    overrides:
+      diagnostics:
+        enabled: true
+        sample_ids:
+          - docvqa:58425
+          - docvqa:59264
+          - docvqa:57903
+          - docvqa:15325
+          - docvqa:49187
+        sample_ledger_sha: abbe3fc8e3b64adf3f4ee6c08e541e2e1d28e9c229a1181516b7bdfd155ca4b7
+        forecast_oracle_steps: 8
+      forecasting:
+        draft_steps: 1
+      selection:
+        minimum_stratum_fraction: 0.0
+
+blocked:
+  - scope:
+      methods: [mosaickv_proto, mosaickv_full]
+    reason: Qwen2.5-VL post-M-RoPE prototype and residual paths remain fail-closed.
+  - scope:
+      tasks: [mmstar, mmvet, textvqa, chartqa, videomme]
+    reason: Oracle diagnostics are limited to the frozen DocVQA calibration ledger.

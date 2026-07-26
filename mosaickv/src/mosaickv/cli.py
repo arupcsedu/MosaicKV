@@ -304,6 +304,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     evaluate_parser.add_argument("--attention-backend", default="eager")
     evaluate_parser.add_argument(
+        "--decode-attention-backend",
+        help="optional audited HF decode backend (for example eager prefill plus SDPA decode)",
+    )
+    evaluate_parser.add_argument(
         "--method",
         default="full_kv",
         choices=[method.value for method in MosaicKVMethod],
@@ -370,6 +374,14 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate_parser.add_argument("--tensor-parallel-size", type=int, default=1)
     evaluate_parser.add_argument("--gpu-memory-utilization", type=float, default=0.9)
     evaluate_parser.add_argument("--vllm-max-model-len", type=int)
+    evaluate_parser.add_argument(
+        "--enable-vllm-prefix-caching",
+        action="store_true",
+        help=(
+            "opt in to vLLM prefix caching; the controlled FullKV reference "
+            "defaults off until cold/cached token parity is established"
+        ),
+    )
     evaluate_parser.add_argument("--sglang-context-length", type=int, default=4096)
     evaluate_parser.add_argument("--sglang-mem-fraction-static", type=float, default=0.8)
     evaluate_parser.add_argument("--sglang-port", type=int, default=0)

@@ -95,7 +95,11 @@ Rows may be grouped as a direct comparison only if the following manifest values
 - backend and attention implementation; and
 - relevant hardware and execution topology.
 
-For paired task-quality analyses, store an immutable example ID and output for every item so that methods are aligned on the same examples. For stochastic decoding, reuse the same declared seed schedule and sampling implementation. If output length is fixed, enforce the same number of generated tokens; if stopping is semantic, share the same stopping criteria and report realized lengths.
+For paired task-quality analyses, store an immutable example ID and output for every item so that methods are aligned on the same examples. For stochastic decoding, reuse the same declared seed schedule and sampling implementation. If output length is fixed, enforce the same number of generated tokens; if stopping is semantic, share the same stopping criteria and report realized lengths. Fixed-length systems timing and benchmark answer scoring are separate accounting boundaries: execute and retain the complete fixed-length token trajectory for latency, but decode the scored answer only through the first model EOS/end-of-turn token. Record the terminal-token IDs, first terminal index, scored token count, and timed token count. Never score post-EOS tokens.
+
+For dense Hugging Face caches, record both logical selected KV bytes and materialized tensor-storage bytes. Materialized active bytes include unavoidable alignment padding and remain the primary systems comparison. `mosaickv_exact` byte-matched runs must fill the declared budget to within the maximum fixed-block rounding gap. If selection intentionally stops on nonpositive marginal gain, allocate only the selected dense capacity and compare the resulting measured active bytes; do not pad an underfilled logical selection back to a nominal retention target and describe the padding as selected evidence.
+
+Utility coefficients may combine signals only after the configured normalization policy has placed them on documented commensurate scales. The default `layer_head_l1` policy independently normalizes attention, expected value contribution, and uniqueness within every layer/KV-head stratum. Record the normalization and the per-stratum reserve in the resolved configuration. Oracle future-query diagnostics are evaluation-only: store them in traces, exclude their runtime and memory effects from online measurements, and never feed them to cache selection or repair.
 
 The comparison validator must run before metric aggregation and must fail closed on missing or mismatched values.
 
@@ -158,6 +162,12 @@ Version the warmup count, measured repetitions, synchronization points, batch/co
 
 Keep quality and systems configurations paired. Measure on otherwise idle, identified hardware; record power/clock policy when controlled. Report the distribution or uncertainty over repetitions, not only the best observation. Preserve raw timings and profiler traces used for breakdown claims.
 
+Inference latency excludes trace construction, canonical catalog hashing, and
+artifact I/O for every method. The HF runtime records trace-construction and
+hashing wall time as `timing_breakdown.trace_instrumentation`; artifact I/O
+begins only after the inference timer has stopped. Do not add method-specific
+debug-catalog work to one method's latency while omitting it from another.
+
 ## Baseline reproduction
 
 Official external source belongs under `third_party/<baseline>/` at a pinned commit SHA with license and attribution intact. Record upstream URL, paper citation, commit, installation steps, local patch hash, model/backend compatibility, and the exact invoked entry point.
@@ -189,6 +199,12 @@ resolved config -> run manifest -> raw per-example outputs/timings
 ```
 
 Every arrow must be implemented by a versioned command or script. Tables and figures must not be edited by hand. Retain logs for failures as well as successes, mark superseded runs without deleting their lineage, and verify hashes when moving artifacts.
+
+Large graph, selection, prototype, and packing catalogs are stored in full only
+for sample IDs explicitly frozen in `diagnostics.sample_ids`. Other traces
+record their exact count and canonical SHA-256 digest so runs remain auditable
+without unbounded artifact growth. Evaluation-only oracle values may appear in
+diagnostic traces but must never be passed back to the online compressor.
 
 ## Minimum reproduction checklist
 

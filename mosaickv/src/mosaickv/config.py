@@ -177,23 +177,47 @@ class ExecutionConfig:
     attention_implementation: str
     seed: int = 0
     deterministic_algorithms: bool = True
+    decode_attention_implementation: str | None = None
 
     def __post_init__(self) -> None:
         if not self.attention_implementation.strip():
             raise ConfigurationError("execution.attention_implementation must be non-empty")
+        if (
+            self.decode_attention_implementation is not None
+            and not self.decode_attention_implementation.strip()
+        ):
+            raise ConfigurationError(
+                "execution.decode_attention_implementation must be non-empty or null"
+            )
         if self.seed < 0:
             raise ConfigurationError("execution.seed must be >= 0")
 
     @classmethod
     def from_mapping(cls, value: object) -> ExecutionConfig:
         data = _mapping(value, "execution")
-        allowed = {"backend", "attention_implementation", "seed", "deterministic_algorithms"}
+        allowed = {
+            "backend",
+            "attention_implementation",
+            "decode_attention_implementation",
+            "seed",
+            "deterministic_algorithms",
+        }
         _reject_unknown(data, allowed, "execution")
         return cls(
             backend=_enum(Backend, data.get("backend"), "execution.backend"),
             attention_implementation=_required_str(data, "attention_implementation", "execution"),
             seed=_int(data, "seed", 0, "execution"),
             deterministic_algorithms=_bool(data, "deterministic_algorithms", True, "execution"),
+            decode_attention_implementation=(
+                None
+                if data.get("decode_attention_implementation") is None
+                else _optional_str(
+                    data,
+                    "decode_attention_implementation",
+                    "eager",
+                    "execution",
+                )
+            ),
         )
 
 
@@ -244,12 +268,19 @@ class FidelityDiagnosticsConfig:
     enabled: bool = False
     sample_ids: tuple[str, ...] = ()
     sample_ledger_sha: str | None = None
+    forecast_oracle_steps: int = 0
 
     def __post_init__(self) -> None:
         if len(self.sample_ids) != len(set(self.sample_ids)):
             raise ConfigurationError("diagnostics.sample_ids cannot contain duplicates")
         if any(not sample_id.strip() for sample_id in self.sample_ids):
             raise ConfigurationError("diagnostics.sample_ids must be non-empty strings")
+        if self.forecast_oracle_steps < 0:
+            raise ConfigurationError("diagnostics.forecast_oracle_steps must be >= 0")
+        if not self.enabled and self.forecast_oracle_steps:
+            raise ConfigurationError(
+                "diagnostics.forecast_oracle_steps requires diagnostics.enabled=true"
+            )
         if self.enabled and not self.sample_ids:
             raise ConfigurationError(
                 "diagnostics.sample_ids must be non-empty when diagnostics are enabled"
@@ -272,7 +303,16 @@ class FidelityDiagnosticsConfig:
     @classmethod
     def from_mapping(cls, value: object) -> FidelityDiagnosticsConfig:
         data = _mapping(value, "diagnostics")
-        _reject_unknown(data, {"enabled", "sample_ids", "sample_ledger_sha"}, "diagnostics")
+        _reject_unknown(
+            data,
+            {
+                "enabled",
+                "sample_ids",
+                "sample_ledger_sha",
+                "forecast_oracle_steps",
+            },
+            "diagnostics",
+        )
         raw_ids = data.get("sample_ids", ())
         if not isinstance(raw_ids, list | tuple) or not all(
             isinstance(sample_id, str) for sample_id in raw_ids
@@ -285,6 +325,7 @@ class FidelityDiagnosticsConfig:
             enabled=_bool(data, "enabled", False, "diagnostics"),
             sample_ids=tuple(cast("list[str] | tuple[str, ...]", raw_ids)),
             sample_ledger_sha=raw_sha,
+            forecast_oracle_steps=_int(data, "forecast_oracle_steps", 0, "diagnostics"),
         )
 
 
@@ -558,21 +599,29 @@ class UtilityConfig:
     lambda_q: float = 1.0
     lambda_v: float = 0.25
     lambda_o: float = 0.25
+    normalization: str = "layer_head_l1"
 
     def __post_init__(self) -> None:
         for name in ("lambda_q", "lambda_v", "lambda_o"):
             value = getattr(self, name)
             if not math.isfinite(value) or value < 0:
                 raise ConfigurationError(f"utility.{name} must be finite and >= 0")
+        if self.normalization != "layer_head_l1":
+            raise ConfigurationError("utility.normalization must be 'layer_head_l1'")
 
     @classmethod
     def from_mapping(cls, value: object) -> UtilityConfig:
         data = _mapping(value, "utility")
-        _reject_unknown(data, {"lambda_q", "lambda_v", "lambda_o"}, "utility")
+        _reject_unknown(
+            data,
+            {"lambda_q", "lambda_v", "lambda_o", "normalization"},
+            "utility",
+        )
         return cls(
             lambda_q=_float(data, "lambda_q", 1.0, "utility"),
             lambda_v=_float(data, "lambda_v", 0.25, "utility"),
             lambda_o=_float(data, "lambda_o", 0.25, "utility"),
+            normalization=_optional_str(data, "normalization", "layer_head_l1", "utility"),
         )
 
 
@@ -585,6 +634,7 @@ class SelectionConfig:
     lambda_g: float = -0.25
     lambda_m: float = -0.25
     stop_on_nonpositive_gain: bool = True
+    minimum_stratum_fraction: float = 0.25
     exhaustive_max_nodes: int = 20
 
     def __post_init__(self) -> None:
@@ -594,6 +644,8 @@ class SelectionConfig:
             value = getattr(self, name)
             if not math.isfinite(value):
                 raise ConfigurationError(f"selection.{name} must be finite")
+        if not 0 <= self.minimum_stratum_fraction <= 1:
+            raise ConfigurationError("selection.minimum_stratum_fraction must be in [0, 1]")
         if self.exhaustive_max_nodes < 1:
             raise ConfigurationError("selection.exhaustive_max_nodes must be >= 1")
 
@@ -606,6 +658,7 @@ class SelectionConfig:
             "lambda_g",
             "lambda_m",
             "stop_on_nonpositive_gain",
+            "minimum_stratum_fraction",
             "exhaustive_max_nodes",
         }
         _reject_unknown(data, allowed, "selection")
@@ -615,6 +668,7 @@ class SelectionConfig:
             lambda_g=_float(data, "lambda_g", -0.25, "selection"),
             lambda_m=_float(data, "lambda_m", -0.25, "selection"),
             stop_on_nonpositive_gain=_bool(data, "stop_on_nonpositive_gain", True, "selection"),
+            minimum_stratum_fraction=_float(data, "minimum_stratum_fraction", 0.25, "selection"),
             exhaustive_max_nodes=_int(data, "exhaustive_max_nodes", 20, "selection"),
         )
 

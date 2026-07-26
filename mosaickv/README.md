@@ -11,7 +11,7 @@ MosaicKV is a training-free multimodal KV-cache compression research system for 
 
 ## Project status
 
-The repository contains installable research infrastructure and a unified eager
+The repository contains installable research infrastructure and a unified
 Hugging Face runtime: strict configuration, provenance manifests, structured
 logging, model inspection, environment diagnostics, an lmms-eval adapter,
 append-only evaluation storage, explicit prefill/token decode, FullKV, simple
@@ -21,19 +21,23 @@ construction, block utility and selection, conservative cache tiers, and
 decode-time repair. Registered HF adapters expose post-RoPE cached keys, so
 unsafe prototype merging fails closed to exact selection.
 
-The common lock, package imports, CUDA smoke, static checks, unit tests, and
-synthetic 100%-retention equivalence gate pass. Pretrained-checkpoint parity,
-dataset progression, vLLM serving, and SGLang serving have not yet passed under
-the common lock. Official LOOK-M and PrefixKV source is pinned for inspection,
+The common lock, package imports, CUDA/FlashAttention smoke, static checks,
+unit tests, synthetic 100%-retention equivalence, and pinned Qwen2.5-VL-3B HF
+eager/SDPA/FlashAttention parity gates pass in exploratory dirty-tree runs.
+Qwen2.5-VL-3B FullKV cross-parity now passes for the current-lock vLLM and
+SGLang Torch-native wrappers. Dataset progression remains incomplete.
+Official LOOK-M and PrefixKV source is pinned for inspection,
 but official execution is disabled; only the explicitly labeled
 reimplementations belong to the common runtime. This repository currently
 reports **no paper-eligible measured experimental results**.
 
 The common environment imports the installed vLLM and SGLang stacks and passes
-the CUDA smoke. Their repository measurement wrappers have not yet passed a
-model-serving parity gate with the versions in the common lock, so no current
-vLLM or SGLang FullKV result is supported. Native MosaicKV integration remains
-fail-closed and produces no simulated native rows.
+the CUDA smoke. SGLang Stage A passes repeated determinism, active-byte
+accounting, request isolation, and 32/32 HF-SDPA token parity. vLLM loads and
+serves the pinned checkpoint, and its uncached Stage-A verifier plus 16/16 HF
+token parity pass. Prefix-cache cold/warm token divergence remains fail-closed.
+Native MosaicKV integration remains fail-closed and produces no simulated
+native rows.
 
 ## Development quick start
 
@@ -50,11 +54,12 @@ mosaickv/scripts/create_envs.sh --sync common
 /scratch/djy8hg/env/mosaickv/bin/mosaickv smoke
 ```
 
-The common lock uses Torch 2.5.1/CUDA 12.4, Transformers 4.49.0, vLLM 0.7.2,
-and SGLang 0.4.3.post4. It is resolver-consistent but remains unverified until
-the clean-tree gates pass. The bounded package-import and CUDA smoke passed on
-an A100; model/backend parity and native Docker remain separate, unpassed
-gates. Standalone FlashAttention-2 is not installed or claimed.
+The common lock uses Torch 2.8.0/CUDA 12.8, Transformers 4.55.2, vLLM 0.10.2,
+SGLang 0.5.1.post3, and FlashAttention 2.8.3. Exploratory A100 job `17347802`
+verified all 251 pins, required imports, CUDA matrix multiplication, and the
+specialized FlashAttention forward/rejection matrix. Model/backend parity and
+native Docker remain separate gates. The worktree was dirty, so none of this
+evidence is paper-eligible until repeated from a clean commit.
 
 Run `evaluate --config mosaickv/configs/smoke.toml` for the CPU preflight, or use `configs/hf_mosaickv.yaml` and a task to execute the unified HF runtime. Model caches must be outside the home directory.
 
@@ -98,6 +103,7 @@ semantics.
 - [Three-tier cache construction](docs/three_tier_cache.md) — exact anchors, conservative RoPE gates, weighted prototypes, pinned CPU residuals, layouts, and diagnostics.
 - [Decode-time residual repair](docs/decode_time_repair.md) — entropy/risk triggers, evaluation-only oracle isolation, asynchronous restoration, one-pass re-decode, persistent promotion, and budget eviction.
 - [Unified Hugging Face runtime](docs/huggingface_runtime.md) — method orchestration, packed-cache masks, safety fallbacks, YAML/CLI usage, traces, and validation progression.
+- [Decode-latency optimization audit](docs/decode_latency_optimization.md) — implemented fast paths, diagnostic evidence, and correctness-gated next optimizations.
 - [vLLM backend](docs/vllm_backend.md) and [native blocker](docs/vllm_native_blocker.md) — common-lock status, installed-source boundary, fail-closed feature flag, and the missing upstream sparse-position interface.
 - [SGLang backend](docs/sglang_backend.md) and [native blocker](docs/sglang_native_blocker.md) — common-lock status, installed-source boundary, and the missing atomic sparse-cache interface.
 - [Simple baselines](docs/simple_baselines.md) — exact-only policies, common budgets, deterministic allocation, traces, and configuration.

@@ -1,0 +1,100 @@
+schema_version: 1
+experiment_id: systems_microbench_validation_v1
+measurement_scope: validation_only_dirty_patch
+time_budget: "02:30:00"
+hardware:
+  required_gpu: NVIDIA A100-SXM4-80GB
+  isolated_visible_gpus_per_job: 1
+  fixed_sm_clock_mhz: 1095
+  fixed_clocks_if_permitted: true
+protocol:
+  warmups: 5
+  timed_repetitions: 20
+  deterministic_generation: true
+  precision: bf16
+  seed: 17
+  primary_memory_measure: active_kv_bytes
+  report_quantiles: [0.50, 0.95]
+measured_jobs:
+  - {backend: hf_eager, model: qwen3b, purpose: measured}
+  - {backend: hf_eager, model: qwen7b, purpose: measured}
+  - {backend: hf_eager, model: llava7b, purpose: measured_fullkv_only}
+supported_sweeps:
+  qwen3b_hf_eager:
+    image_resolutions: [224, 448, 672]
+    image_counts: [1, 2, 4]
+    output_lengths: [32, 64, 128, 256]
+    batch_sizes: [1]
+    retention_ratios: [1.0, 0.4, 0.2, 0.1]
+  qwen7b_hf_eager:
+    image_resolutions: [448]
+    image_counts: [1]
+    output_lengths: [64, 256]
+    batch_sizes: [1]
+    retention_ratios: [1.0, 0.4, 0.2, 0.1]
+  llava7b_hf_eager:
+    image_resolutions: [336]
+    image_counts: [1]
+    output_lengths: [64, 256]
+    batch_sizes: [1]
+    retention_ratios: [1.0, 0.2, 0.1]
+    block_size: 64
+  hf_sdpa:
+    methods: [full_kv]
+    output_lengths: [64, 256]
+  hf_eager_sdpa_decode:
+    methods: [full_kv, mosaickv_exact]
+    restrictions: [all_valid_cache, no_repair]
+    output_lengths: [64, 256]
+  hf_flash_attention_2:
+    methods: [full_kv]
+    output_lengths: [64, 256]
+  qwen3b_vllm:
+    methods: [full_kv]
+    image_resolutions: [224, 448, 672]
+    image_counts: [1, 2, 4]
+    output_lengths: [64, 256]
+    batch_sizes: [1, 2, 4]
+  qwen3b_sglang_torch_native:
+    methods: [full_kv]
+    output_lengths: [64, 256]
+unsupported:
+  - combination: hf_flash_attention_2_compressed
+    reason: compressed per-head logical-position masks require eager attention.
+  - combination: vllm_qwen7b_or_llava7b
+    reason: No matching common-lock parity pass exists for this bounded campaign.
+  - combination: native_mosaickv_vllm_or_sglang
+    reason: Audited native block-mutation APIs are unavailable and remain fail-closed.
+  - combination: mosaickv_proto_or_mosaickv_full
+    reason: Cached keys are post-RoPE and safe prototype phase handling is not implemented.
+  - combination: hf_batch_size_2_or_4
+    reason: The owned explicit HF decode adapters enforce batch size 1; no sequential proxy is used.
+resolved_capability_probe_failures:
+  - combination: hf_sdpa_all_requested_models
+    slurm_array_elements: ["17328032_3", "17328032_4", "17328032_5"]
+    reason: Model-specific adapters reject non-eager attention before inference.
+    resolution: >-
+      Current adapters admit SDPA and FlashAttention-2 FullKV; real Qwen-3B parity
+      jobs 17346718 and 17348171 passed. Eager-prefill/SDPA-decode exact mode is
+      separately labeled and restricted to all-valid no-repair caches.
+  - combination: vllm_qwen3b
+    slurm_array_elements: ["17328032_6"]
+    reason: >-
+      The obsolete split lock used vLLM 0.7.2 with Transformers 4.49.0.
+    resolution: >-
+      The common lock pins vLLM 0.10.2 and Transformers 4.55.2. Job 17351185
+      passed Stage A and exact 16/16 HF token parity with matched Qwen resize limits.
+  - combination: sglang_qwen3b_preprocessing
+    reason: SGLang 0.5.1 used hard-coded checkpoint resize defaults.
+    resolution: >-
+      The repository-local audited launcher aligns the HF/lmms Qwen resize bounds
+      without editing site-packages. Job 17351612 plus HF-SDPA job 17352472 passed
+      exact 32/32 token parity and request-isolation checks.
+bounded_runtime_adjustment:
+  combination: llava7b_mosaickv_exact
+  original_slurm_array_elements: ["17328032_2"]
+  action: use_block_size_64_and_bounded_retention_points
+  reason: >-
+    Block size 16 created four times the descriptor count needed for this systems
+    validation. Block size 64 is applied identically to FullKV and compressed LLaVA
+    rows; the bounded rerun measures retention 0.2 and 0.1.

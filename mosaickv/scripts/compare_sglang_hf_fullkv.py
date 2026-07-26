@@ -41,6 +41,13 @@ def compare(
         raise ValueError("both traces must contain generated token IDs")
     common = min(len(sglang_ids), len(hf_ids))
     matches = sum(sglang_ids[index] == hf_ids[index] for index in range(common))
+    token_ids_match = sglang_ids == hf_ids
+    sglang_quality_answer = sglang_trace.get("quality_answer")
+    decoded_text = (
+        sglang_quality_answer == hf_trace.get("answer")
+        if isinstance(sglang_quality_answer, str)
+        else token_ids_match
+    )
     checks = {
         "model": sglang_manifest.get("model") == hf_manifest.get("model"),
         "input_hashes": sglang_manifest.get("inputs") == hf_manifest.get("inputs"),
@@ -49,8 +56,8 @@ def compare(
             == hf_manifest.get("generation", {}).get("parameters_sha")
         ),
         "sample_id": sglang_trace.get("sample_id") == hf_trace.get("sample_id"),
-        "token_ids": sglang_ids == hf_ids,
-        "decoded_text": trials[0].get("answer") == hf_trace.get("answer"),
+        "token_ids": token_ids_match,
+        "decoded_text": decoded_text,
     }
     return {
         "schema_version": 1,
@@ -59,6 +66,11 @@ def compare(
         "checks": checks,
         "generated_tokens": {"hf": len(hf_ids), "sglang": len(sglang_ids)},
         "token_agreement": matches / max(len(sglang_ids), len(hf_ids)),
+        "decoded_text_basis": (
+            "explicit_eos_truncated_quality_answer"
+            if isinstance(sglang_quality_answer, str)
+            else "implied_by_identical_token_ids_for_legacy_trace"
+        ),
         "artifacts": {
             "hf_manifest": str(hf_manifest_path.resolve()),
             "hf_manifest_sha256": _sha256(hf_manifest_path),

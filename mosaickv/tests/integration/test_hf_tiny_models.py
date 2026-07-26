@@ -96,7 +96,7 @@ class _ProcessorWithoutTemplate(_TextOnlyProcessor):
         raise ValueError("processor has no chat template")
 
 
-def _llava(*, kv_heads: int = 1) -> Llava15Adapter:
+def _llava(*, kv_heads: int = 1, attention: str = "eager") -> Llava15Adapter:
     from transformers import LlavaConfig, LlavaForConditionalGeneration
 
     config = LlavaConfig(
@@ -124,12 +124,12 @@ def _llava(*, kv_heads: int = 1) -> Llava15Adapter:
             "eos_token_id": 2,
         },
         image_token_index=63,
-        attn_implementation="eager",
+        attn_implementation=attention,
     )
     return Llava15Adapter(LlavaForConditionalGeneration(config).eval(), _TextOnlyProcessor())
 
 
-def _qwen() -> Qwen25VLAdapter:
+def _qwen(*, attention: str = "eager") -> Qwen25VLAdapter:
     from transformers import Qwen2_5_VLConfig, Qwen2_5_VLForConditionalGeneration
 
     config = Qwen2_5_VLConfig(
@@ -160,7 +160,7 @@ def _qwen() -> Qwen25VLAdapter:
         video_token_id=61,
         vision_start_token_id=62,
         vision_end_token_id=63,
-        attn_implementation="eager",
+        attn_implementation=attention,
     )
     model = Qwen2_5_VLForConditionalGeneration(config).eval()
     return Qwen25VLAdapter(model, _TextOnlyProcessor())
@@ -175,7 +175,34 @@ def test_qwen_uses_tokenizer_template_when_processor_template_is_missing() -> No
     assert prepared.logical_sequence_length == 4
 
 
-def _onevision() -> LlavaOneVisionAdapter:
+@pytest.mark.hf
+@pytest.mark.integration
+def test_qwen_eager_prefill_can_switch_to_sdpa_decode() -> None:
+    torch.manual_seed(19)
+    eager = _qwen()
+    torch.manual_seed(19)
+    hybrid = _qwen()
+    messages = [{"role": "user", "content": "tiny prompt"}]
+    eager_prefill = eager.prefill(eager.prepare_inputs(messages), capture_queries=False)
+    hybrid_prefill = hybrid.prefill(hybrid.prepare_inputs(messages), capture_queries=False)
+
+    hybrid.set_attention_implementation("sdpa")
+    eager_step = eager.decode_one_token(
+        eager_prefill.next_token_id,
+        eager_prefill.state,
+        capture_queries=False,
+    )
+    hybrid_step = hybrid.decode_one_token(
+        hybrid_prefill.next_token_id,
+        hybrid_prefill.state,
+        capture_queries=False,
+    )
+
+    assert int(eager_step.next_token_id.item()) == int(hybrid_step.next_token_id.item())
+    assert float((eager_step.logits - hybrid_step.logits).abs().max()) <= 1e-5
+
+
+def _onevision(*, attention: str = "eager") -> LlavaOneVisionAdapter:
     from transformers import LlavaOnevisionConfig, LlavaOnevisionForConditionalGeneration
 
     config = LlavaOnevisionConfig(
@@ -205,7 +232,7 @@ def _onevision() -> LlavaOneVisionAdapter:
         image_token_index=62,
         video_token_index=63,
         image_grid_pinpoints=[[8, 8]],
-        attn_implementation="eager",
+        attn_implementation=attention,
     )
     model = LlavaOnevisionForConditionalGeneration(config).eval()
     return LlavaOneVisionAdapter(model, _TextOnlyProcessor())
@@ -362,6 +389,22 @@ def test_tiny_architecture_full_cache_and_reinjection_parity(builder: Any) -> No
     assert reinjection.maximum_logit_difference <= 1e-6
     assert mosaic_reinjection.token_agreement == 1.0
     assert mosaic_reinjection.maximum_logit_difference <= 1e-6
+
+
+@pytest.mark.hf
+@pytest.mark.integration
+@pytest.mark.parametrize("builder", [_llava, _qwen, _onevision])
+def test_tiny_architecture_sdpa_full_cache_matches_generate(builder: Any) -> None:
+    """Guard the fused FullKV route independently of eager compression."""
+
+    torch.manual_seed(0)
+    adapter = builder(attention="sdpa")
+    prepared = adapter.prepare_inputs([{"role": "user", "content": "tiny prompt"}])
+    parity = compare_with_generate(adapter, prepared, max_new_tokens=16)
+
+    assert adapter.model.config._attn_implementation == "sdpa"
+    assert parity.token_agreement == 1.0
+    assert parity.maximum_logit_difference <= 1e-6
 
 
 @pytest.mark.hf

@@ -20,6 +20,7 @@ class EvaluationOnlyOracleQueries:
     query_layers: tuple[Any, ...]
     greedy_token_ids: tuple[int, ...]
     future_steps: int
+    attention_steps: tuple[tuple[Any, ...], ...] = ()
     source: str = "evaluation_only_fullkv_greedy_decode"
 
     def __post_init__(self) -> None:
@@ -29,6 +30,8 @@ class EvaluationOnlyOracleQueries:
             raise ValueError("oracle token count does not match future_steps")
         if not self.query_layers:
             raise ValueError("oracle query layers cannot be empty")
+        if self.attention_steps and len(self.attention_steps) != self.future_steps:
+            raise ValueError("oracle attention step count does not match future_steps")
         for layer in self.query_layers:
             shape = tuple(int(item) for item in layer.shape)
             if len(shape) != 4 or shape[0] != 1 or shape[-2] != self.future_steps:
@@ -44,16 +47,23 @@ def collect_evaluation_only_true_future_queries(
     prefill: PrefillOutput,
     *,
     future_steps: int,
+    capture_attentions: bool = False,
 ) -> EvaluationOnlyOracleQueries:
     """Collect FullKV future queries on an isolated state for diagnostics only."""
 
     if future_steps <= 0:
         raise ValueError("future_steps must be positive")
-    rollout = run_isolated_greedy_query_rollout(adapter, prefill, steps=future_steps)
+    rollout = run_isolated_greedy_query_rollout(
+        adapter,
+        prefill,
+        steps=future_steps,
+        capture_attentions=capture_attentions,
+    )
     return EvaluationOnlyOracleQueries(
         query_layers=rollout.query_layers,
         greedy_token_ids=rollout.token_ids,
         future_steps=future_steps,
+        attention_steps=rollout.attention_steps,
     )
 
 

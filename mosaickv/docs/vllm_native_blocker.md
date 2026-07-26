@@ -1,61 +1,38 @@
 # vLLM native MosaicKV blocker
 
-Audit target: `vllm==0.7.2` in the common environment.
+Audit target: `vllm==0.10.2`, V1 engine, in the common environment.
 
 ## Verdict
 
-Native MosaicKV is unsupported. No native row may be emitted and
-`--enable-mosaickv` must remain fail-closed.
+Native MosaicKV is unsupported. `--enable-mosaickv` remains fail-closed and
+no native, prototype, repair, or simulated backend row may be emitted.
 
 ## Installed source inspected
 
-- `vllm/entrypoints/llm.py:52` — public `LLM` entry point;
-- `vllm/entrypoints/llm.py:277`, `:620`, and `:756` — public generation,
-  chat, and encoding methods;
-- `vllm/worker/cache_engine.py:20` — physical KV cache allocation and
-  swap/copy operations;
-- `vllm/core/block_manager.py:21` — scheduler-owned logical/physical block
-  management;
-- `vllm/worker/model_runner.py:997` — GPU runner base and per-step KV inputs;
-  and
-- `vllm/attention/backends/abstract.py:72` and `:91` — backend cache-shape and
-  block-copy interfaces.
+- `vllm/v1/worker/gpu_model_runner.py:155` — `GPUModelRunner`;
+- `gpu_model_runner.py:862` — `_prepare_inputs`;
+- `vllm/v1/core/kv_cache_manager.py:84` — `KVCacheManager`;
+- `vllm/v1/core/kv_cache_utils.py:159` — `KVCacheBlock`;
+- `vllm/v1/attention/backends/utils.py:37` — `CommonAttentionMetadata`; and
+- `vllm/v1/attention/backends/flash_attn.py:112` —
+  `FlashAttentionMetadata`.
 
-The public entry point exposes no post-prefill callback, request block table,
-arbitrary KV replacement transaction, logical-position override, or
-decode-time restoration callback. Internal cache copy/swap primitives do not
-transfer scheduler ownership and position metadata atomically.
+V1 can allocate/reuse physical blocks and report prefix hits, but it exposes
+no request-scoped post-prefill transaction that jointly updates the scheduler,
+block table, attention slot mapping, prefix ownership, and sparse original
+logical positions.
 
-## Missing hook
+## Required upstream interface
 
-A safe integration needs a request-scoped transaction after prefill and before
-the first decode step that:
+A safe integration needs a scheduler-owned prefill/decode-boundary transaction
+that exposes immutable logical positions and owned physical blocks, validates a
+whole-block selection, commits its block table and position map atomically,
+and invalidates or updates prefix-cache ownership. Prototype replacement would
+add strict K/V dtype/layout validation; repair would require a synchronized
+restore transaction.
 
-1. exposes immutable logical positions and owned physical block IDs;
-2. permits selecting complete blocks without renumbering positions;
-3. validates and commits the replacement block table atomically;
-4. optionally replaces K/V values with explicit dtype/layout validation;
-5. supports a synchronized decode-time restoration transaction; and
-6. invalidates or updates prefix-cache ownership without affecting another
-   request.
-
-## Correctness risks without the hook
-
-Directly mutating internal tensors can desynchronize the scheduler block
-manager, cache engine, attention slot mapping, prefix-cache ownership, and
-multimodal RoPE positions. Likely outcomes include cross-request leakage,
-stale-cache reads, incorrect next-token positions, premature block reuse, or
-silent output corruption.
-
-## Proposed upstream interface
-
-An upstream interface should provide a versioned `PrefillCacheView` and an
-atomic `commit_block_selection(request_id, retained_blocks,
-logical_positions)` operation. A separate synchronized
-`restore_blocks(request_id, blocks)` operation should be permitted only at a
-decode boundary. Both operations should validate attention-backend support and
-return exact active-byte accounting.
-
-Until such an interface or a reviewed version-pinned native patch exists,
-whole-block selection, prototype injection, and residual repair remain
-unsupported.
+Without that boundary, direct mutation risks stale reads, early block reuse,
+M-RoPE renumbering, cross-request leakage, and silent output corruption. A
+reviewed version-pinned native patch implementing this transaction—or an
+equivalent upstream public API—is required before the native flag can be
+enabled.

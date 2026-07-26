@@ -43,8 +43,10 @@ def test_fidelity_diagnostic_ledger_is_strict_and_hashed() -> None:
         enabled=True,
         sample_ids=("task:1", "task:2"),
         sample_ledger_sha="a" * 64,
+        forecast_oracle_steps=8,
     )
     assert config.enabled
+    assert config.forecast_oracle_steps == 8
     with pytest.raises(ConfigurationError, match="cannot contain duplicates"):
         FidelityDiagnosticsConfig(
             enabled=True,
@@ -53,6 +55,8 @@ def test_fidelity_diagnostic_ledger_is_strict_and_hashed() -> None:
         )
     with pytest.raises(ConfigurationError, match="sample_ledger_sha"):
         FidelityDiagnosticsConfig(enabled=True, sample_ids=("task:1",))
+    with pytest.raises(ConfigurationError, match="forecast_oracle_steps"):
+        FidelityDiagnosticsConfig(forecast_oracle_steps=1)
 
 
 @pytest.mark.parametrize("ratio", [0.0, -0.1, 1.1])
@@ -95,6 +99,16 @@ def test_load_hf_yaml_example() -> None:
     assert config.model.id == "Qwen/Qwen2.5-VL-3B-Instruct"
     assert len(config.model.revision) == 40
     assert config.execution.attention_implementation == "eager"
+    assert config.execution.decode_attention_implementation is None
+
+
+def test_execution_accepts_separate_decode_attention_backend() -> None:
+    payload = json.loads(canonical_config_json(synthetic_smoke_config()))
+    payload["execution"]["decode_attention_implementation"] = "sdpa"
+
+    config = RunConfig.from_mapping(payload)
+
+    assert config.execution.decode_attention_implementation == "sdpa"
 
 
 def test_load_simple_baseline_yaml_example() -> None:

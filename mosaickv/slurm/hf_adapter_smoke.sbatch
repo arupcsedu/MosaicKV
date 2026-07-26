@@ -3,7 +3,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=8
-#SBATCH --mem=0
+#SBATCH --mem=80G
 #SBATCH --time=02:00:00
 #SBATCH --partition=bii-gpu
 #SBATCH --reservation=bi_fox_dgx
@@ -53,6 +53,11 @@ if [[ -n "${MOSAICKV_HF_MODEL_ID:-}" ]]; then
   fi
   if [[ "${MOSAICKV_ALLOW_MODEL_DOWNLOAD:-0}" == 1 ]]; then
     CHECKPOINT_ARGS+=(--allow-download)
+  fi
+  if [[ -n "${MOSAICKV_HF_ATTENTION_IMPLEMENTATION:-}" ]]; then
+    CHECKPOINT_ARGS+=(
+      --attention-implementation "${MOSAICKV_HF_ATTENTION_IMPLEMENTATION}"
+    )
   fi
   srun "${HF_PYTHON}" scripts/verify_hf_adapters.py "${CHECKPOINT_ARGS[@]}"
 fi

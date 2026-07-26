@@ -7,12 +7,14 @@ CPU-only diagnostics and unit tests do not require the optional environment.
 from __future__ import annotations
 
 import asyncio
+import functools
 import hashlib
 import json
 import math
 import os
 import statistics
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -22,12 +24,17 @@ from itertools import pairwise
 from pathlib import Path
 from typing import Any, Protocol, cast
 
+from mosaickv.adapters.huggingface.qwen2_5_vl import (
+    QWEN25_VL_MAX_PIXELS,
+    QWEN25_VL_MIN_PIXELS,
+)
 from mosaickv.config import RunConfig
 from mosaickv.evaluation.messages import MultimodalMessage
 from mosaickv.evaluation.model import EvaluationRequest, GenerationMetrics, ModelGeneration
+from mosaickv.generation import QualityDecode, decode_quality_output, terminal_token_ids
 from mosaickv.types import JsonObject, Precision
 
-_AUDITED_VLLM_VERSION = "0.7.2"
+_AUDITED_VLLM_VERSION = "0.10.2"
 _SUPPORTED_MODELS: dict[str, bool] = {
     "Qwen/Qwen2.5-VL-3B-Instruct": True,
     "Qwen/Qwen2.5-VL-7B-Instruct": True,
@@ -67,17 +74,18 @@ def native_integration_capability(vllm_version: str) -> NativeIntegrationCapabil
         supported=False,
         feature="whole_block_selection_with_original_logical_positions",
         reason_code=(
-            "audited_0_7_2_missing_sparse_logical_block_table_hook"
+            "audited_0_10_2_missing_sparse_logical_block_table_hook"
             if vllm_version == _AUDITED_VLLM_VERSION
             else "unaudited_vllm_version"
         ),
         blocker_document="docs/vllm_native_blocker.md",
         inspected_symbols=(
             "vllm.engine.async_llm_engine.AsyncLLMEngine.generate",
-            "vllm.worker.model_runner.ModelRunner.prepare_model_input",
-            "vllm.core.block_manager.SelfAttnBlockSpaceManager",
-            "vllm.worker.cache_engine.CacheEngine",
-            "vllm.attention.backends.abstract.AttentionBackend",
+            "vllm.v1.worker.gpu_model_runner.GPUModelRunner._prepare_inputs",
+            "vllm.v1.core.kv_cache_manager.KVCacheManager",
+            "vllm.v1.core.kv_cache_utils.KVCacheBlock",
+            "vllm.v1.attention.backends.utils.CommonAttentionMetadata",
+            "vllm.v1.attention.backends.flash_attn.FlashAttentionMetadata",
         ),
     )
 
@@ -116,6 +124,7 @@ class VLLMRuntimeOptions:
     max_model_len: int | None = None
     cache_probe_repeats: int = 2
     local_files_only: bool = False
+    enable_prefix_caching: bool = False
     enable_mosaickv: bool = False
 
     def __post_init__(self) -> None:
@@ -399,6 +408,7 @@ class VLLMTrialMeasurement:
     gpu_memory_peak_bytes: int | None
     gpu_memory_peak_delta_bytes: int | None
     finish_reason: str | None
+    engine_timing_source: str = "unspecified"
 
     def to_json_object(self) -> JsonObject:
         return cast("JsonObject", asdict(self))
@@ -438,7 +448,7 @@ class _VLLMStatCollector:
             self._snapshot = _StatSnapshot()
 
     def record_v0(self, stats: Any) -> None:
-        """Record the public vLLM 0.7.2 ``Stats`` payload."""
+        """Record the legacy vLLM V0 ``Stats`` payload."""
 
         with self._lock:
             current = self._snapshot
@@ -453,13 +463,30 @@ class _VLLMStatCollector:
                 + tuple(float(value) for value in stats.time_decode_requests),
             )
 
+    def record_v1(self, iteration_stats: Any) -> None:
+        """Record the audited vLLM 0.10.2 V1 ``IterationStats`` payload."""
+
+        finished = tuple(iteration_stats.finished_requests)
+        with self._lock:
+            current = self._snapshot
+            self._snapshot = _StatSnapshot(
+                ttfts=current.ttfts
+                + tuple(float(value) for value in iteration_stats.time_to_first_tokens_iter),
+                itls=current.itls
+                + tuple(float(value) for value in iteration_stats.inter_token_latencies_iter),
+                prefill_seconds=current.prefill_seconds
+                + tuple(float(value.prefill_time) for value in finished),
+                decode_seconds=current.decode_seconds
+                + tuple(float(value.decode_time) for value in finished),
+            )
+
     def snapshot(self) -> _StatSnapshot:
         with self._lock:
             return self._snapshot
 
 
 class _VLLMStatLogger:
-    """Minimal vLLM 0.7.2 ``StatLoggerBase``-compatible collector."""
+    """Minimal legacy V0 ``StatLoggerBase``-compatible collector."""
 
     def __init__(self, collector: _VLLMStatCollector) -> None:
         self.collector = collector
@@ -471,17 +498,56 @@ class _VLLMStatLogger:
         del type, obj
 
 
-def _vllm_mm_cache_snapshot() -> tuple[int, int] | None:
-    """Read the audited vLLM 0.7.2 preprocessing-cache counters.
+class _VLLMV1StatLogger:
+    """Version-gated vLLM 0.10.2 V1 iteration-stat collector."""
+
+    def __init__(
+        self,
+        vllm_config: Any,
+        engine_index: int = 0,
+        *,
+        collector: _VLLMStatCollector,
+    ) -> None:
+        del vllm_config
+        self.engine_index = engine_index
+        self.collector = collector
+
+    def record(
+        self,
+        scheduler_stats: Any,
+        iteration_stats: Any,
+        engine_idx: int = 0,
+    ) -> None:
+        del scheduler_stats, engine_idx
+        if iteration_stats is not None:
+            self.collector.record_v1(iteration_stats)
+
+    def log_engine_initialized(self) -> None:
+        return None
+
+    def log(self) -> None:
+        return None
+
+
+def _vllm_mm_cache_snapshot(engine: Any | None = None) -> tuple[int, int] | None:
+    """Read audited vLLM 0.10.2 multimodal processor-cache counters.
 
     This private boundary is deliberately version-gated by the engine startup
     check.  It is measurement-only and never mutates the cache.
     """
 
+    if engine is not None:
+        try:
+            cache = engine.processor.mm_processor_cache._cache
+            cache_info = cache.stat()
+            return int(cache_info.total), int(cache_info.hits)
+        except (AttributeError, TypeError, ValueError):
+            pass
     try:
         from vllm.multimodal import MULTIMODAL_REGISTRY
 
-        processing_cache = MULTIMODAL_REGISTRY._processing_cache
+        registry = cast("Any", MULTIMODAL_REGISTRY)
+        processing_cache = registry._processing_cache
         cache = processing_cache._cache
         cache_info = cache.stat()
         return int(cache_info.total), int(cache_info.hits)
@@ -593,7 +659,7 @@ def _generation_int(generation: Mapping[str, object], name: str) -> int:
 
 
 class AsyncVLLMTrialRunner:
-    """Persistent public AsyncLLMEngine streaming wrapper for vLLM 0.7.2."""
+    """Persistent public AsyncLLMEngine streaming wrapper for vLLM 0.10.2."""
 
     def __init__(
         self,
@@ -606,6 +672,9 @@ class AsyncVLLMTrialRunner:
         self.options = options
         self._model_source = model_source or config.model.id
         self._collector = _VLLMStatCollector()
+        self._measurement_guard = threading.Lock()
+        self._active_measurements = 0
+        self._concurrency_epoch = 0
         self._loop = asyncio.new_event_loop()
         self._ready = threading.Event()
         self._startup_error: BaseException | None = None
@@ -631,6 +700,24 @@ class AsyncVLLMTrialRunner:
         self._loop.run_forever()
 
     def _build_engine(self) -> Any:
+        # V1 is required: vLLM 0.10.2 disables multimodal prefix caching in
+        # V0.  Set this before importing vLLM so the selected engine and the
+        # recorded metadata cannot diverge.
+        os.environ["VLLM_USE_V1"] = "1"
+        # The Stage-A contract is deterministic greedy decoding. vLLM's
+        # FlashInfer sampler is unnecessary for that path, while its startup
+        # profile JIT-compiles stochastic top-k/top-p kernels even when they
+        # will never be used. Select vLLM's native sampler explicitly; parity
+        # tests below remain the authority for output equivalence.
+        os.environ["VLLM_USE_FLASHINFER_SAMPLER"] = "0"
+        # FlashInfer JIT compilation is performed in vLLM's spawned engine
+        # process and invokes the locked ``ninja`` executable by name. Direct
+        # execution of ``<venv>/bin/python`` does not activate the environment,
+        # so explicitly expose its sibling executables to every child process.
+        interpreter_bin = str(Path(sys.executable).parent)
+        os.environ["PATH"] = os.pathsep.join(
+            part for part in (interpreter_bin, os.environ.get("PATH", "")) if part
+        )
         try:
             import vllm
             from vllm import AsyncEngineArgs, AsyncLLMEngine
@@ -665,11 +752,21 @@ class AsyncVLLMTrialRunner:
             "tensor_parallel_size": self.options.tensor_parallel_size,
             "gpu_memory_utilization": self.options.gpu_memory_utilization,
             "block_size": self.config.cache.block_size,
-            "enable_prefix_caching": True,
+            # Correctness/reference runs default to an uncached prompt.  The
+            # opt-in repeat-request cache probe remains available, but vLLM
+            # 0.10.2 changed Qwen2.5-VL greedy tokens between cold and cached
+            # requests in the controlled A100 probe.  Never hide that failed
+            # parity by enabling prefix caching in a reference row.
+            "enable_prefix_caching": self.options.enable_prefix_caching,
             "enforce_eager": True,
-            "disable_log_stats": False,
-            "disable_log_requests": True,
+            "disable_log_stats": True,
+            "enable_log_requests": False,
         }
+        if self.config.model.id.startswith("Qwen/Qwen2.5-VL-"):
+            kwargs["mm_processor_kwargs"] = {
+                "min_pixels": QWEN25_VL_MIN_PIXELS,
+                "max_pixels": QWEN25_VL_MAX_PIXELS,
+            }
         if self._model_source == self.config.model.id:
             kwargs["revision"] = self.config.model.revision
             kwargs["tokenizer_revision"] = self.config.model.revision
@@ -679,19 +776,22 @@ class AsyncVLLMTrialRunner:
             kwargs["max_model_len"] = self.options.max_model_len
         engine_args = AsyncEngineArgs(**kwargs)
 
-        engine_config = engine_args.create_engine_config()
+        stat_logger_factory = functools.partial(
+            _VLLMV1StatLogger,
+            collector=self._collector,
+        )
         engine = AsyncLLMEngine.from_engine_args(
             engine_args,
-            engine_config=engine_config,
-            stat_loggers=cast("Any", {"mosaickv": _VLLMStatLogger(self._collector)}),
+            stat_loggers=cast("Any", [stat_logger_factory]),
         )
         self.engine_metadata = {
             "vllm_version": self.vllm_version,
-            "execution_mode": "eager",
+            "execution_mode": "v1_eager",
             "cuda_graph": False,
             "attention_backend": os.environ.get("VLLM_ATTENTION_BACKEND", "auto"),
+            "sampling_backend": "vllm_native_greedy",
             "block_size": self.config.cache.block_size,
-            "prefix_caching": True,
+            "prefix_caching": self.options.enable_prefix_caching,
             "tensor_parallel_size": self.options.tensor_parallel_size,
             "gpu_memory_utilization": self.options.gpu_memory_utilization,
             "max_model_len": self.options.max_model_len,
@@ -700,6 +800,7 @@ class AsyncVLLMTrialRunner:
                 if self._model_source != self.config.model.id
                 else "model_id_and_revision"
             ),
+            "mm_processor_kwargs": kwargs.get("mm_processor_kwargs", {}),
         }
         return engine
 
@@ -717,12 +818,24 @@ class AsyncVLLMTrialRunner:
             top_p=_generation_float(generation, "top_p"),
             max_tokens=_generation_int(generation, "max_new_tokens"),
             seed=_generation_int(generation, "seed"),
+            # The owned HF correctness loop executes exactly max_new_tokens
+            # and only strips terminal tokens for quality scoring afterwards.
+            # Match that timed-output contract instead of letting vLLM stop
+            # its cache/timing trajectory at the first EOS token.
+            ignore_eos=True,
             output_kind=RequestOutputKind.DELTA,
             detokenize=True,
             skip_special_tokens=True,
         )
-        self._collector.reset()
-        mm_cache_before = _vllm_mm_cache_snapshot()
+        with self._measurement_guard:
+            exclusive_start = self._active_measurements == 0
+            self._active_measurements += 1
+            if self._active_measurements > 1:
+                self._concurrency_epoch += 1
+            request_epoch = self._concurrency_epoch
+            if exclusive_start:
+                self._collector.reset()
+        mm_cache_before = _vllm_mm_cache_snapshot(self._engine)
         memory = _GPUMemorySampler()
         memory.start()
         started = time.perf_counter()
@@ -752,16 +865,19 @@ class AsyncVLLMTrialRunner:
         finally:
             finished = time.perf_counter()
             memory.stop()
+            with self._measurement_guard:
+                exclusive_measurement = exclusive_start and request_epoch == self._concurrency_epoch
+                self._active_measurements -= 1
         latency = max(0.0, finished - started)
         ttft = token_times[0] if token_times else None
         itls = tuple(max(0.0, current - previous) for previous, current in pairwise(token_times))
         decode = max(0.0, token_times[-1] - token_times[0]) if len(token_times) > 1 else None
         generated = len(token_ids)
-        stats = self._collector.snapshot()
-        mm_cache_after = _vllm_mm_cache_snapshot()
+        stats = self._collector.snapshot() if exclusive_measurement else _StatSnapshot()
+        mm_cache_after = _vllm_mm_cache_snapshot(self._engine)
         mm_queries: int | None = None
         mm_hits: int | None = None
-        if mm_cache_before is not None and mm_cache_after is not None:
+        if exclusive_measurement and mm_cache_before is not None and mm_cache_after is not None:
             mm_queries = max(0, mm_cache_after[0] - mm_cache_before[0])
             mm_hits = max(0, mm_cache_after[1] - mm_cache_before[1])
         prefix_rate: float | None = None
@@ -786,6 +902,11 @@ class AsyncVLLMTrialRunner:
                 metrics_prefill = max(0.0, float(first_token) - float(scheduled))
             if first_token is not None and completed is not None:
                 metrics_decode = max(0.0, float(completed) - float(first_token))
+        engine_prefill = _one_or_none(stats.prefill_seconds) or metrics_prefill or ttft
+        engine_decode = _one_or_none(stats.decode_seconds) or metrics_decode or decode
+        engine_ttft = (
+            metrics_ttft if metrics_ttft is not None else _one_or_none(stats.ttfts) or ttft
+        )
         return VLLMTrialMeasurement(
             request_id=request_id,
             answer="".join(text_parts),
@@ -806,11 +927,9 @@ class AsyncVLLMTrialRunner:
             mm_cache_queries=mm_queries,
             mm_cache_hits=mm_hits,
             mm_cache_hit_rate=mm_rate,
-            engine_prefill_seconds=_one_or_none(stats.prefill_seconds) or metrics_prefill,
-            engine_decode_seconds=_one_or_none(stats.decode_seconds) or metrics_decode,
-            engine_ttft_seconds=(
-                metrics_ttft if metrics_ttft is not None else _one_or_none(stats.ttfts)
-            ),
+            engine_prefill_seconds=engine_prefill,
+            engine_decode_seconds=engine_decode,
+            engine_ttft_seconds=engine_ttft,
             engine_inter_token_latencies_seconds=stats.itls,
             gpu_memory_source=memory.source,
             gpu_memory_baseline_bytes=memory.baseline_bytes,
@@ -821,6 +940,11 @@ class AsyncVLLMTrialRunner:
                 else None
             ),
             finish_reason=finish_reason,
+            engine_timing_source=(
+                "vllm_v1_iteration_stats"
+                if stats.prefill_seconds or stats.decode_seconds
+                else "client_stream_boundaries_concurrent_safe_fallback"
+            ),
         )
 
     def run(
@@ -840,10 +964,14 @@ class AsyncVLLMTrialRunner:
 
     async def _shutdown_async(self) -> None:
         if self._engine is not None:
-            self._engine.shutdown_background_loop()
-            executor = getattr(getattr(self._engine, "engine", None), "model_executor", None)
-            if executor is not None and hasattr(executor, "shutdown"):
-                executor.shutdown()
+            shutdown = getattr(self._engine, "shutdown", None)
+            if shutdown is not None:
+                shutdown()
+            else:
+                self._engine.shutdown_background_loop()
+                executor = getattr(getattr(self._engine, "engine", None), "model_executor", None)
+                if executor is not None and hasattr(executor, "shutdown"):
+                    executor.shutdown()
         # vLLM's synchronous shutdown schedules cancellation of its asyncio
         # handlers. Give those cancellations a loop turn, then await every
         # remaining handler before stopping the owned event loop.
@@ -969,10 +1097,17 @@ class VLLMFullKVModel:
         )
         processor_kwargs: dict[str, Any] = {
             "local_files_only": options.local_files_only,
+            # Match the audited HF and SGLang Qwen2.5-VL preprocessing path.
+            # Transformers 4.55 switched this checkpoint to a fast processor
+            # by default, which is a controlled-input change rather than a
+            # serving-backend optimization.
+            "use_fast": False,
         }
         if model_source == config.model.id:
             processor_kwargs["revision"] = config.model.revision
-        processor = AutoProcessor.from_pretrained(model_source, **processor_kwargs)
+        processor = AutoProcessor.from_pretrained(  # type: ignore[no-untyped-call]
+            model_source, **processor_kwargs
+        )
         runner = AsyncVLLMTrialRunner(config, options, model_source=model_source)
         generation = {
             "max_new_tokens": config.generation.max_new_tokens,
@@ -1009,6 +1144,19 @@ class VLLMFullKVModel:
                     f"trial {index}; first={reference_tokens}, current={trial.token_ids}"
                 )
         first = trials[0]
+        configured_terminal_ids = terminal_token_ids(self.processor)
+        quality = (
+            decode_quality_output(self.processor, first.token_ids, configured_terminal_ids)
+            if configured_terminal_ids
+            else QualityDecode(
+                text=first.answer,
+                timed_token_count=len(first.token_ids),
+                scored_token_count=len(first.token_ids),
+                quality_completion_tokens=len(first.token_ids),
+                terminal_token_id=None,
+                terminal_token_index=None,
+            )
+        )
         trace: JsonObject = {
             "schema_version": 1,
             "measurement_type": "vllm_fullkv",
@@ -1021,16 +1169,25 @@ class VLLMFullKVModel:
             "prompt_sha256": prepared.prompt_sha256,
             "media_sha256": prepared.media_sha256,
             "generation": cast("JsonObject", generation),
+            "quality_answer": quality.text,
+            "quality_decoding": quality.to_record(),
+            "effective_sampling_parameters": {
+                "max_new_tokens": cast("int", generation["max_new_tokens"]),
+                "temperature": 0.0,
+                "top_p": cast("float", generation["top_p"]),
+                "seed": cast("int", generation["seed"]),
+                "ignore_eos": True,
+            },
             "engine": self.runner.engine_metadata,
             "trials": [trial.to_json_object() for trial in trials],
             "cache_measurement": {
                 "prefix_cache": "RequestOutput.num_cached_tokens",
                 "multimodal_preprocessor_cache": (
-                    "vllm.multimodal.MULTIMODAL_REGISTRY._processing_cache._cache.stat() "
-                    "per-request counter deltas (audited vLLM 0.7.2 private API)"
+                    "AsyncLLM.processor.mm_processor_cache._cache.stat() per-request "
+                    "counter deltas (audited vLLM 0.10.2 V1 private read-only API)"
                 ),
                 "encoder_output_cache": (
-                    "repeat-request timing probe only; vLLM 0.7.2 exposes no per-request "
+                    "repeat-request timing probe only; vLLM 0.10.2 exposes no per-request "
                     "encoder-output-cache hit counter"
                 ),
             },
@@ -1038,7 +1195,7 @@ class VLLMFullKVModel:
         trace_path = self.trace_directory / request.run_id / _safe_trace_name(request.sample_id)
         _atomic_json(trace_path, trace)
         return ModelGeneration(
-            answer=first.answer,
+            answer=quality.text,
             metrics=GenerationMetrics(
                 ttft=first.ttft_seconds,
                 prefill_time=first.engine_prefill_seconds,

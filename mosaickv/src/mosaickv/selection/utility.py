@@ -122,19 +122,31 @@ def _neighbor_sets(graph: SparseEvidenceGraph) -> tuple[frozenset[int], ...]:
 
 
 def _value_novelty(graph: SparseEvidenceGraph) -> tuple[tuple[float, ...], tuple[float, ...]]:
+    """Compute the reference novelty while caching each vector norm exactly once."""
+
     values = [np.asarray(node.pooled_value, dtype=np.float64).reshape(-1) for node in graph.nodes]
+    norms = tuple(float(np.linalg.norm(vector)) for vector in values)
     neighbors = _neighbor_sets(graph)
+    similarities: dict[tuple[int, int], float] = {}
     novelty: list[float] = []
     redundancy: list[float] = []
     for node_id, vector in enumerate(values):
-        vector_norm = float(np.linalg.norm(vector))
         maximum_similarity = 0.0
         for neighbor_id in neighbors[node_id]:
             neighbor = values[neighbor_id]
             if neighbor.size != vector.size:
                 continue
-            denominator = vector_norm * float(np.linalg.norm(neighbor))
-            similarity = float(np.dot(vector, neighbor) / denominator) if denominator else 0.0
+            pair = (node_id, neighbor_id) if node_id < neighbor_id else (neighbor_id, node_id)
+            similarity = similarities.get(pair)
+            if similarity is None:
+                first, second = pair
+                denominator = norms[first] * norms[second]
+                similarity = (
+                    float(np.dot(values[first], values[second]) / denominator)
+                    if denominator
+                    else 0.0
+                )
+                similarities[pair] = similarity
             maximum_similarity = max(maximum_similarity, min(1.0, similarity))
         redundancy.append(maximum_similarity)
         novelty.append(1.0 - maximum_similarity)
@@ -144,22 +156,29 @@ def _value_novelty(graph: SparseEvidenceGraph) -> tuple[tuple[float, ...], tuple
 def _centrality_and_singleton_coverage(
     graph: SparseEvidenceGraph,
 ) -> tuple[tuple[float, ...], tuple[float, ...]]:
-    degree = [0.0] * len(graph.nodes)
-    facility: list[dict[int, float]] = [dict() for _node in graph.nodes]
-    for source, target, weight in zip(
-        graph.row_indices, graph.column_indices, graph.weights, strict=True
-    ):
-        degree[source] += weight
-        degree[target] += weight
-        facility[source][target] = max(weight, facility[source].get(target, 0.0))
-    maximum_degree = max(degree, default=0.0)
-    centrality = tuple(value / maximum_degree if maximum_degree else 0.0 for value in degree)
     node_count = len(graph.nodes)
-    coverage = tuple(
-        (1.0 + sum(weight for target, weight in targets.items() if target != node_id)) / node_count
-        for node_id, targets in enumerate(facility)
-    )
-    return centrality, coverage
+    rows = np.asarray(graph.row_indices, dtype=np.int64)
+    columns = np.asarray(graph.column_indices, dtype=np.int64)
+    weights = np.asarray(graph.weights, dtype=np.float64)
+    degree = np.zeros(node_count, dtype=np.float64)
+    np.add.at(degree, rows, weights)
+    np.add.at(degree, columns, weights)
+    maximum_degree = float(degree.max(initial=0.0))
+    centrality = degree / maximum_degree if maximum_degree else degree
+
+    # Parallel typed edges share a facility pair; only their maximum weight
+    # contributes, exactly matching the sparse dictionary reference path.
+    encoded_pairs = rows * node_count + columns
+    unique_pairs, inverse = np.unique(encoded_pairs, return_inverse=True)
+    pair_weights = np.zeros(len(unique_pairs), dtype=np.float64)
+    np.maximum.at(pair_weights, inverse, weights)
+    pair_sources = unique_pairs // node_count
+    pair_targets = unique_pairs % node_count
+    nonself = pair_sources != pair_targets
+    facility_sums = np.zeros(node_count, dtype=np.float64)
+    np.add.at(facility_sums, pair_sources[nonself], pair_weights[nonself])
+    coverage = (1.0 + facility_sums) / node_count
+    return tuple(float(value) for value in centrality), tuple(float(value) for value in coverage)
 
 
 def _modality_rarity(graph: SparseEvidenceGraph) -> tuple[float, ...]:
@@ -172,6 +191,33 @@ def _modality_rarity(graph: SparseEvidenceGraph) -> tuple[float, ...]:
     return tuple(
         (node_count - counts[node.block.modality.value]) / (node_count - 1) for node in graph.nodes
     )
+
+
+def _normalize_head_signal(
+    graph: SparseEvidenceGraph,
+    values: tuple[float, ...],
+) -> tuple[float, ...]:
+    """Put one nonnegative signal on the same per-head L1 scale as attention.
+
+    The utility equation combines forecast probabilities, value contribution,
+    and uniqueness with dimensionless coefficients.  Comparing a probability
+    distribution with an unnormalized value norm or cosine distance makes the
+    coefficients sequence-length dependent.  Normalize each layer/KV-head
+    independently so every nonzero signal sums to one in the same stratum.
+    """
+
+    if len(values) != len(graph.nodes):
+        raise ValueError("utility signal length does not match graph nodes")
+    if any(not math.isfinite(value) or value < 0 for value in values):
+        raise ValueError("utility signals must be finite and nonnegative")
+    normalized = [0.0] * len(values)
+    for node_ids in _head_groups(graph).values():
+        total = sum(values[node_id] for node_id in node_ids)
+        if total <= 0:
+            continue
+        for node_id in node_ids:
+            normalized[node_id] = values[node_id] / total
+    return tuple(normalized)
 
 
 def compute_block_utilities(
@@ -200,17 +246,25 @@ def compute_block_utilities(
         forecast_attention_by_node=forecast_attention_by_node,
         forecast_attention_by_head=forecast_attention_by_head,
     )
-    novelty, redundancy = _value_novelty(graph)
+    raw_novelty, _raw_redundancy = _value_novelty(graph)
     centrality, coverage = _centrality_and_singleton_coverage(graph)
     rarity = _modality_rarity(graph)
+    raw_contribution = tuple(
+        probabilities[node.node_id]
+        * float(np.linalg.norm(np.asarray(node.pooled_value, dtype=np.float64)))
+        for node in graph.nodes
+    )
+    if weights.normalization != "layer_head_l1":  # pragma: no cover - strict config guards this
+        raise ValueError(f"unsupported utility normalization: {weights.normalization}")
+    contribution = _normalize_head_signal(graph, raw_contribution)
+    novelty = _normalize_head_signal(graph, raw_novelty)
+    redundancy = tuple(1.0 - value for value in novelty)
     utilities: list[BlockUtility] = []
     for node in graph.nodes:
         node_id = node.node_id
-        value_norm = float(np.linalg.norm(np.asarray(node.pooled_value, dtype=np.float64)))
-        contribution = probabilities[node_id] * value_norm
         local = (
             weights.lambda_q * probabilities[node_id]
-            - weights.lambda_v * contribution
+            - weights.lambda_v * contribution[node_id]
             - weights.lambda_o * novelty[node_id]
         )
         utilities.append(
@@ -218,7 +272,7 @@ def compute_block_utilities(
                 node_id=node_id,
                 forecast_attention_probability=probabilities[node_id],
                 value_novelty=novelty[node_id],
-                expected_attention_output_contribution=contribution,
+                expected_attention_output_contribution=contribution[node_id],
                 graph_centrality=centrality[node_id],
                 singleton_coverage_gain=coverage[node_id],
                 modality_rarity=rarity[node_id],

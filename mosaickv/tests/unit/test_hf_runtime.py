@@ -20,9 +20,11 @@ from mosaickv.backends.hf_runtime import (
     _attention_outputs,
     _compact_trace_records,
     _dense_physical_cache_budget,
+    _gather_dense_heads,
     _logit_kl,
+    _trace_catalog,
 )
-from mosaickv.cache_state import FullKVState
+from mosaickv.cache_state import FullKVState, Modality, ModalitySpan
 from mosaickv.config import (
     CacheConfig,
     ForecastingConfig,
@@ -202,6 +204,43 @@ def test_dense_physical_byte_budget_supports_fixed_multitoken_blocks() -> None:
     assert dense.prompt_capacity == 8
     assert dense.target_bytes == full.active_bytes // 2
     assert dense.position_limits == {(0, 0): 8}
+    assert dense.bytes_per_position == full.active_bytes // 16
+    assert dense.minimum_block_representable_fill(4) == (
+        dense.target_bytes - 3 * dense.bytes_per_position
+    )
+
+
+def test_dense_physical_byte_budget_ignores_fragment_only_capacity() -> None:
+    key = np.arange(65 * 4, dtype=np.float32).reshape(1, 1, 65, 4) + 1
+    full = FullKVState.from_tensors(
+        ((key, np.flip(key, axis=-1).copy()),),
+        modality_spans=(
+            ModalitySpan(0, 48, Modality.IMAGE),
+            ModalitySpan(48, 49, Modality.TEXT),
+            ModalitySpan(49, 65, Modality.IMAGE),
+        ),
+        block_size=16,
+        mandatory_logical_positions=(48,),
+        cached_key_state=CachedKeyState.NOT_APPLICABLE,
+    )
+    requested_capacity = 49
+    bytes_per_position = full.active_bytes // 65
+    config = replace(
+        _config(MosaicKVMethod.MOSAICKV_EXACT, requested_capacity / 65),
+        cache=CacheConfig(
+            requested_capacity * bytes_per_position,
+            BudgetUnit.BYTES,
+            requested_capacity / 65,
+            16,
+        ),
+    )
+
+    dense = _dense_physical_cache_budget(full, config)
+
+    assert dense is not None
+    assert dense.prompt_capacity == 48
+    assert dense.target_bytes == 48 * bytes_per_position
+    assert dense.target_bytes <= config.cache.budget_value
 
 
 def test_fidelity_formulas_match_known_attention_and_logit_patterns() -> None:
@@ -232,6 +271,38 @@ def test_fidelity_formulas_match_known_attention_and_logit_patterns() -> None:
     reference = torch.tensor([[3.0, 1.0, -2.0]])
     assert _logit_kl(reference, reference) == pytest.approx(0.0)
     assert _logit_kl(reference, torch.tensor([[1.0, 3.0, -2.0]])) > 0
+
+
+@pytest.mark.parametrize("head_axis,sequence_axis", ((1, 2), (2, 1)))
+def test_vectorized_dense_head_gather_preserves_layout_padding_and_tail(
+    head_axis: int,
+    sequence_axis: int,
+) -> None:
+    canonical = torch.arange(1 * 2 * 6 * 3, dtype=torch.float32).reshape(1, 2, 6, 3)
+    tensor = canonical if head_axis == 1 else canonical.movedim((1, 2), (2, 1))
+    packed, validity = _gather_dense_heads(
+        tensor,
+        head_axis=head_axis,
+        sequence_axis=sequence_axis,
+        positions=((4, 1), (0, 3, 2)),
+        prompt_capacity=4,
+        tail_tensor=tensor,
+        old_prompt_capacity=5,
+    )
+    canonical_packed = packed if head_axis == 1 else packed.movedim((2, 1), (1, 2))
+    expected = torch.zeros((1, 2, 5, 3))
+    expected[:, 0, 0, :] = canonical[:, 0, 4, :]
+    expected[:, 0, 1, :] = canonical[:, 0, 1, :]
+    expected[:, 0, 4, :] = canonical[:, 0, 5, :]
+    expected[:, 1, 0, :] = canonical[:, 1, 0, :]
+    expected[:, 1, 1, :] = canonical[:, 1, 3, :]
+    expected[:, 1, 2, :] = canonical[:, 1, 2, :]
+    expected[:, 1, 4, :] = canonical[:, 1, 5, :]
+    assert torch.equal(canonical_packed, expected)
+    assert torch.equal(
+        validity,
+        torch.tensor([[True, True, False, False, True], [True, True, True, False, True]]),
+    )
 
 
 def test_fidelity_attention_accepts_installed_dynamic_cache_protocol() -> None:
@@ -294,3 +365,16 @@ def test_compact_trace_preserves_counts_hashes_and_generated_tokens() -> None:
     assert forecast["heads"]["record_count"] == 1
     assert payload["generated_token_ids"] == [4, 5, 6]
     assert payload["repair_events"] == [{"triggered": False}]
+
+
+def test_streaming_trace_catalog_matches_post_materialization_compaction() -> None:
+    records = [
+        {"node_id": 2, "weight": 0.25, "type": "fallback"},
+        {"node_id": 7, "weight": 0.75, "type": "semantic"},
+    ]
+    payload = {"graph_edges": list(records)}
+    _compact_trace_records(payload)  # type: ignore[arg-type]
+
+    assert _trace_catalog(iter(records), compact=True) == payload["graph_edges"]
+    assert _trace_catalog(iter(records), compact=False) == records
+    assert _trace_catalog(iter(()), compact=True) == []

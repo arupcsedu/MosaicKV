@@ -69,9 +69,30 @@ def test_unsupported_backend_is_rejected_before_expansion() -> None:
     matrix = ExperimentMatrix.from_mapping(payload)
 
     with pytest.raises(
-        ExperimentMatrixError, match=r"unsupported combination.*model loading failed"
+        ExperimentMatrixError, match=r"unsupported combination.*artifact has not passed"
     ):
         expand_experiment_matrix(matrix)
+
+
+@pytest.mark.parametrize("backend", ("hf_sdpa", "hf_flash_attention_2"))
+def test_fused_hf_backends_admit_fullkv_only(backend: str) -> None:
+    payload = _payload()
+    sweeps = payload["sweeps"]
+    assert isinstance(sweeps, list)
+    assert isinstance(sweeps[0], dict)
+    sweeps[0]["backends"] = [backend]
+    sweeps[0]["methods"] = ["full_kv"]
+    sweeps[0]["retention_ratios"] = [1.0]
+    del sweeps[1:]
+    matrix = ExperimentMatrix.from_mapping(payload)
+
+    runs = expand_experiment_matrix(matrix)
+
+    assert runs
+    assert {run.config.method.value for run in runs} == {"full_kv"}
+    assert {run.config.execution.attention_implementation for run in runs} == {
+        "sdpa" if backend == "hf_sdpa" else "flash_attention_2"
+    }
 
 
 def test_video_task_is_rejected_for_image_only_model() -> None:
@@ -191,3 +212,5 @@ def test_main_quality_uses_only_supported_deterministic_strata() -> None:
     for run in runs:
         expected_block_size = 1 if run.config.method.value == "lookm_reimpl" else 16
         assert run.config.cache.block_size == expected_block_size
+        if run.config.method.value == "mosaickv_exact":
+            assert run.config.selection.stop_on_nonpositive_gain is False

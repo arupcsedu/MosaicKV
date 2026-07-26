@@ -1,84 +1,59 @@
 # SGLang backend
 
-## Current status
+## Stage A: FullKV measurement wrapper
 
-The common environment installs `sglang==0.4.3.post4`. Its package import,
-native-kernel imports, and CUDA smoke passed on an NVIDIA A100-SXM4-80GB, but
-no model-serving or HF parity run has passed with this version. Therefore:
+The common environment pins `sglang==0.5.1.post3`. The correctness profile
+launches the installed HTTP server with overlap scheduling and CUDA graphs
+disabled, Torch-native attention, deterministic greedy sampling, a persistent model,
+and explicitly controlled warmup. It records:
 
-- SGLang FullKV measurement rows are currently unsupported;
-- native MosaicKV remains fail-closed;
-- no optimized server profile is enabled; and
-- no SGLang row is paper-eligible.
+- streamed TTFT, inter-token/decode latency, request latency, and throughput;
+- server prefill/queue/e2e metadata when exposed;
+- Radix cached-token counts and Prometheus cache statistics;
+- exact logical active-KV bytes from model geometry;
+- process GPU memory and the exact server command; and
+- deterministic repeated trials plus an A-B-A request-isolation probe and a
+  warm-B versus post-`/flush_cache` cold-B token comparison.
 
-The repository contains a server-wrapper prototype written for another SGLang
-API version. Its flags, telemetry assumptions, and explicit capability guard
-are not accepted as a common-lock execution path. It must be ported and
-revalidated before use.
+Installed 0.5.1 routes and stream semantics are version-gated:
+`/get_server_info` supplies scheduler/memory-pool metadata, and
+the requested `meta_info.output_token_logprobs` supplies cumulative,
+prefix-validated authoritative token IDs. `BatchStrOut.output_ids` are only
+detokenizer deltas and are not used as the quality token sequence. Stage A
+emits only `full_kv`, retention `1.0`, `native_mosaickv=false` rows.
 
-## Installed-source capability
+SGLang 0.5.1 hard-codes Qwen resize limits in
+`sglang/srt/multimodal/processors/qwen_vl.py::resize_image`. The repository-local
+`mosaickv.backends.sglang_server` launcher preserves SGLang's ordinary import
+order, then sets the audited HF/lmms limits before `TokenizerManager` is
+constructed. The installed package is not edited. Both values and the exact
+launcher command are recorded in engine metadata.
 
-The installed source defines `Qwen2_5_VLForConditionalGeneration` in
-`sglang/srt/models/qwen2_5_vl.py:474` and exports it through `EntryClass` at
-line 759. `sglang/srt/models/llava.py` exports SGLang-specific LLaVA classes at
-line 574. These findings establish source registration only. Neither requested
-Qwen checkpoint nor a LLaVA checkpoint has been loaded through SGLang in the
-common environment.
+Exploratory A100 job `17351612` completed two synthetic samples with identical
+tokens across repeated trials, exact active-byte accounting, and a passing
+A-B-A plus warm-B/cold-B request-isolation check. The two reports under
+`/scratch/djy8hg/runs/mosaickv/sglang-fullkv-0.5.1-fix8/parity-sdpa/` pass all
+input/model/generation/text checks and exact 32/32 token parity against HF
+SDPA. HF eager differed at one near-tie token on the white image; the controlled
+HF SDPA job `17352472` reproduced SGLang exactly, identifying attention-kernel
+numerics rather than preprocessing or state leakage as the cause. Triton
+attention remains a separate optimized-production follow-up and may not inherit
+the Torch-native verdict.
 
-The public engine is `sglang/srt/entrypoints/engine.py:73`; `Engine.generate`
-starts at line 112. It does not expose a post-prefill KV callback or an atomic
-operation for request-scoped cache selection and restoration.
-
-Internally, `ReqToTokenPool` at
-`sglang/srt/mem_cache/memory_pool.py:46` owns request-to-token mappings,
-`TokenToKVPoolAllocator` at line 119 owns token slots, and `RadixCache` at
-`sglang/srt/mem_cache/radix_cache.py:79` owns reusable prefix entries. The
-`set_kv_buffer` method declared at `memory_pool.py:109` is an attention-backend
-write primitive; it does not atomically update all three ownership structures
-or multimodal logical positions. It is not a safe public MosaicKV API.
-
-Consequently, whole-block selection, prototype replacement, and residual
-repair are unsupported in the installed SGLang version.
-
-## Supported commands
-
-Create or reconcile only the common environment:
+Commands:
 
 ```bash
-cd /scratch/djy8hg/workdir/MosaicKV
 source mosaickv/scripts/cache_env.sh
-mosaickv/scripts/assert_clean_worktree.sh
-mosaickv/scripts/create_envs.sh --sync common
+sbatch mosaickv/slurm/sglang_fullkv.sbatch
+sbatch mosaickv/slurm/sglang_hf_fullkv_parity.sbatch
 ```
 
-Verify imports and CUDA without launching a server or loading weights:
+All caches and outputs must be below `/scratch/djy8hg`; `HF_TOKEN` is accepted
+only through the process environment.
 
-```bash
-sbatch --reservation=bi_fox_dgx mosaickv/slurm/env_smoke.sbatch
-```
+## Stage B: native MosaicKV
 
-Run the read-only environment report:
-
-```bash
-/scratch/djy8hg/env/mosaickv/bin/mosaickv doctor
-```
-
-There is intentionally no documented SGLang server command until the wrapper
-passes deterministic FullKV inference and controlled HF parity in the common
-environment. Cache and model files must remain under
-`/scratch/djy8hg/cache/mosaickv`; `HF_TOKEN` is accepted only from the process
-environment.
-
-## Re-enablement gates
-
-Before documenting SGLang execution, all of the following must pass from a
-clean commit:
-
-1. port server arguments, request formatting, and telemetry parsing to the
-   common-lock version;
-2. load each supported pinned checkpoint and preserve exact server arguments;
-3. verify deterministic repeats, request isolation, and controlled HF parity;
-4. validate TTFT, decode, throughput, memory, and Radix-cache observations;
-5. preserve raw per-trial traces and a complete manifest; and
-6. keep native MosaicKV disabled unless retention-1 parity, byte accounting,
-   and request-ownership invariants pass through a safe integration boundary.
+Native whole-block selection is unsupported for the audited installed source.
+The feature gate fails before server launch, and no simulation is substituted.
+The missing scheduler-owned atomic mapping/position transaction is documented
+in `sglang_native_blocker.md`.

@@ -6,7 +6,6 @@ import math
 from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from heapq import nsmallest
 from typing import Any
 
 import numpy as np
@@ -60,16 +59,18 @@ class _EdgeAccumulator:
             del candidates[worst_target]
 
     def finalize(self) -> tuple[_CandidateEdge, ...]:
-        retained: list[_CandidateEdge] = []
+        by_source: dict[int, list[_CandidateEdge]] = defaultdict(list)
         for (source, edge_type), candidates in self._edges.items():
-            retained.extend(
+            by_source[source].extend(
                 _CandidateEdge(source, target, edge_type, weight)
                 for target, weight in candidates.items()
             )
         return tuple(
-            sorted(
-                retained,
-                key=lambda edge: (edge.source, edge.target, edge.edge_type.value),
+            edge
+            for source in sorted(by_source)
+            for edge in sorted(
+                by_source[source],
+                key=lambda item: (item.target, item.edge_type.value),
             )
         )
 
@@ -102,12 +103,10 @@ def _top_indices(
 
     if not candidate_ids:
         return ()
-    ordered = nsmallest(
-        count,
-        range(len(candidate_ids)),
-        key=lambda index: (-float(scores[index]), candidate_ids[index]),
-    )
-    return tuple(ordered)
+    identifiers = np.asarray(candidate_ids, dtype=np.int64)
+    values = np.asarray(scores, dtype=np.float64)
+    ordered = np.lexsort((identifiers, -values))
+    return tuple(int(index) for index in ordered[:count])
 
 
 def _add_cosine_edges(
@@ -146,22 +145,34 @@ def _add_cosine_edges(
     for node_ids in feature_groups.values():
         node_ids.sort()
         matrix = np.stack([normalized[node_id] for node_id in node_ids])
+        unrestricted_group = (
+            config.require_same_layer
+            and config.require_same_kv_head
+            and maximum_position_span is None
+            and len(config.allowed_modality_pairs) == 9
+        )
         for start in range(0, len(node_ids), config.similarity_chunk_size):
             source_ids = node_ids[start : start + config.similarity_chunk_size]
             score_tile = matrix[start : start + len(source_ids)] @ matrix.T
             for row, source_id in enumerate(source_ids):
-                source = nodes[source_id]
-                compatible_indices = [
-                    index
-                    for index, target_id in enumerate(node_ids)
-                    if _compatible(
-                        source,
-                        nodes[target_id],
-                        config,
-                        maximum_position_span=maximum_position_span,
-                    )
-                    and float(score_tile[row, index]) > 0
-                ]
+                if unrestricted_group:
+                    compatible_indices = np.flatnonzero(score_tile[row] > 0).tolist()
+                    self_index = start + row
+                    if self_index in compatible_indices:
+                        compatible_indices.remove(self_index)
+                else:
+                    source = nodes[source_id]
+                    compatible_indices = [
+                        index
+                        for index, target_id in enumerate(node_ids)
+                        if _compatible(
+                            source,
+                            nodes[target_id],
+                            config,
+                            maximum_position_span=maximum_position_span,
+                        )
+                        and float(score_tile[row, index]) > 0
+                    ]
                 candidate_ids = [node_ids[index] for index in compatible_indices]
                 candidate_scores = score_tile[row, compatible_indices]
                 for selected_index in _top_indices(
@@ -458,28 +469,49 @@ def _add_fallback_edges(
         groups[_compatibility_prefix(node, config)].append(node.node_id)
     for node_ids in groups.values():
         ordered = sorted(node_ids, key=lambda node_id: (nodes[node_id].logical_center, node_id))
+        unrestricted_group = (
+            config.require_same_layer
+            and config.require_same_kv_head
+            and len(config.allowed_modality_pairs) == 9
+        )
         for index, source_id in enumerate(ordered):
             first = max(0, index - config.max_neighbors)
             last = min(len(ordered), index + config.max_neighbors + 1)
+            candidates: list[tuple[int, float]] = []
             for target_id in ordered[first:last]:
-                if _compatible(
-                    nodes[source_id],
-                    nodes[target_id],
-                    config,
-                    maximum_position_span=config.fallback_max_position_span,
-                ):
-                    distance = abs(
-                        nodes[source_id].logical_center - nodes[target_id].logical_center
+                source = nodes[source_id]
+                target = nodes[target_id]
+                compatible = (
+                    source_id != target_id
+                    and (
+                        config.fallback_max_position_span is None
+                        or abs(source.logical_center - target.logical_center)
+                        <= config.fallback_max_position_span
                     )
+                    if unrestricted_group
+                    else _compatible(
+                        source,
+                        target,
+                        config,
+                        maximum_position_span=config.fallback_max_position_span,
+                    )
+                )
+                if compatible:
+                    distance = abs(source.logical_center - target.logical_center)
                     span = config.fallback_max_position_span
                     score = 1.0 if span is None else 1.0 - distance / (span + 1)
-                    accumulator.add(
-                        source_id,
-                        target_id,
-                        EdgeType.FALLBACK_POSITIONAL,
-                        score,
-                        config.fallback_weight,
-                    )
+                    candidates.append((target_id, score))
+            for target_id, score in sorted(
+                candidates,
+                key=lambda item: (-item[1], item[0]),
+            )[: config.max_neighbors]:
+                accumulator.add(
+                    source_id,
+                    target_id,
+                    EdgeType.FALLBACK_POSITIONAL,
+                    score,
+                    config.fallback_weight,
+                )
 
 
 def _attention_features(

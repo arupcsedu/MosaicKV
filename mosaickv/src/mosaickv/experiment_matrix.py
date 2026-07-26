@@ -53,7 +53,7 @@ from mosaickv.types import (
 )
 
 MATRIX_SCHEMA_VERSION = 1
-CAPABILITY_CATALOG_VERSION = "common-env-2026-07-21-v1"
+CAPABILITY_CATALOG_VERSION = "common-env-2026-07-25-v2"
 ACCOUNTING_SPEC_SHA = "60915ac01ad35843c4de56620864145d5b81b973a3bfec03fb322d5e4f6ff695"
 
 REQUIRED_MODELS = frozenset(
@@ -159,29 +159,29 @@ BACKEND_CATALOG: dict[str, BackendCapability] = {
         "hf_sdpa",
         Backend.HUGGINGFACE,
         "sdpa",
-        False,
-        "HF adapters explicitly accept eager attention only",
+        True,
+        "FullKV only; compressed methods require eager attention",
     ),
     "hf_flash_attention_2": BackendCapability(
         "hf_flash_attention_2",
         Backend.HUGGINGFACE,
         "flash_attention_2",
-        False,
-        "FlashAttention-2 is not correctness-gated by the HF adapters",
+        True,
+        "FullKV only; requires the pinned host-compatible FlashAttention wheel and GPU gate",
     ),
     "vllm": BackendCapability(
         "vllm",
         Backend.VLLM,
         "eager",
         False,
-        "common-lock Qwen2.5-VL model loading failed and native cache mutation is unavailable",
+        "current vLLM 0.10.2 FullKV serving/parity artifact has not passed",
     ),
     "sglang": BackendCapability(
         "sglang",
         Backend.SGLANG,
-        "triton",
+        "torch_native",
         False,
-        "common-lock model-serving parity and native cache mutation are not validated",
+        "current SGLang 0.5.1 FullKV serving/parity artifact has not passed",
     ),
 }
 
@@ -239,7 +239,16 @@ TASK_CATALOG: dict[str, TaskCapability] = {
 _PUBLISHED_REIMPLEMENTATIONS = frozenset({"lookm_reimpl", "prefixkv_reimpl", "vl_cache_reimpl"})
 _PROTOTYPE_METHODS = frozenset({"mosaickv_proto", "mosaickv_full"})
 _OVERRIDABLE_SECTIONS = frozenset(
-    {"forecasting", "graph", "utility", "selection", "prototypes", "residual", "repair"}
+    {
+        "diagnostics",
+        "forecasting",
+        "graph",
+        "utility",
+        "selection",
+        "prototypes",
+        "residual",
+        "repair",
+    }
 )
 _SCOPE_DIMENSIONS = frozenset({"models", "backends", "methods", "tasks"})
 
@@ -767,8 +776,8 @@ def unsupported_reason(
         return model.note
     if not backend.runnable:
         return backend.reason
-    if backend_key != "hf_eager":
-        return "the current method implementations own only the HF eager cache interface"
+    if backend_key != "hf_eager" and method_name != "full_kv":
+        return "serving and fused HF backends support FullKV only; cache methods require HF eager"
     if method_name in _PROTOTYPE_METHODS:
         return "all registered HF adapters currently disable prototype merge and residual repair"
     if method_name == "prefixkv_reimpl":
@@ -851,7 +860,13 @@ def _base_config(
         forecasting=forecasting,
         graph=GraphConfig(enabled=is_mosaickv),
         utility=UtilityConfig(),
-        selection=SelectionConfig(enabled=is_mosaickv),
+        selection=SelectionConfig(
+            enabled=is_mosaickv,
+            # Exact-selection comparisons spend the declared physical budget.
+            # Otherwise negative marginal gains can silently turn a 40% run
+            # into a sub-1% logical cache padded back to 40% tensor storage.
+            stop_on_nonpositive_gain=method is not MosaicKVMethod.MOSAICKV_EXACT,
+        ),
         prototypes=PrototypeConfig(enabled=prototype_enabled),
         residual=ResidualConfig(
             enabled=residual_enabled,

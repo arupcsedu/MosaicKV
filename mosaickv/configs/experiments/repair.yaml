@@ -1,6 +1,6 @@
 matrix_schema_version: 1
 matrix_revision: 1
-capability_catalog_version: common-env-2026-07-21-v1
+capability_catalog_version: common-env-2026-07-25-v2
 experiment_id: repair
 description: Residual-repair experiment matrix, blocked until prototype and repair adapter gates pass.
 enabled: false

@@ -11,6 +11,13 @@ fi
 
 if ! git -C "${REPOSITORY_ROOT}" diff --quiet || \
   ! git -C "${REPOSITORY_ROOT}" diff --cached --quiet; then
+  if [[ "${MOSAICKV_ALLOW_DIRTY_EXPLORATORY:-0}" == 1 ]]; then
+    printf 'exploratory_dirty_git_sha=%s\n' \
+      "$(git -C "${REPOSITORY_ROOT}" rev-parse HEAD)"
+    printf 'exploratory_worktree_status_sha256=%s\n' \
+      "$(git -C "${REPOSITORY_ROOT}" status --porcelain=v1 -z | sha256sum | cut -d' ' -f1)"
+    exit 0
+  fi
   printf 'Refusing a canonical run: tracked worktree changes are present.\n' >&2
   git -C "${REPOSITORY_ROOT}" status --short >&2
   exit 2

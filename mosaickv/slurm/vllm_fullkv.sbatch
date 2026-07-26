@@ -12,6 +12,11 @@
 
 set -euo pipefail
 
+# Native extensions used by vLLM require GCC >= 9 with Torch 2.8. Keep the
+# audited compiler explicit even though the deterministic greedy wrapper
+# disables the otherwise unnecessary FlashInfer sampling JIT.
+module load "${MOSAICKV_GCC_MODULE:-gcc/11.4.0}"
+
 PROJECT_ROOT=/scratch/djy8hg/workdir/MosaicKV/mosaickv
 VLLM_PYTHON=${MOSAICKV_VLLM_PYTHON:-/scratch/djy8hg/env/mosaickv/bin/python}
 CACHE_ROOT=${MOSAICKV_CACHE_ROOT:-/scratch/djy8hg/cache/mosaickv}
@@ -40,6 +45,8 @@ export VLLM_CACHE_ROOT="${CACHE_ROOT}/vllm"
 export TOKENIZERS_PARALLELISM=false
 export CUBLAS_WORKSPACE_CONFIG=:4096:8
 export PYTHONPATH="${PROJECT_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
+export PATH="$(dirname "${VLLM_PYTHON}"):${PATH}"
+export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-8.0}"
 
 if [[ "${MOSAICKV_ALLOW_MODEL_DOWNLOAD:-0}" != 1 ]]; then
   export HF_HUB_OFFLINE=1

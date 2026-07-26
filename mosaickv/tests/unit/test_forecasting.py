@@ -20,6 +20,7 @@ from mosaickv.evaluation.forecast_diagnostics import (
 )
 from mosaickv.evaluation.oracle_queries import EvaluationOnlyOracleQueries
 from mosaickv.forecasting import build_query_forecast, forecast_from_prefill
+from mosaickv.forecasting.core import _normalize_rows, _streaming_spherical
 from mosaickv.types import ForecastCovariance, ForecastMode
 
 
@@ -223,6 +224,35 @@ def test_hybrid_full_covariance_and_centroids_are_reproducible() -> None:
             assert np.array_equal(left.prompt_covariance, left.prompt_covariance.T)
             assert np.array_equal(left.normalized_centroids, right.normalized_centroids)
             assert np.array_equal(left.forecast_weights, right.forecast_weights)
+
+
+def test_low_memory_centroid_fast_path_is_bitwise_reference_equivalent() -> None:
+    rng = np.random.default_rng(17)
+    sources = tuple(rng.normal(size=(rows, 9)).astype(np.float32) for rows in (7, 3, 1))
+
+    sums: list[np.ndarray] = []
+    centroids: list[np.ndarray] = []
+    counts: list[int] = []
+    for source in sources:
+        for row in source:
+            norm = np.linalg.norm(row.reshape(1, -1), axis=-1)[0]
+            sample = row / norm
+            if len(centroids) < 3:
+                sums.append(sample.copy())
+                centroids.append(sample.copy())
+                counts.append(1)
+                continue
+            assignment = int(np.argmax(np.stack(centroids, axis=0) @ sample))
+            sums[assignment] = sums[assignment] + sample
+            counts[assignment] += 1
+            centroids[assignment] = _normalize_rows(sums[assignment].reshape(1, -1))[0]
+    expected_centroids = np.stack(centroids, axis=0)
+    expected_weights = np.asarray(counts, dtype=np.float32) / float(sum(counts))
+
+    actual_centroids, actual_weights = _streaming_spherical(sources, 3)
+
+    assert np.array_equal(actual_centroids, expected_centroids)
+    assert np.array_equal(actual_weights, expected_weights)
 
 
 @pytest.mark.parametrize(

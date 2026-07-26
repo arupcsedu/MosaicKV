@@ -33,7 +33,11 @@ def compare_with_generate(
     generation_config.do_sample = False
     generation_config.max_new_tokens = max_new_tokens
     generation_config.min_new_tokens = None
-    generation_config.eos_token_id = None
+    # Some multimodal model classes restore their model-specific EOS IDs at
+    # generation time when this field is None. An explicit empty collection
+    # disables EOS stopping without installing MinNewTokensLengthLogitsProcessor,
+    # which would alter the reference logits by masking EOS to -inf.
+    generation_config.eos_token_id = []
     generation_config.forced_eos_token_id = None
     generation_config.forced_bos_token_id = None
     generation_config.suppress_tokens = None

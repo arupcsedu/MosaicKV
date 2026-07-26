@@ -1,7 +1,7 @@
 # Repository and environment audit
 
-Audit target: clean MosaicKV common environment and repository state on
-2026-07-21. This document describes only the active installation path.
+Audit target: MosaicKV common environment and repository state on
+2026-07-25. This document describes only the active installation path.
 
 ## Repository layout
 
@@ -64,14 +64,14 @@ imports on the login node.
 
 | Package | Common version | Status |
 |---|---:|---|
-| torch | 2.5.1 | Installed; CUDA 12.4 wheel runtime |
-| transformers | 4.49.0 | Installed |
+| torch | 2.8.0 | Installed; CUDA 12.8 wheel runtime |
+| transformers | 4.55.2 | Installed |
 | accelerate | 1.13.0 | Installed |
-| flash-attn | — | Not installed; standalone FlashAttention-2 unsupported |
-| vllm | 0.7.2 | Installed; import verified |
-| sglang | 0.4.3.post4 | Installed; patched registration compatibility verified |
+| flash-attn | 2.8.3 | Locked; host source-wheel GPU validation pending |
+| vllm | 0.10.2 | Installed; import verified; serving rerun pending |
+| sglang | 0.5.1.post3 | Installed; import verified; serving rerun pending |
 | lmms_eval | 0.7.2 | Installed |
-| datasets | 4.1.1 | Installed |
+| datasets | 4.8.4 | Installed |
 
 `pip check` passes. The exact verifier checks every distribution in the common
 lock rather than relying on this summary table.
@@ -83,7 +83,7 @@ Clean-tree Slurm job `17182570` verified:
 - NVIDIA A100-SXM4-80GB;
 - one GPU for the environment smoke;
 - NVIDIA driver 595.71.05;
-- PyTorch CUDA runtime 12.4; and
+- PyTorch CUDA runtime 12.8; and
 - a synchronized CUDA matrix multiplication.
 
 GPU availability on a login node is not used as validation evidence. Hardware
@@ -100,10 +100,10 @@ to a file.
 
 ## Current support boundary
 
-The package/import/CUDA environment smoke passed. The synthetic CPU retention
-test also passed with exact equivalence. Exact checkpoint loading and serving
-parity have not been rerun under the common lock, so model/backend combinations
-remain unsupported until their clean-tree gates pass. See
+The exact 251-package lock is resolver-consistent and `pip check` passes. The
+synthetic CPU retention test also passed with exact equivalence. The upgraded
+FlashAttention, SDPA, vLLM, and SGLang GPU/model gates are tracked separately;
+no support claim is made until the corresponding artifact passes. See
 `model_capability_matrix.md` and `backend_capability_matrix.md`.
 
 Docker definitions use the same common lock, but this cluster provides no

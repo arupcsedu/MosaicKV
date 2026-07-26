@@ -139,7 +139,7 @@ def run_sglang_evaluation(args: argparse.Namespace, config: RunConfig) -> tuple[
         startup_timeout_seconds=float(args.sglang_startup_timeout),
     )
     if options.enable_mosaickv:
-        require_native_mosaickv_support(enabled=True, sglang_version="0.4.3.post4")
+        require_native_mosaickv_support(enabled=True, sglang_version="0.5.1.post3")
     if not config.method.is_full_cache or config.cache.retention_ratio != 1.0:
         raise ValueError(
             "SGLang Stage A supports only --method full_kv --retention-ratio 1.0; "
@@ -257,7 +257,7 @@ def run_sglang_evaluation(args: argparse.Namespace, config: RunConfig) -> tuple[
     return (0 if failed == 0 else 1), summary
 
 
-def native_capability_payload(sglang_version: str = "0.4.3.post4") -> JsonObject:
+def native_capability_payload(sglang_version: str = "0.5.1.post3") -> JsonObject:
     """Expose the Stage B verdict to tests, scripts, and diagnostics."""
 
     return native_integration_capability(sglang_version).to_json_object()

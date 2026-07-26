@@ -1014,29 +1014,48 @@ class FullKVState:
 
     def _gather_descriptors(self, descriptors: Sequence[KVBlockDescriptor]) -> ExactTier:
         selected = tuple(descriptors)
-        key_blocks: list[Any] = []
-        value_blocks: list[Any] = []
-        for block in selected:
+        grouped: dict[tuple[int, int], list[tuple[int, KVBlockDescriptor]]] = {}
+        for block_index, block in enumerate(selected):
             self._validate_descriptor(block)
-            layer = self.layers[block.layer]
-            key_blocks.append(
-                _gather_tensor(
-                    layer.key,
-                    head_axis=layer.key_head_dimension,
-                    head=block.kv_head,
-                    sequence_axis=layer.key_sequence_dimension,
-                    positions=block.physical_cache_indices,
-                )
+            grouped.setdefault((block.layer, block.kv_head), []).append((block_index, block))
+        key_blocks: list[Any | None] = [None] * len(selected)
+        value_blocks: list[Any | None] = [None] * len(selected)
+        # Gather all selected positions for a layer/head once, then expose
+        # block-sized views.  Launching one advanced-index operation per block
+        # dominated LLaVA construction because it has 32 KV heads per layer.
+        for (layer_index, kv_head), indexed_blocks in grouped.items():
+            layer = self.layers[layer_index]
+            positions = tuple(
+                position
+                for _block_index, block in indexed_blocks
+                for position in block.physical_cache_indices
             )
-            value_blocks.append(
-                _gather_tensor(
-                    layer.value,
-                    head_axis=layer.value_head_dimension,
-                    head=block.kv_head,
-                    sequence_axis=layer.value_sequence_dimension,
-                    positions=block.physical_cache_indices,
-                )
+            gathered_key = _gather_tensor(
+                layer.key,
+                head_axis=layer.key_head_dimension,
+                head=kv_head,
+                sequence_axis=layer.key_sequence_dimension,
+                positions=positions,
             )
+            gathered_value = _gather_tensor(
+                layer.value,
+                head_axis=layer.value_head_dimension,
+                head=kv_head,
+                sequence_axis=layer.value_sequence_dimension,
+                positions=positions,
+            )
+            offset = 0
+            for block_index, block in indexed_blocks:
+                end = offset + block.position_count
+                key_index: list[Any] = [slice(None)] * _ndim(gathered_key)
+                value_index: list[Any] = [slice(None)] * _ndim(gathered_value)
+                key_index[layer.key_sequence_dimension] = slice(offset, end)
+                value_index[layer.value_sequence_dimension] = slice(offset, end)
+                key_blocks[block_index] = gathered_key[tuple(key_index)]
+                value_blocks[block_index] = gathered_value[tuple(value_index)]
+                offset = end
+        if any(block is None for block in key_blocks + value_blocks):
+            raise RuntimeError("exact-tier grouped gather left an uninitialized block")
         return ExactTier(selected, tuple(key_blocks), tuple(value_blocks))
 
     def gather_exact_blocks(self, blocks: Sequence[KVBlockDescriptor]) -> ExactTier:

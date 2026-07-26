@@ -184,7 +184,9 @@ class SelectionReason(StrEnum):
 
     MANDATORY_EXACT = "mandatory_exact"
     RETENTION_ONE_EXACT = "retention_one_exact"
+    STRATUM_RESERVE = "stratum_reserve"
     LAZY_GREEDY = "lazy_greedy"
+    DENSE_CACHE_FILL = "dense_cache_fill"
     BUDGET_EXHAUSTED = "budget_exhausted"
     NONPOSITIVE_MARGINAL_GAIN = "nonpositive_marginal_gain"
     NOT_SELECTED_LOWER_GAIN = "not_selected_lower_gain"
@@ -213,7 +215,9 @@ class SelectionDecision:
         if self.reason in {
             SelectionReason.MANDATORY_EXACT,
             SelectionReason.RETENTION_ONE_EXACT,
+            SelectionReason.STRATUM_RESERVE,
             SelectionReason.LAZY_GREEDY,
+            SelectionReason.DENSE_CACHE_FILL,
         }:
             if not self.selected:
                 raise ValueError("selected reason cannot be assigned to an unselected block")

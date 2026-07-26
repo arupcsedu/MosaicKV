@@ -8,7 +8,8 @@ import math
 import os
 import tempfile
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
+from contextlib import ExitStack
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, cast
@@ -41,12 +42,28 @@ from mosaickv.baselines import (
     prefixkv_runtime_payloads,
     vl_cache_runtime_payloads,
 )
-from mosaickv.cache_state import FullKVState, MosaicKVState, tensor_storage_bytes
+from mosaickv.cache_state import (
+    FullKVState,
+    KVBlockDescriptor,
+    MosaicKVState,
+    tensor_storage_bytes,
+)
 from mosaickv.config import RunConfig
+from mosaickv.evaluation.forecast_diagnostics import (
+    AttentionDiagnosticInput,
+    ForecastQualityDiagnostics,
+    evaluate_forecast_quality,
+)
 from mosaickv.evaluation.model import EvaluationRequest, GenerationMetrics, ModelGeneration
+from mosaickv.evaluation.oracle_queries import (
+    EvaluationOnlyOracleQueries,
+    collect_evaluation_only_true_future_queries,
+)
 from mosaickv.forecasting import QueryForecast, forecast_with_rollout
 from mosaickv.forecasting.huggingface import IsolatedQueryRollout
+from mosaickv.generation import decode_quality_output, terminal_token_ids
 from mosaickv.graph import SparseEvidenceGraph, build_evidence_graph
+from mosaickv.measurements.timing import ModuleCudaTimer, SynchronizationAudit
 from mosaickv.prototypes import (
     PrototypeRecord,
     ThreeTierCacheConstruction,
@@ -81,19 +98,47 @@ class RuntimePhaseTimings:
     """Single-run phase timings in seconds."""
 
     prefill: float
+    image_video_encoder: float | None
+    projector: float | None
+    language_model_prefill: float | None
     forecast: float
     graph: float
     utility_and_selection: float
     tier_construction: float
     cache_packing: float
     decode: float
+    per_token_decode: tuple[float, ...]
     repair_transfer: float
     repair_redecode: float
     total: float
 
     def __post_init__(self) -> None:
-        if any(not math.isfinite(value) or value < 0 for value in asdict(self).values()):
+        scalar_values = (
+            self.prefill,
+            self.forecast,
+            self.graph,
+            self.utility_and_selection,
+            self.tier_construction,
+            self.cache_packing,
+            self.decode,
+            self.repair_transfer,
+            self.repair_redecode,
+            self.total,
+        )
+        optional_values = (
+            self.image_video_encoder,
+            self.projector,
+            self.language_model_prefill,
+        )
+        if any(not math.isfinite(value) or value < 0 for value in scalar_values):
             raise ValueError("runtime timings must be finite and nonnegative")
+        if any(
+            value is not None and (not math.isfinite(value) or value < 0)
+            for value in optional_values
+        ):
+            raise ValueError("optional runtime timings must be finite and nonnegative")
+        if any(not math.isfinite(value) or value < 0 for value in self.per_token_decode):
+            raise ValueError("per-token runtime timings must be finite and nonnegative")
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,6 +177,7 @@ class PackedRuntimeCache:
     snapshot: CacheSnapshot
     validity_masks: tuple[Any, ...]
     prompt_capacity: int
+    all_slots_valid: bool
     prototype_slots: tuple[tuple[int, int, int, int], ...]
     slot_records: tuple[JsonObject, ...]
 
@@ -144,6 +190,21 @@ class DensePhysicalCacheBudget:
     target_bytes: int
     prompt_capacity: int
     position_limits: Mapping[tuple[int, int], int]
+
+    @property
+    def bytes_per_position(self) -> int:
+        """Physical bytes for one shared sequence slot across all layer/head tensors."""
+
+        if self.prompt_capacity < 1 or self.target_bytes % self.prompt_capacity:
+            raise HuggingFaceRuntimeError("dense target bytes are not position-aligned")
+        return self.target_bytes // self.prompt_capacity
+
+    def minimum_block_representable_fill(self, block_size: int) -> int:
+        """Lower bound after unavoidable fixed-block rounding in every identity."""
+
+        if block_size < 1:
+            raise ValueError("block_size must be positive")
+        return max(0, self.target_bytes - (block_size - 1) * self.bytes_per_position)
 
 
 def _dense_physical_cache_budget(
@@ -191,6 +252,42 @@ def _dense_physical_cache_budget(
     prompt_capacity = requested // bytes_per_position
     if config.cache.retention_ratio == 1.0:
         prompt_capacity = source_length
+    else:
+        # A dense cache is fastest when every layer/head has exactly the same
+        # number of real positions. Quantize the target to a block-subset sum
+        # so the selector can fill every physical slot without padding masks.
+        signatures: dict[tuple[int, int], tuple[tuple[int, bool], ...]] = {}
+        for identity in bytes_per_identity:
+            signatures[identity] = tuple(
+                sorted(
+                    (
+                        block.position_count,
+                        block.mandatory,
+                    )
+                    for block in full_state.blocks
+                    if (block.layer, block.kv_head) == identity
+                )
+            )
+        unique_signatures = set(signatures.values())
+        if len(unique_signatures) != 1:
+            raise HuggingFaceRuntimeError(
+                "dense mask-free packing requires identical block structures per layer/head"
+            )
+        signature = next(iter(unique_signatures))
+        mandatory_positions = sum(size for size, mandatory in signature if mandatory)
+        if mandatory_positions > prompt_capacity:
+            raise HuggingFaceRuntimeError(
+                "physical byte budget cannot represent the mandatory block subset"
+            )
+        # Selection operates on fixed-size blocks, but modality boundaries can
+        # leave smaller fragments. Treating a fragment-dependent sum as a
+        # generally fillable dense capacity is unsafe: greedy selection can
+        # consume a different fragment combination and become stranded just
+        # below that capacity. Quantize the shared physical extent itself to
+        # the fixed block lattice. Mandatory-only capacity is the exception
+        # when the requested budget is smaller than one aligned extent.
+        aligned_capacity = (prompt_capacity // full_state.block_size) * full_state.block_size
+        prompt_capacity = max(mandatory_positions, aligned_capacity)
     if prompt_capacity < 1:
         raise HuggingFaceRuntimeError(
             "physical byte budget cannot represent one KV position per layer/head"
@@ -272,6 +369,23 @@ def _forecast_attention_by_node(
 ) -> dict[int, float]:
     """Pool actual eager prompt/draft attention into RoPE-aware block evidence."""
 
+    by_head = _forecast_token_attention_by_head(full_state, prefill, rollout, config)
+    return {
+        node_id: float(
+            by_head[(block.layer, block.kv_head)][list(block.physical_cache_indices)].sum()
+        )
+        for node_id, block in enumerate(full_state.blocks)
+    }
+
+
+def _forecast_token_attention_by_head(
+    full_state: FullKVState,
+    prefill: PrefillOutput,
+    rollout: IsolatedQueryRollout,
+    config: RunConfig,
+) -> dict[tuple[int, int], np.ndarray[Any, Any]]:
+    """Return the exact token-level evidence pooled by the online selector."""
+
     if not prefill.attention_weights:
         raise HuggingFaceRuntimeError("runtime prefill did not capture eager attention weights")
     prompt_layers = tuple(_to_numpy(value) for value in prefill.attention_weights)
@@ -280,43 +394,126 @@ def _forecast_attention_by_node(
     draft_steps = tuple(
         tuple(_to_numpy(value) for value in step) for step in rollout.attention_steps
     )
-    result: dict[int, float] = {}
-    for node_id, block in enumerate(full_state.blocks):
-        layer = full_state.layers[block.layer]
-        prompt = prompt_layers[block.layer]
+    result: dict[tuple[int, int], np.ndarray[Any, Any]] = {}
+    for layer_index, layer in enumerate(full_state.layers):
+        prompt = prompt_layers[layer_index]
         if prompt.ndim != 4 or prompt.shape[0] != 1:
             raise HuggingFaceRuntimeError("eager prompt attention must have shape [1,H,Q,K]")
         query_heads = int(prompt.shape[1])
         if query_heads % layer.kv_heads:
             raise HuggingFaceRuntimeError("query heads are not divisible by cache KV heads")
         group = query_heads // layer.kv_heads
-        query_start = block.kv_head * group
-        query_end = query_start + group
-        samples: list[float] = []
-        if config.forecasting.prompt_window:
-            window = min(config.forecasting.prompt_window, int(prompt.shape[-2]))
-            selected = prompt[
-                0,
-                query_start:query_end,
-                -window:,
-                list(block.physical_cache_indices),
-            ]
-            samples.append(float(selected.sum(axis=-1).mean()))
-        for step in draft_steps:
-            attention = step[block.layer]
-            if attention.ndim != 4 or attention.shape[0] != 1 or attention.shape[-2] != 1:
-                raise HuggingFaceRuntimeError("eager draft attention must have shape [1,H,1,K]")
-            selected = attention[
-                0,
-                query_start:query_end,
-                0,
-                list(block.physical_cache_indices),
-            ]
-            samples.append(float(selected.sum(axis=-1).mean()))
-        if not samples:
-            raise HuggingFaceRuntimeError("forecast attention has no prompt or draft samples")
-        result[node_id] = max(float(np.mean(samples)), float(np.finfo(np.float64).tiny))
+        sequence_length = layer.sequence_length
+        for kv_head in range(layer.kv_heads):
+            query_start = kv_head * group
+            query_end = query_start + group
+            samples: list[np.ndarray[Any, Any]] = []
+            if config.forecasting.prompt_window:
+                window = min(config.forecasting.prompt_window, int(prompt.shape[-2]))
+                samples.append(
+                    prompt[
+                        0,
+                        query_start:query_end,
+                        -window:,
+                        :sequence_length,
+                    ].mean(axis=(0, 1))
+                )
+            for step in draft_steps:
+                attention = step[layer_index]
+                if attention.ndim != 4 or attention.shape[0] != 1 or attention.shape[-2] != 1:
+                    raise HuggingFaceRuntimeError("eager draft attention must have shape [1,H,1,K]")
+                samples.append(
+                    attention[
+                        0,
+                        query_start:query_end,
+                        0,
+                        :sequence_length,
+                    ].mean(axis=0)
+                )
+            if not samples:
+                raise HuggingFaceRuntimeError("forecast attention has no prompt or draft samples")
+            values = np.mean(np.stack(samples, axis=0), axis=0)
+            if values.shape != (sequence_length,):
+                raise HuggingFaceRuntimeError("forecast token attention length is invalid")
+            result[(layer_index, kv_head)] = np.maximum(
+                values,
+                float(np.finfo(np.float64).tiny),
+            )
     return result
+
+
+def _oracle_token_attention_by_head(
+    full_state: FullKVState,
+    oracle: EvaluationOnlyOracleQueries,
+) -> dict[tuple[int, int], np.ndarray[Any, Any]]:
+    if not oracle.attention_steps:
+        raise HuggingFaceRuntimeError("oracle diagnostics require captured FullKV attention")
+    steps = tuple(tuple(_to_numpy(value) for value in step) for step in oracle.attention_steps)
+    result: dict[tuple[int, int], np.ndarray[Any, Any]] = {}
+    for layer_index, layer in enumerate(full_state.layers):
+        exemplar = steps[0][layer_index]
+        if exemplar.ndim != 4 or exemplar.shape[0] != 1 or exemplar.shape[-2] != 1:
+            raise HuggingFaceRuntimeError("oracle decode attention must have shape [1,H,1,K]")
+        query_heads = int(exemplar.shape[1])
+        if query_heads % layer.kv_heads:
+            raise HuggingFaceRuntimeError("oracle query heads are not divisible by KV heads")
+        group = query_heads // layer.kv_heads
+        for kv_head in range(layer.kv_heads):
+            start = kv_head * group
+            per_step = []
+            for step in steps:
+                attention = step[layer_index]
+                per_step.append(
+                    attention[
+                        0,
+                        start : start + group,
+                        0,
+                        : layer.sequence_length,
+                    ].mean(axis=0)
+                )
+            result[(layer_index, kv_head)] = np.mean(np.stack(per_step, axis=0), axis=0)
+    return result
+
+
+def _forecast_quality_diagnostic(
+    adapter: HuggingFaceMultimodalAdapter,
+    prefill: PrefillOutput,
+    full_state: FullKVState,
+    forecast: QueryForecast,
+    rollout: IsolatedQueryRollout,
+    selection: SelectionResult,
+    config: RunConfig,
+) -> ForecastQualityDiagnostics:
+    """Evaluation-only oracle audit; its outputs never enter online selection."""
+
+    steps = config.diagnostics.forecast_oracle_steps
+    if steps < 1:
+        raise ValueError("forecast oracle diagnostics require a positive step count")
+    oracle = collect_evaluation_only_true_future_queries(
+        adapter,
+        prefill,
+        future_steps=steps,
+        capture_attentions=True,
+    )
+    predicted = _forecast_token_attention_by_head(full_state, prefill, rollout, config)
+    truth = _oracle_token_attention_by_head(full_state, oracle)
+    selected = set(selection.selected_node_ids)
+    inputs: dict[tuple[int, int], AttentionDiagnosticInput] = {}
+    for identity in sorted(predicted):
+        node_ids = tuple(
+            node_id
+            for node_id, block in enumerate(full_state.blocks)
+            if (block.layer, block.kv_head) == identity
+        )
+        inputs[identity] = AttentionDiagnosticInput(
+            predicted_attention=predicted[identity],
+            true_attention=truth[identity],
+            block_positions=tuple(
+                full_state.blocks[node_id].physical_cache_indices for node_id in node_ids
+            ),
+            selected_block_count=sum(node_id in selected for node_id in node_ids),
+        )
+    return evaluate_forecast_quality(forecast, oracle, inputs)
 
 
 def _prompt_attention_by_node(
@@ -400,6 +597,7 @@ def _selection(
     *,
     retention_one: bool,
     position_limits: Mapping[tuple[int, int], int] | None = None,
+    fill_position_limits: bool = False,
 ) -> SelectionResult:
     if retention_one:
         return select_all_exact(objective, SelectionBudget(value, unit))
@@ -407,6 +605,7 @@ def _selection(
         objective,
         SelectionBudget(value, unit),
         position_limits=position_limits,
+        fill_position_limits=fill_position_limits,
     )
 
 
@@ -453,6 +652,7 @@ def _prototype_construction(
             unit,
             retention_one=False,
             position_limits=position_limits,
+            fill_position_limits=position_limits is not None,
         )
         selection_seconds += time.perf_counter() - started
         started = time.perf_counter()
@@ -580,6 +780,7 @@ def build_compression_plan(
             config.cache.budget_unit,
             retention_one=False,
             position_limits=position_limits,
+            fill_position_limits=position_limits is not None,
         )
         selection_seconds = time.perf_counter() - selection_started
         tier_started = time.perf_counter()
@@ -816,9 +1017,13 @@ def _axis(axis: int, rank: int) -> int:
 
 
 def _one_position(tensor: Any, sequence_axis: int, offset: int) -> Any:
-    torch = _torch()
-    index = torch.tensor((offset,), dtype=torch.long, device=tensor.device)
-    return torch.index_select(tensor, sequence_axis, index)
+    # A length-one basic slice is a view.  The previous index_select launched
+    # one CUDA gather for every selected token before the subsequent pack
+    # concatenated those tensors again (hundreds of thousands of launches for
+    # LLaVA's 32 KV heads).
+    index: list[Any] = [slice(None)] * int(tensor.ndim)
+    index[_axis(sequence_axis, int(tensor.ndim))] = slice(offset, offset + 1)
+    return tensor[tuple(index)]
 
 
 def _tier_payloads(
@@ -897,7 +1102,9 @@ def pack_runtime_payloads(
         raise ValueError("tail packing requires the previous prompt capacity")
     layers: list[CacheLayerSnapshot] = []
     validity_masks: list[Any] = []
+    all_slots_valid = True
     prototype_slots: list[tuple[int, int, int, int]] = []
+    finite_flags: list[Any] = []
     for layer_index, source_layer in enumerate(full_state.layers):
         head_keys: list[Any] = []
         head_values: list[Any] = []
@@ -914,6 +1121,7 @@ def pack_runtime_payloads(
             value = torch.cat(tuple(entry[4] for entry in entries), dim=value_sequence)
             valid_count = len(entries)
             if valid_count < prompt_capacity:
+                all_slots_valid = False
                 key_shape = list(key.shape)
                 key_shape[key_sequence] = prompt_capacity - valid_count
                 value_shape = list(value.shape)
@@ -955,12 +1163,13 @@ def pack_runtime_payloads(
                     prototype_slots.append((int(entry[2]), layer_index, kv_head, slot))
         packed_key = torch.cat(tuple(head_keys), dim=source_layer.key_head_dimension)
         packed_value = torch.cat(tuple(head_values), dim=source_layer.value_head_dimension)
-        if not bool(torch.isfinite(packed_key).all()) or not bool(
-            torch.isfinite(packed_value).all()
-        ):
-            raise HuggingFaceRuntimeError("packed cache contains NaN or infinity")
+        finite_flags.extend((torch.isfinite(packed_key).all(), torch.isfinite(packed_value).all()))
         layers.append(CacheLayerSnapshot(packed_key, packed_value, key_sequence))
         validity_masks.append(torch.stack(head_validity, dim=0))
+    # Reduce all device-side validation in one host synchronization.  A sync
+    # for K and V in every layer serialized dozens of tiny packing kernels.
+    if not bool(torch.stack(finite_flags).all().item()):
+        raise HuggingFaceRuntimeError("packed cache contains NaN or infinity")
     active_length = int(layers[0].key.shape[full_state.layers[0].key_sequence_dimension])
     if any(
         int(layer.key.shape[full_state.layers[index].key_sequence_dimension]) != active_length
@@ -978,8 +1187,176 @@ def pack_runtime_payloads(
         snapshot,
         tuple(validity_masks),
         prompt_capacity,
+        all_slots_valid,
         tuple(sorted(prototype_slots)),
         slot_records,
+    )
+
+
+def _gather_dense_heads(
+    tensor: Any,
+    *,
+    head_axis: int,
+    sequence_axis: int,
+    positions: Sequence[Sequence[int]],
+    prompt_capacity: int,
+    tail_tensor: Any | None,
+    old_prompt_capacity: int | None,
+) -> tuple[Any, Any]:
+    """Gather different position rows for every KV head in one CUDA operation."""
+
+    torch = _torch()
+    rank = int(tensor.ndim)
+    normalized_head = _axis(head_axis, rank)
+    normalized_sequence = _axis(sequence_axis, rank)
+    moved = tensor.movedim((normalized_head, normalized_sequence), (0, 1))
+    head_count = int(moved.shape[0])
+    if len(positions) != head_count:
+        raise HuggingFaceRuntimeError("dense gather position rows do not match KV heads")
+    raw_counts = [len(row) for row in positions]
+    if any(count < 1 for count in raw_counts):
+        raise HuggingFaceRuntimeError("packed cache removed every slot from a KV head")
+    if any(count > prompt_capacity for count in raw_counts):
+        raise HuggingFaceRuntimeError("selected positions exceed the physical prompt capacity")
+    counts = torch.tensor(raw_counts, dtype=torch.long, device=tensor.device)
+    index_rows = [tuple(row) + (0,) * (prompt_capacity - len(row)) for row in positions]
+    indices = torch.tensor(index_rows, dtype=torch.long, device=tensor.device)
+    expanded_indices = indices.reshape(head_count, prompt_capacity, *([1] * (rank - 2))).expand(
+        head_count, prompt_capacity, *moved.shape[2:]
+    )
+    packed = torch.gather(moved, 1, expanded_indices)
+    validity = torch.arange(prompt_capacity, device=tensor.device).unsqueeze(0) < counts.unsqueeze(
+        1
+    )
+    expanded_validity = validity.reshape(head_count, prompt_capacity, *([1] * (rank - 2)))
+    packed = packed.masked_fill(~expanded_validity, 0)
+    if tail_tensor is not None:
+        if old_prompt_capacity is None:
+            raise HuggingFaceRuntimeError("tail packing requires the old prompt capacity")
+        tail = tail_tensor.movedim((normalized_head, normalized_sequence), (0, 1))
+        packed = torch.cat((packed, tail[:, old_prompt_capacity:, ...]), dim=1)
+        tail_length = int(tail.shape[1]) - old_prompt_capacity
+        if tail_length < 0:
+            raise HuggingFaceRuntimeError("old prompt capacity exceeds the tail cache")
+        if tail_length:
+            validity = torch.cat(
+                (
+                    validity,
+                    torch.ones((head_count, tail_length), dtype=torch.bool, device=tensor.device),
+                ),
+                dim=1,
+            )
+    return packed.movedim((0, 1), (normalized_head, normalized_sequence)), validity
+
+
+def _pack_exact_runtime_blocks(
+    adapter: HuggingFaceMultimodalAdapter,
+    full_state: FullKVState,
+    blocks: Sequence[KVBlockDescriptor],
+    *,
+    tail_snapshot: CacheSnapshot | None,
+    old_prompt_capacity: int | None,
+    physical_prompt_capacity: int | None,
+) -> PackedRuntimeCache:
+    """Vectorized materialization for exact-only selectors and baselines."""
+
+    torch = _torch()
+    entries: dict[tuple[int, int], list[tuple[int, int, int]]] = {}
+    for block_id, block in enumerate(blocks):
+        for logical, physical in zip(
+            block.original_logical_positions,
+            block.physical_cache_indices,
+            strict=True,
+        ):
+            entries.setdefault((block.layer, block.kv_head), []).append(
+                (logical, physical, block_id)
+            )
+    for values in entries.values():
+        values.sort(key=lambda item: (item[0], item[2]))
+    selected_capacity = max((len(values) for values in entries.values()), default=0)
+    if selected_capacity < 1:
+        raise HuggingFaceRuntimeError("packed runtime cache has no active prompt slots")
+    prompt_capacity = (
+        selected_capacity if physical_prompt_capacity is None else physical_prompt_capacity
+    )
+    if prompt_capacity < selected_capacity:
+        raise HuggingFaceRuntimeError("selected cache exceeds its dense physical prompt capacity")
+
+    layers: list[CacheLayerSnapshot] = []
+    validity_masks: list[Any] = []
+    finite_flags: list[Any] = []
+    slot_records: list[JsonObject] = []
+    all_slots_valid = True
+    for layer_index, source_layer in enumerate(full_state.layers):
+        position_rows: list[tuple[int, ...]] = []
+        for kv_head in range(source_layer.kv_heads):
+            row = entries.get((layer_index, kv_head), [])
+            if not row:
+                raise HuggingFaceRuntimeError(
+                    f"packed cache removed every slot for layer={layer_index}, head={kv_head}"
+                )
+            position_rows.append(tuple(item[1] for item in row))
+            all_slots_valid = all_slots_valid and len(row) == prompt_capacity
+            slot_records.extend(
+                {
+                    "layer": layer_index,
+                    "kv_head": kv_head,
+                    "slot": slot,
+                    "logical_position": item[0],
+                    "tier": "exact",
+                    "source_id": item[2],
+                }
+                for slot, item in enumerate(row)
+            )
+        tail_layer = None if tail_snapshot is None else tail_snapshot.layers[layer_index]
+        packed_key, validity = _gather_dense_heads(
+            source_layer.key,
+            head_axis=source_layer.key_head_dimension,
+            sequence_axis=source_layer.key_sequence_dimension,
+            positions=position_rows,
+            prompt_capacity=prompt_capacity,
+            tail_tensor=None if tail_layer is None else tail_layer.key,
+            old_prompt_capacity=old_prompt_capacity,
+        )
+        packed_value, _value_validity = _gather_dense_heads(
+            source_layer.value,
+            head_axis=source_layer.value_head_dimension,
+            sequence_axis=source_layer.value_sequence_dimension,
+            positions=position_rows,
+            prompt_capacity=prompt_capacity,
+            tail_tensor=None if tail_layer is None else tail_layer.value,
+            old_prompt_capacity=old_prompt_capacity,
+        )
+        finite_flags.extend((torch.isfinite(packed_key).all(), torch.isfinite(packed_value).all()))
+        layers.append(
+            CacheLayerSnapshot(
+                packed_key,
+                packed_value,
+                source_layer.key_sequence_dimension,
+            )
+        )
+        validity_masks.append(validity)
+    if not bool(torch.stack(finite_flags).all().item()):
+        raise HuggingFaceRuntimeError("packed cache contains NaN or infinity")
+    active_length = int(layers[0].key.shape[full_state.layers[0].key_sequence_dimension])
+    if any(
+        int(layer.key.shape[full_state.layers[index].key_sequence_dimension]) != active_length
+        for index, layer in enumerate(layers)
+    ):
+        raise HuggingFaceRuntimeError("packed cache layers have inconsistent physical lengths")
+    return PackedRuntimeCache(
+        CacheSnapshot(
+            tuple(layers),
+            full_state.source_class,
+            full_state.source_kind,
+            active_length,
+            adapter.capabilities.cached_key_state,
+        ),
+        tuple(validity_masks),
+        prompt_capacity,
+        all_slots_valid,
+        (),
+        tuple(slot_records),
     )
 
 
@@ -1000,6 +1377,15 @@ def pack_runtime_cache(
     if state.prototypes.prototype_keys and key_state == "pre_rope":
         raise HuggingFaceRuntimeError(
             "HF prototype materialization requires an adapter-specific safe RoPE transform"
+        )
+    if not state.prototypes.prototype_keys and not active_prototype_ids:
+        return _pack_exact_runtime_blocks(
+            adapter,
+            full_state,
+            state.exact.blocks,
+            tail_snapshot=tail_snapshot,
+            old_prompt_capacity=old_prompt_capacity,
+            physical_prompt_capacity=physical_prompt_capacity,
         )
     payloads, slot_records = _tier_payloads(state, records, active_prototype_ids)
     return pack_runtime_payloads(
@@ -1023,11 +1409,14 @@ def _state_from_packed(
     model_state = dict(original.model_state)
     model_state.update(
         {
-            "mosaickv_validity_masks": packed.validity_masks,
             "mosaickv_prompt_capacity": packed.prompt_capacity,
             "mosaickv_prototype_slots": packed.prototype_slots,
+            "mosaickv_packed_all_valid": packed.all_slots_valid,
+            "mosaickv_cache_all_valid": packed.all_slots_valid,
         }
     )
+    if not packed.all_slots_valid:
+        model_state["mosaickv_validity_masks"] = packed.validity_masks
     return DecodeState(
         past_key_values=adapter.inject_past_key_values(packed.snapshot),
         attention_mask=torch.ones(
@@ -1377,14 +1766,45 @@ def _decode_text(processor: Any, token_ids: Any) -> str:
     return answer
 
 
-def _forecast_trace(forecast: QueryForecast) -> JsonObject:
-    heads: list[JsonObject] = []
-    for layer in forecast.layers:
-        for head in layer:
-            centroids = _to_numpy(head.normalized_centroids)
-            weights = _to_numpy(head.forecast_weights)
-            heads.append(
-                {
+def _trace_catalog(
+    records: Iterable[Mapping[str, object]],
+    *,
+    compact: bool,
+) -> JsonValue:
+    """Serialize a catalog or compute its identical compact digest in one pass."""
+
+    if not compact:
+        return [cast("JsonObject", dict(record)) for record in records]
+    digest = hashlib.sha256()
+    count = 0
+    for record in records:
+        payload = cast("JsonObject", dict(record))
+        digest.update(
+            json.dumps(
+                payload,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode("utf-8")
+        )
+        digest.update(b"\n")
+        count += 1
+    if count == 0:
+        return []
+    return {
+        "storage": "omitted_non_diagnostic",
+        "record_count": count,
+        "sha256": digest.hexdigest(),
+    }
+
+
+def _forecast_trace(forecast: QueryForecast, *, compact_catalogs: bool = False) -> JsonObject:
+    def head_records() -> Iterable[JsonObject]:
+        for layer in forecast.layers:
+            for head in layer:
+                centroids = _to_numpy(head.normalized_centroids)
+                weights = _to_numpy(head.forecast_weights)
+                yield {
                     "layer": head.provenance.layer,
                     "kv_head": head.provenance.kv_head,
                     "prompt_sample_count": head.provenance.prompt_sample_count,
@@ -1393,19 +1813,61 @@ def _forecast_trace(forecast: QueryForecast) -> JsonObject:
                     "centroid_norms": np.linalg.norm(centroids, axis=-1).tolist(),
                     "forecast_weights": weights.tolist(),
                 }
-            )
+
     return cast(
         "JsonObject",
         {
             "provenance": asdict(forecast.provenance),
             "timing": asdict(forecast.timing),
-            "heads": heads,
+            "heads": _trace_catalog(head_records(), compact=compact_catalogs),
         },
     )
 
 
-def _plan_trace(plan: MosaicKVCompressionPlan) -> JsonObject:
-    selection = [
+def _utility_trace(plan: MosaicKVCompressionPlan) -> JsonObject:
+    """Summarize commensurate utility signals without emitting another node catalog."""
+
+    selected = set(plan.selection.selected_node_ids)
+
+    def summary(values: Sequence[float]) -> JsonObject:
+        array = np.asarray(values, dtype=np.float64)
+        return {
+            "minimum": float(array.min()),
+            "mean": float(array.mean()),
+            "maximum": float(array.max()),
+        }
+
+    blocks = plan.utilities.blocks
+    local = tuple(block.local_utility for block in blocks)
+    return {
+        "normalization": plan.utilities.weights.normalization,
+        "weights": cast("JsonObject", asdict(plan.utilities.weights)),
+        "attention_probability": summary(
+            tuple(block.forecast_attention_probability for block in blocks)
+        ),
+        "value_contribution": summary(tuple(block.value_contribution for block in blocks)),
+        "uniqueness": summary(tuple(block.uniqueness for block in blocks)),
+        "local_utility": summary(local),
+        "negative_local_utility_fraction": sum(value < 0 for value in local) / len(local),
+        "selected_mean_local_utility": float(
+            np.mean([blocks[node_id].local_utility for node_id in sorted(selected)])
+        ),
+        "unselected_mean_local_utility": (
+            float(
+                np.mean([block.local_utility for block in blocks if block.node_id not in selected])
+            )
+            if len(selected) < len(blocks)
+            else None
+        ),
+    }
+
+
+def _plan_trace(
+    plan: MosaicKVCompressionPlan,
+    *,
+    compact_catalogs: bool = False,
+) -> JsonObject:
+    selection = (
         {
             "node_id": decision.node_id,
             "selected": decision.selected,
@@ -1414,8 +1876,8 @@ def _plan_trace(plan: MosaicKVCompressionPlan) -> JsonObject:
             "reason": decision.reason.value,
         }
         for decision in plan.selection.decisions
-    ]
-    prototypes = [
+    )
+    prototypes = (
         {
             "prototype_id": record.prototype_id,
             "layer": record.layer,
@@ -1427,8 +1889,8 @@ def _plan_trace(plan: MosaicKVCompressionPlan) -> JsonObject:
             "position_span": record.diagnostics.position_span,
         }
         for record in plan.construction.prototypes
-    ]
-    edges = [
+    )
+    edges = (
         {
             "source": source,
             "target": target,
@@ -1442,7 +1904,7 @@ def _plan_trace(plan: MosaicKVCompressionPlan) -> JsonObject:
             plan.graph.edge_types,
             strict=True,
         )
-    ]
+    )
     return cast(
         "JsonObject",
         {
@@ -1452,17 +1914,25 @@ def _plan_trace(plan: MosaicKVCompressionPlan) -> JsonObject:
             "tier_reason": plan.construction.reason,
             "source_budget_value": plan.source_budget_value,
             "active_budget_value": plan.active_budget_value,
-            "selected_blocks": selection,
-            "prototypes": prototypes,
-            "graph_edges": edges,
+            "selected_blocks": _trace_catalog(selection, compact=compact_catalogs),
+            "prototypes": _trace_catalog(prototypes, compact=compact_catalogs),
+            "graph_edges": _trace_catalog(edges, compact=compact_catalogs),
             "graph_diagnostics": asdict(plan.graph.diagnostics),
-            "forecast_statistics": _forecast_trace(plan.forecast),
+            "forecast_statistics": _forecast_trace(
+                plan.forecast,
+                compact_catalogs=compact_catalogs,
+            ),
+            "utility_diagnostics": _utility_trace(plan),
         },
     )
 
 
-def _baseline_plan_trace(plan: BaselineCompressionPlan) -> JsonObject:
-    selection = [
+def _baseline_plan_trace(
+    plan: BaselineCompressionPlan,
+    *,
+    compact_catalogs: bool = False,
+) -> JsonObject:
+    selection = (
         {
             "node_id": decision.node_id,
             "selected": decision.selected,
@@ -1477,7 +1947,7 @@ def _baseline_plan_trace(plan: BaselineCompressionPlan) -> JsonObject:
             ],
         }
         for decision in plan.selection.decisions
-    ]
+    )
     return cast(
         "JsonObject",
         {
@@ -1496,7 +1966,7 @@ def _baseline_plan_trace(plan: BaselineCompressionPlan) -> JsonObject:
             "budget_unit": plan.selection.budget.unit.value,
             "baseline_seed": plan.selection.seed,
             "selection_provenance": plan.selection.score_provenance,
-            "selected_blocks": selection,
+            "selected_blocks": _trace_catalog(selection, compact=compact_catalogs),
             "prototypes": [],
             "graph_edges": [],
             "graph_diagnostics": {"status": "not_used_by_simple_baseline"},
@@ -1642,7 +2112,7 @@ def _compact_trace_records(payload: JsonObject) -> None:
     """
 
     for key, value in tuple(payload.items()):
-        if key in _COMPACT_TRACE_LIST_KEYS and isinstance(value, list):
+        if key in _COMPACT_TRACE_LIST_KEYS and isinstance(value, list) and value:
             digest = hashlib.sha256()
             for record in value:
                 digest.update(
@@ -1681,8 +2151,11 @@ class HuggingFaceMosaicKVModel:
     ) -> None:
         if config.execution.backend.value != "huggingface":
             raise ValueError("HuggingFaceMosaicKVModel requires execution.backend='huggingface'")
-        if config.execution.attention_implementation != "eager":
-            raise ValueError("the unified HF runtime is correctness-gated only for eager attention")
+        if config.execution.attention_implementation != "eager" and not config.method.is_full_cache:
+            raise ValueError(
+                "compressed HF methods currently require eager attention; "
+                "SDPA and FlashAttention-2 are correctness-gated for FullKV"
+            )
         if config.generation.do_sample or config.generation.temperature != 0:
             raise ValueError("the unified HF runtime requires deterministic greedy decoding")
         if config.generation.output_length_policy is not OutputLengthPolicy.FIXED_MAX_NEW_TOKENS:
@@ -1695,6 +2168,7 @@ class HuggingFaceMosaicKVModel:
         self.model_id = config.model.id
         self.method = config.method.value
         self.retention_ratio = config.cache.retention_ratio
+        self._terminal_token_ids = terminal_token_ids(adapter.model, adapter.processor)
         self.supports_video = adapter.capabilities.video
         self._prefixkv_profile: PrefixKVOfflineProfile | None = None
         if config.method.is_prefixkv_reimplementation and config.prefixkv.profile_path is not None:
@@ -1735,6 +2209,13 @@ class HuggingFaceMosaicKVModel:
 
         torch = _torch()
         trace_path = self._trace_path(request)
+        decode_runtime_policy: JsonObject = {
+            "cache_clone": "repair_provisional_steps_only",
+            "attention_mask_growth": "amortized_device_buffer",
+            "model_attention_mask": "omitted_when_all_physical_slots_are_valid",
+            "cache_position": "amortized_logical_position_buffer",
+            "finite_logit_validation": "single_deferred_sequence_reduction",
+        }
         trace: JsonObject = {
             "schema_version": 1,
             "run_id": request.run_id,
@@ -1745,8 +2226,10 @@ class HuggingFaceMosaicKVModel:
             "retention_ratio": self.retention_ratio,
             "status": "started",
             "repair_events": [],
+            "decode_runtime_policy": decode_runtime_policy,
         }
         started = time.perf_counter()
+        trace_instrumentation_seconds = 0.0
         try:
             if self._prefixkv_profile is not None:
                 self._prefixkv_profile.assert_evaluation_disjoint((request.sample_id,))
@@ -1761,17 +2244,24 @@ class HuggingFaceMosaicKVModel:
                 torch.cuda.synchronize(self.adapter.device)
                 torch.cuda.reset_peak_memory_stats(self.adapter.device)
             method = self.config.method
+            self.adapter.set_attention_implementation(
+                self.config.execution.attention_implementation
+            )
             is_full_cache = method.is_full_cache
             retention_one_identity = not is_full_cache and self.config.cache.retention_ratio == 1.0
+            fixed_diagnostic_sample = (
+                self.config.diagnostics.enabled
+                and request.sample_id in self.config.diagnostics.sample_ids
+            )
             needs_prompt_attention = not retention_one_identity and (
                 method.is_mosaickv
                 or method is MosaicKVMethod.PROMPT_ATTENTION_TOPK
                 or method.is_published_reimplementation
             )
             prepared = self.adapter.prepare_inputs(request.messages)
-            prefill, prefill_seconds = _timed(
-                prepared.model_inputs["input_ids"],
-                lambda: self.adapter.prefill(
+
+            def run_prefill() -> Any:
+                return self.adapter.prefill(
                     prepared,
                     capture_queries=method.is_mosaickv and not retention_one_identity,
                     capture_attentions=needs_prompt_attention,
@@ -1784,8 +2274,64 @@ class HuggingFaceMosaicKVModel:
                             else None
                         )
                     ),
-                ),
+                )
+
+            image_video_encoder_seconds: float | None = None
+            projector_seconds: float | None = None
+            language_model_prefill_seconds: float | None = None
+            is_cuda = (
+                torch.cuda.is_available() and getattr(self.adapter.device, "type", "cpu") == "cuda"
             )
+            if is_cuda:
+                profiling = self.adapter.get_profiling_modules()
+                audit = SynchronizationAudit()
+                vision_timer = ModuleCudaTimer(
+                    profiling.vision_encoder,
+                    torch,
+                    self.adapter.device,
+                    audit,
+                )
+                projector_timer = ModuleCudaTimer(
+                    profiling.projector,
+                    torch,
+                    self.adapter.device,
+                    audit,
+                )
+                language_timer = ModuleCudaTimer(
+                    profiling.language_model,
+                    torch,
+                    self.adapter.device,
+                    audit,
+                )
+
+                def instrumented_prefill() -> Any:
+                    with ExitStack() as stack:
+                        stack.enter_context(vision_timer)
+                        stack.enter_context(projector_timer)
+                        stack.enter_context(language_timer)
+                        return run_prefill()
+
+                prefill, prefill_seconds = _timed(
+                    prepared.model_inputs["input_ids"],
+                    instrumented_prefill,
+                )
+                image_video_encoder_seconds = vision_timer.total_seconds
+                projector_seconds = projector_timer.total_seconds
+                language_model_prefill_seconds = language_timer.total_seconds
+                if (
+                    profiling.vision_includes_projector
+                    and image_video_encoder_seconds is not None
+                    and projector_seconds is not None
+                ):
+                    image_video_encoder_seconds = max(
+                        0.0,
+                        image_video_encoder_seconds - projector_seconds,
+                    )
+            else:
+                prefill, prefill_seconds = _timed(
+                    prepared.model_inputs["input_ids"],
+                    run_prefill,
+                )
             if not bool(torch.isfinite(prefill.logits).all()):
                 raise HuggingFaceRuntimeError("prefill logits contain NaN or infinity")
             source_prefill_kv_bytes = _cache_payload_bytes(
@@ -1800,7 +2346,9 @@ class HuggingFaceMosaicKVModel:
             tier_seconds = 0.0
             packing_seconds = 0.0
             repair_state: RepairCacheState | None = None
+            forecast_rollout: IsolatedQueryRollout | None = None
             dense_budget: DensePhysicalCacheBudget | None = None
+            physical_prompt_capacity: int | None = None
             plan: MosaicKVCompressionPlan | None = None
             baseline_plan: BaselineCompressionPlan | None = None
             lookm_plan: LookMCompressionPlan | None = None
@@ -1847,6 +2395,9 @@ class HuggingFaceMosaicKVModel:
                     mandatory_logical_positions=mandatory_positions,
                 )
                 dense_budget = _dense_physical_cache_budget(full_state, self.config)
+                physical_prompt_capacity = (
+                    None if dense_budget is None else dense_budget.prompt_capacity
+                )
                 planning_config = (
                     self.config
                     if dense_budget is None
@@ -1865,6 +2416,7 @@ class HuggingFaceMosaicKVModel:
                         self.config.forecasting,
                         capture_attentions=True,
                     )
+                    forecast_rollout = rollout
                     forecast_seconds = forecast.timing.total
                     attention = _forecast_attention_by_node(
                         full_state,
@@ -1890,6 +2442,24 @@ class HuggingFaceMosaicKVModel:
                     logical_prefill_active_kv_bytes = (
                         plan.construction.state.statistics.active_kv_bytes
                     )
+                    if (
+                        method is MosaicKVMethod.MOSAICKV_EXACT
+                        and dense_budget is not None
+                        and not self.config.selection.stop_on_nonpositive_gain
+                        and logical_prefill_active_kv_bytes
+                        < dense_budget.minimum_block_representable_fill(
+                            self.config.cache.block_size
+                        )
+                    ):
+                        minimum_representable = dense_budget.minimum_block_representable_fill(
+                            self.config.cache.block_size
+                        )
+                        raise HuggingFaceRuntimeError(
+                            "budget-filling MosaicKV selection underfilled the dense cache: "
+                            f"selected={logical_prefill_active_kv_bytes}, "
+                            f"minimum_representable={minimum_representable}, "
+                            f"target={dense_budget.target_bytes}"
+                        )
                 elif method.is_compressed_baseline:
                     prompt_started = time.perf_counter()
                     prompt_attention = (
@@ -2021,9 +2591,7 @@ class HuggingFaceMosaicKVModel:
                             packed_state,
                             prototype_records,
                             tuple(record.prototype_id for record in prototype_records),
-                            physical_prompt_capacity=(
-                                None if dense_budget is None else dense_budget.prompt_capacity
-                            ),
+                            physical_prompt_capacity=physical_prompt_capacity,
                         ),
                     )
                 state = _state_from_packed(self.adapter, prefill.state, packed)
@@ -2031,23 +2599,48 @@ class HuggingFaceMosaicKVModel:
                     self.adapter,
                     packed.snapshot,
                 )
+                if (
+                    dense_budget is not None
+                    and packed_prefill_active_kv_bytes > dense_budget.target_bytes
+                ):
+                    raise HuggingFaceRuntimeError(
+                        "materialized cache exceeded its hard physical byte budget: "
+                        f"active={packed_prefill_active_kv_bytes}, "
+                        f"budget={dense_budget.target_bytes}"
+                    )
                 if method is MosaicKVMethod.MOSAICKV_FULL and plan is not None:
                     repair_state = RepairCacheState.from_construction(
                         full_state,
                         plan.construction,
                     )
+                trace_started = time.perf_counter()
                 if plan is not None:
-                    trace.update(_plan_trace(plan))
+                    trace.update(
+                        _plan_trace(
+                            plan,
+                            compact_catalogs=not fixed_diagnostic_sample,
+                        )
+                    )
                 elif baseline_plan is not None:
-                    trace.update(_baseline_plan_trace(baseline_plan))
+                    trace.update(
+                        _baseline_plan_trace(
+                            baseline_plan,
+                            compact_catalogs=not fixed_diagnostic_sample,
+                        )
+                    )
                 elif lookm_plan is not None:
                     trace.update(_lookm_plan_trace(lookm_plan))
                 elif prefixkv_plan is not None:
                     trace.update(_prefixkv_plan_trace(prefixkv_plan))
                 elif vl_cache_plan is not None:
                     trace.update(_vl_cache_plan_trace(vl_cache_plan))
-                trace["packed_slots"] = list(packed.slot_records)
+                trace["packed_slots"] = _trace_catalog(
+                    packed.slot_records,
+                    compact=not fixed_diagnostic_sample,
+                )
+                trace["packed_cache_all_slots_valid"] = packed.all_slots_valid
             elif retention_one_identity:
+                trace_started = time.perf_counter()
                 trace.update(
                     {
                         "requested_method": method.value,
@@ -2066,9 +2659,11 @@ class HuggingFaceMosaicKVModel:
                         "baseline_seed": self.config.execution.seed,
                         "selection_provenance": "retention_one_identity_no_selection",
                         "packed_slots": [],
+                        "packed_cache_all_slots_valid": True,
                     }
                 )
             else:
+                trace_started = time.perf_counter()
                 trace.update(
                     {
                         "requested_method": method.value,
@@ -2083,21 +2678,57 @@ class HuggingFaceMosaicKVModel:
                         "baseline_seed": self.config.execution.seed,
                         "selection_provenance": "full_cache_no_selection",
                         "packed_slots": [],
+                        "packed_cache_all_slots_valid": True,
                     }
                 )
 
-            fixed_diagnostic_sample = (
-                self.config.diagnostics.enabled
-                and request.sample_id in self.config.diagnostics.sample_ids
-            )
-            if self.config.diagnostics.enabled and not fixed_diagnostic_sample:
+            if not fixed_diagnostic_sample:
                 _compact_trace_records(trace)
                 trace["trace_detail"] = "compact_non_diagnostic"
             else:
                 trace["trace_detail"] = "full_debug"
+            trace_instrumentation_seconds += time.perf_counter() - trace_started
 
             fidelity: FidelityDiagnostic | None = None
             fidelity_seconds = 0.0
+            forecast_diagnostic_seconds = 0.0
+            if (
+                fixed_diagnostic_sample
+                and self.config.diagnostics.forecast_oracle_steps > 0
+                and plan is not None
+            ):
+                if forecast_rollout is None:
+                    raise HuggingFaceRuntimeError(
+                        "MosaicKV oracle diagnostics are missing the online rollout"
+                    )
+                forecast_diagnostic, forecast_diagnostic_seconds = _timed(
+                    prefill.logits,
+                    lambda: _forecast_quality_diagnostic(
+                        self.adapter,
+                        prefill,
+                        plan.full_state,
+                        plan.forecast,
+                        forecast_rollout,
+                        plan.selection,
+                        self.config,
+                    ),
+                )
+                forecast_payload = cast("JsonObject", asdict(forecast_diagnostic))
+                forecast_payload["overhead_seconds"] = forecast_diagnostic_seconds
+                forecast_payload["online_selection_isolation"] = (
+                    "evaluation_only_output_not_passed_to_compressor"
+                )
+                trace["forecast_quality_diagnostic"] = forecast_payload
+            elif self.config.diagnostics.forecast_oracle_steps > 0:
+                trace["forecast_quality_diagnostic"] = {
+                    "status": (
+                        "not_in_fixed_subset"
+                        if not fixed_diagnostic_sample
+                        else "not_applicable_to_non_mosaickv_method"
+                    )
+                }
+            else:
+                trace["forecast_quality_diagnostic"] = {"status": "disabled"}
             if (
                 self.config.diagnostics.enabled
                 and request.sample_id in self.config.diagnostics.sample_ids
@@ -2136,13 +2767,51 @@ class HuggingFaceMosaicKVModel:
             else:
                 trace["fidelity_diagnostic"] = {"status": "disabled"}
 
+            preallocated_decode_cache = False
+            if repair_state is None and prefixkv_plan is None:
+                preallocated_decode_cache = self.adapter.preallocate_decode_cache(
+                    state,
+                    self.config.generation.max_new_tokens - 1,
+                )
+            decode_runtime_policy["kv_growth"] = (
+                "preallocated_append_only_views"
+                if preallocated_decode_cache
+                else "backend_native_dynamic_growth"
+            )
+            decode_attention = (
+                self.config.execution.decode_attention_implementation
+                or self.config.execution.attention_implementation
+            )
+            if decode_attention != self.config.execution.attention_implementation:
+                if repair_state is not None:
+                    raise HuggingFaceRuntimeError(
+                        "residual repair requires eager decode attention capture"
+                    )
+                if state.model_state.get("mosaickv_validity_masks") is not None:
+                    raise HuggingFaceRuntimeError(
+                        "hybrid decode attention is not yet admitted for padded per-head caches"
+                    )
+                self.adapter.set_attention_implementation(decode_attention)
+            decode_runtime_policy["prefill_attention_implementation"] = (
+                self.config.execution.attention_implementation
+            )
+            decode_runtime_policy["decode_attention_implementation"] = decode_attention
+
             tokens = [prefill.next_token_id]
             token = prefill.next_token_id
             decode_seconds = 0.0
+            per_token_decode_seconds: list[float] = []
+            decode_finite_flags: list[Any] = []
             repair_events: list[RepairEvent] = []
             prefixkv_decode_events: list[JsonObject] = []
             for step_index in range(1, self.config.generation.max_new_tokens):
-                before = _clone_decode_state(self.adapter, state)
+                # Hugging Face cache objects normally grow in place.  A
+                # provisional repair step therefore needs an isolated copy so
+                # it can be discarded and re-decoded, but every non-repair
+                # path can advance the live state directly.  Cloning the full
+                # cache unconditionally here made ordinary token decoding
+                # O(sequence_length) in host-side copy work per step.
+                before = state if repair_state is None else _clone_decode_state(self.adapter, state)
                 decode_token = token
                 needs_attention = repair_state is not None
                 provisional, step_seconds = _timed(
@@ -2157,8 +2826,12 @@ class HuggingFaceMosaicKVModel:
                     ),
                 )
                 decode_seconds += step_seconds
-                if not bool(torch.isfinite(provisional.logits).all()):
-                    raise HuggingFaceRuntimeError("decode logits contain NaN or infinity")
+                per_token_decode_seconds.append(step_seconds)
+                # Queue device-side validation and reduce once after the
+                # sequence.  Converting every scalar flag to bool here forced
+                # a second CUDA synchronization on every token in addition to
+                # the required timing boundary.
+                decode_finite_flags.append(torch.isfinite(provisional.logits).all())
                 if repair_state is None:
                     if prefixkv_plan is not None:
 
@@ -2180,19 +2853,41 @@ class HuggingFaceMosaicKVModel:
                         state, maintenance_events = maintained
                         prefixkv_decode_events.extend(maintenance_events)
                         decode_seconds += maintenance_seconds
+                        per_token_decode_seconds[-1] += maintenance_seconds
                     else:
                         state = provisional.state
                     token = provisional.next_token_id
                     tokens.append(token)
                     continue
 
+                if plan is None:
+                    raise HuggingFaceRuntimeError(
+                        "repair state exists without a MosaicKV compression plan"
+                    )
+
                 prototype_slots = cast(
                     "tuple[tuple[int, int, int, int], ...]",
                     before.model_state.get("mosaickv_prototype_slots", ()),
                 )
-                validity_masks = cast(
-                    "tuple[Any, ...]", before.model_state["mosaickv_validity_masks"]
-                )
+                raw_validity_masks = before.model_state.get("mosaickv_validity_masks")
+                if raw_validity_masks is None:
+                    if before.model_state.get("mosaickv_packed_all_valid") is not True:
+                        raise HuggingFaceRuntimeError(
+                            "repair cache is missing packed validity metadata"
+                        )
+                    # The dense fast path intentionally omits per-layer masks.
+                    # Repair only needs their KV-head dimension to map grouped
+                    # query heads back to prototype slots, so synthesize the
+                    # all-valid shape without reintroducing a decode-time mask.
+                    raw_validity_masks = tuple(
+                        torch.ones(
+                            (layer.kv_heads, before.active_cache_length),
+                            dtype=torch.bool,
+                            device=provisional.logits.device,
+                        )
+                        for layer in plan.full_state.layers
+                    )
+                validity_masks = cast("tuple[Any, ...]", raw_validity_masks)
                 masses = _prototype_attention_mass(
                     provisional.attention_weights,
                     prototype_slots,
@@ -2246,49 +2941,90 @@ class HuggingFaceMosaicKVModel:
                     final = repaired_output[0]
                     state = final.state
                     token = final.next_token_id
+                    decode_finite_flags.append(torch.isfinite(final.logits).all())
                 else:
                     state = provisional.state
                     token = provisional.next_token_id
                 tokens.append(token)
 
+            if decode_finite_flags:
+                finite_logits, validation_seconds = _timed(
+                    prefill.logits,
+                    lambda: torch.stack(decode_finite_flags).all(),
+                )
+                trace_instrumentation_seconds += validation_seconds
+                if not bool(finite_logits):
+                    raise HuggingFaceRuntimeError("decode logits contain NaN or infinity")
+
             token_ids = torch.cat(tokens, dim=-1)
-            answer = _decode_text(self.adapter.processor, token_ids)
+            timed_token_ids = tuple(
+                int(value) for value in token_ids.detach().cpu().reshape(-1).tolist()
+            )
+            quality = decode_quality_output(
+                self.adapter.processor,
+                timed_token_ids,
+                self._terminal_token_ids,
+            )
+            answer = quality.text
             live_cache = self.adapter.extract_past_key_values(state.past_key_values, clone=False)
             active_bytes = sum(
                 tensor_storage_bytes(key) + tensor_storage_bytes(value)
                 for key, value in self.adapter._legacy_layers(live_cache)[0]
             )
             residual_bytes = 0 if repair_state is None else repair_state.residual_storage.cpu_bytes
-            total_seconds = max(0.0, time.perf_counter() - started - fidelity_seconds)
+            total_seconds = max(
+                0.0,
+                time.perf_counter()
+                - started
+                - fidelity_seconds
+                - forecast_diagnostic_seconds
+                - trace_instrumentation_seconds,
+            )
             repair_transfer = sum(event.transfer_time_ms for event in repair_events) / 1000.0
             repair_redecode = sum(event.re_decode_time_ms for event in repair_events) / 1000.0
             timings = RuntimePhaseTimings(
                 prefill=prefill_seconds,
+                image_video_encoder=image_video_encoder_seconds,
+                projector=projector_seconds,
+                language_model_prefill=language_model_prefill_seconds,
                 forecast=forecast_seconds,
                 graph=graph_seconds,
                 utility_and_selection=selection_seconds,
                 tier_construction=tier_seconds,
                 cache_packing=packing_seconds,
                 decode=decode_seconds,
+                per_token_decode=tuple(per_token_decode_seconds),
                 repair_transfer=repair_transfer,
                 repair_redecode=repair_redecode,
                 total=total_seconds,
             )
+            timing_payload = cast("JsonObject", asdict(timings))
+            timing_payload["trace_instrumentation"] = trace_instrumentation_seconds
             trace.update(
                 {
                     "status": "completed",
                     "answer": answer,
-                    "generated_token_ids": [
-                        int(value) for value in token_ids.detach().cpu().reshape(-1).tolist()
-                    ],
+                    "generated_token_ids": list(timed_token_ids),
+                    "quality_decoding": {
+                        **quality.to_record(),
+                        "configured_terminal_token_ids": list(self._terminal_token_ids),
+                    },
                     "repair_events": [event.to_record() for event in repair_events],
                     "prefixkv_decode_events": cast("list[JsonValue]", prefixkv_decode_events),
-                    "timing_breakdown": cast("JsonObject", asdict(timings)),
+                    "timing_breakdown": timing_payload,
                     "source_prefill_kv_bytes": source_prefill_kv_bytes,
                     "logical_prefill_active_kv_bytes": logical_prefill_active_kv_bytes,
                     "packed_prefill_active_kv_bytes": packed_prefill_active_kv_bytes,
                     "packed_padding_kv_bytes": (
                         packed_prefill_active_kv_bytes - logical_prefill_active_kv_bytes
+                    ),
+                    "logical_cache_utilization": (
+                        logical_prefill_active_kv_bytes / packed_prefill_active_kv_bytes
+                    ),
+                    "physical_budget_utilization": (
+                        1.0
+                        if dense_budget is None
+                        else packed_prefill_active_kv_bytes / dense_budget.target_bytes
                     ),
                     "hard_active_kv_budget_bytes": (
                         None if dense_budget is None else dense_budget.target_bytes
@@ -2296,6 +3032,16 @@ class HuggingFaceMosaicKVModel:
                     "active_kv_bytes": packed_prefill_active_kv_bytes,
                     "final_active_kv_bytes": active_bytes,
                     "residual_kv_bytes": residual_bytes,
+                    "peak_gpu_memory_allocated": (
+                        int(torch.cuda.max_memory_allocated(self.adapter.device))
+                        if is_cuda
+                        else None
+                    ),
+                    "peak_gpu_memory_reserved": (
+                        int(torch.cuda.max_memory_reserved(self.adapter.device))
+                        if is_cuda
+                        else None
+                    ),
                     "trace_path": str(trace_path.resolve()),
                 }
             )

@@ -7,52 +7,74 @@ SGLang, evaluation, and development paths:
 /scratch/djy8hg/env/mosaickv
 ```
 
-The authoritative inputs are `env/common/requirements.in`,
-`env/common/requirements.lock`, and the version-specific patch under
-`env/patches/`. The lock contains every direct and transitive
+The authoritative inputs are `env/common/requirements.in` and
+`env/common/requirements.lock`. No installed-package patch is part of the
+active environment. The lock contains every direct and transitive
 Python distribution as an exact `name==version` pin for Linux x86_64. It was
 resolved with uv for a manylinux 2.28 target. The core intersection is:
 
 | Component | Common version |
 |---|---:|
 | Python | 3.11 |
-| PyTorch / CUDA wheel runtime | 2.5.1 / CUDA 12.4 |
-| Transformers | 4.49.0 |
-| vLLM | 0.7.2 |
-| SGLang | 0.4.3.post4 |
+| PyTorch / CUDA wheel runtime | 2.8.0 / CUDA 12.8 |
+| Transformers | 4.55.2 |
+| FlashAttention | 2.8.3 |
+| vLLM | 0.10.2 |
+| SGLang | 0.5.1.post3 |
 | lmms-eval | 0.7.2 |
 
-SGLang 0.4.3.post4 declares its SRT dependency as
-`vllm>=0.6.4.post1,<=0.7.2`; the common lock therefore uses vLLM 0.7.2.
 `env/common` is the only documented installation source and `common` is the
 only documented argument to the setup script.
 
-The common input spells out SGLang's SRT dependency set instead of activating
-the legacy `srt` extra. That extra requires `decord==0.6.0`, whose only Linux
-wheel is tagged for CPython 3.6 and fails both pip and uv platform checks under
-Python 3.11. The lock uses `decord2==3.4.0`, which provides the same `decord`
-module API used by SGLang (`VideoReader` and `cpu`) in a CPython 3.11,
-manylinux 2.28 wheel. This is an environment compatibility decision, not an
-algorithm change, and video support remains unverified until a video smoke
-passes.
+SGLang's runtime packages are pinned explicitly instead of installing its
+`runtime-common` extra. That extra fixes `outlines==0.1.11`, while vLLM fixes
+`outlines-core==0.2.11`; unconstrained deterministic generation does not load
+SGLang's optional Outlines integration. The explicit SGLang runtime set is
+`flashinfer-python==0.2.14.post1`, `sgl-kernel==0.3.7`,
+`torch-memory-saver==0.0.8`, `torchao==0.9.0`, `uvloop==0.21.0`, and
+`xgrammar==0.1.23`. This resolver decision does not establish serving parity.
 
-SGLang 0.4.3.post4 predates Transformers' native Qwen2.5-VL registration. Its
-bundled compatibility config uses the same class name, so Transformers 4.49
-rejects the SGLang processor registration unless `exist_ok=True` is passed.
-`scripts/apply_env_patches.sh` applies the two-argument registration patch only
-to exactly SGLang 0.4.3.post4, recognizes an already-patched source, and fails
-closed on any other source state. The patch SHA and patched target SHA are
-verified before support can be claimed and the patch SHA is stored in every run
-manifest. This does not change inference math.
+FlashAttention's upstream build script prefers a downloadable binary wheel.
+That wheel requires GLIBC 2.32 and cannot load on this cluster's GLIBC 2.28
+nodes. Build the pinned 2.8.3 source against the node with:
 
-The PyTorch lock already includes `nvidia-cuda-nvrtc-cu12==12.4.127`.
-`cache_env.sh` adds that wheel's exact library directory to `LD_LIBRARY_PATH`
-so `sgl_kernel` does not depend on an unrecorded cluster CUDA module.
+```bash
+sbatch mosaickv/slurm/flash_attn_wheel.sbatch
+```
 
-Standalone FlashAttention-2 is intentionally absent from the common lock. HF
-correctness starts with eager attention. vLLM and SGLang use the kernels in the
-common dependency graph. Do not claim SDPA, FlashAttention-2, vLLM, or SGLang
-support until the relevant clean-tree smoke passes.
+The wheel is written under
+`/scratch/djy8hg/cache/mosaickv/flash-attn-wheelhouse-source`; setup prefers it
+automatically and force-reinstalls that exact local artifact after lock
+synchronization. If the common environment is absent, the Slurm wheel script
+bootstraps only the pinned Torch/build prerequisites into its eventual prefix;
+`create_envs.sh --sync common` must then reconcile the complete lock. Setup
+fails explicitly when the source wheel is absent. Do not treat a resolved pin,
+wheel build, or import as SDPA/FlashAttention/vLLM/SGLang model-parity evidence.
+The audited SM80 wheel has SHA-256
+`f91c8f0e024b253ba29b3cfc178ad3d90dcb37617baed02eb5175ae7213f8560`;
+the setup script verifies the build-produced sidecar checksum before installing
+the local artifact.
+The provided Slurm build applies the versioned source patch
+`env/patches/flash-attn-2.8.3-a100-multimodal-inference.patch` (SHA-256
+`e919aa142eba57abd98af403de282ee7ecf622ad22d745da22355a935b654768`).
+It is an inference-only wheel specialized for SM80, FP16/BF16, and the
+64/80/128 head dimensions used by the requested vision and language models;
+backward execution, dropout, ALiBi, softcap, and local-attention behavior are
+intentionally disabled. Uneven head dimensions remain enabled because Qwen's
+vision encoder uses dimension 80. Four backward dispatch
+translation units remain linked because the extension loader requires their
+symbols, but the public backward entry points fail explicitly before dispatch.
+These constraints cover the audited Qwen2.5-VL language/vision dimensions
+128/80 and LLaVA language/vision dimensions 128/64, but they are not general
+FlashAttention support. Build a separate, explicitly
+versioned wheel for another compute capability, head dimension, training, or
+kernel feature set. `verify_envs.py --require-cuda` executes dense and varlen
+forward kernels at all three dimensions and verifies that the specialized
+wheel rejects an uncompiled head dimension before reporting environment
+support.
+The upstream 2.8.3 source archive is independently fixed to SHA-256
+`1e71dd64a9e0280e0447b8a0c2541bad4bf6ac65bdeaa2f90e51a9e57de0370d`;
+the build refuses a different archive before extraction.
 
 ## Cache policy
 
@@ -88,6 +110,8 @@ mutate an existing environment unless `--sync` is explicit:
 cd /scratch/djy8hg/workdir/MosaicKV
 source mosaickv/scripts/cache_env.sh
 mosaickv/scripts/assert_clean_worktree.sh
+sbatch mosaickv/slurm/flash_attn_wheel.sbatch
+# Wait for the wheel job to complete successfully.
 mosaickv/scripts/create_envs.sh --sync common
 ```
 
@@ -118,6 +142,14 @@ sbatch --reservation=bi_fox_dgx mosaickv/slurm/env_smoke.sbatch
 Only `status: support_verified`, an empty error list, and
 `cuda.matmul_passed: true` establish environment support. Model/backend parity
 remains a separate gate.
+
+Exploratory A100 job `17347802` produced exactly that verdict for lock SHA-256
+`fdc56ad9edb03e8bad5cb2108322c7a12b0f33bdd5533ed596dc6b695a2db9c0`:
+all 251 locked distributions matched, every required module imported, the CUDA
+matrix multiply passed, and the specialized FlashAttention dense/varlen
+forward and rejection checks passed. The dirty worktree prevents treating this
+as a canonical artifact, but the common environment is no longer merely an
+unverified resolved lock.
 
 ## Docker
 

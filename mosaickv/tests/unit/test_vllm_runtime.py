@@ -9,6 +9,10 @@ from typing import Any
 
 import pytest
 
+from mosaickv.adapters.huggingface.qwen2_5_vl import (
+    QWEN25_VL_MAX_PIXELS,
+    QWEN25_VL_MIN_PIXELS,
+)
 from mosaickv.backends.vllm_runtime import (
     NativeMosaicKVUnsupported,
     VLLMFullKVModel,
@@ -40,6 +44,16 @@ class _Processor:
             )
             rendered.append(f"{message['role']}:{content}")
         return "|".join(rendered) + "|assistant:"
+
+    def batch_decode(
+        self,
+        token_ids: Any,
+        *,
+        skip_special_tokens: bool,
+        clean_up_tokenization_spaces: bool,
+    ) -> list[str]:
+        del token_ids, skip_special_tokens, clean_up_tokenization_spaces
+        return ["blue"]
 
 
 class _NoTemplateProcessor:
@@ -80,9 +94,9 @@ def _trial(request_id: str, *, cached: int, mm_hit: int) -> VLLMTrialMeasurement
 
 class _Runner:
     def __init__(self) -> None:
-        self.vllm_version = "0.7.2"
+        self.vllm_version = "0.10.2"
         self.engine_metadata: JsonObject = {
-            "vllm_version": "0.7.2",
+            "vllm_version": "0.10.2",
             "cuda_graph": False,
         }
         self.calls = 0
@@ -218,20 +232,31 @@ def test_fullkv_wrapper_writes_raw_trials_and_uses_first_measurement(tmp_path: P
     assert payload["native_mosaickv"] is False
     assert payload["trials"][0]["prefix_cache_hit_rate"] == 0.0
     assert payload["trials"][1]["prefix_cache_hit_rate"] == 1.0
+    assert payload["effective_sampling_parameters"]["ignore_eos"] is True
+    assert payload["effective_sampling_parameters"]["max_new_tokens"] == 2
+    assert payload["quality_answer"] == "blue"
     assert payload["trials"][1]["mm_cache_hit_rate"] == 1.0
 
 
 def test_native_feature_is_explicitly_unsupported_for_installed_version() -> None:
-    capability = native_integration_capability("0.7.2")
+    capability = native_integration_capability("0.10.2")
     assert not capability.supported
-    assert capability.reason_code == "audited_0_7_2_missing_sparse_logical_block_table_hook"
+    assert capability.reason_code == "audited_0_10_2_missing_sparse_logical_block_table_hook"
     with pytest.raises(NativeMosaicKVUnsupported, match="No simulated MosaicKV row"):
         require_native_mosaickv_support(
             enabled=True,
-            vllm_version="0.7.2",
+            vllm_version="0.10.2",
             enforce_eager=True,
             attention_backend="eager",
         )
+
+
+def test_reference_options_disable_prefix_cache_until_repeat_parity_passes() -> None:
+    options = VLLMRuntimeOptions()
+
+    assert not options.enable_prefix_caching
+    assert QWEN25_VL_MIN_PIXELS == 256 * 28 * 28
+    assert QWEN25_VL_MAX_PIXELS == 1_605_632
 
 
 @pytest.mark.parametrize(

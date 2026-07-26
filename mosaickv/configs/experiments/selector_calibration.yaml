@@ -1,0 +1,148 @@
+matrix_schema_version: 1
+matrix_revision: 1
+capability_catalog_version: common-env-2026-07-25-v2
+experiment_id: selector_calibration
+description: Exploratory disjoint-slice calibration of normalized MosaicKV exact selection; no evaluation or paper claims may be produced from these rows.
+enabled: true
+
+axes:
+  models: [llava_1_5_7b, qwen2_5_vl_3b, qwen2_5_vl_7b, llava_onevision_7b_optional]
+  backends: [hf_eager, hf_sdpa, hf_flash_attention_2, vllm, sglang]
+  methods: [full_kv, random_kv, prompt_attention_topk, lookm_reimpl, prefixkv_reimpl, vl_cache_reimpl, mosaickv_exact, mosaickv_proto, mosaickv_full]
+  tasks: [mmstar, mmvet, textvqa, docvqa, chartqa, videomme]
+  retention_ratios: [1.0, 0.8, 0.6, 0.4, 0.2, 0.1, 0.05]
+  output_lengths: [32, 64, 128]
+  selection_seeds: [17, 29, 43]
+
+generation:
+  deterministic: true
+  do_sample: false
+  temperature: 0.0
+  top_p: 1.0
+  output_length_policy: fixed_max_new_tokens
+
+performance:
+  warmups: 5
+  timed_repetitions: 20
+
+comparison:
+  primary_budget: active_kv_bytes
+  nominal_retention_only_for_scheduling: true
+  require_realized_byte_match_before_aggregation: true
+
+run:
+  output_root: /scratch/djy8hg/runs/mosaickv/experiments/selector_calibration
+  cache_root: /scratch/djy8hg/cache/mosaickv
+  subset_size: 5
+  measurement_mode: exploratory_selector_calibration
+  resume: true
+
+sweeps:
+  - name: full_reference
+    models: [qwen2_5_vl_3b]
+    backends: [hf_eager]
+    methods: [full_kv]
+    tasks: [docvqa]
+    retention_ratios: [1.0]
+    output_lengths: [32]
+    selection_seeds: [17]
+    subset_size: 5
+    variant: calibration_full_reference
+
+  - name: strongest_simple_baseline
+    models: [qwen2_5_vl_3b]
+    backends: [hf_eager]
+    methods: [prompt_attention_topk]
+    tasks: [docvqa]
+    retention_ratios: [0.2]
+    output_lengths: [32]
+    selection_seeds: [17]
+    subset_size: 5
+    variant: calibration_prompt_attention
+
+  - name: normalized_hybrid4
+    models: [qwen2_5_vl_3b]
+    backends: [hf_eager]
+    methods: [mosaickv_exact]
+    tasks: [docvqa]
+    retention_ratios: [0.2]
+    output_lengths: [32]
+    selection_seeds: [17]
+    subset_size: 5
+    variant: calibration_normalized_hybrid4_reserve25
+
+  - name: normalized_hybrid1
+    models: [qwen2_5_vl_3b]
+    backends: [hf_eager]
+    methods: [mosaickv_exact]
+    tasks: [docvqa]
+    retention_ratios: [0.2]
+    output_lengths: [32]
+    selection_seeds: [17]
+    subset_size: 5
+    variant: calibration_normalized_hybrid1_reserve25
+    overrides:
+      forecasting:
+        draft_steps: 1
+
+  - name: attention_only_hybrid1
+    models: [qwen2_5_vl_3b]
+    backends: [hf_eager]
+    methods: [mosaickv_exact]
+    tasks: [docvqa]
+    retention_ratios: [0.2]
+    output_lengths: [32]
+    selection_seeds: [17]
+    subset_size: 5
+    variant: calibration_attention_only_hybrid1_reserve25
+    overrides:
+      forecasting:
+        draft_steps: 1
+      utility:
+        lambda_v: 0.0
+        lambda_o: 0.0
+      selection:
+        lambda_g: 0.0
+        lambda_m: 0.0
+
+  - name: normalized_prompt_only
+    models: [qwen2_5_vl_3b]
+    backends: [hf_eager]
+    methods: [mosaickv_exact]
+    tasks: [docvqa]
+    retention_ratios: [0.2]
+    output_lengths: [32]
+    selection_seeds: [17]
+    subset_size: 5
+    variant: calibration_normalized_prompt_only_reserve25
+    overrides:
+      forecasting:
+        mode: prompt_window
+        draft_steps: 0
+
+  - name: normalized_hybrid1_no_reserve
+    models: [qwen2_5_vl_3b]
+    backends: [hf_eager]
+    methods: [mosaickv_exact]
+    tasks: [docvqa]
+    retention_ratios: [0.2]
+    output_lengths: [32]
+    selection_seeds: [17]
+    subset_size: 5
+    variant: calibration_normalized_hybrid1_reserve0
+    overrides:
+      forecasting:
+        draft_steps: 1
+      selection:
+        minimum_stratum_fraction: 0.0
+
+blocked:
+  - scope:
+      backends: [hf_sdpa, hf_flash_attention_2, vllm, sglang]
+    reason: Calibration uses the correctness-gated eager Hugging Face mutable-cache runtime only.
+  - scope:
+      methods: [mosaickv_proto, mosaickv_full]
+    reason: Qwen2.5-VL caches post-M-RoPE keys; prototype merging and residual repair remain fail-closed.
+  - scope:
+      tasks: [mmstar, mmvet, textvqa, chartqa, videomme]
+    reason: The first selector calibration is scoped to a frozen DocVQA calibration slice; evaluation tasks remain untouched.

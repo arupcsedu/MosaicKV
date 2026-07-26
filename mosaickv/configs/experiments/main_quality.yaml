@@ -1,6 +1,6 @@
 matrix_schema_version: 1
 matrix_revision: 3
-capability_catalog_version: common-env-2026-07-21-v1
+capability_catalog_version: common-env-2026-07-25-v2
 experiment_id: main_quality
 description: Main byte-matched quality matrix; common block methods use block-16, while paper-faithful LOOK-M remains a separately labeled token-granularity stratum.
 enabled: true

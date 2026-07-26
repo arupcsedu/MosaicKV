@@ -137,16 +137,16 @@ def test_software_provenance_records_all_installed_backend_versions(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     versions = {
-        "torch": "2.5.1",
-        "transformers": "4.49.0",
-        "vllm": "0.7.2",
-        "sglang": "0.4.3.post4",
+        "torch": "2.8.0",
+        "transformers": "4.55.2",
+        "vllm": "0.10.2",
+        "sglang": "0.5.1.post3",
         "numpy": "1.26.4",
     }
     monkeypatch.setattr(manifest_module, "_version", versions.__getitem__)
-    monkeypatch.setattr(manifest_module, "_torch_cuda_version", lambda: "12.4")
+    monkeypatch.setattr(manifest_module, "_torch_cuda_version", lambda: "12.8")
 
     software = manifest_module._software_provenance(Backend.HUGGINGFACE, 1, "595.71.05")
 
-    assert software["vllm"] == "0.7.2"
-    assert software["sglang"] == "0.4.3.post4"
+    assert software["vllm"] == "0.10.2"
+    assert software["sglang"] == "0.5.1.post3"

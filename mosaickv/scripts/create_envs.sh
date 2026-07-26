@@ -68,11 +68,42 @@ fi
 if [[ ! -x "${ENV_DIR}/bin/uv" ]]; then
   "${ENV_PYTHON}" -m pip install 'uv==0.11.29'
 fi
-"${ENV_DIR}/bin/uv" pip sync \
-  --python "${ENV_PYTHON}" \
-  --cache-dir "${UV_CACHE_DIR}" \
-  "${LOCK_FILE}"
-"${PROJECT_ROOT}/scripts/apply_env_patches.sh" "${ENV_DIR}"
+FLASH_WHEEL_DIR="${MOSAICKV_CACHE_ROOT}/flash-attn-wheelhouse-source"
+FLASH_WHEEL_PATH=""
+SYNC_ARGS=(
+  pip sync
+  --python "${ENV_PYTHON}"
+  --cache-dir "${UV_CACHE_DIR}"
+)
+if compgen -G "${FLASH_WHEEL_DIR}/flash_attn-2.8.3-*.whl" >/dev/null; then
+  # Prefer the wheel compiled by scripts/build_flash_attn_wheel.sh against
+  # this host GLIBC/CUDA stack. The upstream setup script otherwise fetches a
+  # binary wheel that can be incompatible with older compute-node GLIBC.
+  SYNC_ARGS+=(--find-links "${FLASH_WHEEL_DIR}")
+  FLASH_WHEEL_PATH=$(compgen -G "${FLASH_WHEEL_DIR}/flash_attn-2.8.3-*.whl" | head -n 1)
+else
+  printf 'FlashAttention requires a host-compatible wheel or nvcc. Build it on a GPU node:\n' >&2
+  printf '  sbatch mosaickv/slurm/flash_attn_wheel.sbatch\n' >&2
+  exit 2
+fi
+"${ENV_DIR}/bin/uv" "${SYNC_ARGS[@]}" "${LOCK_FILE}"
+if [[ -n "${FLASH_WHEEL_PATH}" ]]; then
+  # Equal-version candidates from an index and --find-links need not have the
+  # same ABI. Force the audited host-built artifact after synchronization.
+  if [[ ! -f "${FLASH_WHEEL_PATH}.sha256" ]]; then
+    printf 'FlashAttention wheel checksum is absent: %s.sha256\n' \
+      "${FLASH_WHEEL_PATH}" >&2
+    exit 2
+  fi
+  (
+    cd "${FLASH_WHEEL_DIR}"
+    sha256sum -c "$(basename "${FLASH_WHEEL_PATH}").sha256"
+  )
+  "${ENV_DIR}/bin/uv" pip install \
+    --python "${ENV_PYTHON}" \
+    --cache-dir "${UV_CACHE_DIR}" \
+    --reinstall --no-deps "${FLASH_WHEEL_PATH}"
+fi
 "${ENV_DIR}/bin/uv" pip install \
   --python "${ENV_PYTHON}" \
   --cache-dir "${UV_CACHE_DIR}" \

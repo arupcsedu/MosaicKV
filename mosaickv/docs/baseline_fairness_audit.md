@@ -209,7 +209,8 @@ class or a fail-safe fallback is not experimental support.
 | Qwen2.5-VL 3B/7B, LLaVA-OneVision 0.5B, InternVL2.5 4B | paper-faithful `prefixkv_reimpl` | Unsupported under that claim. The executable path is explicitly `generalized_prefixkv_reimpl`; it is not official or LLaVA-parity PrefixKV. |
 | Qwen2.5-VL 7B, LLaVA-OneVision 0.5B, InternVL2.5 4B | all nine paper-result rows | Unsupported pending an exact-revision checkpoint/runtime acceptance gate. Static adapter registration is not load evidence. |
 | LLaVA-1.5 7B and Qwen2.5-VL 3B | `vl_cache_reimpl` paper-result rows | Unsupported pending a checkpoint-specific VL-Cache run and retention-1 parity gate. The implementation and synthetic equation tests alone are insufficient. |
-| Every model | every method on vLLM, SGLang, SDPA, or FlashAttention-2 | Unsupported in this audit. The unified compression runtime is HF eager-only. |
+| Every model | native compressed methods on vLLM or SGLang | Unsupported. Only verified FullKV serving rows are admitted; native cache mutation remains fail closed. |
+| Audited HF models | compressed SDPA/FlashAttention-2 prefill | Unsupported because fused prompt-attention evidence is unavailable. Explicit eager-prefill/SDPA-decode exact mode is a separately labeled all-valid, no-repair design and must be compared only under the same backend pair. |
 
 At retention 1.0, every compression method is required to take the exact
 no-transform path. That boundary test does not establish support for prototype

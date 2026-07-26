@@ -1,55 +1,38 @@
 # SGLang native MosaicKV blocker
 
-Audit target: `sglang==0.4.3.post4` in the common environment.
+Audit target: `sglang==0.5.1.post3` in the common environment.
 
 ## Verdict
 
-Native MosaicKV is unsupported. No native SGLang row may be emitted and the
-feature gate must remain fail-closed.
+Native MosaicKV is unsupported. The feature gate remains fail-closed and no
+native, prototype, repair, or simulated SGLang row may be emitted.
 
 ## Installed source inspected
 
-- `sglang/srt/entrypoints/engine.py:73` and `:112` — public engine and
-  generation entry point;
-- `sglang/srt/mem_cache/memory_pool.py:46` — `ReqToTokenPool`;
-- `sglang/srt/mem_cache/memory_pool.py:119` —
-  `TokenToKVPoolAllocator`;
-- `sglang/srt/mem_cache/memory_pool.py:180` — layer KV pool;
-- `sglang/srt/mem_cache/memory_pool.py:109` — abstract KV write primitive;
-- `sglang/srt/mem_cache/radix_cache.py:79` — `RadixCache`; and
-- `sglang/srt/managers/scheduler.py:1927` — cache-flush ownership boundary.
+- `sglang/srt/entrypoints/engine.py:89` and `:140` — `Engine.generate`;
+- `sglang/srt/mem_cache/memory_pool.py:50` — `ReqToTokenPool`;
+- `memory_pool.py:165` and `:372` — `MHATokenToKVPool.set_kv_buffer`;
+- `sglang/srt/mem_cache/allocator.py:118` — `TokenToKVPoolAllocator`;
+- `sglang/srt/mem_cache/radix_cache.py:120` — `RadixCache`;
+- `sglang/srt/model_executor/forward_batch_info.py:165` — `ForwardBatch`; and
+- `sglang/srt/layers/attention/base_attn_backend.py:14` —
+  `AttentionBackend`.
 
-The public engine exposes no post-prefill cache callback or request-scoped
-block-selection transaction. The KV write primitive updates layer storage but
-does not atomically update request-to-token mappings, allocator ownership,
-Radix entries, scheduler state, and multimodal logical positions.
+The layer KV write primitive does not atomically update request-to-token
+mappings, allocator ownership, Radix entries, scheduler state, and multimodal
+logical positions. The public engine has no post-prefill cache callback.
 
-## Missing hook
+## Required upstream interface
 
-A safe integration needs a scheduler-owned transaction that:
-
-1. freezes one request at the prefill/decode boundary;
-2. exposes its logical positions and owned KV locations;
-3. validates and commits retained locations without renumbering positions;
-4. updates request mappings, allocator ownership, and Radix entries together;
-5. optionally replaces K/V values with layer/layout validation; and
-6. restores blocks at a synchronized decode boundary without exposing them to
-   another request.
-
-## Correctness risks without the hook
+A safe integration needs a scheduler-owned transaction that freezes one
+request at the prefill/decode boundary; exposes its logical positions and KV
+locations; validates and commits retained locations without renumbering;
+updates mappings, allocator ownership, and Radix entries together; and supports
+a synchronized restore operation. Prototype replacement additionally requires
+per-layer K/V layout validation.
 
 Ad hoc mutation can leave Radix nodes pointing to freed slots, make the
-scheduler reuse live KV memory, corrupt multimodal M-RoPE positions, or leak
-one request's cache into another. A successful kernel call alone would not
-prove ownership or position correctness.
-
-## Proposed upstream interface
-
-An upstream interface should expose a versioned request cache snapshot plus
-atomic `commit_kv_selection` and `restore_kv_blocks` scheduler operations. The
-commit must validate request identity, logical positions, allocated slots,
-Radix ownership, layer layout, and exact byte accounting before publication.
-
-Until that interface or a reviewed version-pinned native patch exists,
+scheduler reuse live memory, corrupt M-RoPE positions, or leak request data.
+Until an upstream transaction or reviewed version-pinned native patch exists,
 whole-block selection, prototype replacement, and residual repair remain
 unsupported.

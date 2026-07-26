@@ -25,15 +25,20 @@ from itertools import pairwise
 from pathlib import Path
 from typing import Any, Protocol, cast
 
+from mosaickv.adapters.huggingface.qwen2_5_vl import (
+    QWEN25_VL_MAX_PIXELS,
+    QWEN25_VL_MIN_PIXELS,
+)
 from mosaickv.backends.vllm_runtime import (
     _resolve_model_source,
     prepare_vllm_prompt,
 )
 from mosaickv.config import RunConfig
 from mosaickv.evaluation.model import EvaluationRequest, GenerationMetrics, ModelGeneration
+from mosaickv.generation import QualityDecode, decode_quality_output, terminal_token_ids
 from mosaickv.types import JsonObject, Precision
 
-_AUDITED_SGLANG_VERSION = "0.4.3.post4"
+_AUDITED_SGLANG_VERSION = "0.5.1.post3"
 _SUPPORTED_MODELS = {
     "Qwen/Qwen2.5-VL-3B-Instruct",
     "Qwen/Qwen2.5-VL-7B-Instruct",
@@ -71,7 +76,7 @@ def native_integration_capability(sglang_version: str) -> NativeIntegrationCapab
         supported=False,
         feature="whole_block_selection_with_original_logical_and_mrope_positions",
         reason_code=(
-            "audited_0_4_3_post4_missing_atomic_sparse_request_cache_hook"
+            "audited_0_5_1_post3_missing_atomic_sparse_request_cache_hook"
             if sglang_version == _AUDITED_SGLANG_VERSION
             else "unaudited_sglang_version"
         ),
@@ -277,7 +282,7 @@ def build_server_command(
     command = [
         sys.executable,
         "-m",
-        "sglang.launch_server",
+        "mosaickv.backends.sglang_server",
         "--model-path",
         model_source,
         "--host",
@@ -292,6 +297,13 @@ def build_server_command(
         str(options.mem_fraction_static),
         "--stream-interval",
         "1",
+        # In SGLang 0.5.1.post3, tokenizer_manager.py:1633-1652 emits
+        # per-event delta output_ids only when both this server flag and the
+        # request-level stream flag are true.  Without it, output_ids are
+        # cumulative even over the streaming HTTP response, which prevents
+        # token-boundary TTFT/ITL measurement and duplicates IDs in a delta
+        # consumer.
+        "--stream-output",
         "--random-seed",
         str(config.execution.seed),
         "--attention-backend",
@@ -501,6 +513,8 @@ class SGLangTrialRunner(Protocol):
         request_id: str,
     ) -> SGLangTrialMeasurement: ...
 
+    def flush_cache(self) -> None: ...
+
     def close(self) -> None: ...
 
 
@@ -539,6 +553,8 @@ class SGLangHTTPTrialRunner:
         self._log_handle = self._log_path.open("w", encoding="utf-8")
         environment = dict(os.environ)
         environment.setdefault("TOKENIZERS_PARALLELISM", "false")
+        environment["MOSAICKV_QWEN_MIN_PIXELS"] = str(QWEN25_VL_MIN_PIXELS)
+        environment["MOSAICKV_QWEN_MAX_PIXELS"] = str(QWEN25_VL_MAX_PIXELS)
         # SGLang JIT-compiles several attention/position kernels after the
         # server has started.  It invokes the pinned ``ninja`` executable by
         # name, so direct calls to ``<venv>/bin/python`` must still expose the
@@ -563,7 +579,10 @@ class SGLangHTTPTrialRunner:
         self._client = httpx.Client(base_url=self._base_url, timeout=None)
         try:
             self._wait_until_ready(options.startup_timeout_seconds)
-            server_info = self._get_json("/server_info")
+            # SGLang 0.5.1 exposes the scheduler/memory-pool snapshot at this
+            # registered route (http_server.py::get_server_info).  The older
+            # unprefixed route was removed.
+            server_info = self._get_json("/get_server_info")
         except BaseException:
             self.close()
             raise
@@ -599,7 +618,18 @@ class SGLangHTTPTrialRunner:
             "mem_fraction_static": options.mem_fraction_static,
             "context_length": options.context_length,
             "radix_cache": True,
+            "stream_token_id_semantics": (
+                "authoritative output_token_logprobs are cumulative and prefix-validated; "
+                "BatchStrOut.output_ids are detokenizer deltas; installed "
+                "tokenizer_manager.py:1599-1652 and convert_logprob_style:1692-1730"
+            ),
             "image_processor": "checkpoint_slow_processor",
+            "qwen_image_min_pixels": QWEN25_VL_MIN_PIXELS,
+            "qwen_image_max_pixels": QWEN25_VL_MAX_PIXELS,
+            "qwen_resize_override": (
+                "repository-local audited launcher sets qwen_vl module globals before "
+                "TokenizerManager construction; installed SGLang source is unchanged"
+            ),
             "cxx_compiler": _executable_version("g++"),
             "cc_environment": os.environ.get("CC"),
             "cxx_environment": os.environ.get("CXX"),
@@ -650,6 +680,12 @@ class SGLangHTTPTrialRunner:
         response.raise_for_status()
         return response.text
 
+    def flush_cache(self) -> None:
+        """Flush Radix cache through the installed public HTTP route."""
+
+        response = self._client.post("/flush_cache", timeout=30.0)
+        response.raise_for_status()
+
     def run(
         self,
         prompt: JsonObject,
@@ -693,8 +729,9 @@ class SGLangHTTPTrialRunner:
         memory = _GPUMemorySampler(self._process.pid)
         memory.start()
         started = time.perf_counter()
-        token_ids: tuple[int, ...] = ()
+        token_ids: list[int] = []
         timestamps: list[float] = []
+        streamed_id_counts: list[int] = []
         last_output: Mapping[str, Any] | None = None
         try:
             with self._client.stream("POST", "/generate", json=payload) as response:
@@ -711,13 +748,19 @@ class SGLangHTTPTrialRunner:
                     if "error" in event:
                         raise SGLangRuntimeError(f"SGLang request failed: {event['error']}")
                     raw_ids = event.get("output_ids")
-                    if not isinstance(raw_ids, list):
-                        meta = event.get("meta_info")
-                        logprobs = (
-                            meta.get("output_token_logprobs") if isinstance(meta, Mapping) else None
-                        )
-                        if not isinstance(logprobs, list):
-                            raise SGLangRuntimeError("SGLang stream event omitted output token IDs")
+                    meta = event.get("meta_info")
+                    logprobs = (
+                        meta.get("output_token_logprobs") if isinstance(meta, Mapping) else None
+                    )
+                    # BatchStrOut gets ``output_ids`` from the incremental
+                    # detokenizer's decode_ids, not the scheduler's complete
+                    # generated-token list (detokenizer_manager.py:228).  The
+                    # requested output_token_logprobs preserve
+                    # special/withheld token IDs. ``convert_logprob_style`` at
+                    # tokenizer_manager.py:1692-1730 accumulates those slices
+                    # into request state, so this field is authoritative and
+                    # cumulative even though BatchStrOut.output_ids is delta.
+                    if isinstance(logprobs, list):
                         raw_ids = []
                         for entry in logprobs:
                             if not isinstance(entry, (list, tuple)) or len(entry) < 2:
@@ -725,12 +768,29 @@ class SGLangHTTPTrialRunner:
                                     "SGLang output_token_logprobs has an invalid entry"
                                 )
                             raw_ids.append(int(entry[1]))
-                    current_ids = tuple(int(value) for value in raw_ids)
-                    if current_ids[: len(token_ids)] != token_ids:
-                        raise SGLangRuntimeError("SGLang cumulative output IDs changed in flight")
+                        ids_are_delta = False
+                    elif isinstance(raw_ids, list):
+                        ids_are_delta = True
+                    else:
+                        raise SGLangRuntimeError("SGLang stream event omitted output token IDs")
+                    # For text-generating BatchStrOut responses, SGLang
+                    # 0.5.1's tokenizer manager emits only IDs added since the
+                    # previous stream event.  Text is cumulative, token IDs
+                    # are delta.  Treating these IDs as cumulative caused the
+                    # old parity wrapper to reject the second token.
+                    observed_ids = [int(value) for value in raw_ids]
+                    if ids_are_delta:
+                        current_ids = observed_ids
+                    else:
+                        if observed_ids[: len(token_ids)] != token_ids:
+                            raise SGLangRuntimeError(
+                                "SGLang cumulative logprob token IDs changed in flight"
+                            )
+                        current_ids = observed_ids[len(token_ids) :]
                     now = time.perf_counter() - started
-                    timestamps.extend([now] * (len(current_ids) - len(token_ids)))
-                    token_ids = current_ids
+                    streamed_id_counts.append(len(current_ids))
+                    timestamps.extend([now] * len(current_ids))
+                    token_ids.extend(current_ids)
                     last_output = event
         finally:
             memory.stop()
@@ -748,7 +808,9 @@ class SGLangHTTPTrialRunner:
         completion_tokens = int(meta.get("completion_tokens", len(token_ids)))
         if completion_tokens != len(token_ids):
             raise SGLangRuntimeError(
-                "SGLang completion token count differs from streamed output IDs"
+                "SGLang completion token count differs from streamed output IDs: "
+                f"completion={completion_tokens}, streamed={len(token_ids)}, "
+                f"event_counts={streamed_id_counts}"
             )
         cached_tokens = int(meta.get("cached_tokens", 0))
         active_positions = prompt_tokens + max(0, completion_tokens - 1)
@@ -779,7 +841,7 @@ class SGLangHTTPTrialRunner:
         return SGLangTrialMeasurement(
             request_id=request_id,
             answer=answer,
-            token_ids=token_ids,
+            token_ids=tuple(token_ids),
             prompt_tokens=prompt_tokens,
             generated_tokens=completion_tokens,
             active_cache_positions=active_positions,
@@ -895,6 +957,10 @@ class SGLangFullKVModel:
             | None
         ) = None
         self._observed_input_fingerprints: set[tuple[str, str]] = set()
+        self._isolation_observations: dict[
+            tuple[str, str],
+            tuple[PreparedSGLangPrompt, dict[str, object], tuple[int, ...]],
+        ] = {}
 
     @classmethod
     def from_config(
@@ -920,10 +986,10 @@ class SGLangFullKVModel:
         if config.model.id not in _SUPPORTED_MODELS:
             known = ", ".join(sorted(_SUPPORTED_MODELS))
             raise LookupError(f"unsupported SGLang multimodal model; known: {known}")
-        if config.execution.attention_implementation not in {"triton", "fa3"}:
+        if config.execution.attention_implementation != "torch_native":
             raise SGLangRuntimeError(
-                "the deterministic SGLang wrapper requires a Radix-compatible deterministic "
-                "attention backend: triton or fa3"
+                "the correctness SGLang wrapper requires attention_implementation="
+                "'torch_native'; optimized kernels need a separate parity gate"
             )
         if not config.execution.deterministic_algorithms:
             raise SGLangRuntimeError("SGLang FullKV requires deterministic_algorithms=true")
@@ -944,10 +1010,12 @@ class SGLangFullKVModel:
         if model_source == config.model.id:
             load_kwargs["revision"] = config.model.revision
         processor_kwargs = dict(load_kwargs)
-        # Transformers 5 changed Qwen-VL to fast-by-default. The HF reference
+        # Transformers 4.55.2 changed Qwen-VL to fast-by-default. The HF reference
         # was established with the checkpoint's slow processor.
         processor_kwargs["use_fast"] = False
-        processor = AutoProcessor.from_pretrained(model_source, **processor_kwargs)
+        processor = AutoProcessor.from_pretrained(  # type: ignore[no-untyped-call]
+            model_source, **processor_kwargs
+        )
         model_config = AutoConfig.from_pretrained(model_source, **load_kwargs)
         geometry = kv_cache_geometry(model_config, config.model.precision)
         runner = SGLangHTTPTrialRunner(
@@ -991,6 +1059,23 @@ class SGLangFullKVModel:
                     f"trial {index}; first={reference_tokens}, current={trial.token_ids}"
                 )
         first = trials[0]
+        configured_terminal_ids = terminal_token_ids(self.processor)
+        quality = (
+            decode_quality_output(
+                self.processor,
+                first.token_ids,
+                configured_terminal_ids,
+            )
+            if configured_terminal_ids
+            else QualityDecode(
+                text=first.answer,
+                timed_token_count=len(first.token_ids),
+                scored_token_count=len(first.token_ids),
+                quality_completion_tokens=len(first.token_ids),
+                terminal_token_id=None,
+                terminal_token_index=None,
+            )
+        )
         trace: JsonObject = {
             "schema_version": 1,
             "measurement_type": "sglang_fullkv",
@@ -1004,6 +1089,8 @@ class SGLangFullKVModel:
             "media_sha256": prepared.media_sha256,
             "prompt_token_ids": list(prepared.prompt_token_ids),
             "generation": cast("JsonObject", generation),
+            "quality_answer": quality.text,
+            "quality_decoding": quality.to_record(),
             "effective_sampling_parameters": {
                 "max_new_tokens": cast("int", generation["max_new_tokens"]),
                 "temperature": 0.0,
@@ -1021,7 +1108,7 @@ class SGLangFullKVModel:
                 "prefix_cache_gauge": "Prometheus sglang:cache_hit_rate",
                 "cached_token_counter": "Prometheus sglang:cached_tokens_total delta",
                 "encoder_cache": (
-                    "repeat-request timing probe only; SGLang 0.4.3.post4 exposes no "
+                    "repeat-request timing probe only; SGLang 0.5.1.post3 exposes no "
                     "per-request multimodal encoder-cache hit counter"
                 ),
                 "active_kv_bytes": (
@@ -1038,7 +1125,13 @@ class SGLangFullKVModel:
         }
         trace_path = self.trace_directory / request.run_id / _safe_trace_name(request.sample_id)
         _atomic_json(trace_path, trace)
-        self._observed_input_fingerprints.add((prepared.prompt_sha256, prepared.media_sha256))
+        fingerprint = (prepared.prompt_sha256, prepared.media_sha256)
+        self._observed_input_fingerprints.add(fingerprint)
+        self._isolation_observations[fingerprint] = (
+            prepared,
+            generation,
+            reference_tokens,
+        )
         if self._isolation_anchor is None:
             self._isolation_anchor = (
                 prepared,
@@ -1049,7 +1142,7 @@ class SGLangFullKVModel:
                 request.sample_id,
             )
         return ModelGeneration(
-            answer=first.answer,
+            answer=quality.text,
             metrics=GenerationMetrics(
                 ttft=first.ttft_seconds,
                 prefill_time=first.server_prefill_seconds,
@@ -1082,6 +1175,26 @@ class SGLangFullKVModel:
         request_id = f"{run_id}-{sample_id}-isolation-recheck"
         trial = self.runner.run(prepared.request_payload, generation, request_id)
         tokens_match = trial.token_ids == expected_tokens
+        anchor_fingerprint = (prepared.prompt_sha256, prepared.media_sha256)
+        distinct = next(
+            (
+                observation
+                for fingerprint, observation in self._isolation_observations.items()
+                if fingerprint != anchor_fingerprint
+            ),
+            None,
+        )
+        if distinct is None:
+            return False
+        distinct_prepared, distinct_generation, warm_distinct_tokens = distinct
+        self.runner.flush_cache()
+        cold_request_id = f"{run_id}-{sample_id}-isolation-cold-distinct"
+        cold_distinct = self.runner.run(
+            distinct_prepared.request_payload,
+            distinct_generation,
+            cold_request_id,
+        )
+        warm_matches_cold = cold_distinct.token_ids == warm_distinct_tokens
         trace = json.loads(trace_path.read_text(encoding="utf-8"))
         if not isinstance(trace, dict) or not isinstance(trace.get("request_isolation"), dict):
             raise SGLangRuntimeError("anchor trace is invalid during request-isolation probe")
@@ -1094,12 +1207,18 @@ class SGLangFullKVModel:
             "anchor_token_ids": list(expected_tokens),
             "probe_token_ids": list(trial.token_ids),
             "probe_measurement": trial.to_json_object(),
+            "cache_flush_route": "/flush_cache",
+            "cold_distinct_request_id": cold_request_id,
+            "warm_distinct_token_ids_match_cold": warm_matches_cold,
+            "warm_distinct_token_ids": list(warm_distinct_tokens),
+            "cold_distinct_token_ids": list(cold_distinct.token_ids),
+            "cold_distinct_measurement": cold_distinct.to_json_object(),
         }
         _atomic_json(trace_path, cast("JsonObject", trace))
-        if not tokens_match:
+        if not tokens_match or not warm_matches_cold:
             raise SGLangRuntimeError(
-                "SGLang request-isolation A-B-A probe changed the anchor token IDs; "
-                "a cache from an intervening request may have leaked"
+                "SGLang request-isolation probe changed deterministic token IDs across "
+                "an intervening request or a Radix cache flush; a request cache may have leaked"
             )
         return True
 

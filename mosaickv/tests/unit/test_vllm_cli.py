@@ -16,11 +16,13 @@ def test_evaluate_parser_accepts_vllm_measurement_controls() -> None:
             "--enable-mosaickv",
             "--cache-probe-repeats",
             "3",
+            "--enable-vllm-prefix-caching",
         ]
     )
     assert args.backend == "vllm"
     assert args.enable_mosaickv
     assert args.cache_probe_repeats == 3
+    assert args.enable_vllm_prefix_caching
 
 
 def test_native_flag_fails_closed_before_cache_or_weight_loading(capsys: object) -> None:

@@ -147,37 +147,17 @@ class AttentionCapture(AbstractContextManager["AttentionCapture"]):
         return tuple(self._layers)
 
 
-class LayerAttentionMaskOverride(AbstractContextManager["LayerAttentionMaskOverride"]):
-    """Replace the shared HF mask with checked layer/head-specific packed-cache masks."""
+class _ActiveLayerMasks(AbstractContextManager["_ActiveLayerMasks"]):
+    """Activate one mask tuple on an already-installed layer dispatcher."""
 
-    def __init__(self, attentions: Sequence[Any], masks: Sequence[Any]) -> None:
-        self._attentions = tuple(attentions)
+    def __init__(self, dispatcher: LayerAttentionMaskOverride, masks: Sequence[Any]) -> None:
+        self._dispatcher = dispatcher
         self._masks = tuple(masks)
-        self._handles: list[Any] = []
-        if len(self._attentions) != len(self._masks):
-            raise ValueError("packed attention masks must cover every decoder layer")
 
     def __enter__(self) -> Self:
-        for layer_index, (attention, mask) in enumerate(
-            zip(self._attentions, self._masks, strict=True)
-        ):
-
-            def hook(
-                _module: Any,
-                args: tuple[Any, ...],
-                kwargs: dict[str, Any],
-                *,
-                index: int = layer_index,
-                replacement: Any = mask,
-            ) -> tuple[tuple[Any, ...], dict[str, Any]]:
-                if "attention_mask" not in kwargs:
-                    raise RuntimeError(
-                        f"decoder attention layer {index} did not receive attention_mask"
-                    )
-                kwargs["attention_mask"] = replacement
-                return args, kwargs
-
-            self._handles.append(attention.register_forward_pre_hook(hook, with_kwargs=True))
+        if self._dispatcher.active_masks is not None:
+            raise RuntimeError("packed attention-mask overrides cannot be nested")
+        self._dispatcher.active_masks = self._masks
         return self
 
     def __exit__(
@@ -186,9 +166,41 @@ class LayerAttentionMaskOverride(AbstractContextManager["LayerAttentionMaskOverr
         exc_value: BaseException | None,
         traceback: TracebackType | None,
     ) -> None:
-        for handle in self._handles:
-            handle.remove()
-        self._handles.clear()
+        self._dispatcher.active_masks = None
+
+
+class LayerAttentionMaskOverride:
+    """Persistent layer/head mask dispatcher for packed-cache decoding."""
+
+    def __init__(self, attentions: Sequence[Any]) -> None:
+        self._attentions = tuple(attentions)
+        self._handles: list[Any] = []
+        self.active_masks: tuple[Any, ...] | None = None
+        for layer_index, attention in enumerate(self._attentions):
+
+            def hook(
+                _module: Any,
+                args: tuple[Any, ...],
+                kwargs: dict[str, Any],
+                *,
+                index: int = layer_index,
+            ) -> tuple[tuple[Any, ...], dict[str, Any]]:
+                masks = self.active_masks
+                if masks is None:
+                    return args, kwargs
+                if "attention_mask" not in kwargs:
+                    raise RuntimeError(
+                        f"decoder attention layer {index} did not receive attention_mask"
+                    )
+                kwargs["attention_mask"] = masks[index]
+                return args, kwargs
+
+            self._handles.append(attention.register_forward_pre_hook(hook, with_kwargs=True))
+
+    def activate(self, masks: Sequence[Any]) -> _ActiveLayerMasks:
+        if len(masks) != len(self._attentions):
+            raise ValueError("packed attention masks must cover every decoder layer")
+        return _ActiveLayerMasks(self, masks)
 
 
 class HuggingFaceMultimodalAdapter(ABC):
@@ -200,8 +212,9 @@ class HuggingFaceMultimodalAdapter(ABC):
         self.model = model
         self.processor = processor
         self.device = device if device is not None else self._infer_input_device()
+        self._packed_mask_dispatcher: LayerAttentionMaskOverride | None = None
         self._validate_architecture()
-        self._validate_eager_attention()
+        self._validate_attention_implementation()
         if getattr(model, "training", False):
             model.eval()
 
@@ -263,7 +276,7 @@ class HuggingFaceMultimodalAdapter(ABC):
             expected = ", ".join(self.capabilities.architectures)
             raise TypeError(f"expected one of [{expected}], received {architecture}")
 
-    def _validate_eager_attention(self) -> None:
+    def _validate_attention_implementation(self) -> None:
         implementations: set[str] = set()
         for config in self._attention_configs():
             value = getattr(config, "_attn_implementation", None)
@@ -273,8 +286,41 @@ class HuggingFaceMultimodalAdapter(ABC):
         if unsupported:
             found = ", ".join(sorted(unsupported))
             raise ValueError(
-                f"adapter is eager-only but model uses {found}; reload with "
-                "attn_implementation='eager'"
+                f"adapter does not support attention implementation(s) {found}; "
+                f"supported={self.capabilities.attention_implementations}"
+            )
+
+    def _attention_implementation(self) -> str:
+        implementations = {
+            str(config._attn_implementation)
+            for config in self._attention_configs()
+            if getattr(config, "_attn_implementation", None) is not None
+        }
+        if len(implementations) != 1:
+            raise RuntimeError(f"model attention implementation is ambiguous: {implementations}")
+        return next(iter(implementations))
+
+    def set_attention_implementation(self, implementation: str) -> None:
+        """Switch an audited runtime-dispatched attention implementation.
+
+        Transformers 4.55.2 Qwen/LLaVA attention modules dispatch from their
+        shared config on every forward, so no weights or cache tensors change.
+        This is used for eager prefill evidence followed by faster SDPA decode.
+        """
+
+        if implementation not in self.capabilities.attention_implementations:
+            raise ValueError(
+                f"adapter does not support attention implementation {implementation!r}; "
+                f"supported={self.capabilities.attention_implementations}"
+            )
+        observed = False
+        for config in self._attention_configs():
+            if getattr(config, "_attn_implementation", None) is not None:
+                config._attn_implementation = implementation
+                observed = True
+        if not observed or self._attention_implementation() != implementation:
+            raise RuntimeError(
+                f"failed to switch model attention implementation to {implementation!r}"
             )
 
     def _attention_configs(self) -> tuple[Any, ...]:
@@ -316,6 +362,10 @@ class HuggingFaceMultimodalAdapter(ABC):
     def capture_attention_weights(self, *, query_window: int | None = None) -> AttentionCapture:
         """Return a context that captures every eager language attention map."""
 
+        if self._attention_implementation() != "eager":
+            raise NotImplementedError(
+                "attention-probability capture requires attn_implementation='eager'"
+            )
         attentions = tuple(getattr(layer, "self_attn", None) for layer in self._language_layers())
         if any(attention is None for attention in attentions):
             raise RuntimeError("a decoder layer has no self_attn module")
@@ -602,6 +652,11 @@ class HuggingFaceMultimodalAdapter(ABC):
         attention_mask = prepared.model_inputs.get("attention_mask")
         if attention_mask is None:
             attention_mask = torch.ones_like(input_ids)
+        model_state = self._capture_model_state(output)
+        # All supported local adapters operate on one unpadded request.  Mark
+        # that property once at prefill so decode can omit the dense all-ones
+        # model mask without a per-token reduction or host synchronization.
+        model_state["mosaickv_cache_all_valid"] = bool(torch.all(attention_mask != 0).item())
         state = DecodeState(
             past_key_values=cache,
             attention_mask=attention_mask,
@@ -609,7 +664,7 @@ class HuggingFaceMultimodalAdapter(ABC):
             logical_sequence_length=prepared.logical_sequence_length,
             next_decode_position=prepared.logical_sequence_length,
             modality_map=prepared.modality_map,
-            model_state=self._capture_model_state(output),
+            model_state=model_state,
         )
         return PrefillOutput(
             logits,
@@ -626,6 +681,11 @@ class HuggingFaceMultimodalAdapter(ABC):
         del output
         return {}
 
+    def _capture_decode_model_state(self, output: Any) -> dict[str, Any]:
+        """Capture state that can change after a one-token forward."""
+
+        return self._capture_model_state(output)
+
     def _restore_model_state(self, state: DecodeState) -> None:
         del state
 
@@ -640,7 +700,12 @@ class HuggingFaceMultimodalAdapter(ABC):
         """Decode one token and expose the cache before the next token is chosen."""
 
         packed_validity = state.model_state.get("mosaickv_validity_masks")
-        if state.active_cache_length != state.logical_sequence_length and packed_validity is None:
+        packed_all_valid = state.model_state.get("mosaickv_packed_all_valid") is True
+        if (
+            state.active_cache_length != state.logical_sequence_length
+            and packed_validity is None
+            and not packed_all_valid
+        ):
             raise NotImplementedError(
                 "compressed-cache decoding requires an explicit logical-position attention mask; "
                 "only the retention-ratio-1.0 path is enabled"
@@ -650,40 +715,52 @@ class HuggingFaceMultimodalAdapter(ABC):
             token_id = token_id.unsqueeze(-1)
         if tuple(token_id.shape) != (1, 1):
             raise ValueError("decode_one_token expects token_id shape [1, 1]")
-        one = torch.ones(
-            (1, 1), dtype=state.attention_mask.dtype, device=state.attention_mask.device
+        attention_mask = self._append_decode_attention_mask(state)
+        model_attention_mask = (
+            None if state.model_state.get("mosaickv_cache_all_valid") is True else attention_mask
         )
-        attention_mask = torch.cat((state.attention_mask, one), dim=-1)
-        cache_position = torch.tensor(
-            [state.next_decode_position], dtype=torch.long, device=token_id.device
-        )
+        cache_position = self._decode_cache_position(state, token_id.device)
         self._restore_model_state(state)
         layer_masks = (
             self._packed_decode_masks(state, token_id) if packed_validity is not None else ()
         )
-        with torch.inference_mode(), ExitStack() as stack:
-            query_capture = (
-                stack.enter_context(self.capture_query_vectors()) if capture_queries else None
-            )
-            attention_capture = (
-                stack.enter_context(self.capture_attention_weights())
-                if capture_attentions
-                else None
-            )
-            if layer_masks:
-                stack.enter_context(
-                    LayerAttentionMaskOverride(
-                        tuple(layer.self_attn for layer in self._language_layers()),
-                        layer_masks,
-                    )
+        query_capture = None
+        attention_capture = None
+        if not capture_queries and not capture_attentions and not layer_masks:
+            # The normal FullKV/all-valid exact path needs no Python hooks.
+            # Avoid constructing an ExitStack and capture objects on every
+            # generated token; this host hot path is visible at batch size 1.
+            with torch.inference_mode():
+                output = self._decode_forward(
+                    token_id,
+                    state,
+                    model_attention_mask,
+                    cache_position,
+                    output_attentions=False,
                 )
-            output = self._decode_forward(
-                token_id,
-                state,
-                attention_mask,
-                cache_position,
-                output_attentions=capture_attentions,
-            )
+        else:
+            with torch.inference_mode(), ExitStack() as stack:
+                query_capture = (
+                    stack.enter_context(self.capture_query_vectors()) if capture_queries else None
+                )
+                attention_capture = (
+                    stack.enter_context(self.capture_attention_weights())
+                    if capture_attentions
+                    else None
+                )
+                if layer_masks:
+                    if self._packed_mask_dispatcher is None:
+                        self._packed_mask_dispatcher = LayerAttentionMaskOverride(
+                            tuple(layer.self_attn for layer in self._language_layers())
+                        )
+                    stack.enter_context(self._packed_mask_dispatcher.activate(layer_masks))
+                output = self._decode_forward(
+                    token_id,
+                    state,
+                    model_attention_mask,
+                    cache_position,
+                    output_attentions=capture_attentions,
+                )
         query_vectors = QueryVectors(()) if query_capture is None else query_capture.result()
         attention_weights = () if attention_capture is None else attention_capture.result()
         logits = output.logits[:, -1, :]
@@ -692,41 +769,82 @@ class HuggingFaceMultimodalAdapter(ABC):
         expected_active = state.active_cache_length + 1
         if active_length != expected_active:
             raise RuntimeError(f"decode cache grew to {active_length}; expected {expected_active}")
-        model_state = {**state.model_state, **self._capture_model_state(output)}
+        model_state = state.model_state
+        model_state.update(self._capture_decode_model_state(output))
         if packed_validity is not None:
+            buffers = model_state.get("mosaickv_validity_buffers")
+            if not isinstance(buffers, tuple):
+                raise RuntimeError("packed validity buffers were not initialized")
             model_state["mosaickv_validity_masks"] = tuple(
-                torch.cat(
-                    (
-                        validity,
-                        torch.ones(
-                            (int(validity.shape[0]), 1),
-                            dtype=torch.bool,
-                            device=validity.device,
-                        ),
-                    ),
-                    dim=-1,
-                )
-                for validity in packed_validity
+                buffer[..., :active_length] for buffer in buffers
             )
-        updated = DecodeState(
-            past_key_values=cache,
-            attention_mask=attention_mask,
-            active_cache_length=active_length,
-            logical_sequence_length=state.logical_sequence_length + 1,
-            next_decode_position=state.next_decode_position + 1,
-            modality_map=state.modality_map,
-            model_state=model_state,
-        )
+        # Cache.update already mutates the input cache. Advance the explicitly
+        # documented mutable DecodeState in place as well, avoiding one state
+        # allocation and a model-state dictionary copy per token. Repair and
+        # draft paths pass cloned states at this boundary.
+        state.past_key_values = cache
+        state.attention_mask = attention_mask
+        state.active_cache_length = active_length
+        state.logical_sequence_length += 1
+        state.next_decode_position += 1
+        state.model_state = model_state
         return DecodeOutput(
             logits,
             self._greedy_token(logits),
-            updated,
+            state,
             query_vectors,
             attention_weights,
         )
 
+    @staticmethod
+    def _append_decode_attention_mask(state: DecodeState) -> Any:
+        """Append one valid token using an amortized device buffer."""
+
+        torch = _torch()
+        current_length = int(state.attention_mask.shape[-1])
+        required_length = current_length + 1
+        buffer = state.model_state.get("mosaickv_decode_attention_mask_buffer")
+        capacity = int(state.model_state.get("mosaickv_decode_attention_mask_capacity", 0))
+        expected_prefix = tuple(int(value) for value in state.attention_mask.shape[:-1])
+        if (
+            buffer is None
+            or capacity < required_length
+            or tuple(int(value) for value in buffer.shape[:-1]) != expected_prefix
+        ):
+            capacity = max(required_length, max(512, current_length * 2))
+            shape = (*expected_prefix, capacity)
+            buffer = torch.ones(
+                shape,
+                dtype=state.attention_mask.dtype,
+                device=state.attention_mask.device,
+            )
+            buffer[..., :current_length].copy_(state.attention_mask)
+            state.model_state["mosaickv_decode_attention_mask_buffer"] = buffer
+            state.model_state["mosaickv_decode_attention_mask_capacity"] = capacity
+        # The decode metadata mask contains only valid generated positions.
+        # A newly allocated buffer is initialized to one over its full
+        # capacity, so extending its view does not require a one-element CUDA
+        # write on every token.  Existing prompt zeros were copied above and
+        # remain confined to the prefix.
+        return buffer[..., :required_length]
+
+    @staticmethod
+    def _decode_cache_position(state: DecodeState, device: Any) -> Any:
+        """Return one logical position from an amortized device-side range."""
+
+        torch = _torch()
+        required_length = state.next_decode_position + 1
+        positions = state.model_state.get("mosaickv_decode_position_buffer")
+        capacity = int(state.model_state.get("mosaickv_decode_position_capacity", 0))
+        if positions is None or capacity < required_length or positions.device != device:
+            capacity = max(required_length, max(512, state.next_decode_position * 2))
+            positions = torch.arange(capacity, dtype=torch.long, device=device)
+            state.model_state["mosaickv_decode_position_buffer"] = positions
+            state.model_state["mosaickv_decode_position_capacity"] = capacity
+        return positions[state.next_decode_position : required_length]
+
     def _packed_decode_masks(self, state: DecodeState, token_id: Any) -> tuple[Any, ...]:
-        """Build additive eager masks for one packed-cache token decode."""
+        """Return views into amortized additive packed-cache mask buffers."""
 
         torch = _torch()
         validity_masks = state.model_state.get("mosaickv_validity_masks")
@@ -734,6 +852,58 @@ class HuggingFaceMultimodalAdapter(ABC):
             self._language_layers()
         ):
             raise RuntimeError("packed cache validity metadata is incomplete")
+        required_length = state.active_cache_length + 1
+        buffers = state.model_state.get("mosaickv_validity_buffers")
+        additive_buffers = state.model_state.get("mosaickv_additive_mask_buffers")
+        capacity = int(state.model_state.get("mosaickv_mask_capacity", 0))
+        if not isinstance(buffers, tuple) or capacity < required_length:
+            capacity = max(required_length, max(512, state.active_cache_length * 2))
+            new_buffers: list[Any] = []
+            new_additive: list[Any] = []
+            for layer_index, (layer, validity) in enumerate(
+                zip(self._language_layers(), validity_masks, strict=True)
+            ):
+                if (
+                    getattr(validity, "dtype", None) != torch.bool
+                    or getattr(validity, "ndim", 0) != 2
+                ):
+                    raise RuntimeError(f"packed validity mask {layer_index} must be rank-2 bool")
+                if int(validity.shape[-1]) != state.active_cache_length:
+                    raise RuntimeError(
+                        f"packed validity mask {layer_index} has the wrong cache length"
+                    )
+                attention = layer.self_attn
+                kv_heads = int(validity.shape[0])
+                query_heads = int(
+                    getattr(attention, "num_heads", attention.config.num_attention_heads)
+                )
+                if query_heads % kv_heads:
+                    raise RuntimeError("query heads are not divisible by packed KV heads")
+                validity_buffer = torch.ones(
+                    (kv_heads, capacity), dtype=torch.bool, device=validity.device
+                )
+                validity_buffer[..., : state.active_cache_length].copy_(validity)
+                expanded = validity_buffer.repeat_interleave(query_heads // kv_heads, dim=0)
+                dtype = next(attention.parameters()).dtype
+                additive = torch.zeros(
+                    (1, query_heads, 1, capacity), dtype=dtype, device=token_id.device
+                )
+                additive[..., : state.active_cache_length].masked_fill_(
+                    ~expanded[..., : state.active_cache_length]
+                    .to(device=token_id.device)
+                    .unsqueeze(0)
+                    .unsqueeze(-2),
+                    torch.finfo(dtype).min,
+                )
+                new_buffers.append(validity_buffer)
+                new_additive.append(additive)
+            buffers = tuple(new_buffers)
+            additive_buffers = tuple(new_additive)
+            state.model_state["mosaickv_validity_buffers"] = buffers
+            state.model_state["mosaickv_additive_mask_buffers"] = additive_buffers
+            state.model_state["mosaickv_mask_capacity"] = capacity
+        if not isinstance(additive_buffers, tuple):
+            raise RuntimeError("packed additive mask buffers were not initialized")
         result: list[Any] = []
         for layer_index, (layer, validity) in enumerate(
             zip(self._language_layers(), validity_masks, strict=True)
@@ -742,25 +912,8 @@ class HuggingFaceMultimodalAdapter(ABC):
                 raise RuntimeError(f"packed validity mask {layer_index} must be rank-2 bool")
             if int(validity.shape[-1]) != state.active_cache_length:
                 raise RuntimeError(f"packed validity mask {layer_index} has the wrong cache length")
-            attention = layer.self_attn
-            kv_heads = int(validity.shape[0])
-            query_heads = int(getattr(attention, "num_heads", attention.config.num_attention_heads))
-            if query_heads % kv_heads:
-                raise RuntimeError("query heads are not divisible by packed KV heads")
-            valid = validity.repeat_interleave(query_heads // kv_heads, dim=0)
-            valid = torch.cat(
-                (
-                    valid,
-                    torch.ones((query_heads, 1), dtype=torch.bool, device=valid.device),
-                ),
-                dim=-1,
-            )
-            dtype = next(attention.parameters()).dtype
-            additive = torch.zeros(valid.shape, dtype=dtype, device=token_id.device)
-            additive.masked_fill_(~valid.to(device=token_id.device), torch.finfo(dtype).min)
-            if not bool(torch.isfinite(additive).all()):
-                raise RuntimeError("packed attention mask contains NaN or infinity")
-            result.append(additive.unsqueeze(0).unsqueeze(-2))
+            del layer
+            result.append(additive_buffers[layer_index][..., :required_length])
         return tuple(result)
 
     def _decode_forward(
@@ -891,6 +1044,31 @@ class HuggingFaceMultimodalAdapter(ABC):
         raise TypeError(
             f"cache class {snapshot.source_class.__qualname__} cannot be reconstructed safely"
         )
+
+    def preallocate_decode_cache(self, state: DecodeState, additional_positions: int) -> bool:
+        """Replace an append-only Cache object with reserved physical storage.
+
+        Returns ``False`` for legacy tuple/list caches because an adapter may
+        rely on that exact public representation.  The optimization never
+        changes logical positions or the occupied cache length.
+        """
+
+        if additional_positions < 1:
+            return False
+        layers, source_kind = self._legacy_layers(state.past_key_values)
+        if source_kind not in {"cache_object", "cache_layers"}:
+            return False
+        from mosaickv.adapters.huggingface.preallocated_cache import (
+            build_preallocated_dynamic_cache,
+        )
+
+        original_length = self._cache_length(state.past_key_values)
+        state.past_key_values = build_preallocated_dynamic_cache(layers, additional_positions)
+        if self._cache_length(state.past_key_values) != original_length:
+            raise RuntimeError("preallocation changed the occupied cache length")
+        state.model_state["mosaickv_decode_cache_storage"] = "preallocated_append_only"
+        state.model_state["mosaickv_decode_cache_reserved_positions"] = additional_positions
+        return True
 
     def get_cache_layout(self, cache: Any) -> CacheLayout:
         """Return observed shapes/dtypes/devices without assuming a shared layout."""

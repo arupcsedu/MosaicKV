@@ -1,6 +1,6 @@
 matrix_schema_version: 1
 matrix_revision: 1
-capability_catalog_version: common-env-2026-07-21-v1
+capability_catalog_version: common-env-2026-07-25-v2
 experiment_id: ablations
 description: HF eager MosaicKV-exact component ablations with identical prompts and byte-accounting rules.
 enabled: true

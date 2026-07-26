@@ -18,6 +18,10 @@ from pathlib import Path
 from typing import Any
 
 LOCK_PATTERN = re.compile(r"^([A-Za-z0-9_.-]+)==([^;\s]+)$")
+DIRECT_WHEEL_PATTERN = re.compile(
+    r"^([A-Za-z0-9_.-]+)\s+@\s+https://[^\s]+/"
+    r"[^/]*-([0-9]+(?:\.[0-9]+)+(?:\.post[0-9]+)?)(?:%2B|\+|-)"
+)
 CACHE_VARIABLES = (
     "PIP_CACHE_DIR",
     "UV_CACHE_DIR",
@@ -66,6 +70,7 @@ PROFILE_IMPORTS = {
     "mock": ("mosaickv", "numpy", "pytest"),
 }
 COMMON_GPU_IMPORTS = (
+    "flash_attn",
     "vllm",
     "vllm.entrypoints.llm",
     "sglang",
@@ -76,11 +81,8 @@ COMMON_GPU_IMPORTS = (
     "ray",
     "fastapi",
 )
-SGLANG_PATCH_RELATIVE_PATH = Path("env/patches/sglang-0.4.3.post4-transformers-4.49.patch")
-SGLANG_PATCH_TARGET = Path("sglang/srt/configs/qwen2_5_vl_config.py")
-SGLANG_PATCH_MARKERS = (
-    "Qwen2_5_VLConfig, None, Qwen2_5_VLImageProcessor, None, exist_ok=True",
-    "Qwen2_5_VLConfig, Qwen2_5_VLProcessor, exist_ok=True",
+FLASH_ATTN_INFERENCE_PATCH_SHA256 = (
+    "e919aa142eba57abd98af403de282ee7ecf622ad22d745da22355a935b654768"
 )
 
 
@@ -100,7 +102,13 @@ def parse_lock(path: Path) -> dict[str, str]:
             continue
         match = LOCK_PATTERN.fullmatch(line)
         if match is None:
-            raise ValueError(f"{path}:{line_number}: expected an exact name==version pin")
+            direct = DIRECT_WHEEL_PATTERN.match(line)
+            if direct is None:
+                raise ValueError(
+                    f"{path}:{line_number}: expected an exact name==version pin "
+                    "or a versioned HTTPS wheel"
+                )
+            match = direct
         name = normalize_distribution(match.group(1))
         if name in pins:
             raise ValueError(f"{path}:{line_number}: duplicate distribution {name}")
@@ -122,7 +130,7 @@ def verify_pins(pins: dict[str, str]) -> tuple[dict[str, str], list[str]]:
             errors.append(f"missing distribution: {name}=={expected}")
             continue
         installed[name] = actual
-        if actual != expected:
+        if actual != expected and not actual.startswith(f"{expected}+"):
             errors.append(f"version mismatch: {name} locked={expected} installed={actual}")
     return installed, errors
 
@@ -135,41 +143,32 @@ def verify_environment_patches(
 
     if profile != "common":
         return {}, []
-    errors: list[str] = []
-    patch_path = project_root / SGLANG_PATCH_RELATIVE_PATH
-    report: dict[str, Any] = {
-        "sglang_transformers_compat": {
-            "patch_path": str(patch_path),
-            "status": "failed",
-        }
-    }
-    patch_report = report["sglang_transformers_compat"]
-    assert isinstance(patch_report, dict)
+    patch_path = (
+        project_root / "env" / "patches" / "flash-attn-2.8.3-a100-multimodal-inference.patch"
+    )
     if not patch_path.is_file():
-        errors.append(f"environment patch is missing: {patch_path}")
-        return report, errors
-    patch_report["patch_sha256"] = hashlib.sha256(patch_path.read_bytes()).hexdigest()
-    try:
-        distribution = importlib.metadata.distribution("sglang")
-    except importlib.metadata.PackageNotFoundError:
-        errors.append("cannot verify environment patch: sglang is not installed")
-        return report, errors
-    target = Path(str(distribution.locate_file(SGLANG_PATCH_TARGET))).resolve()
-    patch_report["target"] = str(target)
-    if not target.is_file():
-        errors.append(f"environment patch target is missing: {target}")
-        return report, errors
-    source = target.read_text(encoding="utf-8")
-    missing = [marker for marker in SGLANG_PATCH_MARKERS if source.count(marker) != 1]
-    if missing:
+        return {}, [f"FlashAttention source patch is missing: {patch_path}"]
+    actual_sha256 = hashlib.sha256(patch_path.read_bytes()).hexdigest()
+    errors: list[str] = []
+    if actual_sha256 != FLASH_ATTN_INFERENCE_PATCH_SHA256:
         errors.append(
-            "environment patch is not applied exactly once: "
-            + ", ".join(repr(marker) for marker in missing)
+            "FlashAttention source patch SHA mismatch: "
+            f"expected={FLASH_ATTN_INFERENCE_PATCH_SHA256} actual={actual_sha256}"
         )
-        return report, errors
-    patch_report["target_sha256"] = hashlib.sha256(target.read_bytes()).hexdigest()
-    patch_report["status"] = "applied"
-    return report, errors
+    return {
+        "flash_attn_a100_multimodal_inference": {
+            "path": str(patch_path.resolve()),
+            "sha256": actual_sha256,
+            "expected_sha256": FLASH_ATTN_INFERENCE_PATCH_SHA256,
+            "constraints": {
+                "compute_capability": "8.0",
+                "head_dimensions": [64, 80, 128],
+                "inference_only": True,
+                "backward": False,
+            },
+        },
+        "sglang_transformers_compat": {"status": "upstream_no_patch"},
+    }, errors
 
 
 def verify_native_library_paths(profile: str) -> tuple[dict[str, Any], list[str]]:
@@ -365,17 +364,137 @@ def cuda_smoke(profile: str, require_cuda: bool) -> tuple[dict[str, Any], list[s
     torch.cuda.synchronize(device)
     report["matmul_passed"] = True
 
-    minimum_driver = 525
+    if profile == "common":
+        flash_report: dict[str, Any] = {
+            "required": True,
+            "passed": False,
+            "head_dimensions": [64, 80, 128],
+            "dtype": "bfloat16",
+            "causal_modes": [False, True],
+        }
+        try:
+            from flash_attn import flash_attn_func, flash_attn_varlen_func
+
+            generator = torch.Generator(device=device).manual_seed(0)
+            cumulative_lengths = torch.tensor([0, 16], device=device, dtype=torch.int32)
+            forward_outputs: list[Any] = []
+            reference_inputs: tuple[Any, Any, Any] | None = None
+            observed_shapes: dict[str, list[int]] = {}
+            for head_dimension in (64, 80, 128):
+                tensors = tuple(
+                    torch.randn(
+                        (1, 16, 4, head_dimension),
+                        device=device,
+                        dtype=torch.bfloat16,
+                        generator=generator,
+                    )
+                    for _index in range(3)
+                )
+                query, key, value = tensors
+                dense_outputs = [
+                    flash_attn_func(query, key, value, dropout_p=0.0, causal=causal)
+                    for causal in (False, True)
+                ]
+                variable_output = flash_attn_varlen_func(
+                    query.squeeze(0),
+                    key.squeeze(0),
+                    value.squeeze(0),
+                    cumulative_lengths,
+                    cumulative_lengths,
+                    16,
+                    16,
+                    dropout_p=0.0,
+                    causal=True,
+                )
+                if any(output.shape != query.shape for output in dense_outputs):
+                    raise AssertionError(
+                        f"FlashAttention dense output shape mismatch at head-dim {head_dimension}"
+                    )
+                if variable_output.shape != query.squeeze(0).shape:
+                    raise AssertionError(
+                        f"FlashAttention varlen output shape mismatch at head-dim {head_dimension}"
+                    )
+                forward_outputs.extend([*dense_outputs, variable_output])
+                observed_shapes[str(head_dimension)] = list(dense_outputs[0].shape)
+                if head_dimension == 128:
+                    reference_inputs = tensors
+            finite = torch.stack(
+                [output.float().isfinite().all() for output in forward_outputs]
+            ).all()
+            if not bool(finite.item()):
+                raise AssertionError("FlashAttention returned a non-finite output")
+
+            unsupported = torch.randn(
+                (1, 4, 2, 112),
+                device=device,
+                dtype=torch.bfloat16,
+                generator=generator,
+            )
+            try:
+                flash_attn_func(
+                    unsupported,
+                    unsupported,
+                    unsupported,
+                    dropout_p=0.0,
+                    causal=True,
+                )
+            except RuntimeError as error:
+                if "head dimensions <=96 or exactly 128" not in str(error):
+                    raise AssertionError(
+                        "specialized FlashAttention wheel rejected head-dim 112 "
+                        f"with an unexpected error: {error}"
+                    ) from error
+            else:
+                raise AssertionError(
+                    "specialized FlashAttention wheel unexpectedly accepted head-dim 112"
+                )
+
+            if reference_inputs is None:
+                raise AssertionError("FlashAttention smoke did not create head-dim 128 inputs")
+            query, key, value = reference_inputs
+            grad_query = query.detach().clone().requires_grad_(True)
+            grad_key = key.detach().clone().requires_grad_(True)
+            grad_value = value.detach().clone().requires_grad_(True)
+            grad_output = flash_attn_func(
+                grad_query,
+                grad_key,
+                grad_value,
+                dropout_p=0.0,
+                causal=True,
+            )
+            try:
+                grad_output.float().sum().backward()
+            except RuntimeError as error:
+                if "does not support backward" not in str(error):
+                    raise AssertionError(
+                        "specialized FlashAttention wheel rejected backward with an "
+                        f"unexpected error: {error}"
+                    ) from error
+            else:
+                raise AssertionError(
+                    "specialized FlashAttention inference wheel unexpectedly ran backward"
+                )
+            torch.cuda.synchronize(device)
+            flash_report["passed"] = True
+            flash_report["dense_shapes"] = observed_shapes
+            flash_report["varlen_tested"] = True
+            flash_report["unsupported_head_dimension_rejected"] = True
+            flash_report["backward_rejected"] = True
+        except BaseException as error:
+            errors.append(f"FlashAttention kernel smoke failed: {type(error).__name__}: {error}")
+        report["flash_attention"] = flash_report
+
+    minimum_driver = 570
     actual_driver = driver_major(str(report["driver"]))
-    if profile == "common" and str(torch.version.cuda) != "12.4":
-        errors.append(f"common lock requires a CUDA 12.4 torch build, got {torch.version.cuda}")
+    if profile == "common" and str(torch.version.cuda) != "12.8":
+        errors.append(f"common lock requires a CUDA 12.8 torch build, got {torch.version.cuda}")
     if actual_driver is None or actual_driver < minimum_driver:
         errors.append(
             f"{profile} requires NVIDIA driver major >= {minimum_driver}, got {report['driver']}"
         )
-    if profile == "common" and capability < (8, 0):
+    if profile == "common" and capability != (8, 0):
         errors.append(
-            f"common backend lock requires compute capability >= 8.0, got SM {capability}"
+            f"the installed common FlashAttention wheel is A100/SM80-specific; got SM {capability}"
         )
     return report, errors
 

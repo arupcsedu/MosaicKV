@@ -13,6 +13,7 @@ from mosaickv.adapters.huggingface import (
     AdapterCapabilities,
     CachedKeyState,
     CacheSnapshot,
+    DecodeState,
     HuggingFaceMultimodalAdapter,
     InternVL25Adapter,
     Llava15Adapter,
@@ -204,7 +205,14 @@ def test_qwen_video_paths_use_pinned_qwen_vision_preprocessing(
 def test_adapter_capability_metadata_records_rope_and_disabled_features() -> None:
     for adapter_type in (Llava15Adapter, Qwen25VLAdapter, LlavaOneVisionAdapter, InternVL25Adapter):
         capabilities = adapter_type.capabilities
-        assert capabilities.attention_implementations == ("eager",)
+        if adapter_type is InternVL25Adapter:
+            assert capabilities.attention_implementations == ("eager",)
+        else:
+            assert capabilities.attention_implementations == (
+                "eager",
+                "sdpa",
+                "flash_attention_2",
+            )
         assert capabilities.cached_key_state is CachedKeyState.POST_ROPE
         assert capabilities.query_vector_state is QueryVectorState.Q_PROJ_PRE_ROPE
         assert capabilities.supports_prototype_merge is False
@@ -230,7 +238,7 @@ def test_prepare_inputs_maps_expanded_image_tokens_without_torch() -> None:
 
 
 def test_non_eager_model_fails_before_execution() -> None:
-    with pytest.raises(ValueError, match="reload with attn_implementation='eager'"):
+    with pytest.raises(ValueError, match="does not support attention implementation"):
         _FakeAdapter(_FakeModel("sdpa"), _FakeProcessor())
 
 
@@ -304,3 +312,83 @@ def test_all_required_runtime_methods_are_present() -> None:
     }
     for adapter_type in (Llava15Adapter, Qwen25VLAdapter, LlavaOneVisionAdapter, InternVL25Adapter):
         assert required.issubset(set(dir(adapter_type)))
+
+
+def test_decode_metadata_uses_amortized_buffers() -> None:
+    torch = pytest.importorskip("torch")
+    state = DecodeState(
+        past_key_values=object(),
+        attention_mask=torch.tensor([[1, 0, 1]], dtype=torch.long),
+        active_cache_length=3,
+        logical_sequence_length=5,
+        next_decode_position=5,
+        modality_map=(),
+    )
+
+    first_mask = _FakeAdapter._append_decode_attention_mask(state)
+    mask_buffer = state.model_state["mosaickv_decode_attention_mask_buffer"]
+    assert first_mask.tolist() == [[1, 0, 1, 1]]
+    state.attention_mask = first_mask
+    second_mask = _FakeAdapter._append_decode_attention_mask(state)
+    assert second_mask.tolist() == [[1, 0, 1, 1, 1]]
+    assert state.model_state["mosaickv_decode_attention_mask_buffer"] is mask_buffer
+
+    first_position = _FakeAdapter._decode_cache_position(state, torch.device("cpu"))
+    position_buffer = state.model_state["mosaickv_decode_position_buffer"]
+    assert first_position.tolist() == [5]
+    state.next_decode_position = 6
+    second_position = _FakeAdapter._decode_cache_position(state, torch.device("cpu"))
+    assert second_position.tolist() == [6]
+    assert state.model_state["mosaickv_decode_position_buffer"] is position_buffer
+
+
+def test_qwen_decode_reuses_multimodal_position_buffer() -> None:
+    torch = pytest.importorskip("torch")
+
+    class _Output:
+        logits = torch.zeros((1, 1, 4))
+
+    def model_call(self: Any, **kwargs: Any) -> _Output:
+        self.call = kwargs
+        return _Output()
+
+    model_type = type(
+        "Qwen2_5_VLForConditionalGeneration",
+        (_FakeModel,),
+        {"__call__": model_call},
+    )
+    model = model_type()
+    adapter = Qwen25VLAdapter(model, _FakeProcessor())
+    state = DecodeState(
+        past_key_values=object(),
+        attention_mask=torch.ones((1, 5), dtype=torch.long),
+        active_cache_length=5,
+        logical_sequence_length=5,
+        next_decode_position=5,
+        modality_map=(),
+        model_state={
+            "rope_deltas": torch.tensor([[7]], dtype=torch.long),
+            "mosaickv_cache_all_valid": True,
+        },
+    )
+    adapter._decode_forward(
+        torch.tensor([[1]]),
+        state,
+        None,
+        torch.tensor([5]),
+    )
+    first_buffer = state.model_state["mosaickv_qwen_decode_position_ids_buffer"]
+    assert model.call["position_ids"].reshape(-1).tolist() == [12, 12, 12]
+    assert model.call["attention_mask"] == {
+        "full_attention": None,
+        "sliding_attention": None,
+    }
+    state.next_decode_position = 6
+    adapter._decode_forward(
+        torch.tensor([[2]]),
+        state,
+        None,
+        torch.tensor([6]),
+    )
+    assert state.model_state["mosaickv_qwen_decode_position_ids_buffer"] is first_buffer
+    assert model.call["position_ids"].reshape(-1).tolist() == [13, 13, 13]
