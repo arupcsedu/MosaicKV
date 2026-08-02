@@ -17,8 +17,7 @@ import pyarrow.parquet as pq
 import yaml
 
 QWEN_MROPE_TRANSFORM_PROVENANCE = (
-    "transformers_4_55_2_qwen2_5_vl_get_rope_index_"
-    "rotary_emb_apply_multimodal_rotary_pos_emb_v1"
+    "transformers_4_55_2_qwen2_5_vl_get_rope_index_rotary_emb_apply_multimodal_rotary_pos_emb_v1"
 )
 
 
@@ -202,9 +201,7 @@ def _aggregate(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     [row["attention_output_error"] for row in completed]
                 ),
                 "prototype_count": _average([row["prototype_count"] for row in completed]),
-                "residual_kv_bytes": _average(
-                    [row["residual_kv_bytes"] for row in completed]
-                ),
+                "residual_kv_bytes": _average([row["residual_kv_bytes"] for row in completed]),
                 "repair_frequency": (
                     repair_events
                     / sum(max(1, int(row["generated_tokens"] or 1) - 1) for row in completed)
@@ -289,10 +286,7 @@ def _task_differences(
     right: str,
     column: str,
 ) -> dict[str, float | None]:
-    return {
-        task: _difference(frame, [task], left, right, column)
-        for task in tasks
-    }
+    return {task: _difference(frame, [task], left, right, column) for task in tasks}
 
 
 def _fmt(value: float | None, digits: int = 4) -> str:
@@ -332,8 +326,7 @@ class _PdfCanvas:
 
     def text(self, x: float, y: float, value: object, *, size: float = 8.0) -> None:
         self.commands.append(
-            f"0 0 0 rg BT /F1 {size:.2f} Tf {x:.2f} {y:.2f} Td "
-            f"({self._escape(value)}) Tj ET"
+            f"0 0 0 rg BT /F1 {size:.2f} Tf {x:.2f} {y:.2f} Td ({self._escape(value)}) Tj ET"
         )
 
     def marker(
@@ -434,9 +427,7 @@ def _draw_panel(
         value = low + fraction * (high - low)
         canvas.line(px, gy, px + pw, gy, color=(0.82, 0.82, 0.82), width=0.4)
         canvas.text(x + 2, gy - 2, f"{value:.3g}", size=6)
-    x_positions = [
-        px + (index + 0.5) * pw / len(x_labels) for index in range(len(x_labels))
-    ]
+    x_positions = [px + (index + 0.5) * pw / len(x_labels) for index in range(len(x_labels))]
     for xpos, label in zip(x_positions, x_labels, strict=True):
         canvas.text(xpos - 3, py - 12, label, size=7)
     for series_index, (name, row, color) in enumerate(series):
@@ -559,11 +550,7 @@ def _write_figures(frame: pd.DataFrame, figures: Path) -> None:
         subset = measured[measured.task == task]
         points: list[tuple[str, float | None, float | None]] = []
         for row in subset.itertuples():
-            latency = (
-                None
-                if pd.isna(row.end_to_end_latency_s)
-                else float(row.end_to_end_latency_s)
-            )
+            latency = None if pd.isna(row.end_to_end_latency_s) else float(row.end_to_end_latency_s)
             score = None if pd.isna(row.task_score) else float(row.task_score)
             points.append((str(row.variant_id), latency, score))
         _draw_xy_panel(
@@ -638,16 +625,12 @@ def _write_analysis(
     oracle_gain = _difference(frame, tasks, "K", "B", "selected_block_recall")
     forecast_scores = _task_differences(frame, tasks, "A", "B", "task_score")
     graph_scores = _task_differences(frame, tasks, "A", "E", "task_score")
-    structured_coverage = _difference(
-        frame, ["docvqa", "chartqa"], "A", "E", "graph_coverage"
-    )
+    structured_coverage = _difference(frame, ["docvqa", "chartqa"], "A", "E", "graph_coverage")
     general_coverage = _difference(frame, ["mmstar"], "A", "E", "graph_coverage")
     structured_graph_fidelity = _difference(
         frame, ["docvqa", "chartqa"], "E", "A", "attention_output_error"
     )
-    general_graph_fidelity = _difference(
-        frame, ["mmstar"], "E", "A", "attention_output_error"
-    )
+    general_graph_fidelity = _difference(frame, ["mmstar"], "E", "A", "attention_output_error")
     value_fidelity = _difference(
         frame,
         tasks,
@@ -657,9 +640,7 @@ def _write_analysis(
     )
     value_logit_kl = _difference(frame, tasks, "G", "A", "logit_kl")
     prototype_scores = _task_differences(frame, tasks, "J", "I", "task_score")
-    prototype_attention = _difference(
-        frame, tasks, "J", "I", "attention_output_error"
-    )
+    prototype_attention = _difference(frame, tasks, "J", "I", "attention_output_error")
     prototype_logit = _difference(frame, tasks, "J", "I", "logit_kl")
     repair_scores = _task_differences(frame, tasks, "A", "J", "task_score")
     repair_latency = _difference(frame, tasks, "A", "J", "end_to_end_latency_s")
@@ -668,18 +649,10 @@ def _write_analysis(
     completed_samples = int(measured.sample_count.sum())
     failed_samples = int(measured.failed_samples.sum())
     three_tier = measured[measured.tier_mode.fillna("").str.contains("three_tier")]
-    online_repair_frequency = _average(
-        list(measured[measured.variant_id == "A"].repair_frequency)
-    )
-    oracle_repair_benefit = _average(
-        list(measured[measured.variant_id == "L"].repair_benefit)
-    )
-    oracle_repair_frequency = _average(
-        list(measured[measured.variant_id == "L"].repair_frequency)
-    )
-    oracle_repair_latency = _average(
-        list(measured[measured.variant_id == "L"].repair_latency_s)
-    )
+    online_repair_frequency = _average(list(measured[measured.variant_id == "A"].repair_frequency))
+    oracle_repair_benefit = _average(list(measured[measured.variant_id == "L"].repair_benefit))
+    oracle_repair_frequency = _average(list(measured[measured.variant_id == "L"].repair_frequency))
+    oracle_repair_latency = _average(list(measured[measured.variant_id == "L"].repair_latency_s))
     subset_sizes = cast("dict[str, int]", study["subset_sizes"])
     subset_description = ", ".join(f"{task}={subset_sizes[task]}" for task in tasks)
     lines = [
@@ -865,9 +838,7 @@ def analyze(index: Path, project_root: Path) -> None:
         controls_passed=controls_passed,
         output_root=output_root,
         study={
-            "subset_sizes": {
-                str(row["task"]): int(row["subset_size"]) for row in index_rows
-            },
+            "subset_sizes": {str(row["task"]): int(row["subset_size"]) for row in index_rows},
             "model": first_manifest["model"]["id"] if first_manifest else "unknown",
             "precision": first_manifest["model"]["precision"] if first_manifest else "unknown",
             "prefill_attention": (
@@ -880,17 +851,11 @@ def analyze(index: Path, project_root: Path) -> None:
                 if first_manifest
                 else "unknown"
             ),
-            "output_length": (
-                study_spec.get("output_length", "unknown")
-            ),
+            "output_length": (study_spec.get("output_length", "unknown")),
             "retention_ratio": (
-                first_manifest["cache"]["retention_ratio"]
-                if first_manifest
-                else "unknown"
+                first_manifest["cache"]["retention_ratio"] if first_manifest else "unknown"
             ),
-            "block_size": (
-                study_spec.get("block_size", "unknown")
-            ),
+            "block_size": (study_spec.get("block_size", "unknown")),
         },
     )
     print(

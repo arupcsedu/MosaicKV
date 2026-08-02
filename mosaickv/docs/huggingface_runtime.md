@@ -12,15 +12,16 @@ may switch an all-valid exact cache to SDPA after selection; padded per-head
 caches and repair fail closed. Both implementations are recorded in the config,
 manifest, and debug trace, so this is never silently labeled HF eager.
 
-All audited adapters expose post-RoPE cached keys. Qwen2.5-VL is the narrow
-exception to the exact-only rule: Transformers 4.55.2 eager execution supplies
-an audited M-RoPE inverse/anchor transform and declares prototype plus residual
-repair support. LLaVA-1.5, LLaVA-OneVision, InternVL, version mismatches, and
-fused prototype paths remain exact-only fallbacks. Consequently:
+All audited adapters expose post-RoPE cached keys. Transformers 4.55.2 eager
+execution supplies an audited M-RoPE inverse/anchor transform for Qwen2.5-VL
+and standard Llama/Qwen2 transforms for LLaVA-1.5 and LLaVA-OneVision. These
+three families declare prototype plus residual-repair support. InternVL,
+version/position mismatches, and fused prototype paths remain exact-only
+fallbacks. Consequently:
 
 - `mosaickv_exact` runs forecasting, graph construction, utility, and exact block selection;
-- Qwen `mosaickv_proto` constructs exact and phase-safe prototype tiers;
-- Qwen `mosaickv_full` additionally constructs pinned residuals and evaluates
+- supported native-adapter `mosaickv_proto` constructs exact and phase-safe prototype tiers;
+- supported native-adapter `mosaickv_full` additionally constructs pinned residuals and evaluates
   the configured repair policy; and
 - unsupported paths record an explicit `mosaickv_exact_safety_fallback` label.
 
@@ -206,8 +207,12 @@ and no 20-example dataset progression has been accepted under this common
 lock. The bounded v17 Qwen2.5-VL-3B component run completed 44 three-tier cells
 and four exact no-prototype controls with a passed active-byte/provenance gate.
 Its 84 rows are implementation evidence only because the worktree was dirty
-and each task had one or two examples. LLaVA-1.5 and the other post-RoPE model
-families still use the exact safety fallback.
+and each task had one or two examples. Subsequent exploratory A100 gates
+`17855955` (LLaVA-1.5 FP16) and `17856497` (OneVision-7B BF16) each passed
+16-token FullKV/reinjection parity, retention-one identity, a real 50%
+three-tier cache, and forced residual restoration with at most one re-decode.
+They validate implementation support but remain non-canonical dirty-tree
+evidence.
 
 The lmms-eval route constrains task discovery to the requested task family, delegates MMStar
 answer processing and aggregation to the installed official functions, and pins the dataset load

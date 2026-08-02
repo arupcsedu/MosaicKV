@@ -208,6 +208,7 @@ class RepairCacheState:
     mosaic_state: MosaicKVState
     residual_storage: ResidualStorageReport
     prototype_catalog: tuple[PrototypeRecord, ...]
+    active_prototype_records: tuple[PrototypeRecord, ...]
     active_prototype_ids: tuple[int, ...]
     exact_node_ids: tuple[int, ...]
     initial_exact_node_ids: tuple[int, ...]
@@ -240,6 +241,20 @@ class RepairCacheState:
         catalog_ids = {record.prototype_id for record in self.prototype_catalog}
         if catalog_ids != set(range(len(self.prototype_catalog))):
             raise ValueError("repair prototype catalog IDs must be contiguous")
+        active_record_ids = tuple(record.prototype_id for record in self.active_prototype_records)
+        if active_record_ids != self.active_prototype_ids:
+            raise ValueError("active prototype records must align with active prototype IDs")
+        for record in self.active_prototype_records:
+            original = self.prototype_catalog[record.prototype_id]
+            if not set(record.assigned_node_ids) <= set(original.assigned_node_ids):
+                raise ValueError("active prototype gained a source outside its original cluster")
+            if (
+                record.layer != original.layer
+                or record.kv_head != original.kv_head
+                or record.anchor_node_id != original.anchor_node_id
+                or record.anchor_logical_position != original.anchor_logical_position
+            ):
+                raise ValueError("active prototype changed its immutable anchor identity")
         removed = set(self.superseded_prototype_ids) | set(self.budget_evicted_prototype_ids)
         if set(self.superseded_prototype_ids) & set(self.budget_evicted_prototype_ids):
             raise ValueError("a prototype cannot be both superseded and budget-evicted")
@@ -254,8 +269,8 @@ class RepairCacheState:
             raise ValueError("repair exact IDs do not match exact-tier blocks")
         expected_prototype_blocks = tuple(
             self.full_state.blocks[node_id]
-            for prototype_id in self.active_prototype_ids
-            for node_id in self.prototype_catalog[prototype_id].assigned_node_ids
+            for record in self.active_prototype_records
+            for node_id in record.assigned_node_ids
         )
         if self.mosaic_state.prototypes.source_blocks != expected_prototype_blocks:
             raise ValueError("active repair prototypes do not match source memberships")
@@ -266,13 +281,26 @@ class RepairCacheState:
         ):
             raise ValueError("residual storage references an unknown prototype")
         for node_id in self.promoted_node_ids:
-            parents = {
+            parent_ids = {
                 record.prototype_id
                 for record in self.prototype_catalog
                 if node_id in record.assigned_node_ids
             }
-            if len(parents) != 1 or not parents <= set(self.superseded_prototype_ids):
-                raise ValueError("promoted block does not belong to one superseded prototype")
+            if len(parent_ids) != 1:
+                raise ValueError("promoted block does not belong to exactly one prototype")
+            parent_id = next(iter(parent_ids))
+            active_parent = next(
+                (
+                    record
+                    for record in self.active_prototype_records
+                    if record.prototype_id == parent_id
+                ),
+                None,
+            )
+            if active_parent is not None and node_id in active_parent.assigned_node_ids:
+                raise ValueError("promoted block remains represented by its active prototype")
+            if active_parent is None and parent_id not in removed:
+                raise ValueError("promoted block's inactive parent has no removal provenance")
         if self.mosaic_state.logical_positions != self.full_state.logical_positions:
             raise ValueError("repair changed the source logical-position map")
         if self.active_cost > self.active_budget.value:
@@ -300,6 +328,7 @@ class RepairCacheState:
             mosaic_state=construction.state,
             residual_storage=construction.residual_storage,
             prototype_catalog=construction.prototypes,
+            active_prototype_records=construction.prototypes,
             active_prototype_ids=tuple(record.prototype_id for record in construction.prototypes),
             exact_node_ids=construction.exact_node_ids,
             initial_exact_node_ids=construction.exact_node_ids,
@@ -324,10 +353,10 @@ class RepairCacheState:
         raise ValueError(f"unsupported repair budget unit: {self.active_budget.unit}")
 
     def prototype_record(self, prototype_id: int) -> PrototypeRecord:
-        try:
-            return self.prototype_catalog[prototype_id]
-        except IndexError as error:
-            raise KeyError(f"prototype does not exist: {prototype_id}") from error
+        for record in self.active_prototype_records:
+            if record.prototype_id == prototype_id:
+                return record
+        raise KeyError(f"active prototype does not exist: {prototype_id}")
 
 
 @dataclass(frozen=True, slots=True)

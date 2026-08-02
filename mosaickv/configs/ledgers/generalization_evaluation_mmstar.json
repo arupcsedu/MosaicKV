@@ -1,0 +1,11 @@
+{
+  "dataset_id": "Lin-Chen/MMStar",
+  "dataset_revision": "bc98d668301da7b14f648724866e57302778ab27",
+  "sample_ids": [
+    "mmstar:1343",
+    "mmstar:905"
+  ],
+  "schema_version": 1,
+  "split": "test",
+  "task": "mmstar"
+}

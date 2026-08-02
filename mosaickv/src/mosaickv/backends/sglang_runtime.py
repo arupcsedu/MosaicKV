@@ -29,6 +29,7 @@ from mosaickv.adapters.huggingface.qwen2_5_vl import (
     QWEN25_VL_MAX_PIXELS,
     QWEN25_VL_MIN_PIXELS,
 )
+from mosaickv.backends.native_blocks import native_audit_path
 from mosaickv.backends.vllm_runtime import (
     _resolve_model_source,
     prepare_vllm_prompt,
@@ -69,14 +70,14 @@ class NativeIntegrationCapability:
 
 
 def native_integration_capability(sglang_version: str) -> NativeIntegrationCapability:
-    """Return a fail-closed whole-block capability for a SGLang release."""
+    """Return the version-pinned whole-block capability for SGLang."""
 
     return NativeIntegrationCapability(
         sglang_version=sglang_version,
-        supported=False,
-        feature="whole_block_selection_with_original_logical_and_mrope_positions",
+        supported=sglang_version == _AUDITED_SGLANG_VERSION,
+        feature="request_wide_whole_block_compaction_with_logical_and_mrope_positions",
         reason_code=(
-            "audited_0_5_1_post3_missing_atomic_sparse_request_cache_hook"
+            "repository_patch_transaction_v1"
             if sglang_version == _AUDITED_SGLANG_VERSION
             else "unaudited_sglang_version"
         ),
@@ -88,6 +89,7 @@ def native_integration_capability(sglang_version: str) -> NativeIntegrationCapab
             "sglang.srt.mem_cache.radix_cache.RadixCache.cache_finished_req",
             "sglang.srt.model_executor.forward_batch_info.ForwardBatch",
             "sglang.srt.layers.attention.base_attn_backend.AttentionBackend",
+            "mosaickv.backends.sglang_native_patch.install",
         ),
     )
 
@@ -313,6 +315,8 @@ def build_server_command(
         "--disable-overlap-schedule",
         "--disable-cuda-graph",
     ]
+    if options.enable_mosaickv:
+        command.append("--disable-radix-cache")
     if options.context_length is not None:
         command.extend(("--context-length", str(options.context_length)))
     if model_source == config.model.id:
@@ -494,6 +498,8 @@ class SGLangTrialMeasurement:
     gpu_memory_peak_bytes: int | None
     gpu_memory_peak_delta_bytes: int | None
     finish_reason: str | None
+    compression_seconds: float = 0.0
+    native_audit: JsonObject | None = None
 
     def to_json_object(self) -> JsonObject:
         return cast("JsonObject", asdict(self))
@@ -542,6 +548,7 @@ class SGLangHTTPTrialRunner:
             )
         self.sglang_version = version
         self.cache_geometry = cache_geometry
+        self._native_enabled = options.enable_mosaickv
         self._port = options.port or _free_local_port()
         self._base_url = f"http://127.0.0.1:{self._port}"
         self._command = build_server_command(
@@ -549,12 +556,18 @@ class SGLangHTTPTrialRunner:
         )
         log_root = Path(log_directory)
         log_root.mkdir(parents=True, exist_ok=True)
+        self._native_audit_directory = log_root / "native_audit"
         self._log_path = log_root / f"server-{self._port}.log"
         self._log_handle = self._log_path.open("w", encoding="utf-8")
         environment = dict(os.environ)
         environment.setdefault("TOKENIZERS_PARALLELISM", "false")
         environment["MOSAICKV_QWEN_MIN_PIXELS"] = str(QWEN25_VL_MIN_PIXELS)
         environment["MOSAICKV_QWEN_MAX_PIXELS"] = str(QWEN25_VL_MAX_PIXELS)
+        if options.enable_mosaickv:
+            environment["MOSAICKV_NATIVE_SGLANG"] = "1"
+            environment["MOSAICKV_NATIVE_RETENTION_RATIO"] = str(config.cache.retention_ratio)
+            environment["MOSAICKV_NATIVE_BLOCK_SIZE"] = str(config.cache.block_size)
+            environment["MOSAICKV_NATIVE_AUDIT_DIR"] = str(self._native_audit_directory.resolve())
         # SGLang JIT-compiles several attention/position kernels after the
         # server has started.  It invokes the pinned ``ninja`` executable by
         # name, so direct calls to ``<venv>/bin/python`` must still expose the
@@ -617,7 +630,13 @@ class SGLangHTTPTrialRunner:
             "tensor_parallel_size": options.tensor_parallel_size,
             "mem_fraction_static": options.mem_fraction_static,
             "context_length": options.context_length,
-            "radix_cache": True,
+            "radix_cache": not options.enable_mosaickv,
+            "native_mosaickv": options.enable_mosaickv,
+            "native_patch": (
+                "mosaickv.backends.sglang_native_patch:install"
+                if options.enable_mosaickv
+                else "not_used"
+            ),
             "stream_token_id_semantics": (
                 "authoritative output_token_logprobs are cumulative and prefix-validated; "
                 "BatchStrOut.output_ids are detokenizer deltas; installed "
@@ -813,7 +832,31 @@ class SGLangHTTPTrialRunner:
                 f"event_counts={streamed_id_counts}"
             )
         cached_tokens = int(meta.get("cached_tokens", 0))
-        active_positions = prompt_tokens + max(0, completion_tokens - 1)
+        native_audit: JsonObject | None = None
+        compression_seconds = 0.0
+        active_prompt_positions = prompt_tokens
+        if self._native_enabled:
+            audit_path = native_audit_path(self._native_audit_directory, "sglang", request_id)
+            if not audit_path.is_file():
+                raise SGLangRuntimeError(
+                    f"native SGLang request completed without scheduler audit: {audit_path}"
+                )
+            payload = json.loads(audit_path.read_text(encoding="utf-8"))
+            if not isinstance(payload, Mapping):
+                raise SGLangRuntimeError("native SGLang scheduler audit is invalid")
+            native_audit = cast("JsonObject", dict(payload))
+            selection = payload.get("selection")
+            if not isinstance(selection, Mapping):
+                raise SGLangRuntimeError("native SGLang audit omitted its selection")
+            raw_selected = selection.get("selected_positions")
+            raw_compression = payload.get("compression_seconds")
+            if isinstance(raw_selected, bool) or not isinstance(raw_selected, int):
+                raise SGLangRuntimeError("native SGLang selected-position count is invalid")
+            if isinstance(raw_compression, bool) or not isinstance(raw_compression, (int, float)):
+                raise SGLangRuntimeError("native SGLang compression timing is invalid")
+            active_prompt_positions = raw_selected
+            compression_seconds = float(raw_compression)
+        active_positions = active_prompt_positions + max(0, completion_tokens - 1)
         active_bytes = self.cache_geometry.active_bytes(active_positions)
         ttft = timestamps[0] if timestamps else None
         itls = tuple(later - earlier for earlier, later in pairwise(timestamps))
@@ -871,6 +914,8 @@ class SGLangHTTPTrialRunner:
             finish_reason=(
                 str(meta["finish_reason"]) if meta.get("finish_reason") is not None else None
             ),
+            compression_seconds=compression_seconds,
+            native_audit=native_audit,
         )
 
     def close(self) -> None:
@@ -917,7 +962,7 @@ def _safe_trace_name(sample_id: str) -> str:
 
 
 class SGLangFullKVModel:
-    """Backend-neutral evaluation adapter for measured SGLang FullKV."""
+    """Evaluation adapter for SGLang FullKV or native exact block transport."""
 
     backend = "sglang"
     method = "full_kv"
@@ -933,6 +978,8 @@ class SGLangFullKVModel:
         trace_directory: str | Path,
         generation: Mapping[str, object],
         cache_probe_repeats: int = 2,
+        method: str = "full_kv",
+        retention_ratio: float = 1.0,
     ) -> None:
         if model_id not in _SUPPORTED_MODELS:
             known = ", ".join(sorted(_SUPPORTED_MODELS))
@@ -945,6 +992,8 @@ class SGLangFullKVModel:
         self.trace_directory = Path(trace_directory)
         self.generation = dict(generation)
         self.cache_probe_repeats = cache_probe_repeats
+        self.method = method
+        self.retention_ratio = retention_ratio
         self._isolation_anchor: (
             tuple[
                 PreparedSGLangPrompt,
@@ -974,11 +1023,13 @@ class SGLangFullKVModel:
             raise ValueError("SGLangFullKVModel requires execution.backend='sglang'")
         if options.enable_mosaickv:
             require_native_mosaickv_support(enabled=True, sglang_version=_AUDITED_SGLANG_VERSION)
-        if not config.method.is_full_cache or config.cache.retention_ratio != 1.0:
+        native = options.enable_mosaickv
+        if native and config.method.value != "mosaickv_exact":
             raise SGLangRuntimeError(
-                "Stage A emits only SGLang FullKV rows at retention_ratio=1.0; "
-                "native MosaicKV is not simulated"
+                "native SGLang Stage B currently supports only method=mosaickv_exact"
             )
+        if not native and (not config.method.is_full_cache or config.cache.retention_ratio != 1.0):
+            raise SGLangRuntimeError("SGLang FullKV requires retention_ratio=1.0")
         if options.tensor_parallel_size != 1:
             raise SGLangRuntimeError(
                 "the audited active-KV byte contract currently supports tp_size=1 only"
@@ -1037,6 +1088,8 @@ class SGLangFullKVModel:
                 "seed": config.execution.seed,
             },
             cache_probe_repeats=options.cache_probe_repeats,
+            method=config.method.value,
+            retention_ratio=config.cache.retention_ratio,
         )
 
     def generate(self, request: EvaluationRequest) -> ModelGeneration:
@@ -1076,12 +1129,13 @@ class SGLangFullKVModel:
                 terminal_token_index=None,
             )
         )
+        native = self.method == "mosaickv_exact"
         trace: JsonObject = {
             "schema_version": 1,
-            "measurement_type": "sglang_fullkv",
+            "measurement_type": "sglang_native_mosaickv" if native else "sglang_fullkv",
             "backend": "sglang",
-            "method": "full_kv",
-            "native_mosaickv": False,
+            "method": self.method,
+            "native_mosaickv": native,
             "run_id": request.run_id,
             "sample_id": request.sample_id,
             "model": self.model_id,
@@ -1103,6 +1157,9 @@ class SGLangFullKVModel:
             },
             "engine": self.runner.engine_metadata,
             "trials": [trial.to_json_object() for trial in trials],
+            "native_scope": (
+                "request_wide_whole_token_blocks_transport_gate" if native else "not_used"
+            ),
             "cache_measurement": {
                 "radix_prefix_cache": "Generate response meta_info.cached_tokens",
                 "prefix_cache_gauge": "Prometheus sglang:cache_hit_rate",
@@ -1112,7 +1169,10 @@ class SGLangFullKVModel:
                     "per-request multimodal encoder-cache hit counter"
                 ),
                 "active_kv_bytes": (
-                    "(prompt_tokens + max(completion_tokens - 1, 0)) * "
+                    "(selected_prompt_tokens + max(completion_tokens - 1, 0)) * "
+                    "2 * layers * kv_heads * head_dim * dtype_bytes"
+                    if native
+                    else "(prompt_tokens + max(completion_tokens - 1, 0)) * "
                     "2 * layers * kv_heads * head_dim * dtype_bytes"
                 ),
             },
@@ -1146,7 +1206,7 @@ class SGLangFullKVModel:
             metrics=GenerationMetrics(
                 ttft=first.ttft_seconds,
                 prefill_time=first.server_prefill_seconds,
-                compression_time=0.0,
+                compression_time=first.compression_seconds,
                 decode_time=first.decode_seconds,
                 end_to_end_time=first.request_latency_seconds,
                 generated_tokens=first.generated_tokens,
@@ -1156,7 +1216,7 @@ class SGLangFullKVModel:
                 repair_count=0,
                 repaired_bytes=0,
             ),
-            effective_method="full_kv",
+            effective_method=self.method,
         )
 
     def verify_request_isolation(self) -> bool:

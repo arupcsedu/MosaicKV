@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import numpy as np
 import pytest
 
@@ -34,7 +36,7 @@ from mosaickv.selection import (
     compute_block_utilities,
     lazy_greedy_select,
 )
-from mosaickv.types import BudgetUnit, RepairPolicy
+from mosaickv.types import BudgetUnit, RepairCandidateRanking, RepairPolicy
 
 
 def _capabilities() -> AdapterCapabilities:
@@ -100,7 +102,7 @@ def _fixture(
         budget = 32 if budget_unit is BudgetUnit.BYTES else 4
     else:
         values = (1.0, 10.0, 30.0)
-        edges = ((1, 0, 0.25), (2, 0, 0.75))
+        edges = ((1, 0, 0.75), (2, 0, 0.25))
         probabilities = (1.0, 0.0, 0.0)
         budget = 16 if budget_unit is BudgetUnit.BYTES else 2
     key = np.asarray(values, dtype=np.float32).reshape(1, 1, -1, 1)
@@ -124,6 +126,12 @@ def _fixture(
         SelectionConfig(lambda_g=0.0, lambda_m=0.0),
     )
     selection = lazy_greedy_select(objective, SelectionBudget(budget, budget_unit))
+    if not eviction_choice:
+        repair_headroom = 8 if budget_unit is BudgetUnit.BYTES else 1
+        selection = replace(
+            selection,
+            budget=SelectionBudget(budget + repair_headroom, budget_unit),
+        )
     construction = construct_three_tier_cache(
         full,
         graph,
@@ -168,6 +176,9 @@ def test_removed_critical_block_is_restored_and_recovers_current_token() -> None
         calls += 1
         assert repaired.promoted_node_ids == (2,)
         assert repaired.exact_node_ids == (0, 2)
+        assert repaired.prototype_record(0).assigned_node_ids == (1,)
+        assert repaired.mosaic_state.prototypes.prototype_keys[0].item() == pytest.approx(10.0)
+        assert repaired.mosaic_state.prototypes.prototype_values[0].item() == pytest.approx(20.0)
         return np.asarray([1.0, 4.0], dtype=np.float32)
 
     result = evaluate_repair_decode_step(
@@ -194,7 +205,9 @@ def test_removed_critical_block_is_restored_and_recovers_current_token() -> None
     assert result.event.maximum_logit_change == pytest.approx(3.0)
     assert result.event.token_changed
     assert result.event.quality_recovered is True
-    assert result.event.superseded_prototype_ids == (0,)
+    assert result.event.superseded_prototype_ids == ()
+    assert result.state.active_prototype_ids == (0,)
+    assert result.state.prototype_record(0).assigned_node_ids == (1,)
     assert result.state.active_cost <= result.state.active_budget.value
     assert 2 not in {payload.source_node_id for payload in result.state.residual_storage.payloads}
     record = result.event.to_record()
@@ -232,6 +245,49 @@ def test_entropy_signals_and_optional_draft_kl_are_deterministic() -> None:
     )
     assert signals.draft_kl_divergence is not None
     assert signals.draft_kl_divergence > 0
+
+
+def test_risk_entropy_floor_blocks_high_confidence_cache_mutation() -> None:
+    state = _fixture()
+    result = repair_decode_step(
+        state,
+        RepairConfig(
+            policy=RepairPolicy.PROTOTYPE_RISK,
+            prototype_risk_threshold=0.1,
+            prototype_risk_min_entropy=0.5,
+            max_blocks_per_step=1,
+        ),
+        step_index=0,
+        provisional_logits=np.asarray([20.0, 0.0], dtype=np.float32),
+        prototype_attention_mass={0: 0.9},
+        re_decode=_must_not_redecode,
+    )
+
+    assert result.event.trigger_reason is RepairTriggerReason.THRESHOLD_NOT_MET
+    assert not result.event.triggered
+    assert result.state.active_prototype_records == state.active_prototype_records
+
+
+def test_legacy_partial_supersession_remains_an_explicit_control() -> None:
+    state = _fixture()
+    result = repair_decode_step(
+        state,
+        RepairConfig(
+            policy=RepairPolicy.PROTOTYPE_RISK,
+            prototype_risk_threshold=0.1,
+            max_blocks_per_step=1,
+            candidate_ranking=RepairCandidateRanking.PROTOTYPE_WEIGHT,
+            preserve_partial_prototype=False,
+        ),
+        step_index=0,
+        provisional_logits=np.asarray([1.0, 0.0], dtype=np.float32),
+        prototype_attention_mass={0: 0.9},
+        re_decode=lambda _state: np.asarray([0.0, 1.0], dtype=np.float32),
+    )
+
+    assert result.event.restored_block_ids == (1,)
+    assert result.event.superseded_prototype_ids == (0,)
+    assert result.state.active_prototype_ids == ()
 
 
 @pytest.mark.parametrize(
@@ -301,8 +357,14 @@ def test_promotion_evicts_lowest_utility_remaining_prototype_to_hold_budget(
     def re_decode(repaired: RepairCacheState) -> np.ndarray:
         nonlocal calls
         calls += 1
-        assert repaired.promoted_node_ids == (3, 4)
-        assert repaired.active_prototype_ids == (1,)
+        # R=2 spans the two highest-risk clusters. Prototype 0 is
+        # algebraically downdated to its unpromoted member instead of losing
+        # that evidence when node 4 becomes exact.
+        assert repaired.promoted_node_ids == (4, 5)
+        assert repaired.active_prototype_ids == (0,)
+        assert repaired.prototype_record(0).assigned_node_ids == (3,)
+        assert repaired.mosaic_state.prototypes.prototype_keys[0].item() == pytest.approx(10.0)
+        assert repaired.mosaic_state.prototypes.prototype_values[0].item() == pytest.approx(20.0)
         return np.asarray([0.0, 1.0], dtype=np.float32)
 
     result = repair_decode_step(
@@ -319,8 +381,8 @@ def test_promotion_evicts_lowest_utility_remaining_prototype_to_hold_budget(
     )
 
     assert calls == 1
-    assert result.event.restored_block_ids == (3, 4)
-    assert result.event.superseded_prototype_ids == (0,)
+    assert result.event.restored_block_ids == (4, 5)
+    assert result.event.superseded_prototype_ids == (1,)
     assert result.event.evicted_prototype_ids == (2,)
     assert result.event.active_cost_before == state.active_budget.value
     assert result.event.active_cost_after == state.active_budget.value
@@ -348,7 +410,7 @@ def test_promoted_blocks_persist_on_later_decode_steps() -> None:
         RepairConfig(policy=RepairPolicy.NONE),
         step_index=1,
         provisional_logits=np.asarray([0.0, 1.0]),
-        prototype_attention_mass={},
+        prototype_attention_mass={0: 0.0},
         re_decode=_must_not_redecode,
     )
 
@@ -406,3 +468,5 @@ def test_repair_config_rejects_invalid_policy_parameters() -> None:
         RepairConfig(entropy_threshold=1.1)
     with pytest.raises(ConfigurationError, match="prototype_risk_threshold"):
         RepairConfig(prototype_risk_threshold=-0.1)
+    with pytest.raises(ConfigurationError, match="prototype_risk_min_entropy"):
+        RepairConfig(prototype_risk_min_entropy=1.1)

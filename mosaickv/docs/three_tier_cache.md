@@ -30,10 +30,11 @@ only when all of the following hold:
 
 Unknown keys and post-RoPE keys without a matching transform are never
 averaged. Qwen2.5-VL on Transformers 4.55.2 supplies the exact prefill M-RoPE
-phase. It de-rotates each member, pools and averages in phase-neutral FP32, and
-re-rotates the result at the selected anchor. LLaVA-1.5, LLaVA-OneVision, and
-InternVL2.5 do not supply such a transform and therefore return an explicitly
-labeled exact-only safety fallback.
+phase. LLaVA-1.5 and LLaVA-OneVision supply the corresponding exact standard
+Llama/Qwen2 RoPE phase for one unpadded monotonic request. Each transform
+de-rotates members, pools and averages in phase-neutral FP32, and re-rotates at
+the selected anchor. InternVL2.5 and any version/position mismatch return an
+explicitly labeled exact-only safety fallback.
 
 ## Prototype assignment and values
 

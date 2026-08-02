@@ -63,7 +63,7 @@ def _json_bytes(payload: object) -> bytes:
 def _spec() -> dict[str, object]:
     return {
         "schema_version": 1,
-        "pilot_revision": 5,
+        "pilot_revision": 6,
         "classification": "diagnostic_gpu_pilot_not_paper_result",
         "model_key": MODEL_KEY,
         "backend_key": BACKEND_KEY,
@@ -80,21 +80,14 @@ def _spec() -> dict[str, object]:
                 "Qwen2.5-VL uses grouped-query attention. The runtime rejects this combination."
             )
         },
-        "expected_safety_fallbacks": {
-            "mosaickv_proto": "Qwen cached keys are post-RoPE; prototype merging is disabled",
-            "mosaickv_full": (
-                "Qwen cached keys are post-RoPE and residual repair capability is disabled"
-            ),
-        },
+        "expected_safety_fallbacks": {},
         "expected_effective_methods": {
             "prefixkv_reimpl": ["generalized_prefixkv_reimpl"],
             "mosaickv_proto": [
                 "mosaickv_proto__retention_one_exact",
-                "mosaickv_proto__mosaickv_exact_safety_fallback",
             ],
             "mosaickv_full": [
                 "mosaickv_full__retention_one_exact",
-                "mosaickv_full__mosaickv_exact_safety_fallback",
             ],
         },
         "primary_budget": "packed_prefill_active_kv_bytes",

@@ -121,7 +121,7 @@ def _resume_payload(
             "selected_samples": len(rows),
             "failed_samples": failed,
             "backend": "vllm",
-            "method": "full_kv",
+            "method": config.method.value,
             "raw_output": str(raw_path),
             "parquet_output": str(parquet_path) if parquet_path is not None else None,
             "manifest_path": str(manifest_path),
@@ -149,11 +149,12 @@ def run_vllm_evaluation(args: argparse.Namespace, config: RunConfig) -> tuple[in
             enforce_eager=True,
             attention_backend=config.execution.attention_implementation,
         )
-    if not config.method.is_full_cache or config.cache.retention_ratio != 1.0:
-        raise ValueError(
-            "vLLM Stage A supports only --method full_kv --retention-ratio 1.0; "
-            "use --enable-mosaickv only after native support is reported"
-        )
+    if options.enable_mosaickv and config.method.value != "mosaickv_exact":
+        raise ValueError("vLLM native Stage B supports only --method mosaickv_exact")
+    if not options.enable_mosaickv and (
+        not config.method.is_full_cache or config.cache.retention_ratio != 1.0
+    ):
+        raise ValueError("vLLM FullKV requires --method full_kv --retention-ratio 1.0")
     _external_cache()
     task_name = _task_name(config, cast("str | None", args.task))
     registry = default_task_registry()
@@ -216,6 +217,7 @@ def run_vllm_evaluation(args: argparse.Namespace, config: RunConfig) -> tuple[in
                 registry=registry,
                 dataset_revision=config.dataset.revision,
             )
+        runtime.verify_request_isolation()
     finally:
         runtime.close()
 
@@ -231,7 +233,7 @@ def run_vllm_evaluation(args: argparse.Namespace, config: RunConfig) -> tuple[in
     RunManifestWriter().write(
         manifest_path,
         config,
-        MeasurementType.REFERENCE,
+        MeasurementType.METHOD if options.enable_mosaickv else MeasurementType.REFERENCE,
         _input_provenance(config, task_name, raw_path),
         artifacts,
         run_id=run_id,
@@ -258,7 +260,7 @@ def run_vllm_evaluation(args: argparse.Namespace, config: RunConfig) -> tuple[in
         {
             "status": "completed" if failed == 0 else "completed_with_failures",
             "backend": "vllm",
-            "method": "full_kv",
+            "method": config.method.value,
             "manifest_path": str(manifest_path),
             "trace_directory": str((trace_root / run_id).resolve()),
             "failed_samples": failed,

@@ -16,6 +16,7 @@ from mosaickv.adapters.huggingface.qwen2_5_vl import (
 from mosaickv.backends.vllm_runtime import (
     NativeMosaicKVUnsupported,
     VLLMFullKVModel,
+    VLLMKVCacheGeometry,
     VLLMRuntimeOptions,
     VLLMTrialMeasurement,
     _resolve_model_source,
@@ -92,6 +93,29 @@ def _trial(request_id: str, *, cached: int, mm_hit: int) -> VLLMTrialMeasurement
     )
 
 
+def _native_trial(request_id: str) -> VLLMTrialMeasurement:
+    trial = _trial(request_id, cached=0, mm_hit=0)
+    return VLLMTrialMeasurement(
+        **{
+            **trial.to_json_object(),
+            "native_audit": {
+                "status": "scheduler_transaction_committed",
+                "selection": {
+                    "logical_positions": 8,
+                    "selected_positions": 8,
+                    "source_blocks": 1,
+                    "selected_blocks": [0],
+                    "mandatory_blocks": [0],
+                    "retention_ratio": 1.0,
+                },
+                "compression_seconds": 0.003,
+                "logical_next_position": 8,
+                "prefix_cache_disabled": True,
+            },
+        }
+    )
+
+
 class _Runner:
     def __init__(self) -> None:
         self.vllm_version = "0.10.2"
@@ -119,6 +143,18 @@ class _Runner:
 
     def close(self) -> None:
         self.closed = True
+
+
+class _NativeRunner(_Runner):
+    def run(
+        self,
+        prompt: dict[str, Any],
+        generation: Mapping[str, object],
+        request_id: str,
+    ) -> VLLMTrialMeasurement:
+        del prompt, generation
+        self.calls += 1
+        return _native_trial(request_id)
 
 
 def test_prepare_prompt_preserves_ordered_media_and_chat_template() -> None:
@@ -238,17 +274,86 @@ def test_fullkv_wrapper_writes_raw_trials_and_uses_first_measurement(tmp_path: P
     assert payload["trials"][1]["mm_cache_hit_rate"] == 1.0
 
 
-def test_native_feature_is_explicitly_unsupported_for_installed_version() -> None:
+def test_native_feature_is_version_pinned_and_unaudited_versions_fail() -> None:
     capability = native_integration_capability("0.10.2")
-    assert not capability.supported
-    assert capability.reason_code == "audited_0_10_2_missing_sparse_logical_block_table_hook"
-    with pytest.raises(NativeMosaicKVUnsupported, match="No simulated MosaicKV row"):
+    assert capability.supported
+    assert capability.reason_code == "repository_plugin_transaction_v1"
+    require_native_mosaickv_support(
+        enabled=True,
+        vllm_version="0.10.2",
+        enforce_eager=True,
+        attention_backend="eager",
+    )
+    with pytest.raises(NativeMosaicKVUnsupported, match="unaudited_vllm_version"):
         require_native_mosaickv_support(
             enabled=True,
-            vllm_version="0.10.2",
+            vllm_version="0.10.3",
             enforce_eager=True,
             attention_backend="eager",
         )
+
+
+def test_vllm_request_isolation_rechecks_anchor_after_distinct_input(tmp_path: Path) -> None:
+    runner = _Runner()
+    model = VLLMFullKVModel(
+        model_id="Qwen/Qwen2.5-VL-3B-Instruct",
+        processor=_Processor(),
+        runner=runner,
+        trace_directory=tmp_path,
+        generation={"max_new_tokens": 2, "temperature": 0.0, "top_p": 1.0, "seed": 0},
+        cache_probe_repeats=2,
+    )
+    for sample_id, media in (("first", b"red"), ("second", b"white")):
+        model.generate(
+            EvaluationRequest(
+                run_id="run",
+                sample_id=sample_id,
+                task="synthetic_smoke",
+                messages=build_multimodal_messages(
+                    "What color?", (MediaItem(MediaKind.IMAGE, media),)
+                ),
+                generation_kwargs={},
+            )
+        )
+
+    assert model.verify_request_isolation()
+    anchor = json.loads(next((tmp_path / "run").glob("first-*.json")).read_text())
+    assert anchor["request_isolation"]["token_ids_match_anchor"] is True
+    assert anchor["request_isolation"]["intervening_distinct_input_fingerprints"] == 1
+    assert runner.calls == 5
+
+
+def test_native_wrapper_requires_audit_and_accounts_selected_storage(tmp_path: Path) -> None:
+    model = VLLMFullKVModel(
+        model_id="Qwen/Qwen2.5-VL-3B-Instruct",
+        processor=_Processor(),
+        runner=_NativeRunner(),
+        trace_directory=tmp_path,
+        generation={"max_new_tokens": 2, "temperature": 0.0, "top_p": 1.0, "seed": 0},
+        cache_probe_repeats=2,
+        method="mosaickv_exact",
+        retention_ratio=1.0,
+        block_size=16,
+        cache_geometry=VLLMKVCacheGeometry(2, 2, 4, 2),
+    )
+    output = model.generate(
+        EvaluationRequest(
+            run_id="native",
+            sample_id="identity",
+            task="synthetic_smoke",
+            messages=build_multimodal_messages(
+                "What color?", (MediaItem(MediaKind.IMAGE, b"image"),)
+            ),
+            generation_kwargs={},
+        )
+    )
+
+    assert output.effective_method == "mosaickv_exact"
+    assert output.metrics.compression_time == pytest.approx(0.003)
+    assert output.metrics.active_kv_bytes == 9 * 2 * 2 * 2 * 4 * 2
+    trace = json.loads(next((tmp_path / "native").glob("*.json")).read_text())
+    assert trace["measurement_type"] == "vllm_native_mosaickv"
+    assert trace["trials"][0]["native_audit"]["logical_next_position"] == 8
 
 
 def test_reference_options_disable_prefix_cache_until_repeat_parity_passes() -> None:

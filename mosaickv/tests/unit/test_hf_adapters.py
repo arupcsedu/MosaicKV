@@ -155,6 +155,7 @@ def test_runtime_registry_is_fail_closed() -> None:
     assert (
         runtime_adapter_class("llava-hf/llava-onevision-qwen2-0.5b-ov-hf") is LlavaOneVisionAdapter
     )
+    assert runtime_adapter_class("llava-hf/llava-onevision-qwen2-7b-ov-hf") is LlavaOneVisionAdapter
     assert runtime_adapter_class("OpenGVLab/InternVL2_5-4B") is InternVL25Adapter
     with pytest.raises(LookupError, match="no runtime HF adapter"):
         runtime_adapter_class("unreviewed/model")
@@ -216,9 +217,9 @@ def test_adapter_capability_metadata_records_rope_and_safely_gated_features() ->
             )
         assert capabilities.cached_key_state is CachedKeyState.POST_ROPE
         assert capabilities.query_vector_state is QueryVectorState.Q_PROJ_PRE_ROPE
-        expected_qwen_support = adapter_type is Qwen25VLAdapter
-        assert capabilities.supports_prototype_merge is expected_qwen_support
-        assert capabilities.supports_residual_repair is expected_qwen_support
+        expected_phase_transform_support = adapter_type is not InternVL25Adapter
+        assert capabilities.supports_prototype_merge is expected_phase_transform_support
+        assert capabilities.supports_residual_repair is expected_phase_transform_support
 
 
 def test_qwen_visual_grids_produce_exact_spatial_and_frame_spans() -> None:

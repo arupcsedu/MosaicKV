@@ -20,10 +20,10 @@ Milestone status must be one of:
 | C | correctness tests | in_progress | A, B |
 | D | simple baselines | in_progress | A, C |
 | E | published baselines | in_progress | A, C, D |
-| F | quality evaluation | planned | C, D, E |
+| F | quality evaluation | in_progress | C, D, E |
 | G | systems evaluation | planned | C, F |
-| H | vLLM integration | blocked | C, G |
-| I | SGLang integration | blocked | C, G |
+| H | vLLM integration | in_progress | C, G |
+| I | SGLang integration | in_progress | C, G |
 | J | artifact packaging | planned | A-I |
 
 Statuses are governance metadata, not empirical results. Update them only with links to tests, manifests, or artifacts that support the change.
@@ -89,9 +89,18 @@ and [three-tier guide](docs/three_tier_cache.md), with repair in
 `in_progress`: the unified eager runtime performs compact exact/prototype/
 residual decoding while preserving original logical positions. Qwen2.5-VL on
 Transformers 4.55.2 has an audited M-RoPE transform and completed the bounded
-v17 three-tier/oracle-repair implementation gate. Other post-RoPE adapters and
-fused paths still fail closed to exact selection; clean checkpoint parity and
-statistically meaningful evaluation remain pending. See
+v17 three-tier/oracle-repair implementation gate. A subsequent seven-example
+Experiment-4 sweep completed all 105 paired rows and exposed both one
+benchmark-score improvement and one harmful answer change; this validates the
+instrumented path but does not establish population-level repair efficacy.
+A 44-cell follow-up fixed partial-prototype evidence loss, added
+reconstruction-error ranking and confidence-gated risk, and recovered the one
+observed compressed failure without the prior DocVQA regression. Guarded
+prototype risk was the bounded-run operating point (5/7 score sum, no harmful
+answer changes, 3.983 seconds paired mean overhead). Clean-tree calibration and
+larger evaluation remain required before this can support a paper claim.
+Other post-RoPE adapters and fused paths still fail closed to exact selection;
+clean checkpoint parity and statistically meaningful evaluation remain pending. See
 [the unified HF runtime guide](docs/huggingface_runtime.md).
 
 **Deliverables**
@@ -221,6 +230,17 @@ keep this phase `in_progress`.
 
 **Goal:** measure task quality and generation fidelity at matched cache budgets.
 
+**Current evidence:** a bounded, disjoint Experiment-5 calibration selected and
+froze one Qwen2.5-VL-3B/DocVQA configuration, then evaluated it without
+retuning across Qwen2.5-VL-3B, Qwen2.5-VL-7B, and LLaVA-1.5-7B on MMStar,
+DocVQA, and ChartQA. Slurm array `17844973` completed all 54 sample rows and
+all six direct HF eager/SDPA/FlashAttention-2 parity probes. Results and
+limitations are recorded in
+[the generalization analysis](analysis/hyperparameter_generalization.md) and
+[architecture report](analysis/architecture_specific_adaptations.md). This is
+exploratory dirty-tree, two-example-per-task evidence; it does not satisfy the
+clean-tree, uncertainty, or paper-scale exit criteria.
+
 **Deliverables**
 
 - Pinned benchmark and dataset revisions with documented licenses and preprocessing.
@@ -258,14 +278,18 @@ keep this phase `in_progress`.
 
 **Goal:** integrate MosaicKV into a pinned vLLM revision while preserving the validated core semantics.
 
-**Current evidence:** the common environment imports vLLM 0.7.2 and passes the
-CUDA smoke. The measurement wrapper has not been ported to this API version or
-passed pinned-checkpoint FullKV/HF parity, so Stage A is unsupported. Stage B
-is blocked because the installed public API exposes no atomic
-sparse-logical-block commit that preserves original positions.
-`--enable-mosaickv` remains fail-closed and emits no simulated result. The
-source boundary and proposed upstream API are recorded in
-[the native blocker](docs/vllm_native_blocker.md).
+**Current evidence:** the common environment imports vLLM 0.10.2 and passes the
+CUDA smoke. The pinned Qwen FullKV measurement wrapper and 16/16 HF token
+parity gate pass. A version-pinned general plugin now performs an atomic
+whole-block transaction across allocator ownership, scheduler and worker block
+tables, compact physical attention metadata, and unchanged logical positions.
+A100 job `17869843` passed retention-1 identity, retention-0.5 physical
+compaction, deterministic repeats, exact byte accounting, and A-B-A request
+isolation. The transport is therefore operational for its fail-closed audited
+configuration. Paper-method rows remain gated on bridging the common
+forecast/graph/utility selector plan into this transaction; prototype injection
+and residual repair are not supported. See
+[the native transaction status](docs/vllm_native_blocker.md).
 
 **Deliverables**
 
@@ -285,15 +309,19 @@ source boundary and proposed upstream API are recorded in
 
 **Goal:** integrate MosaicKV into a pinned SGLang revision while preserving the validated core semantics.
 
-**Current evidence:** the common environment imports SGLang 0.4.3.post4 and
-its native-kernel surfaces and passes the CUDA smoke. The server wrapper has not
-been ported to this API version or passed pinned-checkpoint FullKV/HF parity,
-so Stage A and optimized profiles are unsupported. Stage B is blocked because
-the installed public API does not offer an atomic request-scoped commit for KV
-allocator ownership, `ReqToTokenPool`, Radix nodes, logical positions, and
-Qwen mRoPE positions. The feature gate remains fail-closed and never emits
-simulated native rows. See
-[the SGLang native blocker](docs/sglang_native_blocker.md).
+**Current evidence:** the common environment imports SGLang 0.5.1.post3 and
+its native-kernel surfaces and passes the CUDA smoke. The pinned Qwen FullKV
+wrapper passes repeated determinism, cache accounting, request isolation, and
+32/32 HF-SDPA token parity. A version-pinned, spawn-safe patch now performs a
+whole-block transaction across KV allocator ownership, `ReqToTokenPool`, active
+attention lengths, and unchanged logical/Qwen mRoPE positions while Radix cache,
+overlap scheduling, and CUDA graphs are disabled. A100 job `17871006` passed
+retention-1 identity, retention-0.5 physical compaction, deterministic repeats,
+allocator self-checks, exact byte accounting, and A-B-A isolation. The transport
+is operational for this fail-closed audited configuration. Paper-method rows
+remain gated on the common selector-plan bridge; prototype injection and repair
+are not supported. See
+[the SGLang native transaction status](docs/sglang_native_blocker.md).
 
 **Deliverables**
 

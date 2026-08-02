@@ -1,6 +1,6 @@
 matrix_schema_version: 1
 matrix_revision: 1
-capability_catalog_version: common-env-2026-07-25-v2
+capability_catalog_version: common-env-2026-08-02-v3
 experiment_id: selector_oracle_diagnostic
 description: Evaluation-only FullKV oracle audit of the frozen selector-calibration winner on calibration IDs; oracle outputs cannot enter online selection.
 enabled: true

@@ -53,7 +53,7 @@ from mosaickv.types import (
 )
 
 MATRIX_SCHEMA_VERSION = 1
-CAPABILITY_CATALOG_VERSION = "common-env-2026-07-25-v2"
+CAPABILITY_CATALOG_VERSION = "common-env-2026-08-02-v3"
 ACCOUNTING_SPEC_SHA = "60915ac01ad35843c4de56620864145d5b81b973a3bfec03fb322d5e4f6ff695"
 
 REQUIRED_MODELS = frozenset(
@@ -146,8 +146,8 @@ MODEL_CATALOG: dict[str, ModelCapability] = {
         "llava-hf/llava-onevision-qwen2-7b-ov-hf",
         "0d50680527681998e456c7b78950205bedd8a068",
         True,
-        False,
-        "optional checkpoint is pinned but no exact 7B runtime adapter is registered",
+        True,
+        "registered native Transformers OneVision adapter; BF16 A100 gate 17856497 passed",
     ),
 }
 
@@ -173,15 +173,21 @@ BACKEND_CATALOG: dict[str, BackendCapability] = {
         "vllm",
         Backend.VLLM,
         "eager",
-        False,
-        "current vLLM 0.10.2 FullKV serving/parity artifact has not passed",
+        True,
+        (
+            "audited vLLM 0.10.2 FullKV path and native whole-block transport; "
+            "paper compression rows await a common-selector plan bridge"
+        ),
     ),
     "sglang": BackendCapability(
         "sglang",
         Backend.SGLANG,
         "torch_native",
-        False,
-        "current SGLang 0.5.1 FullKV serving/parity artifact has not passed",
+        True,
+        (
+            "audited SGLang 0.5.1.post3 FullKV path and native whole-block transport; "
+            "paper compression rows await a common-selector plan bridge"
+        ),
     ),
 }
 
@@ -237,7 +243,6 @@ TASK_CATALOG: dict[str, TaskCapability] = {
 }
 
 _PUBLISHED_REIMPLEMENTATIONS = frozenset({"lookm_reimpl", "prefixkv_reimpl", "vl_cache_reimpl"})
-_PROTOTYPE_METHODS = frozenset({"mosaickv_proto", "mosaickv_full"})
 _OVERRIDABLE_SECTIONS = frozenset(
     {
         "diagnostics",
@@ -776,10 +781,18 @@ def unsupported_reason(
         return model.note
     if not backend.runnable:
         return backend.reason
+    if backend_key in {"vllm", "sglang"} and model_key not in {
+        "qwen2_5_vl_3b",
+        "qwen2_5_vl_7b",
+    }:
+        return f"{backend_key} FullKV is not checkpoint-gated for {model.model_id}"
+    if backend_key in {"vllm", "sglang"} and method_name != "full_kv":
+        return (
+            "the native whole-block transaction is a transport gate only; paper cache rows "
+            "require the common MosaicKV selector-plan bridge"
+        )
     if backend_key != "hf_eager" and method_name != "full_kv":
-        return "serving and fused HF backends support FullKV only; cache methods require HF eager"
-    if method_name in _PROTOTYPE_METHODS:
-        return "all registered HF adapters currently disable prototype merge and residual repair"
+        return "fused HF backends support FullKV only; cache methods require HF eager"
     if method_name == "prefixkv_reimpl":
         return (
             "paper-result PrefixKV requires a pinned offline layer profile and disjoint "

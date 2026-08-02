@@ -732,9 +732,7 @@ def _required_prototype_anchors(
         segment: list[int] = []
 
         def reserve_anchor(members: Sequence[int]) -> None:
-            if not members or any(
-                graph.nodes[node_id].block.mandatory for node_id in members
-            ):
+            if not members or any(graph.nodes[node_id].block.mandatory for node_id in members):
                 return
             required.append(
                 min(
@@ -787,9 +785,7 @@ def _refined_budget_candidates(
     for cost in costs:
         quantum = math.gcd(quantum, int(cost))
     quantum = max(1, quantum)
-    lattice = tuple(
-        range(upper_failure - quantum, lower_infeasible, -quantum)
-    )
+    lattice = tuple(range(upper_failure - quantum, lower_infeasible, -quantum))
     if len(lattice) <= maximum_points:
         return lattice
     span = upper_failure - lower_infeasible
@@ -929,9 +925,7 @@ def _prototype_construction(
             representation_failure_budget = exact_budget
             continue
         if estimated_cost > target:
-            failures[
-                f"active cost {estimated_cost} exceeds target {target}"
-            ] += 1
+            failures[f"active cost {estimated_cost} exceeds target {target}"] += 1
             representation_failure_budget = exact_budget
             continue
         # The estimate above already validates the deterministic assignment and
@@ -970,9 +964,7 @@ def _prototype_construction(
     construction = _exact_construction(
         full_state, graph, fallback, capabilities, config, key_transform
     )
-    summary = "; ".join(
-        f"{count}x {reason}" for reason, count in failures.most_common(4)
-    )
+    summary = "; ".join(f"{count}x {reason}" for reason, count in failures.most_common(4))
     construction = replace(
         construction,
         mode=TierConstructionMode.EXACT_ONLY_INCOMPATIBLE,
@@ -2210,9 +2202,7 @@ def _plan_trace(
             "effective_method": plan.effective_method,
             "tier_mode": plan.construction.mode.value,
             "tier_reason": plan.construction.reason,
-            "prototype_safety": cast(
-                "JsonObject", asdict(plan.construction.safety)
-            ),
+            "prototype_safety": cast("JsonObject", asdict(plan.construction.safety)),
             "source_budget_value": plan.source_budget_value,
             "active_budget_value": plan.active_budget_value,
             "selected_blocks": _trace_catalog(selection, compact=compact_catalogs),
@@ -2227,6 +2217,85 @@ def _plan_trace(
             "selection_objective": cast("JsonObject", asdict(plan.selection.objective)),
         },
     )
+
+
+def _repair_event_trace(
+    event: RepairEvent,
+    plan: MosaicKVCompressionPlan,
+) -> JsonObject:
+    """Enrich one repair event with source-block and cluster provenance."""
+
+    record = event.to_record()
+    prototypes = {prototype.prototype_id: prototype for prototype in plan.construction.prototypes}
+    parent_by_node = {
+        node_id: prototype.prototype_id
+        for prototype in plan.construction.prototypes
+        for node_id in prototype.assigned_node_ids
+    }
+    residual_by_node = {
+        payload.source_node_id: payload for payload in plan.construction.residual_storage.payloads
+    }
+    restored_blocks: list[JsonObject] = []
+    for node_id in event.restored_block_ids:
+        block = plan.full_state.blocks[node_id]
+        payload = residual_by_node[node_id]
+        prototype = prototypes[parent_by_node[node_id]]
+        member = next(member for member in prototype.members if member.node_id == node_id)
+        restored_blocks.append(
+            {
+                "node_id": node_id,
+                "prototype_id": parent_by_node[node_id],
+                "layer": block.layer,
+                "kv_head": block.kv_head,
+                "modality": block.modality.value,
+                "physical_cache_indices": list(block.physical_cache_indices),
+                "original_logical_positions": list(block.original_logical_positions),
+                "token_ids": None if block.token_ids is None else list(block.token_ids),
+                "image_index": block.image_index,
+                "frame_index": block.frame_index,
+                "page_index": block.page_index,
+                "region": None if block.region is None else list(block.region),
+                "byte_size": block.byte_size,
+                "prototype_weight": member.normalized_weight,
+                "reconstruction_error": member.reconstruction_error,
+                "risk_weighted_reconstruction_priority": (
+                    event.signals.risk_for(prototype.prototype_id)
+                    * member.normalized_weight
+                    * member.reconstruction_error
+                ),
+                "residual_storage_dtype": payload.storage_dtype.value,
+                "residual_placement": (
+                    "cpu_pinned" if payload.key_pinned and payload.value_pinned else "cpu_pageable"
+                ),
+            }
+        )
+    clusters: list[JsonObject] = []
+    triggered_ids = sorted({parent_by_node[node_id] for node_id in event.restored_block_ids})
+    for prototype_id in triggered_ids:
+        prototype = prototypes[prototype_id]
+        clusters.append(
+            {
+                "prototype_id": prototype_id,
+                "layer": prototype.layer,
+                "kv_head": prototype.kv_head,
+                "anchor_node_id": prototype.anchor_node_id,
+                "anchor_logical_position": prototype.anchor_logical_position,
+                "assigned_node_ids": list(prototype.assigned_node_ids),
+                "attention_mass": event.signals.attention_mass_for(prototype_id),
+                "dispersion": prototype.diagnostics.dispersion,
+                "risk": event.signals.risk_for(prototype_id),
+                "modality_composition": [
+                    [modality.value, count]
+                    for modality, count in prototype.diagnostics.modality_composition
+                ],
+                "minimum_logical_position": (prototype.diagnostics.minimum_logical_position),
+                "maximum_logical_position": (prototype.diagnostics.maximum_logical_position),
+                "position_span": prototype.diagnostics.position_span,
+            }
+        )
+    record["triggered_prototype_clusters"] = cast("list[JsonValue]", clusters)
+    record["restored_blocks"] = cast("list[JsonValue]", restored_blocks)
+    return record
 
 
 def _baseline_plan_trace(
@@ -2668,6 +2737,7 @@ class HuggingFaceMosaicKVModel:
             dense_budget: DensePhysicalCacheBudget | None = None
             physical_prompt_capacity: int | None = None
             plan: MosaicKVCompressionPlan | None = None
+            key_transform: RotaryPrototypeKeyTransform | None = None
             baseline_plan: BaselineCompressionPlan | None = None
             lookm_plan: LookMCompressionPlan | None = None
             prefixkv_plan: PrefixKVCompressionPlan | None = None
@@ -2728,7 +2798,6 @@ class HuggingFaceMosaicKVModel:
                     )
                 )
                 if method.is_mosaickv:
-                    key_transform = None
                     key_transform_seconds = 0.0
                     if method in {
                         MosaicKVMethod.MOSAICKV_PROTO,
@@ -3215,8 +3284,7 @@ class HuggingFaceMosaicKVModel:
             prefixkv_decode_events: list[JsonObject] = []
             oracle_reference_state = (
                 _clone_decode_state(self.adapter, prefill.state)
-                if repair_state is not None
-                and self.config.repair.policy is RepairPolicy.ORACLE
+                if repair_state is not None and self.config.repair.policy is RepairPolicy.ORACLE
                 else None
             )
             for step_index in range(1, self.config.generation.max_new_tokens):
@@ -3340,7 +3408,7 @@ class HuggingFaceMosaicKVModel:
                         self.adapter,
                         updated_repair.full_state,
                         updated_repair.mosaic_state,
-                        updated_repair.prototype_catalog,
+                        updated_repair.active_prototype_records,
                         updated_repair.active_prototype_ids,
                         tail_snapshot=old_snapshot,
                         old_prompt_capacity=old_capacity,
@@ -3371,6 +3439,7 @@ class HuggingFaceMosaicKVModel:
                         re_decode=re_decode,
                         reference_token_id=reference_id,
                         oracle_should_repair=provisional_id != reference_id,
+                        key_transform=key_transform,
                     )
                 else:
                     repair = repair_decode_step(
@@ -3380,6 +3449,7 @@ class HuggingFaceMosaicKVModel:
                         provisional_logits=provisional.logits,
                         prototype_attention_mass=masses,
                         re_decode=re_decode,
+                        key_transform=key_transform,
                     )
                 repair_state = repair.state
                 repair_events.append(repair.event)
@@ -3449,6 +3519,37 @@ class HuggingFaceMosaicKVModel:
             )
             timing_payload = cast("JsonObject", asdict(timings))
             timing_payload["trace_instrumentation"] = trace_instrumentation_seconds
+            if repair_events and plan is None:
+                raise HuggingFaceRuntimeError("repair events are missing their compression plan")
+            repair_event_records = (
+                []
+                if plan is None
+                else [_repair_event_trace(event, plan) for event in repair_events]
+            )
+            residual_configuration: JsonObject | None = None
+            if plan is not None and plan.construction.residual_storage.payloads:
+                residual_payloads = plan.construction.residual_storage.payloads
+                actual_placements = sorted(
+                    {
+                        (
+                            "cpu_pinned"
+                            if payload.key_pinned and payload.value_pinned
+                            else "cpu_pageable"
+                        )
+                        for payload in residual_payloads
+                    }
+                )
+                residual_configuration = {
+                    "storage_dtype": self.config.residual.storage_dtype.value,
+                    "requested_placement": (
+                        "cpu_pinned"
+                        if self.config.residual.require_pinned_memory
+                        else "cpu_pageable"
+                    ),
+                    "actual_placements": cast("list[JsonValue]", actual_placements),
+                    "all_payloads_pinned": (plan.construction.residual_storage.all_payloads_pinned),
+                    "cpu_bytes_initial": plan.construction.residual_storage.cpu_bytes,
+                }
             trace.update(
                 {
                     "status": "completed",
@@ -3458,7 +3559,8 @@ class HuggingFaceMosaicKVModel:
                         **quality.to_record(),
                         "configured_terminal_token_ids": list(self._terminal_token_ids),
                     },
-                    "repair_events": [event.to_record() for event in repair_events],
+                    "repair_events": cast("list[JsonValue]", repair_event_records),
+                    "residual_configuration": residual_configuration,
                     "oracle_repair_diagnostic": {
                         "status": (
                             "completed_evaluation_only"

@@ -108,6 +108,11 @@ def _pin_torch(tensor: Any, *, required: bool) -> tuple[Any, bool]:
 def _encode_and_place(tensor: Any, config: ResidualConfig) -> tuple[Any, float | None, bool]:
     if _is_torch_tensor(tensor):
         encoded, scale = _encode_torch(tensor, config.storage_dtype)
+        if not config.require_pinned_memory:
+            # Experimentally requested pageable placement must be real rather
+            # than a best-effort pin.  Otherwise a pinned/pageable placement
+            # sweep can silently execute the same storage path in both rows.
+            return encoded, scale, False
         placed, pinned = _pin_torch(encoded, required=config.require_pinned_memory)
         return placed, scale, pinned
     if config.require_pinned_memory:
@@ -142,6 +147,16 @@ def _batch_lossless_torch_payloads(
     shapes = tuple(tuple(int(size) for size in tensor.shape) for tensor in tensors)
     counts = tuple(int(tensor.numel()) for tensor in tensors)
     flattened = torch.cat(tuple(tensor.detach().reshape(-1) for tensor in tensors))
+    if not require_pinned:
+        slab = flattened.to(device="cpu").contiguous()
+        pageable_payloads: list[Any] = []
+        offset = 0
+        for shape, count in zip(shapes, counts, strict=True):
+            pageable_payloads.append(slab.narrow(0, offset, count).view(shape))
+            offset += count
+        if offset != int(slab.numel()):  # pragma: no cover - arithmetic invariant
+            raise RuntimeError("batched residual slab offsets do not cover its storage")
+        return tuple(pageable_payloads), False
     try:
         slab = torch.empty(
             int(flattened.numel()),
@@ -151,18 +166,15 @@ def _batch_lossless_torch_payloads(
         )
         slab.copy_(flattened)
         pinned = bool(slab.is_pinned())
-        if require_pinned and not pinned:
+        if not pinned:
             raise PinnedMemoryUnavailableError(
                 "PyTorch returned non-pinned memory for a required residual slab"
             )
     except RuntimeError as error:
-        if require_pinned:
-            raise PinnedMemoryUnavailableError(
-                "pinned residual memory was required but the PyTorch/CUDA runtime "
-                "could not allocate a batched slab"
-            ) from error
-        slab = flattened.to(device="cpu").contiguous()
-        pinned = bool(slab.is_pinned())
+        raise PinnedMemoryUnavailableError(
+            "pinned residual memory was required but the PyTorch/CUDA runtime "
+            "could not allocate a batched slab"
+        ) from error
     payloads: list[Any] = []
     offset = 0
     for shape, count in zip(shapes, counts, strict=True):

@@ -1,6 +1,6 @@
 matrix_schema_version: 1
 matrix_revision: 1
-capability_catalog_version: common-env-2026-07-25-v2
+capability_catalog_version: common-env-2026-08-02-v3
 experiment_id: ablations
 description: HF eager MosaicKV-exact component ablations with identical prompts and byte-accounting rules.
 enabled: true
@@ -79,11 +79,5 @@ sweeps:
 
 blocked:
   - scope:
-      methods: [mosaickv_proto, mosaickv_full]
-    reason: Prototype and repair ablations are blocked until adapter correctness gates pass.
-  - scope:
       backends: [hf_sdpa, hf_flash_attention_2, vllm, sglang]
     reason: Ablations must not confound component removal with an unvalidated backend change.
-  - scope:
-      models: [llava_onevision_7b_optional]
-    reason: The optional model lacks a registered exact adapter.

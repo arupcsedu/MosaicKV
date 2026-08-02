@@ -116,7 +116,7 @@ def _resume_payload(
             "selected_samples": len(rows),
             "failed_samples": failed,
             "backend": "sglang",
-            "method": "full_kv",
+            "method": config.method.value,
             "raw_output": str(raw_path),
             "parquet_output": str(parquet_path) if parquet_path is not None else None,
             "manifest_path": str(manifest_path),
@@ -140,11 +140,12 @@ def run_sglang_evaluation(args: argparse.Namespace, config: RunConfig) -> tuple[
     )
     if options.enable_mosaickv:
         require_native_mosaickv_support(enabled=True, sglang_version="0.5.1.post3")
-    if not config.method.is_full_cache or config.cache.retention_ratio != 1.0:
-        raise ValueError(
-            "SGLang Stage A supports only --method full_kv --retention-ratio 1.0; "
-            "native MosaicKV remains fail-closed"
-        )
+    if options.enable_mosaickv and config.method.value != "mosaickv_exact":
+        raise ValueError("SGLang native Stage B supports only --method mosaickv_exact")
+    if not options.enable_mosaickv and (
+        not config.method.is_full_cache or config.cache.retention_ratio != 1.0
+    ):
+        raise ValueError("SGLang FullKV requires --method full_kv --retention-ratio 1.0")
     _external_cache()
     task_name = _task_name(config, cast("str | None", args.task))
     registry = default_task_registry()
@@ -224,7 +225,7 @@ def run_sglang_evaluation(args: argparse.Namespace, config: RunConfig) -> tuple[
     RunManifestWriter().write(
         manifest_path,
         config,
-        MeasurementType.REFERENCE,
+        MeasurementType.METHOD if options.enable_mosaickv else MeasurementType.REFERENCE,
         _input_provenance(config, task_name, raw_path),
         artifacts,
         run_id=run_id,
@@ -248,7 +249,7 @@ def run_sglang_evaluation(args: argparse.Namespace, config: RunConfig) -> tuple[
         {
             "status": "completed" if failed == 0 else "completed_with_failures",
             "backend": "sglang",
-            "method": "full_kv",
+            "method": config.method.value,
             "manifest_path": str(manifest_path),
             "trace_directory": str((trace_root / run_id).resolve()),
             "failed_samples": failed,

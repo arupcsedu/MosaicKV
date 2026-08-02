@@ -1,14 +1,14 @@
 # Backend capability matrix
 
 Audit target: the common environment at `/scratch/djy8hg/env/mosaickv`,
-2026-07-25. A package import, a model-serving pass, token parity, and a native
+2026-08-02. A package import, a model-serving pass, token parity, and a native
 cache-mutation pass are separate evidence levels.
 
 | Component | Installed version | Package state | FullKV model gate | Native MosaicKV |
 |---|---:|---|---|---|
-| Hugging Face Transformers | 4.55.2 | Imports; CUDA smoke passed | Qwen2.5-VL-3B SDPA job `17346718` and FA2 job `17348171` passed 16-token ordinary/reinjection/retention-1 parity with maximum logit difference 0 | Exact selection for supported adapters; Qwen2.5-VL eager prototype/repair through audited M-RoPE transform; other post-RoPE/fused paths fail closed |
-| vLLM V1 | 0.10.2 | Imports and loads Qwen2.5-VL-3B | Job `17351185` passed Stage A and its report has exact 16/16 HF token parity | Unsupported |
-| SGLang | 0.5.1.post3 | Imports and launches Qwen2.5-VL-3B | Job `17351612` passed Stage A, request isolation, byte accounting, and exact 32/32 parity with the numerically corresponding HF-SDPA reference | Unsupported |
+| Hugging Face Transformers | 4.55.2 | Imports; CUDA smoke passed | Qwen2.5-VL-3B SDPA job `17346718` and FA2 job `17348171`; LLaVA-1.5 eager job `17855955`; OneVision-7B BF16 eager job `17856497` passed checkpoint-specific gates | Exact selection for supported adapters; Qwen2.5-VL M-RoPE and LLaVA/OneVision standard-RoPE prototype/repair transforms on eager; fused compressed paths fail closed |
+| vLLM V1 | 0.10.2 | Imports and loads Qwen2.5-VL-3B | Job `17351185` passed Stage A and its report has exact 16/16 HF token parity | Version-pinned whole-block transport passed job `17869843`; paper method rows remain unsupported until the common-selector plan bridge passes |
+| SGLang | 0.5.1.post3 | Imports and launches Qwen2.5-VL-3B | Job `17351612` passed Stage A, request isolation, byte accounting, and exact 32/32 parity with the numerically corresponding HF-SDPA reference | Version-pinned whole-block transport passed job `17871006`; paper method rows remain unsupported until the common-selector plan bridge passes |
 
 Rows remain non-canonical while the worktree is dirty. No pending or failed
 job is a support claim.
@@ -18,9 +18,9 @@ job is a support claim.
 | Required operation | Hugging Face eager | vLLM 0.10.2 V1 | SGLang 0.5.1.post3 |
 |---|---|---|---|
 | Inspect KV after prefill | Supported through returned `past_key_values` | Unsupported request-scoped API | Unsupported request-scoped API |
-| Select whole KV blocks | Supported in the owned explicit loop | Unsupported atomic transaction | Unsupported atomic transaction |
+| Select whole KV blocks | Supported in the owned explicit loop | Supported by the repository plugin's request-wide transport transaction; current selector is validation-only | Supported by the spawn-safe request-wide transaction; current selector is validation-only |
 | Inject modified KV | Supported through a compatible HF cache object | Unsupported | Storage write exists, ownership transaction unsupported |
-| Preserve original logical positions | Explicit adapter state and position inputs | No sparse logical-position commit hook | No atomic mapping/position commit hook |
+| Preserve original logical positions | Explicit adapter state and position inputs | Supported by the version-pinned plugin: scheduler counters remain logical while attention receives compact physical tables | Supported by separate active `seq_lens` and logical `orig_seq_lens` plus patched decode/M-RoPE positions |
 | Restore blocks during decode | Owned explicit loop | Unsupported | Unsupported |
 
 “Unsupported” means no safe installed API was found; direct tensor mutation is
@@ -37,8 +37,9 @@ available safely in fused paths. An explicitly labeled eager-prefill/SDPA-decode
 exact path is now implemented; it is admitted only for all-valid caches without
 repair and records both implementations. Cached keys are
 post-RoPE, so phase-unaligned prototype construction is rejected. Qwen2.5-VL
-on the exact 4.55.2 eager path supplies a model-derived M-RoPE inverse/anchor
-transform; the bounded v17 run exercised real three-tier and residual state.
+supplies a model-derived M-RoPE inverse/anchor transform; LLaVA-1.5 and
+OneVision supply the corresponding standard Llama/Qwen2 rotary transform.
+All transforms are version- and position-gated.
 
 ## vLLM installed-source boundary
 
@@ -51,11 +52,15 @@ The audited V1 path uses:
 - `vllm/v1/attention/backends/utils.py:37` — `CommonAttentionMetadata`; and
 - `vllm/v1/attention/backends/flash_attn.py:112` — `FlashAttentionMetadata`.
 
-These internal structures do not expose an atomic request-scoped callback
-between multimodal prefill and decode that can select sparse blocks, preserve
-logical/M-RoPE positions, update prefix ownership, and safely restore blocks.
-The measurement wrapper uses public generation plus read-only cache/timing
-telemetry. See `vllm_native_blocker.md`.
+The installed package exposes no public atomic request callback, but the
+repository now supplies a fail-closed 0.10.2 general plugin spanning
+`Scheduler.update_from_output`, scheduler-to-worker block-table replacement,
+`GPUModelRunner._update_states`, and compact attention metadata in
+`GPUModelRunner._prepare_inputs`. Prefix caching is disabled and logical/M-RoPE
+positions remain unchanged. A100 job `17869843` passed identity token parity,
+50% physical-block release, exact accounting, determinism, and A-B-A request
+isolation. This proves the native transport, not the common MosaicKV selector;
+see `vllm_native_blocker.md`.
 
 ## SGLang installed-source boundary
 
@@ -69,9 +74,14 @@ The audited path uses:
 - `sglang/srt/model_executor/forward_batch_info.py:165` — `ForwardBatch`; and
 - `sglang/srt/layers/attention/base_attn_backend.py:14` — `AttentionBackend`.
 
-`set_kv_buffer` is a storage primitive, not an atomic transaction across
-request mappings, allocator ownership, Radix entries, scheduler state, and
-logical positions. See `sglang_native_blocker.md`.
+The installed package has no public transaction spanning these structures, but
+the repository now provides a fail-closed 0.5.1.post3 scheduler patch. It is
+installed inside SGLang's spawned GPU process, compacts `ReqToTokenPool`, frees
+dropped allocator locations, preserves `orig_seq_lens`, updates active
+`seq_lens`, and owns the disabled-Radix/ChunkCache release paths. A100 job
+`17871006` passed identity parity, 50% physical compaction, byte accounting,
+allocator self-check, determinism, and A-B-A isolation. This validates the
+transport only; see `sglang_native_blocker.md`.
 
 ## Execution rule
 

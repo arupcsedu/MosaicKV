@@ -1,6 +1,6 @@
 matrix_schema_version: 1
 matrix_revision: 1
-capability_catalog_version: common-env-2026-07-25-v2
+capability_catalog_version: common-env-2026-08-02-v3
 experiment_id: selector_evaluation
 description: Frozen held-out DocVQA comparison of the calibrated selector; no parameter may be changed after inspecting these rows.
 enabled: true

@@ -1,0 +1,15 @@
+\begin{tabular}{llllllllll}
+\toprule
+Prefill & Decode & Method & Status & Token agr. & Token dev. & Max logit dev. & Mean logit dev. & Mean KL & Score delta \\
+\midrule
+hf\_eager & hf\_eager & full\_kv & passed & 1.0000 & 0.0000 & 0.0000 & 0.0000 & 0.0000 & 0.0000 \\
+hf\_sdpa & hf\_sdpa & full\_kv & passed & 1.0000 & 0.0000 & 0.9219 & 0.1056 & 0.0002 & 0.0000 \\
+hf\_flash\_attention\_2 & hf\_flash\_attention\_2 & full\_kv & passed & 1.0000 & 0.0000 & 0.8438 & 0.1127 & 0.0004 & 0.0000 \\
+hf\_eager & hf\_eager & mosaickv\_exact & passed & 1.0000 & 0.0000 & -- & -- & -- & 0.0000 \\
+hf\_eager & hf\_sdpa & mosaickv\_exact & passed & 1.0000 & 0.0000 & -- & -- & -- & 0.0000 \\
+hf\_eager & hf\_flash\_attention\_2 & mosaickv\_exact & passed & 1.0000 & 0.0000 & -- & -- & -- & 0.0000 \\
+vllm & vllm & full\_kv & passed\_prior\_artifact & 1.0000 & 0.0000 & -- & -- & -- & -- \\
+sglang & sglang & full\_kv & passed\_prior\_artifact & 1.0000 & 0.0000 & -- & -- & -- & -- \\
+sglang & sglang & full\_kv & passed\_prior\_artifact & 1.0000 & 0.0000 & -- & -- & -- & -- \\
+\bottomrule
+\end{tabular}

@@ -1,6 +1,6 @@
 matrix_schema_version: 1
 matrix_revision: 1
-capability_catalog_version: common-env-2026-07-25-v2
+capability_catalog_version: common-env-2026-08-02-v3
 experiment_id: selector_calibration
 description: Exploratory disjoint-slice calibration of normalized MosaicKV exact selection; no evaluation or paper claims may be produced from these rows.
 enabled: true
@@ -142,7 +142,7 @@ blocked:
     reason: Calibration uses the correctness-gated eager Hugging Face mutable-cache runtime only.
   - scope:
       methods: [mosaickv_proto, mosaickv_full]
-    reason: Qwen2.5-VL caches post-M-RoPE keys; prototype merging and residual repair remain fail-closed.
+    reason: Selector calibration isolates exact-block selection and intentionally excludes downstream prototype and repair stages.
   - scope:
       tasks: [mmstar, mmvet, textvqa, chartqa, videomme]
     reason: The first selector calibration is scoped to a frozen DocVQA calibration slice; evaluation tasks remain untouched.

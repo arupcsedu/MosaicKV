@@ -1,6 +1,6 @@
 matrix_schema_version: 1
 matrix_revision: 3
-capability_catalog_version: common-env-2026-07-25-v2
+capability_catalog_version: common-env-2026-08-02-v3
 experiment_id: main_quality
 description: Main byte-matched quality matrix; common block methods use block-16, while paper-faithful LOOK-M remains a separately labeled token-granularity stratum.
 enabled: true
@@ -128,17 +128,11 @@ blocked:
       backends: [hf_sdpa, hf_flash_attention_2, vllm, sglang]
     reason: Only HF eager currently owns and exposes the mutable cache interface safely.
   - scope:
-      methods: [mosaickv_proto, mosaickv_full]
-    reason: Prototype merge and residual repair remain disabled by every registered adapter.
-  - scope:
       methods: [prefixkv_reimpl]
     reason: Paper-result rows require an immutable offline layer profile and disjoint calibration IDs.
   - scope:
       methods: [vl_cache_reimpl]
     reason: Pinned disjoint calibration and checkpoint-specific retention-1 parity are not available.
-  - scope:
-      models: [llava_onevision_7b_optional]
-    reason: Optional model; no exact registered 7B adapter or clean parity evidence exists.
   - scope:
       models: [llava_1_5_7b]
       tasks: [videomme]

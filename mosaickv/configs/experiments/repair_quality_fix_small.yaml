@@ -1,0 +1,53 @@
+schema_version: 1
+experiment_id: residual_repair_quality_fix_small_v1
+classification: exploratory_dirty_tree_repair_quality_fix_v1
+model: qwen2_5_vl_3b
+backend: hf_eager_prefill_eager_decode
+retention_ratio: 0.2
+block_size: 16
+prototype_group_size: 12
+prototype_max_position_span: 256
+minimum_stratum_fraction: 0.1
+graph_max_neighbors: 24
+output_length: 8
+seed: 17
+subset_size_by_task:
+  mmstar: 2
+  docvqa: 2
+  chartqa: 2
+  videomme: 1
+tasks: [mmstar, docvqa, chartqa, videomme]
+primary_budget: packed_prefill_active_kv_bytes
+base_repair:
+  entropy_threshold: 0.01
+  prototype_risk_threshold: 1.0e-6
+  prototype_risk_min_entropy: 0.005
+  max_blocks_per_step: 2
+  candidate_ranking: risk_weighted_reconstruction_error
+  preserve_partial_prototype: true
+  storage_dtype: lossless
+  placement: cpu_pinned
+variants:
+  - {id: F, name: full_kv_reference, kind: full_kv}
+  - {id: N, name: no_repair, policy: none}
+  - {id: L, name: legacy_combined_control, policy: entropy_or_prototype_risk, prototype_risk_min_entropy: 0.0, candidate_ranking: prototype_weight, preserve_partial_prototype: false}
+  - {id: E, name: quality_entropy_only, policy: entropy}
+  - {id: P, name: quality_guarded_prototype_risk, policy: prototype_risk}
+  - {id: C, name: quality_guarded_combined, policy: entropy_or_prototype_risk}
+  - {id: O, name: quality_oracle_evaluation_only, policy: oracle, evaluation_only: true}
+  - {id: R1, name: quality_guarded_max_blocks_1, policy: entropy_or_prototype_risk, max_blocks_per_step: 1}
+  - {id: R4, name: quality_guarded_max_blocks_4, policy: entropy_or_prototype_risk, max_blocks_per_step: 4}
+  - {id: D8, name: quality_guarded_residual_fp8, policy: entropy_or_prototype_risk, storage_dtype: fp8}
+  - {id: DI8, name: quality_guarded_residual_int8, policy: entropy_or_prototype_risk, storage_dtype: int8}
+controls:
+  identical_model_weights_and_precision: true
+  identical_processor_and_chat_template: true
+  identical_media_preprocessing: true
+  identical_prompts_and_sample_ids: true
+  identical_generation: true
+  identical_active_byte_budget: true
+  identical_mandatory_tokens: true
+  identical_block_granularity: true
+  identical_attention_backend: true
+  deterministic_generation: true
+  one_variable_at_a_time_sweep: true

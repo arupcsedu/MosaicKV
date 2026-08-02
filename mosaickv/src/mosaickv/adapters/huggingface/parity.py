@@ -168,7 +168,13 @@ def _build_report(
         raise RuntimeError("reference and candidate have different token counts")
     agreement = float((reference_flat == candidate_flat).float().mean().item())
     maximum = 0.0
-    for reference_step, candidate_step in zip(reference_logits, candidate_logits, strict=True):
+    for step_index, (reference_step, candidate_step) in enumerate(
+        zip(reference_logits, candidate_logits, strict=True)
+    ):
+        if not bool(torch.isfinite(reference_step).all().item()):
+            raise RuntimeError(f"reference logits are non-finite at decode step {step_index}")
+        if not bool(torch.isfinite(candidate_step).all().item()):
+            raise RuntimeError(f"candidate logits are non-finite at decode step {step_index}")
         difference = torch.max(
             torch.abs(reference_step.detach().float() - candidate_step.detach().float())
         )

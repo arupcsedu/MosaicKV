@@ -42,13 +42,59 @@ three-tier construction, and evaluation-only oracle repair, but its one-/two-
 example task subsets are not paper evidence. See the
 [component-ablation analysis](analysis/component_ablations.md).
 
+The bounded dirty-tree Experiment-4 validation completed 105/105 paired rows
+and 686 decode-step records over seven MMStar, DocVQA, ChartQA, and Video-MME
+examples. It audits entropy, prototype-risk, combined, and evaluation-only
+oracle repair plus threshold, restoration-count, residual-dtype, and placement
+sensitivity. One failure was oracle-repairable; entropy and oracle repair each
+improved its benchmark score, while the conservative combined threshold also
+damaged a DocVQA answer and therefore had zero net score gain. The primary
+combined policy changed the failing ChartQA answer to a different wrong number
+without improving its score. The measured online overhead is not justified by
+this tiny sample. See the
+[repair analysis](analysis/residual_repair.md) and
+[qualitative appendix](analysis/residual_repair_qualitative.md).
+
+The subsequent 44-cell quality-fix validation corrects partial-prototype
+restoration, ranks residual members by weighted reconstruction error, and gates
+prototype risk on minimum token uncertainty. On the same seven examples, the
+guarded risk policy repaired the sole compressed benchmark failure (score sum
+4/7 to 5/7) with no harmful answer changes and 3.983 seconds paired mean
+end-to-end overhead. FP8/INT8 retained this quality gain and halved residual
+storage to 26.80 MiB, but did not reduce latency; re-decode and conversion
+dominate transfers of only about 13 KiB per event. `R=1`, `R=2`, and `R=4` all
+repaired the failure, so larger restoration counts are not justified by this
+sample. These measurements are still exploratory dirty-tree evidence. See the
+[quality-fix analysis](analysis/residual_repair_quality_fix.md).
+
+The bounded Experiment-5 study calibrated on two disjoint Qwen2.5-VL-3B
+DocVQA examples, froze `hybrid4`, and completed 54 held-out rows across
+Qwen2.5-VL-3B, Qwen2.5-VL-7B, and LLaVA-1.5-7B. Eight of nine uniform
+exact-selection model/task cells preserved the tiny-slice FullKV score while
+reducing active KV memory by 80.3%--81.6%; the Qwen3B ChartQA cell did not.
+All six direct HF eager/SDPA/FlashAttention-2 token-parity probes passed.
+The supplemental same-prefix FullKV probe also records full-vocabulary maximum
+and mean absolute logit deviation plus KL for SDPA and FlashAttention-2.
+Prototype/repair transfer was mixed and remains separated from the
+architecture-neutral result. The run is exploratory dirty-tree evidence, not
+a paper claim. See the
+[generalization analysis](analysis/hyperparameter_generalization.md) and
+[architecture report](analysis/architecture_specific_adaptations.md).
+
 The common environment imports the installed vLLM and SGLang stacks and passes
 the CUDA smoke. SGLang Stage A passes repeated determinism, active-byte
 accounting, request isolation, and 32/32 HF-SDPA token parity. vLLM loads and
 serves the pinned checkpoint, and its uncached Stage-A verifier plus 16/16 HF
 token parity pass. Prefix-cache cold/warm token divergence remains fail-closed.
-Native MosaicKV integration remains fail-closed and produces no simulated
-native rows.
+Version-pinned native whole-block transactions now pass on A100 for vLLM
+0.10.2 (job `17869843`) and SGLang 0.5.1.post3 (job `17871006`): both reproduce
+ordinary FullKV at retention 1.0, release 9 of 18 prompt blocks at retention
+0.5, preserve logical decode positions, and pass A-B-A isolation. These are
+transport-validation runs using a deterministic fallback selector. They do not
+authorize compressed paper rows; the experiment matrix remains fail-closed
+until the common MosaicKV selector-plan bridge passes. No simulated native row
+is produced, and prototype injection/repair remain unsupported in serving
+backends.
 
 ## Development quick start
 
@@ -113,10 +159,12 @@ semantics.
 - [Block utility and selection](docs/block_utility_and_selection.md) — RoPE-aware attention boundary, signal definitions, signed objective, hard budgets, lazy greedy, and exhaustive diagnostics.
 - [Three-tier cache construction](docs/three_tier_cache.md) — exact anchors, conservative RoPE gates, weighted prototypes, pinned CPU residuals, layouts, and diagnostics.
 - [Decode-time residual repair](docs/decode_time_repair.md) — entropy/risk triggers, evaluation-only oracle isolation, asynchronous restoration, one-pass re-decode, persistent promotion, and budget eviction.
+- [Detailed residual-repair experiment](docs/residual_repair_experiment.md) — bounded policy and storage sweep, paired metrics, trace schema, and exploratory execution protocol.
+- [Hyperparameter-generalization experiment](docs/hyperparameter_generalization_experiment.md) — disjoint calibration/freeze boundary, held-out model/task matrix, backend support boundary, and executed exploratory evidence.
 - [Unified Hugging Face runtime](docs/huggingface_runtime.md) — method orchestration, packed-cache masks, safety fallbacks, YAML/CLI usage, traces, and validation progression.
 - [Decode-latency optimization audit](docs/decode_latency_optimization.md) — implemented fast paths, diagnostic evidence, and correctness-gated next optimizations.
-- [vLLM backend](docs/vllm_backend.md) and [native blocker](docs/vllm_native_blocker.md) — common-lock status, installed-source boundary, fail-closed feature flag, and the missing upstream sparse-position interface.
-- [SGLang backend](docs/sglang_backend.md) and [native blocker](docs/sglang_native_blocker.md) — common-lock status, installed-source boundary, and the missing atomic sparse-cache interface.
+- [vLLM backend](docs/vllm_backend.md) and [native transaction status](docs/vllm_native_blocker.md) — version-pinned atomic compaction, A100 evidence, fail-closed boundaries, and the remaining selector-plan gate.
+- [SGLang backend](docs/sglang_backend.md) and [native transaction status](docs/sglang_native_blocker.md) — spawn-safe allocator/mapping compaction, A100 evidence, and the remaining selector-plan gate.
 - [Simple baselines](docs/simple_baselines.md) — exact-only policies, common budgets, deterministic allocation, traces, and configuration.
 - [LOOK-M specification](docs/baselines/lookm_spec.md) and [parity report](docs/baselines/lookm_parity_report.md) — pinned official source, paper equations, source deviations, unified `lookm_reimpl`, and current comparison blockers.
 - [PrefixKV specification](docs/baselines/prefixkv_spec.md) and [parity report](docs/baselines/prefixkv_parity_report.md) — adaptive layer profiles, ratio conventions, fixed-distance decoding, strict leakage checks, unified `prefixkv_reimpl`, and the completed non-canonical official LLaVA parity diagnostic.

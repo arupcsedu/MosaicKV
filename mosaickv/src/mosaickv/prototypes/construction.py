@@ -86,9 +86,7 @@ def assess_prototype_safety(
             f"({source_state.value} != {adapter_state.value})"
         )
     elif key_transform is not None and not transform_matches:
-        reason = (
-            "prototype phase transform does not match the source cached-key representation"
-        )
+        reason = "prototype phase transform does not match the source cached-key representation"
     elif source_state is CachedKeyState.POST_ROPE and not transform_matches:
         reason = (
             "cached keys are post-RoPE and no matching audited phase transform was supplied; "
@@ -264,9 +262,7 @@ def _assign_to_anchors(
         neighbors[first].append((second, weight))
         if first != second:
             neighbors[second].append((first, weight))
-    selected_by_identity: dict[tuple[int, int, object], list[tuple[float, int]]] = defaultdict(
-        list
-    )
+    selected_by_identity: dict[tuple[int, int, object], list[tuple[float, int]]] = defaultdict(list)
     for anchor_id in selected:
         anchor = graph.nodes[anchor_id]
         selected_by_identity[
@@ -285,9 +281,7 @@ def _assign_to_anchors(
         source = graph.nodes[node_id]
         candidates: list[tuple[float, int]] = []
         window = max(1, 2 * config.group_size)
-        for anchor_modality in sorted(
-            allowed_anchor_modalities[source.block.modality.value]
-        ):
+        for anchor_modality in sorted(allowed_anchor_modalities[source.block.modality.value]):
             modality = type(source.block.modality)(anchor_modality)
             anchors = selected_by_identity.get(
                 (source.block.layer, source.block.kv_head, modality),
@@ -327,13 +321,9 @@ def _assign_to_anchors(
                 and weight >= config.min_anchor_weight
                 and _compatible(node.block, anchor.block, config)
             ):
-                weights_by_anchor[anchor_id] = max(
-                    weight, weights_by_anchor.get(anchor_id, 0.0)
-                )
+                weights_by_anchor[anchor_id] = max(weight, weights_by_anchor.get(anchor_id, 0.0))
         for anchor_id, weight in positional_candidates(node_id):
-            weights_by_anchor[anchor_id] = max(
-                weight, weights_by_anchor.get(anchor_id, 0.0)
-            )
+            weights_by_anchor[anchor_id] = max(weight, weights_by_anchor.get(anchor_id, 0.0))
         candidates = [(weight, anchor_id) for anchor_id, weight in weights_by_anchor.items()]
         if not candidates:
             return {}, f"unselected node {node_id} has no compatible selected graph anchor"
@@ -356,9 +346,7 @@ def _assign_to_anchors(
             for node_id in member_ids:
                 if node_id in selected:
                     continue
-                candidates = tuple(
-                    item for item in preferences[node_id] if item[1] in anchors
-                )
+                candidates = tuple(item for item in preferences[node_id] if item[1] in anchors)
                 if not candidates:
                     return (
                         f"unselected node {node_id} has no compatible selected anchor "
@@ -425,9 +413,7 @@ def _assign_to_anchors(
                 continue
             visited_anchors.add(anchor_id)
             members = groups[anchor_id]
-            if len(members) < config.group_size and cluster_fits(
-                anchor_id, (*members, node_id)
-            ):
+            if len(members) < config.group_size and cluster_fits(anchor_id, (*members, node_id)):
                 members.append(node_id)
                 assignments[node_id] = (anchor_id, weight)
                 return True
@@ -530,6 +516,12 @@ def _dispersion(pooled: Sequence[Any], average: Any, weights: Sequence[float]) -
     return max(0.0, result)
 
 
+def _mean_squared_error(value: Any, average: Any) -> float:
+    squared = (value - average) * (value - average)
+    mean = squared.mean()
+    return max(0.0, float(mean.item()) if hasattr(mean, "item") else float(mean))
+
+
 def _prototype_payloads(
     full_state: FullKVState,
     graph: SparseEvidenceGraph,
@@ -541,9 +533,7 @@ def _prototype_payloads(
     for node_id, (anchor_id, _weight) in assignments.items():
         grouped[anchor_id].append(node_id)
     ordered_member_ids = tuple(
-        node_id
-        for anchor_id in sorted(grouped)
-        for node_id in sorted(grouped[anchor_id])
+        node_id for anchor_id in sorted(grouped) for node_id in sorted(grouped[anchor_id])
     )
     ordered_member_blocks = tuple(graph.nodes[node_id].block for node_id in ordered_member_ids)
     # Gather every unselected source block once per layer/head.  Gathering one
@@ -604,8 +594,23 @@ def _prototype_payloads(
         prototype_values.append(prototype_value)
         total_weight = sum(raw_weights)
         members = tuple(
-            PrototypeMember(node_id, raw_weight, raw_weight / total_weight)
-            for node_id, raw_weight in zip(member_ids, raw_weights, strict=True)
+            PrototypeMember(
+                node_id,
+                raw_weight,
+                raw_weight / total_weight,
+                0.5
+                * (
+                    _mean_squared_error(pooled_key, key_average_fp32)
+                    + _mean_squared_error(pooled_value, value_average_fp32)
+                ),
+            )
+            for node_id, raw_weight, pooled_key, pooled_value in zip(
+                member_ids,
+                raw_weights,
+                pooled_keys,
+                pooled_values,
+                strict=True,
+            )
         )
         modalities = Counter(block.modality for block in member_blocks)
         logical_positions = tuple(
@@ -734,9 +739,7 @@ def estimate_prototype_active_cost(
                 return None, "prototype anchor bytes are not divisible by its position count"
             prototype_bytes += anchor.byte_size // anchor.position_count
         return selection.active_bytes + prototype_bytes, None
-    raise PrototypeConstructionError(
-        f"unsupported selection budget unit: {selection.budget.unit}"
-    )
+    raise PrototypeConstructionError(f"unsupported selection budget unit: {selection.budget.unit}")
 
 
 def construct_three_tier_cache(

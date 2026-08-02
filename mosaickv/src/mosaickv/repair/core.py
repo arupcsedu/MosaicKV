@@ -18,6 +18,9 @@ from mosaickv.cache_state import (
     tensor_storage_bytes,
 )
 from mosaickv.config import RepairConfig
+from mosaickv.prototypes.refresh import refresh_prototype_after_promotions
+from mosaickv.prototypes.rope import RotaryPrototypeKeyTransform
+from mosaickv.prototypes.types import PrototypeRecord
 from mosaickv.repair.types import (
     RepairCacheState,
     RepairEvent,
@@ -29,7 +32,7 @@ from mosaickv.residual.storage import (
     discard_residual_payloads,
     restore_residual_payloads_async,
 )
-from mosaickv.types import BudgetUnit, RepairPolicy
+from mosaickv.types import BudgetUnit, RepairCandidateRanking, RepairPolicy
 
 ReDecodeCallback = Callable[[RepairCacheState], Any]
 
@@ -166,7 +169,10 @@ def _trigger_reason(
             else RepairTriggerReason.ORACLE_NO_REPAIR
         )
     entropy = signals.normalized_entropy >= config.entropy_threshold
-    risk = signals.maximum_prototype_risk >= config.prototype_risk_threshold
+    risk = (
+        signals.maximum_prototype_risk >= config.prototype_risk_threshold
+        and signals.normalized_entropy >= config.prototype_risk_min_entropy
+    )
     if config.policy is RepairPolicy.ENTROPY:
         return RepairTriggerReason.ENTROPY if entropy else RepairTriggerReason.THRESHOLD_NOT_MET
     if config.policy is RepairPolicy.PROTOTYPE_RISK:
@@ -229,32 +235,79 @@ def _active_cost_for_plan(
 def _rank_promotion_candidates(
     state: RepairCacheState,
     signals: RepairStepSignals,
+    ranking: RepairCandidateRanking,
 ) -> tuple[tuple[int, int], ...]:
     residual_nodes = {payload.source_node_id for payload in state.residual_storage.payloads}
-    result: list[tuple[int, int]] = []
     ordered_prototypes = sorted(
         state.active_prototype_ids,
         key=lambda prototype_id: (-signals.risk_for(prototype_id), prototype_id),
     )
+    members_by_prototype: dict[int, tuple[Any, ...]] = {}
     for prototype_id in ordered_prototypes:
         record = state.prototype_record(prototype_id)
-        members = sorted(
-            (member for member in record.members if member.node_id in residual_nodes),
-            key=lambda member: (-member.normalized_weight, member.node_id),
+        members_by_prototype[prototype_id] = tuple(
+            sorted(
+                (member for member in record.members if member.node_id in residual_nodes),
+                key=lambda member: (
+                    -(
+                        member.normalized_weight * member.reconstruction_error
+                        if ranking is RepairCandidateRanking.RISK_WEIGHTED_RECONSTRUCTION_ERROR
+                        else member.normalized_weight
+                    ),
+                    -member.reconstruction_error,
+                    -member.normalized_weight,
+                    member.node_id,
+                ),
+            )
         )
-        result.extend((member.node_id, prototype_id) for member in members)
-    return tuple(result)
+    if ranking is RepairCandidateRanking.PROTOTYPE_WEIGHT:
+        return tuple(
+            (member.node_id, prototype_id)
+            for prototype_id in ordered_prototypes
+            for member in members_by_prototype[prototype_id]
+        )
+    # Allocate the first R slots across the highest-risk clusters before
+    # taking a second member from any one cluster. This gives larger repair
+    # budgets evidence coverage instead of repeatedly decomposing one local
+    # prototype; member order within a cluster targets its largest weighted
+    # reconstruction error.
+    maximum_cluster_size = max(
+        (len(members) for members in members_by_prototype.values()),
+        default=0,
+    )
+    return tuple(
+        (members_by_prototype[prototype_id][member_rank].node_id, prototype_id)
+        for member_rank in range(maximum_cluster_size)
+        for prototype_id in ordered_prototypes
+        if member_rank < len(members_by_prototype[prototype_id])
+    )
 
 
 def _plan_repair(
     state: RepairCacheState,
     signals: RepairStepSignals,
-    maximum_blocks: int,
+    config: RepairConfig,
 ) -> _RepairPlan | None:
-    candidates = list(_rank_promotion_candidates(state, signals)[:maximum_blocks])
+    candidates = list(
+        _rank_promotion_candidates(state, signals, config.candidate_ranking)[
+            : config.max_blocks_per_step
+        ]
+    )
     while candidates:
         promotions = tuple(candidates)
-        superseded = {parent_id for _node_id, parent_id in promotions}
+        promoted_by_parent: dict[int, set[int]] = {}
+        for node_id, parent_id in promotions:
+            promoted_by_parent.setdefault(parent_id, set()).add(node_id)
+        superseded = (
+            {
+                parent_id
+                for parent_id, promoted in promoted_by_parent.items()
+                if promoted == set(state.prototype_record(parent_id).assigned_node_ids)
+            }
+            if config.preserve_partial_prototype
+            else set(promoted_by_parent)
+        )
+        protected = set(promoted_by_parent) - superseded
         active = set(state.active_prototype_ids) - superseded
         evicted: list[int] = []
         while (
@@ -262,13 +315,19 @@ def _plan_repair(
             > state.active_budget.value
             and active
         ):
-            victim = min(
-                active,
-                key=lambda prototype_id: (
-                    state.prototype_record(prototype_id).eviction_utility,
-                    prototype_id,
-                ),
+            victim = (
+                min(
+                    active - protected,
+                    key=lambda prototype_id: (
+                        state.prototype_record(prototype_id).eviction_utility,
+                        prototype_id,
+                    ),
+                )
+                if active - protected
+                else None
             )
+            if victim is None:
+                break
             active.remove(victim)
             evicted.append(victim)
         if (
@@ -286,25 +345,18 @@ def _plan_repair(
 
 
 def _rebuild_prototype_tier(
-    state: RepairCacheState,
-    active_prototype_ids: tuple[int, ...],
+    full_state: Any,
+    records: tuple[PrototypeRecord, ...],
+    payloads: Mapping[int, tuple[Any, Any]],
 ) -> PrototypeTier:
-    payloads = {
-        prototype_id: (
-            state.mosaic_state.prototypes.prototype_keys[offset],
-            state.mosaic_state.prototypes.prototype_values[offset],
-        )
-        for offset, prototype_id in enumerate(state.active_prototype_ids)
-    }
     blocks: list[KVBlockDescriptor] = []
     assignments: list[int] = []
     keys: list[Any] = []
     values: list[Any] = []
-    for local_id, prototype_id in enumerate(active_prototype_ids):
-        record = state.prototype_record(prototype_id)
-        blocks.extend(state.full_state.blocks[node_id] for node_id in record.assigned_node_ids)
+    for local_id, record in enumerate(records):
+        blocks.extend(full_state.blocks[node_id] for node_id in record.assigned_node_ids)
         assignments.extend(local_id for _node_id in record.assigned_node_ids)
-        key, value = payloads[prototype_id]
+        key, value = payloads[record.prototype_id]
         keys.append(key)
         values.append(value)
     return PrototypeTier(tuple(blocks), tuple(keys), tuple(values), tuple(assignments))
@@ -313,6 +365,7 @@ def _rebuild_prototype_tier(
 def _promote(
     state: RepairCacheState,
     plan: _RepairPlan,
+    key_transform: RotaryPrototypeKeyTransform | None,
 ) -> tuple[RepairCacheState, tuple[int, ...], int, float, bool]:
     payload_by_node = {
         payload.source_node_id: payload.payload_index for payload in state.residual_storage.payloads
@@ -366,7 +419,34 @@ def _promote(
         tuple(exact_payloads[node_id][0] for node_id in exact_ids),
         tuple(exact_payloads[node_id][1] for node_id in exact_ids),
     )
-    prototypes = _rebuild_prototype_tier(state, plan.active_prototype_ids)
+    promoted_by_parent: dict[int, dict[int, tuple[Any, Any]]] = {}
+    for node_id, parent_id in plan.ranked_promotions:
+        promoted_by_parent.setdefault(parent_id, {})[node_id] = restored[node_id]
+    active_records: list[PrototypeRecord] = []
+    active_payloads: dict[int, tuple[Any, Any]] = {}
+    for prototype_id in plan.active_prototype_ids:
+        record = state.prototype_record(prototype_id)
+        payload = prototype_payloads[prototype_id]
+        selected = promoted_by_parent.get(prototype_id)
+        if selected:
+            refreshed = refresh_prototype_after_promotions(
+                state.full_state,
+                record,
+                payload[0],
+                payload[1],
+                selected,
+                key_transform=key_transform,
+            )
+            record = refreshed.record
+            payload = (refreshed.key, refreshed.value)
+        active_records.append(record)
+        active_payloads[prototype_id] = payload
+    active_record_tuple = tuple(active_records)
+    prototypes = _rebuild_prototype_tier(
+        state.full_state,
+        active_record_tuple,
+        active_payloads,
+    )
     residual_storage = discard_residual_payloads(state.residual_storage, payload_indices)
     mosaic_state = MosaicKVState.create(
         state.full_state,
@@ -380,6 +460,7 @@ def _promote(
         mosaic_state=mosaic_state,
         residual_storage=residual_storage,
         prototype_catalog=state.prototype_catalog,
+        active_prototype_records=active_record_tuple,
         active_prototype_ids=plan.active_prototype_ids,
         exact_node_ids=exact_ids,
         initial_exact_node_ids=state.initial_exact_node_ids,
@@ -503,6 +584,7 @@ def _repair_decode_step(
     draft_distribution: Any | None,
     oracle_should_repair: bool | None,
     reference_token_id: int | None,
+    key_transform: RotaryPrototypeKeyTransform | None,
 ) -> RepairStepResult:
     if step_index < 0:
         raise ValueError("repair step index must be nonnegative")
@@ -535,7 +617,7 @@ def _repair_decode_step(
             signals,
             reference_token_id,
         )
-    plan = _plan_repair(state, signals, config.max_blocks_per_step)
+    plan = _plan_repair(state, signals, config)
     if plan is None:
         return _event_without_repair(
             state,
@@ -548,7 +630,11 @@ def _repair_decode_step(
         )
 
     active_before = state.active_cost
-    promoted, restored_ids, restored_bytes, transfer_ms, asynchronous = _promote(state, plan)
+    promoted, restored_ids, restored_bytes, transfer_ms, asynchronous = _promote(
+        state,
+        plan,
+        key_transform,
+    )
     repaired_logits, re_decode_ms = _timed_redecode(
         re_decode,
         promoted,
@@ -597,6 +683,7 @@ def repair_decode_step(
     prototype_attention_mass: Mapping[int, float],
     re_decode: ReDecodeCallback,
     draft_distribution: Any | None = None,
+    key_transform: RotaryPrototypeKeyTransform | None = None,
 ) -> RepairStepResult:
     """Apply an online repair policy; oracle/reference data is not accepted here."""
 
@@ -612,6 +699,7 @@ def repair_decode_step(
         draft_distribution=draft_distribution,
         oracle_should_repair=None,
         reference_token_id=None,
+        key_transform=key_transform,
     )
 
 

@@ -381,14 +381,19 @@ def cuda_smoke(profile: str, require_cuda: bool) -> tuple[dict[str, Any], list[s
             reference_inputs: tuple[Any, Any, Any] | None = None
             observed_shapes: dict[str, list[int]] = {}
             for head_dimension in (64, 80, 128):
-                tensors = tuple(
-                    torch.randn(
-                        (1, 16, 4, head_dimension),
+
+                def make_tensor(dimension: int) -> Any:
+                    return torch.randn(
+                        (1, 16, 4, dimension),
                         device=device,
                         dtype=torch.bfloat16,
                         generator=generator,
                     )
-                    for _index in range(3)
+
+                tensors = (
+                    make_tensor(head_dimension),
+                    make_tensor(head_dimension),
+                    make_tensor(head_dimension),
                 )
                 query, key, value = tensors
                 dense_outputs = [

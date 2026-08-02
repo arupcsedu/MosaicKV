@@ -17,6 +17,7 @@ from mosaickv.adapters.huggingface import (  # noqa: E402
     compare_mosaickv_retention_one,
     compare_with_generate,
 )
+from mosaickv.adapters.huggingface.parity import _build_report  # noqa: E402
 from mosaickv.backends import (  # noqa: E402
     HuggingFaceMosaicKVModel,
     compare_runtime_retention_one,
@@ -391,6 +392,41 @@ def test_tiny_architecture_full_cache_and_reinjection_parity(builder: Any) -> No
     assert mosaic_reinjection.maximum_logit_difference <= 1e-6
 
 
+def test_parity_gate_rejects_matching_tokens_from_nonfinite_logits() -> None:
+    tokens = torch.tensor([[0]], dtype=torch.long)
+    logits = (torch.tensor([[float("nan"), 0.0]]),)
+
+    with pytest.raises(RuntimeError, match="reference logits are non-finite"):
+        _build_report("nonfinite-regression", tokens, logits, tokens, logits)
+
+
+@pytest.mark.hf
+@pytest.mark.integration
+@pytest.mark.parametrize("builder", [_llava, _onevision])
+def test_llava_families_capture_exact_standard_rope_phase(builder: Any) -> None:
+    """Reject regressions that would make post-RoPE prototype pooling unsafe."""
+
+    torch.manual_seed(0)
+    adapter = builder()
+    prepared = adapter.prepare_inputs([{"role": "user", "content": "tiny prompt"}])
+    transform = adapter.build_prototype_key_transform(prepared)
+    prefill = adapter.prefill(prepared, capture_queries=False)
+    snapshot = adapter.extract_past_key_values(prefill.state.past_key_values)
+    key = snapshot.layers[0].key.detach().float()
+    cos = transform.cos.to(device=key.device, dtype=torch.float32)
+    sin = transform.sin.to(device=key.device, dtype=torch.float32)
+    denominator = (cos * cos + sin * sin).clamp_min(1e-12)
+    phase_neutral = (key * cos - transform._rotate_half(key) * sin) / denominator
+    reconstructed = phase_neutral * cos + transform._rotate_half(phase_neutral) * sin
+
+    assert transform.provenance.startswith("transformers_4_55_2_llava")
+    assert tuple(transform.cos.shape[-2:]) == (
+        prepared.logical_sequence_length,
+        int(key.shape[-1]),
+    )
+    assert float((reconstructed - key).abs().max()) <= 1e-5
+
+
 @pytest.mark.hf
 @pytest.mark.integration
 @pytest.mark.parametrize("builder", [_llava, _qwen, _onevision])
@@ -522,8 +558,16 @@ def test_unified_runtime_methods_decode_and_write_complete_traces(
     assert "forecast_statistics" in trace
     assert "repair_events" in trace
     assert "timing_breakdown" in trace
-    if method is not MosaicKVMethod.MOSAICKV_EXACT:
-        assert trace["effective_method"].endswith("mosaickv_exact_safety_fallback")
+    if method is MosaicKVMethod.MOSAICKV_EXACT:
+        assert trace["prototypes"] == []
+        assert trace["repair_events"] == []
+    else:
+        assert trace["effective_method"] == method.value
+        assert trace["tier_mode"] == "three_tier"
+        assert trace["prototype_safety"]["safe"] is True
+        assert trace["prototypes"]
+    if method is MosaicKVMethod.MOSAICKV_FULL:
+        assert all(event["re_decode_count"] <= 1 for event in trace["repair_events"])
 
 
 @pytest.mark.hf

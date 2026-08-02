@@ -9,8 +9,10 @@ from mosaickv.adapters.huggingface.base import HuggingFaceMultimodalAdapter, val
 from mosaickv.adapters.huggingface.types import (
     AdapterCapabilities,
     CachedKeyState,
+    PreparedInputs,
     QueryVectorState,
 )
+from mosaickv.prototypes.rope import RotaryPrototypeKeyTransform
 
 
 class LlavaOneVisionAdapter(HuggingFaceMultimodalAdapter):
@@ -32,9 +34,14 @@ class LlavaOneVisionAdapter(HuggingFaceMultimodalAdapter):
         cache_sequence_dimension=-2,
         cached_key_state=CachedKeyState.POST_ROPE,
         query_vector_state=QueryVectorState.Q_PROJ_PRE_ROPE,
-        supports_prototype_merge=False,
-        supports_residual_repair=False,
-        notes=("SDPA and FlashAttention-2 are FullKV-only until compressed parity passes",),
+        supports_prototype_merge=True,
+        supports_residual_repair=True,
+        notes=(
+            "SDPA and FlashAttention-2 are FullKV-only until compressed parity passes",
+            "prototype keys are de-rotated with exact prefill Qwen2 RoPE phases and "
+            "re-rotated at anchors",
+            "prototype and repair decode require eager attention",
+        ),
     )
 
     @classmethod
@@ -65,6 +72,18 @@ class LlavaOneVisionAdapter(HuggingFaceMultimodalAdapter):
 
     def _language_layers(self) -> Sequence[Any]:
         return self._standard_language_layers()
+
+    def build_prototype_key_transform(
+        self, prepared: PreparedInputs
+    ) -> RotaryPrototypeKeyTransform:
+        """Capture the exact prefill Qwen2 RoPE phase for safe prototypes."""
+
+        return self._build_standard_rotary_prototype_key_transform(
+            prepared,
+            provenance=(
+                "transformers_4_55_2_llava_onevision_qwen2_rotary_emb_apply_rotary_pos_emb_v1"
+            ),
+        )
 
     def _image_token_id(self) -> int | None:
         value = getattr(self.model.config, "image_token_id", None)

@@ -28,6 +28,7 @@ from mosaickv.adapters.huggingface.qwen2_5_vl import (
     QWEN25_VL_MAX_PIXELS,
     QWEN25_VL_MIN_PIXELS,
 )
+from mosaickv.backends.native_blocks import native_audit_path
 from mosaickv.config import RunConfig
 from mosaickv.evaluation.messages import MultimodalMessage
 from mosaickv.evaluation.model import EvaluationRequest, GenerationMetrics, ModelGeneration
@@ -67,14 +68,14 @@ class NativeIntegrationCapability:
 
 
 def native_integration_capability(vllm_version: str) -> NativeIntegrationCapability:
-    """Return the fail-closed native whole-block capability for a vLLM release."""
+    """Return the version-pinned native whole-block capability."""
 
     return NativeIntegrationCapability(
         vllm_version=vllm_version,
-        supported=False,
-        feature="whole_block_selection_with_original_logical_positions",
+        supported=vllm_version == _AUDITED_VLLM_VERSION,
+        feature="request_wide_whole_block_compaction_with_logical_positions",
         reason_code=(
-            "audited_0_10_2_missing_sparse_logical_block_table_hook"
+            "repository_plugin_transaction_v1"
             if vllm_version == _AUDITED_VLLM_VERSION
             else "unaudited_vllm_version"
         ),
@@ -86,6 +87,7 @@ def native_integration_capability(vllm_version: str) -> NativeIntegrationCapabil
             "vllm.v1.core.kv_cache_utils.KVCacheBlock",
             "vllm.v1.attention.backends.utils.CommonAttentionMetadata",
             "vllm.v1.attention.backends.flash_attn.FlashAttentionMetadata",
+            "mosaickv.backends.vllm_native_plugin.register",
         ),
     )
 
@@ -138,6 +140,46 @@ class VLLMRuntimeOptions:
             raise ValueError("max_model_len must be >= 2 or null")
         if self.cache_probe_repeats < 1:
             raise ValueError("cache_probe_repeats must be >= 1")
+
+
+@dataclass(frozen=True, slots=True)
+class VLLMKVCacheGeometry:
+    """Exact TP=1 decoder KV bytes per active token position."""
+
+    layers: int
+    kv_heads: int
+    head_dim: int
+    dtype_bytes: int
+
+    @property
+    def bytes_per_position(self) -> int:
+        return 2 * self.layers * self.kv_heads * self.head_dim * self.dtype_bytes
+
+    def active_bytes(self, positions: int) -> int:
+        if positions < 0:
+            raise ValueError("positions must be >= 0")
+        return positions * self.bytes_per_position
+
+    def to_json_object(self) -> JsonObject:
+        return cast("JsonObject", asdict(self))
+
+
+def _vllm_kv_cache_geometry(model_config: Any, precision: Precision) -> VLLMKVCacheGeometry:
+    text_config = getattr(model_config, "text_config", model_config)
+    layers = int(text_config.num_hidden_layers)
+    heads = int(text_config.num_attention_heads)
+    kv_heads = int(getattr(text_config, "num_key_value_heads", heads))
+    hidden = int(text_config.hidden_size)
+    if hidden % heads:
+        raise VLLMRuntimeError("model hidden size is not divisible by attention heads")
+    dtype_bytes = {
+        Precision.FP16: 2,
+        Precision.BF16: 2,
+        Precision.FP32: 4,
+    }.get(precision)
+    if dtype_bytes is None:
+        raise VLLMRuntimeError("native vLLM supports fp16, bf16, or fp32 KV geometry")
+    return VLLMKVCacheGeometry(layers, kv_heads, hidden // heads, dtype_bytes)
 
 
 @dataclass(frozen=True, slots=True)
@@ -409,6 +451,7 @@ class VLLMTrialMeasurement:
     gpu_memory_peak_delta_bytes: int | None
     finish_reason: str | None
     engine_timing_source: str = "unspecified"
+    native_audit: JsonObject | None = None
 
     def to_json_object(self) -> JsonObject:
         return cast("JsonObject", asdict(self))
@@ -667,10 +710,14 @@ class AsyncVLLMTrialRunner:
         options: VLLMRuntimeOptions,
         *,
         model_source: str | None = None,
+        native_audit_directory: str | Path | None = None,
     ) -> None:
         self.config = config
         self.options = options
         self._model_source = model_source or config.model.id
+        self._native_audit_directory = (
+            Path(native_audit_directory) if native_audit_directory is not None else None
+        )
         self._collector = _VLLMStatCollector()
         self._measurement_guard = threading.Lock()
         self._active_measurements = 0
@@ -710,6 +757,29 @@ class AsyncVLLMTrialRunner:
         # will never be used. Select vLLM's native sampler explicitly; parity
         # tests below remain the authority for output equivalence.
         os.environ["VLLM_USE_FLASHINFER_SAMPLER"] = "0"
+        if self.options.enable_mosaickv:
+            if self.options.enable_prefix_caching:
+                raise VLLMRuntimeError("native MosaicKV requires vLLM prefix caching disabled")
+            if self._native_audit_directory is None:
+                raise VLLMRuntimeError("native MosaicKV requires an audit directory")
+            os.environ["VLLM_PLUGINS"] = "mosaickv_native"
+            os.environ["MOSAICKV_NATIVE_VLLM"] = "1"
+            os.environ["MOSAICKV_NATIVE_RETENTION_RATIO"] = str(self.config.cache.retention_ratio)
+            os.environ["MOSAICKV_NATIVE_BLOCK_SIZE"] = str(self.config.cache.block_size)
+            os.environ["MOSAICKV_NATIVE_AUDIT_DIR"] = str(self._native_audit_directory.resolve())
+        else:
+            # The evaluation process may construct a native engine and a
+            # FullKV engine sequentially.  Never let the process-global
+            # plugin controls leak into the reference engine.
+            if os.environ.get("VLLM_PLUGINS") == "mosaickv_native":
+                os.environ.pop("VLLM_PLUGINS", None)
+            for variable in (
+                "MOSAICKV_NATIVE_VLLM",
+                "MOSAICKV_NATIVE_RETENTION_RATIO",
+                "MOSAICKV_NATIVE_BLOCK_SIZE",
+                "MOSAICKV_NATIVE_AUDIT_DIR",
+            ):
+                os.environ.pop(variable, None)
         # FlashInfer JIT compilation is performed in vLLM's spawned engine
         # process and invokes the locked ``ninja`` executable by name. Direct
         # execution of ``<venv>/bin/python`` does not activate the environment,
@@ -792,6 +862,12 @@ class AsyncVLLMTrialRunner:
             "sampling_backend": "vllm_native_greedy",
             "block_size": self.config.cache.block_size,
             "prefix_caching": self.options.enable_prefix_caching,
+            "native_mosaickv": self.options.enable_mosaickv,
+            "native_patch": (
+                "mosaickv.backends.vllm_native_plugin:register"
+                if self.options.enable_mosaickv
+                else "not_used"
+            ),
             "tensor_parallel_size": self.options.tensor_parallel_size,
             "gpu_memory_utilization": self.options.gpu_memory_utilization,
             "max_model_len": self.options.max_model_len,
@@ -826,6 +902,17 @@ class AsyncVLLMTrialRunner:
             output_kind=RequestOutputKind.DELTA,
             detokenize=True,
             skip_special_tokens=True,
+            extra_args=(
+                {
+                    "mosaickv_native": {
+                        "retention_ratio": self.config.cache.retention_ratio,
+                        "block_size": self.config.cache.block_size,
+                        "scope": "request_wide_token_blocks",
+                    }
+                }
+                if self.options.enable_mosaickv
+                else None
+            ),
         )
         with self._measurement_guard:
             exclusive_start = self._active_measurements == 0
@@ -907,6 +994,18 @@ class AsyncVLLMTrialRunner:
         engine_ttft = (
             metrics_ttft if metrics_ttft is not None else _one_or_none(stats.ttfts) or ttft
         )
+        native_audit: JsonObject | None = None
+        if self.options.enable_mosaickv:
+            assert self._native_audit_directory is not None
+            audit_path = native_audit_path(self._native_audit_directory, "vllm", request_id)
+            if not audit_path.is_file():
+                raise VLLMRuntimeError(
+                    f"native vLLM request completed without scheduler audit: {audit_path}"
+                )
+            payload = json.loads(audit_path.read_text(encoding="utf-8"))
+            if not isinstance(payload, Mapping):
+                raise VLLMRuntimeError("native vLLM scheduler audit is not a JSON object")
+            native_audit = cast("JsonObject", dict(payload))
         return VLLMTrialMeasurement(
             request_id=request_id,
             answer="".join(text_parts),
@@ -945,6 +1044,7 @@ class AsyncVLLMTrialRunner:
                 if stats.prefill_seconds or stats.decode_seconds
                 else "client_stream_boundaries_concurrent_safe_fallback"
             ),
+            native_audit=native_audit,
         )
 
     def run(
@@ -1027,7 +1127,7 @@ def _safe_trace_name(sample_id: str) -> str:
 
 
 class VLLMFullKVModel:
-    """Backend-neutral evaluation adapter for measured vLLM FullKV requests."""
+    """Evaluation adapter for vLLM FullKV or native exact block transport."""
 
     backend = "vllm"
     method = "full_kv"
@@ -1042,6 +1142,10 @@ class VLLMFullKVModel:
         trace_directory: str | Path,
         generation: Mapping[str, object],
         cache_probe_repeats: int = 2,
+        method: str = "full_kv",
+        retention_ratio: float = 1.0,
+        block_size: int = 16,
+        cache_geometry: VLLMKVCacheGeometry | None = None,
     ) -> None:
         if model_id not in _SUPPORTED_MODELS:
             known = ", ".join(sorted(_SUPPORTED_MODELS))
@@ -1055,6 +1159,22 @@ class VLLMFullKVModel:
         self.trace_directory = Path(trace_directory)
         self.generation = dict(generation)
         self.cache_probe_repeats = cache_probe_repeats
+        self.method = method
+        self.retention_ratio = retention_ratio
+        self.block_size = block_size
+        self.cache_geometry = cache_geometry
+        self._isolation_anchor: (
+            tuple[
+                PreparedVLLMPrompt,
+                dict[str, object],
+                tuple[int, ...],
+                Path,
+                str,
+                str,
+            ]
+            | None
+        ) = None
+        self._observed_input_fingerprints: set[tuple[str, str]] = set()
 
     @classmethod
     def from_config(
@@ -1073,11 +1193,13 @@ class VLLMFullKVModel:
                 enforce_eager=True,
                 attention_backend=config.execution.attention_implementation,
             )
-        if not config.method.is_full_cache or config.cache.retention_ratio != 1.0:
+        native = options.enable_mosaickv
+        if native and config.method.value != "mosaickv_exact":
             raise VLLMRuntimeError(
-                "Stage A emits only vLLM FullKV rows at retention_ratio=1.0; "
-                "native MosaicKV is not simulated"
+                "native vLLM Stage B currently supports only method=mosaickv_exact"
             )
+        if not native and (not config.method.is_full_cache or config.cache.retention_ratio != 1.0):
+            raise VLLMRuntimeError("vLLM FullKV requires retention_ratio=1.0")
         if config.model.id not in _SUPPORTED_MODELS:
             known = ", ".join(sorted(_SUPPORTED_MODELS))
             raise LookupError(f"unsupported vLLM multimodal model; known: {known}")
@@ -1087,7 +1209,7 @@ class VLLMFullKVModel:
                 "(vLLM enforce_eager execution with CUDA graphs disabled)"
             )
         try:
-            from transformers import AutoProcessor
+            from transformers import AutoConfig, AutoProcessor
         except ImportError as error:
             raise VLLMRuntimeError("vLLM environment must provide transformers") from error
         model_source = _resolve_model_source(
@@ -1099,7 +1221,6 @@ class VLLMFullKVModel:
             "local_files_only": options.local_files_only,
             # Match the audited HF and SGLang Qwen2.5-VL preprocessing path.
             # Transformers 4.55 switched this checkpoint to a fast processor
-            # by default, which is a controlled-input change rather than a
             # serving-backend optimization.
             "use_fast": False,
         }
@@ -1108,7 +1229,19 @@ class VLLMFullKVModel:
         processor = AutoProcessor.from_pretrained(  # type: ignore[no-untyped-call]
             model_source, **processor_kwargs
         )
-        runner = AsyncVLLMTrialRunner(config, options, model_source=model_source)
+        config_kwargs: dict[str, Any] = {
+            "local_files_only": options.local_files_only,
+        }
+        if model_source == config.model.id:
+            config_kwargs["revision"] = config.model.revision
+        model_config = AutoConfig.from_pretrained(model_source, **config_kwargs)
+        geometry = _vllm_kv_cache_geometry(model_config, config.model.precision)
+        runner = AsyncVLLMTrialRunner(
+            config,
+            options,
+            model_source=model_source,
+            native_audit_directory=Path(trace_directory) / "native_audit",
+        )
         generation = {
             "max_new_tokens": config.generation.max_new_tokens,
             "temperature": config.generation.temperature,
@@ -1122,6 +1255,10 @@ class VLLMFullKVModel:
             trace_directory=trace_directory,
             generation=generation,
             cache_probe_repeats=options.cache_probe_repeats,
+            method=config.method.value,
+            retention_ratio=config.cache.retention_ratio,
+            block_size=config.cache.block_size,
+            cache_geometry=geometry,
         )
 
     def generate(self, request: EvaluationRequest) -> ModelGeneration:
@@ -1157,12 +1294,31 @@ class VLLMFullKVModel:
                 terminal_token_index=None,
             )
         )
+        native = self.method == "mosaickv_exact"
+        active_kv_bytes: int | None = None
+        compression_seconds = 0.0
+        if native:
+            if first.native_audit is None or self.cache_geometry is None:
+                raise VLLMRuntimeError("native vLLM result omitted audit or KV geometry")
+            selection = first.native_audit.get("selection")
+            if not isinstance(selection, Mapping):
+                raise VLLMRuntimeError("native vLLM audit omitted its selection")
+            raw_selected = selection.get("selected_positions")
+            raw_compression = first.native_audit.get("compression_seconds")
+            if isinstance(raw_selected, bool) or not isinstance(raw_selected, int):
+                raise VLLMRuntimeError("native vLLM selected-position count is invalid")
+            if isinstance(raw_compression, bool) or not isinstance(raw_compression, (int, float)):
+                raise VLLMRuntimeError("native vLLM compression timing is invalid")
+            selected_prompt_positions = raw_selected
+            active_positions = selected_prompt_positions + max(0, first.generated_tokens - 1)
+            active_kv_bytes = self.cache_geometry.active_bytes(active_positions)
+            compression_seconds = float(raw_compression)
         trace: JsonObject = {
             "schema_version": 1,
-            "measurement_type": "vllm_fullkv",
+            "measurement_type": "vllm_native_mosaickv" if native else "vllm_fullkv",
             "backend": "vllm",
-            "method": "full_kv",
-            "native_mosaickv": False,
+            "method": self.method,
+            "native_mosaickv": native,
             "run_id": request.run_id,
             "sample_id": request.sample_id,
             "model": self.model_id,
@@ -1180,6 +1336,9 @@ class VLLMFullKVModel:
             },
             "engine": self.runner.engine_metadata,
             "trials": [trial.to_json_object() for trial in trials],
+            "native_scope": (
+                "request_wide_whole_token_blocks_transport_gate" if native else "not_used"
+            ),
             "cache_measurement": {
                 "prefix_cache": "RequestOutput.num_cached_tokens",
                 "multimodal_preprocessor_cache": (
@@ -1194,23 +1353,65 @@ class VLLMFullKVModel:
         }
         trace_path = self.trace_directory / request.run_id / _safe_trace_name(request.sample_id)
         _atomic_json(trace_path, trace)
+        fingerprint = (prepared.prompt_sha256, prepared.media_sha256)
+        self._observed_input_fingerprints.add(fingerprint)
+        if self._isolation_anchor is None:
+            self._isolation_anchor = (
+                prepared,
+                generation,
+                reference_tokens,
+                trace_path,
+                request.run_id,
+                request.sample_id,
+            )
         return ModelGeneration(
             answer=quality.text,
             metrics=GenerationMetrics(
                 ttft=first.ttft_seconds,
                 prefill_time=first.engine_prefill_seconds,
-                compression_time=0.0,
+                compression_time=compression_seconds,
                 decode_time=first.decode_seconds,
                 end_to_end_time=first.request_latency_seconds,
                 generated_tokens=first.generated_tokens,
-                active_kv_bytes=None,
+                active_kv_bytes=active_kv_bytes,
                 residual_kv_bytes=0,
                 peak_gpu_memory=first.gpu_memory_peak_bytes,
                 repair_count=0,
                 repaired_bytes=0,
             ),
-            effective_method="full_kv",
+            effective_method=self.method,
         )
+
+    def verify_request_isolation(self) -> bool:
+        """Run an A-B-A probe against the persistent engine request state."""
+
+        anchor = self._isolation_anchor
+        if anchor is None or len(self._observed_input_fingerprints) < 2:
+            return False
+        prepared, generation, expected_tokens, trace_path, run_id, sample_id = anchor
+        request_id = f"{run_id}-{sample_id}-isolation-recheck"
+        trial = self.runner.run(prepared.engine_prompt, generation, request_id)
+        tokens_match = trial.token_ids == expected_tokens
+        trace = json.loads(trace_path.read_text(encoding="utf-8"))
+        if not isinstance(trace, dict):
+            raise VLLMRuntimeError("anchor trace is invalid during request-isolation probe")
+        trace["request_isolation"] = {
+            "performed": True,
+            "intervening_distinct_input_fingerprints": (len(self._observed_input_fingerprints) - 1),
+            "request_id": request_id,
+            "token_ids_match_anchor": tokens_match,
+            "anchor_token_ids": list(expected_tokens),
+            "probe_token_ids": list(trial.token_ids),
+            "probe_measurement": trial.to_json_object(),
+            "prefix_cache_disabled": True,
+        }
+        _atomic_json(trace_path, cast("JsonObject", trace))
+        if not tokens_match:
+            raise VLLMRuntimeError(
+                "vLLM request-isolation probe changed deterministic token IDs after an "
+                "intervening request"
+            )
+        return True
 
     def close(self) -> None:
         self.runner.close()

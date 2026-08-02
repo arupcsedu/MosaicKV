@@ -94,8 +94,8 @@ to all methods in any fairness table.
 | SGLang Qwen-3B FullKV Torch-native | supported for validation | Stage A, request isolation, byte accounting, and exact 32/32 HF-SDPA token parity pass. |
 | vLLM Qwen-3B FullKV uncached | supported for validation | Installed vLLM 0.10.2 Stage A and exact 16/16 HF token parity pass; prefix-cache cold/warm divergence remains fail closed. |
 | vLLM Qwen-7B / LLaVA-7B | unsupported in this bounded run | No matching current-lock parity pass was available before scheduling. |
-| Native MosaicKV on vLLM/SGLang | unsupported | No safe request-scoped KV mutation API exists in the audited versions. |
-| `mosaickv_proto` / `mosaickv_full` | unsupported | Safe post-RoPE prototype handling has not passed correctness. |
+| Native MosaicKV on vLLM/SGLang | excluded from this historical bounded run | Version-pinned whole-block transport was validated later in jobs `17869843`/`17871006`; the common MosaicKV selector-plan bridge is still not paper-gated. |
+| `mosaickv_proto` / `mosaickv_full` in the original 440-row run | absent | At execution time, safe post-RoPE prototype handling had not passed. Later LLaVA-1.5 and OneVision-7B implementation gates are documented separately and are not retroactively inserted here. |
 | HF batch 2/4 | unsupported | Explicit HF adapters enforce batch size one. |
 
 ## Interpretation limits

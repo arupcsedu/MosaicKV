@@ -68,6 +68,7 @@ class PrototypeMember:
     node_id: int
     raw_weight: float
     normalized_weight: float
+    reconstruction_error: float = 0.0
 
     def __post_init__(self) -> None:
         if self.node_id < 0:
@@ -76,6 +77,8 @@ class PrototypeMember:
             raise ValueError("prototype raw weights must be finite and positive")
         if not math.isfinite(self.normalized_weight) or not 0 < self.normalized_weight <= 1:
             raise ValueError("prototype normalized weights must lie in (0, 1]")
+        if not math.isfinite(self.reconstruction_error) or self.reconstruction_error < 0:
+            raise ValueError("prototype member reconstruction error must be finite and nonnegative")
 
 
 @dataclass(frozen=True, slots=True)

@@ -7,6 +7,11 @@ from mosaickv.prototypes.construction import (
     construct_three_tier_cache,
     estimate_prototype_active_cost,
 )
+from mosaickv.prototypes.refresh import (
+    PrototypeRefreshError,
+    RefreshedPrototype,
+    refresh_prototype_after_promotions,
+)
 from mosaickv.prototypes.types import (
     ActiveHeadLayout,
     PrototypeDiagnostics,
@@ -23,11 +28,14 @@ __all__ = [
     "PrototypeDiagnostics",
     "PrototypeMember",
     "PrototypeRecord",
+    "PrototypeRefreshError",
     "PrototypeSafetyAssessment",
     "PrototypeTier",
+    "RefreshedPrototype",
     "ThreeTierCacheConstruction",
     "TierConstructionMode",
     "assess_prototype_safety",
     "construct_three_tier_cache",
     "estimate_prototype_active_cost",
+    "refresh_prototype_after_promotions",
 ]

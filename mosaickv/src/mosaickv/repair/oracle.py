@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from mosaickv.config import RepairConfig
+from mosaickv.prototypes.rope import RotaryPrototypeKeyTransform
 from mosaickv.repair.core import ReDecodeCallback, _repair_decode_step
 from mosaickv.repair.types import RepairCacheState, RepairStepResult
 from mosaickv.types import RepairPolicy
@@ -22,6 +23,7 @@ def evaluate_repair_decode_step(
     reference_token_id: int,
     oracle_should_repair: bool | None = None,
     draft_distribution: Any | None = None,
+    key_transform: RotaryPrototypeKeyTransform | None = None,
 ) -> RepairStepResult:
     """Run repair with evaluation-only reference labels and optional oracle trigger."""
 
@@ -41,6 +43,7 @@ def evaluate_repair_decode_step(
         draft_distribution=draft_distribution,
         oracle_should_repair=oracle_should_repair,
         reference_token_id=reference_token_id,
+        key_transform=key_transform,
     )
 
 

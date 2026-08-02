@@ -1,0 +1,11 @@
+{
+  "dataset_id": "lmms-lab/ChartQA",
+  "dataset_revision": "9e63b7df1592a1c2158e735cc1725454aef0d6d9",
+  "sample_ids": [
+    "chartqa:811",
+    "chartqa:1447"
+  ],
+  "schema_version": 1,
+  "split": "test",
+  "task": "chartqa"
+}

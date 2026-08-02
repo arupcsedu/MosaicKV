@@ -1,6 +1,6 @@
 matrix_schema_version: 1
 matrix_revision: 1
-capability_catalog_version: common-env-2026-07-25-v2
+capability_catalog_version: common-env-2026-08-02-v3
 experiment_id: pilot
 description: Twenty-sample development gate for HF eager FullKV, simple baselines, and MosaicKV exact selection.
 enabled: true
@@ -62,10 +62,4 @@ sweeps:
 blocked:
   - scope:
       backends: [hf_sdpa, hf_flash_attention_2, vllm, sglang]
-    reason: These backends have not passed the current common-environment model/parity gate.
-  - scope:
-      methods: [mosaickv_proto, mosaickv_full]
-    reason: Registered adapters currently disable prototype merging and residual repair.
-  - scope:
-      models: [llava_onevision_7b_optional]
-    reason: The optional 7B checkpoint is pinned but has no exact registered runtime adapter.
+    reason: This bounded pilot is scoped to the mutable HF eager path; fused HF and serving backends admit FullKV only.

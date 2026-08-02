@@ -368,8 +368,7 @@ def test_dense_mask_free_selection_excludes_optional_partial_fragments() -> None
 
     assert sum(block.position_count for block in plan.selection.selected_blocks) == 48
     assert all(
-        block.mandatory or block.position_count == 16
-        for block in plan.selection.selected_blocks
+        block.mandatory or block.position_count == 16 for block in plan.selection.selected_blocks
     )
 
 

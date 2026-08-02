@@ -438,7 +438,7 @@ def _analysis(
     lines.extend(
         (
             "",
-            "A backend contributes tables and figures only when its completed FullKV token IDs match the paired HF-eager trials. A missing or failed gate is excluded, never replaced by a simulated row. Native vLLM/SGLang MosaicKV remains unsupported.",
+            "A backend contributes tables and figures only when its completed FullKV token IDs match the paired HF-eager trials. A missing or failed gate is excluded, never replaced by a simulated row. Version-pinned native vLLM/SGLang whole-block transport is validated separately; compressed paper rows remain excluded until the common-selector plan bridge passes.",
             "",
             "## Supported coverage",
             "",
@@ -493,10 +493,10 @@ def _analysis(
             "| Combination | Status | Reason |",
             "|---|---|---|",
             "| HF SDPA/FlashAttention-2 compression | unsupported | Prompt-attention capture and arbitrary packed per-head masks remain eager-only. |",
-            "| SGLang/vLLM compressed methods | unsupported | No safe native request-scoped KV mutation API exists in the audited versions. |",
+            "| SGLang/vLLM compressed methods | excluded | Native whole-block transport is version-gated, but the common MosaicKV selector-plan bridge is not yet paper-gated. |",
             "| vLLM Qwen-7B / LLaVA-7B | unsupported in this bounded run | No matching current-lock parity pass was available before scheduling. |",
-            "| Native MosaicKV on vLLM/SGLang | unsupported | No safe request-scoped KV mutation API exists in the audited versions. |",
-            "| `mosaickv_proto` / `mosaickv_full` | unsupported | Safe post-RoPE prototype handling has not passed correctness. |",
+            "| Native MosaicKV on vLLM/SGLang | transport-only | Jobs 17869843/17871006 validate native whole-block transactions; no paper method row is authorized before selector-plan equivalence. |",
+            "| `mosaickv_proto` / `mosaickv_full` in the original 440-row run | absent | At execution time, safe post-RoPE prototype handling had not passed. Later adapter gates are not retroactively inserted. |",
             "| HF batch 2/4 | unsupported | Explicit HF adapters enforce batch size one. |",
             "",
             "## Interpretation limits",

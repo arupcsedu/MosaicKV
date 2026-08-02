@@ -1,0 +1,32 @@
+{
+  "classification": "exploratory_dirty_tree_repair_quality_fix_v1",
+  "index_sha": "d09dc4d3b8f49fb0e8472c0009ba30f91df980fa19b4bb1c6599d78d6083aa3b",
+  "manifest_count": 44,
+  "model_provenance": {
+    "model_id": "Qwen/Qwen2.5-VL-3B-Instruct",
+    "model_revision": "66285546d2b821cf421d4f5eb2576359d3770cd3",
+    "precision": "bf16"
+  },
+  "output_root": "/sfs/weka/scratch/djy8hg/runs/mosaickv/repair-quality-fix-v1",
+  "repairable_failures": [
+    [
+      "chartqa",
+      "chartqa:1447"
+    ]
+  ],
+  "software": {
+    "cuda": "12.8",
+    "driver": "595.71.05",
+    "numpy": "2.2.6",
+    "python": "3.11.15",
+    "pytorch": "2.8.0",
+    "sglang": "0.5.1.post3",
+    "transformers": "4.55.2",
+    "vllm": "0.10.2"
+  },
+  "source_provenance": {
+    "git_dirty": true,
+    "git_sha": "9e8b77c0cfe9af62d6a1a6ce5840a01543f17b72",
+    "patch_sha": "15c30f973f9196dac44b0bb9c7257e21b149b6799999490ef432d724710253c2"
+  }
+}

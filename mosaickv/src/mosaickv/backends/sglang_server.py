@@ -48,9 +48,16 @@ def main() -> None:
     # Preserve SGLang's ordinary launcher import order. Importing qwen_vl
     # directly before http_server initializes the quantization registry causes
     # an installed-source circular import through layers.linear/awq.
-    from sglang.srt.entrypoints.http_server import launch_server  # type: ignore[import-untyped]
-    from sglang.srt.server_args import prepare_server_args  # type: ignore[import-untyped]
-    from sglang.srt.utils import kill_process_tree  # type: ignore[import-untyped]
+    from sglang.srt.entrypoints.http_server import launch_server
+    from sglang.srt.server_args import prepare_server_args
+    from sglang.srt.utils import kill_process_tree
+
+    # The native patch is a no-op unless the controlled runtime explicitly
+    # exports MOSAICKV_NATIVE_SGLANG=1.  Install after SGLang's ordinary import
+    # order has initialized its modules and before scheduler construction.
+    from mosaickv.backends.sglang_native_patch import install
+
+    install()
 
     qwen_vl = importlib.import_module("sglang.srt.multimodal.processors.qwen_vl")
 

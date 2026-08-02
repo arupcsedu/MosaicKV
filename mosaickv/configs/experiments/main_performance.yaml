@@ -1,6 +1,6 @@
 matrix_schema_version: 1
 matrix_revision: 1
-capability_catalog_version: common-env-2026-07-25-v2
+capability_catalog_version: common-env-2026-08-02-v3
 experiment_id: main_performance
 description: Performance protocol reserved for a persistent unified microbenchmark runner.
 enabled: false
@@ -45,7 +45,4 @@ blocked:
     reason: The unified compressed-method runtime does not yet expose persistent 5-warmup/20-repetition microbenchmarks.
   - scope:
       backends: [hf_sdpa, hf_flash_attention_2, vllm, sglang]
-    reason: Backend correctness/parity gates must pass before systems comparisons are scheduled.
-  - scope:
-      models: [llava_onevision_7b_optional]
-    reason: The optional 7B model has no registered runtime adapter.
+    reason: Fused HF and serving FullKV paths are correctness-gated separately; native compressed rows remain unavailable.

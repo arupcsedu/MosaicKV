@@ -31,6 +31,7 @@ _REVISIONS = {
     "Qwen/Qwen2.5-VL-3B-Instruct": "66285546d2b821cf421d4f5eb2576359d3770cd3",
     "Qwen/Qwen2.5-VL-7B-Instruct": "cc594898137f460bfe9f0759e9844b3ce807cfb5",
     "llava-hf/llava-onevision-qwen2-0.5b-ov-hf": "74dd0bf867a4cda7950c17663794267c60cf4b40",
+    "llava-hf/llava-onevision-qwen2-7b-ov-hf": "0d50680527681998e456c7b78950205bedd8a068",
     "OpenGVLab/InternVL2_5-4B": "2cf4a8158bbc40d35015e7c63b527890de4d27b3",
 }
 
@@ -118,7 +119,13 @@ def test_pinned_checkpoint_16_token_parity() -> None:
     model_kwargs: dict[str, Any] = {
         "cache_dir": str(hub_cache),
         "device_map": "auto",
-        "torch_dtype": "auto",
+        # The pinned OneVision-7B config mixes a BF16 nested text dtype with
+        # FP16 stored tensors. Explicit BF16 converts every module uniformly;
+        # `auto` creates mixed lm_head/hidden dtypes and eager FP16 produced
+        # non-finite logits on the A100 gate.
+        "torch_dtype": (
+            torch.bfloat16 if model_id == "llava-hf/llava-onevision-qwen2-7b-ov-hf" else "auto"
+        ),
         "local_files_only": not allow_download,
     }
     adapter = load_hf_adapter(
@@ -193,3 +200,147 @@ def test_pinned_checkpoint_16_token_parity() -> None:
     assert reinjection.generated_tokens == 16
     assert reinjection.token_agreement == 1.0
     assert reinjection.maximum_logit_difference <= tolerance
+
+    if os.environ.get("MOSAICKV_VERIFY_THREE_TIER") == "1":
+        _verify_three_tier_runtime(adapter, messages, model_id, revision, record)
+
+
+def _verify_three_tier_runtime(
+    adapter: Any,
+    messages: tuple[Any, ...],
+    model_id: str,
+    revision: str,
+    provenance: dict[str, Any],
+) -> None:
+    """Exercise identity, prototypes, and a forced repair on one real checkpoint."""
+
+    import tempfile
+
+    from mosaickv.backends import HuggingFaceMosaicKVModel
+    from mosaickv.config import (
+        CacheConfig,
+        DatasetConfig,
+        ExecutionConfig,
+        ForecastingConfig,
+        GenerationConfig,
+        ModelConfig,
+        RepairConfig,
+        ResidualConfig,
+        RunConfig,
+    )
+    from mosaickv.evaluation.model import EvaluationRequest
+    from mosaickv.types import (
+        Backend,
+        BudgetUnit,
+        ForecastMode,
+        MosaicKVMethod,
+        Precision,
+        RepairPolicy,
+    )
+
+    precision = Precision.BF16 if adapter.model.dtype == torch.bfloat16 else Precision.FP16
+    dataset_revision = sha256(b"adapter-three-tier-validation-v1").hexdigest()
+
+    def config(method: MosaicKVMethod, retention_ratio: float) -> RunConfig:
+        repair_enabled = method is MosaicKVMethod.MOSAICKV_FULL and retention_ratio < 1.0
+        return RunConfig(
+            model=ModelConfig(model_id, revision, precision),
+            dataset=DatasetConfig(
+                "mosaickv/adapter-three-tier-validation",
+                dataset_revision,
+                "validation",
+            ),
+            execution=ExecutionConfig(Backend.HUGGINGFACE, "eager", 0, True),
+            generation=GenerationConfig(max_new_tokens=4),
+            cache=CacheConfig(2_147_483_647, BudgetUnit.BYTES, retention_ratio, 16),
+            method=method,
+            forecasting=ForecastingConfig(
+                enabled=method is not MosaicKVMethod.FULLKV,
+                mode=ForecastMode.PROMPT_WINDOW,
+                prompt_window=8,
+                draft_steps=0,
+                centroid_count=4,
+            ),
+            residual=ResidualConfig(
+                enabled=method is MosaicKVMethod.MOSAICKV_FULL,
+                require_pinned_memory=repair_enabled,
+            ),
+            repair=RepairConfig(
+                enabled=repair_enabled,
+                policy=RepairPolicy.ENTROPY if repair_enabled else RepairPolicy.NONE,
+                entropy_threshold=0.0,
+                max_blocks_per_step=1 if repair_enabled else 0,
+            ),
+        )
+
+    request = EvaluationRequest(
+        run_id="adapter-three-tier-validation",
+        sample_id="single-image",
+        task="synthetic_smoke",
+        messages=messages,
+        generation_kwargs={},
+    )
+    scratch_tmp = Path(os.environ["TMPDIR"])
+    with tempfile.TemporaryDirectory(prefix="hf-three-tier-", dir=scratch_tmp) as raw_directory:
+        directory = Path(raw_directory)
+        runs: dict[str, tuple[Any, dict[str, Any]]] = {}
+        for method, ratio in (
+            (MosaicKVMethod.FULLKV, 1.0),
+            (MosaicKVMethod.MOSAICKV_PROTO, 1.0),
+            (MosaicKVMethod.MOSAICKV_FULL, 1.0),
+            (MosaicKVMethod.MOSAICKV_PROTO, 0.5),
+            (MosaicKVMethod.MOSAICKV_FULL, 0.5),
+        ):
+            run_request = EvaluationRequest(
+                run_id=f"{method.value}-{ratio}",
+                sample_id=request.sample_id,
+                task=request.task,
+                messages=request.messages,
+                generation_kwargs=request.generation_kwargs,
+            )
+            output = HuggingFaceMosaicKVModel(
+                adapter,
+                config(method, ratio),
+                trace_directory=directory,
+            ).generate(run_request)
+            trace_path = next((directory / run_request.run_id).glob("*.json"))
+            runs[f"{method.value}:{ratio}"] = (
+                output,
+                json.loads(trace_path.read_text(encoding="utf-8")),
+            )
+        reference_trace = runs["fullkv:1.0"][1]
+        for identity in ("mosaickv_proto:1.0", "mosaickv_full:1.0"):
+            output, trace = runs[identity]
+            assert trace["generated_token_ids"] == reference_trace["generated_token_ids"]
+            assert output.metrics.compression_time == 0.0
+            assert trace["tier_mode"] == "retention_one"
+        for identity in ("mosaickv_proto:0.5", "mosaickv_full:0.5"):
+            output, trace = runs[identity]
+            assert output.metrics.generated_tokens == 4
+            assert trace["tier_mode"] == "three_tier"
+            assert trace["prototype_safety"]["safe"] is True
+            assert trace["prototypes"]
+            assert all(event["re_decode_count"] <= 1 for event in trace["repair_events"])
+        full_trace = runs["mosaickv_full:0.5"][1]
+        triggered = [event for event in full_trace["repair_events"] if event["triggered"]]
+        assert triggered, "forced entropy policy did not exercise residual restoration"
+        assert all(event["restored_block_ids"] for event in triggered)
+        assert all(event["restored_bytes"] > 0 for event in triggered)
+
+        provenance["three_tier_runtime"] = {
+            "model_id": model_id,
+            "model_revision": revision,
+            "retention_one_token_identity": True,
+            "compressed_tier_modes": {
+                identity: runs[identity][1]["tier_mode"]
+                for identity in ("mosaickv_proto:0.5", "mosaickv_full:0.5")
+            },
+            "prototype_phase_transform": full_trace["prototype_safety"][
+                "phase_transform_provenance"
+            ],
+            "triggered_repairs": len(triggered),
+            "maximum_redecode_count": max(
+                event["re_decode_count"] for event in full_trace["repair_events"]
+            ),
+        }
+        print(json.dumps(provenance, sort_keys=True))

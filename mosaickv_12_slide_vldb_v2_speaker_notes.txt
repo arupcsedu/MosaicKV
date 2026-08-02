@@ -1,0 +1,845 @@
+MosaicKV: Query-Forecasted Inter-Modal KV-Cache Compression
+Slide-by-slide speaker notes for mosaickv_12_slide_vldb_v2.tex
+
+Suggested pacing
+----------------
+Slides 1-6: problem and motivation, about 5 minutes.
+Slides 7-13: baselines and design overview, about 6 minutes.
+Slides 14-28: algorithm components and correctness, about 12 minutes.
+Slides 29-32: implementation and evaluation protocol, about 4 minutes.
+Slides 33-45: exploratory evidence, limitations, and research gates, about 12 minutes.
+Slides 46-47: conclusion and discussion, about 2 minutes.
+Slides 48-50: appendix; present only when relevant to a question.
+
+Evidence-language convention
+----------------------------
+“Design contract” describes intended or implemented behavior, not a measured
+performance result. “Measured exploratory” means the number is backed by a
+recorded run but is not yet a paper-scale result. “Pending” means the result
+must not be presented as validated. Preserve these distinctions while speaking.
+
+
+SLIDE 01 — MosaicKV: Query-Forecasted Inter-Modal KV-Cache Compression
+Purpose: Introduce the system and set an appropriately careful claim boundary.
+
+Speaker notes:
+Today I will present MosaicKV, a training-free system for compressing the
+multimodal key-value cache during vision-language model inference. The central
+idea is that cache entries should not be ranked independently using only past
+attention. Instead, MosaicKV forecasts future query demand, represents
+cross-modal evidence relationships, considers both keys and values, and retains
+a repair path for uncertain decoding decisions. I will separate the design and
+implementation from the small exploratory measurements. The latter demonstrate
+behavior and expose failure modes, but they are not yet final paper claims.
+
+Transition: I will first define the problem, then build the design component by
+component, and finally show comparative and systems evidence.
+
+
+SLIDE 02 — Talk Roadmap
+Purpose: Explain the structure of the presentation and the evidence labels.
+
+Speaker notes:
+The talk has three parts. First, I will explain why multimodal KV caches are a
+systems problem and why ordinary independent pruning is a scientific problem.
+Second, I will describe MosaicKV’s forecasting, evidence graph, value-aware
+selection, three-tier representation, and residual repair. Third, I will show
+baseline comparisons, ablations, systems measurements, and limitations. The
+labels are important: blue identifies design or implementation contracts, green
+identifies provenance-backed exploratory measurements, and red identifies
+pending evidence that should not enter a paper table.
+
+Transition: To see where compression is possible, start with how the cache is
+created and consumed.
+
+
+SLIDE 03 — How a Multimodal KV Cache Is Created and Reused
+Purpose: Give the minimum VLM and attention background needed for the talk.
+
+Speaker notes:
+The processor converts text and media into a joint sequence. During prefill,
+each transformer layer and KV head projects hidden states into keys and values.
+During every subsequent decoding step, the new query attends to this retained
+prefix and a new key-value pair is appended. The important asymmetry is that the
+prefix is produced once but read repeatedly. A mistaken eviction can therefore
+affect every future token, not just the first token after compression. This is
+why a cache compressor must preserve both addressability through K and the
+attention output carried by V.
+
+Transition: The repeated use of this state becomes expensive as multimodal
+prefixes grow.
+
+
+SLIDE 04 — The Systems Problem: Multimodal Prefixes Are Large
+Purpose: Quantify what controls KV memory and state the systems objective.
+
+Speaker notes:
+KV storage grows linearly with precision, layer count, KV-head count, head
+dimension, and sequence length. Multimodal sequence length includes text,
+visual patches, OCR and layout tokens, and video frames. Multi-image and video
+requests can therefore exceed the memory capacity that would otherwise support
+larger batches or more concurrent requests. Our primary systems target is
+measured active KV bytes. A reduction matters only if the resulting attention
+working set saves more time than forecasting, selection, and cache packing cost.
+
+Transition: Memory alone is not the whole challenge, because multimodal
+evidence is not a collection of independent tokens.
+
+
+SLIDE 05 — The Scientific Problem: Evidence Is Heterogeneous and Coupled
+Purpose: Motivate structured evidence preservation.
+
+Speaker notes:
+Consider a chart question asking which bar is largest. The answer may require a
+visual mark, a legend color, and an OCR axis label together. One element can have
+low prompt-time attention while remaining essential to the reasoning chain. An
+independent top-k rule can remove that weak-looking connector and destroy the
+answer. Evidence can also become relevant only later in decoding, or matter
+because its value vector changes the attention output even when its key receives
+moderate attention. MosaicKV therefore treats compression as evidence-set
+selection rather than isolated token ranking.
+
+Transition: These observations lead to both algorithmic and systems
+requirements.
+
+
+SLIDE 06 — Research Problem and Design Requirements
+Purpose: State the optimization problem and non-negotiable constraints.
+
+Speaker notes:
+The input is a full multimodal cache, an exact active-byte budget, and unknown
+future decoder queries. The output is a smaller cache state that preserves
+answer quality and ideally lowers decoding cost. Algorithmically, we need to
+anticipate future demand, cover related evidence, account for keys and values,
+and recover from selected mistakes. From the systems side, we need strict byte
+accounting, correct logical and RoPE positions, deterministic identity at full
+retention, and a favorable break-even point. We compare methods by realized
+active bytes, not nominal token-retention percentages.
+
+Transition: Before presenting MosaicKV, I will locate it relative to the main
+controls and published methods.
+
+
+SLIDE 07 — Baseline Landscape
+Purpose: Introduce every baseline and its main limitation.
+
+Speaker notes:
+FullKV is the quality and systems reference. Random and uniform retention test
+whether an apparently intelligent selector beats simple allocation under the
+same byte budget. Prompt Attention Top-k is the strongest simple online control.
+LOOK-M adds a text prior and pivot-based merging. PrefixKV allocates retention
+by an offline layer profile. The ICLR VL-Cache method uses attention sparsity and
+modality-aware, layer-adaptive pruning. MosaicKV combines forecast, graph, K/V
+utility, prototypes, and repair, but pays richer planning overhead. The methods
+ending in “reimpl” are local paper-faithful reimplementations, never official
+code.
+
+Transition: LOOK-M is the closest baseline in its use of KV merging, so I will
+contrast it first.
+
+
+SLIDE 08 — Baseline Deep Dive: LOOK-M vs. MosaicKV
+Purpose: Distinguish pivot merging from the full MosaicKV design.
+
+Speaker notes:
+Our LOOK-M reimplementation follows prompt self-attention scoring, a text prior,
+recent and high-score preservation, cosine-similar pivot assignment, and its
+documented merge rules. MosaicKV differs at every decision boundary: it includes
+temporary future queries, uses typed blocks and graph context, enforces exact
+byte budgets, permits only phase-safe clusters, and preserves indexed residuals
+for recovery. LOOK-M is a one-shot prompt-time merge method. MosaicKV treats
+merging as one optional representation tier inside a dynamic and recoverable
+state. LOOK-M’s documented LLaVA-1.5 MHA assumptions also limit fair model
+coverage.
+
+Transition: PrefixKV and VL-Cache differ in a second way: their budget is
+calibrated offline rather than planned per request.
+
+
+SLIDE 09 — Baseline Deep Dive: PrefixKV and VL-Cache vs. MosaicKV
+Purpose: Compare information signals, budget shape, granularity, and recovery.
+
+Speaker notes:
+PrefixKV derives a per-layer profile from a prompt-attention CDF and calibration
+search. VL-Cache measures attention sparsity and modality importance to assign a
+layer-adaptive budget. Both retain or evict exact positions and have no online
+recovery path. MosaicKV plans a block budget for the current request using
+forecasted attention, K/V utility, and graph coverage, then may represent
+compatible unselected blocks with prototypes and residuals. When PrefixKV is
+applied outside its official model assumptions, we explicitly call it
+generalized PrefixKV. Realized bytes and disclosed mandatory policies remain the
+comparison axis.
+
+Transition: Sophisticated methods are meaningful only if they also beat simple,
+well-controlled baselines.
+
+
+SLIDE 10 — Why Simple Baselines Still Matter
+Purpose: Explain the role of random, uniform, and prompt-attention controls.
+
+Speaker notes:
+Random KV checks whether a ranking actually outperforms deterministic chance.
+Uniform KV checks whether adaptive allocation across layers, heads, and
+modalities is useful. Prompt Top-k isolates the incremental value of forecast,
+graph structure, and value-aware utility over current attention alone. These are
+not throwaway baselines: they use the same block size, mandatory-token policy,
+byte budget, decode loop, and deterministic generation. They do not receive
+prototype merging or repair, because adding those features would no longer test
+the named baseline.
+
+Transition: With those controls defined, the next table summarizes MosaicKV’s
+structural novelty.
+
+
+SLIDE 11 — What Is Structurally Different About MosaicKV?
+Purpose: Summarize the feature-level differences in one table.
+
+Speaker notes:
+No comparison method combines all six columns. Existing methods mainly score
+past attention and perform one-shot pruning or merging. MosaicKV exact adds
+future-query forecasting, graph coverage, value-aware utility, and a submodular
+block budget. MosaicKV proto adds a phase-safe representation of compatible
+unselected evidence. MosaicKV full adds online residual repair. The hypothesis
+is not simply that more mechanisms are better. It is that a compact cache should
+jointly represent predicted demand, evidence coverage, value contribution, and
+recoverability instead of optimizing one prompt-time scalar.
+
+Transition: Here is that hypothesis as a single end-to-end system.
+
+
+SLIDE 12 — MosaicKV in One Slide
+Purpose: Establish the six-component mental model.
+
+Speaker notes:
+MosaicKV begins with the full prefetched cache. It estimates the query
+distribution that will consume the cache, builds a sparse graph among evidence
+blocks, computes value-aware utility, and selects blocks under an exact budget.
+Selected blocks stay exact. Compatible unselected evidence may be summarized by
+prototypes, while original sources can be retained in a CPU residual tier.
+During decoding, uncertainty can trigger a bounded restoration. These six
+mechanisms form the system contract; the next slides unpack them in execution
+order.
+
+Transition: First, I will trace one request through the complete pipeline.
+
+
+SLIDE 13 — End-to-End Compression Pipeline
+Purpose: Show ordering and state separation.
+
+Speaker notes:
+We prefill exactly once, derive modality spans, and blockize the full cache.
+Forecasting then estimates future queries; the graph and utility modules turn
+the cache into a selection problem; lazy greedy produces the active set. The
+runtime gathers exact blocks, optionally constructs prototypes, and stores
+residual sources before explicit token-by-token decoding. Three lengths remain
+separate: the packed physical cache length, the original logical sequence
+length, and the next decode position. This separation is essential for RoPE and
+attention-mask correctness.
+
+Transition: The first concrete data structure is the typed cache block.
+
+
+SLIDE 14 — Component 0: Typed Blockization and Logical Positions
+Purpose: Explain the common unit of selection and accounting.
+
+Speaker notes:
+MosaicKV partitions the sequence into fixed-size token blocks independently for
+every layer and KV head. A descriptor records physical indices, original logical
+positions, modality, token IDs when available, media metadata, dtype, device,
+byte size, and whether the block is mandatory. Blocks never cross layer or head
+boundaries. Although selected blocks may be packed densely, their logical
+positions remain monotonic and unchanged. This gives every method the same
+granularity and makes exact active-byte accounting possible.
+
+Transition: Once the candidate blocks exist, we estimate which ones future
+decoder queries will need.
+
+
+SLIDE 15 — Component 1: Future-Query Forecasting Modes
+Purpose: Explain prompt-window, draft-rollout, and hybrid forecasts.
+
+Speaker notes:
+Prompt-window mode summarizes queries from the last w prompt positions. It is
+cheap but cannot observe continuation behavior. Draft-rollout mode reuses the
+original prefill, performs r temporary greedy decode steps, records their query
+vectors, and then discards the draft tokens. Hybrid mode combines prompt
+statistics with normalized draft centroids and weights. The draft uses a cloned
+cache, so it cannot mutate the cache used by the final run. True future queries
+exist only in an evaluation-only oracle used to diagnose forecast quality.
+
+Transition: The output is not a predicted string; it is a distribution over
+future attention demand.
+
+
+SLIDE 16 — Why Forecasting Changes the Selection Problem
+Purpose: Connect forecast vectors to block-level attention estimates.
+
+Speaker notes:
+Prompt and draft queries are reduced to normalized centroids with explicit
+weights. Each centroid is compared with the pooled key descriptor of every
+block, and the weighted softmax mass becomes forecasted attention. Selection is
+therefore conditioned on likely continuation queries rather than only on the
+last observed prompt attention. We diagnose this approximation with cosine
+similarity to true future queries, attention-rank correlation, selected-block
+recall, and forecast regret. The oracle measures forecast error; it never informs
+the online result.
+
+Transition: Forecasted demand identifies likely blocks, but it does not yet
+capture evidence relationships.
+
+
+SLIDE 17 — Component 2: Sparse Cross-Modal Evidence Graph
+Purpose: Explain graph nodes, edge semantics, and scalable storage.
+
+Speaker notes:
+Every node is a typed KV block. Edges can encode semantic similarity,
+prompt-side co-activation, spatial adjacency, OCR or layout relations, temporal
+adjacency, shared regions, and explicit cross-modal alignment. A chart mark can
+therefore connect to a legend and OCR label; video evidence can connect across
+nearby frames. We keep only top-d neighbors and compute similarity in chunks, so
+normal execution stores sparse COO or CSR rather than an n-squared dense graph.
+This graph supplies coverage and redundancy information to selection.
+
+Transition: Not every plausible edge or cluster is valid, so compatibility is
+enforced before scoring.
+
+
+SLIDE 18 — Graph Compatibility Prevents Invalid Evidence Mixing
+Purpose: Describe fail-closed graph and merge constraints.
+
+Speaker notes:
+Edges and prototype assignments may be restricted to the same layer and KV
+head, approved modality pairs, bounded logical spans, and valid image, page, or
+frame metadata. If structured metadata is unavailable, we do not invent it. The
+fallback combines semantic top-d neighbors with local positional neighbors and
+preserves mandatory boundaries, while recording which edge sources are missing.
+We also report graph size, degree, connected components, modality mixing, and
+evidence-cluster coverage so an expensive but uninformative graph is visible.
+
+Transition: The graph now lets the utility function value both individual
+blocks and their substitutability.
+
+
+SLIDE 19 — Component 3: Value-Aware Block Utility
+Purpose: Explain why keys, values, coverage, and redundancy all matter.
+
+Speaker notes:
+For each block we combine forecasted attention, expected attention-output
+contribution, novelty relative to graph neighbors, coverage, modality rarity,
+redundancy, and mandatory priority. Attention mass measures how strongly a key
+may be addressed, but not what its value contributes or whether a neighbor can
+replace it. The equation shown follows the registered coefficient convention in
+the implementation; the important operational point is that contribution and
+novelty are preservation rewards after applying those signs and weights. The
+ablation later tests both logit and attention-output fidelity.
+
+Transition: Utility scores become a constrained set-selection problem rather
+than an unconstrained ranking.
+
+
+SLIDE 20 — Component 4: Budgeted Submodular Selection
+Purpose: Explain mandatory-first lazy greedy selection and exact budgets.
+
+Speaker notes:
+Mandatory blocks are selected first. Remaining candidates enter a lazy marginal-
+gain heap, and the top candidate is recomputed before acceptance. Fixed-size
+blocks use a cardinality budget; variable-size paths check exact bytes. Stable
+block identifiers provide deterministic tie-breaking, and every selected block
+records its marginal gain and reason. Facility and modality terms encourage
+coverage instead of repeated near-duplicates. For tiny graphs, exhaustive search
+measures the greedy optimality gap, and monotonicity or diminishing-return tests
+run only where the objective assumptions actually hold.
+
+Transition: Selection determines the anchors; the cache representation decides
+what to do with the remaining evidence.
+
+
+SLIDE 21 — Component 5: Three-Tier Cache State
+Purpose: Introduce exact, prototype, and residual storage and budget semantics.
+
+Speaker notes:
+Selected high-utility blocks remain unchanged in the exact tier. Compatible
+unselected blocks may be summarized by prototypes that remain active on the
+GPU. Their original sources can be indexed in a CPU residual tier for possible
+restoration. The primary serving budget counts exact plus prototype GPU bytes.
+Residual CPU bytes and transfer traffic are always reported separately, so the
+method cannot claim a misleading retention ratio by hiding a large residual
+store.
+
+Transition: The exact tier is the universal path and the basis of retention-one
+identity.
+
+
+SLIDE 22 — Exact Tier: The Universal Safety Path
+Purpose: Define selection-only MosaicKV and its invariants.
+
+Speaker notes:
+Exact-tier construction gathers or aliases selected blocks without changing any
+key or value. The packed tensors travel with their original logical positions
+and the correct next decode position. This produces mosaickv_exact: forecast,
+graph, utility, and budgeted selection, but no merge and no repair. Mandatory
+blocks remain exact, storage-derived byte counts must match the reported bytes,
+and full retention reconstructs the original cache exactly. If prototype
+geometry is not audited for a model, this is the safe fallback rather than an
+invalid approximation.
+
+Transition: Prototype compression is more aggressive, but RoPE makes naive
+averaging unsafe.
+
+
+SLIDE 23 — Prototype Tier: Compression Must Respect RoPE Geometry
+Purpose: Explain phase-safe prototype construction and rejection behavior.
+
+Speaker notes:
+Keys at different logical positions can carry different rotary phases. Averaging
+post-RoPE keys directly can produce a vector that corresponds to no meaningful
+position. A valid prototype path must move compatible keys to a common anchor
+frame, compute weighted K and V prototypes in FP32, cast back to the cache dtype,
+and associate the result with the anchor position. Clusters remain within one
+layer and head and obey modality and span constraints. If an audited inverse and
+re-anchoring transform is unavailable, merging is disabled and the runtime uses
+exact selection only.
+
+Transition: The residual tier preserves the source detail that prototypes may
+lose.
+
+
+SLIDE 24 — Residual Tier: A Recoverable Representation of Evicted Evidence
+Purpose: Explain residual indexing, placement, and accounting.
+
+Speaker notes:
+For each prototype, MosaicKV can preserve the original source K/V blocks on CPU,
+indexed by layer, head, prototype identifier, and logical position. The initial
+safe representation is lossless FP16 or BF16, with optional lower-precision
+storage studied separately. Pinned memory enables asynchronous transfer when the
+platform supports it; pageable placement remains explicit. Residual storage is
+not active GPU memory, but it is still real memory and must be reported. At full
+retention, no prototype or residual transformation occurs at all.
+
+Transition: During decoding, uncertainty signals decide whether any residual
+detail should return to the exact tier.
+
+
+SLIDE 25 — Component 6: Decode-Time Uncertainty Signals
+Purpose: Define entropy, prototype risk, and optional KL triggers.
+
+Speaker notes:
+At a provisional decode step, normalized token entropy measures output
+instability. Prototype risk multiplies current attention mass on a prototype by
+its dispersion, targeting compressed clusters that are both influential and
+heterogeneous. A cheap draft-distribution KL can be recorded or used only by a
+policy that explicitly names it. The online policies are none, entropy,
+prototype risk, and their disjunction. Oracle repair is evaluation-only and is
+isolated from online compression.
+
+Transition: A trigger starts a bounded state transaction, not an unbounded retry
+loop.
+
+
+SLIDE 26 — Residual Repair Is a Bounded Transaction
+Purpose: Walk through one repair event and its safeguards.
+
+Speaker notes:
+The runtime first produces provisional logits. If the policy triggers, it ranks
+prototype clusters by attention mass times dispersion, transfers at most R
+source blocks, promotes them to exact blocks, refreshes the affected prototype,
+and recomputes the current step once. Promoted blocks remain exact for later
+steps. If promotion would exceed the budget, the lowest-utility non-promoted
+prototype is evicted. Every event records the reason, positions, modalities,
+bytes, transfer and re-decode times, logit and token changes, and whether quality
+was recovered.
+
+Transition: These components form three named runtime methods for controlled
+ablation.
+
+
+SLIDE 27 — Three Runtime Methods Share One Pipeline
+Purpose: Define mosaickv_exact, mosaickv_proto, and mosaickv_full.
+
+Speaker notes:
+All three methods share forecast, graph, selector, mandatory policy, explicit
+decode, and byte accounting. mosaickv_exact retains selected blocks exactly.
+mosaickv_proto adds phase-safe prototypes when supported. mosaickv_full adds the
+residual tier and decode-time repair. Unsupported prototype geometry causes an
+explicit exact fallback; it must not masquerade as a successful prototype row.
+At retention one, all method names take the same transformation-free FullKV path
+within the documented numerical tolerance.
+
+Transition: That identity rule is one member of a larger correctness contract.
+
+
+SLIDE 28 — Correctness Invariants Are Part of the Design
+Purpose: Emphasize correctness as a first-class research contribution.
+
+Speaker notes:
+Compression is invalid if cache ownership, byte accounting, positions, or
+request isolation are wrong, even when generated text looks plausible. The
+cache invariants enforce unique block ownership, non-conflicting tiers, exact
+storage accounting, mandatory retention, monotonic logical positions, and
+retention-one reconstruction. Runtime invariants protect cloned draft state,
+next-token position, single re-decode, post-repair budgets, request isolation,
+and explicit rejection of unsupported kernels. CPU property tests cover random
+shapes and synthetic cases; real checkpoints and serving engines require
+separate GPU gates.
+
+Transition: I will now show how those abstractions map into the software stack.
+
+
+SLIDE 29 — Implementation Architecture
+Purpose: Present the package organization and provenance path.
+
+Speaker notes:
+The front end is YAML plus CLI. The evaluation registry emits raw JSONL and
+Parquet aggregates, while manifests and structured logs preserve provenance.
+Model adapters expose cache layout, queries, modalities, and logical positions.
+The algorithm modules implement forecast through repair, and backend modules
+provide explicit HF decoding plus serving wrappers. The common environment is
+Python 3.11, Torch 2.8 with CUDA 12.8, Transformers 4.55.2, and FlashAttention
+2.8.3. Deterministic ledgers, failed-row preservation, and resume by run and
+sample ID support reproducible evaluation.
+
+Transition: The Hugging Face runtime is the most instrumentable reference path.
+
+
+SLIDE 30 — Hugging Face Runtime: Explicit Prefill and Decode
+Purpose: Explain why the compressed path does not use model.generate().
+
+Speaker notes:
+The runtime prepares multimodal inputs, executes prefill explicitly, captures
+K/V, query projections, and modality mappings, constructs the selected cache,
+and then decodes one token at a time. This explicit loop is necessary because
+the cache must be inspected and replaced between prefill and decode, and again
+during repair. Hooks observe q_proj without modifying weights. Eager attention
+is the complete instrumentation path. SDPA and FlashAttention-2 exact-decode
+paths are enabled only after token-parity gates and remain labeled by their true
+prefill and decode configuration.
+
+Transition: Serving engines require a different kind of integration because
+they own physical block allocation and scheduler metadata.
+
+
+SLIDE 31 — Serving Backends: Real Native Transport, Narrow Support
+Purpose: State what the vLLM and SGLang integrations do and do not prove.
+
+Speaker notes:
+The vLLM plugin can release whole physical blocks after prefill, update worker
+and scheduler tables, construct compact attention metadata, and preserve logical
+or multimodal RoPE positions. The SGLang patch compacts request-to-token
+ownership, frees KV-pool slots, preserves logical positions, and fixes release
+bookkeeping. Both paths fail closed for features that invalidate the transaction,
+such as prefix or Radix caching, CUDA graphs, speculation, or unaudited kernels.
+These are native physical-transport gates. Common-selector equivalence is still
+pending, and serving prototypes and repair are unsupported.
+
+Transition: Whether the backend is HF or a serving engine, scientific comparison
+requires the same controlled protocol.
+
+
+SLIDE 32 — Fair Evaluation Protocol
+Purpose: Define apples-to-apples comparison and reporting rules.
+
+Speaker notes:
+Every direct comparison fixes prompt text, media, processor, chat template,
+tokenization, output length, deterministic decoding, weights and revision,
+precision, attention implementation, mandatory policy, and realized active-byte
+budget. Timing uses the same warmups and synchronization boundaries, and every
+row records software, GPU, seed, and failure status. We report task-local scores,
+memory, phase-separated latency, fidelity diagnostics, and repair outcomes.
+Incompatible benchmark metrics are not silently averaged, and synthetic values
+never appear in measured tables.
+
+Transition: With that protocol in mind, I will show what the current bounded
+experiments establish—and what they do not.
+
+
+SLIDE 33 — Exploratory GPU Pilot: What Was Compared
+Purpose: Establish the pilot’s scope and passed invariants before showing scores.
+
+Speaker notes:
+The diagnostic pilot used Qwen2.5-VL-3B in BF16 with HF eager attention: twenty
+examples each from MMStar, TextVQA, and ChartQA, four retention ratios, and 32
+deterministic output tokens. All 1,740 rows completed. Retention-one identity,
+monotonic active bytes, equal sample-level budgets, seeded random reproducibility,
+complete timing, and revision recording passed. This is a clean-SHA diagnostic,
+not a paper result. LOOK-M is unsupported on Qwen GQA, PrefixKV is generalized,
+and pilot prototype/full labels used exact safety fallbacks.
+
+Transition: The equal-budget scores revealed an important negative result.
+
+
+SLIDE 34 — Pilot Baseline Comparison at Equal 20% Active KV Budget
+Purpose: Present the early selector failure honestly and motivate the redesign.
+
+Speaker notes:
+At the same sample-level active bytes, Prompt Top-k preserved the FullKV TextVQA
+score and reached 0.50 on ChartQA; generalized PrefixKV reached 0.72 and 0.65 on
+those tasks. The early MosaicKV exact selector improved MMStar from 0.55 to 0.60
+but collapsed to zero on TextVQA and ChartQA. This is not evidence for MosaicKV
+superiority. It identified a real design bug: utility scales and evidence
+allocation were not sufficiently modality balanced. The response was normalized
+utility, explicit evidence reserves, and disjoint calibration and evaluation
+ledgers.
+
+Transition: A small held-out boundary check tested whether that selector fix
+moved the memory frontier in the intended direction.
+
+
+SLIDE 35 — Post-Pilot Selector Diagnostic: Same Quality at Half the Active Bytes
+Purpose: Show the best current memory result without overstating it.
+
+Speaker notes:
+On five disjoint DocVQA examples, FullKV, Prompt Top-k at 20 percent, and
+MosaicKV exact at 10 percent all scored five out of five. MosaicKV used 7.56 MB
+versus 15.14 MB for Prompt Top-k, or 50.1 percent fewer active KV bytes at the
+same score. Compression time was slightly lower for MosaicKV, but end-to-end
+latency was one percent higher. This demonstrates a promising memory-frontier
+point, not a statistically reliable quality win or a latency win. The run also
+has dirty-tree provenance, so it cannot support a final paper table.
+
+Transition: The ablations help explain which component changed block selection.
+
+
+SLIDE 36 — Ablation: Forecasting Improves Block Recall
+Purpose: Report forecast diagnostics and the gap between recall and task score.
+
+Speaker notes:
+In this bounded A100 ablation, hybrid forecasting improved mean selected-block
+recall against the oracle by 0.2888 compared with no forecast. Forecast regret
+also generally fell. However, task-score effects were inconsistent: DocVQA
+improved, ChartQA declined, and MMStar and Video-MME did not change. This is an
+important distinction. Forecasting can identify more oracle-selected blocks
+without guaranteeing that the selected evidence produces a better final answer.
+The sample size is tiny, so the result supports mechanism diagnosis only.
+
+Transition: Graph, value utility, and prototypes show similarly nuanced effects.
+
+
+SLIDE 37 — Ablation: Graph, Value Utility, and Prototypes
+Purpose: Summarize the current component-level evidence, including mixed results.
+
+Speaker notes:
+The graph increased facility coverage, but task scores did not change on this
+small slice, so we cannot claim a structured-task advantage. Removing value
+awareness increased attention-output error by 0.0023, which supports the intended
+local-fidelity role, but reduced logit KL by 0.0085, so the fidelity metrics are
+mixed. At equal active bytes, measured phase-safe prototypes substantially
+reduced attention-output error and logit KL relative to exact-only rows, while
+task scores tied. The safe conclusion is that prototypes improved internal
+fidelity here, not demonstrated benchmark quality.
+
+Transition: Repair gives one concrete example where internal risk detection did
+recover an answer, but its cost remains high.
+
+
+SLIDE 38 — Repair Case Study and Policy Trade-off
+Purpose: Show a representative successful repair and aggregate costs.
+
+Speaker notes:
+For ChartQA example 1447, FullKV answered 2980.2. The compressed no-repair path
+dropped a digit and answered 298.6. Guarded prototype-risk repair restored image
+blocks, re-decoded the current token, and answered 2980.05, recovering the task
+score. Across seven examples, the score sum improved from four to five, with no
+incorrect answer changes. But only one in four triggers was beneficial, mean
+repair latency was 341 milliseconds, and paired end-to-end cost increased by
+3.983 seconds. Lower-precision residuals halved storage but did not lower
+latency because re-decode and dequantization dominated the small transfer.
+
+Transition: That overhead is part of a broader systems question: when do fewer
+KV bytes actually translate into faster inference?
+
+
+SLIDE 39 — Systems Microbenchmark: Memory and Compression Overhead
+Purpose: Present the systems campaign and its main lesson.
+
+Speaker notes:
+The bounded A100 campaign contains 440 per-trial rows, with five warmups and
+twenty timed repetitions per point. The plots relate decode latency to active
+memory and isolate compression overhead. The central result is that reducing
+active bytes is necessary but not sufficient for speed. Forecasting, graph
+construction, Python-side selection, and cache packing can dominate, especially
+for short outputs. These measurements use a controlled synthetic visual
+workload and a staged patch, so they are engineering diagnostics rather than
+paper-eligible performance results.
+
+Transition: Two implementation changes show that the decode path itself can
+benefit once packing overhead is controlled.
+
+
+SLIDE 40 — What Reduced Decode Latency—and What Still Dominates
+Purpose: Identify measured speedups and the remaining bottleneck.
+
+Speaker notes:
+At identical active bytes and 64 output tokens, the dense exact fast path reduced
+MosaicKV p50 decode from the Prompt Top-k value of 3.396 seconds to 3.338 seconds.
+The changes were vectorized layer gathers, dense all-valid cache handling, and
+append-only decode storage. At a smaller cache, eager prefill followed by SDPA
+decode reduced MosaicKV p50 decode by 10.5 percent and end-to-end time by 7.6
+percent. Yet at the matched Prompt Top-k comparison, MosaicKV still paid 0.778
+seconds of compression overhead and lost end to end. Forecast and graph planning
+are therefore the next optimization target.
+
+Transition: Before interpreting backend performance, we also validate numerical
+parity and identity.
+
+
+SLIDE 41 — Backend Correctness: Reference and FullKV Paths
+Purpose: Separate validated reference paths from compressed native execution.
+
+Speaker notes:
+HF eager is the instrumented reference. The SDPA and FlashAttention-2 exact
+decode paths passed their listed token-parity gates and retention-one identity,
+with eager prefill retained where scoring requires instrumentation. vLLM FullKV
+matched HF for 16 tokens with prefix caching disabled. SGLang FullKV matched the
+HF-SDPA reference for 32 tokens on its Torch-native path. These serving rows
+validate deterministic FullKV wrappers; they are not compressed MosaicKV rows.
+Native publication requires physical compaction and selector integration to pass
+with logical positions, bytes, and request isolation together.
+
+Transition: The next slide states exactly which native transaction properties
+have already passed.
+
+
+SLIDE 42 — Native Physical Compaction: What Is Proven
+Purpose: Report native transport validation without implying method completion.
+
+Speaker notes:
+Both the installed vLLM and SGLang transport paths reduced an 18-block request
+to nine blocks, preserved retention-one identity and logical positions, and
+passed repeated selection plus A-B-A request-isolation tests. In the measured
+A100 gates, active cache bytes fell from 11,132,928 to 5,824,512 per request at
+retention 0.5. What remains pending is the end-to-end common MosaicKV selector
+bridge and selection-equivalence proof. These are genuine native physical
+transactions, but they are not yet native MosaicKV method results, and no
+simulated row is shown.
+
+Transition: We can now map each mechanism back to the original research problem.
+
+
+SLIDE 43 — How the Design Addresses the Research Problem
+Purpose: Synthesize the problem-to-mechanism argument.
+
+Speaker notes:
+Each design element addresses a specific failure mode. Forecasting addresses
+future demand that prompt scores cannot see. The evidence graph preserves linked
+multimodal chains. Value-aware utility accounts for attention-output behavior.
+Facility coverage and prototypes reduce redundancy. Residual repair provides a
+bounded response to rare high-risk errors. Logical-position maps and phase-safe
+transforms protect RoPE correctness under physical packing. Finally,
+phase-separated timing makes the systems break-even point explicit. MosaicKV is
+therefore a coordinated design, not merely a new ranking score.
+
+Transition: The same mapping also makes the current gaps easy to state.
+
+
+SLIDE 44 — Current Limitations and Negative Findings
+Purpose: Make limitations visible before the conclusion.
+
+Speaker notes:
+Most component evidence comes from only one to seven examples and sometimes a
+dirty worktree. The early selector failed OCR and chart tasks. Graph coverage
+has not yet produced a measured structured-task score advantage. Repair has low
+precision and material end-to-end cost. On the systems side, planning can erase
+decode savings; HF scoring still begins in eager prefill; common-selector
+equivalence for vLLM and SGLang is pending; and native serving prototypes and
+repair remain unsupported. These are explicit engineering and experimental
+targets, not exclusions hidden from the comparison.
+
+Transition: The next slide turns those limitations into concrete publication
+gates.
+
+
+SLIDE 45 — What Must Pass Before a Paper-Scale Claim?
+Purpose: Define the checklist for scientifically defensible results.
+
+Speaker notes:
+Paper-scale evidence begins from a clean immutable commit and pinned model and
+dataset revisions. Every model and backend must pass retention-one parity. Every
+comparison must match sample-level bytes, prompts, media, precision, and output
+length. Calibration and evaluation examples must remain disjoint. Results must
+appear per model and task with paired confidence intervals before any macro
+summary. Systems points require warmups and repeated synchronized trials.
+Native rows need common-selector equivalence, failures must remain visible, and
+the paper must show regimes where MosaicKV is not Pareto-optimal.
+
+Transition: With those boundaries, I can summarize the contribution and the
+current state in one slide.
+
+
+SLIDE 46 — Takeaways
+Purpose: Deliver the central contribution, evidence, and open problem.
+
+Speaker notes:
+MosaicKV reframes multimodal KV compression as forecasted, structured,
+value-aware, budgeted, and recoverable evidence selection. Algorithmically, it
+combines future-query forecasts, sparse evidence graphs, and submodular block
+selection. Its representation uses exact blocks, phase-safe prototypes, and
+indexed residuals. Its runtime uses explicit decoding, bounded repair, exact
+byte accounting, and fail-closed backend support. Tiny held-out diagnostics show
+that it can preserve quality at much smaller active-memory points and can
+slightly improve decode latency after dense packing. Planning and repair cost,
+as well as paper-scale generalization, remain open.
+
+Transition: I will close with the design trade-off that should guide discussion.
+
+
+SLIDE 47 — Discussion
+Purpose: Invite questions around the core systems trade-off.
+
+Speaker notes:
+The central question is not whether compression can remove more tokens. It is
+how much forecast quality and evidence structure are worth paying for in
+planning cost, how aggressively active memory should be reduced, and how much
+repair risk and residual storage are acceptable. Different workloads may choose
+different points: short answers may favor simple exact pruning, while long
+decodes or reusable plans may amortize richer selection. I welcome questions on
+the algorithm, correctness, backend integration, or experimental design.
+
+Transition: The remaining slides are appendix material for technical questions.
+
+
+SLIDE 48 — Appendix: Attention Fidelity and Forecast Regret
+Purpose: Provide a mathematical explanation for key/value scoring and forecast
+diagnostics. Use on demand.
+
+Speaker notes:
+The first bound is a local perturbation view of attention. Errors in both K and V
+contribute to attention-output error, which motivates measuring addressability
+and value reconstruction instead of attention mass alone. The second expression
+decomposes regret into error from forecasting Q and error from selecting under
+that forecast. Future-query cosine and attention-rank diagnostics probe the
+first term; exhaustive tiny-graph comparisons probe the selector term. These
+are explanatory bounds and diagnostics, not a claim of a global tight guarantee
+for the complete neural network.
+
+
+SLIDE 49 — Appendix: Submodularity and the Systems Break-Even Point
+Purpose: Explain selection assumptions and when compression can be faster. Use
+on demand.
+
+Speaker notes:
+Lazy greedy has its familiar approximation behavior only when the registered
+coverage terms are monotone submodular and the utility is compatible with those
+assumptions. The tests therefore check monotonicity and diminishing returns only
+in valid configurations and compare tiny instances with brute force. The
+systems inequality is equally important: forecast, graph, selection, packing,
+and repair must cost less than the decode time they save. Longer outputs, larger
+visual prefixes, batching, or reusable plans improve amortization; short outputs
+can rationally favor Prompt Top-k or another simpler method.
+
+
+SLIDE 50 — Appendix: Reproducibility Pointers
+Purpose: Direct reviewers to implementation, provenance, and analysis artifacts.
+Use on demand.
+
+Speaker notes:
+This slide maps every major claim category to a repository artifact: governance
+and scientific rules, algorithm modules, backend implementations, baseline
+specifications, raw pilot provenance, and the ablation, performance, repair, and
+native-backend reports. The data policy is strict: every numerical result in the
+deck is copied from a measured aggregate or an analysis backed by raw rows.
+Design-only diagrams contain no fabricated performance values. For a review or
+artifact evaluation, this table is the starting point for tracing a slide claim
+back to code, configuration, manifest, and measurements.
+
+
+End of speaker notes.

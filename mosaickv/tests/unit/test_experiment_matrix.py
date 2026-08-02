@@ -60,18 +60,19 @@ def test_versioned_matrices_cover_required_vocabularies(name: str) -> None:
     expand_experiment_matrix(matrix)
 
 
-def test_unsupported_backend_is_rejected_before_expansion() -> None:
+def test_vllm_fullkv_is_admitted_for_checkpoint_gated_qwen() -> None:
     payload = _payload()
     sweeps = payload["sweeps"]
     assert isinstance(sweeps, list)
     assert isinstance(sweeps[0], dict)
     sweeps[0]["backends"] = ["vllm"]
+    del sweeps[1:]
     matrix = ExperimentMatrix.from_mapping(payload)
 
-    with pytest.raises(
-        ExperimentMatrixError, match=r"unsupported combination.*artifact has not passed"
-    ):
-        expand_experiment_matrix(matrix)
+    runs = expand_experiment_matrix(matrix)
+
+    assert runs
+    assert {run.config.execution.backend.value for run in runs} == {"vllm"}
 
 
 @pytest.mark.parametrize("backend", ("hf_sdpa", "hf_flash_attention_2"))
@@ -108,16 +109,19 @@ def test_video_task_is_rejected_for_image_only_model() -> None:
         expand_experiment_matrix(matrix)
 
 
-def test_prototype_method_is_rejected_until_adapter_gate_passes() -> None:
+def test_prototype_method_is_admitted_after_adapter_phase_transform_gate() -> None:
     payload = _payload()
     sweeps = payload["sweeps"]
     assert isinstance(sweeps, list)
     assert isinstance(sweeps[0], dict)
     sweeps[0]["methods"] = ["mosaickv_proto"]
+    del sweeps[1:]
     matrix = ExperimentMatrix.from_mapping(payload)
 
-    with pytest.raises(ExperimentMatrixError, match="disable prototype merge"):
-        expand_experiment_matrix(matrix)
+    runs = expand_experiment_matrix(matrix)
+
+    assert runs
+    assert {run.config.method.value for run in runs} == {"mosaickv_proto"}
 
 
 @pytest.mark.parametrize(

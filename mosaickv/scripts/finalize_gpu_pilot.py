@@ -884,8 +884,9 @@ def _report(
             "Those design differences are disclosed, not normalized away.",
             "- These are single-pass quality/timing observations, not the configured 5-warmup, "
             "20-repetition systems microbenchmark protocol.",
-            "- Qwen cached keys are post-RoPE, so prototype merging and residual repair are "
-            "disabled rather than executed unsafely.",
+            "- Qwen cached keys are post-M-RoPE. Prototype rows require the exact "
+            "Transformers-4.55.2 model-derived inverse/anchor transform; a missing or "
+            "mismatched transform fails closed.",
             "- Any failed sample remains in raw JSONL and prevents a complete-cohort claim.",
             "",
             "## Derived artifacts",

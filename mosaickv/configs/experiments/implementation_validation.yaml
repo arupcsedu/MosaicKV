@@ -1,6 +1,6 @@
 matrix_schema_version: 1
 matrix_revision: 1
-capability_catalog_version: common-env-2026-07-25-v2
+capability_catalog_version: common-env-2026-08-02-v3
 experiment_id: implementation_validation
 description: Predeclared 33-job implementation-quality gate for paired, byte-matched HF eager FullKV, simple baselines, LOOK-M on LLaVA, and MosaicKV exact selection.
 enabled: true
@@ -123,9 +123,6 @@ blocked:
   - scope:
       backends: [hf_sdpa, hf_flash_attention_2, vllm, sglang]
     reason: This implementation gate uses only the HF eager mutable-cache path that passed the current correctness gate.
-  - scope:
-      methods: [mosaickv_proto, mosaickv_full]
-    reason: Registered adapters currently disable prototype merging and residual repair; this gate validates mosaickv_exact only.
   - scope:
       methods: [prefixkv_reimpl]
     reason: A paper-eligible immutable offline profile and disjoint calibration IDs are not available for this short gate.

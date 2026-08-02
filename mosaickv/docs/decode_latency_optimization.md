@@ -133,10 +133,12 @@ for every method.
 Lower active KV bytes do not guarantee lower latency when the remaining
 attention work is smaller than MLP, projection, Python, or synchronization
 overheads. Results must therefore report both active bytes and measured p50/p95
-decode latency. Native vLLM/SGLang cache mutation, post-RoPE prototype merging,
-and residual repair remain fail-closed until their independent correctness
-gates pass; simulated rows are prohibited. The one exception is the audited
-HF eager Qwen2.5-VL/Transformers-4.55.2 path. Its v17 Video-MME diagnostic
+decode latency. Version-pinned whole-block cache mutation now passes transport
+gates for vLLM 0.10.2 and SGLang 0.5.1.post3, but paper rows remain fail-closed
+until the common selector-plan bridge passes. Serving-engine prototype merging
+and residual repair also remain unsupported; simulated rows are prohibited.
+The audited HF eager Qwen2.5-VL/Transformers-4.55.2 path supports those tiers.
+Its v17 Video-MME diagnostic
 reduced tier construction from 317.7 to 22.0 seconds through grouped gather and
 single materialization; this is compression-overhead evidence, not a decode-
 latency or paper claim.

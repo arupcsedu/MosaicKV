@@ -35,7 +35,7 @@ class AdapterRegistry:
 
 
 def default_registry() -> AdapterRegistry:
-    """Return adapters for the five models in the audited capability matrix."""
+    """Return adapters for the six models in the audited capability matrix."""
 
     return AdapterRegistry(
         [
@@ -77,6 +77,14 @@ def default_registry() -> AdapterRegistry:
                 audited_revision="74dd0bf867a4cda7950c17663794267c60cf4b40",
                 architecture="LlavaOnevisionForConditionalGeneration",
                 cache_layout="24 x (K,V)[B,2,S,64]",
+                capabilities=ModelCapabilities(True, True, True, True, True, False, True, True),
+            ),
+            StaticModelAdapter(
+                name="llava_onevision_7b",
+                pattern=r"llava-hf/llava-onevision-qwen2-7b-ov-hf",
+                audited_revision="0d50680527681998e456c7b78950205bedd8a068",
+                architecture="LlavaOnevisionForConditionalGeneration",
+                cache_layout="28 x (K,V)[B,4,S,128]",
                 capabilities=ModelCapabilities(True, True, True, True, True, False, True, True),
             ),
         ]

@@ -211,12 +211,13 @@ class or a fail-safe fallback is not experimental support.
 
 | Model(s) | Method(s) | Status and exact reason |
 |---|---|---|
-| All five audited HF models | `mosaickv_proto`, `mosaickv_full` below retention 1.0 | Unsupported. Every adapter declares post-RoPE keys, `supports_prototype_merge=False`, and `supports_residual_repair=False`; the runtime uses an exact-only safety fallback. See the capability declarations for [LLaVA-1.5](../src/mosaickv/adapters/huggingface/llava.py#L24), [Qwen2.5-VL](../src/mosaickv/adapters/huggingface/qwen2_5_vl.py#L26), [OneVision](../src/mosaickv/adapters/huggingface/llava_onevision.py#L24), and [InternVL](../src/mosaickv/adapters/huggingface/internvl.py#L49). |
+| InternVL2.5-4B | `mosaickv_proto`, `mosaickv_full` below retention 1.0 | Unsupported. Its post-RoPE remote-code cache has no audited phase transform, so the runtime remains exact-only. |
+| Qwen2.5-VL, LLaVA-1.5, LLaVA-OneVision | canonical paper-result `mosaickv_proto`/`mosaickv_full` rows | Awaiting clean-worktree reruns. Their audited eager phase transforms and exploratory checkpoint gates establish implementation support, but dirty validation evidence is not a measured paper row. |
 | Qwen2.5-VL 3B/7B, LLaVA-OneVision 0.5B, InternVL2.5 4B | `lookm_reimpl` | Unsupported. The current reimplementation is restricted to the LLaVA-1.5 MHA path and rejects unequal query/KV head counts; no cross-family paper-faithful parity gate exists. |
 | Qwen2.5-VL 3B/7B, LLaVA-OneVision 0.5B, InternVL2.5 4B | paper-faithful `prefixkv_reimpl` | Unsupported under that claim. The executable path is explicitly `generalized_prefixkv_reimpl`; it is not official or LLaVA-parity PrefixKV. |
-| Qwen2.5-VL 7B, LLaVA-OneVision 0.5B, InternVL2.5 4B | all nine paper-result rows | Unsupported pending an exact-revision checkpoint/runtime acceptance gate. Static adapter registration is not load evidence. |
+| Qwen2.5-VL 7B, LLaVA-OneVision 0.5B, InternVL2.5 4B | all nine paper-result rows | Unsupported pending an exact-revision checkpoint/runtime acceptance gate. Static adapter registration is not load evidence. The separately pinned OneVision-7B adapter has exploratory runtime evidence but is not part of this older five-model audit artifact. |
 | LLaVA-1.5 7B and Qwen2.5-VL 3B | `vl_cache_reimpl` paper-result rows | Unsupported pending a checkpoint-specific VL-Cache run and retention-1 parity gate. The implementation and synthetic equation tests alone are insufficient. |
-| Every model | native compressed methods on vLLM or SGLang | Unsupported. Only verified FullKV serving rows are admitted; native cache mutation remains fail closed. |
+| Every model | paper-method compressed rows on vLLM or SGLang | Unsupported in this audit. Later version-pinned jobs validate native whole-block transport, but the common forecast/graph/utility selector plan has not yet passed an equivalence gate; no transport-only run is relabeled as a paper method. |
 | Audited HF models | compressed SDPA/FlashAttention-2 prefill | Unsupported because fused prompt-attention evidence is unavailable. Explicit eager-prefill/SDPA-decode exact mode is a separately labeled all-valid, no-repair design and must be compared only under the same backend pair. |
 
 At retention 1.0, every compression method is required to take the exact

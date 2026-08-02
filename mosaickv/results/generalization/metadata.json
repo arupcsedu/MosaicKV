@@ -1,0 +1,58 @@
+{
+  "analysis_script_sha": "99ac42074bd275cc06c8903c7b9e637c1e35ea080f38c92a89770221f6d9113a",
+  "calibration_model": "Qwen/Qwen2.5-VL-3B-Instruct",
+  "calibration_sample_ids": [
+    "docvqa:58425",
+    "docvqa:59264"
+  ],
+  "calibration_task": "docvqa",
+  "classification": "exploratory_dirty_tree_hyperparameter_generalization_v1",
+  "evaluation_index_sha": "f6a8a5110fcc2a1138fbf6ce5d8f4100bba77421d6b72c207b5fb9055bbec4bb",
+  "evaluation_source_provenance": [
+    {
+      "git_dirty": true,
+      "git_sha": "9e8b77c0cfe9af62d6a1a6ce5840a01543f17b72",
+      "patch_sha": "b1242ef9d2cb43191fbf0d5bc04c0ee0f55be7b74645db587f60423ec3b7a5b2"
+    }
+  ],
+  "frozen_hyperparameter_sha": "53e1eeebbfd08b9c90b2100878590c39c4fe17bffb570d765f853d6dfb60c598",
+  "frozen_hyperparameters": {
+    "block_size": 16,
+    "centroid_count": 4,
+    "draft_steps": 4,
+    "forecast_mode": "hybrid",
+    "graph_max_neighbors": 24,
+    "minimum_stratum_fraction": 0.0,
+    "preserve_partial_prototype": true,
+    "prompt_window": 16,
+    "prototype_group_size": 12,
+    "prototype_max_position_span": 256,
+    "repair_candidate_ranking": "risk_weighted_reconstruction_error",
+    "repair_entropy_threshold": 0.01,
+    "repair_max_blocks_per_step": 1,
+    "repair_policy": "prototype_risk",
+    "repair_prototype_risk_min_entropy": 0.005,
+    "repair_prototype_risk_threshold": 1e-06,
+    "retention_ratio": 0.2
+  },
+  "frozen_winner": "hybrid4",
+  "hf_logit_parity_artifact": {
+    "measurement": "same_prefix_full_vocabulary_fullkv_backend_logit_parity",
+    "path": "/sfs/weka/scratch/djy8hg/runs/mosaickv/generalization-backend-logits-v1/summary.json",
+    "sha256": "08a26619b6d602c057450d67827da812a6d40adbf0609f81032290f2e5e8f96a"
+  },
+  "prior_parity_artifacts": [
+    {
+      "path": "/sfs/weka/scratch/djy8hg/runs/mosaickv/vllm-fullkv-0.10.2-fix9/parity/ci-red.json",
+      "sha256": "46675bdc943a8cc5ebf2f93dcc387196faf2fd6bbb534f3dc3557774cdb6e668"
+    },
+    {
+      "path": "/sfs/weka/scratch/djy8hg/runs/mosaickv/sglang-fullkv-0.5.1-fix8/parity-sdpa/ci-red.json",
+      "sha256": "3f46caecba2ed8b579194e179d134322f0f377e425c96e22e24abd37d220cbe7"
+    },
+    {
+      "path": "/sfs/weka/scratch/djy8hg/runs/mosaickv/sglang-fullkv-0.5.1-fix8/parity-sdpa/ci-white.json",
+      "sha256": "a583a2635161cbd8b2ce0edac71be11bfe55ff3599172b5b08c6ea6867e8ee33"
+    }
+  ]
+}

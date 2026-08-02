@@ -39,6 +39,7 @@ REVISIONS = {
     "Qwen/Qwen2.5-VL-3B-Instruct": "66285546d2b821cf421d4f5eb2576359d3770cd3",
     "Qwen/Qwen2.5-VL-7B-Instruct": "cc594898137f460bfe9f0759e9844b3ce807cfb5",
     "llava-hf/llava-onevision-qwen2-0.5b-ov-hf": "74dd0bf867a4cda7950c17663794267c60cf4b40",
+    "llava-hf/llava-onevision-qwen2-7b-ov-hf": "0d50680527681998e456c7b78950205bedd8a068",
     "OpenGVLab/InternVL2_5-4B": "2cf4a8158bbc40d35015e7c63b527890de4d27b3",
 }
 
@@ -504,7 +505,9 @@ def run_checkpoint(args: argparse.Namespace) -> dict[str, Any]:
         model_kwargs={
             "cache_dir": str(hub_cache),
             "device_map": "auto",
-            "torch_dtype": "auto",
+            "torch_dtype": (
+                torch.bfloat16 if model_id == "llava-hf/llava-onevision-qwen2-7b-ov-hf" else "auto"
+            ),
             "local_files_only": not args.allow_download,
             "attn_implementation": attention_implementation,
         },

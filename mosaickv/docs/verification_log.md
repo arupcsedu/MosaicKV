@@ -80,3 +80,54 @@ table and does not establish model or backend support.
   `slirp4netns`, so a private rootless daemon is also unavailable. Apptainer is
   installed but was not mislabeled as Docker evidence. See
   `docs/docker_verification.md`; no Docker support claim is made.
+
+## 2026-08-02 LLaVA phase-transform gates
+
+- Exploratory A100 job `17855955` loaded the pinned LLaVA-1.5-7B revision in
+  FP16. Its explicit 16-token FullKV loop and retention-one cache reinjection
+  both matched `model.generate()` with 100% token agreement and maximum logit
+  difference `0.0`. At retention 0.5, `mosaickv_proto` and `mosaickv_full`
+  both constructed real `three_tier` states using the registered Llama RoPE
+  transform; three forced residual repairs restored bytes with at most one
+  re-decode per event.
+- The first OneVision-7B auto-dtype attempt failed because the checkpoint mixes
+  a nested BF16 text declaration with FP16 output-head weights. The uniform
+  FP16 retry reached token parity but produced non-finite logits, which the HF
+  runtime rejected. That failure exposed a parity-tool bug where
+  `max(0.0, NaN)` could report zero; parity reporting now rejects non-finite
+  reference or candidate logits explicitly.
+- Exploratory A100 job `17856497` then loaded every pinned OneVision-7B module
+  uniformly in BF16. It passed the same 16-token parity and retention-one
+  checks with maximum logit difference `0.0`, constructed both real
+  three-tier methods at retention 0.5 through the registered Qwen2 RoPE
+  transform, and completed three forced repairs with at most one re-decode.
+- These jobs record dirty-worktree provenance and are implementation gates,
+  not canonical experimental results. A clean rerun is still required before
+  paper tables.
+
+## 2026-08-02 native serving transaction gates
+
+- Exploratory A100 job `17869843` passed the vLLM 0.10.2 native transaction
+  gate. On two distinct Qwen2.5-VL-3B requests, native retention 1.0 exactly
+  matched ordinary vLLM token IDs, and retention 0.5 selected 9 of 18 prompt
+  blocks, reduced active KV bytes from 11,132,928 to 5,824,512, generated 16
+  valid tokens, and passed deterministic-repeat and A-B-A isolation checks.
+- Initial SGLang job `17869844` failed because the GPU scheduler uses
+  multiprocessing `spawn`; a parent-process class patch was not inherited and
+  no request audit was emitted. The scheduler process target is now a
+  spawn-safe wrapper that installs the patch before constructing `Scheduler`.
+- SGLang retry `17870743` passed retention-one parity but its compressed run
+  tripped SGLang's allocator self-check. Disabled Radix with configured
+  chunked prefill selects `ChunkCache`; its ordinary finish path attempted to
+  free zeroed logical slots already released by compression. Both ChunkCache
+  and disabled-Radix release paths now free only compact active ownership.
+- Final exploratory A100 job `17871006` passed the SGLang 0.5.1.post3 native
+  transaction gate with the same two requests and the same 18-to-9 block and
+  11,132,928-to-5,824,512 byte transition. Retention-one token parity,
+  deterministic repeats, A-B-A isolation, logical positions, and the engine's
+  allocator self-check all passed.
+- Both successful gates explicitly report
+  `paper_method_rows_authorized=false`. Their mandatory/even-coverage policy
+  validates atomic transport only; the common MosaicKV selector-plan bridge
+  remains a separate paper-eligibility gate. All three SGLang attempts and the
+  vLLM gate record dirty-worktree provenance and are not canonical results.

@@ -558,10 +558,33 @@ def test_lossless_torch_residuals_share_batched_host_slabs() -> None:
     value_storage = {item.untyped_storage().data_ptr() for item in report.tier.value_residuals}
     assert len(key_storage) == 1
     assert len(value_storage) == 1
+    assert not report.all_payloads_pinned
+    assert all(not item.is_pinned() for item in report.tier.key_residuals)
+    assert all(not item.is_pinned() for item in report.tier.value_residuals)
     for payload_index in range(3):
         restored_key, restored_value = restore_residual_payload(report, payload_index, full)
         assert torch.equal(restored_key, key[:, :, payload_index : payload_index + 1])
         assert torch.equal(restored_value, value[:, :, payload_index : payload_index + 1])
+
+
+def test_torch_pageable_placement_is_not_silently_pinned() -> None:
+    torch = pytest.importorskip("torch")
+    key = torch.arange(12, dtype=torch.float32).reshape(1, 1, 3, 4)
+    value = key + 100
+    full = FullKVState.from_tensors(((key, value),), block_size=1)
+
+    report = build_residual_storage(
+        full,
+        {1: 0},
+        ResidualConfig(
+            storage_dtype=ResidualStorageDType.FP16,
+            require_pinned_memory=False,
+        ),
+    )
+
+    assert not report.all_payloads_pinned
+    assert not report.tier.key_residuals[0].is_pinned()
+    assert not report.tier.value_residuals[0].is_pinned()
 
 
 def test_residual_storage_reuses_only_aligned_pre_gathered_payloads() -> None:

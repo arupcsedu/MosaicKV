@@ -173,9 +173,7 @@ def test_processor_grid_metadata_reaches_spatial_graph_without_override() -> Non
     key = np.arange(1 * 1 * 8 * 3, dtype=np.float32).reshape(1, 1, 8, 3)
     full = FullKVState.from_tensors(
         ((key, key + 1),),
-        modality_spans=(
-            ModalitySpan(0, 8, Modality.IMAGE, image_index=0, grid_shape=(2, 4)),
-        ),
+        modality_spans=(ModalitySpan(0, 8, Modality.IMAGE, image_index=0, grid_shape=(2, 4)),),
         block_size=2,
     )
 

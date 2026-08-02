@@ -26,6 +26,7 @@ from mosaickv.types import (
     OutputLengthPolicy,
     Precision,
     PrefixKVProfileMode,
+    RepairCandidateRanking,
     RepairPolicy,
     ResidualStorageDType,
 )
@@ -1060,7 +1061,12 @@ class RepairConfig:
     policy: RepairPolicy = RepairPolicy.ENTROPY_OR_PROTOTYPE_RISK
     entropy_threshold: float = 0.5
     prototype_risk_threshold: float = 0.25
+    prototype_risk_min_entropy: float = 0.0
     max_blocks_per_step: int = 2
+    candidate_ranking: RepairCandidateRanking = (
+        RepairCandidateRanking.RISK_WEIGHTED_RECONSTRUCTION_ERROR
+    )
+    preserve_partial_prototype: bool = True
     evaluation_only: bool = False
 
     def __post_init__(self) -> None:
@@ -1068,6 +1074,10 @@ class RepairConfig:
             raise ConfigurationError("repair.entropy_threshold must be in the interval [0, 1]")
         if not math.isfinite(self.prototype_risk_threshold) or self.prototype_risk_threshold < 0:
             raise ConfigurationError("repair.prototype_risk_threshold must be finite and >= 0")
+        if not 0 <= self.prototype_risk_min_entropy <= 1:
+            raise ConfigurationError(
+                "repair.prototype_risk_min_entropy must be in the interval [0, 1]"
+            )
         if self.max_blocks_per_step < 0:
             raise ConfigurationError("repair.max_blocks_per_step must be >= 0")
         if self.enabled and self.policy is not RepairPolicy.NONE and self.max_blocks_per_step < 1:
@@ -1085,7 +1095,10 @@ class RepairConfig:
             "policy",
             "entropy_threshold",
             "prototype_risk_threshold",
+            "prototype_risk_min_entropy",
             "max_blocks_per_step",
+            "candidate_ranking",
+            "preserve_partial_prototype",
             "evaluation_only",
         }
         _reject_unknown(data, allowed, "repair")
@@ -1098,7 +1111,17 @@ class RepairConfig:
             ),
             entropy_threshold=_float(data, "entropy_threshold", 0.5, "repair"),
             prototype_risk_threshold=_float(data, "prototype_risk_threshold", 0.25, "repair"),
+            prototype_risk_min_entropy=_float(data, "prototype_risk_min_entropy", 0.0, "repair"),
             max_blocks_per_step=_int(data, "max_blocks_per_step", 2, "repair"),
+            candidate_ranking=_enum(
+                RepairCandidateRanking,
+                data.get(
+                    "candidate_ranking",
+                    RepairCandidateRanking.RISK_WEIGHTED_RECONSTRUCTION_ERROR.value,
+                ),
+                "repair.candidate_ranking",
+            ),
+            preserve_partial_prototype=_bool(data, "preserve_partial_prototype", True, "repair"),
             evaluation_only=_bool(data, "evaluation_only", False, "repair"),
         )
 

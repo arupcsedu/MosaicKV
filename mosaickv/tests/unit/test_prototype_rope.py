@@ -17,7 +17,11 @@ from mosaickv.config import (  # noqa: E402
 )
 from mosaickv.graph import EdgeType, GraphDiagnostics, SparseEvidenceGraph  # noqa: E402
 from mosaickv.graph.pooling import pool_block_descriptors  # noqa: E402
-from mosaickv.prototypes import TierConstructionMode, construct_three_tier_cache  # noqa: E402
+from mosaickv.prototypes import (  # noqa: E402
+    TierConstructionMode,
+    construct_three_tier_cache,
+    refresh_prototype_after_promotions,
+)
 from mosaickv.prototypes.rope import RotaryPrototypeKeyTransform  # noqa: E402
 from mosaickv.selection import (  # noqa: E402
     BudgetedObjective,
@@ -152,3 +156,21 @@ def test_qwen_post_rope_construction_requires_and_accepts_exact_phase_transform(
     assert torch.allclose(
         with_transform.state.prototypes.prototype_keys[0], expected, atol=1e-5, rtol=0
     )
+
+    promoted = full.gather_exact_blocks((full.blocks[2],))
+    refreshed = refresh_prototype_after_promotions(
+        full,
+        with_transform.prototypes[0],
+        with_transform.state.prototypes.prototype_keys[0],
+        with_transform.state.prototypes.prototype_values[0],
+        {2: (promoted.key_blocks[0], promoted.value_blocks[0])},
+        key_transform=RotaryPrototypeKeyTransform(cos, sin, "synthetic_qwen_mrope_v1"),
+    )
+    expected_remaining_key = _rotate(
+        neutral[..., 1:2, :],
+        cos[..., :1, :],
+        sin[..., :1, :],
+    )
+    assert refreshed.record.assigned_node_ids == (1,)
+    assert torch.allclose(refreshed.key, expected_remaining_key, atol=1e-4, rtol=0)
+    assert torch.allclose(refreshed.value, neutral[..., 1:2, :], atol=1e-5, rtol=0)

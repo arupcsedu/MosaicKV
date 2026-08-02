@@ -54,7 +54,27 @@ only through the process environment.
 
 ## Stage B: native MosaicKV
 
-Native whole-block selection is unsupported for the audited V1 source. The
-flag fails before model loading, and no simulation is substituted. The exact
-classes inspected and missing atomic sparse-position transaction are recorded
-in `vllm_native_blocker.md`.
+The repository now supplies a vLLM general plugin for exactly 0.10.2. It
+commits request-wide whole-block release after complete prefill, replaces the
+scheduler-to-worker block table, gives FlashAttention a compact physical table
+and active length, and retains the original logical/M-RoPE decode positions.
+Prefix caching, speculative decoding, CUDA graphs, cascade/AOT scheduling,
+non-FlashAttention metadata, and multiple cache groups fail explicitly.
+
+Exploratory A100 job `17869843` passed ordinary-FullKV versus native-retention-1
+token parity on two distinct multimodal requests, deterministic repeated
+selection, exact physical-byte accounting, a retention-0.5 release from 18 to
+9 prompt blocks, and an A-B-A request-isolation probe. The gate command is:
+
+```bash
+MOSAICKV_NATIVE_BACKEND=vllm \
+MOSAICKV_ALLOW_DIRTY_EXPLORATORY=1 \
+sbatch mosaickv/slurm/native_backend_parity.sbatch
+```
+
+The native fallback selection policy is only a transport validator. It cannot
+be emitted as a paper method row, and the versioned experiment matrix continues
+to reject it until a plan from the common MosaicKV selector is bridged and
+selection equivalence is tested. No HF fallback or logical-only byte counter is
+labeled native. Prototype injection and repair remain unsupported. See
+`vllm_native_blocker.md` for the exact transaction and evidence.

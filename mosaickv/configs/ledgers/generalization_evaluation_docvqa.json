@@ -1,0 +1,11 @@
+{
+  "dataset_id": "lmms-lab/DocVQA",
+  "dataset_revision": "539088ef8a8ada01ac8e2e6d4e372586748a265e",
+  "sample_ids": [
+    "docvqa:6817",
+    "docvqa:56775"
+  ],
+  "schema_version": 1,
+  "split": "validation",
+  "task": "docvqa"
+}

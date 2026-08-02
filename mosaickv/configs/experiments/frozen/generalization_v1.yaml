@@ -1,0 +1,90 @@
+artifacts:
+- cell_id: full_reference
+  config_sha: 5babf851a10113c952ac34c8846d7d9ba8d4532b473124937a4d9a2cf5b869ba
+  manifest_path: /sfs/weka/scratch/djy8hg/runs/mosaickv/generalization-calibration-v1/exp5-cal-d85c9466d4-full/manifest.json
+  manifest_sha: 23af1919006ea940594d9b0139612b1318e61331aad59b37d36af99e38dd6ac5
+  result_path: /sfs/weka/scratch/djy8hg/runs/mosaickv/generalization-calibration-v1/exp5-cal-d85c9466d4-full/results.jsonl
+  result_sha: eb2a366b0fbd29319c5aa86661b04094d5b61ef5ab160e4b60e233d04a492bf7
+  trace_set_sha: a4044aad9ea4331b6887255989b4b142b1b7f8a4575876e2cc25fd57bfc0072d
+- cell_id: hybrid1
+  config_sha: c0652bfd924b9ed9d9577baa27300566c59e01291d5546a4b08d06a650f582c7
+  manifest_path: /sfs/weka/scratch/djy8hg/runs/mosaickv/generalization-calibration-v1/exp5-cal-d85c9466d4-hybrid1/manifest.json
+  manifest_sha: 62aac573475e6a8164a3f9c92407b8fcdbbcbf5ba00b9290fe07e482efffab30
+  result_path: /sfs/weka/scratch/djy8hg/runs/mosaickv/generalization-calibration-v1/exp5-cal-d85c9466d4-hybrid1/results.jsonl
+  result_sha: db7c06e0c63965d10500eaa737ad958b513021c53cb6f44dc6443007a67404e9
+  trace_set_sha: b152e22465bc0fee18da46c3f8e71a631986bccdeac684acd9b21add047c47db
+- cell_id: hybrid4
+  config_sha: 623c4d2b9a8115be5c462329092a48cc4652cb5a8d439b7936b18aed375a0ba0
+  manifest_path: /sfs/weka/scratch/djy8hg/runs/mosaickv/generalization-calibration-v1/exp5-cal-d85c9466d4-hybrid4/manifest.json
+  manifest_sha: 3aecf6eeaa084ea21ec3164f689747a9243273adc88384f19d1178e3cf0f12f8
+  result_path: /sfs/weka/scratch/djy8hg/runs/mosaickv/generalization-calibration-v1/exp5-cal-d85c9466d4-hybrid4/results.jsonl
+  result_sha: e62d600685c0362fc5709dad18f2d56ef140330b4c04e569c120fbd322877d94
+  trace_set_sha: 096297442ddd95a10a6d9819d2d238522d7655450675bc8b13bf67c29e870926
+- cell_id: prompt_only
+  config_sha: f4af78cc9054a3a0927afb5d3c05547ec4d0d3f540a0917f397c4b86273072e2
+  manifest_path: /sfs/weka/scratch/djy8hg/runs/mosaickv/generalization-calibration-v1/exp5-cal-d85c9466d4-prompt_only/manifest.json
+  manifest_sha: 9e08a5be905b2487500c6a56da5296159f0d18a3a921189f1145e4c082d6b082
+  result_path: /sfs/weka/scratch/djy8hg/runs/mosaickv/generalization-calibration-v1/exp5-cal-d85c9466d4-prompt_only/results.jsonl
+  result_sha: 798746143f3b9e8965c458a5229f30e9f1ab79d410b7713e2e6b9ee3fc40b391
+  trace_set_sha: ee31e47e1e16a28c7d5497cf58ae977fe9fa5c5fa91bcc6341f3551f5b8fa1c0
+calibration_index_sha: 412bd6d6b6eac34094d004be785fac353473e1286c46bc358481c42a13d03ec8
+calibration_ledger_sha: a6d07ef20c13d808fe3e4c77d6743e1bef169ffc57228c3ea28df19f36644360
+calibration_model: Qwen/Qwen2.5-VL-3B-Instruct
+calibration_sample_ids:
+- docvqa:58425
+- docvqa:59264
+calibration_task: docvqa
+candidate_metrics:
+- candidate_id: hybrid1
+  mean_end_to_end_seconds: 13.473127692328767
+  mean_forecast_regret: 0.49720475230862415
+  mean_selected_block_recall: 0.7316666666666666
+  mean_task_score: 1.0
+  mean_token_agreement: 0.75
+- candidate_id: hybrid4
+  mean_end_to_end_seconds: 13.678092140946536
+  mean_forecast_regret: 0.4893433625011388
+  mean_selected_block_recall: 0.8105555555555564
+  mean_task_score: 1.0
+  mean_token_agreement: 0.75
+- candidate_id: prompt_only
+  mean_end_to_end_seconds: 13.251108611401168
+  mean_forecast_regret: 0.5276477540849063
+  mean_selected_block_recall: 0.5519444444444443
+  mean_task_score: 1.0
+  mean_token_agreement: 0.75
+classification: exploratory_dirty_tree_hyperparameter_generalization_v1
+experiment_id: hyperparameter_generalization_small_v1
+hyperparameters:
+  block_size: 16
+  centroid_count: 4
+  draft_steps: 4
+  forecast_mode: hybrid
+  graph_max_neighbors: 24
+  minimum_stratum_fraction: 0.0
+  preserve_partial_prototype: true
+  prompt_window: 16
+  prototype_group_size: 12
+  prototype_max_position_span: 256
+  repair_candidate_ranking: risk_weighted_reconstruction_error
+  repair_entropy_threshold: 0.01
+  repair_max_blocks_per_step: 1
+  repair_policy: prototype_risk
+  repair_prototype_risk_min_entropy: 0.005
+  repair_prototype_risk_threshold: 1.0e-06
+  retention_ratio: 0.2
+matrix_manifest_path: /sfs/weka/scratch/djy8hg/runs/mosaickv/generalization-calibration-matrix-v1/manifest.json
+matrix_manifest_sha: 4caf077effc9607fec5d85bc8467aa6e032fabe33363f6c36ac28bac767ab95b
+schema_version: 1
+source:
+  git_dirty: true
+  git_sha: 9e8b77c0cfe9af62d6a1a6ce5840a01543f17b72
+  patch_sha: ef8d984a62536500afe44e169a029ec15d1ac428d1bc5fa57d30681a65d7f81d
+winner: hybrid4
+winner_rule:
+- maximize_mean_task_score
+- maximize_mean_token_agreement
+- maximize_mean_selected_block_recall
+- minimize_mean_forecast_regret
+- minimize_mean_end_to_end_seconds
+- lexicographic_candidate_id

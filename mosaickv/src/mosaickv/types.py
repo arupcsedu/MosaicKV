@@ -89,6 +89,13 @@ class RepairPolicy(StrEnum):
     ORACLE = "oracle"
 
 
+class RepairCandidateRanking(StrEnum):
+    """Online residual-block priorities within triggered prototype clusters."""
+
+    PROTOTYPE_WEIGHT = "prototype_weight"
+    RISK_WEIGHTED_RECONSTRUCTION_ERROR = "risk_weighted_reconstruction_error"
+
+
 class AblationVariant(StrEnum):
     """Controlled Experiment-3 component variants."""
 

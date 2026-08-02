@@ -6,7 +6,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from contextlib import AbstractContextManager, ExitStack
 from types import TracebackType
-from typing import Any, Self, cast
+from typing import TYPE_CHECKING, Any, Self, cast
 
 from mosaickv.adapters.huggingface.types import (
     AdapterCapabilities,
@@ -24,6 +24,9 @@ from mosaickv.adapters.huggingface.types import (
     PreparedInputs,
     QueryVectors,
 )
+
+if TYPE_CHECKING:
+    from mosaickv.prototypes.rope import RotaryPrototypeKeyTransform
 
 
 def _torch() -> Any:
@@ -606,6 +609,102 @@ class HuggingFaceMultimodalAdapter(ABC):
 
         del prepared
         return None
+
+    def _build_standard_rotary_prototype_key_transform(
+        self,
+        prepared: PreparedInputs,
+        *,
+        provenance: str,
+    ) -> RotaryPrototypeKeyTransform:
+        """Capture the exact one-dimensional RoPE phase used by Llama/Qwen2.
+
+        LLaVA-1.5 and LLaVA-OneVision both cache keys after applying the
+        language model's rotary embedding.  Prototype construction is safe
+        only if those source phases are inverted before pooling and the mean
+        is rotated at its anchor.  This helper deliberately accepts only the
+        audited Transformers release and a single unpadded request; any
+        non-standard position scheme fails closed.
+        """
+
+        from importlib.metadata import version
+
+        torch = _torch()
+        installed_transformers = version("transformers")
+        if installed_transformers != "4.55.2":
+            raise RuntimeError(
+                "standard RoPE prototype support is audited only for "
+                f"Transformers 4.55.2; found {installed_transformers}"
+            )
+        model_inputs = prepared.model_inputs
+        input_ids = model_inputs.get("input_ids")
+        if input_ids is None or tuple(input_ids.shape) != (
+            1,
+            prepared.logical_sequence_length,
+        ):
+            raise RuntimeError(
+                "standard RoPE prototype support requires one expanded, unpadded request"
+            )
+        attention_mask = model_inputs.get("attention_mask")
+        if attention_mask is not None and (
+            tuple(attention_mask.shape) != tuple(input_ids.shape)
+            or not bool(torch.all(attention_mask != 0).item())
+        ):
+            raise RuntimeError(
+                "standard RoPE prototype support does not infer phases through padding"
+            )
+        position_ids = model_inputs.get("position_ids")
+        if position_ids is None:
+            position_ids = torch.arange(
+                prepared.logical_sequence_length,
+                dtype=torch.long,
+                device=input_ids.device,
+            ).unsqueeze(0)
+        else:
+            position_ids = position_ids.to(device=input_ids.device, dtype=torch.long)
+        if tuple(position_ids.shape) != tuple(input_ids.shape):
+            raise RuntimeError("standard RoPE position_ids must have shape [1, sequence]")
+        expected = torch.arange(
+            prepared.logical_sequence_length,
+            dtype=torch.long,
+            device=position_ids.device,
+        ).unsqueeze(0)
+        if not bool(torch.equal(position_ids, expected)):
+            raise RuntimeError(
+                "standard RoPE prototype support requires the audited monotonic position map"
+            )
+
+        pending = [self.model]
+        visited: set[int] = set()
+        rotary = None
+        while pending:
+            candidate = pending.pop(0)
+            if candidate is None or id(candidate) in visited:
+                continue
+            visited.add(id(candidate))
+            rotary = getattr(candidate, "rotary_emb", None)
+            if rotary is not None:
+                break
+            pending.extend(
+                (
+                    getattr(candidate, "language_model", None),
+                    getattr(candidate, "model", None),
+                )
+            )
+        if rotary is None or not callable(rotary):
+            raise RuntimeError("adapter cannot locate the audited language-model rotary embedding")
+        reference = torch.empty((), dtype=self.model.dtype, device=self.device)
+        cos, sin = rotary(reference, position_ids)
+        expected_prefix = (1, prepared.logical_sequence_length)
+        if tuple(cos.shape[:2]) != expected_prefix or tuple(cos.shape) != tuple(sin.shape):
+            raise RuntimeError("standard rotary embedding returned an unexpected phase shape")
+
+        from mosaickv.prototypes.rope import RotaryPrototypeKeyTransform
+
+        return RotaryPrototypeKeyTransform(
+            cos.unsqueeze(1),
+            sin.unsqueeze(1),
+            provenance=provenance,
+        )
 
     def get_logical_sequence_length(self, value: PreparedInputs | DecodeState) -> int:
         return value.logical_sequence_length

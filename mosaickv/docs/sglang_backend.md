@@ -53,7 +53,25 @@ only through the process environment.
 
 ## Stage B: native MosaicKV
 
-Native whole-block selection is unsupported for the audited installed source.
-The feature gate fails before server launch, and no simulation is substituted.
-The missing scheduler-owned atomic mapping/position transaction is documented
-in `sglang_native_blocker.md`.
+The controlled launcher now installs a spawn-safe scheduler patch for exactly
+0.5.1.post3. It compacts the request-to-token mapping after complete prefill,
+releases dropped allocator slots, preserves `orig_seq_lens` for logical and
+M-RoPE decode positions, supplies active lengths to attention, and releases
+only compact ownership through both disabled-Radix and ChunkCache paths.
+
+Exploratory A100 job `17871006` passed ordinary-FullKV versus
+native-retention-1 token parity on two distinct requests, deterministic 18-to-9
+block selection at retention 0.5, exact active-byte accounting, SGLang's
+allocator self-check, and A-B-A isolation. Run the gate with:
+
+```bash
+MOSAICKV_NATIVE_BACKEND=sglang \
+MOSAICKV_ALLOW_DIRTY_EXPLORATORY=1 \
+sbatch mosaickv/slurm/native_backend_parity.sbatch
+```
+
+The fallback selector validates native transport only. It cannot be emitted as
+a paper method row until a common MosaicKV selector plan is bridged and its
+selected blocks are shown equivalent. Prototype injection and repair remain
+unsupported. See `sglang_native_blocker.md` for exact internals and retained
+failure evidence.

@@ -101,6 +101,30 @@ def _trial(request_id: str, *, cached: int) -> SGLangTrialMeasurement:
     )
 
 
+def _native_trial(request_id: str) -> SGLangTrialMeasurement:
+    trial = _trial(request_id, cached=0)
+    return SGLangTrialMeasurement(
+        **{
+            **trial.to_json_object(),
+            "compression_seconds": 0.004,
+            "native_audit": {
+                "status": "scheduler_transaction_committed",
+                "selection": {
+                    "logical_positions": 8,
+                    "selected_positions": 8,
+                    "source_blocks": 1,
+                    "selected_blocks": [0],
+                    "mandatory_blocks": [0],
+                    "retention_ratio": 1.0,
+                },
+                "compression_seconds": 0.004,
+                "logical_next_position": 8,
+                "radix_cache_disabled": True,
+            },
+        }
+    )
+
+
 class _Runner:
     def __init__(self) -> None:
         self.sglang_version = "0.5.1.post3"
@@ -131,6 +155,18 @@ class _Runner:
 
     def flush_cache(self) -> None:
         self.flushes += 1
+
+
+class _NativeRunner(_Runner):
+    def run(
+        self,
+        prompt: JsonObject,
+        generation: Mapping[str, object],
+        request_id: str,
+    ) -> SGLangTrialMeasurement:
+        del prompt, generation
+        self.calls += 1
+        return _native_trial(request_id)
 
 
 def test_prepare_prompt_reuses_chat_boundary_and_makes_media_json_safe() -> None:
@@ -261,12 +297,55 @@ def test_request_isolation_rechecks_anchor_after_distinct_input(tmp_path: Path) 
     assert runner.flushes == 1
 
 
-def test_native_feature_is_explicitly_unsupported_for_installed_version() -> None:
+def test_native_feature_is_version_pinned_and_unaudited_versions_fail() -> None:
     capability = native_integration_capability("0.5.1.post3")
-    assert not capability.supported
-    assert capability.reason_code.endswith("missing_atomic_sparse_request_cache_hook")
-    with pytest.raises(NativeMosaicKVUnsupported, match="No simulated MosaicKV row"):
-        require_native_mosaickv_support(enabled=True, sglang_version="0.5.1.post3")
+    assert capability.supported
+    assert capability.reason_code == "repository_patch_transaction_v1"
+    require_native_mosaickv_support(enabled=True, sglang_version="0.5.1.post3")
+    with pytest.raises(NativeMosaicKVUnsupported, match="unaudited_sglang_version"):
+        require_native_mosaickv_support(enabled=True, sglang_version="0.5.2")
+
+
+def test_native_server_disables_radix_cache_and_wrapper_records_transaction(
+    tmp_path: Path,
+) -> None:
+    root = Path(__file__).parents[2]
+    config = load_config(root / "configs" / "sglang_fullkv_3b.yaml")
+    command = build_server_command(
+        config,
+        SGLangRuntimeOptions(enable_mosaickv=True),
+        model_source=config.model.id,
+        port=30123,
+    )
+    assert "--disable-radix-cache" in command
+
+    model = SGLangFullKVModel(
+        model_id="Qwen/Qwen2.5-VL-3B-Instruct",
+        processor=_Processor(),
+        runner=_NativeRunner(),
+        trace_directory=tmp_path,
+        generation={"max_new_tokens": 2, "temperature": 0.0, "top_p": 1.0, "seed": 0},
+        cache_probe_repeats=2,
+        method="mosaickv_exact",
+        retention_ratio=1.0,
+    )
+    output = model.generate(
+        EvaluationRequest(
+            run_id="native",
+            sample_id="identity",
+            task="synthetic_smoke",
+            messages=build_multimodal_messages(
+                "What color?", (MediaItem(MediaKind.IMAGE, b"image"),)
+            ),
+            generation_kwargs={},
+        )
+    )
+
+    assert output.effective_method == "mosaickv_exact"
+    assert output.metrics.compression_time == pytest.approx(0.004)
+    trace = json.loads(next((tmp_path / "native").glob("*.json")).read_text())
+    assert trace["measurement_type"] == "sglang_native_mosaickv"
+    assert trace["trials"][0]["native_audit"]["logical_next_position"] == 8
 
 
 @pytest.mark.parametrize(

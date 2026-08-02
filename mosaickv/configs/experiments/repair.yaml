@@ -1,6 +1,6 @@
 matrix_schema_version: 1
 matrix_revision: 1
-capability_catalog_version: common-env-2026-07-25-v2
+capability_catalog_version: common-env-2026-08-02-v3
 experiment_id: repair
 description: Residual-repair experiment matrix, blocked until prototype and repair adapter gates pass.
 enabled: false
@@ -41,12 +41,5 @@ sweeps: []
 
 blocked:
   - scope:
-      methods: [mosaickv_proto, mosaickv_full]
-      backends: [hf_eager]
-    reason: Every registered adapter declares supports_prototype_merge=false and supports_residual_repair=false.
-  - scope:
       backends: [hf_sdpa, hf_flash_attention_2, vllm, sglang]
     reason: Repair requires cache replacement and logical-position correctness unavailable on these paths.
-  - scope:
-      models: [llava_onevision_7b_optional]
-    reason: The optional model has no exact registered adapter.

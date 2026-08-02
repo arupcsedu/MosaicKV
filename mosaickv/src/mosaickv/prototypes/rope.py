@@ -79,6 +79,56 @@ class RotaryPrototypeKeyTransform:
         )
         return cos, sin
 
+    def phase_neutral_pool(
+        self,
+        key: Any,
+        block: KVBlockDescriptor,
+        *,
+        sequence_dimension: int,
+    ) -> Any:
+        """Invert source RoPE and pool one source block in FP32."""
+
+        normalized_axis = sequence_dimension % key.ndim
+        if normalized_axis != key.ndim - 2:
+            raise PrototypeKeyTransformError(
+                "rotary prototype transform requires the cache sequence axis at -2"
+            )
+        if int(key.shape[-1]) != int(self.cos.shape[-1]):
+            raise PrototypeKeyTransformError(
+                "cached key head dimension differs from the captured RoPE phase"
+            )
+        if int(key.shape[-2]) != len(block.original_logical_positions):
+            raise PrototypeKeyTransformError(
+                "cached key sequence length differs from its block descriptor"
+            )
+        key_fp32 = key.detach().float()
+        cos, sin = self._phase(block.original_logical_positions, key_fp32)
+        denominator = (cos * cos + sin * sin).clamp_min(1e-12)
+        phase_neutral = (key_fp32 * cos - self._rotate_half(key_fp32) * sin) / denominator
+        return phase_neutral.mean(dim=normalized_axis, keepdim=True)
+
+    def remove_anchor_phase(self, prototype_key: Any, anchor_logical_position: int) -> Any:
+        """Return the FP32 phase-neutral mean stored by one prototype key."""
+
+        key_fp32 = prototype_key.detach().float()
+        if int(key_fp32.shape[-2]) != 1:
+            raise PrototypeKeyTransformError("a prototype key must contain exactly one slot")
+        cos, sin = self._phase((anchor_logical_position,), key_fp32)
+        denominator = (cos * cos + sin * sin).clamp_min(1e-12)
+        return (key_fp32 * cos - self._rotate_half(key_fp32) * sin) / denominator
+
+    def apply_anchor_phase(
+        self,
+        phase_neutral_key: Any,
+        anchor_logical_position: int,
+        reference: Any,
+    ) -> Any:
+        """Rotate one FP32 phase-neutral mean into its cache anchor phase."""
+
+        anchor_cos, anchor_sin = self._phase((anchor_logical_position,), phase_neutral_key)
+        rotated = phase_neutral_key * anchor_cos + self._rotate_half(phase_neutral_key) * anchor_sin
+        return rotated.to(dtype=reference.dtype, device=reference.device)
+
     def merge(
         self,
         key_blocks: tuple[Any, ...],
@@ -98,34 +148,23 @@ class RotaryPrototypeKeyTransform:
             raise PrototypeKeyTransformError("prototype key weights must be positive")
         pooled: list[Any] = []
         for key, block in zip(key_blocks, blocks, strict=True):
-            normalized_axis = sequence_dimension % key.ndim
-            if normalized_axis != key.ndim - 2:
-                raise PrototypeKeyTransformError(
-                    "rotary prototype transform requires the cache sequence axis at -2"
+            pooled.append(
+                self.phase_neutral_pool(
+                    key,
+                    block,
+                    sequence_dimension=sequence_dimension,
                 )
-            if int(key.shape[-1]) != int(self.cos.shape[-1]):
-                raise PrototypeKeyTransformError(
-                    "cached key head dimension differs from the captured RoPE phase"
-                )
-            if int(key.shape[-2]) != len(block.original_logical_positions):
-                raise PrototypeKeyTransformError(
-                    "cached key sequence length differs from its block descriptor"
-                )
-            key_fp32 = key.detach().float()
-            cos, sin = self._phase(block.original_logical_positions, key_fp32)
-            denominator = (cos * cos + sin * sin).clamp_min(1e-12)
-            phase_neutral = (
-                key_fp32 * cos - self._rotate_half(key_fp32) * sin
-            ) / denominator
-            pooled.append(phase_neutral.mean(dim=normalized_axis, keepdim=True))
+            )
         total = float(sum(weights))
         normalized = tuple(weight / total for weight in weights)
         average = pooled[0] * normalized[0]
         for value, weight in zip(pooled[1:], normalized[1:], strict=True):
             average = average + value * weight
-        anchor_cos, anchor_sin = self._phase((anchor_logical_position,), average)
-        rotated = average * anchor_cos + self._rotate_half(average) * anchor_sin
-        prototype = rotated.to(dtype=key_blocks[0].dtype, device=key_blocks[0].device)
+        prototype = self.apply_anchor_phase(
+            average,
+            anchor_logical_position,
+            key_blocks[0],
+        )
         return PrototypeKeyMerge(tuple(pooled), average, prototype)
 
 
