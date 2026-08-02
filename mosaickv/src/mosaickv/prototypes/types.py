@@ -31,6 +31,7 @@ class PrototypeSafetyAssessment:
     adapter_cached_key_state: CachedKeyState
     source_cached_key_state: CachedKeyState
     adapter_declares_support: bool
+    phase_transform_provenance: str | None
     safe: bool
     reason: str
 
@@ -40,9 +41,22 @@ class PrototypeSafetyAssessment:
         expected_safe = (
             self.adapter_declares_support
             and self.adapter_cached_key_state == self.source_cached_key_state
-            and self.source_cached_key_state
-            in {CachedKeyState.PRE_ROPE, CachedKeyState.NOT_APPLICABLE}
+            and (
+                (
+                    self.source_cached_key_state
+                    in {CachedKeyState.PRE_ROPE, CachedKeyState.NOT_APPLICABLE}
+                    and self.phase_transform_provenance is None
+                )
+                or (
+                    self.source_cached_key_state is CachedKeyState.POST_ROPE
+                    and self.phase_transform_provenance is not None
+                )
+            )
         )
+        if self.phase_transform_provenance is not None and not (
+            self.phase_transform_provenance.strip()
+        ):
+            raise ValueError("prototype phase-transform provenance must be non-empty")
         if self.safe != expected_safe:
             raise ValueError("prototype safety result contradicts the conservative RoPE policy")
 

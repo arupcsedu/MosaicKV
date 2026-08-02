@@ -55,7 +55,8 @@ def _spearman(first: np.ndarray[Any, Any], second: np.ndarray[Any, Any]) -> floa
     denominator = float(np.linalg.norm(first_centered) * np.linalg.norm(second_centered))
     if denominator == 0.0:
         return 1.0 if np.array_equal(first_rank, second_rank) else 0.0
-    return float(np.dot(first_centered, second_centered) / denominator)
+    value = float(np.dot(first_centered, second_centered) / denominator)
+    return min(1.0, max(-1.0, value))
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,6 +67,7 @@ class AttentionDiagnosticInput:
     true_attention: Any
     block_positions: tuple[tuple[int, ...], ...]
     selected_block_count: int
+    selected_block_indices: tuple[int, ...] | None = None
 
     def __post_init__(self) -> None:
         predicted = _to_numpy(self.predicted_attention).reshape(-1)
@@ -80,6 +82,16 @@ class AttentionDiagnosticInput:
             raise ValueError("attention diagnostics require blocks and a positive selection count")
         if self.selected_block_count > len(self.block_positions):
             raise ValueError("selected_block_count exceeds available blocks")
+        if self.selected_block_indices is not None:
+            if len(self.selected_block_indices) != self.selected_block_count:
+                raise ValueError("selected_block_indices count does not match selected_block_count")
+            if self.selected_block_indices != tuple(sorted(set(self.selected_block_indices))):
+                raise ValueError("selected_block_indices must be sorted and unique")
+            if any(
+                index < 0 or index >= len(self.block_positions)
+                for index in self.selected_block_indices
+            ):
+                raise ValueError("selected_block_indices contains an unknown local block")
         flattened = [position for block in self.block_positions for position in block]
         if sorted(flattened) != list(range(len(predicted))):
             raise ValueError("block positions must partition every attention position exactly once")
@@ -145,6 +157,30 @@ class ForecastQualityDiagnostics:
             raise ValueError("macro forecast diagnostics do not match per-head values")
 
 
+@dataclass(frozen=True, slots=True)
+class AttentionSelectionHeadDiagnostics:
+    """Query-independent selected-block audit for one cache identity."""
+
+    layer: int
+    kv_head: int
+    attention_rank_correlation: float
+    selected_block_recall: float
+    forecast_regret: float
+    selected_blocks: tuple[int, ...]
+    oracle_selected_blocks: tuple[int, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class AttentionSelectionDiagnostics:
+    """Macro selected-block quality against evaluation-only future attention."""
+
+    heads: tuple[AttentionSelectionHeadDiagnostics, ...]
+    mean_attention_rank_correlation: float
+    mean_selected_block_recall: float
+    mean_forecast_regret: float
+    oracle_source: str = "evaluation_only_fullkv_greedy_decode"
+
+
 def _selected_blocks(
     attention: np.ndarray[Any, Any],
     block_positions: tuple[tuple[int, ...], ...],
@@ -153,6 +189,63 @@ def _selected_blocks(
     utilities = [float(attention[list(positions)].sum()) for positions in block_positions]
     return tuple(
         sorted(range(len(utilities)), key=lambda index: (-utilities[index], index))[:count]
+    )
+
+
+def evaluate_attention_selection_quality(
+    attention: Mapping[HeadId, AttentionDiagnosticInput],
+) -> AttentionSelectionDiagnostics:
+    """Evaluate actual selected blocks without requiring query centroids."""
+
+    results: list[AttentionSelectionHeadDiagnostics] = []
+    for (layer, kv_head), item in sorted(attention.items()):
+        predicted_attention = _to_numpy(item.predicted_attention).reshape(-1)
+        true_attention = _to_numpy(item.true_attention).reshape(-1)
+        selected = (
+            item.selected_block_indices
+            if item.selected_block_indices is not None
+            else _selected_blocks(
+                predicted_attention,
+                item.block_positions,
+                item.selected_block_count,
+            )
+        )
+        oracle = _selected_blocks(
+            true_attention,
+            item.block_positions,
+            item.selected_block_count,
+        )
+        recall = len(set(selected) & set(oracle)) / len(oracle)
+        oracle_utility = sum(
+            float(true_attention[list(item.block_positions[index])].sum()) for index in oracle
+        )
+        selected_utility = sum(
+            float(true_attention[list(item.block_positions[index])].sum()) for index in selected
+        )
+        regret = (
+            max(0.0, oracle_utility - selected_utility) / oracle_utility
+            if oracle_utility > 0
+            else 0.0
+        )
+        results.append(
+            AttentionSelectionHeadDiagnostics(
+                layer,
+                kv_head,
+                _spearman(predicted_attention, true_attention),
+                recall,
+                regret,
+                selected,
+                oracle,
+            )
+        )
+    if not results:
+        raise ValueError("attention selection diagnostics require at least one cache identity")
+    count = len(results)
+    return AttentionSelectionDiagnostics(
+        tuple(results),
+        sum(item.attention_rank_correlation for item in results) / count,
+        sum(item.selected_block_recall for item in results) / count,
+        sum(item.forecast_regret for item in results) / count,
     )
 
 
@@ -186,10 +279,14 @@ def evaluate_forecast_quality(
             predicted_attention = _to_numpy(attention_input.predicted_attention).reshape(-1)
             true_attention = _to_numpy(attention_input.true_attention).reshape(-1)
             rank_correlation = _spearman(predicted_attention, true_attention)
-            predicted_blocks = _selected_blocks(
-                predicted_attention,
-                attention_input.block_positions,
-                attention_input.selected_block_count,
+            predicted_blocks = (
+                attention_input.selected_block_indices
+                if attention_input.selected_block_indices is not None
+                else _selected_blocks(
+                    predicted_attention,
+                    attention_input.block_positions,
+                    attention_input.selected_block_count,
+                )
             )
             oracle_blocks = _selected_blocks(
                 true_attention,
@@ -238,7 +335,9 @@ def evaluate_forecast_quality(
 
 __all__ = [
     "AttentionDiagnosticInput",
+    "AttentionSelectionDiagnostics",
     "ForecastQualityDiagnostics",
     "HeadForecastDiagnostics",
+    "evaluate_attention_selection_quality",
     "evaluate_forecast_quality",
 ]

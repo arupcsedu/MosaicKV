@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import numpy as np
 import pytest
 
@@ -21,6 +23,7 @@ from mosaickv.evaluation.forecast_diagnostics import (
 from mosaickv.evaluation.oracle_queries import EvaluationOnlyOracleQueries
 from mosaickv.forecasting import build_query_forecast, forecast_from_prefill
 from mosaickv.forecasting.core import _normalize_rows, _streaming_spherical
+from mosaickv.forecasting.huggingface import run_isolated_greedy_query_rollout
 from mosaickv.types import ForecastCovariance, ForecastMode
 
 
@@ -187,6 +190,16 @@ def test_draft_forecast_reuses_prefill_and_does_not_mutate_original_cache() -> N
     assert draft_samples.shape == (12, 3)
 
 
+def test_evaluation_rollout_does_not_require_prompt_queries() -> None:
+    adapter = _DraftIsolationAdapter()
+    prefill = replace(_fake_prefill(), query_vectors=QueryVectors(()))
+
+    rollout = run_isolated_greedy_query_rollout(adapter, prefill, steps=2)
+
+    assert rollout.token_ids == (2, 3)
+    assert rollout.original_cache_unchanged
+
+
 def test_hybrid_full_covariance_and_centroids_are_reproducible() -> None:
     prompt = _queries()
     draft = _queries(sequence=4)
@@ -337,3 +350,40 @@ def test_forecast_quality_diagnostics_report_all_requested_metrics() -> None:
     assert diagnostics.heads[1].forecast_regret > 0
     assert -1.0 <= diagnostics.mean_cosine_similarity <= 1.0
     assert diagnostics.oracle_source.startswith("evaluation_only")
+
+
+def test_forecast_diagnostic_can_score_actual_selector_blocks() -> None:
+    prompt = _queries(layers=1, sequence=4)
+    forecast = build_query_forecast(
+        prompt,
+        (),
+        (2,),
+        ForecastingConfig(
+            mode=ForecastMode.PROMPT_WINDOW,
+            prompt_window=2,
+            draft_steps=0,
+            centroid_count=2,
+        ),
+        original_logical_sequence_length=4,
+        draft_cache_isolated=True,
+    )
+    oracle = EvaluationOnlyOracleQueries(
+        query_layers=(prompt[0][:, :, -2:, :].copy(),),
+        greedy_token_ids=(8, 9),
+        future_steps=2,
+    )
+    attention = {
+        identity: AttentionDiagnosticInput(
+            predicted_attention=np.asarray([0.8, 0.1, 0.05, 0.05]),
+            true_attention=np.asarray([0.7, 0.2, 0.05, 0.05]),
+            block_positions=((0, 1), (2, 3)),
+            selected_block_count=1,
+            selected_block_indices=(1,),
+        )
+        for identity in ((0, 0), (0, 1))
+    }
+
+    diagnostics = evaluate_forecast_quality(forecast, oracle, attention)
+
+    assert diagnostics.mean_selected_block_recall == 0.0
+    assert diagnostics.mean_forecast_regret > 0

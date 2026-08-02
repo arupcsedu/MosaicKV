@@ -601,6 +601,12 @@ class HuggingFaceMultimodalAdapter(ABC):
     def get_modality_map(self, prepared: PreparedInputs) -> tuple[ModalitySpan, ...]:
         return prepared.modality_map
 
+    def build_prototype_key_transform(self, prepared: PreparedInputs) -> Any | None:
+        """Return an audited model-specific cached-key phase transform, if any."""
+
+        del prepared
+        return None
+
     def get_logical_sequence_length(self, value: PreparedInputs | DecodeState) -> int:
         return value.logical_sequence_length
 

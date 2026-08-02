@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from bisect import bisect_left
 from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
 from typing import Any
@@ -20,6 +21,7 @@ from mosaickv.cache_state import (
 )
 from mosaickv.config import PrototypeConfig, ResidualConfig
 from mosaickv.graph.types import SparseEvidenceGraph
+from mosaickv.prototypes.rope import RotaryPrototypeKeyTransform
 from mosaickv.prototypes.types import (
     ActiveHeadLayout,
     PrototypeDiagnostics,
@@ -51,16 +53,28 @@ def _coerce_key_state(value: Any) -> CachedKeyState:
 def assess_prototype_safety(
     full_state: FullKVState,
     capabilities: AdapterCapabilities,
+    key_transform: RotaryPrototypeKeyTransform | None = None,
 ) -> PrototypeSafetyAssessment:
-    """Apply the initial no-post-RoPE-averaging safety policy."""
+    """Reject post-RoPE merging unless an exact audited phase transform exists."""
 
     source_state = _coerce_key_state(full_state.cached_key_state)
     adapter_state = _coerce_key_state(capabilities.cached_key_state)
     declares_support = capabilities.supports_prototype_merge
+    transform_provenance = None if key_transform is None else key_transform.provenance
+    transform_matches = bool(
+        key_transform is not None and key_transform.source_key_state is source_state
+    )
+    phase_neutral_source = source_state in {
+        CachedKeyState.PRE_ROPE,
+        CachedKeyState.NOT_APPLICABLE,
+    }
     safe = (
         declares_support
         and source_state == adapter_state
-        and source_state in {CachedKeyState.PRE_ROPE, CachedKeyState.NOT_APPLICABLE}
+        and (
+            (phase_neutral_source and key_transform is None)
+            or (source_state is CachedKeyState.POST_ROPE and transform_matches)
+        )
     )
     if source_state is CachedKeyState.UNKNOWN:
         reason = "source cache RoPE state is unknown; prototype merging is disabled"
@@ -71,22 +85,32 @@ def assess_prototype_safety(
             "source and adapter cached-key RoPE metadata disagree "
             f"({source_state.value} != {adapter_state.value})"
         )
-    elif source_state is CachedKeyState.POST_ROPE:
+    elif key_transform is not None and not transform_matches:
         reason = (
-            "cached keys are post-RoPE; the initial implementation never averages "
-            "different RoPE phases"
+            "prototype phase transform does not match the source cached-key representation"
+        )
+    elif source_state is CachedKeyState.POST_ROPE and not transform_matches:
+        reason = (
+            "cached keys are post-RoPE and no matching audited phase transform was supplied; "
+            "the implementation never averages different RoPE phases"
         )
     elif not declares_support:
         reason = "adapter does not declare prototype merging safe"
     else:
         reason = (
             f"adapter explicitly supports prototype merging for {source_state.value} cached keys"
+            + (
+                f" through phase transform {transform_provenance}"
+                if transform_provenance is not None
+                else ""
+            )
         )
     return PrototypeSafetyAssessment(
         model_family=capabilities.model_family,
         adapter_cached_key_state=adapter_state,
         source_cached_key_state=source_state,
         adapter_declares_support=declares_support,
+        phase_transform_provenance=transform_provenance,
         safe=safe,
         reason=reason,
     )
@@ -235,36 +259,220 @@ def _assign_to_anchors(
     config: PrototypeConfig,
 ) -> tuple[dict[int, tuple[int, float]], str | None]:
     weights = _undirected_anchor_weights(graph)
-    assignments: dict[int, tuple[int, float]] = {}
+    neighbors: dict[int, list[tuple[int, float]]] = defaultdict(list)
+    for (first, second), weight in weights.items():
+        neighbors[first].append((second, weight))
+        if first != second:
+            neighbors[second].append((first, weight))
+    selected_by_identity: dict[tuple[int, int, object], list[tuple[float, int]]] = defaultdict(
+        list
+    )
+    for anchor_id in selected:
+        anchor = graph.nodes[anchor_id]
+        selected_by_identity[
+            (anchor.block.layer, anchor.block.kv_head, anchor.block.modality)
+        ].append((anchor.logical_center, anchor_id))
+    for anchors in selected_by_identity.values():
+        anchors.sort()
+    allowed_anchor_modalities: dict[str, set[str]] = defaultdict(set)
+    for pair in config.allowed_modality_pairs:
+        source_modality, anchor_modality = pair.split(":", maxsplit=1)
+        allowed_anchor_modalities[source_modality].add(anchor_modality)
+
+    def positional_candidates(node_id: int) -> tuple[tuple[int, float], ...]:
+        """Return a bounded compatibility scaffold independent of evidence scores."""
+
+        source = graph.nodes[node_id]
+        candidates: list[tuple[float, int]] = []
+        window = max(1, 2 * config.group_size)
+        for anchor_modality in sorted(
+            allowed_anchor_modalities[source.block.modality.value]
+        ):
+            modality = type(source.block.modality)(anchor_modality)
+            anchors = selected_by_identity.get(
+                (source.block.layer, source.block.kv_head, modality),
+                (),
+            )
+            if not anchors:
+                continue
+            centers = [center for center, _anchor_id in anchors]
+            insertion = bisect_left(centers, source.logical_center)
+            first = max(0, insertion - window)
+            last = min(len(anchors), insertion + window)
+            for center, anchor_id in anchors[first:last]:
+                anchor = graph.nodes[anchor_id]
+                if not _compatible(source.block, anchor.block, config):
+                    continue
+                distance = abs(source.logical_center - center)
+                span = config.max_position_span
+                normalized = 1.0 / (1.0 + distance) if span is None else 1.0 - distance / (span + 1)
+                # Compatibility edges are deliberately weaker than evidence
+                # edges. They make representation feasible without claiming
+                # semantic evidence or affecting which real graph edge wins.
+                weight = max(config.min_anchor_weight, 0.01 * max(normalized, 1e-12))
+                candidates.append((weight, anchor_id))
+        return tuple((anchor_id, weight) for weight, anchor_id in candidates)
+
+    preferences: dict[int, tuple[tuple[float, int], ...]] = {}
     for node_id, node in enumerate(graph.nodes):
         if node_id in selected:
             continue
-        candidates: list[tuple[float, int]] = []
-        for anchor_id in selected:
+        weights_by_anchor: dict[int, float] = {}
+        for anchor_id, weight in neighbors.get(node_id, ()):
+            if anchor_id not in selected:
+                continue
             anchor = graph.nodes[anchor_id]
-            identity = (min(node_id, anchor_id), max(node_id, anchor_id))
-            weight = weights.get(identity, 0.0)
             if (
                 weight > 0
                 and weight >= config.min_anchor_weight
                 and _compatible(node.block, anchor.block, config)
             ):
-                candidates.append((weight, anchor_id))
+                weights_by_anchor[anchor_id] = max(
+                    weight, weights_by_anchor.get(anchor_id, 0.0)
+                )
+        for anchor_id, weight in positional_candidates(node_id):
+            weights_by_anchor[anchor_id] = max(
+                weight, weights_by_anchor.get(anchor_id, 0.0)
+            )
+        candidates = [(weight, anchor_id) for anchor_id, weight in weights_by_anchor.items()]
         if not candidates:
             return {}, f"unselected node {node_id} has no compatible selected graph anchor"
         # Higher graph weight wins; lower node ID is the deterministic tie-break.
-        weight, anchor_id = min(candidates, key=lambda item: (-item[0], item[1]))
-        assignments[node_id] = (anchor_id, weight)
+        preferences[node_id] = tuple(sorted(candidates, key=lambda item: (-item[0], item[1])))
 
-    groups: dict[int, list[int]] = defaultdict(list)
-    for node_id, (anchor_id, _weight) in assignments.items():
-        groups[anchor_id].append(node_id)
-    for anchor_id, member_ids in groups.items():
-        if len(member_ids) > config.group_size:
-            return {}, (
-                f"anchor {anchor_id} received {len(member_ids)} members, exceeding "
-                f"prototypes.group_size={config.group_size}"
+    def segmented_assignments() -> tuple[dict[int, tuple[int, float]], str | None]:
+        """Return the deterministic anchor-cover assignment used as a safe fallback."""
+
+        strata: dict[tuple[int, int, object], list[int]] = defaultdict(list)
+        for node in graph.nodes:
+            block = node.block
+            strata[(block.layer, block.kv_head, block.modality)].append(node.node_id)
+        result: dict[int, tuple[int, float]] = {}
+
+        def assign_segment(member_ids: Sequence[int]) -> str | None:
+            anchors = frozenset(node_id for node_id in member_ids if node_id in selected)
+            if not anchors:
+                return f"prototype anchor-cover segment {tuple(member_ids)} has no selected anchor"
+            for node_id in member_ids:
+                if node_id in selected:
+                    continue
+                candidates = tuple(
+                    item for item in preferences[node_id] if item[1] in anchors
+                )
+                if not candidates:
+                    return (
+                        f"unselected node {node_id} has no compatible selected anchor "
+                        "inside its anchor-cover segment"
+                    )
+                result[node_id] = candidates[0][1], candidates[0][0]
+            return None
+
+        for identity in sorted(strata, key=lambda item: (item[0], item[1], str(item[2]))):
+            ordered = sorted(
+                strata[identity],
+                key=lambda node_id: (
+                    graph.nodes[node_id].block.original_logical_positions[0],
+                    node_id,
+                ),
             )
+            segment: list[int] = []
+            for node_id in ordered:
+                trial = [*segment, node_id]
+                positions = [
+                    position
+                    for member_id in trial
+                    for position in graph.nodes[member_id].block.original_logical_positions
+                ]
+                exceeds_capacity = len(trial) > config.group_size + 1
+                exceeds_span = bool(
+                    config.max_position_span is not None
+                    and max(positions) - min(positions) > config.max_position_span
+                )
+                if segment and (exceeds_capacity or exceeds_span):
+                    reason = assign_segment(segment)
+                    if reason is not None:
+                        return {}, reason
+                    segment = [node_id]
+                else:
+                    segment = trial
+            reason = assign_segment(segment)
+            if reason is not None:
+                return {}, reason
+        return result, None
+
+    # Scarce nodes choose first. When an anchor is full, a deterministic
+    # augmenting-path relocation finds another compatible slot for an existing
+    # member before rejecting a feasible capacitated assignment.
+    assignments: dict[int, tuple[int, float]] = {}
+    groups: dict[int, list[int]] = defaultdict(list)
+
+    def cluster_fits(anchor_id: int, member_ids: Sequence[int]) -> bool:
+        if config.max_position_span is None:
+            return True
+        positions = [
+            position
+            for candidate_id in (anchor_id, *member_ids)
+            for position in graph.nodes[candidate_id].block.original_logical_positions
+        ]
+        return max(positions) - min(positions) <= config.max_position_span
+
+    def assign(node_id: int, visited_nodes: set[int], visited_anchors: set[int]) -> bool:
+        if node_id in visited_nodes:
+            return False
+        visited_nodes.add(node_id)
+        for weight, anchor_id in preferences[node_id]:
+            if anchor_id in visited_anchors:
+                continue
+            visited_anchors.add(anchor_id)
+            members = groups[anchor_id]
+            if len(members) < config.group_size and cluster_fits(
+                anchor_id, (*members, node_id)
+            ):
+                members.append(node_id)
+                assignments[node_id] = (anchor_id, weight)
+                return True
+            # Relocate the weakest current member first. This retains the
+            # highest possible local graph weights without nondeterminism.
+            displaced_order = sorted(
+                members,
+                key=lambda member_id: (
+                    assignments[member_id][1],
+                    -member_id,
+                ),
+            )
+            for displaced in displaced_order:
+                old_assignment = assignments[displaced]
+                members.remove(displaced)
+                del assignments[displaced]
+                if cluster_fits(anchor_id, (*members, node_id)) and assign(
+                    displaced, visited_nodes, visited_anchors
+                ):
+                    members.append(node_id)
+                    assignments[node_id] = (anchor_id, weight)
+                    return True
+                assignments[displaced] = old_assignment
+                members.append(displaced)
+        return False
+
+    source_order = sorted(
+        preferences,
+        key=lambda node_id: (
+            len(preferences[node_id]),
+            -preferences[node_id][0][0],
+            node_id,
+        ),
+    )
+    for node_id in source_order:
+        if not assign(node_id, set(), set()):
+            fallback, fallback_reason = segmented_assignments()
+            if fallback_reason is None:
+                return fallback, None
+            return {}, (
+                f"unselected node {node_id} cannot be assigned within "
+                f"prototypes.group_size={config.group_size}; {fallback_reason}"
+            )
+
+    for anchor_id, member_ids in groups.items():
         if config.max_position_span is not None:
             blocks = [graph.nodes[anchor_id].block]
             blocks.extend(graph.nodes[node_id].block for node_id in member_ids)
@@ -272,9 +480,12 @@ def _assign_to_anchors(
                 position for block in blocks for position in block.original_logical_positions
             ]
             if max(positions) - min(positions) > config.max_position_span:
+                fallback, fallback_reason = segmented_assignments()
+                if fallback_reason is None:
+                    return fallback, None
                 return {}, (
                     f"anchor {anchor_id} cluster exceeds prototypes.max_position_span="
-                    f"{config.max_position_span}"
+                    f"{config.max_position_span}; {fallback_reason}"
                 )
     return assignments, None
 
@@ -324,10 +535,31 @@ def _prototype_payloads(
     graph: SparseEvidenceGraph,
     assignments: Mapping[int, tuple[int, float]],
     selection: SelectionResult,
-) -> tuple[PrototypeTier, tuple[PrototypeRecord, ...], dict[int, int]]:
+    key_transform: RotaryPrototypeKeyTransform | None,
+) -> tuple[PrototypeTier, tuple[PrototypeRecord, ...], dict[int, int], ExactTier]:
     grouped: dict[int, list[int]] = defaultdict(list)
     for node_id, (anchor_id, _weight) in assignments.items():
         grouped[anchor_id].append(node_id)
+    ordered_member_ids = tuple(
+        node_id
+        for anchor_id in sorted(grouped)
+        for node_id in sorted(grouped[anchor_id])
+    )
+    ordered_member_blocks = tuple(graph.nodes[node_id].block for node_id in ordered_member_ids)
+    # Gather every unselected source block once per layer/head.  Gathering one
+    # prototype cluster at a time launches thousands of small indexing kernels
+    # for long documents and videos.  The views below retain the identical
+    # block order and feed both prototype construction and residual storage.
+    gathered_sources = full_state.gather_exact_blocks(ordered_member_blocks)
+    gathered_by_node = {
+        node_id: (key, value)
+        for node_id, key, value in zip(
+            ordered_member_ids,
+            gathered_sources.key_blocks,
+            gathered_sources.value_blocks,
+            strict=True,
+        )
+    }
     source_blocks: list[KVBlockDescriptor] = []
     tier_assignments: list[int] = []
     prototype_keys: list[Any] = []
@@ -338,20 +570,35 @@ def _prototype_payloads(
     for prototype_id, anchor_id in enumerate(sorted(grouped)):
         member_ids = tuple(sorted(grouped[anchor_id]))
         member_blocks = tuple(graph.nodes[node_id].block for node_id in member_ids)
-        gathered = full_state.gather_exact_blocks(member_blocks)
+        gathered_keys = tuple(gathered_by_node[node_id][0] for node_id in member_ids)
+        gathered_values = tuple(gathered_by_node[node_id][1] for node_id in member_ids)
         layer = full_state.layers[graph.nodes[anchor_id].block.layer]
-        pooled_keys = tuple(
-            _pool_fp32(tensor, layer.key_sequence_dimension) for tensor in gathered.key_blocks
-        )
-        pooled_values = tuple(
-            _pool_fp32(tensor, layer.value_sequence_dimension) for tensor in gathered.value_blocks
-        )
         raw_weights = tuple(assignments[node_id][1] for node_id in member_ids)
-        key_average_fp32, prototype_key = _weighted_average(
-            pooled_keys, raw_weights, gathered.key_blocks[0]
+        if key_transform is None:
+            pooled_keys = tuple(
+                _pool_fp32(tensor, layer.key_sequence_dimension) for tensor in gathered_keys
+            )
+            key_average_fp32, prototype_key = _weighted_average(
+                pooled_keys, raw_weights, gathered_keys[0]
+            )
+        else:
+            transformed = key_transform.merge(
+                gathered_keys,
+                member_blocks,
+                raw_weights,
+                sequence_dimension=layer.key_sequence_dimension,
+                anchor_logical_position=(
+                    graph.nodes[anchor_id].block.original_logical_positions[0]
+                ),
+            )
+            pooled_keys = transformed.pooled_keys_fp32
+            key_average_fp32 = transformed.average_key_fp32
+            prototype_key = transformed.prototype_key
+        pooled_values = tuple(
+            _pool_fp32(tensor, layer.value_sequence_dimension) for tensor in gathered_values
         )
         value_average_fp32, prototype_value = _weighted_average(
-            pooled_values, raw_weights, gathered.value_blocks[0]
+            pooled_values, raw_weights, gathered_values[0]
         )
         prototype_keys.append(prototype_key)
         prototype_values.append(prototype_value)
@@ -406,7 +653,7 @@ def _prototype_payloads(
         tuple(prototype_values),
         tuple(tier_assignments),
     )
-    return tier, tuple(records), source_to_prototype
+    return tier, tuple(records), source_to_prototype, gathered_sources
 
 
 def _selection_budget_violation(
@@ -433,6 +680,65 @@ def _selection_budget_violation(
     )
 
 
+def estimate_prototype_active_cost(
+    graph: SparseEvidenceGraph,
+    selection: SelectionResult,
+    config: PrototypeConfig,
+    *,
+    position_limits: Mapping[tuple[int, int], int] | None = None,
+) -> tuple[int | None, str | None]:
+    """Validate assignments and estimate exact prototype cost without tensor copies.
+
+    Candidate-budget search can inspect dozens of selected sets. Materializing
+    and casting every candidate K/V tier made planning proportional to the
+    complete cache size times the number of search points. Fixed-size prototype
+    slots have an exact descriptor-derived cost, so rejected candidates need no
+    device gather at all.
+    """
+
+    assignments, reason = _assign_to_anchors(
+        graph,
+        frozenset(selection.selected_node_ids),
+        config,
+    )
+    if reason is not None:
+        return None, reason
+    prototype_anchor_ids = tuple(sorted({anchor_id for anchor_id, _weight in assignments.values()}))
+    if position_limits is not None:
+        active_positions: dict[tuple[int, int], int] = defaultdict(int)
+        for block in selection.selected_blocks:
+            active_positions[(block.layer, block.kv_head)] += block.position_count
+        for anchor_id in prototype_anchor_ids:
+            anchor = graph.nodes[anchor_id].block
+            active_positions[(anchor.layer, anchor.kv_head)] += 1
+        violations = {
+            identity: (active_positions[identity], limit)
+            for identity, limit in position_limits.items()
+            if active_positions[identity] > limit
+        }
+        if violations:
+            return None, f"prototype slots exceed dense layer/head capacities: {violations}"
+    if selection.budget.unit is BudgetUnit.BLOCKS:
+        return len(selection.selected_blocks) + len(prototype_anchor_ids), None
+    if selection.budget.unit is BudgetUnit.RETAINED_SLOTS:
+        return (
+            sum(block.position_count for block in selection.selected_blocks)
+            + len(prototype_anchor_ids),
+            None,
+        )
+    if selection.budget.unit is BudgetUnit.BYTES:
+        prototype_bytes = 0
+        for anchor_id in prototype_anchor_ids:
+            anchor = graph.nodes[anchor_id].block
+            if anchor.byte_size % anchor.position_count:
+                return None, "prototype anchor bytes are not divisible by its position count"
+            prototype_bytes += anchor.byte_size // anchor.position_count
+        return selection.active_bytes + prototype_bytes, None
+    raise PrototypeConstructionError(
+        f"unsupported selection budget unit: {selection.budget.unit}"
+    )
+
+
 def construct_three_tier_cache(
     full_state: FullKVState,
     graph: SparseEvidenceGraph,
@@ -443,6 +749,7 @@ def construct_three_tier_cache(
     residual_config: ResidualConfig | None = None,
     active_byte_budget: int | None = None,
     retention_ratio: float | None = None,
+    key_transform: RotaryPrototypeKeyTransform | None = None,
 ) -> ThreeTierCacheConstruction:
     """Build exact, prototype, and CPU residual tiers or safely select exact-only.
 
@@ -471,7 +778,7 @@ def construct_three_tier_cache(
             "selected exact blocks already exceed active_byte_budget: "
             f"exact={selection.active_bytes}, budget={active_byte_budget}"
         )
-    safety = assess_prototype_safety(full_state, capabilities)
+    safety = assess_prototype_safety(full_state, capabilities, key_transform)
     all_node_ids = tuple(range(len(graph.nodes)))
     if retention_ratio == 1.0 and selection.selected_node_ids != all_node_ids:
         raise PrototypeConstructionError(
@@ -515,8 +822,8 @@ def construct_three_tier_cache(
             reason=incompatibility,
         )
     exact = selection.to_exact_tier(full_state)
-    prototype_tier, records, source_to_prototype = _prototype_payloads(
-        full_state, graph, assignments, selection
+    prototype_tier, records, source_to_prototype, gathered_sources = _prototype_payloads(
+        full_state, graph, assignments, selection, key_transform
     )
     budget_violation = _selection_budget_violation(exact, prototype_tier, selection)
     if budget_violation is not None:
@@ -542,7 +849,16 @@ def construct_three_tier_cache(
                     f"configured budget ({active_byte_budget})"
                 ),
             )
-    residual_report = build_residual_storage(full_state, source_to_prototype, residuals)
+    residual_node_order = tuple(
+        node_id for record in records for node_id in record.assigned_node_ids
+    )
+    residual_report = build_residual_storage(
+        full_state,
+        source_to_prototype,
+        residuals,
+        node_order=residual_node_order,
+        gathered=gathered_sources,
+    )
     state = MosaicKVState.create(
         full_state,
         exact=exact,
@@ -569,4 +885,5 @@ __all__ = [
     "PrototypeConstructionError",
     "assess_prototype_safety",
     "construct_three_tier_cache",
+    "estimate_prototype_active_cost",
 ]

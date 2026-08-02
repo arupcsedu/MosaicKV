@@ -7,11 +7,11 @@ records. A backend supplies provisional logits, globally normalized prototype
 attention masses, and a callback that recomputes the same decode step from the
 promoted cache state.
 
-Current Hugging Face adapters still declare `supports_residual_repair=false`
-and cannot decode packed active/logical layouts. Consequently this module is
-validated with synthetic cache tensors and callback-driven re-decode; it does
-not claim end-to-end repair support for LLaVA, Qwen2.5-VL, OneVision, or
-InternVL checkpoints.
+Qwen2.5-VL declares residual repair support for the audited Transformers
+4.55.2 eager path and can decode packed active/logical layouts through the
+owned HF runtime. LLaVA, OneVision, InternVL, fused attention, and other
+Transformers versions remain fail-closed. Synthetic callback tests and real
+Qwen checkpoint evidence are separate validation levels.
 
 ## Persistent state
 
@@ -129,3 +129,12 @@ paper result. Slurm job `17112166` completed this no-download check on an
 NVIDIA A100-SXM4-80GB with PyTorch `2.11.0+cu130`: pinned residual transfer
 reported the asynchronous CUDA path, restored source block `2`, invoked one
 re-decode, and kept the active cache within its construction budget.
+
+The bounded Qwen2.5-VL-3B v17 ablation produced real pinned residual tiers for
+all applicable full/prototype rows. The registered online
+`entropy_or_prototype_risk` thresholds made zero promotions. Evaluation-only
+oracle repair triggered on 7.14% of diagnostic decode steps on average,
+measured 0.1932 seconds mean transfer plus re-decode latency, and labeled 33.33%
+of triggered events as quality recovered. These are exploratory one-/two-
+sample diagnostics: they prove the path is operational but do not justify the
+online residual overhead or constitute a quality claim.

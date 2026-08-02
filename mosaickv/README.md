@@ -18,8 +18,12 @@ append-only evaluation storage, explicit prefill/token decode, FullKV, simple
 exact-cache baselines, and local `lookm_reimpl`, `prefixkv_reimpl`, and
 `vl_cache_reimpl` methods. It also contains forecasting, sparse graph
 construction, block utility and selection, conservative cache tiers, and
-decode-time repair. Registered HF adapters expose post-RoPE cached keys, so
-unsafe prototype merging fails closed to exact selection.
+decode-time repair. Qwen2.5-VL now has a version-pinned, audited post-M-RoPE
+prototype transform: cached keys are de-rotated with exact model phases,
+merged in FP32 phase-neutral space, and re-rotated at the prototype anchor.
+Prototype and residual-repair execution remains eager-only and fails closed
+outside Transformers 4.55.2. Other post-RoPE adapters still fall back to exact
+selection.
 
 The common lock, package imports, CUDA/FlashAttention smoke, static checks,
 unit tests, synthetic 100%-retention equivalence, and pinned Qwen2.5-VL-3B HF
@@ -30,6 +34,13 @@ Official LOOK-M and PrefixKV source is pinned for inspection,
 but official execution is disabled; only the explicitly labeled
 reimplementations belong to the common runtime. This repository currently
 reports **no paper-eligible measured experimental results**.
+
+The bounded dirty-tree Experiment-3 validation completed 84/84 rows on A100
+GPUs with identical per-sample active byte budgets. It provides implementation
+evidence for Qwen2.5-VL forecasting, spatial/attention graph inputs, safe
+three-tier construction, and evaluation-only oracle repair, but its one-/two-
+example task subsets are not paper evidence. See the
+[component-ablation analysis](analysis/component_ablations.md).
 
 The common environment imports the installed vLLM and SGLang stacks and passes
 the CUDA smoke. SGLang Stage A passes repeated determinism, active-byte

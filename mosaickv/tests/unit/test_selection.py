@@ -144,6 +144,24 @@ def test_block_utility_records_every_requested_signal_and_exact_formula() -> Non
     assert table.for_node(2).modality_rarity > table.for_node(0).modality_rarity
 
 
+def test_signed_value_coefficient_rewards_expected_output_contribution() -> None:
+    full = _full(
+        (Modality.TEXT, Modality.TEXT),
+        values=np.asarray([[10.0, 0.0], [1.0, 0.0]], dtype=np.float32),
+    )
+    graph = build_evidence_graph(full, _isolated_graph_config())
+    table = compute_block_utilities(
+        graph,
+        UtilityConfig(lambda_q=0.0, lambda_v=-1.0, lambda_o=0.0),
+        forecast_attention_by_node=(0.5, 0.5),
+        attention_provenance="synthetic_signed_preservation_fixture",
+        rope_aware=True,
+    )
+
+    assert table.for_node(0).value_contribution > table.for_node(1).value_contribution
+    assert table.for_node(0).local_utility > table.for_node(1).local_utility
+
+
 def test_token_attention_is_aggregated_and_normalized_by_layer_and_head() -> None:
     full = _full((Modality.TEXT,) * 4, block_size=2)
     graph = build_evidence_graph(full, _isolated_graph_config())
@@ -212,6 +230,33 @@ def test_lazy_greedy_is_deterministic_and_selects_mandatory_blocks_first() -> No
     assert first.budget_spent <= budget.value
     assert first.marginal_recomputations > 0
     assert first.to_exact_tier(full).active_bytes == first.active_bytes
+
+
+def test_required_prototype_anchors_are_selected_before_lazy_greedy() -> None:
+    full = _full((Modality.TEXT,) * 6, mandatory=(5,))
+    _graph, _utilities, objective = _utilities_and_objective(full)
+
+    result = lazy_greedy_select(
+        objective,
+        SelectionBudget(3, BudgetUnit.BLOCKS),
+        required_node_ids=(3, 1, 3),
+    )
+
+    assert result.selection_order[:3] == (5, 1, 3)
+    assert result.decisions[1].reason is SelectionReason.PROTOTYPE_ANCHOR
+    assert result.decisions[3].reason is SelectionReason.PROTOTYPE_ANCHOR
+
+
+def test_required_prototype_anchor_budget_fails_closed() -> None:
+    full = _full((Modality.TEXT,) * 4, mandatory=(3,))
+    _graph, _utilities, objective = _utilities_and_objective(full)
+
+    with pytest.raises(InfeasibleSelectionBudgetError, match="prototype anchors"):
+        lazy_greedy_select(
+            objective,
+            SelectionBudget(2, BudgetUnit.BLOCKS),
+            required_node_ids=(0, 1),
+        )
 
 
 def test_retention_one_selects_all_exact_in_linear_mandatory_first_path() -> None:

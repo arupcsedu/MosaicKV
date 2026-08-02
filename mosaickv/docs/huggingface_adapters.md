@@ -9,12 +9,15 @@ The runtime adapters implement the Phase A explicit full-cache path for:
 - `llava-hf/llava-onevision-qwen2-0.5b-ov-hf`; and
 - `OpenGVLab/InternVL2_5-4B` as an optional remote-code adapter.
 
-The backend-independent three-tier constructor can consume adapter capability
-metadata, but all four adapters currently declare prototype merging and
-residual repair unsupported. Because their cached keys are post-RoPE, the
-constructor fails closed to selection-only exact cache state instead of
-averaging incompatible rotary phases. LLaVA-1.5, Qwen2.5-VL, and
-LLaVA-OneVision accept eager, SDPA, and FlashAttention-2 for FullKV execution.
+The backend-independent three-tier constructor consumes adapter capability
+metadata. Qwen2.5-VL declares prototype merging and residual repair only for
+the audited Transformers 4.55.2 eager path. It captures the model-produced
+M-RoPE phase, exactly de-rotates each cached member key, merges in FP32
+phase-neutral space, and re-rotates at the anchor. Any version/API mismatch
+raises rather than averaging incompatible phases. LLaVA-1.5, LLaVA-OneVision,
+and InternVL remain post-RoPE exact-selection fallbacks. LLaVA-1.5,
+Qwen2.5-VL, and LLaVA-OneVision accept eager, SDPA, and FlashAttention-2 for
+FullKV execution.
 Compression prefill remains eager because prompt-attention capture is not
 exposed by SDPA or FlashAttention-2. The runtime may explicitly switch an
 all-valid, no-repair exact cache to SDPA for decoding; arbitrary padded
@@ -81,6 +84,14 @@ language layer's `q_proj`; the captured tensors are reshaped to
 `[batch, heads, sequence, head_dim]` and are explicitly labeled
 `q_proj_output_pre_rope`. Hooks are removed after each forward and never alter
 weights.
+
+For Qwen2.5-VL only, `build_prototype_key_transform` mirrors the installed
+`get_rope_index`, `Qwen2_5_VLRotaryEmbedding`, and
+`apply_multimodal_rotary_pos_emb` dataflow. The transform provenance is
+`transformers_4_55_2_qwen2_5_vl_get_rope_index_rotary_emb_apply_multimodal_rotary_pos_emb_v1`.
+Its inverse divides by `cos^2 + sin^2`, so attention scaling is not assumed to
+be unit magnitude. Prototype and repair decode reject SDPA and
+FlashAttention-2; those implementations remain exact-only.
 
 Qwen2.5-VL's M-RoPE `rope_deltas` is copied into the prefill decode state and
 restored before each token step. Its immutable decoded position range is
@@ -159,3 +170,8 @@ retention-1 reconstruction each had 16/16 token agreement and maximum logit
 difference `0.0`. Its dirty-tree provenance makes this implementation evidence,
 not a canonical experimental row. Eager and FlashAttention-2 retain their own
 independent gates.
+
+The bounded v17 component-ablation run subsequently completed 44/44 compressed
+prototype cells as `three_tier` with the registered transform provenance, plus
+four exact-only no-prototype cells. This is exploratory dirty-tree checkpoint
+evidence, not a clean support claim or paper result.

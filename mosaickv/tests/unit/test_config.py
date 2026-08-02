@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from mosaickv.config import (
+    AblationConfig,
     CacheConfig,
     ConfigurationError,
     FidelityDiagnosticsConfig,
@@ -22,6 +23,7 @@ from mosaickv.config import (
     synthetic_smoke_config,
 )
 from mosaickv.types import (
+    AblationVariant,
     BudgetUnit,
     ForecastMode,
     LookMMergeStrategy,
@@ -36,6 +38,17 @@ def test_smoke_config_is_stable_and_valid() -> None:
     assert config.execution.seed == 7
     assert len(config_sha256(config)) == 64
     assert canonical_config_json(config) == canonical_config_json(config)
+    assert "ablation" not in json.loads(canonical_config_json(config))
+
+
+def test_oracle_ablation_requires_explicit_evaluation_only_gate() -> None:
+    with pytest.raises(ConfigurationError, match="evaluation_only=true"):
+        AblationConfig(variant=AblationVariant.ORACLE_FUTURE_QUERY)
+    config = AblationConfig(
+        variant=AblationVariant.ORACLE_FUTURE_QUERY,
+        evaluation_only=True,
+    )
+    assert config.evaluation_only
 
 
 def test_fidelity_diagnostic_ledger_is_strict_and_hashed() -> None:

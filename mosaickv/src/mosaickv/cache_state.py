@@ -35,6 +35,7 @@ class ModalitySpan:
     frame_index: int | None = None
     page_index: int | None = None
     region: tuple[float, float, float, float] | None = None
+    grid_shape: tuple[int, int] | None = None
 
     def __post_init__(self) -> None:
         if self.start < 0 or self.end <= self.start:
@@ -49,6 +50,14 @@ class ModalitySpan:
             left, top, right, bottom = self.region
             if right < left or bottom < top:
                 raise ValueError("region right/bottom cannot precede left/top")
+        if self.grid_shape is not None:
+            if len(self.grid_shape) != 2 or any(value <= 0 for value in self.grid_shape):
+                raise ValueError("grid_shape must contain positive (rows, columns)")
+            rows, columns = self.grid_shape
+            if self.end - self.start != rows * columns:
+                raise ValueError(
+                    "a grid-backed modality span must contain exactly rows*columns tokens"
+                )
 
     def contains(self, logical_position: int) -> bool:
         return self.start <= logical_position < self.end
@@ -76,6 +85,7 @@ class MediaMetadata:
             self.frame_index,
             self.page_index,
             self.region,
+            None,
         )
 
 
@@ -850,6 +860,7 @@ class FullKVState:
         int | None,
         int | None,
         tuple[float, float, float, float] | None,
+        tuple[int, int] | None,
     ]:
         return (
             span.modality,
@@ -857,6 +868,55 @@ class FullKVState:
             span.frame_index,
             span.page_index,
             span.region,
+            span.grid_shape,
+        )
+
+    @staticmethod
+    def _block_region(
+        span: ModalitySpan,
+        logical_positions: Sequence[int],
+    ) -> tuple[float, float, float, float] | None:
+        """Return one normalized raster box shared by a fixed-size KV block.
+
+        Qwen expands every visual grid cell into one language-sequence token.
+        Blocks may cross a raster row, so their graph node is represented by
+        the smallest normalized bounding box containing every member cell.
+        Explicit dataset/processor regions remain authoritative.
+        """
+
+        if span.region is not None:
+            return span.region
+        if span.grid_shape is None:
+            return None
+        rows, columns = span.grid_shape
+        offsets = tuple(position - span.start for position in logical_positions)
+        if any(offset < 0 or offset >= rows * columns for offset in offsets):
+            raise ValueError("block logical position lies outside its visual grid span")
+        row_ids = tuple(offset // columns for offset in offsets)
+        column_ids = tuple(offset % columns for offset in offsets)
+        return (
+            min(column_ids) / columns,
+            min(row_ids) / rows,
+            (max(column_ids) + 1) / columns,
+            (max(row_ids) + 1) / rows,
+        )
+
+    @classmethod
+    def _block_metadata(
+        cls,
+        span: ModalitySpan,
+        logical_positions: Sequence[int],
+    ) -> tuple[MediaMetadata, ...]:
+        region = cls._block_region(span, logical_positions)
+        return tuple(
+            MediaMetadata(
+                logical_position,
+                span.image_index,
+                span.frame_index,
+                span.page_index,
+                region,
+            )
+            for logical_position in logical_positions
         )
 
     @classmethod
@@ -887,10 +947,7 @@ class FullKVState:
                         end += 1
                     selected_physical = tuple(range(physical, end))
                     selected_logical = positions.gather(selected_physical)
-                    metadata = tuple(
-                        cls._media_metadata(cls._span_for(spans, logical), logical)
-                        for logical in selected_logical
-                    )
+                    metadata = cls._block_metadata(first_span, selected_logical)
                     key_bytes = cls._position_bytes(
                         layer.key,
                         layer.key_head_dimension,
@@ -937,16 +994,6 @@ class FullKVState:
         )
         return elements_per_head_position * position_count * _tensor_element_size(tensor)
 
-    @staticmethod
-    def _media_metadata(span: ModalitySpan, logical_position: int) -> MediaMetadata:
-        return MediaMetadata(
-            logical_position,
-            span.image_index,
-            span.frame_index,
-            span.page_index,
-            span.region,
-        )
-
     def _validate_descriptor(self, block: KVBlockDescriptor) -> None:
         try:
             layer = self.layers[block.layer]
@@ -972,9 +1019,8 @@ class FullKVState:
         )
         if any(span.modality is not block.modality for span in expected_spans):
             raise ValueError("block modality differs from the source modality map")
-        expected_metadata = tuple(
-            self._media_metadata(span, logical)
-            for span, logical in zip(expected_spans, block.original_logical_positions, strict=True)
+        expected_metadata = self._block_metadata(
+            expected_spans[0], block.original_logical_positions
         )
         if expected_metadata != block.media_metadata:
             raise ValueError("block media metadata differs from the source modality map")
@@ -1105,10 +1151,7 @@ class FullKVState:
                     end += 1
                 positions = physical_positions[offset:end]
                 logical_positions = self.logical_positions.gather(positions)
-                metadata = tuple(
-                    self._media_metadata(self._span_for(self.modality_spans, logical), logical)
-                    for logical in logical_positions
-                )
+                metadata = self._block_metadata(first_span, logical_positions)
                 key_bytes = self._position_bytes(
                     layer.key,
                     layer.key_head_dimension,

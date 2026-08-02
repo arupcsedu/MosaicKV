@@ -20,7 +20,7 @@ checkpoint has not passed a clean common-environment load and parity gate.
 | Model | HF 4.55.2 source | vLLM 0.10.2 source | SGLang 0.5.1 source | Current runtime evidence |
 |---|---|---|---|---|
 | LLaVA-1.5-7B | Native | Registered | Checkpoint compatibility unverified | HF eager controlled FullKV/exact-selection job `17346904_2` completed; fused parity remains model-specific |
-| Qwen2.5-VL-3B | Native | Registered | Registered | HF eager/SDPA/FA2 load and parity pass; SGLang Stage A passes; serving cross-parity is pending |
+| Qwen2.5-VL-3B | Native | Registered | Registered | HF eager/SDPA/FA2 FullKV parity; HF eager three-tier/repair path measured in bounded v17; serving Stage A parity passes |
 | Qwen2.5-VL-7B | Native | Registered | Registered | HF loads; serving reruns pending |
 | InternVL2.5-4B | Remote checkpoint code only | Registered | Unsupported | Optional HF remote-code path unverified in upgraded lock |
 | LLaVA-OneVision-0.5B | Native | Registered | Unsupported | HF source/load gate pending |
@@ -61,6 +61,12 @@ smoke-tested in the common environment.
 | Qwen2.5-VL | Accessible | Accessible | `[batch, KV head, sequence, head dim]` | Post-RoPE |
 | LLaVA-OneVision | Accessible | Accessible through Qwen2 attention | `[batch, KV head, sequence, head dim]` | Post-RoPE |
 | InternVL2.5 | Unsupported until remote code loads | Unsupported until load | Unsupported | Unsupported |
+
+Qwen2.5-VL is the only adapter currently declaring prototype/repair support.
+That declaration is restricted to Transformers 4.55.2 eager attention and the
+registered exact M-RoPE phase transform. Qwen 7B shares the source contract but
+has not passed the checkpoint-specific three-tier gate; it must not inherit the
+3B result. Other adapters remain exact-only below retention 1.0.
 
 For serving backends, public APIs do not expose model-owned query projections
 or request KV tensors safely. Those capabilities are unsupported regardless of

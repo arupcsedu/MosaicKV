@@ -184,6 +184,7 @@ class SelectionReason(StrEnum):
 
     MANDATORY_EXACT = "mandatory_exact"
     RETENTION_ONE_EXACT = "retention_one_exact"
+    PROTOTYPE_ANCHOR = "prototype_anchor"
     STRATUM_RESERVE = "stratum_reserve"
     LAZY_GREEDY = "lazy_greedy"
     DENSE_CACHE_FILL = "dense_cache_fill"
@@ -215,6 +216,7 @@ class SelectionDecision:
         if self.reason in {
             SelectionReason.MANDATORY_EXACT,
             SelectionReason.RETENTION_ONE_EXACT,
+            SelectionReason.PROTOTYPE_ANCHOR,
             SelectionReason.STRATUM_RESERVE,
             SelectionReason.LAZY_GREEDY,
             SelectionReason.DENSE_CACHE_FILL,

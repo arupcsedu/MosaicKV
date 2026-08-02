@@ -8,6 +8,7 @@ import math
 import os
 import tempfile
 import time
+from collections import Counter, deque
 from collections.abc import Iterable, Mapping, Sequence
 from contextlib import ExitStack
 from dataclasses import asdict, dataclass, replace
@@ -51,7 +52,9 @@ from mosaickv.cache_state import (
 from mosaickv.config import RunConfig
 from mosaickv.evaluation.forecast_diagnostics import (
     AttentionDiagnosticInput,
+    AttentionSelectionDiagnostics,
     ForecastQualityDiagnostics,
+    evaluate_attention_selection_quality,
     evaluate_forecast_quality,
 )
 from mosaickv.evaluation.model import EvaluationRequest, GenerationMetrics, ModelGeneration
@@ -59,7 +62,7 @@ from mosaickv.evaluation.oracle_queries import (
     EvaluationOnlyOracleQueries,
     collect_evaluation_only_true_future_queries,
 )
-from mosaickv.forecasting import QueryForecast, forecast_with_rollout
+from mosaickv.forecasting import QueryForecast, build_query_forecast, forecast_with_rollout
 from mosaickv.forecasting.huggingface import IsolatedQueryRollout
 from mosaickv.generation import decode_quality_output, terminal_token_ids
 from mosaickv.graph import SparseEvidenceGraph, build_evidence_graph
@@ -69,11 +72,19 @@ from mosaickv.prototypes import (
     ThreeTierCacheConstruction,
     TierConstructionMode,
     construct_three_tier_cache,
+    estimate_prototype_active_cost,
 )
-from mosaickv.repair import RepairCacheState, RepairEvent, repair_decode_step
+from mosaickv.prototypes.rope import RotaryPrototypeKeyTransform
+from mosaickv.repair import (
+    RepairCacheState,
+    RepairEvent,
+    evaluate_repair_decode_step,
+    repair_decode_step,
+)
 from mosaickv.selection import (
     BlockUtilityTable,
     BudgetedObjective,
+    InfeasibleSelectionBudgetError,
     SelectionBudget,
     SelectionResult,
     compute_block_utilities,
@@ -81,11 +92,13 @@ from mosaickv.selection import (
     select_all_exact,
 )
 from mosaickv.types import (
+    AblationVariant,
     BudgetUnit,
     JsonObject,
     JsonValue,
     MosaicKVMethod,
     OutputLengthPolicy,
+    RepairPolicy,
 )
 
 
@@ -158,7 +171,7 @@ class MosaicKVCompressionPlan:
     method: MosaicKVMethod
     effective_method: str
     full_state: FullKVState
-    forecast: QueryForecast
+    forecast: QueryForecast | None
     graph: SparseEvidenceGraph
     utilities: BlockUtilityTable
     selection: SelectionResult
@@ -286,8 +299,11 @@ def _dense_physical_cache_budget(
         # below that capacity. Quantize the shared physical extent itself to
         # the fixed block lattice. Mandatory-only capacity is the exception
         # when the requested budget is smaller than one aligned extent.
-        aligned_capacity = (prompt_capacity // full_state.block_size) * full_state.block_size
-        prompt_capacity = max(mandatory_positions, aligned_capacity)
+        optional_capacity = max(0, prompt_capacity - mandatory_positions)
+        aligned_optional_capacity = (
+            optional_capacity // full_state.block_size
+        ) * full_state.block_size
+        prompt_capacity = mandatory_positions + aligned_optional_capacity
     if prompt_capacity < 1:
         raise HuggingFaceRuntimeError(
             "physical byte budget cannot represent one KV position per layer/head"
@@ -496,6 +512,23 @@ def _forecast_quality_diagnostic(
         capture_attentions=True,
     )
     predicted = _forecast_token_attention_by_head(full_state, prefill, rollout, config)
+    return _forecast_quality_from_oracle(
+        full_state,
+        forecast,
+        oracle,
+        predicted,
+        selection,
+    )
+
+
+def _attention_diagnostic_inputs(
+    full_state: FullKVState,
+    predicted: Mapping[tuple[int, int], np.ndarray[Any, Any]],
+    oracle: EvaluationOnlyOracleQueries,
+    selection: SelectionResult,
+) -> dict[tuple[int, int], AttentionDiagnosticInput]:
+    """Align actual selected blocks and oracle attention within each cache identity."""
+
     truth = _oracle_token_attention_by_head(full_state, oracle)
     selected = set(selection.selected_node_ids)
     inputs: dict[tuple[int, int], AttentionDiagnosticInput] = {}
@@ -505,15 +538,68 @@ def _forecast_quality_diagnostic(
             for node_id, block in enumerate(full_state.blocks)
             if (block.layer, block.kv_head) == identity
         )
+        local_selected = tuple(
+            local_index for local_index, node_id in enumerate(node_ids) if node_id in selected
+        )
         inputs[identity] = AttentionDiagnosticInput(
             predicted_attention=predicted[identity],
             true_attention=truth[identity],
             block_positions=tuple(
                 full_state.blocks[node_id].physical_cache_indices for node_id in node_ids
             ),
-            selected_block_count=sum(node_id in selected for node_id in node_ids),
+            selected_block_count=len(local_selected),
+            selected_block_indices=local_selected,
         )
-    return evaluate_forecast_quality(forecast, oracle, inputs)
+    return inputs
+
+
+def _forecast_quality_from_oracle(
+    full_state: FullKVState,
+    forecast: QueryForecast,
+    oracle: EvaluationOnlyOracleQueries,
+    predicted: Mapping[tuple[int, int], np.ndarray[Any, Any]],
+    selection: SelectionResult,
+) -> ForecastQualityDiagnostics:
+    return evaluate_forecast_quality(
+        forecast,
+        oracle,
+        _attention_diagnostic_inputs(full_state, predicted, oracle, selection),
+    )
+
+
+def _selection_quality_from_oracle(
+    full_state: FullKVState,
+    oracle: EvaluationOnlyOracleQueries,
+    predicted: Mapping[tuple[int, int], np.ndarray[Any, Any]],
+    selection: SelectionResult,
+) -> AttentionSelectionDiagnostics:
+    return evaluate_attention_selection_quality(
+        _attention_diagnostic_inputs(full_state, predicted, oracle, selection)
+    )
+
+
+def _uniform_token_attention_by_head(
+    full_state: FullKVState,
+) -> dict[tuple[int, int], np.ndarray[Any, Any]]:
+    """No-forecast control: equal evidence for every source position."""
+
+    return {
+        (layer_index, kv_head): np.ones(layer.sequence_length, dtype=np.float64)
+        for layer_index, layer in enumerate(full_state.layers)
+        for kv_head in range(layer.kv_heads)
+    }
+
+
+def _block_attention_from_token_attention(
+    full_state: FullKVState,
+    by_head: Mapping[tuple[int, int], np.ndarray[Any, Any]],
+) -> dict[int, float]:
+    return {
+        node_id: float(
+            by_head[(block.layer, block.kv_head)][list(block.physical_cache_indices)].sum()
+        )
+        for node_id, block in enumerate(full_state.blocks)
+    }
 
 
 def _prompt_attention_by_node(
@@ -598,6 +684,8 @@ def _selection(
     retention_one: bool,
     position_limits: Mapping[tuple[int, int], int] | None = None,
     fill_position_limits: bool = False,
+    position_fill_quantum: int | None = None,
+    required_node_ids: Iterable[int] = (),
 ) -> SelectionResult:
     if retention_one:
         return select_all_exact(objective, SelectionBudget(value, unit))
@@ -606,6 +694,113 @@ def _selection(
         SelectionBudget(value, unit),
         position_limits=position_limits,
         fill_position_limits=fill_position_limits,
+        position_fill_quantum=position_fill_quantum,
+        required_node_ids=required_node_ids,
+    )
+
+
+def _required_prototype_anchors(
+    objective: BudgetedObjective,
+    config: RunConfig,
+) -> tuple[int, ...]:
+    """Choose a sparse deterministic anchor cover for prototype feasibility.
+
+    Nodes are partitioned only within a layer, KV head, and modality. Each
+    contiguous segment contains at most ``group_size + 1`` nodes and respects
+    the configured prototype position span. A mandatory node already supplies
+    that segment's anchor; otherwise the highest-local-utility node is reserved
+    exact with node ID as the tie-break. Universal sparse positional edges make
+    every member directly reachable from the reserved anchor.
+    """
+
+    graph = objective.graph
+    groups: dict[tuple[int, int, object], list[int]] = {}
+    for node in graph.nodes:
+        block = node.block
+        groups.setdefault((block.layer, block.kv_head, block.modality), []).append(node.node_id)
+
+    required: list[int] = []
+    maximum_members = config.prototypes.group_size
+    for identity in sorted(groups, key=lambda item: (item[0], item[1], str(item[2]))):
+        ordered = sorted(
+            groups[identity],
+            key=lambda node_id: (
+                graph.nodes[node_id].block.original_logical_positions[0],
+                node_id,
+            ),
+        )
+        segment: list[int] = []
+
+        def reserve_anchor(members: Sequence[int]) -> None:
+            if not members or any(
+                graph.nodes[node_id].block.mandatory for node_id in members
+            ):
+                return
+            required.append(
+                min(
+                    members,
+                    key=lambda node_id: (
+                        -objective.utilities.for_node(node_id).local_utility,
+                        node_id,
+                    ),
+                )
+            )
+
+        for node_id in ordered:
+            trial = [*segment, node_id]
+            positions = [
+                position
+                for member_id in trial
+                for position in graph.nodes[member_id].block.original_logical_positions
+            ]
+            exceeds_capacity = len(trial) > maximum_members + 1
+            exceeds_span = bool(
+                config.prototypes.max_position_span is not None
+                and max(positions) - min(positions) > config.prototypes.max_position_span
+            )
+            if segment and (exceeds_capacity or exceeds_span):
+                reserve_anchor(segment)
+                segment = [node_id]
+            else:
+                segment = trial
+        reserve_anchor(segment)
+    return tuple(sorted(required))
+
+
+def _refined_budget_candidates(
+    upper_failure: int,
+    lower_infeasible: int,
+    costs: Sequence[int],
+    *,
+    maximum_points: int = 512,
+) -> tuple[int, ...]:
+    """Refine only the coarse interval where feasibility changes.
+
+    Selection changes only when a whole block can be added. The GCD of source
+    block costs is therefore the finest useful byte/cardinality step. A bounded
+    interpolation remains available for unusually heterogeneous layouts.
+    """
+
+    if upper_failure <= lower_infeasible + 1 or maximum_points < 1:
+        return ()
+    quantum = 0
+    for cost in costs:
+        quantum = math.gcd(quantum, int(cost))
+    quantum = max(1, quantum)
+    lattice = tuple(
+        range(upper_failure - quantum, lower_infeasible, -quantum)
+    )
+    if len(lattice) <= maximum_points:
+        return lattice
+    span = upper_failure - lower_infeasible
+    return tuple(
+        sorted(
+            {
+                lower_infeasible + math.floor(span * index / (maximum_points + 1))
+                for index in range(1, maximum_points + 1)
+            },
+            reverse=True,
+        )
     )
 
 
@@ -615,6 +810,7 @@ def _exact_construction(
     selection: SelectionResult,
     capabilities: AdapterCapabilities,
     config: RunConfig,
+    key_transform: RotaryPrototypeKeyTransform | None,
 ) -> ThreeTierCacheConstruction:
     return construct_three_tier_cache(
         full_state,
@@ -624,6 +820,7 @@ def _exact_construction(
         prototype_config=replace(config.prototypes, enabled=False),
         residual_config=replace(config.residual, enabled=False),
         retention_ratio=config.cache.retention_ratio,
+        key_transform=key_transform,
     )
 
 
@@ -635,6 +832,7 @@ def _prototype_construction(
     config: RunConfig,
     target: int,
     position_limits: Mapping[tuple[int, int], int] | None,
+    key_transform: RotaryPrototypeKeyTransform | None,
 ) -> tuple[SelectionResult, ThreeTierCacheConstruction, float, float]:
     """Reserve active capacity for prototypes with bounded deterministic search."""
 
@@ -653,6 +851,7 @@ def _prototype_construction(
             retention_one=False,
             position_limits=position_limits,
             fill_position_limits=position_limits is not None,
+            position_fill_quantum=(full_state.block_size if position_limits is not None else None),
         )
         selection_seconds += time.perf_counter() - started
         started = time.perf_counter()
@@ -664,34 +863,84 @@ def _prototype_construction(
             prototype_config=config.prototypes,
             residual_config=config.residual,
             retention_ratio=config.cache.retention_ratio,
+            key_transform=key_transform,
         )
         tier_seconds += time.perf_counter() - started
         return selection, construction, selection_seconds, tier_seconds
 
+    required_anchors = _required_prototype_anchors(objective, config)
+    failures: Counter[str] = Counter()
     upper = max(mandatory, target - 1)
     span = upper - mandatory
     if span <= 128:
         candidates = tuple(range(upper, mandatory - 1, -1))
-    elif config.method.is_prefixkv_reimplementation:
+    else:
+        # Byte budgets commonly span millions of integer values. Searching
+        # every byte is neither meaningful (blocks are indivisible) nor
+        # tractable, so evaluate a deterministic 128-point coarse-to-fine
+        # lattice. The prior method-specific branch left ``candidates``
+        # undefined for ordinary MosaicKV byte budgets.
         candidates = tuple(
             sorted(
                 {mandatory + math.floor(span * index / 127) for index in range(128)},
                 reverse=True,
             )
         )
-    last_selection: SelectionResult | None = None
-    for exact_budget in candidates:
+    pending = deque(candidates)
+    representation_failure_budget: int | None = None
+    refinement_inserted = False
+    costs = tuple(SelectionBudget(1, unit).cost(node.block) for node in graph.nodes)
+    while pending:
+        exact_budget = pending.popleft()
         started = time.perf_counter()
-        candidate = _selection(
-            objective,
-            exact_budget,
-            unit,
-            retention_one=False,
-            position_limits=position_limits,
-        )
+        try:
+            candidate = _selection(
+                objective,
+                exact_budget,
+                unit,
+                retention_one=False,
+                position_limits=position_limits,
+                required_node_ids=required_anchors,
+            )
+        except InfeasibleSelectionBudgetError as error:
+            selection_seconds += time.perf_counter() - started
+            failures[f"selection: {error}"] += 1
+            if representation_failure_budget is not None and not refinement_inserted:
+                pending.clear()
+                pending.extend(
+                    _refined_budget_candidates(
+                        representation_failure_budget,
+                        exact_budget,
+                        costs,
+                    )
+                )
+                refinement_inserted = True
+            continue
         candidate = replace(candidate, budget=SelectionBudget(target, unit))
         selection_seconds += time.perf_counter() - started
-        last_selection = candidate
+        estimated_cost, incompatibility = estimate_prototype_active_cost(
+            graph,
+            candidate,
+            config.prototypes,
+            position_limits=position_limits,
+        )
+        if estimated_cost is None:
+            failures[f"assignment: {incompatibility or 'unknown incompatibility'}"] += 1
+            representation_failure_budget = exact_budget
+            continue
+        if estimated_cost > target:
+            failures[
+                f"active cost {estimated_cost} exceeds target {target}"
+            ] += 1
+            representation_failure_budget = exact_budget
+            continue
+        # The estimate above already validates the deterministic assignment and
+        # its exact active cost.  Materialize the chosen representation once,
+        # including residuals when the method requests them.  The old two-pass
+        # path first built every prototype with residuals disabled and then
+        # rebuilt the identical prototypes with residuals enabled.  For long
+        # videos that duplicated thousands of gather/RoPE/FP32 merge operations
+        # and dominated compression latency without adding a correctness check.
         started = time.perf_counter()
         construction = construct_three_tier_cache(
             full_state,
@@ -699,18 +948,15 @@ def _prototype_construction(
             candidate,
             capabilities,
             prototype_config=config.prototypes,
-            residual_config=(
-                config.residual
-                if config.method is MosaicKVMethod.MOSAICKV_FULL
-                else replace(config.residual, enabled=False)
-            ),
+            residual_config=config.residual,
             retention_ratio=config.cache.retention_ratio,
+            key_transform=key_transform,
         )
         tier_seconds += time.perf_counter() - started
         if construction.mode is TierConstructionMode.THREE_TIER:
             return candidate, construction, selection_seconds, tier_seconds
-    if last_selection is None:  # pragma: no cover - target always gives one candidate
-        raise HuggingFaceRuntimeError("prototype selection search produced no candidate")
+        failures[f"construction: {construction.reason}"] += 1
+        representation_failure_budget = exact_budget
     started = time.perf_counter()
     fallback = _selection(
         objective,
@@ -721,33 +967,53 @@ def _prototype_construction(
     )
     selection_seconds += time.perf_counter() - started
     started = time.perf_counter()
-    construction = _exact_construction(full_state, graph, fallback, capabilities, config)
+    construction = _exact_construction(
+        full_state, graph, fallback, capabilities, config, key_transform
+    )
+    summary = "; ".join(
+        f"{count}x {reason}" for reason, count in failures.most_common(4)
+    )
+    construction = replace(
+        construction,
+        mode=TierConstructionMode.EXACT_ONLY_INCOMPATIBLE,
+        reason=(
+            "prototype budget search found no feasible representation"
+            + (f": {summary}" if summary else "")
+        ),
+    )
     tier_seconds += time.perf_counter() - started
     return fallback, construction, selection_seconds, tier_seconds
 
 
 def build_compression_plan(
     full_state: FullKVState,
-    forecast: QueryForecast,
+    forecast: QueryForecast | None,
     forecast_attention_by_node: Mapping[int, float],
     capabilities: AdapterCapabilities,
     config: RunConfig,
     *,
     position_limits: Mapping[tuple[int, int], int] | None = None,
+    attention_provenance: str = "eager_prompt_and_isolated_draft_attention_v1",
+    key_transform: RotaryPrototypeKeyTransform | None = None,
+    prompt_attentions: Sequence[Any] | None = None,
 ) -> MosaicKVCompressionPlan:
     """Run graph, utility, selection, and tier construction for one prefill."""
 
     if config.method.is_full_cache:
         raise ValueError("FullKV does not run the MosaicKV compression planner")
     graph_started = time.perf_counter()
-    graph = build_evidence_graph(full_state, config.graph)
+    graph = build_evidence_graph(
+        full_state,
+        config.graph,
+        prompt_attentions=prompt_attentions,
+    )
     graph_seconds = time.perf_counter() - graph_started
     selection_started = time.perf_counter()
     utilities = compute_block_utilities(
         graph,
         config.utility,
         forecast_attention_by_node=forecast_attention_by_node,
-        attention_provenance="eager_prompt_and_isolated_draft_attention_v1",
+        attention_provenance=attention_provenance,
         rope_aware=True,
     )
     objective = BudgetedObjective(graph, utilities, config.selection)
@@ -772,6 +1038,7 @@ def build_compression_plan(
             prototype_config=config.prototypes,
             residual_config=config.residual,
             retention_ratio=1.0,
+            key_transform=key_transform,
         )
     elif config.method is MosaicKVMethod.MOSAICKV_EXACT:
         selection = _selection(
@@ -781,10 +1048,13 @@ def build_compression_plan(
             retention_one=False,
             position_limits=position_limits,
             fill_position_limits=position_limits is not None,
+            position_fill_quantum=(full_state.block_size if position_limits is not None else None),
         )
         selection_seconds = time.perf_counter() - selection_started
         tier_started = time.perf_counter()
-        construction = _exact_construction(full_state, graph, selection, capabilities, config)
+        construction = _exact_construction(
+            full_state, graph, selection, capabilities, config, key_transform
+        )
     else:
         selection, construction, selector_seconds, tier_seconds = _prototype_construction(
             full_state,
@@ -794,6 +1064,7 @@ def build_compression_plan(
             config,
             target,
             position_limits,
+            key_transform,
         )
         selection_seconds = utility_seconds + selector_seconds
         tier_started = None
@@ -809,6 +1080,8 @@ def build_compression_plan(
         effective_method = f"{config.method.value}__mosaickv_exact_safety_fallback"
     else:
         effective_method = f"{config.method.value}__{construction.mode.value}"
+    if config.ablation.variant is not AblationVariant.NONE:
+        effective_method = f"{effective_method}__ablation_{config.ablation.variant.value}"
     return MosaicKVCompressionPlan(
         config.method,
         effective_method,
@@ -823,6 +1096,20 @@ def build_compression_plan(
         graph_seconds,
         selection_seconds,
         tier_seconds,
+    )
+
+
+def _plan_has_live_residual_repair(
+    method: MosaicKVMethod,
+    plan: MosaicKVCompressionPlan | None,
+) -> bool:
+    """Whether real prototype/residual tiers were safely materialized."""
+
+    return bool(
+        method is MosaicKVMethod.MOSAICKV_FULL
+        and plan is not None
+        and plan.construction.mode is TierConstructionMode.THREE_TIER
+        and plan.construction.prototypes
     )
 
 
@@ -894,6 +1181,7 @@ def compare_runtime_retention_one(
             _forecast_attention_by_node(full_state, prefill, rollout, config),
             adapter.capabilities,
             config,
+            prompt_attentions=prefill.attention_weights,
         )
         packed = pack_runtime_cache(
             adapter,
@@ -1798,7 +2086,17 @@ def _trace_catalog(
     }
 
 
-def _forecast_trace(forecast: QueryForecast, *, compact_catalogs: bool = False) -> JsonObject:
+def _forecast_trace(
+    forecast: QueryForecast | None,
+    *,
+    compact_catalogs: bool = False,
+) -> JsonObject:
+    if forecast is None:
+        return {
+            "status": "disabled_by_declared_ablation",
+            "attention_source": "uniform_per_source_position",
+        }
+
     def head_records() -> Iterable[JsonObject]:
         for layer in forecast.layers:
             for head in layer:
@@ -1912,6 +2210,9 @@ def _plan_trace(
             "effective_method": plan.effective_method,
             "tier_mode": plan.construction.mode.value,
             "tier_reason": plan.construction.reason,
+            "prototype_safety": cast(
+                "JsonObject", asdict(plan.construction.safety)
+            ),
             "source_budget_value": plan.source_budget_value,
             "active_budget_value": plan.active_budget_value,
             "selected_blocks": _trace_catalog(selection, compact=compact_catalogs),
@@ -1923,6 +2224,7 @@ def _plan_trace(
                 compact_catalogs=compact_catalogs,
             ),
             "utility_diagnostics": _utility_trace(plan),
+            "selection_objective": cast("JsonObject", asdict(plan.selection.objective)),
         },
     )
 
@@ -2227,6 +2529,8 @@ class HuggingFaceMosaicKVModel:
             "status": "started",
             "repair_events": [],
             "decode_runtime_policy": decode_runtime_policy,
+            "ablation_variant": self.config.ablation.variant.value,
+            "ablation_evaluation_only": self.config.ablation.evaluation_only,
         }
         started = time.perf_counter()
         trace_instrumentation_seconds = 0.0
@@ -2253,8 +2557,17 @@ class HuggingFaceMosaicKVModel:
                 self.config.diagnostics.enabled
                 and request.sample_id in self.config.diagnostics.sample_ids
             )
+            no_forecast_ablation = (
+                self.config.ablation.variant is AblationVariant.NO_FUTURE_QUERY_FORECAST
+            )
             needs_prompt_attention = not retention_one_identity and (
-                method.is_mosaickv
+                (
+                    method.is_mosaickv
+                    and (
+                        not no_forecast_ablation
+                        or (self.config.graph.enabled and self.config.graph.attention_weight > 0)
+                    )
+                )
                 or method is MosaicKVMethod.PROMPT_ATTENTION_TOPK
                 or method.is_published_reimplementation
             )
@@ -2263,7 +2576,11 @@ class HuggingFaceMosaicKVModel:
             def run_prefill() -> Any:
                 return self.adapter.prefill(
                     prepared,
-                    capture_queries=method.is_mosaickv and not retention_one_identity,
+                    capture_queries=(
+                        method.is_mosaickv
+                        and not retention_one_identity
+                        and not no_forecast_ablation
+                    ),
                     capture_attentions=needs_prompt_attention,
                     attention_query_window=(
                         None
@@ -2346,7 +2663,8 @@ class HuggingFaceMosaicKVModel:
             tier_seconds = 0.0
             packing_seconds = 0.0
             repair_state: RepairCacheState | None = None
-            forecast_rollout: IsolatedQueryRollout | None = None
+            oracle_queries: EvaluationOnlyOracleQueries | None = None
+            predicted_token_attention: dict[tuple[int, int], np.ndarray[Any, Any]] | None = None
             dense_budget: DensePhysicalCacheBudget | None = None
             physical_prompt_capacity: int | None = None
             plan: MosaicKVCompressionPlan | None = None
@@ -2410,20 +2728,84 @@ class HuggingFaceMosaicKVModel:
                     )
                 )
                 if method.is_mosaickv:
-                    forecast, rollout = forecast_with_rollout(
-                        self.adapter,
-                        prefill,
-                        self.config.forecasting,
-                        capture_attentions=True,
-                    )
-                    forecast_rollout = rollout
-                    forecast_seconds = forecast.timing.total
-                    attention = _forecast_attention_by_node(
-                        full_state,
-                        prefill,
-                        rollout,
-                        self.config,
-                    )
+                    key_transform = None
+                    key_transform_seconds = 0.0
+                    if method in {
+                        MosaicKVMethod.MOSAICKV_PROTO,
+                        MosaicKVMethod.MOSAICKV_FULL,
+                    }:
+                        key_transform, key_transform_seconds = _timed(
+                            prefill.logits,
+                            lambda: self.adapter.build_prototype_key_transform(prepared),
+                        )
+                    attention_provenance = "eager_prompt_and_isolated_draft_attention_v1"
+                    if no_forecast_ablation:
+                        forecast = None
+                        predicted_token_attention = _uniform_token_attention_by_head(full_state)
+                        attention = _block_attention_from_token_attention(
+                            full_state,
+                            predicted_token_attention,
+                        )
+                        attention_provenance = "declared_no_forecast_uniform_position_control_v1"
+                    elif self.config.ablation.variant is AblationVariant.ORACLE_FUTURE_QUERY:
+                        if not self.config.ablation.evaluation_only:
+                            raise HuggingFaceRuntimeError(
+                                "oracle forecasting is restricted to evaluation-only ablations"
+                            )
+
+                        def build_oracle_forecast() -> tuple[
+                            QueryForecast,
+                            EvaluationOnlyOracleQueries,
+                        ]:
+                            oracle = collect_evaluation_only_true_future_queries(
+                                self.adapter,
+                                prefill,
+                                future_steps=self.config.diagnostics.forecast_oracle_steps,
+                                capture_attentions=True,
+                            )
+                            forecast_value = build_query_forecast(
+                                prefill.query_vectors.layers,
+                                oracle.query_layers,
+                                tuple(layer.kv_heads for layer in full_state.layers),
+                                self.config.forecasting,
+                                original_logical_sequence_length=(
+                                    prefill.state.logical_sequence_length
+                                ),
+                                draft_cache_isolated=True,
+                            )
+                            return forecast_value, oracle
+
+                        (forecast, oracle_queries), forecast_seconds = _timed(
+                            prefill.logits,
+                            build_oracle_forecast,
+                        )
+                        predicted_token_attention = _oracle_token_attention_by_head(
+                            full_state,
+                            oracle_queries,
+                        )
+                        attention = _block_attention_from_token_attention(
+                            full_state,
+                            predicted_token_attention,
+                        )
+                        attention_provenance = "evaluation_only_fullkv_true_future_attention_v1"
+                    else:
+                        forecast, rollout = forecast_with_rollout(
+                            self.adapter,
+                            prefill,
+                            self.config.forecasting,
+                            capture_attentions=True,
+                        )
+                        forecast_seconds = forecast.timing.total
+                        predicted_token_attention = _forecast_token_attention_by_head(
+                            full_state,
+                            prefill,
+                            rollout,
+                            self.config,
+                        )
+                        attention = _block_attention_from_token_attention(
+                            full_state,
+                            predicted_token_attention,
+                        )
                     plan = build_compression_plan(
                         full_state,
                         forecast,
@@ -2433,10 +2815,13 @@ class HuggingFaceMosaicKVModel:
                         position_limits=(
                             None if dense_budget is None else dense_budget.position_limits
                         ),
+                        attention_provenance=attention_provenance,
+                        key_transform=key_transform,
+                        prompt_attentions=prefill.attention_weights,
                     )
                     graph_seconds = plan.graph_seconds
                     selection_seconds = plan.selection_seconds
-                    tier_seconds = plan.tier_seconds
+                    tier_seconds = plan.tier_seconds + key_transform_seconds
                     packed_state = plan.construction.state
                     prototype_records = plan.construction.prototypes
                     logical_prefill_active_kv_bytes = (
@@ -2608,7 +2993,9 @@ class HuggingFaceMosaicKVModel:
                         f"active={packed_prefill_active_kv_bytes}, "
                         f"budget={dense_budget.target_bytes}"
                     )
-                if method is MosaicKVMethod.MOSAICKV_FULL and plan is not None:
+                if _plan_has_live_residual_repair(method, plan):
+                    if plan is None:  # pragma: no cover - helper guarantees this
+                        raise HuggingFaceRuntimeError("repairable plan is unexpectedly absent")
                     repair_state = RepairCacheState.from_construction(
                         full_state,
                         plan.construction,
@@ -2697,26 +3084,47 @@ class HuggingFaceMosaicKVModel:
                 and self.config.diagnostics.forecast_oracle_steps > 0
                 and plan is not None
             ):
-                if forecast_rollout is None:
+                if predicted_token_attention is None:
                     raise HuggingFaceRuntimeError(
-                        "MosaicKV oracle diagnostics are missing the online rollout"
+                        "MosaicKV oracle diagnostics are missing predicted attention"
                     )
-                forecast_diagnostic, forecast_diagnostic_seconds = _timed(
-                    prefill.logits,
-                    lambda: _forecast_quality_diagnostic(
-                        self.adapter,
-                        prefill,
+
+                def run_forecast_diagnostic() -> (
+                    ForecastQualityDiagnostics | AttentionSelectionDiagnostics
+                ):
+                    oracle = oracle_queries
+                    if oracle is None:
+                        oracle = collect_evaluation_only_true_future_queries(
+                            self.adapter,
+                            prefill,
+                            future_steps=self.config.diagnostics.forecast_oracle_steps,
+                            capture_attentions=True,
+                        )
+                    if plan.forecast is None:
+                        return _selection_quality_from_oracle(
+                            plan.full_state,
+                            oracle,
+                            predicted_token_attention,
+                            plan.selection,
+                        )
+                    return _forecast_quality_from_oracle(
                         plan.full_state,
                         plan.forecast,
-                        forecast_rollout,
+                        oracle,
+                        predicted_token_attention,
                         plan.selection,
-                        self.config,
-                    ),
+                    )
+
+                forecast_diagnostic, forecast_diagnostic_seconds = _timed(
+                    prefill.logits,
+                    run_forecast_diagnostic,
                 )
                 forecast_payload = cast("JsonObject", asdict(forecast_diagnostic))
                 forecast_payload["overhead_seconds"] = forecast_diagnostic_seconds
                 forecast_payload["online_selection_isolation"] = (
-                    "evaluation_only_output_not_passed_to_compressor"
+                    "evaluation_only_oracle_is_the_declared_compressor_input"
+                    if self.config.ablation.variant is AblationVariant.ORACLE_FUTURE_QUERY
+                    else "evaluation_only_output_not_passed_to_compressor"
                 )
                 trace["forecast_quality_diagnostic"] = forecast_payload
             elif self.config.diagnostics.forecast_oracle_steps > 0:
@@ -2800,10 +3208,17 @@ class HuggingFaceMosaicKVModel:
             tokens = [prefill.next_token_id]
             token = prefill.next_token_id
             decode_seconds = 0.0
+            oracle_repair_diagnostic_seconds = 0.0
             per_token_decode_seconds: list[float] = []
             decode_finite_flags: list[Any] = []
             repair_events: list[RepairEvent] = []
             prefixkv_decode_events: list[JsonObject] = []
+            oracle_reference_state = (
+                _clone_decode_state(self.adapter, prefill.state)
+                if repair_state is not None
+                and self.config.repair.policy is RepairPolicy.ORACLE
+                else None
+            )
             for step_index in range(1, self.config.generation.max_new_tokens):
                 # Hugging Face cache objects normally grow in place.  A
                 # provisional repair step therefore needs an isolated copy so
@@ -2814,6 +3229,21 @@ class HuggingFaceMosaicKVModel:
                 before = state if repair_state is None else _clone_decode_state(self.adapter, state)
                 decode_token = token
                 needs_attention = repair_state is not None
+                oracle_reference = None
+                if oracle_reference_state is not None:
+                    oracle_reference, oracle_seconds = _timed(
+                        decode_token,
+                        lambda current=decode_token, current_state=oracle_reference_state: (
+                            self.adapter.decode_one_token(
+                                current,
+                                current_state,
+                                capture_queries=False,
+                                capture_attentions=False,
+                            )
+                        ),
+                    )
+                    oracle_repair_diagnostic_seconds += oracle_seconds
+                    oracle_reference_state = oracle_reference.state
                 provisional, step_seconds = _timed(
                     decode_token,
                     lambda current=decode_token, current_state=before, capture=needs_attention: (
@@ -2925,14 +3355,32 @@ class HuggingFaceMosaicKVModel:
                     sink.append(output)
                     return output.logits
 
-                repair = repair_decode_step(
-                    repair_state,
-                    self.config.repair,
-                    step_index=step_index,
-                    provisional_logits=provisional.logits,
-                    prototype_attention_mass=masses,
-                    re_decode=re_decode,
-                )
+                if self.config.repair.policy is RepairPolicy.ORACLE:
+                    if oracle_reference is None:
+                        raise HuggingFaceRuntimeError(
+                            "oracle repair is missing its evaluation-only FullKV reference"
+                        )
+                    provisional_id = int(provisional.next_token_id.item())
+                    reference_id = int(oracle_reference.next_token_id.item())
+                    repair = evaluate_repair_decode_step(
+                        repair_state,
+                        self.config.repair,
+                        step_index=step_index,
+                        provisional_logits=provisional.logits,
+                        prototype_attention_mass=masses,
+                        re_decode=re_decode,
+                        reference_token_id=reference_id,
+                        oracle_should_repair=provisional_id != reference_id,
+                    )
+                else:
+                    repair = repair_decode_step(
+                        repair_state,
+                        self.config.repair,
+                        step_index=step_index,
+                        provisional_logits=provisional.logits,
+                        prototype_attention_mass=masses,
+                        re_decode=re_decode,
+                    )
                 repair_state = repair.state
                 repair_events.append(repair.event)
                 if repair.event.triggered:
@@ -2978,6 +3426,7 @@ class HuggingFaceMosaicKVModel:
                 - started
                 - fidelity_seconds
                 - forecast_diagnostic_seconds
+                - oracle_repair_diagnostic_seconds
                 - trace_instrumentation_seconds,
             )
             repair_transfer = sum(event.transfer_time_ms for event in repair_events) / 1000.0
@@ -3010,6 +3459,21 @@ class HuggingFaceMosaicKVModel:
                         "configured_terminal_token_ids": list(self._terminal_token_ids),
                     },
                     "repair_events": [event.to_record() for event in repair_events],
+                    "oracle_repair_diagnostic": {
+                        "status": (
+                            "completed_evaluation_only"
+                            if oracle_reference_state is not None
+                            else "not_used"
+                        ),
+                        "overhead_seconds_excluded_from_online_total": (
+                            oracle_repair_diagnostic_seconds
+                        ),
+                        "trigger_definition": (
+                            "provisional_token_differs_from_same_prefix_fullkv"
+                            if oracle_reference_state is not None
+                            else None
+                        ),
+                    },
                     "prefixkv_decode_events": cast("list[JsonValue]", prefixkv_decode_events),
                     "timing_breakdown": timing_payload,
                     "source_prefill_kv_bytes": source_prefill_kv_bytes,

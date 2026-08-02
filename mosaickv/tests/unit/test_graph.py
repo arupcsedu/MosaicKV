@@ -88,6 +88,17 @@ def test_pooling_uses_recorded_cache_axes_and_optional_hidden_states() -> None:
     assert np.isclose(np.linalg.norm(nodes[0].semantic_embedding), 1.0)
 
 
+def test_disabled_graph_preserves_nodes_and_has_no_edges() -> None:
+    full = _full_state((Modality.TEXT, Modality.IMAGE, Modality.TEXT))
+
+    graph = build_evidence_graph(full, GraphConfig(enabled=False))
+
+    assert len(graph.nodes) == len(full.blocks)
+    assert graph.row_indices == ()
+    assert graph.diagnostics.edge_count == 0
+    assert graph.diagnostics.connected_components == len(graph.nodes)
+
+
 def test_pooling_supports_feature_before_sequence_cache_layout() -> None:
     key = np.arange(1 * 1 * 3 * 4, dtype=np.float32).reshape(1, 1, 3, 4)
     value = (key + 10).copy()
@@ -156,6 +167,26 @@ def test_synthetic_chart_has_spatial_and_cross_modal_connections() -> None:
     assert (3, 2) in _edge_pairs(graph, EdgeType.CROSS_MODAL_ALIGNMENT)
     assert graph.diagnostics.modality_mixing > 0
     assert not graph.diagnostics.fallback_used
+
+
+def test_processor_grid_metadata_reaches_spatial_graph_without_override() -> None:
+    key = np.arange(1 * 1 * 8 * 3, dtype=np.float32).reshape(1, 1, 8, 3)
+    full = FullKVState.from_tensors(
+        ((key, key + 1),),
+        modality_spans=(
+            ModalitySpan(0, 8, Modality.IMAGE, image_index=0, grid_shape=(2, 4)),
+        ),
+        block_size=2,
+    )
+
+    graph = build_evidence_graph(
+        full,
+        _isolated_config(spatial_weight=1.0, spatial_max_distance=0.3, max_neighbors=2),
+    )
+
+    assert _edge_pairs(graph, EdgeType.SPATIAL_ADJACENCY)
+    assert not graph.diagnostics.fallback_used
+    assert all(node.evidence.normalized_box is not None for node in graph.nodes)
 
 
 def test_synthetic_document_layout_connects_rows_columns_regions_and_ocr() -> None:
@@ -302,6 +333,29 @@ def test_missing_metadata_uses_local_fallback_and_csr_is_valid() -> None:
         len(graph.neighbors(node.node_id, EdgeType.FALLBACK_POSITIONAL)) <= config.max_neighbors
         for node in graph.nodes
     )
+
+
+def test_positional_fallback_remains_available_with_structural_metadata() -> None:
+    full = _full_state((Modality.IMAGE,) * 4)
+    metadata = {
+        node_id: BlockEvidenceMetadata(
+            normalized_box=(node_id * 0.2, 0.0, node_id * 0.2 + 0.1, 0.1)
+        )
+        for node_id in range(4)
+    }
+
+    graph = build_evidence_graph(
+        full,
+        _isolated_config(
+            fallback_weight=0.25,
+            fallback_max_position_span=2,
+            max_neighbors=2,
+        ),
+        metadata_by_node=metadata,
+    )
+
+    assert graph.diagnostics.fallback_used
+    assert _edge_pairs(graph, EdgeType.FALLBACK_POSITIONAL)
 
 
 def test_evidence_cluster_diagnostics_and_edge_source_ablation_are_independent() -> None:

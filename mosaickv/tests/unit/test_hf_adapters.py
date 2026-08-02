@@ -19,6 +19,7 @@ from mosaickv.adapters.huggingface import (
     Llava15Adapter,
     LlavaOneVisionAdapter,
     Modality,
+    ModalitySpan,
     QueryVectorState,
     Qwen25VLAdapter,
     runtime_adapter_class,
@@ -202,7 +203,7 @@ def test_qwen_video_paths_use_pinned_qwen_vision_preprocessing(
     assert {"fps", "min_pixels", "max_pixels"}.isdisjoint(kwargs)
 
 
-def test_adapter_capability_metadata_records_rope_and_disabled_features() -> None:
+def test_adapter_capability_metadata_records_rope_and_safely_gated_features() -> None:
     for adapter_type in (Llava15Adapter, Qwen25VLAdapter, LlavaOneVisionAdapter, InternVL25Adapter):
         capabilities = adapter_type.capabilities
         if adapter_type is InternVL25Adapter:
@@ -215,8 +216,59 @@ def test_adapter_capability_metadata_records_rope_and_disabled_features() -> Non
             )
         assert capabilities.cached_key_state is CachedKeyState.POST_ROPE
         assert capabilities.query_vector_state is QueryVectorState.Q_PROJ_PRE_ROPE
-        assert capabilities.supports_prototype_merge is False
-        assert capabilities.supports_residual_repair is False
+        expected_qwen_support = adapter_type is Qwen25VLAdapter
+        assert capabilities.supports_prototype_merge is expected_qwen_support
+        assert capabilities.supports_residual_repair is expected_qwen_support
+
+
+def test_qwen_visual_grids_produce_exact_spatial_and_frame_spans() -> None:
+    spans = (
+        ModalitySpan(0, 1, Modality.TEXT),
+        ModalitySpan(1, 5, Modality.IMAGE),
+        ModalitySpan(5, 6, Modality.TEXT),
+        ModalitySpan(6, 14, Modality.VIDEO),
+        ModalitySpan(14, 15, Modality.TEXT),
+    )
+
+    enriched = Qwen25VLAdapter.enrich_modality_spans(
+        spans,
+        image_grid_thw=((1, 4, 4),),
+        video_grid_thw=((2, 4, 4),),
+        spatial_merge_size=2,
+    )
+
+    assert enriched == (
+        spans[0],
+        ModalitySpan(1, 5, Modality.IMAGE, image_index=0, grid_shape=(2, 2)),
+        spans[2],
+        ModalitySpan(
+            6,
+            10,
+            Modality.VIDEO,
+            image_index=0,
+            frame_index=0,
+            grid_shape=(2, 2),
+        ),
+        ModalitySpan(
+            10,
+            14,
+            Modality.VIDEO,
+            image_index=0,
+            frame_index=1,
+            grid_shape=(2, 2),
+        ),
+        spans[4],
+    )
+
+
+def test_qwen_visual_grid_mismatch_fails_instead_of_guessing_metadata() -> None:
+    with pytest.raises(RuntimeError, match="requires 4"):
+        Qwen25VLAdapter.enrich_modality_spans(
+            (ModalitySpan(0, 3, Modality.IMAGE),),
+            image_grid_thw=((1, 4, 4),),
+            video_grid_thw=None,
+            spatial_merge_size=2,
+        )
 
 
 def test_prepare_inputs_maps_expanded_image_tokens_without_torch() -> None:

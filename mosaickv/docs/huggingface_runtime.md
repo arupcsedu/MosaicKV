@@ -12,17 +12,20 @@ may switch an all-valid exact cache to SDPA after selection; padded per-head
 caches and repair fail closed. Both implementations are recorded in the config,
 manifest, and debug trace, so this is never silently labeled HF eager.
 
-The audited LLaVA-1.5, Qwen2.5-VL, LLaVA-OneVision, and optional InternVL adapters expose
-post-RoPE cached keys. Their capability records therefore set `supports_prototype_merge=false`
-and `supports_residual_repair=false`. For these adapters:
+All audited adapters expose post-RoPE cached keys. Qwen2.5-VL is the narrow
+exception to the exact-only rule: Transformers 4.55.2 eager execution supplies
+an audited M-RoPE inverse/anchor transform and declares prototype plus residual
+repair support. LLaVA-1.5, LLaVA-OneVision, InternVL, version mismatches, and
+fused prototype paths remain exact-only fallbacks. Consequently:
 
 - `mosaickv_exact` runs forecasting, graph construction, utility, and exact block selection;
-- `mosaickv_proto` is recorded as `mosaickv_proto__mosaickv_exact_safety_fallback`;
-- `mosaickv_full` is recorded as `mosaickv_full__mosaickv_exact_safety_fallback`.
+- Qwen `mosaickv_proto` constructs exact and phase-safe prototype tiers;
+- Qwen `mosaickv_full` additionally constructs pinned residuals and evaluates
+  the configured repair policy; and
+- unsupported paths record an explicit `mosaickv_exact_safety_fallback` label.
 
-The fallback is intentional and visible in every trace. It does not average post-RoPE phases,
-create fake residuals, or claim that repair ran. Backend-independent synthetic tests exercise
-the real prototype and repair components with explicitly RoPE-free capability metadata.
+Every trace records the safety assessment and transform provenance. Fallbacks
+do not average post-RoPE phases, create fake residuals, or claim repair ran.
 
 ## Cache representation
 
@@ -200,8 +203,11 @@ maximum logit difference zero.
 
 No pretrained-checkpoint run is canonical while the current worktree is dirty,
 and no 20-example dataset progression has been accepted under this common
-lock. Qwen2.5-VL and LLaVA-1.5 expose post-RoPE cached keys, so prototype
-merging remains a safety fallback to exact selection.
+lock. The bounded v17 Qwen2.5-VL-3B component run completed 44 three-tier cells
+and four exact no-prototype controls with a passed active-byte/provenance gate.
+Its 84 rows are implementation evidence only because the worktree was dirty
+and each task had one or two examples. LLaVA-1.5 and the other post-RoPE model
+families still use the exact safety fallback.
 
 The lmms-eval route constrains task discovery to the requested task family, delegates MMStar
 answer processing and aggregation to the installed official functions, and pins the dataset load

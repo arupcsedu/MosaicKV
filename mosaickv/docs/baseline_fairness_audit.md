@@ -4,6 +4,13 @@ Audit date: 2026-07-21. Scope: the unified Hugging Face eager runtime and the
 nine requested method labels. This is a source, configuration, trace, and
 structural-accounting audit. It is not a benchmark result.
 
+> Status note (2026-08-01): this historical audit predates the version-pinned
+> Qwen2.5-VL M-RoPE prototype transform and eager residual-repair integration.
+> Its statements that every adapter is prototype/repair unsupported describe
+> the audited July revision, not the current Qwen 4.55.2 path. Existing audit
+> rows are intentionally not rewritten; current bounded evidence is in
+> [`analysis/component_ablations.md`](../analysis/component_ablations.md).
+
 ## Verdict
 
 **The failed revision-4 pilot is not a scientifically fair comparison.** It is

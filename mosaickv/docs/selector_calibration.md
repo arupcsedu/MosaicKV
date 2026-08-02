@@ -55,12 +55,14 @@ against the same hard byte budget and are recorded with the
 
 ## Repair gate
 
-Qwen2.5-VL stores post-M-RoPE keys and its adapter currently declares both
-prototype merging and residual repair unsupported. Do not enable
-`mosaickv_full`, simulate repair, or publish native repair rows for this model.
-Plan C may proceed only after an adapter-specific correctness proof establishes
-safe block replacement and retention-1 parity. Until then, the calibrated
-method is an explicitly exact-only MosaicKV variant.
+Qwen2.5-VL stores post-M-RoPE keys. Transformers 4.55.2 eager execution now
+has an audited adapter-specific phase transform and real prototype/residual
+runtime path. Other versions, attention implementations, and model families
+remain fail-closed. The registered online repair thresholds still require a
+disjoint calibration ledger before adjustment: the bounded v17 evaluation
+observed zero online triggers, and that evaluation set must not be reused to
+tune thresholds. Oracle repair remains evaluation-only and is never a native
+online row.
 
 ## Exploratory outcome (2026-07-25)
 

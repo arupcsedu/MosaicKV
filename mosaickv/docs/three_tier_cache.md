@@ -25,23 +25,33 @@ only when all of the following hold:
 
 1. the adapter explicitly sets `supports_prototype_merge=true`;
 2. source and adapter RoPE-state declarations agree; and
-3. keys are `pre_rope` or RoPE is `not_applicable`.
+3. keys are `pre_rope`/`not_applicable`, or the adapter supplies an audited
+   transform whose declared source state exactly matches the post-RoPE cache.
 
-Unknown or post-RoPE keys are never averaged. LLaVA-1.5, Qwen2.5-VL,
-LLaVA-OneVision, and InternVL2.5 currently declare post-RoPE caches and
-prototype support false. They therefore return
-`exact_only_prototype_merge_unsafe`, preserving the selected exact blocks and
-creating no transformed tier. This is a supported selection-only MosaicKV
-mode, not prototype support.
+Unknown keys and post-RoPE keys without a matching transform are never
+averaged. Qwen2.5-VL on Transformers 4.55.2 supplies the exact prefill M-RoPE
+phase. It de-rotates each member, pools and averages in phase-neutral FP32, and
+re-rotates the result at the selected anchor. LLaVA-1.5, LLaVA-OneVision, and
+InternVL2.5 do not supply such a transform and therefore return an explicitly
+labeled exact-only safety fallback.
 
 ## Prototype assignment and values
 
-Every unselected block must have a graph edge to a compatible selected anchor.
+Every unselected block must have a compatible selected anchor. Real evidence
+edges determine the preferred anchor when available.
 Compatibility requires the same layer and KV head, an allowed directed
 `source:anchor` modality pair, and the configured maximum logical-position
 span. The highest edge weight wins; equal weights choose the lower anchor node
 ID. Typed or reverse-direction parallel evidence is reduced by maximum weight
 without materializing a dense matrix.
+
+The runtime reserves deterministic anchor-cover blocks before global
+selection. A bounded positional compatibility scaffold can make a
+representation feasible when a real evidence edge is absent, but it is kept
+weaker than semantic/attention/spatial/layout/temporal evidence and is never
+reported as an evidence-graph edge. Capacity-constrained assignment enforces
+`group_size`; deterministic segmented assignment is the fail-safe for a
+feasible anchor cover.
 
 The anchor remains exact and is not averaged into the prototype. Its role is
 to define the cluster and its active logical reference position. Assigned
@@ -83,6 +93,13 @@ tier. `require_pinned_memory=false` exists for CPU/mock validation only.
 `restore_residual_payload` converts a stored payload back to its source dtype
 and device.
 
+Lossless Torch residuals use one contiguous pinned slab for all keys and one
+for all values, with block-shaped views retaining the existing index. The
+constructor gathers all unselected source blocks once per layer/KV head and
+reuses those views for prototype and residual materialization. The chosen tier
+is materialized once after descriptor-level assignment/cost validation; this
+does not change values or accounting.
+
 Residual membership intentionally overlaps prototype source membership: the
 prototype is active device KV, while the residual is the inactive original
 source data used by the decode-time repair controller. It may never overlap exact
@@ -94,9 +111,10 @@ membership. `active_kv_bytes` counts exact plus prototype payloads;
 `ThreeTierCacheConstruction` retains the source original logical sequence
 length and next decode position separately from each layer/head's physical
 `active_cache_length`. `ActiveHeadLayout` records exact logical positions,
-prototype IDs, and their selected-anchor logical positions. Current Hugging
-Face decoding still rejects active/logical length divergence, so this module
-does not claim compressed end-to-end adapter execution yet. See
+prototype IDs, and their selected-anchor logical positions. The owned eager HF
+runtime packs these per-head layouts while preserving original logical and
+next-decode positions; other attention implementations remain fail-closed for
+prototype/repair execution. See
 [decode-time residual repair](decode_time_repair.md) for the backend-independent
 promotion controller and its current integration boundary.
 
@@ -125,3 +143,11 @@ fallback for all four current post-RoPE adapter classes, and a
 transformation-free retention-one reconstruction. This synthetic-tensor
 `validation_smoke` is hardware-path evidence only; it is not checkpoint
 acceptance, a quality measurement, or a paper result.
+
+On 2026-08-01, the bounded Qwen2.5-VL-3B v17 run produced 44 measured
+`three_tier` cells with the registered post-M-RoPE transform and four exact-only
+no-prototype controls at identical per-sample packed active bytes. Grouped
+gather plus single materialization reduced the Video-MME tier-construction
+time from 317.7 seconds in the diagnostic v16 row to 22.0 seconds in the paired
+v17 row without changing active or residual bytes. Both runs are exploratory
+dirty-tree evidence, not paper measurements.

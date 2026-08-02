@@ -7,6 +7,7 @@ from mosaickv.repair.core import (
     normalized_next_token_entropy,
     repair_decode_step,
 )
+from mosaickv.repair.oracle import evaluate_repair_decode_step
 from mosaickv.repair.types import (
     RepairCacheState,
     RepairEvent,
@@ -24,6 +25,7 @@ __all__ = [
     "RepairTriggerReason",
     "calculate_repair_signals",
     "draft_kl_divergence",
+    "evaluate_repair_decode_step",
     "normalized_next_token_entropy",
     "repair_decode_step",
 ]

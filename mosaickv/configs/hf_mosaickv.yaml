@@ -51,8 +51,10 @@ graph:
 
 utility:
   lambda_q: 1.0
-  lambda_v: 0.25
-  lambda_o: 0.25
+  # The registered equation subtracts these signed coefficients. Negative
+  # values therefore reward retaining high-contribution and novel evidence.
+  lambda_v: -0.25
+  lambda_o: -0.25
 
 selection:
   enabled: true

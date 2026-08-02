@@ -5,6 +5,7 @@ from mosaickv.prototypes.construction import (
     PrototypeConstructionError,
     assess_prototype_safety,
     construct_three_tier_cache,
+    estimate_prototype_active_cost,
 )
 from mosaickv.prototypes.types import (
     ActiveHeadLayout,
@@ -28,4 +29,5 @@ __all__ = [
     "TierConstructionMode",
     "assess_prototype_safety",
     "construct_three_tier_cache",
+    "estimate_prototype_active_cost",
 ]

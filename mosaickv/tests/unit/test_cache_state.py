@@ -181,6 +181,24 @@ def test_blockization_preserves_media_source_boundaries_and_metadata() -> None:
     assert not full.blocks[1].non_compressible
 
 
+def test_grid_backed_blockization_derives_normalized_block_boxes() -> None:
+    key = np.zeros((1, 1, 6, 2), dtype=np.float32)
+    value = np.ones_like(key)
+    full = FullKVState.from_tensors(
+        ((key, value),),
+        modality_spans=(
+            ModalitySpan(0, 4, Modality.IMAGE, image_index=0, grid_shape=(2, 2)),
+            ModalitySpan(4, 6, Modality.TEXT),
+        ),
+        block_size=2,
+    )
+
+    assert full.blocks[0].region == (0.0, 0.0, 1.0, 0.5)
+    assert full.blocks[1].region == (0.0, 0.5, 1.0, 1.0)
+    assert full.blocks[2].region is None
+    assert all(item.region == full.blocks[0].region for item in full.blocks[0].media_metadata)
+
+
 def test_source_partition_rejects_missing_or_duplicate_membership() -> None:
     full = _simple_full()
     with pytest.raises(ValueError, match="exactly one block"):

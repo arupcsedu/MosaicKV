@@ -42,7 +42,17 @@ u_i = lambda_q * forecast_attention_i
 
 Here `value_contribution_i` is the recorded expected attention-output
 contribution and `uniqueness_i` is value novelty. All raw terms remain in the
-utility table so their signs and scale are auditable.
+utility table so their signs and scale are auditable. The two coefficients are
+signed: the default `lambda_v=-0.25` and `lambda_o=-0.25` turn the literal
+minus terms into preservation rewards. Positive values intentionally penalize
+the corresponding signal and remain available for explicit ablations. This
+sign convention is important; a positive default would preferentially evict
+the blocks with the largest expected attention-output contribution.
+
+Attention, value contribution, and novelty are each normalized to a
+nonnegative unit-sum signal within every layer/KV-head stratum before applying
+the equation. This avoids making the registered coefficients depend on prompt
+length or raw value-vector magnitude.
 
 ## Set objective and sign convention
 
@@ -102,3 +112,9 @@ exceed `exhaustive_max_nodes`. `compare_greedy_to_exhaustive` reports the
 absolute and relative objective gap and the exact number of evaluated feasible
 subsets. This is a correctness diagnostic for tiny graphs, not an experimental
 quality result.
+
+The bounded v17 value ablation used identical packed active bytes. Removing
+value contribution increased mean attention-output error by 0.0023, so the
+registered value-aware term improved that requested fidelity diagnostic. It
+reduced mean logit KL by 0.0085, however, so the downstream logit result is
+mixed and no universal fidelity claim is made.

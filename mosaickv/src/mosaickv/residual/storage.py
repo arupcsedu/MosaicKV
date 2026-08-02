@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from typing import Any
 
 import numpy as np
 
-from mosaickv.cache_state import FullKVState, ResidualTier
+from mosaickv.cache_state import ExactTier, FullKVState, ResidualTier
 from mosaickv.config import ResidualConfig
 from mosaickv.residual.types import (
     ResidualIndexEntry,
@@ -119,6 +119,60 @@ def _encode_and_place(tensor: Any, config: ResidualConfig) -> tuple[Any, float |
     return encoded, scale, False
 
 
+def _batch_lossless_torch_payloads(
+    tensors: tuple[Any, ...],
+    *,
+    require_pinned: bool,
+) -> tuple[tuple[Any, ...], bool]:
+    """Copy lossless torch payloads through one contiguous host allocation.
+
+    Thousands of per-block ``pin_memory`` allocations dominate construction
+    for long documents and videos.  One flat slab preserves every payload
+    bit-for-bit; the returned shaped views remain distinct tensor objects and
+    therefore retain the existing per-block residual interface and accounting.
+    """
+
+    if not tensors:
+        return (), False
+    import torch
+
+    source_dtype = tensors[0].dtype
+    if any(tensor.dtype != source_dtype for tensor in tensors):
+        raise ResidualStorageError("one batched residual slab cannot mix torch dtypes")
+    shapes = tuple(tuple(int(size) for size in tensor.shape) for tensor in tensors)
+    counts = tuple(int(tensor.numel()) for tensor in tensors)
+    flattened = torch.cat(tuple(tensor.detach().reshape(-1) for tensor in tensors))
+    try:
+        slab = torch.empty(
+            int(flattened.numel()),
+            dtype=source_dtype,
+            device="cpu",
+            pin_memory=True,
+        )
+        slab.copy_(flattened)
+        pinned = bool(slab.is_pinned())
+        if require_pinned and not pinned:
+            raise PinnedMemoryUnavailableError(
+                "PyTorch returned non-pinned memory for a required residual slab"
+            )
+    except RuntimeError as error:
+        if require_pinned:
+            raise PinnedMemoryUnavailableError(
+                "pinned residual memory was required but the PyTorch/CUDA runtime "
+                "could not allocate a batched slab"
+            ) from error
+        slab = flattened.to(device="cpu").contiguous()
+        pinned = bool(slab.is_pinned())
+    payloads: list[Any] = []
+    offset = 0
+    for shape, count in zip(shapes, counts, strict=True):
+        payloads.append(slab.narrow(0, offset, count).view(shape))
+        offset += count
+    if offset != int(slab.numel()):  # pragma: no cover - arithmetic invariant
+        raise RuntimeError("batched residual slab offsets do not cover its storage")
+    return tuple(payloads), pinned
+
+
 def empty_residual_storage() -> ResidualStorageReport:
     """Return an empty residual report for exact-only and residual-disabled runs."""
 
@@ -129,6 +183,9 @@ def build_residual_storage(
     full_state: FullKVState,
     assignments: Mapping[int, int],
     config: ResidualConfig,
+    *,
+    node_order: Sequence[int] | None = None,
+    gathered: ExactTier | None = None,
 ) -> ResidualStorageReport:
     """Preserve assigned source blocks on CPU, indexed by original position.
 
@@ -139,11 +196,41 @@ def build_residual_storage(
 
     if not config.enabled or not assignments:
         return empty_residual_storage()
-    node_ids = tuple(sorted(assignments))
+    node_ids = (
+        tuple(sorted(assignments))
+        if node_order is None
+        else tuple(int(node_id) for node_id in node_order)
+    )
+    if len(node_ids) != len(set(node_ids)) or set(node_ids) != set(assignments):
+        raise ValueError("residual node_order must contain every assigned source node exactly once")
     if any(node_id < 0 or node_id >= len(full_state.blocks) for node_id in node_ids):
         raise ValueError("residual assignment references a non-source graph node")
     blocks = tuple(full_state.blocks[node_id] for node_id in node_ids)
-    gathered = full_state.gather_exact_blocks(blocks)
+    if gathered is None:
+        gathered = full_state.gather_exact_blocks(blocks)
+    elif gathered.blocks != blocks:
+        raise ValueError(
+            "pre-gathered residual payloads must align exactly with residual node_order"
+        )
+    batched_lossless = bool(
+        config.storage_dtype is ResidualStorageDType.LOSSLESS
+        and gathered.key_blocks
+        and all(_is_torch_tensor(tensor) for tensor in gathered.key_blocks)
+        and all(_is_torch_tensor(tensor) for tensor in gathered.value_blocks)
+    )
+    batched_keys: tuple[Any, ...] = ()
+    batched_values: tuple[Any, ...] = ()
+    batch_key_pinned = False
+    batch_value_pinned = False
+    if batched_lossless:
+        batched_keys, batch_key_pinned = _batch_lossless_torch_payloads(
+            gathered.key_blocks,
+            require_pinned=config.require_pinned_memory,
+        )
+        batched_values, batch_value_pinned = _batch_lossless_torch_payloads(
+            gathered.value_blocks,
+            require_pinned=config.require_pinned_memory,
+        )
     key_payloads: list[Any] = []
     value_payloads: list[Any] = []
     metadata: list[ResidualPayloadMetadata] = []
@@ -151,8 +238,15 @@ def build_residual_storage(
     for payload_index, (node_id, block, key, value) in enumerate(
         zip(node_ids, blocks, gathered.key_blocks, gathered.value_blocks, strict=True)
     ):
-        key_payload, key_scale, key_pinned = _encode_and_place(key, config)
-        value_payload, value_scale, value_pinned = _encode_and_place(value, config)
+        if batched_lossless:
+            key_payload = batched_keys[payload_index]
+            value_payload = batched_values[payload_index]
+            key_scale = value_scale = None
+            key_pinned = batch_key_pinned
+            value_pinned = batch_value_pinned
+        else:
+            key_payload, key_scale, key_pinned = _encode_and_place(key, config)
+            value_payload, value_scale, value_pinned = _encode_and_place(value, config)
         key_payloads.append(key_payload)
         value_payloads.append(value_payload)
         prototype_id = assignments[node_id]

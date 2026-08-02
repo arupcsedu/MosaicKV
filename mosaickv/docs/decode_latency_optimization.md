@@ -23,6 +23,9 @@ optimizations without changing selected positions or K/V values:
   all-ones attention mask; and
 - exact blocks are packed with one vectorized gather per layer instead of one
   gather per selected token;
+- prototype construction gathers all unselected blocks once per layer/KV head,
+  reuses those views for pinned residual slabs, and materializes the validated
+  tier once instead of rebuilding it with and without residuals;
 - low-memory forecast centroids stage one bounded layer of CUDA query samples
   at a time rather than synchronizing a host transfer for every KV head and
   prompt/draft source;
@@ -132,4 +135,8 @@ attention work is smaller than MLP, projection, Python, or synchronization
 overheads. Results must therefore report both active bytes and measured p50/p95
 decode latency. Native vLLM/SGLang cache mutation, post-RoPE prototype merging,
 and residual repair remain fail-closed until their independent correctness
-gates pass; simulated rows are prohibited.
+gates pass; simulated rows are prohibited. The one exception is the audited
+HF eager Qwen2.5-VL/Transformers-4.55.2 path. Its v17 Video-MME diagnostic
+reduced tier construction from 317.7 to 22.0 seconds through grouped gather and
+single materialization; this is compression-overhead evidence, not a decode-
+latency or paper claim.

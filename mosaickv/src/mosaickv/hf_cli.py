@@ -50,6 +50,7 @@ from mosaickv.manifest import (
     sha256_text,
 )
 from mosaickv.types import (
+    AblationVariant,
     Backend,
     BudgetUnit,
     ForecastMode,
@@ -487,15 +488,19 @@ def run_hf_evaluation(
     )
     if not manifest_path.exists():
         measurement = (
-            MeasurementType.REFERENCE
-            if config.method.is_full_cache
+            MeasurementType.ABLATION
+            if config.ablation.variant is not AblationVariant.NONE
             else (
-                MeasurementType.BASELINE_SIMPLE
-                if config.method.is_simple_baseline
+                MeasurementType.REFERENCE
+                if config.method.is_full_cache
                 else (
-                    MeasurementType.BASELINE_REIMPL
-                    if config.method.is_published_reimplementation
-                    else MeasurementType.METHOD
+                    MeasurementType.BASELINE_SIMPLE
+                    if config.method.is_simple_baseline
+                    else (
+                        MeasurementType.BASELINE_REIMPL
+                        if config.method.is_published_reimplementation
+                        else MeasurementType.METHOD
+                    )
                 )
             )
         )

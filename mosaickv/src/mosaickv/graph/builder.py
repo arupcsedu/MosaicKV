@@ -461,11 +461,15 @@ def _add_fallback_edges(
     nodes: tuple[PooledBlockDescriptor, ...],
     config: GraphConfig,
     accumulator: _EdgeAccumulator,
+    *,
+    eligible_node_ids: frozenset[int] | None = None,
 ) -> None:
     if config.fallback_weight == 0:
         return
     groups: dict[tuple[int, int], list[int]] = defaultdict(list)
     for node in nodes:
+        if eligible_node_ids is not None and node.node_id not in eligible_node_ids:
+            continue
         groups[_compatibility_prefix(node, config)].append(node.node_id)
     for node_ids in groups.values():
         ordered = sorted(node_ids, key=lambda node_id: (nodes[node_id].logical_center, node_id))
@@ -629,8 +633,6 @@ def build_evidence_graph(
     chunked score tiles; structural sources use indexed metadata groups.
     """
 
-    if not config.enabled:
-        raise ValueError("cannot build an evidence graph when graph.enabled is false")
     if attention_coactivation is not None and prompt_attentions is not None:
         raise ValueError(
             "provide either pre-pooled attention_coactivation or prompt_attentions, not both"
@@ -641,6 +643,16 @@ def build_evidence_graph(
         hidden_sequence_dimension=hidden_sequence_dimension,
         metadata_by_node=metadata_by_node,
     )
+    if not config.enabled:
+        edges: tuple[_CandidateEdge, ...] = ()
+        return SparseEvidenceGraph(
+            nodes=nodes,
+            row_indices=(),
+            column_indices=(),
+            weights=(),
+            edge_types=(),
+            diagnostics=_diagnostics(nodes, edges, fallback_used=False),
+        )
     accumulator = _EdgeAccumulator(config)
     _add_cosine_edges(
         nodes,
@@ -668,10 +680,14 @@ def build_evidence_graph(
     _add_layout_edges(nodes, config, accumulator)
     _add_temporal_edges(nodes, config, accumulator)
     _add_identifier_edges(nodes, config, accumulator)
-    metadata_unavailable = not any(node.evidence.has_structural_metadata for node in nodes)
-    fallback_used = metadata_unavailable and config.fallback_weight > 0
-    if metadata_unavailable:
-        _add_fallback_edges(nodes, config, accumulator)
+    # Positional locality is an independent sparse evidence source, not a
+    # replacement for semantic/structural metadata.  Keeping it for every node
+    # gives downstream prototype construction a bounded local compatibility
+    # path even when learned descriptors select mutually dissimilar neighbors.
+    # Each source still contributes at most ``max_neighbors`` outgoing edges,
+    # so the graph remains O(n*d).
+    fallback_used = config.fallback_weight > 0
+    _add_fallback_edges(nodes, config, accumulator)
     edges = accumulator.finalize()
     diagnostics = _diagnostics(nodes, edges, fallback_used=fallback_used)
     return SparseEvidenceGraph(

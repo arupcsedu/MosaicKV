@@ -155,9 +155,11 @@ def run_isolated_greedy_query_rollout(
 
     if steps < 0:
         raise ValueError("rollout steps must be nonnegative")
-    if not prefill.query_vectors.layers:
-        raise ValueError("prefill must capture query vectors before forecasting")
-    exemplar = prefill.query_vectors.layers[0]
+    # An evaluation-only oracle may need only decode-step queries. Online
+    # prompt/hybrid forecasting still validates prompt queries in
+    # ``build_query_forecast``; the isolated rollout itself can use logits as
+    # its timing exemplar when prompt query capture was deliberately disabled.
+    exemplar = prefill.query_vectors.layers[0] if prefill.query_vectors.layers else prefill.logits
     if steps == 0:
         snapshot, clone_seconds, clone_syncs, backend = _measure(
             exemplar,

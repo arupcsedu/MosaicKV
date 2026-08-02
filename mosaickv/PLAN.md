@@ -86,11 +86,12 @@ construction in [the prototype and residual packages](src/mosaickv/prototypes)
 and [three-tier guide](docs/three_tier_cache.md), with repair in
 [the repair package](src/mosaickv/repair) and
 [decode-time repair guide](docs/decode_time_repair.md). This phase remains
-`in_progress`: the unified eager runtime performs compact exact-selection
-decoding while preserving original logical positions. Current post-RoPE
-adapters still fail closed from prototype merging to exact selection, so
-real-model prototype and repair support remains unavailable until adapter
-mutation and parity gates pass. See
+`in_progress`: the unified eager runtime performs compact exact/prototype/
+residual decoding while preserving original logical positions. Qwen2.5-VL on
+Transformers 4.55.2 has an audited M-RoPE transform and completed the bounded
+v17 three-tier/oracle-repair implementation gate. Other post-RoPE adapters and
+fused paths still fail closed to exact selection; clean checkpoint parity and
+statistically meaningful evaluation remain pending. See
 [the unified HF runtime guide](docs/huggingface_runtime.md).
 
 **Deliverables**

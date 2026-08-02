@@ -95,4 +95,7 @@ The common-environment unit suite covers every mode, strict
 zero-window/zero-rollout rules, GQA mapping, diagonal and full covariance, both
 centroid algorithms, draft-cache mutation isolation, reproducibility, oracle
 namespace isolation, and all four diagnostics. Pretrained-checkpoint forecast
-quality remains unsupported until a clean pinned-checkpoint gate passes.
+quality is still non-canonical until a clean pinned-checkpoint gate passes. In
+the bounded dirty-tree v17 run, hybrid selected-block recall exceeded the
+no-forecast control by 0.2888 on average; mean task score was 0.0662 lower, so
+the recall gain is implementation evidence rather than a quality claim.

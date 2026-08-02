@@ -19,6 +19,10 @@ state.
 normalized `(left, top, right, bottom)` coordinates in `[0, 1]`. Image, frame,
 and page identities default to the cache descriptor. Unnormalized regions in
 legacy cache metadata are not silently interpreted as normalized boxes.
+For Qwen2.5-VL, image/video token runs are validated against processor-owned
+`image_grid_thw`/`video_grid_thw` and `spatial_merge_size`. Each block receives
+its exact normalized raster box and image/frame identity. Grid/token-count
+mismatches raise instead of generating guessed spatial evidence.
 
 ## Independent edge sources
 
@@ -46,8 +50,10 @@ source-specific maximum logical-position spans.
   window.
 - Evidence-region and alignment edges use explicit stable identifiers;
   alignment edges require different modalities.
-- If no node has structural metadata, the builder adds local positional
-  fallback candidates. The diagnostic flag records this path.
+- Positional fallback is an independent sparse source for every node, including
+  nodes that also have metadata. It cannot disappear merely because one
+  structural source is present. Its configured weight and diagnostic counts
+  remain separate from all real evidence types.
 
 Each source independently retains at most `max_neighbors` outgoing neighbors
 per node with deterministic target-ID tie-breaking. Consequently, disabling
@@ -73,3 +79,9 @@ named evidence regions whose induced graph is connected; singleton regions
 count as covered, and the field is `None` when no evidence-region IDs exist.
 
 These diagnostics are structural outputs, not measured model-quality results.
+In the bounded v17 run, the full graph increased facility coverage over the
+no-graph control by 0.8326 on DocVQA/ChartQA and 0.8114 on MMStar. Task scores
+did not change at the one-/two-example resolution; the structured-task
+attention-output diagnostic improved by 0.0008 on average while MMStar worsened
+by 0.0651. This is directional exploratory evidence, not a structured-task
+quality claim.

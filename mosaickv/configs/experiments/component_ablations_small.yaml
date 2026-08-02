@@ -1,0 +1,64 @@
+schema_version: 1
+experiment_id: component_ablations_small_v7
+classification: exploratory_dirty_tree_component_ablation_mrope_v7
+model: qwen2_5_vl_3b
+backend: hf_eager_prefill_eager_decode
+retention_ratio: 0.2
+block_size: 16
+prototype_group_size: 12
+prototype_max_position_span: 256
+minimum_stratum_fraction: 0.1
+graph_max_neighbors: 24
+output_length: 8
+seed: 17
+subset_size_by_task:
+  mmstar: 2
+  docvqa: 2
+  chartqa: 2
+  videomme: 1
+forecast_oracle_steps: 4
+primary_budget: packed_prefill_active_kv_bytes
+tasks:
+  - mmstar
+  - docvqa
+  - chartqa
+  - videomme
+variants:
+  - id: A
+    name: mosaickv_full
+  - id: B
+    name: no_future_query_forecast
+  - id: C
+    name: prompt_window_only
+  - id: D
+    name: draft_only
+  - id: E
+    name: no_evidence_graph
+  - id: F
+    name: semantic_only_graph
+  - id: G
+    name: no_value_aware_contribution
+  - id: H
+    name: attention_only_utility
+  - id: I
+    name: no_prototype_merging
+  - id: J
+    name: no_residual_repair
+  - id: K
+    name: oracle_future_query_evaluation_only
+    evaluation_only: true
+  - id: L
+    name: oracle_repair_evaluation_only
+    evaluation_only: true
+controls:
+  identical_model_weights_and_precision: true
+  identical_processor_and_chat_template: true
+  identical_media_preprocessing: true
+  identical_prompts_and_sample_ids: true
+  identical_generation: true
+  identical_active_byte_budget: true
+  identical_mandatory_tokens: true
+  identical_block_granularity: true
+  identical_prototype_geometry_where_enabled: true
+  identical_attention_backend: true
+  deterministic_generation: true

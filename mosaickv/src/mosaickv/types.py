@@ -89,6 +89,24 @@ class RepairPolicy(StrEnum):
     ORACLE = "oracle"
 
 
+class AblationVariant(StrEnum):
+    """Controlled Experiment-3 component variants."""
+
+    NONE = "none"
+    FULL = "mosaickv_full"
+    NO_FUTURE_QUERY_FORECAST = "no_future_query_forecast"
+    PROMPT_WINDOW_ONLY = "prompt_window_only"
+    DRAFT_ONLY = "draft_only"
+    NO_EVIDENCE_GRAPH = "no_evidence_graph"
+    SEMANTIC_ONLY_GRAPH = "semantic_only_graph"
+    NO_VALUE_AWARE_CONTRIBUTION = "no_value_aware_contribution"
+    ATTENTION_ONLY_UTILITY = "attention_only_utility"
+    NO_PROTOTYPE_MERGING = "no_prototype_merging"
+    NO_RESIDUAL_REPAIR = "no_residual_repair"
+    ORACLE_FUTURE_QUERY = "oracle_future_query_evaluation_only"
+    ORACLE_REPAIR = "oracle_repair_evaluation_only"
+
+
 class LookMMergeStrategy(StrEnum):
     """Paper-defined LOOK-M KV-pair merge variants."""
 

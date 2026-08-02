@@ -6,7 +6,7 @@ cache-mutation pass are separate evidence levels.
 
 | Component | Installed version | Package state | FullKV model gate | Native MosaicKV |
 |---|---:|---|---|---|
-| Hugging Face Transformers | 4.55.2 | Imports; CUDA smoke passed | Qwen2.5-VL-3B SDPA job `17346718` and FA2 job `17348171` passed 16-token ordinary/reinjection/retention-1 parity with maximum logit difference 0 | Exact selection owned by MosaicKV; prototype/repair fail closed for post-RoPE keys |
+| Hugging Face Transformers | 4.55.2 | Imports; CUDA smoke passed | Qwen2.5-VL-3B SDPA job `17346718` and FA2 job `17348171` passed 16-token ordinary/reinjection/retention-1 parity with maximum logit difference 0 | Exact selection for supported adapters; Qwen2.5-VL eager prototype/repair through audited M-RoPE transform; other post-RoPE/fused paths fail closed |
 | vLLM V1 | 0.10.2 | Imports and loads Qwen2.5-VL-3B | Job `17351185` passed Stage A and its report has exact 16/16 HF token parity | Unsupported |
 | SGLang | 0.5.1.post3 | Imports and launches Qwen2.5-VL-3B | Job `17351612` passed Stage A, request isolation, byte accounting, and exact 32/32 parity with the numerically corresponding HF-SDPA reference | Unsupported |
 
@@ -36,7 +36,9 @@ compression prefill remains eager because prompt-attention capture is not
 available safely in fused paths. An explicitly labeled eager-prefill/SDPA-decode
 exact path is now implemented; it is admitted only for all-valid caches without
 repair and records both implementations. Cached keys are
-post-RoPE, so phase-unaligned prototype construction is rejected.
+post-RoPE, so phase-unaligned prototype construction is rejected. Qwen2.5-VL
+on the exact 4.55.2 eager path supplies a model-derived M-RoPE inverse/anchor
+transform; the bounded v17 run exercised real three-tier and residual state.
 
 ## vLLM installed-source boundary
 

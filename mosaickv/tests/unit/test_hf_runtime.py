@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 import torch
 
+import mosaickv.backends.hf_runtime as hf_runtime
 from mosaickv.adapters.huggingface import (
     AdapterCapabilities,
     CachedKeyState,
@@ -22,6 +23,8 @@ from mosaickv.backends.hf_runtime import (
     _dense_physical_cache_budget,
     _gather_dense_heads,
     _logit_kl,
+    _plan_has_live_residual_repair,
+    _refined_budget_candidates,
     _trace_catalog,
 )
 from mosaickv.cache_state import FullKVState, Modality, ModalitySpan
@@ -128,6 +131,21 @@ def test_tiny_synthetic_cache_plans_every_runtime_method(method: MosaicKVMethod)
     assert {0, 7} <= set(plan.selection.selected_node_ids)
 
 
+def test_no_forecast_control_accepts_uniform_attention_without_query_object() -> None:
+    full = _full()
+    plan = build_compression_plan(
+        full,
+        None,
+        {node_id: 1.0 for node_id in range(8)},
+        _capabilities(safe=False),
+        _config(MosaicKVMethod.MOSAICKV_EXACT, 0.5),
+        attention_provenance="declared_no_forecast_uniform_position_control_v1",
+    )
+
+    assert plan.forecast is None
+    assert plan.utilities.attention_provenance.startswith("declared_no_forecast")
+
+
 def test_post_rope_proto_and_full_are_explicit_exact_safety_fallbacks() -> None:
     full = _full()
     for method in (MosaicKVMethod.MOSAICKV_PROTO, MosaicKVMethod.MOSAICKV_FULL):
@@ -141,6 +159,7 @@ def test_post_rope_proto_and_full_are_explicit_exact_safety_fallbacks() -> None:
         assert plan.effective_method.endswith("mosaickv_exact_safety_fallback")
         assert not plan.construction.prototypes
         assert not plan.construction.residual_storage.payloads
+        assert not _plan_has_live_residual_repair(method, plan)
 
 
 def test_retention_one_is_exact_and_active_bytes_are_monotonic() -> None:
@@ -185,6 +204,64 @@ def test_dense_physical_byte_budget_quantizes_and_constrains_selection() -> None
     assert plan.selection.active_bytes == dense.target_bytes
 
 
+def test_prototype_search_handles_large_integer_byte_budget_lattice() -> None:
+    key = np.arange(8 * 64, dtype=np.float32).reshape(1, 1, 8, 64) + 1
+    full = FullKVState.from_tensors(
+        ((key, np.flip(key, axis=-1).copy()),),
+        block_size=1,
+        mandatory_logical_positions=(0, 7),
+        cached_key_state=CachedKeyState.NOT_APPLICABLE,
+    )
+    config = replace(
+        _config(MosaicKVMethod.MOSAICKV_PROTO, 0.5),
+        cache=CacheConfig(full.active_bytes, BudgetUnit.BYTES, 0.5, 1),
+    )
+
+    plan = build_compression_plan(
+        full,
+        _forecast(),
+        {node_id: float(8 - node_id) for node_id in range(8)},
+        _capabilities(safe=True),
+        config,
+    )
+
+    assert plan.active_budget_value > 128
+    assert plan.construction.active_device_bytes <= plan.active_budget_value
+
+
+def test_full_method_materializes_prototypes_and_residuals_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+    implementation = hf_runtime.construct_three_tier_cache
+
+    def counted_construction(*args: object, **kwargs: object) -> object:
+        nonlocal calls
+        calls += 1
+        return implementation(*args, **kwargs)
+
+    monkeypatch.setattr(hf_runtime, "construct_three_tier_cache", counted_construction)
+    plan = build_compression_plan(
+        _full(),
+        _forecast(),
+        {node_id: float(8 - node_id) for node_id in range(8)},
+        _capabilities(safe=True),
+        _config(MosaicKVMethod.MOSAICKV_FULL, 0.5),
+    )
+
+    assert plan.construction.mode.value == "three_tier"
+    assert plan.construction.prototypes
+    assert plan.construction.residual_storage.payloads
+    assert calls == 1
+
+
+def test_prototype_budget_refinement_scans_only_transition_interval() -> None:
+    assert _refined_budget_candidates(100, 60, (16, 16, 8)) == (92, 84, 76, 68)
+    bounded = _refined_budget_candidates(10_000, 0, (1,), maximum_points=8)
+    assert len(bounded) == 8
+    assert bounded == tuple(sorted(set(bounded), reverse=True))
+
+
 def test_dense_physical_byte_budget_supports_fixed_multitoken_blocks() -> None:
     key = np.arange(16 * 4, dtype=np.float32).reshape(1, 1, 16, 4) + 1
     full = FullKVState.from_tensors(
@@ -210,7 +287,7 @@ def test_dense_physical_byte_budget_supports_fixed_multitoken_blocks() -> None:
     )
 
 
-def test_dense_physical_byte_budget_ignores_fragment_only_capacity() -> None:
+def test_dense_physical_byte_budget_aligns_capacity_after_mandatory_fragments() -> None:
     key = np.arange(65 * 4, dtype=np.float32).reshape(1, 1, 65, 4) + 1
     full = FullKVState.from_tensors(
         ((key, np.flip(key, axis=-1).copy()),),
@@ -223,7 +300,7 @@ def test_dense_physical_byte_budget_ignores_fragment_only_capacity() -> None:
         mandatory_logical_positions=(48,),
         cached_key_state=CachedKeyState.NOT_APPLICABLE,
     )
-    requested_capacity = 49
+    requested_capacity = 48
     bytes_per_position = full.active_bytes // 65
     config = replace(
         _config(MosaicKVMethod.MOSAICKV_EXACT, requested_capacity / 65),
@@ -238,9 +315,62 @@ def test_dense_physical_byte_budget_ignores_fragment_only_capacity() -> None:
     dense = _dense_physical_cache_budget(full, config)
 
     assert dense is not None
-    assert dense.prompt_capacity == 48
-    assert dense.target_bytes == 48 * bytes_per_position
+    assert dense.prompt_capacity == 33
+    assert dense.target_bytes == 33 * bytes_per_position
     assert dense.target_bytes <= config.cache.budget_value
+
+    plan = build_compression_plan(
+        full,
+        _forecast(),
+        {node_id: float(len(full.blocks) - node_id) for node_id in range(len(full.blocks))},
+        _capabilities(safe=False),
+        replace(config, cache=replace(config.cache, budget_value=dense.target_bytes)),
+        position_limits=dense.position_limits,
+    )
+    selected_positions = sum(block.position_count for block in plan.selection.selected_blocks)
+    assert selected_positions == dense.prompt_capacity
+    assert plan.selection.active_bytes == dense.target_bytes
+
+
+def test_dense_mask_free_selection_excludes_optional_partial_fragments() -> None:
+    key = np.arange(64 * 4, dtype=np.float32).reshape(1, 1, 64, 4) + 1
+    full = FullKVState.from_tensors(
+        ((key, np.flip(key, axis=-1).copy()),),
+        modality_spans=(
+            ModalitySpan(0, 15, Modality.IMAGE),
+            ModalitySpan(15, 48, Modality.TEXT),
+            ModalitySpan(48, 64, Modality.IMAGE),
+        ),
+        block_size=16,
+        mandatory_logical_positions=(63,),
+        cached_key_state=CachedKeyState.NOT_APPLICABLE,
+    )
+    config = replace(
+        _config(MosaicKVMethod.MOSAICKV_EXACT, 0.75),
+        cache=CacheConfig(full.active_bytes, BudgetUnit.BYTES, 0.75, 16),
+    )
+    dense = _dense_physical_cache_budget(full, config)
+
+    assert dense is not None
+    assert dense.prompt_capacity == 48
+    attention = {
+        node_id: (100.0 if block.position_count < 16 else float(len(full.blocks) - node_id))
+        for node_id, block in enumerate(full.blocks)
+    }
+    plan = build_compression_plan(
+        full,
+        _forecast(),
+        attention,
+        _capabilities(safe=False),
+        replace(config, cache=replace(config.cache, budget_value=dense.target_bytes)),
+        position_limits=dense.position_limits,
+    )
+
+    assert sum(block.position_count for block in plan.selection.selected_blocks) == 48
+    assert all(
+        block.mandatory or block.position_count == 16
+        for block in plan.selection.selected_blocks
+    )
 
 
 def test_fidelity_formulas_match_known_attention_and_logit_patterns() -> None:

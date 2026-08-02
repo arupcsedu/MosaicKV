@@ -15,6 +15,7 @@ from typing import TypeVar, cast
 import yaml
 
 from mosaickv.types import (
+    AblationVariant,
     Backend,
     BudgetUnit,
     ForecastCovariance,
@@ -330,6 +331,38 @@ class FidelityDiagnosticsConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class AblationConfig:
+    """Explicit component-ablation identity and oracle safety gate."""
+
+    variant: AblationVariant = AblationVariant.NONE
+    evaluation_only: bool = False
+
+    def __post_init__(self) -> None:
+        is_oracle = self.variant in {
+            AblationVariant.ORACLE_FUTURE_QUERY,
+            AblationVariant.ORACLE_REPAIR,
+        }
+        if is_oracle != self.evaluation_only:
+            raise ConfigurationError(
+                "oracle ablations require ablation.evaluation_only=true, and that flag "
+                "is reserved for oracle ablations"
+            )
+
+    @classmethod
+    def from_mapping(cls, value: object) -> AblationConfig:
+        data = _mapping(value, "ablation")
+        _reject_unknown(data, {"variant", "evaluation_only"}, "ablation")
+        return cls(
+            variant=_enum(
+                AblationVariant,
+                data.get("variant", AblationVariant.NONE.value),
+                "ablation.variant",
+            ),
+            evaluation_only=_bool(data, "evaluation_only", False, "ablation"),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class CacheConfig:
     """Cache budget and block layout."""
 
@@ -594,18 +627,26 @@ class GraphConfig:
 
 @dataclass(frozen=True, slots=True)
 class UtilityConfig:
-    """Weights in the preregistered per-block local utility equation."""
+    """Signed coefficients in the preregistered local utility equation.
+
+    The equation contains explicit minus signs for value contribution and
+    uniqueness.  Negative ``lambda_v``/``lambda_o`` values therefore express
+    preservation rewards without changing the registered equation.  Keeping
+    these coefficients signed also prevents the accidental behavior where
+    high-contribution, novel evidence is preferentially discarded.
+    """
 
     lambda_q: float = 1.0
-    lambda_v: float = 0.25
-    lambda_o: float = 0.25
+    lambda_v: float = -0.25
+    lambda_o: float = -0.25
     normalization: str = "layer_head_l1"
 
     def __post_init__(self) -> None:
-        for name in ("lambda_q", "lambda_v", "lambda_o"):
-            value = getattr(self, name)
-            if not math.isfinite(value) or value < 0:
-                raise ConfigurationError(f"utility.{name} must be finite and >= 0")
+        if not math.isfinite(self.lambda_q) or self.lambda_q < 0:
+            raise ConfigurationError("utility.lambda_q must be finite and >= 0")
+        for name in ("lambda_v", "lambda_o"):
+            if not math.isfinite(getattr(self, name)):
+                raise ConfigurationError(f"utility.{name} must be finite")
         if self.normalization != "layer_head_l1":
             raise ConfigurationError("utility.normalization must be 'layer_head_l1'")
 
@@ -619,8 +660,8 @@ class UtilityConfig:
         )
         return cls(
             lambda_q=_float(data, "lambda_q", 1.0, "utility"),
-            lambda_v=_float(data, "lambda_v", 0.25, "utility"),
-            lambda_o=_float(data, "lambda_o", 0.25, "utility"),
+            lambda_v=_float(data, "lambda_v", -0.25, "utility"),
+            lambda_o=_float(data, "lambda_o", -0.25, "utility"),
             normalization=_optional_str(data, "normalization", "layer_head_l1", "utility"),
         )
 
@@ -1072,6 +1113,7 @@ class RunConfig:
     generation: GenerationConfig
     cache: CacheConfig
     diagnostics: FidelityDiagnosticsConfig = field(default_factory=FidelityDiagnosticsConfig)
+    ablation: AblationConfig = field(default_factory=AblationConfig)
     method: MosaicKVMethod = MosaicKVMethod.FULLKV
     forecasting: ForecastingConfig = field(default_factory=ForecastingConfig)
     graph: GraphConfig = field(default_factory=GraphConfig)
@@ -1088,6 +1130,88 @@ class RunConfig:
     def __post_init__(self) -> None:
         if self.schema_version != 1:
             raise ConfigurationError("schema_version must equal 1")
+        if self.ablation.variant is not AblationVariant.NONE and not self.method.is_mosaickv:
+            raise ConfigurationError("component ablations require a MosaicKV method")
+        if (
+            self.ablation.variant is AblationVariant.NO_FUTURE_QUERY_FORECAST
+            and self.forecasting.enabled
+        ):
+            raise ConfigurationError("no_future_query_forecast requires forecasting.enabled=false")
+        if (
+            self.ablation.variant is not AblationVariant.NO_FUTURE_QUERY_FORECAST
+            and self.method.is_mosaickv
+            and not self.forecasting.enabled
+        ):
+            raise ConfigurationError(
+                "MosaicKV requires forecasting unless the declared ablation removes it"
+            )
+        variant = self.ablation.variant
+        if variant is AblationVariant.NO_EVIDENCE_GRAPH and self.graph.enabled:
+            raise ConfigurationError("no_evidence_graph requires graph.enabled=false")
+        if variant is AblationVariant.SEMANTIC_ONLY_GRAPH:
+            nonsemantic = (
+                self.graph.attention_weight,
+                self.graph.spatial_weight,
+                self.graph.layout_weight,
+                self.graph.temporal_weight,
+                self.graph.same_region_weight,
+                self.graph.cross_modal_weight,
+                self.graph.fallback_weight,
+            )
+            if not self.graph.enabled or self.graph.semantic_weight <= 0 or any(nonsemantic):
+                raise ConfigurationError(
+                    "semantic_only_graph requires an enabled positive semantic source and "
+                    "all other graph-source weights equal to zero"
+                )
+        if variant is AblationVariant.NO_VALUE_AWARE_CONTRIBUTION and self.utility.lambda_v != 0:
+            raise ConfigurationError("no_value_aware_contribution requires utility.lambda_v=0")
+        if variant is AblationVariant.ATTENTION_ONLY_UTILITY and (
+            self.utility.lambda_v != 0
+            or self.utility.lambda_o != 0
+            or self.selection.lambda_g != 0
+            or self.selection.lambda_m != 0
+        ):
+            raise ConfigurationError(
+                "attention_only_utility requires value, uniqueness, graph-coverage, and "
+                "modality-coverage coefficients equal to zero"
+            )
+        if variant is AblationVariant.NO_PROTOTYPE_MERGING and (
+            self.prototypes.enabled or self.residual.enabled or self.repair.enabled
+        ):
+            raise ConfigurationError(
+                "no_prototype_merging requires prototype, residual, and repair stages disabled"
+            )
+        if variant is AblationVariant.NO_RESIDUAL_REPAIR and (
+            not self.prototypes.enabled
+            or self.residual.enabled
+            or self.repair.enabled
+            or self.repair.policy is not RepairPolicy.NONE
+        ):
+            raise ConfigurationError(
+                "no_residual_repair requires prototypes enabled and residual/repair disabled"
+            )
+        if variant is AblationVariant.ORACLE_FUTURE_QUERY:
+            if self.diagnostics.forecast_oracle_steps < 1:
+                raise ConfigurationError(
+                    "oracle future-query ablation requires diagnostics.forecast_oracle_steps > 0"
+                )
+            if (
+                self.forecasting.mode is not ForecastMode.DRAFT_ROLLOUT
+                or self.forecasting.prompt_window != 0
+                or self.forecasting.draft_steps != self.diagnostics.forecast_oracle_steps
+            ):
+                raise ConfigurationError(
+                    "oracle future-query ablation uses draft_rollout geometry with draft_steps "
+                    "equal to diagnostics.forecast_oracle_steps and prompt_window=0"
+                )
+        if variant is AblationVariant.ORACLE_REPAIR and (
+            not self.repair.enabled
+            or self.repair.policy is not RepairPolicy.ORACLE
+            or not self.repair.evaluation_only
+        ):
+            raise ConfigurationError(
+                "oracle repair ablation requires enabled evaluation-only oracle repair"
+            )
         if self.method is MosaicKVMethod.FULL_KV and self.cache.retention_ratio != 1.0:
             raise ConfigurationError("method='full_kv' requires cache.retention_ratio=1.0")
         if (
@@ -1239,6 +1363,7 @@ class RunConfig:
             "generation",
             "cache",
             "diagnostics",
+            "ablation",
             "method",
             "forecasting",
             "graph",
@@ -1263,6 +1388,7 @@ class RunConfig:
             generation=GenerationConfig.from_mapping(data["generation"]),
             cache=CacheConfig.from_mapping(data["cache"]),
             diagnostics=FidelityDiagnosticsConfig.from_mapping(data.get("diagnostics", {})),
+            ablation=AblationConfig.from_mapping(data.get("ablation", {})),
             method=_enum(
                 MosaicKVMethod,
                 data.get("method", MosaicKVMethod.FULLKV.value),
@@ -1318,7 +1444,12 @@ def load_config(path: str | Path) -> RunConfig:
 def canonical_config(config: RunConfig) -> JsonObject:
     """Return the machine-independent canonical configuration object."""
 
-    return cast("JsonObject", asdict(config))
+    payload = cast("JsonObject", asdict(config))
+    # Preserve hashes of pre-Experiment-3 configurations. The explicit field
+    # enters provenance only when an ablation is actually requested.
+    if config.ablation.variant is AblationVariant.NONE:
+        payload.pop("ablation", None)
+    return payload
 
 
 def canonical_config_json(config: RunConfig) -> str:
@@ -1367,6 +1498,7 @@ def synthetic_evaluation_config(seed: int = 0) -> RunConfig:
 
 
 __all__ = [
+    "AblationConfig",
     "CacheConfig",
     "ConfigurationError",
     "DatasetConfig",

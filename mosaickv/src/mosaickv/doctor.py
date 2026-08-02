@@ -8,6 +8,7 @@ import os
 import platform
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Final, cast
 
@@ -62,13 +63,32 @@ def probe_packages() -> JsonObject:
     """Report package metadata separately from actual importability."""
 
     packages: JsonObject = {}
-    for label, (module, distributions) in _OPTIONAL_PACKAGES.items():
+    installed_records: dict[str, tuple[str | None, bool]] = {}
+    for label, (_module, distributions) in _OPTIONAL_PACKAGES.items():
         version = _metadata_version(distributions)
-        installed = version is not None
+        installed_records[label] = (version, version is not None)
+
+    # Backend imports are independent read-only probes. vLLM, SGLang, and
+    # lmms-eval can each spend many seconds importing Torch; serial probing can
+    # exceed the CLI's own integration-test timeout despite every package being
+    # healthy. Bound concurrency to avoid oversubscribing a login node while
+    # keeping doctor responsive.
+    import_results: dict[str, tuple[bool, str | None]] = {}
+    with ThreadPoolExecutor(max_workers=4, thread_name_prefix="mosaickv-doctor") as executor:
+        futures = {
+            label: executor.submit(_probe_import, module)
+            for label, (module, _distributions) in _OPTIONAL_PACKAGES.items()
+            if installed_records[label][1]
+        }
+        for label, future in futures.items():
+            import_results[label] = future.result()
+
+    for label in _OPTIONAL_PACKAGES:
+        version, installed = installed_records[label]
         importable = False
         error: str | None = None
         if installed:
-            importable, error = _probe_import(module)
+            importable, error = import_results[label]
         record: JsonObject = {
             "installed": installed,
             "version": version or "not_installed",

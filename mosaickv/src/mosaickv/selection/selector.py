@@ -5,7 +5,7 @@ from __future__ import annotations
 import heapq
 import math
 from collections import defaultdict
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 
 from mosaickv.selection.objective import BudgetedObjective
 from mosaickv.selection.types import (
@@ -96,6 +96,8 @@ def lazy_greedy_select(
     *,
     position_limits: Mapping[tuple[int, int], int] | None = None,
     fill_position_limits: bool = False,
+    position_fill_quantum: int | None = None,
+    required_node_ids: Iterable[int] = (),
 ) -> SelectionResult:
     """Select mandatory blocks, then maximize cached marginal-gain density.
 
@@ -107,7 +109,15 @@ def lazy_greedy_select(
 
     if not objective.is_submodular:
         raise ValueError("lazy greedy requires a submodular objective coefficient configuration")
+    if position_fill_quantum is not None:
+        if not fill_position_limits or position_limits is None:
+            raise ValueError("position_fill_quantum requires dense-cache position filling")
+        if position_fill_quantum < 1:
+            raise ValueError("position_fill_quantum must be positive")
     graph = objective.graph
+    required = tuple(sorted(set(int(node_id) for node_id in required_node_ids)))
+    if any(node_id < 0 or node_id >= len(graph.nodes) for node_id in required):
+        raise ValueError("required_node_ids reference a node outside the evidence graph")
     costs = tuple(budget.cost(node.block) for node in graph.nodes)
     mandatory = tuple(node.node_id for node in graph.nodes if node.block.mandatory)
     mandatory_cost = sum(costs[node_id] for node_id in mandatory)
@@ -124,6 +134,15 @@ def lazy_greedy_select(
     selection_order: list[int] = []
     decisions: dict[int, SelectionDecision] = {}
     spent = 0
+
+    def is_position_representable(node_id: int) -> bool:
+        block = graph.nodes[node_id].block
+        return (
+            block.mandatory
+            or position_fill_quantum is None
+            or block.position_count % position_fill_quantum == 0
+        )
+
     for node_id in mandatory:
         block = graph.nodes[node_id].block
         identity = (block.layer, block.kv_head)
@@ -150,6 +169,46 @@ def lazy_greedy_select(
             reason=SelectionReason.MANDATORY_EXACT,
         )
 
+    # Prototype anchors are representation constraints, not optional greedy
+    # choices. Mandatory source blocks remain first in the audit trail; the
+    # additional anchors are then selected deterministically before stratum
+    # reserves and ordinary lazy greedy.
+    for node_id in required:
+        if node_id in selected:
+            continue
+        block = graph.nodes[node_id].block
+        identity = (block.layer, block.kv_head)
+        limit = None if position_limits is None else position_limits.get(identity)
+        cost = costs[node_id]
+        if not is_position_representable(node_id):
+            raise InfeasibleSelectionBudgetError(
+                f"required prototype anchor {node_id} is not representable in the dense cache"
+            )
+        if cost > budget.value - spent:
+            raise InfeasibleSelectionBudgetError(
+                "required prototype anchors exceed the configured selection budget"
+            )
+        if limit is not None and selected_positions[identity] + block.position_count > limit:
+            raise InfeasibleSelectionBudgetError(
+                "required prototype anchors exceed the dense cache capacity: "
+                f"layer={block.layer}, kv_head={block.kv_head}, limit={limit}"
+            )
+        gain = incremental.select(node_id)
+        rank = len(selection_order)
+        selected.add(node_id)
+        selection_order.append(node_id)
+        spent += cost
+        selected_positions[identity] += block.position_count
+        decisions[node_id] = SelectionDecision(
+            node_id=node_id,
+            selected=True,
+            selection_rank=rank,
+            marginal_gain=gain,
+            marginal_gain_per_cost=gain / cost,
+            cost=cost,
+            reason=SelectionReason.PROTOTYPE_ANCHOR,
+        )
+
     if position_limits is not None and objective.config.minimum_stratum_fraction > 0:
         groups: defaultdict[tuple[int, int], list[int]] = defaultdict(list)
         for node in graph.nodes:
@@ -161,6 +220,9 @@ def lazy_greedy_select(
                 candidates: list[tuple[float, float, int, int, float]] = []
                 for node_id in groups.get(identity, ()):
                     if node_id in selected:
+                        continue
+                    if not is_position_representable(node_id):
+                        constrained.add(node_id)
                         continue
                     block = graph.nodes[node_id].block
                     cost = costs[node_id]
@@ -200,6 +262,9 @@ def lazy_greedy_select(
     for node in graph.nodes:
         node_id = node.node_id
         if node_id in selected:
+            continue
+        if not is_position_representable(node_id):
+            constrained.add(node_id)
             continue
         gain = incremental.marginal_gain(node_id)
         heapq.heappush(heap, _entry(node_id, gain, costs[node_id], state_version))
@@ -253,6 +318,9 @@ def lazy_greedy_select(
                 fill_candidates: list[tuple[float, float, int, int, float]] = []
                 for node_id in fill_groups.get(identity, ()):
                     if node_id in selected:
+                        continue
+                    if not is_position_representable(node_id):
+                        constrained.add(node_id)
                         continue
                     block = graph.nodes[node_id].block
                     cost = costs[node_id]

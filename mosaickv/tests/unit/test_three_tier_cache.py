@@ -25,6 +25,7 @@ from mosaickv.prototypes import (
     PrototypeConstructionError,
     TierConstructionMode,
     construct_three_tier_cache,
+    estimate_prototype_active_cost,
 )
 from mosaickv.residual import (
     PinnedMemoryUnavailableError,
@@ -365,6 +366,26 @@ def test_highest_weight_compatible_selected_anchor_wins() -> None:
     assert result.prototypes[0].members[0].raw_weight == pytest.approx(0.9)
 
 
+def test_positional_compatibility_scaffold_supports_graph_ablation() -> None:
+    full = _full()
+    graph = _graph(full, ())
+    selection = _selection(graph, 2, (1.0, 0.5, 0.0))
+    selection = replace(selection, budget=SelectionBudget(3, BudgetUnit.BLOCKS))
+
+    result = construct_three_tier_cache(
+        full,
+        graph,
+        selection,
+        _safe_capabilities(),
+        prototype_config=PrototypeConfig(group_size=1, max_position_span=4),
+        residual_config=ResidualConfig(enabled=False),
+    )
+
+    assert result.mode is TierConstructionMode.THREE_TIER
+    assert len(result.prototypes) == 1
+    assert result.prototypes[0].members[0].raw_weight <= 0.01
+
+
 def test_incompatible_assignment_falls_back_without_partial_prototypes() -> None:
     full = _full()
     graph = _graph(full)
@@ -454,6 +475,22 @@ def test_selection_block_budget_rejects_prototype_growth() -> None:
     assert "active blocks" in result.reason
 
 
+def test_prototype_cost_estimate_rejects_dense_head_overflow() -> None:
+    full = _full()
+    graph = _graph(full)
+    selection = _selection(graph, 1, (1.0, 0.0, 0.0))
+
+    cost, reason = estimate_prototype_active_cost(
+        graph,
+        selection,
+        PrototypeConfig(group_size=2),
+        position_limits={(0, 0): 1},
+    )
+
+    assert cost is None
+    assert reason is not None and "dense layer/head capacities" in reason
+
+
 def test_explicit_byte_budget_rejects_prototype_growth() -> None:
     full = _full()
     graph = _graph(full)
@@ -500,3 +537,52 @@ def test_torch_bfloat16_and_fp8_residual_storage_when_available() -> None:
         restored_key, restored_value = restore_residual_payload(report, 0, full)
         assert torch.allclose(restored_key, key[:, :, 1:2], atol=0.25, rtol=0)
         assert torch.allclose(restored_value, value[:, :, 1:2], atol=0.25, rtol=0)
+
+
+def test_lossless_torch_residuals_share_batched_host_slabs() -> None:
+    torch = pytest.importorskip("torch")
+    key = torch.arange(12, dtype=torch.float32).reshape(1, 1, 3, 4)
+    value = key + 100
+    full = FullKVState.from_tensors(((key, value),), block_size=1)
+
+    report = build_residual_storage(
+        full,
+        {0: 0, 1: 0, 2: 0},
+        ResidualConfig(
+            storage_dtype=ResidualStorageDType.LOSSLESS,
+            require_pinned_memory=False,
+        ),
+    )
+
+    key_storage = {item.untyped_storage().data_ptr() for item in report.tier.key_residuals}
+    value_storage = {item.untyped_storage().data_ptr() for item in report.tier.value_residuals}
+    assert len(key_storage) == 1
+    assert len(value_storage) == 1
+    for payload_index in range(3):
+        restored_key, restored_value = restore_residual_payload(report, payload_index, full)
+        assert torch.equal(restored_key, key[:, :, payload_index : payload_index + 1])
+        assert torch.equal(restored_value, value[:, :, payload_index : payload_index + 1])
+
+
+def test_residual_storage_reuses_only_aligned_pre_gathered_payloads() -> None:
+    full = _full()
+    blocks = (full.blocks[1], full.blocks[2])
+    gathered = full.gather_exact_blocks(blocks)
+
+    report = build_residual_storage(
+        full,
+        {1: 0, 2: 0},
+        ResidualConfig(require_pinned_memory=False),
+        node_order=(1, 2),
+        gathered=gathered,
+    )
+
+    assert report.tier.source_blocks == blocks
+    with pytest.raises(ValueError, match="align exactly"):
+        build_residual_storage(
+            full,
+            {1: 0, 2: 0},
+            ResidualConfig(require_pinned_memory=False),
+            node_order=(1, 2),
+            gathered=full.gather_exact_blocks(tuple(reversed(blocks))),
+        )
