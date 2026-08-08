@@ -1,0 +1,58 @@
+schema_version: 1
+revision: 16
+experiment_id: choice_c_batched_prototype_system
+classification: exploratory_dirty_tree_system_parity_not_paper_result
+frozen_before_execution: true
+model: llava_1_5_7b
+backend: hf_eager
+task: docvqa
+retention_ratio: 0.2
+output_length: 16
+seed: 17
+calibration_ledger: configs/ledgers/choice_c_v15_design_docvqa.json
+calibration_validation_ledger: configs/ledgers/choice_c_v16_system_parity_docvqa.json
+evaluation_ledger: configs/ledgers/choice_c_v14_heldout_docvqa.json
+frozen_fidelity_profile: /scratch/djy8hg/runs/mosaickv/choice-c-forecast-stability-design-v15/frozen_fidelity_profile.json
+calibration_rule:
+  labels_or_task_scores_used: false
+  objective: preserve_v15_frozen_profile_and_outputs_while_reducing_system_overhead
+  predecessor_spec: configs/experiments/choice_c_forecast_stability_design_v15.yaml
+methods:
+  - mosaickv_full
+choice_c_candidates:
+  frozen_v15: &frozen
+    utility: {lambda_q: 1.0, lambda_v: -0.30, lambda_o: -0.30}
+    selection:
+      prompt_anchor_fraction: 0.15
+      evidence_preservation_fraction: 0.15
+      minimum_stratum_fraction: 0.10
+    routing:
+      draft_steps: 8
+      prompt_window: 16
+      head_shift_threshold: 0.15
+      stable_head_prompt_weight: 1.0
+      shifted_head_prompt_weight: 0.0
+      uncertainty_exact_head_fraction: 0.0
+    graph:
+      max_neighbors: 4
+      spatial_weight: 0.0
+    prototypes:
+      group_size: 15
+      max_position_span: 255
+      forecast_weight: 0.50
+      attention_log_bias_scale: 1.0
+      pooling_mode: forecast_attention_token
+      attention_bias_basis: forecast_attention_entropy
+      anchor_position_strategy: forecast_weighted_member_medoid
+    repair:
+      policy: none
+      prototype_risk_threshold: 0.01
+      decision_margin_threshold: 0.10
+      max_blocks_per_step: 2
+gate:
+  primary_budget: measured_active_kv_bytes
+  maximum_relative_byte_mismatch: 0.0
+  require_all_rows_complete: true
+  require_genuine_three_tier_mosaickv: true
+  require_exact_token_and_metric_parity_with_v15: true
+output_root: /scratch/djy8hg/runs/mosaickv/choice-c-batched-prototype-system-v16

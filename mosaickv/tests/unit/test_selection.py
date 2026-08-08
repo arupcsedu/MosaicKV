@@ -247,6 +247,23 @@ def test_required_prototype_anchors_are_selected_before_lazy_greedy() -> None:
     assert result.decisions[3].reason is SelectionReason.PROTOTYPE_ANCHOR
 
 
+def test_prompt_and_evidence_reservations_are_auditable_and_budgeted() -> None:
+    full = _full((Modality.TEXT,) * 6, mandatory=(5,))
+    _graph, _utilities, objective = _utilities_and_objective(full)
+
+    result = lazy_greedy_select(
+        objective,
+        SelectionBudget(4, BudgetUnit.BLOCKS),
+        prompt_anchor_node_ids=(3,),
+        evidence_node_ids=(1,),
+    )
+
+    assert result.selection_order[:3] == (5, 3, 1)
+    assert result.decisions[3].reason is SelectionReason.PROMPT_ANCHOR
+    assert result.decisions[1].reason is SelectionReason.EVIDENCE_PRESERVATION
+    assert result.budget_spent <= result.budget.value
+
+
 def test_required_prototype_anchor_budget_fails_closed() -> None:
     full = _full((Modality.TEXT,) * 4, mandatory=(3,))
     _graph, _utilities, objective = _utilities_and_objective(full)

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from itertools import pairwise
 from typing import Any, Self
@@ -424,11 +424,11 @@ class KVLayerStorage:
 def _memberships(blocks: Sequence[KVBlockDescriptor]) -> frozenset[tuple[int, int, int]]:
     memberships: set[tuple[int, int, int]] = set()
     for block in blocks:
-        overlap = memberships.intersection(block.source_memberships)
-        if overlap:
-            member = min(overlap)
-            raise ValueError(f"duplicate source membership within tier: {member}")
-        memberships.update(block.source_memberships)
+        for position in block.physical_cache_indices:
+            member = (block.layer, block.kv_head, position)
+            if member in memberships:
+                raise ValueError(f"duplicate source membership within tier: {member}")
+            memberships.add(member)
     return frozenset(memberships)
 
 
@@ -445,11 +445,14 @@ class ExactTier:
     blocks: tuple[KVBlockDescriptor, ...] = ()
     key_blocks: tuple[Any, ...] = ()
     value_blocks: tuple[Any, ...] = ()
+    _source_memberships: frozenset[tuple[int, int, int]] = field(
+        init=False, repr=False, compare=False
+    )
 
     def __post_init__(self) -> None:
         if len(self.blocks) != len(self.key_blocks) or len(self.blocks) != len(self.value_blocks):
             raise ValueError("exact tier blocks and K/V payloads must align")
-        _memberships(self.blocks)
+        object.__setattr__(self, "_source_memberships", _memberships(self.blocks))
         _ensure_unique_tensors((*self.key_blocks, *self.value_blocks), "exact tier")
         for index, (block, key, value) in enumerate(
             zip(self.blocks, self.key_blocks, self.value_blocks, strict=True)
@@ -477,7 +480,7 @@ class ExactTier:
 
     @property
     def source_memberships(self) -> frozenset[tuple[int, int, int]]:
-        return _memberships(self.blocks)
+        return self._source_memberships
 
     @property
     def active_bytes(self) -> int:
@@ -508,9 +511,12 @@ class PrototypeTier:
     prototype_keys: tuple[Any, ...] = ()
     prototype_values: tuple[Any, ...] = ()
     assignments: tuple[int, ...] = ()
+    _source_memberships: frozenset[tuple[int, int, int]] = field(
+        init=False, repr=False, compare=False
+    )
 
     def __post_init__(self) -> None:
-        _memberships(self.source_blocks)
+        object.__setattr__(self, "_source_memberships", _memberships(self.source_blocks))
         if len(self.prototype_keys) != len(self.prototype_values):
             raise ValueError("prototype K/V payload counts must match")
         if len(self.assignments) != len(self.source_blocks):
@@ -527,7 +533,7 @@ class PrototypeTier:
 
     @property
     def source_memberships(self) -> frozenset[tuple[int, int, int]]:
-        return _memberships(self.source_blocks)
+        return self._source_memberships
 
     @property
     def active_bytes(self) -> int:
@@ -543,9 +549,12 @@ class ResidualTier:
     source_blocks: tuple[KVBlockDescriptor, ...] = ()
     key_residuals: tuple[Any, ...] = ()
     value_residuals: tuple[Any, ...] = ()
+    _source_memberships: frozenset[tuple[int, int, int]] = field(
+        init=False, repr=False, compare=False
+    )
 
     def __post_init__(self) -> None:
-        _memberships(self.source_blocks)
+        object.__setattr__(self, "_source_memberships", _memberships(self.source_blocks))
         if len(self.source_blocks) != len(self.key_residuals) or len(self.source_blocks) != len(
             self.value_residuals
         ):
@@ -554,7 +563,7 @@ class ResidualTier:
 
     @property
     def source_memberships(self) -> frozenset[tuple[int, int, int]]:
-        return _memberships(self.source_blocks)
+        return self._source_memberships
 
     @property
     def active_bytes(self) -> int:
@@ -626,6 +635,10 @@ class FullKVState:
     source_class: type[Any]
     source_kind: str
     cached_key_state: Any
+    _source_memberships: frozenset[tuple[int, int, int]] = field(
+        init=False, repr=False, compare=False
+    )
+    _source_block_set: frozenset[KVBlockDescriptor] = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if not self.layers:
@@ -641,6 +654,7 @@ class FullKVState:
             raise ValueError("source_kind must be non-empty")
         self._validate_spans()
         self._validate_block_partition()
+        object.__setattr__(self, "_source_block_set", frozenset(self.blocks))
 
     @property
     def original_logical_sequence_length(self) -> int:
@@ -660,7 +674,7 @@ class FullKVState:
 
     @property
     def source_memberships(self) -> frozenset[tuple[int, int, int]]:
-        return _memberships(self.blocks)
+        return self._source_memberships
 
     def _validate_spans(self) -> None:
         ordered = sorted(self.modality_spans, key=lambda span: (span.start, span.end))
@@ -689,6 +703,7 @@ class FullKVState:
                 "every source cache position must belong to exactly one block; "
                 f"missing={len(missing)}, extra={len(extra)}"
             )
+        object.__setattr__(self, "_source_memberships", observed)
         expected_bytes = self.active_bytes
         descriptor_bytes = sum(block.byte_size for block in self.blocks)
         if descriptor_bytes != expected_bytes:
@@ -995,6 +1010,8 @@ class FullKVState:
         return elements_per_head_position * position_count * _tensor_element_size(tensor)
 
     def _validate_descriptor(self, block: KVBlockDescriptor) -> None:
+        if block in self._source_block_set:
+            return
         try:
             layer = self.layers[block.layer]
         except IndexError as error:

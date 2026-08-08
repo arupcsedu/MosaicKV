@@ -145,7 +145,11 @@ def test_manual_cluster_matches_expected_fp32_weighted_prototype() -> None:
         graph,
         selection,
         _safe_capabilities(),
-        prototype_config=PrototypeConfig(group_size=2, max_position_span=8),
+        prototype_config=PrototypeConfig(
+            group_size=2,
+            max_position_span=8,
+            attention_log_bias_scale=1.0,
+        ),
         residual_config=ResidualConfig(enabled=False),
     )
 
@@ -169,10 +173,31 @@ def test_manual_cluster_matches_expected_fp32_weighted_prototype() -> None:
     assert record.diagnostics.active_bytes_saved == full.blocks[1].byte_size
     assert record.diagnostics.key_dispersion == pytest.approx(18.75)
     assert record.diagnostics.value_dispersion == pytest.approx(3.0)
+    assert record.represented_source_positions == 2
+    assert record.attention_log_bias == pytest.approx(np.log(2.0))
     assert result.original_logical_sequence_length == 8
     assert result.next_decode_position == 9
     assert result.active_layouts[0].active_cache_length == 2
     assert result.active_layouts[0].prototype_anchor_positions == (2,)
+
+
+def test_dispersion_guard_rejects_lossy_cluster_without_unsafe_merge() -> None:
+    full = _full()
+    graph = _graph(full)
+    selection = _selection(graph, 2, (1.0, 0.0, 0.0))
+
+    result = construct_three_tier_cache(
+        full,
+        graph,
+        selection,
+        _safe_capabilities(),
+        prototype_config=PrototypeConfig(group_size=2, max_key_dispersion=1.0),
+        residual_config=ResidualConfig(enabled=False),
+    )
+
+    assert result.mode is TierConstructionMode.EXACT_ONLY_INCOMPATIBLE
+    assert "dispersion guard" in result.reason
+    assert not result.prototypes
 
 
 def test_prototype_pools_each_multitoken_block_before_weighting() -> None:
@@ -199,6 +224,47 @@ def test_prototype_pools_each_multitoken_block_before_weighting() -> None:
     assert float(result.state.prototypes.prototype_keys[0].item()) == pytest.approx(19.5)
     assert float(result.state.prototypes.prototype_values[0].item()) == pytest.approx(119.5)
     assert result.prototypes[0].diagnostics.active_bytes_saved == 24
+
+
+def test_forecast_attention_pooling_preserves_token_mass_and_uses_member_medoid() -> None:
+    key = np.asarray([0.0, 2.0, 10.0, 14.0, 20.0, 24.0], dtype=np.float32).reshape(1, 1, 6, 1)
+    value = (key + 100).copy()
+    full = FullKVState.from_tensors(
+        ((key, value),),
+        block_size=2,
+        cached_key_state=CachedKeyState.NOT_APPLICABLE,
+    )
+    graph = _graph(full, ((1, 0, 0.25), (2, 0, 0.75)))
+    selection = _selection(graph, 2, (1.0, 0.0, 0.0))
+    token_attention = {(0, 0): np.asarray([0.0, 0.0, 0.9, 0.1, 0.1, 0.1])}
+
+    result = construct_three_tier_cache(
+        full,
+        graph,
+        selection,
+        _safe_capabilities(),
+        prototype_config=PrototypeConfig(
+            group_size=2,
+            pooling_mode="forecast_attention_token",
+            attention_bias_basis="forecast_attention_entropy",
+            anchor_position_strategy="forecast_weighted_member_medoid",
+            attention_log_bias_scale=1.0,
+        ),
+        residual_config=ResidualConfig(enabled=False),
+        prototype_token_weight_by_head=token_attention,
+    )
+
+    record = result.prototypes[0]
+    assert float(result.state.prototypes.prototype_keys[0].item()) == pytest.approx(12.333333)
+    assert float(result.state.prototypes.prototype_values[0].item()) == pytest.approx(112.333333)
+    assert record.anchor_logical_position == 2
+    assert record.members[0].normalized_weight == pytest.approx(5.0 / 6.0)
+    assert record.members[0].position_weights == pytest.approx((0.9, 0.1))
+    assert record.members[1].position_weights == pytest.approx((0.5, 0.5))
+    expected_entropy = -(
+        0.75 * np.log(0.75) + 3 * (1.0 / 12.0) * np.log(1.0 / 12.0)
+    )
+    assert record.attention_log_bias == pytest.approx(expected_entropy)
 
 
 def test_lossless_residuals_preserve_and_index_every_original_position() -> None:

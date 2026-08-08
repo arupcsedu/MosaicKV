@@ -1,0 +1,25 @@
+{
+  "dataset_id": "lmms-lab/DocVQA",
+  "dataset_revision": "539088ef8a8ada01ac8e2e6d4e372586748a265e",
+  "materialization_model_name": "llava-hf/llava-1.5-7b-hf",
+  "sample_count": 12,
+  "sample_ids": [
+    "docvqa:64703",
+    "docvqa:59347",
+    "docvqa:58332",
+    "docvqa:62404",
+    "docvqa:50773",
+    "docvqa:60744",
+    "docvqa:56080",
+    "docvqa:59846",
+    "docvqa:59032",
+    "docvqa:62138",
+    "docvqa:43159",
+    "docvqa:56073"
+  ],
+  "schema_version": 1,
+  "selection_seed": 20270807,
+  "selection_rule": "next_12_seeded_question_ids_after_v11_design_not_present_in_any_existing_docvqa_ledger",
+  "split": "validation",
+  "task": "docvqa"
+}

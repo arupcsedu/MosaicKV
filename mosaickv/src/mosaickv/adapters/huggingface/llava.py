@@ -12,6 +12,7 @@ from mosaickv.adapters.huggingface.types import (
     PreparedInputs,
     QueryVectorState,
 )
+from mosaickv.cache_state import Modality, ModalitySpan
 from mosaickv.prototypes.rope import RotaryPrototypeKeyTransform
 
 
@@ -72,6 +73,74 @@ class Llava15Adapter(HuggingFaceMultimodalAdapter):
 
     def _language_layers(self) -> Sequence[Any]:
         return self._standard_language_layers()
+
+    @staticmethod
+    def _enrich_image_grid_spans(
+        spans: tuple[ModalitySpan, ...],
+        *,
+        rows: int,
+        columns: int,
+    ) -> tuple[ModalitySpan, ...]:
+        """Attach the pinned LLaVA patch grid without inventing coordinates.
+
+        The LLaVA processor expands each image placeholder into one token per
+        selected vision patch.  A contiguous run may represent multiple
+        adjacent image placeholders, so it is split only when its length is an
+        exact multiple of the model-configured patch grid.  Any mismatch is
+        left metadata-free and the evidence graph safely falls back to its
+        non-spatial edges.
+        """
+
+        grid_tokens = rows * columns
+        image_index = 0
+        enriched: list[ModalitySpan] = []
+        for span in spans:
+            if span.modality is not Modality.IMAGE:
+                enriched.append(span)
+                continue
+            length = span.end - span.start
+            if length % grid_tokens:
+                enriched.append(span)
+                image_index += 1
+                continue
+            for start in range(span.start, span.end, grid_tokens):
+                enriched.append(
+                    ModalitySpan(
+                        start,
+                        start + grid_tokens,
+                        Modality.IMAGE,
+                        image_index=image_index,
+                        grid_shape=(rows, columns),
+                    )
+                )
+                image_index += 1
+        return tuple(enriched)
+
+    def prepare_inputs(
+        self, messages: Sequence[Any], media: Sequence[Any] = ()
+    ) -> PreparedInputs:
+        """Prepare LLaVA inputs and add authoritative patch-grid provenance."""
+
+        prepared = super().prepare_inputs(messages, media)
+        vision = getattr(self.model.config, "vision_config", None)
+        image_size = getattr(vision, "image_size", None)
+        patch_size = getattr(vision, "patch_size", None)
+        strategy = getattr(self.model.config, "vision_feature_select_strategy", "default")
+        if (
+            strategy == "default"
+            and isinstance(image_size, int)
+            and isinstance(patch_size, int)
+            and image_size > 0
+            and patch_size > 0
+            and image_size % patch_size == 0
+        ):
+            side = image_size // patch_size
+            prepared.modality_map = self._enrich_image_grid_spans(
+                prepared.modality_map,
+                rows=side,
+                columns=side,
+            )
+        return prepared
 
     def build_prototype_key_transform(
         self, prepared: PreparedInputs

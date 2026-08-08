@@ -1,0 +1,11 @@
+schema_version: 1
+profile_id: choice_c_baseline_budget_profile_v10
+design_spec_sha256: a12de3de1aaa58bac4eae847572f38c3ef2b8c3bbc254782538021e5069440e5
+primary_budget: measured_active_kv_bytes
+labels_or_task_scores_used: false
+calibration_provenance: prior_llava_docvqa_realized_active_byte_ratios
+maximum_allowed_relative_byte_mismatch: 0.02
+retention_ratio_by_method:
+  prompt_attention_topk: 0.2
+  lookm_reimpl: 0.18775
+  vl_cache_reimpl: 0.18682

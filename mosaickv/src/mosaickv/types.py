@@ -86,6 +86,7 @@ class RepairPolicy(StrEnum):
     ENTROPY = "entropy"
     PROTOTYPE_RISK = "prototype_risk"
     ENTROPY_OR_PROTOTYPE_RISK = "entropy_or_prototype_risk"
+    DECISION_AWARE = "decision_aware"
     ORACLE = "oracle"
 
 
@@ -94,6 +95,7 @@ class RepairCandidateRanking(StrEnum):
 
     PROTOTYPE_WEIGHT = "prototype_weight"
     RISK_WEIGHTED_RECONSTRUCTION_ERROR = "risk_weighted_reconstruction_error"
+    DECISION_INFLUENCE = "decision_influence"
 
 
 class AblationVariant(StrEnum):

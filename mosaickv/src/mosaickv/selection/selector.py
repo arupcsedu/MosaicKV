@@ -98,6 +98,8 @@ def lazy_greedy_select(
     fill_position_limits: bool = False,
     position_fill_quantum: int | None = None,
     required_node_ids: Iterable[int] = (),
+    prompt_anchor_node_ids: Iterable[int] = (),
+    evidence_node_ids: Iterable[int] = (),
 ) -> SelectionResult:
     """Select mandatory blocks, then maximize cached marginal-gain density.
 
@@ -116,8 +118,11 @@ def lazy_greedy_select(
             raise ValueError("position_fill_quantum must be positive")
     graph = objective.graph
     required = tuple(sorted(set(int(node_id) for node_id in required_node_ids)))
-    if any(node_id < 0 or node_id >= len(graph.nodes) for node_id in required):
-        raise ValueError("required_node_ids reference a node outside the evidence graph")
+    prompt_anchors = tuple(sorted(set(int(node_id) for node_id in prompt_anchor_node_ids)))
+    evidence_nodes = tuple(sorted(set(int(node_id) for node_id in evidence_node_ids)))
+    all_required = (*required, *prompt_anchors, *evidence_nodes)
+    if any(node_id < 0 or node_id >= len(graph.nodes) for node_id in all_required):
+        raise ValueError("required selector IDs reference a node outside the evidence graph")
     costs = tuple(budget.cost(node.block) for node in graph.nodes)
     mandatory = tuple(node.node_id for node in graph.nodes if node.block.mandatory)
     mandatory_cost = sum(costs[node_id] for node_id in mandatory)
@@ -169,45 +174,58 @@ def lazy_greedy_select(
             reason=SelectionReason.MANDATORY_EXACT,
         )
 
-    # Prototype anchors are representation constraints, not optional greedy
-    # choices. Mandatory source blocks remain first in the audit trail; the
-    # additional anchors are then selected deterministically before stratum
-    # reserves and ordinary lazy greedy.
-    for node_id in required:
-        if node_id in selected:
-            continue
-        block = graph.nodes[node_id].block
-        identity = (block.layer, block.kv_head)
-        limit = None if position_limits is None else position_limits.get(identity)
-        cost = costs[node_id]
-        if not is_position_representable(node_id):
-            raise InfeasibleSelectionBudgetError(
-                f"required prototype anchor {node_id} is not representable in the dense cache"
+    def select_required_nodes(
+        node_ids: Iterable[int],
+        reason: SelectionReason,
+        label: str,
+    ) -> None:
+        nonlocal spent
+        for node_id in node_ids:
+            if node_id in selected:
+                continue
+            block = graph.nodes[node_id].block
+            identity = (block.layer, block.kv_head)
+            limit = None if position_limits is None else position_limits.get(identity)
+            cost = costs[node_id]
+            if not is_position_representable(node_id):
+                raise InfeasibleSelectionBudgetError(
+                    f"required {label} {node_id} is not representable in the dense cache"
+                )
+            if cost > budget.value - spent:
+                raise InfeasibleSelectionBudgetError(
+                    f"required {label}s exceed the configured selection budget"
+                )
+            if limit is not None and selected_positions[identity] + block.position_count > limit:
+                raise InfeasibleSelectionBudgetError(
+                    f"required {label}s exceed the dense cache capacity: "
+                    f"layer={block.layer}, kv_head={block.kv_head}, limit={limit}"
+                )
+            gain = incremental.select(node_id)
+            rank = len(selection_order)
+            selected.add(node_id)
+            selection_order.append(node_id)
+            spent += cost
+            selected_positions[identity] += block.position_count
+            decisions[node_id] = SelectionDecision(
+                node_id=node_id,
+                selected=True,
+                selection_rank=rank,
+                marginal_gain=gain,
+                marginal_gain_per_cost=gain / cost,
+                cost=cost,
+                reason=reason,
             )
-        if cost > budget.value - spent:
-            raise InfeasibleSelectionBudgetError(
-                "required prototype anchors exceed the configured selection budget"
-            )
-        if limit is not None and selected_positions[identity] + block.position_count > limit:
-            raise InfeasibleSelectionBudgetError(
-                "required prototype anchors exceed the dense cache capacity: "
-                f"layer={block.layer}, kv_head={block.kv_head}, limit={limit}"
-            )
-        gain = incremental.select(node_id)
-        rank = len(selection_order)
-        selected.add(node_id)
-        selection_order.append(node_id)
-        spent += cost
-        selected_positions[identity] += block.position_count
-        decisions[node_id] = SelectionDecision(
-            node_id=node_id,
-            selected=True,
-            selection_rank=rank,
-            marginal_gain=gain,
-            marginal_gain_per_cost=gain / cost,
-            cost=cost,
-            reason=SelectionReason.PROTOTYPE_ANCHOR,
-        )
+
+    # Prompt anchors are a quality guard, evidence nodes preserve fine local
+    # structure, and prototype anchors are representation constraints. All are
+    # auditable hard reservations inside the same active budget.
+    select_required_nodes(prompt_anchors, SelectionReason.PROMPT_ANCHOR, "prompt anchor")
+    select_required_nodes(
+        evidence_nodes,
+        SelectionReason.EVIDENCE_PRESERVATION,
+        "evidence-preservation block",
+    )
+    select_required_nodes(required, SelectionReason.PROTOTYPE_ANCHOR, "prototype anchor")
 
     if position_limits is not None and objective.config.minimum_stratum_fraction > 0:
         groups: defaultdict[tuple[int, int], list[int]] = defaultdict(list)

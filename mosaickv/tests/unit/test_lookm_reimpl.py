@@ -134,3 +134,18 @@ def test_lookm_requires_token_sized_blocks() -> None:
             _config(LookMMergeStrategy.PIVOTAL),
             CacheConfig(4, BudgetUnit.BLOCKS, 0.5, 2),
         )
+
+
+def test_lookm_honors_common_physical_byte_capacity() -> None:
+    state = _state()
+    bytes_per_position = state.active_bytes // state.active_sequence_length
+    plan = build_lookm_reimpl_plan(
+        state,
+        _attention(),
+        _config(LookMMergeStrategy.PIVOTAL),
+        CacheConfig(3 * bytes_per_position, BudgetUnit.BYTES, 0.5, 1),
+        physical_prompt_capacity=3,
+    )
+
+    assert all(len(head.selected_physical_positions) == 3 for head in plan.heads)
+    assert plan.active_bytes == 3 * bytes_per_position

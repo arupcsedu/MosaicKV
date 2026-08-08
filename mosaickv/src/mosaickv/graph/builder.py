@@ -154,25 +154,44 @@ def _add_cosine_edges(
         for start in range(0, len(node_ids), config.similarity_chunk_size):
             source_ids = node_ids[start : start + config.similarity_chunk_size]
             score_tile = matrix[start : start + len(source_ids)] @ matrix.T
-            for row, source_id in enumerate(source_ids):
-                if unrestricted_group:
-                    compatible_indices = np.flatnonzero(score_tile[row] > 0).tolist()
-                    self_index = start + row
-                    if self_index in compatible_indices:
-                        compatible_indices.remove(self_index)
-                else:
-                    source = nodes[source_id]
-                    compatible_indices = [
-                        index
-                        for index, target_id in enumerate(node_ids)
-                        if _compatible(
-                            source,
-                            nodes[target_id],
-                            config,
-                            maximum_position_span=maximum_position_span,
+            if unrestricted_group:
+                # Columns follow sorted node IDs. A stable descending sort is
+                # therefore exactly the documented lower-node-ID tie break,
+                # but performs one vectorized ordering operation per tile
+                # instead of one lexsort/allocation per source node.
+                positive = score_tile > 0
+                for row in range(len(source_ids)):
+                    positive[row, start + row] = False
+                ranked = np.argsort(-score_tile, axis=1, kind="stable")
+                for row, source_id in enumerate(source_ids):
+                    retained = 0
+                    for column in ranked[row]:
+                        if not positive[row, column]:
+                            continue
+                        accumulator.add(
+                            source_id,
+                            node_ids[int(column)],
+                            edge_type,
+                            float(score_tile[row, column]),
+                            source_weight,
                         )
-                        and float(score_tile[row, index]) > 0
-                    ]
+                        retained += 1
+                        if retained == config.max_neighbors:
+                            break
+                continue
+            for row, source_id in enumerate(source_ids):
+                source = nodes[source_id]
+                compatible_indices = [
+                    index
+                    for index, target_id in enumerate(node_ids)
+                    if _compatible(
+                        source,
+                        nodes[target_id],
+                        config,
+                        maximum_position_span=maximum_position_span,
+                    )
+                    and float(score_tile[row, index]) > 0
+                ]
                 candidate_ids = [node_ids[index] for index in compatible_indices]
                 candidate_scores = score_tile[row, compatible_indices]
                 for selected_index in _top_indices(

@@ -131,6 +131,77 @@ def _token_feature_matrix(
     )
 
 
+def _torch_token_feature_matrix(
+    value: Any,
+    *,
+    sequence_axis: int,
+    head_axis: int | None,
+) -> Any:
+    """Canonicalize a torch layer without staging the full KV tensor on CPU."""
+
+    array = value.detach().float()
+    rank = int(array.ndim)
+    sequence = _normalize_axis(sequence_axis, rank, "sequence")
+    head = None if head_axis is None else _normalize_axis(head_axis, rank, "head")
+    if head == sequence:
+        raise ValueError("head and sequence axes must differ")
+    reductions = () if rank < 3 or 0 in {sequence, head} else (0,)
+    excluded = {sequence, *reductions}
+    if head is not None:
+        excluded.add(head)
+    features = tuple(axis for axis in range(rank) if axis not in excluded)
+    leading = (sequence,) if head is None else (head, sequence)
+    transposed = array.permute((*leading, *reductions, *features))
+    reduction_size = int(np.prod([array.shape[axis] for axis in reductions])) or 1
+    feature_size = int(np.prod([array.shape[axis] for axis in features])) or 1
+    if head is None:
+        return transposed.reshape(array.shape[sequence], reduction_size, feature_size)
+    return transposed.reshape(
+        array.shape[head],
+        array.shape[sequence],
+        reduction_size,
+        feature_size,
+    )
+
+
+def _pool_torch_token_feature_batch(
+    matrix: Any,
+    *,
+    positions: tuple[tuple[int, ...], ...],
+    heads: tuple[int, ...] | None,
+) -> np.ndarray[Any, np.dtype[np.float32]]:
+    """Pool one equal-width block batch on its source device, then copy only descriptors."""
+
+    import torch
+
+    if (
+        not positions
+        or not positions[0]
+        or any(len(item) != len(positions[0]) for item in positions)
+    ):
+        raise ValueError("graph pooling batches require one nonzero block width")
+    position_index = torch.as_tensor(positions, dtype=torch.long, device=matrix.device)
+    sequence_length = int(matrix.shape[0] if heads is None else matrix.shape[1])
+    if int(position_index.min()) < 0 or int(position_index.max()) >= sequence_length:
+        raise ValueError("graph block position lies outside descriptor source tensor")
+    if heads is None:
+        selected = matrix[position_index]
+    else:
+        if len(heads) != len(positions):
+            raise ValueError("graph pooling heads and position rows must align")
+        head_index = torch.as_tensor(heads, dtype=torch.long, device=matrix.device)
+        if int(head_index.min()) < 0 or int(head_index.max()) >= int(matrix.shape[0]):
+            raise ValueError("graph block KV head lies outside descriptor source tensor")
+        selected = matrix[head_index[:, None], position_index]
+    pooled = selected.reshape(len(positions), -1, selected.shape[-1]).mean(dim=1)
+    result: np.ndarray[Any, np.dtype[np.float32]] = (
+        pooled.detach().cpu().numpy().astype(np.float32, copy=False)
+    )
+    if not bool(np.all(np.isfinite(result))):
+        raise ValueError("graph descriptor source tensors must be finite")
+    return result
+
+
 def _pool_token_features(
     matrix: np.ndarray[Any, np.dtype[np.float32]],
     *,
@@ -245,26 +316,47 @@ def pool_block_descriptors(
     # is prohibitive for multi-head VLMs while producing identical values.
     indexed_result: list[tuple[int, PooledBlockDescriptor]] = []
     for layer_index, layer in enumerate(full_state.layers):
-        key_source = _as_numpy_float(layer.key)
-        value_source = _as_numpy_float(layer.value)
-        hidden_source = None if hidden is None else _as_numpy_float(hidden[layer_index])
-        key_tokens = _token_feature_matrix(
-            key_source,
-            sequence_axis=layer.key_sequence_dimension,
-            head_axis=layer.key_head_dimension,
+        torch_sources = layer.key.__class__.__module__.startswith("torch") and (
+            layer.value.__class__.__module__.startswith("torch")
         )
-        value_tokens = _token_feature_matrix(
-            value_source,
-            sequence_axis=layer.value_sequence_dimension,
-            head_axis=layer.value_head_dimension,
-        )
+        if torch_sources:
+            key_tokens = _torch_token_feature_matrix(
+                layer.key,
+                sequence_axis=layer.key_sequence_dimension,
+                head_axis=layer.key_head_dimension,
+            )
+            value_tokens = _torch_token_feature_matrix(
+                layer.value,
+                sequence_axis=layer.value_sequence_dimension,
+                head_axis=layer.value_head_dimension,
+            )
+        else:
+            key_tokens = _token_feature_matrix(
+                _as_numpy_float(layer.key),
+                sequence_axis=layer.key_sequence_dimension,
+                head_axis=layer.key_head_dimension,
+            )
+            value_tokens = _token_feature_matrix(
+                _as_numpy_float(layer.value),
+                sequence_axis=layer.value_sequence_dimension,
+                head_axis=layer.value_head_dimension,
+            )
+        hidden_source = None if hidden is None else hidden[layer_index]
         hidden_tokens = (
             None
             if hidden_source is None
-            else _token_feature_matrix(
-                hidden_source,
-                sequence_axis=hidden_sequence_dimension,
-                head_axis=None,
+            else (
+                _torch_token_feature_matrix(
+                    hidden_source,
+                    sequence_axis=hidden_sequence_dimension,
+                    head_axis=None,
+                )
+                if hidden_source.__class__.__module__.startswith("torch")
+                else _token_feature_matrix(
+                    _as_numpy_float(hidden_source),
+                    sequence_axis=hidden_sequence_dimension,
+                    head_axis=None,
+                )
             )
         )
         layer_blocks = blocks_by_layer[layer_index]
@@ -277,26 +369,21 @@ def pool_block_descriptors(
         for group in width_groups.values():
             positions = tuple(block.physical_cache_indices for _node_id, block in group)
             heads = tuple(block.kv_head for _node_id, block in group)
-            key_batch = _pool_token_feature_batch(
-                key_tokens,
-                positions=positions,
-                heads=heads,
+            batch_pool = (
+                _pool_torch_token_feature_batch if torch_sources else _pool_token_feature_batch
             )
-            value_batch = _pool_token_feature_batch(
-                value_tokens,
-                positions=positions,
-                heads=heads,
-            )
+            key_batch = batch_pool(key_tokens, positions=positions, heads=heads)
+            value_batch = batch_pool(value_tokens, positions=positions, heads=heads)
             for batch_index, (node_id, _block) in enumerate(group):
                 pooled_keys[node_id] = _readonly_row(key_batch, batch_index)
                 pooled_values[node_id] = _readonly_row(value_batch, batch_index)
             if hidden_tokens is not None:
                 unique_positions = tuple(dict.fromkeys(positions))
-                hidden_batch = _pool_token_feature_batch(
-                    hidden_tokens,
-                    positions=unique_positions,
-                    heads=None,
-                )
+                hidden_batch = (
+                    _pool_torch_token_feature_batch
+                    if hidden_tokens.__class__.__module__.startswith("torch")
+                    else _pool_token_feature_batch
+                )(hidden_tokens, positions=unique_positions, heads=None)
                 for batch_index, item_positions in enumerate(unique_positions):
                     hidden_by_positions[item_positions] = _readonly_row(
                         hidden_batch,
@@ -358,6 +445,45 @@ def pool_prompt_attention_coactivation(
     for layer_index, (attention, layer) in enumerate(
         zip(attention_layers, full_state.layers, strict=True)
     ):
+        if attention.__class__.__module__.startswith("torch"):
+            import torch
+
+            tensor = attention.detach().float()
+            if tensor.ndim == 3:
+                tensor = tensor.unsqueeze(0)
+            if tensor.ndim != 4:
+                raise ValueError(
+                    "prompt attention must have shape [batch, query_heads, queries, keys]"
+                )
+            query_heads = int(tensor.shape[1])
+            if query_heads % layer.kv_heads:
+                raise ValueError("prompt query-head count must be divisible by KV-head count")
+            if int(tensor.shape[-1]) < layer.sequence_length:
+                raise ValueError("prompt attention key axis is shorter than the active KV cache")
+            if bool(torch.any(tensor < 0)):
+                raise ValueError(
+                    "prompt attention co-activation requires nonnegative attention weights"
+                )
+            query_heads_per_kv = query_heads // layer.kv_heads
+            by_head_width: dict[tuple[int, int], list[tuple[int, Any]]] = defaultdict(list)
+            for node_id, block in enumerate(full_state.blocks):
+                if block.layer == layer_index:
+                    by_head_width[(block.kv_head, block.position_count)].append((node_id, block))
+            for (kv_head, _width), indexed_blocks in by_head_width.items():
+                positions = torch.as_tensor(
+                    tuple(block.physical_cache_indices for _node_id, block in indexed_blocks),
+                    dtype=torch.long,
+                    device=tensor.device,
+                )
+                query_start = kv_head * query_heads_per_kv
+                query_end = query_start + query_heads_per_kv
+                source = tensor[:, query_start:query_end, :, :]
+                selected = source[..., positions]
+                pooled = selected.mean(dim=(0, 1, 4)).transpose(0, 1)
+                host = pooled.detach().cpu().numpy().astype(np.float32, copy=False)
+                for row, (node_id, _block) in enumerate(indexed_blocks):
+                    result[node_id] = _readonly_row(host, row)
+            continue
         array = _as_numpy_float(attention)
         if array.ndim == 3:
             array = array[None, ...]

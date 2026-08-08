@@ -16,7 +16,7 @@ import numpy as np
 
 from mosaickv.cache_state import FullKVState, Modality, tensor_storage_bytes
 from mosaickv.config import CacheConfig, LookMConfig
-from mosaickv.types import JsonObject, LookMMergeStrategy
+from mosaickv.types import BudgetUnit, JsonObject, LookMMergeStrategy
 
 
 class LookMReimplementationError(RuntimeError):
@@ -370,7 +370,22 @@ def _modality_by_physical(full_state: FullKVState) -> tuple[Modality, ...]:
     return tuple(result)
 
 
-def _selection_counts(length: int, config: LookMConfig) -> tuple[int, int]:
+def _selection_counts(
+    length: int,
+    config: LookMConfig,
+    physical_prompt_capacity: int | None = None,
+) -> tuple[int, int]:
+    if physical_prompt_capacity is not None:
+        if not 0 < physical_prompt_capacity <= length:
+            raise LookMReimplementationError(
+                "LOOK-M physical prompt capacity must lie in [1, source length]"
+            )
+        configured = config.recent_ratio + config.important_ratio
+        if configured <= 0:  # pragma: no cover - LookMConfig guards this
+            raise LookMReimplementationError("LOOK-M configured retention must be positive")
+        recent_share = config.recent_ratio / configured
+        recent = min(physical_prompt_capacity, int(physical_prompt_capacity * recent_share))
+        return recent, physical_prompt_capacity - recent
     if math.isclose(
         config.recent_ratio + config.important_ratio,
         1.0,
@@ -387,6 +402,8 @@ def build_lookm_reimpl_plan(
     attention_weights: tuple[Any, ...],
     lookm_config: LookMConfig,
     cache_config: CacheConfig,
+    *,
+    physical_prompt_capacity: int | None = None,
 ) -> LookMCompressionPlan:
     """Apply paper text-prior selection and the configured merge equation."""
 
@@ -401,7 +418,11 @@ def build_lookm_reimpl_plan(
             "LOOK-M attention layer count does not match the source cache"
         )
     length = full_state.active_sequence_length
-    recent_count, important_count = _selection_counts(length, lookm_config)
+    recent_count, important_count = _selection_counts(
+        length,
+        lookm_config,
+        physical_prompt_capacity,
+    )
     if recent_count + important_count < 1:
         raise LookMReimplementationError(
             "LOOK-M ratios retain zero positions for this prompt; use a longer prompt or ratio"
@@ -521,12 +542,17 @@ def build_lookm_reimpl_plan(
                 )
             )
     active_slots = sum(len(head.selected_physical_positions) for head in head_states)
-    if active_slots > cache_config.budget_value:
+    if cache_config.budget_unit is BudgetUnit.BLOCKS and active_slots > cache_config.budget_value:
         raise LookMReimplementationError(
             "LOOK-M active token/head slots exceed cache.budget_value: "
             f"active={active_slots}, budget={cache_config.budget_value}"
         )
     active_bytes = sum(head.active_bytes for head in head_states)
+    if cache_config.budget_unit is BudgetUnit.BYTES and active_bytes > cache_config.budget_value:
+        raise LookMReimplementationError(
+            "LOOK-M active bytes exceed cache.budget_value: "
+            f"active={active_bytes}, budget={cache_config.budget_value}"
+        )
     return LookMCompressionPlan(
         full_state,
         lookm_config,

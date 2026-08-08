@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from contextlib import AbstractContextManager, ExitStack
@@ -957,6 +958,9 @@ class HuggingFaceMultimodalAdapter(ABC):
             self._language_layers()
         ):
             raise RuntimeError("packed cache validity metadata is incomplete")
+        prototype_biases = state.model_state.get("mosaickv_prototype_attention_biases", ())
+        if not isinstance(prototype_biases, tuple):
+            raise RuntimeError("prototype attention-bias metadata must be a tuple")
         required_length = state.active_cache_length + 1
         buffers = state.model_state.get("mosaickv_validity_buffers")
         additive_buffers = state.model_state.get("mosaickv_additive_mask_buffers")
@@ -1000,6 +1004,23 @@ class HuggingFaceMultimodalAdapter(ABC):
                     .unsqueeze(-2),
                     torch.finfo(dtype).min,
                 )
+                group = query_heads // kv_heads
+                for raw in prototype_biases:
+                    if not isinstance(raw, tuple) or len(raw) != 5:
+                        raise RuntimeError("prototype attention-bias record is malformed")
+                    _prototype_id, bias_layer, kv_head, slot, bias = raw
+                    if int(bias_layer) != layer_index:
+                        continue
+                    if not 0 <= int(kv_head) < kv_heads:
+                        raise RuntimeError("prototype attention-bias KV head is out of range")
+                    if not 0 <= int(slot) < state.active_cache_length:
+                        raise RuntimeError("prototype attention-bias slot is out of range")
+                    if not math.isfinite(float(bias)) or float(bias) < 0:
+                        raise RuntimeError(
+                            "prototype attention log bias must be finite and nonnegative"
+                        )
+                    start = int(kv_head) * group
+                    additive[0, start : start + group, 0, int(slot)] += float(bias)
                 new_buffers.append(validity_buffer)
                 new_additive.append(additive)
             buffers = tuple(new_buffers)

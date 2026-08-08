@@ -80,6 +80,16 @@ def normalized_next_token_entropy(logits: Any) -> float:
     return min(1.0, max(0.0, normalized))
 
 
+def next_token_probability_margin(logits: Any) -> float:
+    """Return the softmax probability gap between the top two token decisions."""
+
+    probabilities = _softmax(logits)
+    if probabilities.size == 1:
+        return 1.0
+    top_two = np.partition(probabilities, -2)[-2:]
+    return min(1.0, max(0.0, float(top_two.max() - top_two.min())))
+
+
 def draft_kl_divergence(logits: Any, draft_distribution: Any | None) -> float | None:
     """Return KL(provisional || draft) for an optional cheap draft probability vector."""
 
@@ -112,6 +122,7 @@ def calculate_repair_signals(
     prototype_attention_mass: Mapping[int, float],
     *,
     draft_distribution: Any | None = None,
+    normalize_prototype_risk: bool = False,
 ) -> RepairStepSignals:
     """Calculate entropy, total prototype mass, dispersion risk, and optional draft KL."""
 
@@ -131,15 +142,25 @@ def calculate_repair_signals(
     total_mass = sum(masses.values())
     if total_mass > 1 + 1e-9:
         raise ValueError("globally normalized prototype attention masses cannot sum above one")
-    risks = tuple(
+    raw_risks = tuple(
         (
             prototype_id,
             masses[prototype_id] * state.prototype_record(prototype_id).diagnostics.dispersion,
         )
         for prototype_id in state.active_prototype_ids
     )
+    risk_total = sum(risk for _prototype_id, risk in raw_risks)
+    risks = (
+        tuple(
+            (prototype_id, risk / risk_total)
+            for prototype_id, risk in raw_risks
+        )
+        if normalize_prototype_risk and risk_total > 0
+        else raw_risks
+    )
     return RepairStepSignals(
         normalized_entropy=normalized_next_token_entropy(provisional_logits),
+        next_token_probability_margin=next_token_probability_margin(provisional_logits),
         total_prototype_attention_mass=total_mass,
         prototype_attention_masses=tuple(
             (prototype_id, masses[prototype_id]) for prototype_id in state.active_prototype_ids
@@ -147,6 +168,9 @@ def calculate_repair_signals(
         prototype_risks=risks,
         maximum_prototype_risk=max((risk for _prototype_id, risk in risks), default=0.0),
         draft_kl_divergence=draft_kl_divergence(provisional_logits, draft_distribution),
+        risk_normalization=(
+            "sum_to_one" if normalize_prototype_risk else "raw_attention_mass_times_dispersion"
+        ),
     )
 
 
@@ -177,6 +201,21 @@ def _trigger_reason(
         return RepairTriggerReason.ENTROPY if entropy else RepairTriggerReason.THRESHOLD_NOT_MET
     if config.policy is RepairPolicy.PROTOTYPE_RISK:
         return RepairTriggerReason.PROTOTYPE_RISK if risk else RepairTriggerReason.THRESHOLD_NOT_MET
+    if config.policy is RepairPolicy.DECISION_AWARE:
+        high_risk = bool(
+            config.decision_high_risk_threshold is not None
+            and signals.maximum_prototype_risk >= config.decision_high_risk_threshold
+        )
+        if high_risk:
+            return RepairTriggerReason.HIGH_PROTOTYPE_RISK
+        decision_risk = risk and (
+            signals.next_token_probability_margin <= config.decision_margin_threshold
+        )
+        return (
+            RepairTriggerReason.DECISION_RISK
+            if decision_risk
+            else RepairTriggerReason.THRESHOLD_NOT_MET
+        )
     if config.policy is RepairPolicy.ENTROPY_OR_PROTOTYPE_RISK:
         if entropy and risk:
             return RepairTriggerReason.ENTROPY_AND_PROTOTYPE_RISK
@@ -193,6 +232,8 @@ def _reason_triggers(reason: RepairTriggerReason) -> bool:
         RepairTriggerReason.ENTROPY,
         RepairTriggerReason.PROTOTYPE_RISK,
         RepairTriggerReason.ENTROPY_AND_PROTOTYPE_RISK,
+        RepairTriggerReason.DECISION_RISK,
+        RepairTriggerReason.HIGH_PROTOTYPE_RISK,
         RepairTriggerReason.ORACLE,
     }
 
@@ -250,8 +291,18 @@ def _rank_promotion_candidates(
                 (member for member in record.members if member.node_id in residual_nodes),
                 key=lambda member: (
                     -(
-                        member.normalized_weight * member.reconstruction_error
-                        if ranking is RepairCandidateRanking.RISK_WEIGHTED_RECONSTRUCTION_ERROR
+                        member.normalized_weight
+                        * member.reconstruction_error
+                        * (
+                            1.0 + member.value_output_norm
+                            if ranking is RepairCandidateRanking.DECISION_INFLUENCE
+                            else 1.0
+                        )
+                        if ranking
+                        in {
+                            RepairCandidateRanking.RISK_WEIGHTED_RECONSTRUCTION_ERROR,
+                            RepairCandidateRanking.DECISION_INFLUENCE,
+                        }
                         else member.normalized_weight
                     ),
                     -member.reconstruction_error,
@@ -595,6 +646,7 @@ def _repair_decode_step(
         provisional_logits,
         prototype_attention_mass,
         draft_distribution=draft_distribution,
+        normalize_prototype_risk=config.normalize_prototype_risk,
     )
     reason = _trigger_reason(config, signals, oracle_should_repair=oracle_should_repair)
     if not _reason_triggers(reason):

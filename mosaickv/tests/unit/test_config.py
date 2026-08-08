@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -72,6 +73,51 @@ def test_fidelity_diagnostic_ledger_is_strict_and_hashed() -> None:
         FidelityDiagnosticsConfig(forecast_oracle_steps=1)
 
 
+def test_per_head_prototype_routes_are_strict_and_resolved() -> None:
+    config = PrototypeConfig(
+        group_size=15,
+        max_position_span=255,
+        exact_head_routes=("0:1",),
+        head_group_sizes=("0:2:11",),
+        head_position_spans=("0:2:127",),
+        adaptive_grouping=True,
+    )
+    assert config.requires_exact_head(0, 1)
+    assert config.group_size_for(0, 2) == 11
+    assert config.group_size_for(1, 2) == 15
+    assert config.position_span_for(0, 2) == 127
+    with pytest.raises(ConfigurationError, match="cannot repeat"):
+        PrototypeConfig(head_group_sizes=("0:1:4", "0:1:8"))
+
+
+@pytest.mark.parametrize("scale", [-0.1, 1.1, float("inf")])
+def test_prototype_attention_log_bias_scale_is_strict(scale: float) -> None:
+    with pytest.raises(ConfigurationError, match="attention_log_bias_scale"):
+        PrototypeConfig(attention_log_bias_scale=scale)
+
+    resolved = PrototypeConfig.from_mapping({"attention_log_bias_scale": 0.5})
+    assert resolved.attention_log_bias_scale == 0.5
+
+
+def test_forecast_attention_prototype_controls_are_strictly_coupled() -> None:
+    resolved = PrototypeConfig.from_mapping(
+        {
+            "pooling_mode": "forecast_attention_token",
+            "attention_bias_basis": "forecast_attention_entropy",
+            "anchor_position_strategy": "forecast_weighted_member_medoid",
+        }
+    )
+    assert resolved.pooling_mode == "forecast_attention_token"
+    assert resolved.attention_bias_basis == "forecast_attention_entropy"
+    assert resolved.anchor_position_strategy == "forecast_weighted_member_medoid"
+    with pytest.raises(ConfigurationError, match="requires the forecast-attention entropy"):
+        PrototypeConfig(pooling_mode="forecast_attention_token")
+    with pytest.raises(ConfigurationError, match="requires forecast-attention token pooling"):
+        PrototypeConfig(attention_bias_basis="forecast_attention_entropy")
+    with pytest.raises(ConfigurationError, match="anchor_position_strategy"):
+        PrototypeConfig(anchor_position_strategy="free_rope_phase")
+
+
 @pytest.mark.parametrize("ratio", [0.0, -0.1, 1.1])
 def test_invalid_retention_ratio_has_useful_path(ratio: float) -> None:
     with pytest.raises(ConfigurationError, match=r"cache\.retention_ratio"):
@@ -87,6 +133,35 @@ def test_unknown_configuration_field_is_rejected() -> None:
     payload["model"]["typo_revision"] = "bad"
     with pytest.raises(ConfigurationError, match=r"model contains unknown field.*typo_revision"):
         RunConfig.from_mapping(payload)
+
+
+def test_common_physical_budget_controls_are_strict() -> None:
+    resolved = CacheConfig.from_mapping(
+        {
+            "budget_value": 1024,
+            "budget_unit": "bytes",
+            "retention_ratio": 0.2,
+            "block_size": 1,
+            "physical_budget_block_size": 16,
+            "physical_budget_mandatory_policy": "last_token",
+        }
+    )
+    assert resolved.physical_budget_block_size == 16
+    assert resolved.physical_budget_mandatory_policy == "last_token"
+    with pytest.raises(ConfigurationError, match="physical_budget_block_size"):
+        replace(resolved, physical_budget_block_size=0)
+    with pytest.raises(ConfigurationError, match="physical_budget_mandatory_policy"):
+        replace(resolved, physical_budget_mandatory_policy="baseline_native")
+
+
+def test_uncertainty_exact_routing_requires_adaptive_forecasting() -> None:
+    with pytest.raises(ConfigurationError, match="requires adaptive_head_routing"):
+        ForecastingConfig(uncertainty_exact_head_fraction=0.02)
+    resolved = ForecastingConfig(
+        adaptive_head_routing=True,
+        uncertainty_exact_head_fraction=0.02,
+    )
+    assert resolved.uncertainty_exact_head_fraction == 0.02
 
 
 def test_invalid_enum_lists_allowed_values() -> None:

@@ -1,0 +1,25 @@
+{
+  "dataset_id": "lmms-lab/DocVQA",
+  "dataset_revision": "539088ef8a8ada01ac8e2e6d4e372586748a265e",
+  "materialization_model_name": "llava-hf/llava-1.5-7b-hf",
+  "sample_count": 12,
+  "sample_ids": [
+    "docvqa:28305",
+    "docvqa:49396",
+    "docvqa:51218",
+    "docvqa:39012",
+    "docvqa:59436",
+    "docvqa:16358",
+    "docvqa:55103",
+    "docvqa:61367",
+    "docvqa:57784",
+    "docvqa:51159",
+    "docvqa:58518",
+    "docvqa:59841"
+  ],
+  "schema_version": 1,
+  "selection_seed": 20270806,
+  "selection_rule": "first_12_seeded_ids_not_present_in_any_existing_docvqa_ledger",
+  "split": "validation",
+  "task": "docvqa"
+}

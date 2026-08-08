@@ -38,11 +38,33 @@ def _fp32(value: Any) -> Any:
     return np.asarray(value, dtype=np.float32)
 
 
-def _pool(value: Any, axis: int) -> Any:
+def _pool(value: Any, axis: int, position_weights: tuple[float, ...]) -> Any:
     fp32 = _fp32(value)
+    normalized_axis = axis % int(fp32.ndim)
+    if len(position_weights) != int(fp32.shape[normalized_axis]):
+        raise PrototypeRefreshError(
+            "prototype refresh position weights do not match the source block"
+        )
     if fp32.__class__.__module__.startswith("torch"):
-        return fp32.mean(dim=axis, keepdim=True)
-    return fp32.mean(axis=axis, keepdims=True, dtype=np.float32)
+        import torch
+
+        shape = [1] * int(fp32.ndim)
+        shape[normalized_axis] = len(position_weights)
+        torch_weights = torch.as_tensor(
+            position_weights,
+            dtype=fp32.dtype,
+            device=fp32.device,
+        ).reshape(shape)
+        return torch.sum(fp32 * torch_weights, dim=normalized_axis, keepdim=True)
+    shape = [1] * int(fp32.ndim)
+    shape[normalized_axis] = len(position_weights)
+    numpy_weights = np.asarray(position_weights, dtype=np.float32).reshape(shape)
+    return np.sum(
+        fp32 * numpy_weights,
+        axis=normalized_axis,
+        keepdims=True,
+        dtype=np.float32,
+    )
 
 
 def _cast_like(value: Any, reference: Any) -> Any:
@@ -135,13 +157,17 @@ def refresh_prototype_after_promotions(
                 key,
                 block,
                 sequence_dimension=layer.key_sequence_dimension,
+                position_weights=member.position_weights,
             )
             if key_transform is not None
-            else _pool(key, layer.key_sequence_dimension)
+            else _pool(key, layer.key_sequence_dimension, member.position_weights)
         )
         removed_keys.append((member.normalized_weight, pooled_key))
         removed_values.append(
-            (member.normalized_weight, _pool(value, layer.value_sequence_dimension))
+            (
+                member.normalized_weight,
+                _pool(value, layer.value_sequence_dimension, member.position_weights),
+            )
         )
 
     old_value_mean = _fp32(prototype_value)
@@ -149,10 +175,27 @@ def refresh_prototype_after_promotions(
     value_members = tuple(removed_values)
     new_key_mean = _subtract_members(old_key_mean, key_members) / remaining_weight
     new_value_mean = _subtract_members(old_value_mean, value_members) / remaining_weight
+    normalized_members = tuple(
+        PrototypeMember(
+            node_id=member.node_id,
+            raw_weight=member.raw_weight,
+            normalized_weight=member.normalized_weight / remaining_weight,
+            reconstruction_error=member.reconstruction_error,
+            value_output_norm=member.value_output_norm,
+            position_weights=member.position_weights,
+        )
+        for member in remaining_members
+    )
+    blocks = tuple(full_state.blocks[member.node_id] for member in normalized_members)
+    # The cache slot and its logical/RoPE position are an immutable identity.
+    # A weighted-medoid prototype chooses that identity once during prefill.
+    # Removing members may change the statistical medoid, but moving an active
+    # cache entry would invalidate the packed layout and the next decode mask.
+    refreshed_anchor_position = record.anchor_logical_position
     refreshed_key = (
         key_transform.apply_anchor_phase(
             new_key_mean,
-            record.anchor_logical_position,
+            refreshed_anchor_position,
             prototype_key,
         )
         if key_transform is not None
@@ -160,16 +203,6 @@ def refresh_prototype_after_promotions(
     )
     refreshed_value = _cast_like(new_value_mean, prototype_value)
 
-    normalized_members = tuple(
-        PrototypeMember(
-            node_id=member.node_id,
-            raw_weight=member.raw_weight,
-            normalized_weight=member.normalized_weight / remaining_weight,
-            reconstruction_error=member.reconstruction_error,
-        )
-        for member in remaining_members
-    )
-    blocks = tuple(full_state.blocks[member.node_id] for member in normalized_members)
     positions = tuple(position for block in blocks for position in block.original_logical_positions)
     modalities = Counter(block.modality for block in blocks)
     source_bytes = sum(block.byte_size for block in blocks)
@@ -204,10 +237,15 @@ def refresh_prototype_after_promotions(
             layer=record.layer,
             kv_head=record.kv_head,
             anchor_node_id=record.anchor_node_id,
-            anchor_logical_position=record.anchor_logical_position,
+            anchor_logical_position=refreshed_anchor_position,
             members=normalized_members,
             assigned_node_ids=tuple(sorted(member.node_id for member in normalized_members)),
             diagnostics=diagnostics,
+            represented_source_positions=sum(block.position_count for block in blocks),
+            attention_log_bias_scale=record.attention_log_bias_scale,
+            attention_bias_basis=record.attention_bias_basis,
+            pooling_mode=record.pooling_mode,
+            anchor_position_strategy=record.anchor_position_strategy,
             eviction_utility=record.eviction_utility,
             utility_provenance=f"{record.utility_provenance};partial_residual_downdate_v1",
         ),

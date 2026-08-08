@@ -1,0 +1,103 @@
+schema_version: 1
+revision: 5
+experiment_id: choice_c_corrective_gate
+classification: exploratory_dirty_tree_gate_not_paper_result
+frozen_before_execution: true
+model: llava_1_5_7b
+backend: hf_eager
+task: docvqa
+retention_ratio: 0.2
+output_length: 16
+seed: 17
+calibration_ledger: configs/ledgers/choice_c_v5_design_docvqa.json
+calibration_validation_ledger: configs/ledgers/choice_c_v5_internal_validation_docvqa.json
+evaluation_ledger: configs/ledgers/choice_c_v5_heldout_docvqa.json
+calibration_rule:
+  labels_or_task_scores_used: false
+  objective: robust_fullkv_fidelity_loss
+  byte_constraint: common_nominal_ratio_and_measured_candidate_ceiling
+  tail_weight: 0.25
+  bootstrap_resamples: 1000
+  bootstrap_seed: 20270804
+  minimum_selection_frequency: 0.60
+  minimum_samples: 20
+  require_internal_validation: true
+  tie_break: [lower_mean_active_kv_bytes, lexicographic_variant]
+head_routing:
+  damage_threshold: 0.02
+  exact_head_fraction: 0.02
+  sensitive_group_size: 11
+  sensitive_position_span: 127
+  forecast_weight: 0.50
+prototype_safety_calibration:
+  safety_factor: 1.25
+  response_to_excess_dispersion: exact_selection_fallback
+repair_calibration:
+  target_trigger_rate: 0.10
+  minimum_precision: 0.50
+  calibration_signal: fullkv_counterfactual_without_task_labels
+methods:
+  - full_kv
+  - prompt_attention_topk
+  - lookm_reimpl
+  - vl_cache_reimpl
+  - mosaickv_full
+choice_c_candidates:
+  prompt_anchored_15:
+    utility: {lambda_q: 1.0, lambda_v: -0.25, lambda_o: -0.25}
+    selection:
+      prompt_anchor_fraction: 0.20
+      evidence_preservation_fraction: 0.10
+      minimum_stratum_fraction: 0.10
+    routing:
+      head_shift_threshold: 0.10
+      stable_head_prompt_weight: 1.0
+      shifted_head_prompt_weight: 0.25
+    prototypes: {group_size: 15, max_position_span: 255, forecast_weight: 0.50}
+    repair:
+      policy: none
+      prototype_risk_threshold: 0.01
+      decision_margin_threshold: 0.10
+      max_blocks_per_step: 2
+  evidence_anchored_15:
+    utility: {lambda_q: 1.0, lambda_v: -0.35, lambda_o: -0.35}
+    selection:
+      prompt_anchor_fraction: 0.10
+      evidence_preservation_fraction: 0.20
+      minimum_stratum_fraction: 0.10
+    routing:
+      head_shift_threshold: 0.15
+      stable_head_prompt_weight: 1.0
+      shifted_head_prompt_weight: 0.25
+    prototypes: {group_size: 15, max_position_span: 255, forecast_weight: 0.50}
+    repair:
+      policy: none
+      prototype_risk_threshold: 0.01
+      decision_margin_threshold: 0.10
+      max_blocks_per_step: 2
+  balanced_23:
+    utility: {lambda_q: 1.0, lambda_v: -0.30, lambda_o: -0.30}
+    selection:
+      prompt_anchor_fraction: 0.15
+      evidence_preservation_fraction: 0.15
+      minimum_stratum_fraction: 0.10
+    routing:
+      head_shift_threshold: 0.15
+      stable_head_prompt_weight: 1.0
+      shifted_head_prompt_weight: 0.25
+    prototypes: {group_size: 23, max_position_span: 383, forecast_weight: 0.50}
+    repair:
+      policy: none
+      prototype_risk_threshold: 0.01
+      decision_margin_threshold: 0.10
+      max_blocks_per_step: 2
+gate:
+  primary_budget: measured_active_kv_bytes
+  maximum_relative_byte_mismatch: 0.02
+  primary_fidelity_error: one_minus_token_agreement_plus_log1p_logit_kl_plus_attention_output_error
+  required_relative_improvement_over_nearest_competitor: 0.30
+  task_score_noninferiority_margin: 0.05
+  require_all_rows_complete: true
+  require_genuine_three_tier_mosaickv: true
+  full_sweep_action_on_failure: stop
+output_root: /scratch/djy8hg/runs/mosaickv/choice-c-corrective-gate-v5

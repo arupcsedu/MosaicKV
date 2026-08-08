@@ -316,6 +316,30 @@ def test_prompt_attention_maps_pool_query_heads_by_kv_head() -> None:
     )
 
 
+def test_batched_torch_prompt_attention_pool_matches_numpy_reference() -> None:
+    torch = pytest.importorskip("torch")
+    full = _full_state((Modality.TEXT,) * 5, heads=2, block_size=2)
+    torch_full = FullKVState.from_tensors(
+        tuple(
+            (
+                torch.as_tensor(layer.key),
+                torch.as_tensor(layer.value),
+            )
+            for layer in full.layers
+        ),
+        modality_spans=full.modality_spans,
+        block_size=2,
+    )
+    attention = np.arange(1 * 4 * 3 * 5, dtype=np.float32).reshape(1, 4, 3, 5)
+
+    expected = pool_prompt_attention_coactivation(full, (attention,))
+    observed = pool_prompt_attention_coactivation(torch_full, (torch.as_tensor(attention),))
+
+    assert set(observed) == set(expected)
+    for node_id in expected:
+        assert np.allclose(observed[node_id], expected[node_id], atol=1e-6, rtol=0)
+
+
 def test_missing_metadata_uses_local_fallback_and_csr_is_valid() -> None:
     full = _full_state((Modality.TEXT,) * 6)
     config = _isolated_config(fallback_weight=0.5, max_neighbors=2, fallback_max_position_span=2)

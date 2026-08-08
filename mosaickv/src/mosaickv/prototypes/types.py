@@ -69,6 +69,8 @@ class PrototypeMember:
     raw_weight: float
     normalized_weight: float
     reconstruction_error: float = 0.0
+    value_output_norm: float = 0.0
+    position_weights: tuple[float, ...] = ()
 
     def __post_init__(self) -> None:
         if self.node_id < 0:
@@ -79,6 +81,25 @@ class PrototypeMember:
             raise ValueError("prototype normalized weights must lie in (0, 1]")
         if not math.isfinite(self.reconstruction_error) or self.reconstruction_error < 0:
             raise ValueError("prototype member reconstruction error must be finite and nonnegative")
+        if not math.isfinite(self.value_output_norm) or self.value_output_norm < 0:
+            raise ValueError("prototype member value-output norm must be finite and nonnegative")
+        if not self.position_weights:
+            raise ValueError("prototype members must record every source-position weight")
+        if any(not math.isfinite(value) or value <= 0 for value in self.position_weights):
+            raise ValueError("prototype source-position weights must be finite and positive")
+        if not math.isclose(
+            sum(self.position_weights),
+            1.0,
+            rel_tol=0,
+            abs_tol=1e-7,
+        ):
+            raise ValueError("prototype source-position weights must sum to one")
+
+    @property
+    def within_block_attention_entropy(self) -> float:
+        """Entropy of the forecast distribution inside this source block."""
+
+        return -sum(weight * math.log(weight) for weight in self.position_weights)
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,6 +163,11 @@ class PrototypeRecord:
     members: tuple[PrototypeMember, ...]
     assigned_node_ids: tuple[int, ...]
     diagnostics: PrototypeDiagnostics
+    represented_source_positions: int
+    attention_log_bias_scale: float
+    attention_bias_basis: str
+    pooling_mode: str
+    anchor_position_strategy: str
     eviction_utility: float
     utility_provenance: str
 
@@ -172,10 +198,64 @@ class PrototypeRecord:
             raise ValueError("prototype normalized member weights must sum to one")
         if self.diagnostics.cluster_size != len(self.members):
             raise ValueError("prototype diagnostics cluster size does not match members")
+        if self.represented_source_positions < self.diagnostics.cluster_size:
+            raise ValueError(
+                "prototype represented positions cannot be fewer than its source blocks"
+            )
+        if self.represented_source_positions != sum(
+            len(member.position_weights) for member in self.members
+        ):
+            raise ValueError(
+                "prototype represented positions do not match member position weights"
+            )
+        if not math.isfinite(self.attention_log_bias_scale) or not (
+            0 <= self.attention_log_bias_scale <= 1
+        ):
+            raise ValueError("prototype attention log-bias scale must lie in [0, 1]")
+        if self.attention_bias_basis not in {
+            "source_position_multiplicity",
+            "forecast_attention_entropy",
+        }:
+            raise ValueError("unsupported prototype attention-bias basis")
+        if self.pooling_mode not in {
+            "graph_weighted_block_mean",
+            "forecast_attention_token",
+        }:
+            raise ValueError("unsupported prototype pooling mode")
+        if self.anchor_position_strategy not in {
+            "selected_anchor_start",
+            "forecast_weighted_member_medoid",
+        }:
+            raise ValueError("unsupported prototype anchor-position strategy")
         if not math.isfinite(self.eviction_utility):
             raise ValueError("prototype eviction utility must be finite")
         if not self.utility_provenance.strip():
             raise ValueError("prototype utility provenance must be non-empty")
+
+    @property
+    def attention_log_bias(self) -> float:
+        """Forecast-mass correction for one pooled prototype slot.
+
+        Pooling ``m`` otherwise-identical source positions into one key removes
+        ``log(m)`` from their aggregate log-sum-exp attention score.  When
+        forecast-attention pooling is active, the corresponding correction is
+        the entropy of the exact hierarchical source-position distribution:
+        block entropy plus within-block entropy.  This is equal to ``log(m)``
+        for uniform evidence and preserves the forecast attention mass in the
+        linear-key limiting case.
+        """
+
+        if self.attention_bias_basis == "source_position_multiplicity":
+            basis = math.log(self.represented_source_positions)
+        else:
+            basis = -sum(
+                member.normalized_weight * math.log(member.normalized_weight)
+                for member in self.members
+            ) + sum(
+                member.normalized_weight * member.within_block_attention_entropy
+                for member in self.members
+            )
+        return self.attention_log_bias_scale * basis
 
 
 @dataclass(frozen=True, slots=True)

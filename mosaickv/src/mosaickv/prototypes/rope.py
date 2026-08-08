@@ -85,6 +85,7 @@ class RotaryPrototypeKeyTransform:
         block: KVBlockDescriptor,
         *,
         sequence_dimension: int,
+        position_weights: tuple[float, ...] | None = None,
     ) -> Any:
         """Invert source RoPE and pool one source block in FP32."""
 
@@ -105,7 +106,29 @@ class RotaryPrototypeKeyTransform:
         cos, sin = self._phase(block.original_logical_positions, key_fp32)
         denominator = (cos * cos + sin * sin).clamp_min(1e-12)
         phase_neutral = (key_fp32 * cos - self._rotate_half(key_fp32) * sin) / denominator
-        return phase_neutral.mean(dim=normalized_axis, keepdim=True)
+        if position_weights is None:
+            return phase_neutral.mean(dim=normalized_axis, keepdim=True)
+        if len(position_weights) != int(key.shape[-2]):
+            raise PrototypeKeyTransformError(
+                "prototype key position weights do not match the cache block width"
+            )
+        if any(weight <= 0 for weight in position_weights):
+            raise PrototypeKeyTransformError("prototype key position weights must be positive")
+        import torch
+
+        total = float(sum(position_weights))
+        shape = [1] * int(phase_neutral.ndim)
+        shape[normalized_axis] = len(position_weights)
+        weight_tensor = torch.as_tensor(
+            tuple(weight / total for weight in position_weights),
+            dtype=phase_neutral.dtype,
+            device=phase_neutral.device,
+        ).reshape(shape)
+        return torch.sum(
+            phase_neutral * weight_tensor,
+            dim=normalized_axis,
+            keepdim=True,
+        )
 
     def remove_anchor_phase(self, prototype_key: Any, anchor_logical_position: int) -> Any:
         """Return the FP32 phase-neutral mean stored by one prototype key."""
@@ -129,6 +152,73 @@ class RotaryPrototypeKeyTransform:
         rotated = phase_neutral_key * anchor_cos + self._rotate_half(phase_neutral_key) * anchor_sin
         return rotated.to(dtype=reference.dtype, device=reference.device)
 
+    def apply_anchor_phase_batch(
+        self,
+        phase_neutral_keys: Any,
+        anchor_logical_positions: tuple[int, ...],
+        reference: Any,
+    ) -> Any:
+        """Rotate a batch of phase-neutral means with one device launch.
+
+        The leading dimension indexes prototypes; every remaining dimension is
+        identical to one cache-key payload.  This is numerically the same
+        operation as :meth:`apply_anchor_phase`, but avoids one small RoPE
+        kernel per prototype on long multimodal prompts.
+        """
+
+        import torch
+
+        if phase_neutral_keys.ndim != reference.ndim + 1:
+            raise PrototypeKeyTransformError(
+                "batched prototype keys require one leading prototype dimension"
+            )
+        if int(phase_neutral_keys.shape[0]) != len(anchor_logical_positions):
+            raise PrototypeKeyTransformError(
+                "batched prototype keys and anchor positions must align"
+            )
+        if int(phase_neutral_keys.shape[-2]) != 1:
+            raise PrototypeKeyTransformError(
+                "each batched prototype key must contain exactly one slot"
+            )
+        if not anchor_logical_positions:
+            raise PrototypeKeyTransformError("batched prototype anchors cannot be empty")
+        if min(anchor_logical_positions) < 0 or max(anchor_logical_positions) >= int(
+            self.cos.shape[-2]
+        ):
+            raise PrototypeKeyTransformError(
+                "prototype logical position lies outside the captured prefill RoPE phase"
+            )
+        indices = torch.as_tensor(
+            anchor_logical_positions,
+            dtype=torch.long,
+            device=self.cos.device,
+        )
+        cos = (
+            self.cos[0, 0]
+            .index_select(0, indices)
+            .to(
+                device=phase_neutral_keys.device,
+                dtype=torch.float32,
+            )
+        )
+        sin = (
+            self.sin[0, 0]
+            .index_select(0, indices)
+            .to(
+                device=phase_neutral_keys.device,
+                dtype=torch.float32,
+            )
+        )
+        phase_shape = (
+            (len(anchor_logical_positions),)
+            + (1,) * (phase_neutral_keys.ndim - 2)
+            + (int(cos.shape[-1]),)
+        )
+        cos = cos.reshape(phase_shape)
+        sin = sin.reshape(phase_shape)
+        rotated = phase_neutral_keys * cos + self._rotate_half(phase_neutral_keys) * sin
+        return rotated.to(dtype=reference.dtype, device=reference.device)
+
     def merge(
         self,
         key_blocks: tuple[Any, ...],
@@ -137,6 +227,7 @@ class RotaryPrototypeKeyTransform:
         *,
         sequence_dimension: int,
         anchor_logical_position: int,
+        position_weights: tuple[tuple[float, ...], ...] | None = None,
     ) -> PrototypeKeyMerge:
         """Return one cache-ready key without averaging incompatible phases."""
 
@@ -146,26 +237,98 @@ class RotaryPrototypeKeyTransform:
             )
         if any(weight <= 0 for weight in weights):
             raise PrototypeKeyTransformError("prototype key weights must be positive")
-        pooled: list[Any] = []
-        for key, block in zip(key_blocks, blocks, strict=True):
-            pooled.append(
-                self.phase_neutral_pool(
-                    key,
-                    block,
-                    sequence_dimension=sequence_dimension,
-                )
+        if position_weights is not None and len(position_weights) != len(key_blocks):
+            raise PrototypeKeyTransformError(
+                "prototype key position weights must align with source blocks"
             )
+        import torch
+
+        pooled: list[Any | None] = [None] * len(key_blocks)
+        shape_groups: dict[tuple[int, ...], list[int]] = {}
+        for index, key in enumerate(key_blocks):
+            normalized_axis = sequence_dimension % key.ndim
+            if normalized_axis != key.ndim - 2:
+                raise PrototypeKeyTransformError(
+                    "rotary prototype transform requires the cache sequence axis at -2"
+                )
+            if int(key.shape[-1]) != int(self.cos.shape[-1]):
+                raise PrototypeKeyTransformError(
+                    "cached key head dimension differs from the captured RoPE phase"
+                )
+            if int(key.shape[-2]) != len(blocks[index].original_logical_positions):
+                raise PrototypeKeyTransformError(
+                    "cached key sequence length differs from its block descriptor"
+                )
+            shape_groups.setdefault(tuple(int(size) for size in key.shape), []).append(index)
+        for indices in shape_groups.values():
+            references = tuple(key_blocks[index] for index in indices)
+            stacked_keys = torch.stack(
+                tuple(reference.detach().float() for reference in references), dim=0
+            )
+            positions = torch.as_tensor(
+                tuple(blocks[index].original_logical_positions for index in indices),
+                dtype=torch.long,
+                device=self.cos.device,
+            )
+            if int(positions.min()) < 0 or int(positions.max()) >= int(self.cos.shape[-2]):
+                raise PrototypeKeyTransformError(
+                    "prototype logical position lies outside the captured prefill RoPE phase"
+                )
+            cos = self.cos[0, 0][positions].to(device=stacked_keys.device, dtype=torch.float32)
+            sin = self.sin[0, 0][positions].to(device=stacked_keys.device, dtype=torch.float32)
+            phase_shape = (len(indices),) + (1,) * (stacked_keys.ndim - 3) + tuple(cos.shape[-2:])
+            cos = cos.reshape(phase_shape)
+            sin = sin.reshape(phase_shape)
+            denominator = (cos * cos + sin * sin).clamp_min(1e-12)
+            phase_neutral = (
+                stacked_keys * cos - self._rotate_half(stacked_keys) * sin
+            ) / denominator
+            if position_weights is None:
+                pooled_batch = phase_neutral.mean(dim=-2, keepdim=True)
+            else:
+                local_weights = tuple(position_weights[index] for index in indices)
+                width = int(stacked_keys.shape[-2])
+                if any(len(row) != width for row in local_weights):
+                    raise PrototypeKeyTransformError(
+                        "prototype key position weights do not match a source block width"
+                    )
+                if any(weight <= 0 for row in local_weights for weight in row):
+                    raise PrototypeKeyTransformError(
+                        "prototype key position weights must be positive"
+                    )
+                normalized_rows = tuple(
+                    tuple(weight / sum(row) for weight in row) for row in local_weights
+                )
+                weight_tensor = torch.as_tensor(
+                    normalized_rows,
+                    dtype=phase_neutral.dtype,
+                    device=phase_neutral.device,
+                ).reshape((len(indices),) + (1,) * (phase_neutral.ndim - 3) + (width, 1))
+                pooled_batch = torch.sum(
+                    phase_neutral * weight_tensor,
+                    dim=-2,
+                    keepdim=True,
+                )
+            for batch_index, source_index in enumerate(indices):
+                pooled[source_index] = pooled_batch[batch_index]
+        if any(value is None for value in pooled):  # pragma: no cover - grouping invariant
+            raise RuntimeError("batched RoPE pooling left an uninitialized member")
+        pooled_values = tuple(value for value in pooled if value is not None)
         total = float(sum(weights))
         normalized = tuple(weight / total for weight in weights)
-        average = pooled[0] * normalized[0]
-        for value, weight in zip(pooled[1:], normalized[1:], strict=True):
-            average = average + value * weight
+        stacked = torch.stack(pooled_values, dim=0)
+        weight_tensor = torch.as_tensor(
+            normalized,
+            dtype=stacked.dtype,
+            device=stacked.device,
+        ).reshape((-1,) + (1,) * (stacked.ndim - 1))
+        average = torch.sum(stacked * weight_tensor, dim=0)
         prototype = self.apply_anchor_phase(
             average,
             anchor_logical_position,
             key_blocks[0],
         )
-        return PrototypeKeyMerge(tuple(pooled), average, prototype)
+        return PrototypeKeyMerge(pooled_values, average, prototype)
 
 
 __all__ = [

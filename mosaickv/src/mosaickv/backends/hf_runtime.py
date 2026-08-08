@@ -8,7 +8,7 @@ import math
 import os
 import tempfile
 import time
-from collections import Counter, deque
+from collections import Counter, defaultdict, deque
 from collections.abc import Iterable, Mapping, Sequence
 from contextlib import ExitStack
 from dataclasses import asdict, dataclass, replace
@@ -162,6 +162,7 @@ class FidelityDiagnostic:
     sequence_agreement: bool
     logit_kl: float
     attention_output_error: float
+    attention_output_error_by_kv_head: tuple[tuple[int, int, float], ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -192,6 +193,7 @@ class PackedRuntimeCache:
     prompt_capacity: int
     all_slots_valid: bool
     prototype_slots: tuple[tuple[int, int, int, int], ...]
+    prototype_attention_biases: tuple[tuple[int, int, int, int, float], ...]
     slot_records: tuple[JsonObject, ...]
 
 
@@ -237,6 +239,33 @@ def _dense_physical_cache_budget(
         return None
     if full_state.block_size != config.cache.block_size:
         raise HuggingFaceRuntimeError("runtime and FullKV block sizes disagree")
+    accounting_state = full_state
+    accounting_block_size = config.cache.physical_budget_block_size
+    accounting_policy = config.cache.physical_budget_mandatory_policy
+    if accounting_block_size is not None or accounting_policy != "method":
+        reference_block_size = (
+            full_state.block_size if accounting_block_size is None else accounting_block_size
+        )
+        reference_mandatory = (
+            tuple(full_state.mandatory_logical_positions)
+            if accounting_policy == "method"
+            else (full_state.original_logical_sequence_length - 1,)
+        )
+        accounting_state = FullKVState.from_tensors(
+            tuple((layer.key, layer.value) for layer in full_state.layers),
+            modality_spans=full_state.modality_spans,
+            token_ids=full_state.token_ids,
+            block_size=reference_block_size,
+            sequence_dimension=full_state.layers[0].key_sequence_dimension,
+            head_dimension=full_state.layers[0].key_head_dimension,
+            logical_positions=full_state.logical_positions.physical_to_logical,
+            original_logical_sequence_length=full_state.original_logical_sequence_length,
+            next_decode_position=full_state.next_decode_position,
+            mandatory_logical_positions=reference_mandatory,
+            source_class=full_state.source_class,
+            source_kind=full_state.source_kind,
+            cached_key_state=full_state.cached_key_state,
+        )
     lengths = {layer.sequence_length for layer in full_state.layers}
     if len(lengths) != 1:
         raise HuggingFaceRuntimeError(
@@ -244,7 +273,7 @@ def _dense_physical_cache_budget(
         )
     source_length = next(iter(lengths))
     bytes_per_identity: dict[tuple[int, int], int] = {}
-    for block in full_state.blocks:
+    for block in accounting_state.blocks:
         if block.byte_size % block.position_count:
             raise HuggingFaceRuntimeError("KV block bytes are not divisible by its positions")
         identity = (block.layer, block.kv_head)
@@ -277,7 +306,7 @@ def _dense_physical_cache_budget(
                         block.position_count,
                         block.mandatory,
                     )
-                    for block in full_state.blocks
+                    for block in accounting_state.blocks
                     if (block.layer, block.kv_head) == identity
                 )
             )
@@ -301,8 +330,8 @@ def _dense_physical_cache_budget(
         # when the requested budget is smaller than one aligned extent.
         optional_capacity = max(0, prompt_capacity - mandatory_positions)
         aligned_optional_capacity = (
-            optional_capacity // full_state.block_size
-        ) * full_state.block_size
+            optional_capacity // accounting_state.block_size
+        ) * accounting_state.block_size
         prompt_capacity = mandatory_positions + aligned_optional_capacity
     if prompt_capacity < 1:
         raise HuggingFaceRuntimeError(
@@ -394,13 +423,44 @@ def _forecast_attention_by_node(
     }
 
 
-def _forecast_token_attention_by_head(
+def _route_head_attention(
+    prompt_sample: np.ndarray[Any, Any] | None,
+    draft_samples: Sequence[np.ndarray[Any, Any]],
+    config: RunConfig,
+) -> tuple[np.ndarray[Any, Any], float | None, float | None]:
+    """Route one KV head between prompt safety and shifted draft evidence."""
+
+    samples = ([] if prompt_sample is None else [prompt_sample]) + list(draft_samples)
+    if not samples:
+        raise HuggingFaceRuntimeError("forecast attention has no prompt or draft samples")
+    if not (
+        config.forecasting.adaptive_head_routing and prompt_sample is not None and draft_samples
+    ):
+        return np.mean(np.stack(samples, axis=0), axis=0), None, None
+    draft_sample = np.mean(np.stack(draft_samples, axis=0), axis=0)
+    epsilon = float(np.finfo(np.float64).tiny)
+    prompt_distribution = prompt_sample / max(float(prompt_sample.sum()), epsilon)
+    draft_distribution = draft_sample / max(float(draft_sample.sum()), epsilon)
+    shift = 0.5 * float(np.abs(prompt_distribution - draft_distribution).sum())
+    prompt_weight = (
+        config.forecasting.stable_head_prompt_weight
+        if shift <= config.forecasting.head_shift_threshold
+        else config.forecasting.shifted_head_prompt_weight
+    )
+    values = prompt_weight * prompt_sample + (1.0 - prompt_weight) * draft_sample
+    return values, shift, prompt_weight
+
+
+def _forecast_token_attention_and_shift_by_head(
     full_state: FullKVState,
     prefill: PrefillOutput,
     rollout: IsolatedQueryRollout,
     config: RunConfig,
-) -> dict[tuple[int, int], np.ndarray[Any, Any]]:
-    """Return the exact token-level evidence pooled by the online selector."""
+) -> tuple[
+    dict[tuple[int, int], np.ndarray[Any, Any]],
+    dict[tuple[int, int], float],
+]:
+    """Return token evidence and label-blind prompt/draft shift per KV head."""
 
     if not prefill.attention_weights:
         raise HuggingFaceRuntimeError("runtime prefill did not capture eager attention weights")
@@ -411,6 +471,7 @@ def _forecast_token_attention_by_head(
         tuple(_to_numpy(value) for value in step) for step in rollout.attention_steps
     )
     result: dict[tuple[int, int], np.ndarray[Any, Any]] = {}
+    shifts: dict[tuple[int, int], float] = {}
     for layer_index, layer in enumerate(full_state.layers):
         prompt = prompt_layers[layer_index]
         if prompt.ndim != 4 or prompt.shape[0] != 1:
@@ -423,22 +484,21 @@ def _forecast_token_attention_by_head(
         for kv_head in range(layer.kv_heads):
             query_start = kv_head * group
             query_end = query_start + group
-            samples: list[np.ndarray[Any, Any]] = []
+            prompt_sample: np.ndarray[Any, Any] | None = None
+            draft_samples: list[np.ndarray[Any, Any]] = []
             if config.forecasting.prompt_window:
                 window = min(config.forecasting.prompt_window, int(prompt.shape[-2]))
-                samples.append(
-                    prompt[
-                        0,
-                        query_start:query_end,
-                        -window:,
-                        :sequence_length,
-                    ].mean(axis=(0, 1))
-                )
+                prompt_sample = prompt[
+                    0,
+                    query_start:query_end,
+                    -window:,
+                    :sequence_length,
+                ].mean(axis=(0, 1))
             for step in draft_steps:
                 attention = step[layer_index]
                 if attention.ndim != 4 or attention.shape[0] != 1 or attention.shape[-2] != 1:
                     raise HuggingFaceRuntimeError("eager draft attention must have shape [1,H,1,K]")
-                samples.append(
+                draft_samples.append(
                     attention[
                         0,
                         query_start:query_end,
@@ -446,16 +506,54 @@ def _forecast_token_attention_by_head(
                         :sequence_length,
                     ].mean(axis=0)
                 )
-            if not samples:
-                raise HuggingFaceRuntimeError("forecast attention has no prompt or draft samples")
-            values = np.mean(np.stack(samples, axis=0), axis=0)
+            values, shift, _prompt_weight = _route_head_attention(
+                prompt_sample,
+                draft_samples,
+                config,
+            )
             if values.shape != (sequence_length,):
                 raise HuggingFaceRuntimeError("forecast token attention length is invalid")
             result[(layer_index, kv_head)] = np.maximum(
                 values,
                 float(np.finfo(np.float64).tiny),
             )
-    return result
+            if shift is not None:
+                shifts[(layer_index, kv_head)] = shift
+    return result, shifts
+
+
+def _forecast_token_attention_by_head(
+    full_state: FullKVState,
+    prefill: PrefillOutput,
+    rollout: IsolatedQueryRollout,
+    config: RunConfig,
+) -> dict[tuple[int, int], np.ndarray[Any, Any]]:
+    """Return the exact token-level evidence pooled by the online selector."""
+
+    return _forecast_token_attention_and_shift_by_head(
+        full_state,
+        prefill,
+        rollout,
+        config,
+    )[0]
+
+
+def _uncertainty_exact_head_routes(
+    shifts: Mapping[tuple[int, int], float],
+    fraction: float,
+) -> tuple[str, ...]:
+    """Select the highest prompt/draft-shift heads with deterministic ties."""
+
+    if not 0 <= fraction <= 1:
+        raise ValueError("uncertainty exact-head fraction must lie in [0, 1]")
+    if not shifts or fraction == 0:
+        return ()
+    count = min(len(shifts), max(1, math.ceil(len(shifts) * fraction)))
+    ranked = sorted(
+        shifts,
+        key=lambda identity: (-float(shifts[identity]), identity[0], identity[1]),
+    )
+    return tuple(f"{layer}:{head}" for layer, head in sorted(ranked[:count]))
 
 
 def _oracle_token_attention_by_head(
@@ -686,6 +784,8 @@ def _selection(
     fill_position_limits: bool = False,
     position_fill_quantum: int | None = None,
     required_node_ids: Iterable[int] = (),
+    prompt_anchor_node_ids: Iterable[int] = (),
+    evidence_node_ids: Iterable[int] = (),
 ) -> SelectionResult:
     if retention_one:
         return select_all_exact(objective, SelectionBudget(value, unit))
@@ -696,12 +796,136 @@ def _selection(
         fill_position_limits=fill_position_limits,
         position_fill_quantum=position_fill_quantum,
         required_node_ids=required_node_ids,
+        prompt_anchor_node_ids=prompt_anchor_node_ids,
+        evidence_node_ids=evidence_node_ids,
     )
+
+
+def _bounded_reservation(
+    objective: BudgetedObjective,
+    budget_value: int,
+    budget_unit: BudgetUnit,
+    fraction: float,
+    scores: Mapping[int, float],
+    *,
+    position_limits: Mapping[tuple[int, int], int] | None = None,
+    position_fill_quantum: int | None = None,
+    reserved_node_ids: Iterable[int] = (),
+) -> tuple[int, ...]:
+    """Reserve ranked optional blocks after all earlier reservations.
+
+    ``reserved_node_ids`` are occupied capacity, not merely exclusions.  Their
+    byte/cardinality cost and per-head positions are therefore removed before
+    the new fraction is allocated.  This makes mandatory, prototype-anchor,
+    prompt-anchor, and evidence reservations one ordered budget transaction.
+    """
+
+    if fraction <= 0:
+        return ()
+    if position_fill_quantum is not None and position_fill_quantum < 1:
+        raise ValueError("reservation position_fill_quantum must be positive")
+    budget = SelectionBudget(max(1, budget_value), budget_unit)
+    reserved = set(int(node_id) for node_id in reserved_node_ids)
+    occupied = {
+        node.node_id
+        for node in objective.graph.nodes
+        if node.block.mandatory or node.node_id in reserved
+    }
+    occupied_cost = sum(budget.cost(objective.graph.nodes[node_id].block) for node_id in occupied)
+    allowance = math.floor(max(0, budget_value - occupied_cost) * fraction)
+    chosen: list[int] = []
+    spent = 0
+    selected_positions: defaultdict[tuple[int, int], int] = defaultdict(int)
+    for node_id in occupied:
+        block = objective.graph.nodes[node_id].block
+        identity = (block.layer, block.kv_head)
+        selected_positions[identity] += block.position_count
+    for node_id in sorted(
+        scores,
+        key=lambda candidate: (
+            -(float(scores[candidate]) / budget.cost(objective.graph.nodes[candidate].block)),
+            -float(scores[candidate]),
+            candidate,
+        ),
+    ):
+        block = objective.graph.nodes[node_id].block
+        if node_id in occupied:
+            continue
+        if (
+            position_fill_quantum is not None
+            and not block.mandatory
+            and block.position_count % position_fill_quantum != 0
+        ):
+            continue
+        cost = budget.cost(block)
+        identity = (block.layer, block.kv_head)
+        limit = None if position_limits is None else position_limits.get(identity)
+        if limit is not None and selected_positions[identity] + block.position_count > limit:
+            continue
+        if cost <= allowance - spent:
+            chosen.append(node_id)
+            spent += cost
+            selected_positions[identity] += block.position_count
+    return tuple(sorted(chosen))
+
+
+def _evidence_preservation_scores(objective: BudgetedObjective) -> dict[int, float]:
+    """Rank fine structural evidence while preventing one region from monopolizing reserve."""
+
+    groups: dict[
+        tuple[
+            int,
+            int,
+            str,
+            int | None,
+            int | None,
+            int | None,
+            str | None,
+            str | None,
+            int | None,
+            int | None,
+        ],
+        list[int],
+    ] = {}
+    for node in objective.graph.nodes:
+        evidence = node.evidence
+        if not evidence.has_structural_metadata:
+            continue
+        region_identity = (
+            node.block.layer,
+            node.block.kv_head,
+            node.block.modality.value,
+            evidence.image_index,
+            evidence.page_index,
+            evidence.frame_index,
+            evidence.evidence_region,
+            evidence.page_region,
+            evidence.row_index,
+            evidence.column_index,
+        )
+        groups.setdefault(region_identity, []).append(node.node_id)
+    scores: dict[int, float] = {}
+    for region_identity in sorted(groups, key=repr):
+        members = sorted(
+            groups[region_identity],
+            key=lambda node_id: (
+                -objective.utilities.for_node(node_id).local_utility,
+                node_id,
+            ),
+        )
+        # The first block in every fine region receives the largest score;
+        # later blocks remain eligible but cannot crowd out unseen regions.
+        for local_rank, node_id in enumerate(members):
+            utility = objective.utilities.for_node(node_id).local_utility
+            scores[node_id] = (1.0 / (local_rank + 1)) + max(0.0, utility) * 1e-6
+    return scores
 
 
 def _required_prototype_anchors(
     objective: BudgetedObjective,
     config: RunConfig,
+    *,
+    existing_anchor_ids: Iterable[int] = (),
 ) -> tuple[int, ...]:
     """Choose a sparse deterministic anchor cover for prototype feasibility.
 
@@ -720,8 +944,10 @@ def _required_prototype_anchors(
         groups.setdefault((block.layer, block.kv_head, block.modality), []).append(node.node_id)
 
     required: list[int] = []
-    maximum_members = config.prototypes.group_size
+    existing = frozenset(int(node_id) for node_id in existing_anchor_ids)
     for identity in sorted(groups, key=lambda item: (item[0], item[1], str(item[2]))):
+        maximum_members = config.prototypes.group_size_for(identity[0], identity[1])
+        maximum_span = config.prototypes.position_span_for(identity[0], identity[1])
         ordered = sorted(
             groups[identity],
             key=lambda node_id: (
@@ -729,10 +955,15 @@ def _required_prototype_anchors(
                 node_id,
             ),
         )
+        if config.prototypes.requires_exact_head(identity[0], identity[1]):
+            required.extend(ordered)
+            continue
         segment: list[int] = []
 
         def reserve_anchor(members: Sequence[int]) -> None:
-            if not members or any(graph.nodes[node_id].block.mandatory for node_id in members):
+            if not members or any(
+                graph.nodes[node_id].block.mandatory or node_id in existing for node_id in members
+            ):
                 return
             required.append(
                 min(
@@ -753,8 +984,7 @@ def _required_prototype_anchors(
             ]
             exceeds_capacity = len(trial) > maximum_members + 1
             exceeds_span = bool(
-                config.prototypes.max_position_span is not None
-                and max(positions) - min(positions) > config.prototypes.max_position_span
+                maximum_span is not None and max(positions) - min(positions) > maximum_span
             )
             if segment and (exceeds_capacity or exceeds_span):
                 reserve_anchor(segment)
@@ -829,6 +1059,11 @@ def _prototype_construction(
     target: int,
     position_limits: Mapping[tuple[int, int], int] | None,
     key_transform: RotaryPrototypeKeyTransform | None,
+    required_anchors: tuple[int, ...],
+    prompt_anchor_node_ids: tuple[int, ...],
+    evidence_node_ids: tuple[int, ...],
+    prototype_weight_by_node: Mapping[int, float],
+    prototype_token_weight_by_head: Mapping[tuple[int, int], Any] | None,
 ) -> tuple[SelectionResult, ThreeTierCacheConstruction, float, float]:
     """Reserve active capacity for prototypes with bounded deterministic search."""
 
@@ -848,6 +1083,8 @@ def _prototype_construction(
             position_limits=position_limits,
             fill_position_limits=position_limits is not None,
             position_fill_quantum=(full_state.block_size if position_limits is not None else None),
+            prompt_anchor_node_ids=prompt_anchor_node_ids,
+            evidence_node_ids=evidence_node_ids,
         )
         selection_seconds += time.perf_counter() - started
         started = time.perf_counter()
@@ -860,13 +1097,37 @@ def _prototype_construction(
             residual_config=config.residual,
             retention_ratio=config.cache.retention_ratio,
             key_transform=key_transform,
+            prototype_weight_by_node=prototype_weight_by_node,
+            prototype_token_weight_by_head=prototype_token_weight_by_head,
         )
         tier_seconds += time.perf_counter() - started
         return selection, construction, selection_seconds, tier_seconds
 
-    required_anchors = _required_prototype_anchors(objective, config)
     failures: Counter[str] = Counter()
-    upper = max(mandatory, target - 1)
+    # Reserve the deterministic lower bound for one prototype slot per anchor
+    # cover before invoking the expensive lazy selector. Starting at
+    # ``target-1`` guarantees that every compressed prototype candidate is
+    # over budget and made LLaVA repeat a large 32-head selection dozens of
+    # times. Mandatory blocks can themselves anchor a segment, so include them
+    # in the conservative slot set; a small over-reservation is refined below.
+    prototype_anchor_lower_bound = tuple(
+        sorted(
+            {
+                *required_anchors,
+                *(node.node_id for node in graph.nodes if node.block.mandatory),
+            }
+        )
+    )
+    if unit is BudgetUnit.BLOCKS or unit is BudgetUnit.RETAINED_SLOTS:
+        reserved_prototype_cost = len(prototype_anchor_lower_bound)
+    elif unit is BudgetUnit.BYTES:
+        reserved_prototype_cost = sum(
+            graph.nodes[node_id].block.byte_size // graph.nodes[node_id].block.position_count
+            for node_id in prototype_anchor_lower_bound
+        )
+    else:  # pragma: no cover - controlled vocabulary
+        raise HuggingFaceRuntimeError(f"unsupported prototype budget unit: {unit}")
+    upper = max(mandatory, target - reserved_prototype_cost)
     span = upper - mandatory
     if span <= 128:
         candidates = tuple(range(upper, mandatory - 1, -1))
@@ -897,6 +1158,8 @@ def _prototype_construction(
                 retention_one=False,
                 position_limits=position_limits,
                 required_node_ids=required_anchors,
+                prompt_anchor_node_ids=prompt_anchor_node_ids,
+                evidence_node_ids=evidence_node_ids,
             )
         except InfeasibleSelectionBudgetError as error:
             selection_seconds += time.perf_counter() - started
@@ -945,6 +1208,8 @@ def _prototype_construction(
             residual_config=config.residual,
             retention_ratio=config.cache.retention_ratio,
             key_transform=key_transform,
+            prototype_weight_by_node=prototype_weight_by_node,
+            prototype_token_weight_by_head=prototype_token_weight_by_head,
         )
         tier_seconds += time.perf_counter() - started
         if construction.mode is TierConstructionMode.THREE_TIER:
@@ -958,6 +1223,8 @@ def _prototype_construction(
         unit,
         retention_one=False,
         position_limits=position_limits,
+        prompt_anchor_node_ids=prompt_anchor_node_ids,
+        evidence_node_ids=evidence_node_ids,
     )
     selection_seconds += time.perf_counter() - started
     started = time.perf_counter()
@@ -988,6 +1255,8 @@ def build_compression_plan(
     attention_provenance: str = "eager_prompt_and_isolated_draft_attention_v1",
     key_transform: RotaryPrototypeKeyTransform | None = None,
     prompt_attentions: Sequence[Any] | None = None,
+    prompt_attention_by_node: Mapping[int, float] | None = None,
+    prototype_token_weight_by_head: Mapping[tuple[int, int], Any] | None = None,
 ) -> MosaicKVCompressionPlan:
     """Run graph, utility, selection, and tier construction for one prefill."""
 
@@ -1011,6 +1280,47 @@ def build_compression_plan(
     objective = BudgetedObjective(graph, utilities, config.selection)
     utility_seconds = time.perf_counter() - selection_started
     source_budget, target = _resolve_budget(full_state, config)
+    if config.selection.prompt_anchor_fraction and prompt_attention_by_node is None:
+        raise HuggingFaceRuntimeError(
+            "prompt-anchored selection requires prompt-only block attention"
+        )
+    prototype_path_enabled = bool(
+        config.cache.retention_ratio < 1.0
+        and config.method in {MosaicKVMethod.MOSAICKV_PROTO, MosaicKVMethod.MOSAICKV_FULL}
+        and capabilities.supports_prototype_merge
+        and (
+            config.method is not MosaicKVMethod.MOSAICKV_FULL
+            or capabilities.supports_residual_repair
+        )
+    )
+    required_prototype_anchor_ids = (
+        _required_prototype_anchors(objective, config) if prototype_path_enabled else ()
+    )
+    reservation_fill_quantum = (
+        full_state.block_size
+        if position_limits is not None and config.method is MosaicKVMethod.MOSAICKV_EXACT
+        else None
+    )
+    prompt_anchor_node_ids = _bounded_reservation(
+        objective,
+        target,
+        config.cache.budget_unit,
+        config.selection.prompt_anchor_fraction,
+        {} if prompt_attention_by_node is None else prompt_attention_by_node,
+        position_limits=position_limits,
+        position_fill_quantum=reservation_fill_quantum,
+        reserved_node_ids=required_prototype_anchor_ids,
+    )
+    evidence_node_ids = _bounded_reservation(
+        objective,
+        target,
+        config.cache.budget_unit,
+        config.selection.evidence_preservation_fraction,
+        _evidence_preservation_scores(objective),
+        position_limits=position_limits,
+        position_fill_quantum=reservation_fill_quantum,
+        reserved_node_ids=(*required_prototype_anchor_ids, *prompt_anchor_node_ids),
+    )
     if config.cache.retention_ratio == 1.0:
         selection = _selection(
             objective,
@@ -1041,6 +1351,8 @@ def build_compression_plan(
             position_limits=position_limits,
             fill_position_limits=position_limits is not None,
             position_fill_quantum=(full_state.block_size if position_limits is not None else None),
+            prompt_anchor_node_ids=prompt_anchor_node_ids,
+            evidence_node_ids=evidence_node_ids,
         )
         selection_seconds = time.perf_counter() - selection_started
         tier_started = time.perf_counter()
@@ -1057,6 +1369,11 @@ def build_compression_plan(
             target,
             position_limits,
             key_transform,
+            required_prototype_anchor_ids,
+            prompt_anchor_node_ids,
+            evidence_node_ids,
+            forecast_attention_by_node,
+            prototype_token_weight_by_head,
         )
         selection_seconds = utility_seconds + selector_seconds
         tier_started = None
@@ -1094,14 +1411,20 @@ def build_compression_plan(
 def _plan_has_live_residual_repair(
     method: MosaicKVMethod,
     plan: MosaicKVCompressionPlan | None,
+    *,
+    repair_enabled: bool = True,
+    repair_policy: RepairPolicy = RepairPolicy.ENTROPY_OR_PROTOTYPE_RISK,
 ) -> bool:
-    """Whether real prototype/residual tiers were safely materialized."""
+    """Whether online decoding must pay for repair instrumentation."""
 
     return bool(
         method is MosaicKVMethod.MOSAICKV_FULL
+        and repair_enabled
+        and repair_policy is not RepairPolicy.NONE
         and plan is not None
         and plan.construction.mode is TierConstructionMode.THREE_TIER
         and plan.construction.prototypes
+        and plan.construction.residual_storage.payloads
     )
 
 
@@ -1167,13 +1490,20 @@ def compare_runtime_retention_one(
             config.forecasting,
             capture_attentions=True,
         )
+        prototype_token_attention = _forecast_token_attention_by_head(
+            full_state,
+            prefill,
+            rollout,
+            config,
+        )
         mosaic_plan = build_compression_plan(
             full_state,
             forecast,
-            _forecast_attention_by_node(full_state, prefill, rollout, config),
+            _block_attention_from_token_attention(full_state, prototype_token_attention),
             adapter.capabilities,
             config,
             prompt_attentions=prefill.attention_weights,
+            prototype_token_weight_by_head=prototype_token_attention,
         )
         packed = pack_runtime_cache(
             adapter,
@@ -1337,8 +1667,8 @@ def _tier_payloads(
         )
     for identity in payloads:
         payloads[identity].sort(key=lambda item: (item[0], item[1] != "exact", item[2]))
-        trace.extend(
-            {
+        for slot, entry in enumerate(payloads[identity]):
+            item: JsonObject = {
                 "layer": identity[0],
                 "kv_head": identity[1],
                 "slot": slot,
@@ -1346,8 +1676,12 @@ def _tier_payloads(
                 "tier": entry[1],
                 "source_id": entry[2],
             }
-            for slot, entry in enumerate(payloads[identity])
-        )
+            if entry[1] == "prototype":
+                record = record_by_id[int(entry[2])]
+                item["represented_source_positions"] = record.represented_source_positions
+                item["attention_log_bias"] = record.attention_log_bias
+                item["attention_log_bias_scale"] = record.attention_log_bias_scale
+            trace.append(item)
     return payloads, tuple(trace)
 
 
@@ -1363,6 +1697,7 @@ def pack_runtime_payloads(
     tail_snapshot: CacheSnapshot | None = None,
     old_prompt_capacity: int | None = None,
     physical_prompt_capacity: int | None = None,
+    prototype_log_bias_by_id: Mapping[int, float] | None = None,
 ) -> PackedRuntimeCache:
     """Pack algorithm-owned head payloads through the common HF cache interface."""
 
@@ -1384,6 +1719,7 @@ def pack_runtime_payloads(
     validity_masks: list[Any] = []
     all_slots_valid = True
     prototype_slots: list[tuple[int, int, int, int]] = []
+    prototype_attention_biases: list[tuple[int, int, int, int, float]] = []
     finite_flags: list[Any] = []
     for layer_index, source_layer in enumerate(full_state.layers):
         head_keys: list[Any] = []
@@ -1440,7 +1776,17 @@ def pack_runtime_payloads(
             )
             for slot, entry in enumerate(entries):
                 if entry[1] == "prototype":
-                    prototype_slots.append((int(entry[2]), layer_index, kv_head, slot))
+                    prototype_id = int(entry[2])
+                    prototype_slots.append((prototype_id, layer_index, kv_head, slot))
+                    bias = float((prototype_log_bias_by_id or {}).get(prototype_id, 0.0))
+                    if not math.isfinite(bias) or bias < 0:
+                        raise HuggingFaceRuntimeError(
+                            "prototype attention log bias must be finite and nonnegative"
+                        )
+                    if bias > 0:
+                        prototype_attention_biases.append(
+                            (prototype_id, layer_index, kv_head, slot, bias)
+                        )
         packed_key = torch.cat(tuple(head_keys), dim=source_layer.key_head_dimension)
         packed_value = torch.cat(tuple(head_values), dim=source_layer.value_head_dimension)
         finite_flags.extend((torch.isfinite(packed_key).all(), torch.isfinite(packed_value).all()))
@@ -1469,6 +1815,7 @@ def pack_runtime_payloads(
         prompt_capacity,
         all_slots_valid,
         tuple(sorted(prototype_slots)),
+        tuple(sorted(prototype_attention_biases)),
         slot_records,
     )
 
@@ -1636,6 +1983,7 @@ def _pack_exact_runtime_blocks(
         prompt_capacity,
         all_slots_valid,
         (),
+        (),
         tuple(slot_records),
     )
 
@@ -1668,6 +2016,7 @@ def pack_runtime_cache(
             physical_prompt_capacity=physical_prompt_capacity,
         )
     payloads, slot_records = _tier_payloads(state, records, active_prototype_ids)
+    record_by_id = {record.prototype_id: record for record in records}
     return pack_runtime_payloads(
         adapter,
         full_state,
@@ -1676,6 +2025,10 @@ def pack_runtime_cache(
         tail_snapshot=tail_snapshot,
         old_prompt_capacity=old_prompt_capacity,
         physical_prompt_capacity=physical_prompt_capacity,
+        prototype_log_bias_by_id={
+            prototype_id: record_by_id[prototype_id].attention_log_bias
+            for prototype_id in active_prototype_ids
+        },
     )
 
 
@@ -1687,16 +2040,25 @@ def _state_from_packed(
     torch = _torch()
     device = packed.snapshot.layers[0].key.device
     model_state = dict(original.model_state)
+    for stale_key in (
+        "mosaickv_validity_buffers",
+        "mosaickv_additive_mask_buffers",
+        "mosaickv_mask_capacity",
+    ):
+        model_state.pop(stale_key, None)
     model_state.update(
         {
             "mosaickv_prompt_capacity": packed.prompt_capacity,
             "mosaickv_prototype_slots": packed.prototype_slots,
             "mosaickv_packed_all_valid": packed.all_slots_valid,
             "mosaickv_cache_all_valid": packed.all_slots_valid,
+            "mosaickv_prototype_attention_biases": packed.prototype_attention_biases,
         }
     )
-    if not packed.all_slots_valid:
+    if not packed.all_slots_valid or packed.prototype_attention_biases:
         model_state["mosaickv_validity_masks"] = packed.validity_masks
+    else:
+        model_state.pop("mosaickv_validity_masks", None)
     return DecodeState(
         past_key_values=adapter.inject_past_key_values(packed.snapshot),
         attention_mask=torch.ones(
@@ -1903,6 +2265,25 @@ def _attention_outputs(
     return tuple(outputs)
 
 
+def _kv_head_counts(adapter: HuggingFaceMultimodalAdapter, state: DecodeState) -> tuple[int, ...]:
+    live_cache = adapter.extract_past_key_values(state.past_key_values, clone=False)
+    if isinstance(live_cache, CacheSnapshot):
+        values = tuple(layer.value for layer in live_cache.layers)
+        sequence_axes = tuple(layer.sequence_dimension for layer in live_cache.layers)
+    else:
+        legacy, _source_kind = adapter._legacy_layers(live_cache)
+        values = tuple(value for _key, value in legacy)
+        sequence_axes = tuple(adapter._cache_sequence_dimension(value) for value in values)
+    result: list[int] = []
+    for value, sequence_axis in zip(values, sequence_axes, strict=True):
+        normalized_sequence = sequence_axis % value.ndim
+        head_axis = normalized_sequence - 1
+        if head_axis < 0:
+            raise HuggingFaceRuntimeError("cache layout has no KV-head axis before sequence")
+        result.append(int(value.shape[head_axis]))
+    return tuple(result)
+
+
 def _attention_output_error(reference: Sequence[Any], candidate: Sequence[Any]) -> float:
     torch = _torch()
     if len(reference) != len(candidate) or not reference:
@@ -1916,6 +2297,40 @@ def _attention_output_error(reference: Sequence[Any], candidate: Sequence[Any]) 
         numerator = numerator + torch.sum(delta * delta)
         denominator = denominator + torch.sum(left.double() * left.double())
     return float(torch.sqrt(numerator / denominator.clamp_min(1e-24)).item())
+
+
+def _attention_output_error_by_kv_head(
+    reference: Sequence[Any],
+    candidate: Sequence[Any],
+    kv_heads_by_layer: Sequence[int],
+) -> tuple[tuple[int, int, float], ...]:
+    """Return relative attention-output error for each layer/KV-head group."""
+
+    torch = _torch()
+    if len(reference) != len(candidate) or len(reference) != len(kv_heads_by_layer):
+        raise HuggingFaceRuntimeError("per-head fidelity diagnostic layer counts differ")
+    result: list[tuple[int, int, float]] = []
+    for layer, (left, right, kv_heads) in enumerate(
+        zip(reference, candidate, kv_heads_by_layer, strict=True)
+    ):
+        if left.shape != right.shape or left.ndim != 3:
+            raise HuggingFaceRuntimeError("per-head attention-output shapes differ")
+        query_heads = int(left.shape[1])
+        if kv_heads < 1 or query_heads % kv_heads:
+            raise HuggingFaceRuntimeError("per-head fidelity query/KV grouping is invalid")
+        query_heads_per_kv = query_heads // kv_heads
+        reference_groups = left.double().reshape(
+            int(left.shape[0]), kv_heads, query_heads_per_kv, int(left.shape[-1])
+        )
+        candidate_groups = right.double().reshape_as(reference_groups)
+        reduction_axes = (0, 2, 3)
+        numerator = torch.sum((reference_groups - candidate_groups) ** 2, dim=reduction_axes)
+        denominator = torch.sum(reference_groups * reference_groups, dim=reduction_axes).clamp_min(
+            1e-24
+        )
+        errors = torch.sqrt(numerator / denominator).detach().cpu().tolist()
+        result.extend((layer, kv_head, float(errors[kv_head])) for kv_head in range(kv_heads))
+    return tuple(result)
 
 
 def _logit_kl(reference_logits: Any, candidate_logits: Any) -> float:
@@ -1951,6 +2366,8 @@ def _run_fidelity_diagnostic(
     candidate_tokens = [candidate_token]
     divergences: list[float] = []
     attention_errors: list[float] = []
+    attention_errors_by_head: dict[tuple[int, int], list[float]] = {}
+    kv_heads_by_layer = _kv_head_counts(adapter, candidate_state)
     for _step in range(1, max_new_tokens):
         reference_output = adapter.decode_one_token(
             reference_token,
@@ -1965,20 +2382,25 @@ def _run_fidelity_diagnostic(
             capture_attentions=True,
         )
         divergences.append(_logit_kl(reference_output.logits, candidate_output.logits))
-        attention_errors.append(
-            _attention_output_error(
-                _attention_outputs(
-                    adapter,
-                    reference_output.attention_weights,
-                    reference_output.state,
-                ),
-                _attention_outputs(
-                    adapter,
-                    candidate_output.attention_weights,
-                    candidate_output.state,
-                ),
-            )
+        reference_attention_outputs = _attention_outputs(
+            adapter,
+            reference_output.attention_weights,
+            reference_output.state,
         )
+        candidate_attention_outputs = _attention_outputs(
+            adapter,
+            candidate_output.attention_weights,
+            candidate_output.state,
+        )
+        attention_errors.append(
+            _attention_output_error(reference_attention_outputs, candidate_attention_outputs)
+        )
+        for layer, kv_head, error in _attention_output_error_by_kv_head(
+            reference_attention_outputs,
+            candidate_attention_outputs,
+            kv_heads_by_layer,
+        ):
+            attention_errors_by_head.setdefault((layer, kv_head), []).append(error)
         reference_state = reference_output.state
         compressed_state = candidate_output.state
         reference_token = reference_output.next_token_id
@@ -1993,6 +2415,10 @@ def _run_fidelity_diagnostic(
         sequence_agreement=bool(torch.equal(reference_ids, candidate_ids)),
         logit_kl=float(np.mean(divergences)) if divergences else 0.0,
         attention_output_error=float(np.mean(attention_errors)) if attention_errors else 0.0,
+        attention_output_error_by_kv_head=tuple(
+            (layer, head, float(np.mean(values)))
+            for (layer, head), values in sorted(attention_errors_by_head.items())
+        ),
     )
 
 
@@ -2152,6 +2578,45 @@ def _utility_trace(plan: MosaicKVCompressionPlan) -> JsonObject:
     }
 
 
+def _prototype_diagnostics_by_head(plan: MosaicKVCompressionPlan) -> list[JsonObject]:
+    grouped: dict[tuple[int, int], list[PrototypeRecord]] = {}
+    for record in plan.construction.prototypes:
+        grouped.setdefault((record.layer, record.kv_head), []).append(record)
+    result: list[JsonObject] = []
+    for (layer, head), records in sorted(grouped.items()):
+        key_dispersion = tuple(record.diagnostics.key_dispersion for record in records)
+        value_dispersion = tuple(record.diagnostics.value_dispersion for record in records)
+        result.append(
+            {
+                "layer": layer,
+                "kv_head": head,
+                "prototype_count": len(records),
+                "mean_key_dispersion": float(np.mean(key_dispersion)),
+                "maximum_key_dispersion": max(key_dispersion),
+                "mean_value_dispersion": float(np.mean(value_dispersion)),
+                "maximum_value_dispersion": max(value_dispersion),
+                "maximum_position_span": max(
+                    record.diagnostics.position_span for record in records
+                ),
+                "maximum_cluster_size": max(record.diagnostics.cluster_size for record in records),
+                "mean_represented_source_positions": float(
+                    np.mean([record.represented_source_positions for record in records])
+                ),
+                "mean_attention_log_bias": float(
+                    np.mean([record.attention_log_bias for record in records])
+                ),
+                "attention_log_bias_scale": records[0].attention_log_bias_scale,
+                "attention_bias_basis": records[0].attention_bias_basis,
+                "pooling_mode": records[0].pooling_mode,
+                "anchor_position_strategy": records[0].anchor_position_strategy,
+                "maximum_member_reconstruction_error": max(
+                    member.reconstruction_error for record in records for member in record.members
+                ),
+            }
+        )
+    return result
+
+
 def _plan_trace(
     plan: MosaicKVCompressionPlan,
     *,
@@ -2177,6 +2642,15 @@ def _plan_trace(
             "weights": [member.normalized_weight for member in record.members],
             "dispersion": record.diagnostics.dispersion,
             "position_span": record.diagnostics.position_span,
+            "represented_source_positions": record.represented_source_positions,
+            "attention_log_bias": record.attention_log_bias,
+            "attention_log_bias_scale": record.attention_log_bias_scale,
+            "attention_bias_basis": record.attention_bias_basis,
+            "pooling_mode": record.pooling_mode,
+            "anchor_position_strategy": record.anchor_position_strategy,
+            "member_position_weight_entropy": [
+                member.within_block_attention_entropy for member in record.members
+            ],
         }
         for record in plan.construction.prototypes
     )
@@ -2214,6 +2688,7 @@ def _plan_trace(
                 compact_catalogs=compact_catalogs,
             ),
             "utility_diagnostics": _utility_trace(plan),
+            "prototype_diagnostics_by_kv_head": _prototype_diagnostics_by_head(plan),
             "selection_objective": cast("JsonObject", asdict(plan.selection.objective)),
         },
     )
@@ -2222,6 +2697,8 @@ def _plan_trace(
 def _repair_event_trace(
     event: RepairEvent,
     plan: MosaicKVCompressionPlan,
+    *,
+    compact: bool = False,
 ) -> JsonObject:
     """Enrich one repair event with source-block and cluster provenance."""
 
@@ -2295,6 +2772,14 @@ def _repair_event_trace(
         )
     record["triggered_prototype_clusters"] = cast("list[JsonValue]", clusters)
     record["restored_blocks"] = cast("list[JsonValue]", restored_blocks)
+    if compact:
+        for key in ("prototype_attention_masses", "prototype_risks"):
+            values = cast("list[JsonValue]", record.pop(key, []))
+            serialized_values = json.dumps(values, separators=(",", ":"), allow_nan=False).encode()
+            record[f"{key}_summary"] = {
+                "record_count": len(values),
+                "sha256": hashlib.sha256(serialized_values).hexdigest(),
+            }
     return record
 
 
@@ -2626,6 +3111,9 @@ class HuggingFaceMosaicKVModel:
                 self.config.diagnostics.enabled
                 and request.sample_id in self.config.diagnostics.sample_ids
             )
+            full_debug_trace = bool(
+                fixed_diagnostic_sample and self.config.diagnostics.capture_full_trace
+            )
             no_forecast_ablation = (
                 self.config.ablation.variant is AblationVariant.NO_FUTURE_QUERY_FORECAST
             )
@@ -2734,6 +3222,8 @@ class HuggingFaceMosaicKVModel:
             repair_state: RepairCacheState | None = None
             oracle_queries: EvaluationOnlyOracleQueries | None = None
             predicted_token_attention: dict[tuple[int, int], np.ndarray[Any, Any]] | None = None
+            online_head_shifts: dict[tuple[int, int], float] = {}
+            online_exact_head_routes: tuple[str, ...] = ()
             dense_budget: DensePhysicalCacheBudget | None = None
             physical_prompt_capacity: int | None = None
             plan: MosaicKVCompressionPlan | None = None
@@ -2751,7 +3241,12 @@ class HuggingFaceMosaicKVModel:
                     if method.is_lookm_reimplementation
                     else 1
                 )
-                if method.is_lookm_reimplementation:
+                mandatory_positions: tuple[int, ...]
+                if self.config.cache.physical_budget_mandatory_policy == "last_token":
+                    mandatory_positions = (
+                        int(prefill.state.logical_sequence_length) - 1,
+                    )
+                elif method.is_lookm_reimplementation:
                     mandatory_positions = tuple(
                         range(
                             prefill.state.logical_sequence_length - recent_count,
@@ -2865,7 +3360,10 @@ class HuggingFaceMosaicKVModel:
                             capture_attentions=True,
                         )
                         forecast_seconds = forecast.timing.total
-                        predicted_token_attention = _forecast_token_attention_by_head(
+                        (
+                            predicted_token_attention,
+                            online_head_shifts,
+                        ) = _forecast_token_attention_and_shift_by_head(
                             full_state,
                             prefill,
                             rollout,
@@ -2875,18 +3373,48 @@ class HuggingFaceMosaicKVModel:
                             full_state,
                             predicted_token_attention,
                         )
+                    online_exact_head_routes = _uncertainty_exact_head_routes(
+                        online_head_shifts,
+                        self.config.forecasting.uncertainty_exact_head_fraction,
+                    )
+                    online_planning_config = planning_config
+                    if online_exact_head_routes:
+                        combined_routes = tuple(
+                            sorted(
+                                set(planning_config.prototypes.exact_head_routes)
+                                | set(online_exact_head_routes),
+                                key=lambda route: tuple(int(value) for value in route.split(":")),
+                            )
+                        )
+                        online_planning_config = replace(
+                            planning_config,
+                            prototypes=replace(
+                                planning_config.prototypes,
+                                exact_head_routes=combined_routes,
+                            ),
+                        )
                     plan = build_compression_plan(
                         full_state,
                         forecast,
                         attention,
                         self.adapter.capabilities,
-                        planning_config,
+                        online_planning_config,
                         position_limits=(
                             None if dense_budget is None else dense_budget.position_limits
                         ),
                         attention_provenance=attention_provenance,
                         key_transform=key_transform,
                         prompt_attentions=prefill.attention_weights,
+                        prompt_attention_by_node=(
+                            _prompt_attention_by_node(
+                                full_state,
+                                prefill,
+                                prompt_window=self.config.forecasting.prompt_window,
+                            )
+                            if self.config.selection.prompt_anchor_fraction > 0
+                            else None
+                        ),
+                        prototype_token_weight_by_head=predicted_token_attention,
                     )
                     graph_seconds = plan.graph_seconds
                     selection_seconds = plan.selection_seconds
@@ -2950,6 +3478,9 @@ class HuggingFaceMosaicKVModel:
                             prefill.attention_weights,
                             self.config.lookm,
                             planning_config.cache,
+                            physical_prompt_capacity=(
+                                None if dense_budget is None else dense_budget.prompt_capacity
+                            ),
                         ),
                     )
                     packed_state = None
@@ -3062,7 +3593,12 @@ class HuggingFaceMosaicKVModel:
                         f"active={packed_prefill_active_kv_bytes}, "
                         f"budget={dense_budget.target_bytes}"
                     )
-                if _plan_has_live_residual_repair(method, plan):
+                if _plan_has_live_residual_repair(
+                    method,
+                    plan,
+                    repair_enabled=self.config.repair.enabled,
+                    repair_policy=self.config.repair.policy,
+                ):
                     if plan is None:  # pragma: no cover - helper guarantees this
                         raise HuggingFaceRuntimeError("repairable plan is unexpectedly absent")
                     repair_state = RepairCacheState.from_construction(
@@ -3074,14 +3610,14 @@ class HuggingFaceMosaicKVModel:
                     trace.update(
                         _plan_trace(
                             plan,
-                            compact_catalogs=not fixed_diagnostic_sample,
+                            compact_catalogs=not full_debug_trace,
                         )
                     )
                 elif baseline_plan is not None:
                     trace.update(
                         _baseline_plan_trace(
                             baseline_plan,
-                            compact_catalogs=not fixed_diagnostic_sample,
+                            compact_catalogs=not full_debug_trace,
                         )
                     )
                 elif lookm_plan is not None:
@@ -3092,7 +3628,7 @@ class HuggingFaceMosaicKVModel:
                     trace.update(_vl_cache_plan_trace(vl_cache_plan))
                 trace["packed_slots"] = _trace_catalog(
                     packed.slot_records,
-                    compact=not fixed_diagnostic_sample,
+                    compact=not full_debug_trace,
                 )
                 trace["packed_cache_all_slots_valid"] = packed.all_slots_valid
             elif retention_one_identity:
@@ -3138,9 +3674,11 @@ class HuggingFaceMosaicKVModel:
                     }
                 )
 
-            if not fixed_diagnostic_sample:
+            if not full_debug_trace:
                 _compact_trace_records(trace)
-                trace["trace_detail"] = "compact_non_diagnostic"
+                trace["trace_detail"] = (
+                    "compact_diagnostic" if fixed_diagnostic_sample else "compact_non_diagnostic"
+                )
             else:
                 trace["trace_detail"] = "full_debug"
             trace_instrumentation_seconds += time.perf_counter() - trace_started
@@ -3232,6 +3770,10 @@ class HuggingFaceMosaicKVModel:
                     "sequence_agreement": fidelity.sequence_agreement,
                     "logit_kl": fidelity.logit_kl,
                     "attention_output_error": fidelity.attention_output_error,
+                    "attention_output_error_by_kv_head": [
+                        {"layer": layer, "kv_head": head, "error": error}
+                        for layer, head, error in fidelity.attention_output_error_by_kv_head
+                    ],
                     "overhead_seconds": fidelity_seconds,
                     "trajectory": "independent_deterministic_greedy",
                     "attention_output_definition": "pre_output_projection_weighted_value",
@@ -3489,7 +4031,11 @@ class HuggingFaceMosaicKVModel:
                 tensor_storage_bytes(key) + tensor_storage_bytes(value)
                 for key, value in self.adapter._legacy_layers(live_cache)[0]
             )
-            residual_bytes = 0 if repair_state is None else repair_state.residual_storage.cpu_bytes
+            residual_bytes = (
+                repair_state.residual_storage.cpu_bytes
+                if repair_state is not None
+                else (plan.construction.residual_storage.cpu_bytes if plan is not None else 0)
+            )
             total_seconds = max(
                 0.0,
                 time.perf_counter()
@@ -3524,7 +4070,10 @@ class HuggingFaceMosaicKVModel:
             repair_event_records = (
                 []
                 if plan is None
-                else [_repair_event_trace(event, plan) for event in repair_events]
+                else [
+                    _repair_event_trace(event, plan, compact=not full_debug_trace)
+                    for event in repair_events
+                ]
             )
             residual_configuration: JsonObject | None = None
             if plan is not None and plan.construction.residual_storage.payloads:
@@ -3594,6 +4143,20 @@ class HuggingFaceMosaicKVModel:
                     ),
                     "hard_active_kv_budget_bytes": (
                         None if dense_budget is None else dense_budget.target_bytes
+                    ),
+                    "online_uncertainty_routing": cast(
+                        "JsonObject",
+                        {
+                            "metric": "prompt_draft_attention_total_variation",
+                            "configured_exact_head_fraction": (
+                                self.config.forecasting.uncertainty_exact_head_fraction
+                            ),
+                            "selected_exact_head_routes": cast(
+                                "list[JsonValue]",
+                                [list(route) for route in online_exact_head_routes],
+                            ),
+                            "head_shift_count": len(online_head_shifts),
+                        },
                     ),
                     "active_kv_bytes": packed_prefill_active_kv_bytes,
                     "final_active_kv_bytes": active_bytes,

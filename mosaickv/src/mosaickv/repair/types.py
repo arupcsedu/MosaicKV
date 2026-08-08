@@ -23,6 +23,8 @@ class RepairTriggerReason(StrEnum):
     ENTROPY = "entropy_threshold"
     PROTOTYPE_RISK = "prototype_risk_threshold"
     ENTROPY_AND_PROTOTYPE_RISK = "entropy_and_prototype_risk_thresholds"
+    DECISION_RISK = "low_margin_prototype_risk"
+    HIGH_PROTOTYPE_RISK = "calibrated_high_prototype_risk"
     ORACLE = "oracle_evaluation_only"
     ORACLE_NO_REPAIR = "oracle_no_repair"
     NO_ELIGIBLE_RESIDUAL = "no_eligible_residual"
@@ -34,15 +36,19 @@ class RepairStepSignals:
     """Uncertainty and prototype-attention signals from one provisional step."""
 
     normalized_entropy: float
+    next_token_probability_margin: float
     total_prototype_attention_mass: float
     prototype_attention_masses: tuple[tuple[int, float], ...]
     prototype_risks: tuple[tuple[int, float], ...]
     maximum_prototype_risk: float
     draft_kl_divergence: float | None
+    risk_normalization: str
 
     def __post_init__(self) -> None:
         if not 0 <= self.normalized_entropy <= 1:
             raise ValueError("normalized next-token entropy must lie in [0, 1]")
+        if not 0 <= self.next_token_probability_margin <= 1:
+            raise ValueError("next-token probability margin must lie in [0, 1]")
         if not 0 <= self.total_prototype_attention_mass <= 1 + 1e-9:
             raise ValueError("total prototype attention mass must lie in [0, 1]")
         mass_ids = tuple(prototype_id for prototype_id, _mass in self.prototype_attention_masses)
@@ -76,6 +82,11 @@ class RepairStepSignals:
             not math.isfinite(self.draft_kl_divergence) or self.draft_kl_divergence < 0
         ):
             raise ValueError("draft KL divergence must be finite and nonnegative")
+        if self.risk_normalization not in {
+            "raw_attention_mass_times_dispersion",
+            "sum_to_one",
+        }:
+            raise ValueError("repair risk normalization provenance is unsupported")
 
     def risk_for(self, prototype_id: int) -> float:
         for candidate, risk in self.prototype_risks:
@@ -187,6 +198,7 @@ class RepairEvent:
             "final_token_id": self.final_token_id,
             "quality_recovered": self.quality_recovered,
             "normalized_entropy": self.signals.normalized_entropy,
+            "next_token_probability_margin": self.signals.next_token_probability_margin,
             "total_prototype_attention_mass": (self.signals.total_prototype_attention_mass),
             "prototype_attention_masses": [
                 [prototype_id, mass]
@@ -196,6 +208,7 @@ class RepairEvent:
                 [prototype_id, risk] for prototype_id, risk in self.signals.prototype_risks
             ],
             "maximum_prototype_risk": self.signals.maximum_prototype_risk,
+            "risk_normalization": self.signals.risk_normalization,
             "draft_kl_divergence": self.signals.draft_kl_divergence,
         }
 

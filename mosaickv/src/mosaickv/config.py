@@ -271,6 +271,7 @@ class FidelityDiagnosticsConfig:
     sample_ids: tuple[str, ...] = ()
     sample_ledger_sha: str | None = None
     forecast_oracle_steps: int = 0
+    capture_full_trace: bool = False
 
     def __post_init__(self) -> None:
         if len(self.sample_ids) != len(set(self.sample_ids)):
@@ -312,6 +313,7 @@ class FidelityDiagnosticsConfig:
                 "sample_ids",
                 "sample_ledger_sha",
                 "forecast_oracle_steps",
+                "capture_full_trace",
             },
             "diagnostics",
         )
@@ -328,6 +330,7 @@ class FidelityDiagnosticsConfig:
             sample_ids=tuple(cast("list[str] | tuple[str, ...]", raw_ids)),
             sample_ledger_sha=raw_sha,
             forecast_oracle_steps=_int(data, "forecast_oracle_steps", 0, "diagnostics"),
+            capture_full_trace=_bool(data, "capture_full_trace", False, "diagnostics"),
         )
 
 
@@ -372,6 +375,8 @@ class CacheConfig:
     retention_ratio: float
     block_size: int = 16
     accounting_spec_sha: str = _SYNTHETIC_ACCOUNTING_SHA
+    physical_budget_block_size: int | None = None
+    physical_budget_mandatory_policy: str = "method"
 
     def __post_init__(self) -> None:
         if self.budget_value < 1:
@@ -380,6 +385,12 @@ class CacheConfig:
             raise ConfigurationError("cache.retention_ratio must be in the interval (0, 1]")
         if self.block_size < 1:
             raise ConfigurationError("cache.block_size must be >= 1")
+        if self.physical_budget_block_size is not None and self.physical_budget_block_size < 1:
+            raise ConfigurationError("cache.physical_budget_block_size must be >= 1 or null")
+        if self.physical_budget_mandatory_policy not in {"method", "last_token"}:
+            raise ConfigurationError(
+                "cache.physical_budget_mandatory_policy must be 'method' or 'last_token'"
+            )
         if len(self.accounting_spec_sha) != 64 or any(
             char not in "0123456789abcdef" for char in self.accounting_spec_sha
         ):
@@ -394,6 +405,8 @@ class CacheConfig:
             "retention_ratio",
             "block_size",
             "accounting_spec_sha",
+            "physical_budget_block_size",
+            "physical_budget_mandatory_policy",
         }
         _reject_unknown(data, allowed, "cache")
         return cls(
@@ -403,6 +416,12 @@ class CacheConfig:
             block_size=_int(data, "block_size", 16, "cache"),
             accounting_spec_sha=_optional_str(
                 data, "accounting_spec_sha", _SYNTHETIC_ACCOUNTING_SHA, "cache"
+            ),
+            physical_budget_block_size=_optional_int(
+                data, "physical_budget_block_size", None, "cache"
+            ),
+            physical_budget_mandatory_policy=_optional_str(
+                data, "physical_budget_mandatory_policy", "method", "cache"
             ),
         )
 
@@ -419,6 +438,11 @@ class ForecastingConfig:
     covariance: ForecastCovariance = ForecastCovariance.DIAGONAL
     low_memory_centroids: bool = True
     centroid_iterations: int = 4
+    adaptive_head_routing: bool = False
+    head_shift_threshold: float = 0.15
+    stable_head_prompt_weight: float = 1.0
+    shifted_head_prompt_weight: float = 0.25
+    uncertainty_exact_head_fraction: float = 0.0
 
     def __post_init__(self) -> None:
         if self.prompt_window < 0:
@@ -429,6 +453,19 @@ class ForecastingConfig:
             raise ConfigurationError("forecasting.centroid_count must be >= 1")
         if self.centroid_iterations < 1:
             raise ConfigurationError("forecasting.centroid_iterations must be >= 1")
+        if not 0 <= self.head_shift_threshold <= 1:
+            raise ConfigurationError("forecasting.head_shift_threshold must be in [0, 1]")
+        for name in ("stable_head_prompt_weight", "shifted_head_prompt_weight"):
+            if not 0 <= getattr(self, name) <= 1:
+                raise ConfigurationError(f"forecasting.{name} must be in [0, 1]")
+        if not 0 <= self.uncertainty_exact_head_fraction <= 1:
+            raise ConfigurationError(
+                "forecasting.uncertainty_exact_head_fraction must be in [0, 1]"
+            )
+        if self.uncertainty_exact_head_fraction and not self.adaptive_head_routing:
+            raise ConfigurationError(
+                "forecasting.uncertainty_exact_head_fraction requires adaptive_head_routing"
+            )
         if not self.enabled:
             return
         if self.mode is ForecastMode.PROMPT_WINDOW and (
@@ -460,6 +497,11 @@ class ForecastingConfig:
             "covariance",
             "low_memory_centroids",
             "centroid_iterations",
+            "adaptive_head_routing",
+            "head_shift_threshold",
+            "stable_head_prompt_weight",
+            "shifted_head_prompt_weight",
+            "uncertainty_exact_head_fraction",
         }
         _reject_unknown(data, allowed, "forecasting")
         return cls(
@@ -475,6 +517,15 @@ class ForecastingConfig:
             ),
             low_memory_centroids=_bool(data, "low_memory_centroids", True, "forecasting"),
             centroid_iterations=_int(data, "centroid_iterations", 4, "forecasting"),
+            adaptive_head_routing=_bool(data, "adaptive_head_routing", False, "forecasting"),
+            head_shift_threshold=_float(data, "head_shift_threshold", 0.15, "forecasting"),
+            stable_head_prompt_weight=_float(data, "stable_head_prompt_weight", 1.0, "forecasting"),
+            shifted_head_prompt_weight=_float(
+                data, "shifted_head_prompt_weight", 0.25, "forecasting"
+            ),
+            uncertainty_exact_head_fraction=_float(
+                data, "uncertainty_exact_head_fraction", 0.0, "forecasting"
+            ),
         )
 
 
@@ -678,6 +729,8 @@ class SelectionConfig:
     stop_on_nonpositive_gain: bool = True
     minimum_stratum_fraction: float = 0.25
     exhaustive_max_nodes: int = 20
+    prompt_anchor_fraction: float = 0.0
+    evidence_preservation_fraction: float = 0.0
 
     def __post_init__(self) -> None:
         if self.algorithm != "lazy_greedy":
@@ -690,6 +743,13 @@ class SelectionConfig:
             raise ConfigurationError("selection.minimum_stratum_fraction must be in [0, 1]")
         if self.exhaustive_max_nodes < 1:
             raise ConfigurationError("selection.exhaustive_max_nodes must be >= 1")
+        for name in ("prompt_anchor_fraction", "evidence_preservation_fraction"):
+            if not 0 <= getattr(self, name) <= 1:
+                raise ConfigurationError(f"selection.{name} must be in [0, 1]")
+        if self.prompt_anchor_fraction + self.evidence_preservation_fraction > 1:
+            raise ConfigurationError(
+                "selection prompt/evidence reservation fractions cannot sum above 1"
+            )
 
     @classmethod
     def from_mapping(cls, value: object) -> SelectionConfig:
@@ -702,6 +762,8 @@ class SelectionConfig:
             "stop_on_nonpositive_gain",
             "minimum_stratum_fraction",
             "exhaustive_max_nodes",
+            "prompt_anchor_fraction",
+            "evidence_preservation_fraction",
         }
         _reject_unknown(data, allowed, "selection")
         return cls(
@@ -712,6 +774,10 @@ class SelectionConfig:
             stop_on_nonpositive_gain=_bool(data, "stop_on_nonpositive_gain", True, "selection"),
             minimum_stratum_fraction=_float(data, "minimum_stratum_fraction", 0.25, "selection"),
             exhaustive_max_nodes=_int(data, "exhaustive_max_nodes", 20, "selection"),
+            prompt_anchor_fraction=_float(data, "prompt_anchor_fraction", 0.0, "selection"),
+            evidence_preservation_fraction=_float(
+                data, "evidence_preservation_fraction", 0.0, "selection"
+            ),
         )
 
 
@@ -723,6 +789,19 @@ class PrototypeConfig:
     group_size: int = 4
     max_position_span: int | None = 128
     min_anchor_weight: float = 0.0
+    max_key_dispersion: float | None = None
+    max_value_dispersion: float | None = None
+    max_member_key_error: float | None = None
+    max_member_value_error: float | None = None
+    forecast_weight: float = 0.0
+    attention_log_bias_scale: float = 0.0
+    pooling_mode: str = "graph_weighted_block_mean"
+    attention_bias_basis: str = "source_position_multiplicity"
+    anchor_position_strategy: str = "selected_anchor_start"
+    adaptive_grouping: bool = False
+    exact_head_routes: tuple[str, ...] = ()
+    head_group_sizes: tuple[str, ...] = ()
+    head_position_spans: tuple[str, ...] = ()
     allowed_modality_pairs: tuple[str, ...] = (
         "text:text",
         "image:image",
@@ -736,6 +815,82 @@ class PrototypeConfig:
             raise ConfigurationError("prototypes.max_position_span must be >= 0 or null")
         if not 0 <= self.min_anchor_weight <= 1:
             raise ConfigurationError("prototypes.min_anchor_weight must be in [0, 1]")
+        for name in (
+            "max_key_dispersion",
+            "max_value_dispersion",
+            "max_member_key_error",
+            "max_member_value_error",
+        ):
+            value = getattr(self, name)
+            if value is not None and (not math.isfinite(value) or value < 0):
+                raise ConfigurationError(f"prototypes.{name} must be finite and >= 0 or null")
+        if not 0 <= self.forecast_weight <= 1:
+            raise ConfigurationError("prototypes.forecast_weight must be in [0, 1]")
+        if not math.isfinite(self.attention_log_bias_scale) or not (
+            0 <= self.attention_log_bias_scale <= 1
+        ):
+            raise ConfigurationError(
+                "prototypes.attention_log_bias_scale must be finite and in [0, 1]"
+            )
+        if self.pooling_mode not in {
+            "graph_weighted_block_mean",
+            "forecast_attention_token",
+        }:
+            raise ConfigurationError(
+                "prototypes.pooling_mode must be 'graph_weighted_block_mean' or "
+                "'forecast_attention_token'"
+            )
+        if self.attention_bias_basis not in {
+            "source_position_multiplicity",
+            "forecast_attention_entropy",
+        }:
+            raise ConfigurationError(
+                "prototypes.attention_bias_basis must be "
+                "'source_position_multiplicity' or 'forecast_attention_entropy'"
+            )
+        if self.anchor_position_strategy not in {
+            "selected_anchor_start",
+            "forecast_weighted_member_medoid",
+        }:
+            raise ConfigurationError(
+                "prototypes.anchor_position_strategy must be "
+                "'selected_anchor_start' or 'forecast_weighted_member_medoid'"
+            )
+        if (
+            self.pooling_mode == "forecast_attention_token"
+            and self.attention_bias_basis != "forecast_attention_entropy"
+        ):
+            raise ConfigurationError(
+                "forecast-attention token pooling requires the forecast-attention "
+                "entropy bias basis"
+            )
+        if (
+            self.attention_bias_basis == "forecast_attention_entropy"
+            and self.pooling_mode != "forecast_attention_token"
+        ):
+            raise ConfigurationError(
+                "forecast-attention entropy bias requires forecast-attention token pooling"
+            )
+        self._validate_head_routes(self.head_group_sizes, "head_group_sizes", minimum=1)
+        self._validate_head_routes(self.head_position_spans, "head_position_spans", minimum=0)
+        exact_identities: set[tuple[int, int]] = set()
+        for route in self.exact_head_routes:
+            parts = route.split(":")
+            if len(parts) != 2:
+                raise ConfigurationError(
+                    "prototypes.exact_head_routes entries must use '<layer>:<kv_head>'"
+                )
+            try:
+                identity = int(parts[0]), int(parts[1])
+            except ValueError as error:
+                raise ConfigurationError(
+                    "prototypes.exact_head_routes entries must contain integers"
+                ) from error
+            if min(identity) < 0 or identity in exact_identities:
+                raise ConfigurationError(
+                    "prototypes.exact_head_routes require unique nonnegative identities"
+                )
+            exact_identities.add(identity)
         valid_modalities = {"text", "image", "video"}
         if not self.allowed_modality_pairs:
             raise ConfigurationError("prototypes.allowed_modality_pairs cannot be empty")
@@ -762,6 +917,19 @@ class PrototypeConfig:
             "max_position_span",
             "min_anchor_weight",
             "allowed_modality_pairs",
+            "max_key_dispersion",
+            "max_value_dispersion",
+            "max_member_key_error",
+            "max_member_value_error",
+            "forecast_weight",
+            "attention_log_bias_scale",
+            "pooling_mode",
+            "attention_bias_basis",
+            "anchor_position_strategy",
+            "adaptive_grouping",
+            "exact_head_routes",
+            "head_group_sizes",
+            "head_position_spans",
         }
         _reject_unknown(data, allowed, "prototypes")
         defaults = cls()
@@ -770,6 +938,55 @@ class PrototypeConfig:
             group_size=_int(data, "group_size", 4, "prototypes"),
             max_position_span=_optional_int(data, "max_position_span", 128, "prototypes"),
             min_anchor_weight=_float(data, "min_anchor_weight", 0.0, "prototypes"),
+            max_key_dispersion=(
+                None
+                if data.get("max_key_dispersion") is None
+                else _float(data, "max_key_dispersion", 0.0, "prototypes")
+            ),
+            max_value_dispersion=(
+                None
+                if data.get("max_value_dispersion") is None
+                else _float(data, "max_value_dispersion", 0.0, "prototypes")
+            ),
+            max_member_key_error=(
+                None
+                if data.get("max_member_key_error") is None
+                else _float(data, "max_member_key_error", 0.0, "prototypes")
+            ),
+            max_member_value_error=(
+                None
+                if data.get("max_member_value_error") is None
+                else _float(data, "max_member_value_error", 0.0, "prototypes")
+            ),
+            forecast_weight=_float(data, "forecast_weight", 0.0, "prototypes"),
+            attention_log_bias_scale=_float(
+                data,
+                "attention_log_bias_scale",
+                0.0,
+                "prototypes",
+            ),
+            pooling_mode=_optional_str(
+                data,
+                "pooling_mode",
+                "graph_weighted_block_mean",
+                "prototypes",
+            ),
+            attention_bias_basis=_optional_str(
+                data,
+                "attention_bias_basis",
+                "source_position_multiplicity",
+                "prototypes",
+            ),
+            anchor_position_strategy=_optional_str(
+                data,
+                "anchor_position_strategy",
+                "selected_anchor_start",
+                "prototypes",
+            ),
+            adaptive_grouping=_bool(data, "adaptive_grouping", False, "prototypes"),
+            exact_head_routes=_string_tuple(data, "exact_head_routes", (), "prototypes"),
+            head_group_sizes=_string_tuple(data, "head_group_sizes", (), "prototypes"),
+            head_position_spans=_string_tuple(data, "head_position_spans", (), "prototypes"),
             allowed_modality_pairs=_string_tuple(
                 data,
                 "allowed_modality_pairs",
@@ -777,6 +994,50 @@ class PrototypeConfig:
                 "prototypes",
             ),
         )
+
+    @staticmethod
+    def _validate_head_routes(routes: tuple[str, ...], name: str, *, minimum: int) -> None:
+        identities: set[tuple[int, int]] = set()
+        for route in routes:
+            parts = route.split(":")
+            if len(parts) != 3:
+                raise ConfigurationError(
+                    f"prototypes.{name} entries must use '<layer>:<kv_head>:<value>'"
+                )
+            try:
+                layer, head, value = (int(part) for part in parts)
+            except ValueError as error:
+                raise ConfigurationError(
+                    f"prototypes.{name} entries must contain integers"
+                ) from error
+            if layer < 0 or head < 0 or value < minimum:
+                raise ConfigurationError(
+                    f"prototypes.{name} entries require nonnegative layer/head and "
+                    f"value >= {minimum}"
+                )
+            if (layer, head) in identities:
+                raise ConfigurationError(
+                    f"prototypes.{name} cannot repeat layer/head {(layer, head)}"
+                )
+            identities.add((layer, head))
+
+    @staticmethod
+    def _head_route(routes: tuple[str, ...], layer: int, head: int) -> int | None:
+        prefix = f"{layer}:{head}:"
+        for route in routes:
+            if route.startswith(prefix):
+                return int(route.rsplit(":", maxsplit=1)[1])
+        return None
+
+    def group_size_for(self, layer: int, head: int) -> int:
+        return self._head_route(self.head_group_sizes, layer, head) or self.group_size
+
+    def position_span_for(self, layer: int, head: int) -> int | None:
+        routed = self._head_route(self.head_position_spans, layer, head)
+        return self.max_position_span if routed is None else routed
+
+    def requires_exact_head(self, layer: int, head: int) -> bool:
+        return f"{layer}:{head}" in self.exact_head_routes
 
 
 @dataclass(frozen=True, slots=True)
@@ -1062,6 +1323,9 @@ class RepairConfig:
     entropy_threshold: float = 0.5
     prototype_risk_threshold: float = 0.25
     prototype_risk_min_entropy: float = 0.0
+    decision_margin_threshold: float = 0.15
+    normalize_prototype_risk: bool = False
+    decision_high_risk_threshold: float | None = None
     max_blocks_per_step: int = 2
     candidate_ranking: RepairCandidateRanking = (
         RepairCandidateRanking.RISK_WEIGHTED_RECONSTRUCTION_ERROR
@@ -1077,6 +1341,15 @@ class RepairConfig:
         if not 0 <= self.prototype_risk_min_entropy <= 1:
             raise ConfigurationError(
                 "repair.prototype_risk_min_entropy must be in the interval [0, 1]"
+            )
+        if not 0 <= self.decision_margin_threshold <= 1:
+            raise ConfigurationError("repair.decision_margin_threshold must be in [0, 1]")
+        if self.decision_high_risk_threshold is not None and (
+            not math.isfinite(self.decision_high_risk_threshold)
+            or self.decision_high_risk_threshold < 0
+        ):
+            raise ConfigurationError(
+                "repair.decision_high_risk_threshold must be finite and >= 0 or null"
             )
         if self.max_blocks_per_step < 0:
             raise ConfigurationError("repair.max_blocks_per_step must be >= 0")
@@ -1096,6 +1369,9 @@ class RepairConfig:
             "entropy_threshold",
             "prototype_risk_threshold",
             "prototype_risk_min_entropy",
+            "decision_margin_threshold",
+            "normalize_prototype_risk",
+            "decision_high_risk_threshold",
             "max_blocks_per_step",
             "candidate_ranking",
             "preserve_partial_prototype",
@@ -1112,6 +1388,13 @@ class RepairConfig:
             entropy_threshold=_float(data, "entropy_threshold", 0.5, "repair"),
             prototype_risk_threshold=_float(data, "prototype_risk_threshold", 0.25, "repair"),
             prototype_risk_min_entropy=_float(data, "prototype_risk_min_entropy", 0.0, "repair"),
+            decision_margin_threshold=_float(data, "decision_margin_threshold", 0.15, "repair"),
+            normalize_prototype_risk=_bool(data, "normalize_prototype_risk", False, "repair"),
+            decision_high_risk_threshold=(
+                None
+                if data.get("decision_high_risk_threshold") is None
+                else _float(data, "decision_high_risk_threshold", 0.0, "repair")
+            ),
             max_blocks_per_step=_int(data, "max_blocks_per_step", 2, "repair"),
             candidate_ranking=_enum(
                 RepairCandidateRanking,
@@ -1285,9 +1568,9 @@ class RunConfig:
                 raise ConfigurationError(
                     "lookm recent + important ratios must equal cache.retention_ratio"
                 )
-            if self.cache.budget_unit is not BudgetUnit.BLOCKS:
+            if self.cache.budget_unit not in {BudgetUnit.BLOCKS, BudgetUnit.BYTES}:
                 raise ConfigurationError(
-                    "method='lookm_reimpl' requires cache.budget_unit='blocks'"
+                    "method='lookm_reimpl' requires cache.budget_unit='blocks' or 'bytes'"
                 )
             enabled = []
             if self.forecasting.enabled:

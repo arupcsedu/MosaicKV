@@ -247,6 +247,36 @@ def test_entropy_signals_and_optional_draft_kl_are_deterministic() -> None:
     assert signals.draft_kl_divergence > 0
 
 
+def test_normalized_risk_and_high_risk_decision_trigger() -> None:
+    state = _fixture(multiple_prototypes=True)
+    signals = calculate_repair_signals(
+        state,
+        np.asarray([2.0, 1.0], dtype=np.float32),
+        {0: 0.6, 1: 0.2},
+        normalize_prototype_risk=True,
+    )
+    assert signals.risk_normalization == "sum_to_one"
+    assert sum(risk for _prototype_id, risk in signals.prototype_risks) == pytest.approx(1.0)
+
+    result = repair_decode_step(
+        state,
+        RepairConfig(
+            policy=RepairPolicy.DECISION_AWARE,
+            normalize_prototype_risk=True,
+            prototype_risk_threshold=1.0,
+            decision_margin_threshold=0.0,
+            decision_high_risk_threshold=0.5,
+            max_blocks_per_step=1,
+        ),
+        step_index=0,
+        provisional_logits=np.asarray([20.0, 0.0], dtype=np.float32),
+        prototype_attention_mass={0: 0.6, 1: 0.2},
+        re_decode=lambda _state: np.asarray([0.0, 1.0], dtype=np.float32),
+    )
+    assert result.event.trigger_reason is RepairTriggerReason.HIGH_PROTOTYPE_RISK
+    assert result.event.triggered
+
+
 def test_risk_entropy_floor_blocks_high_confidence_cache_mutation() -> None:
     state = _fixture()
     result = repair_decode_step(
@@ -339,6 +369,39 @@ def test_online_trigger_policies(
     assert result.event.trigger_reason is expected
     assert result.event.re_decode_count == 1
     assert calls == 1
+
+
+def test_decision_aware_repair_only_triggers_for_low_margin_risky_decisions() -> None:
+    state = _fixture()
+    config = RepairConfig(
+        policy=RepairPolicy.DECISION_AWARE,
+        prototype_risk_threshold=0.1,
+        decision_margin_threshold=0.2,
+        max_blocks_per_step=1,
+    )
+    uncertain = repair_decode_step(
+        state,
+        config,
+        step_index=0,
+        provisional_logits=np.asarray([0.1, 0.0], dtype=np.float32),
+        prototype_attention_mass={0: 0.9},
+        re_decode=lambda _state: np.asarray([0.0, 1.0], dtype=np.float32),
+    )
+    assert uncertain.event.trigger_reason is RepairTriggerReason.DECISION_RISK
+    assert uncertain.event.triggered
+    assert uncertain.event.signals.next_token_probability_margin < 0.2
+
+    confident = repair_decode_step(
+        state,
+        config,
+        step_index=0,
+        provisional_logits=np.asarray([8.0, 0.0], dtype=np.float32),
+        prototype_attention_mass={0: 0.9},
+        re_decode=_must_not_redecode,
+    )
+    assert confident.event.trigger_reason is RepairTriggerReason.THRESHOLD_NOT_MET
+    assert not confident.event.triggered
+    assert confident.event.signals.next_token_probability_margin > 0.9
 
 
 @pytest.mark.parametrize(
@@ -470,3 +533,5 @@ def test_repair_config_rejects_invalid_policy_parameters() -> None:
         RepairConfig(prototype_risk_threshold=-0.1)
     with pytest.raises(ConfigurationError, match="prototype_risk_min_entropy"):
         RepairConfig(prototype_risk_min_entropy=1.1)
+    with pytest.raises(ConfigurationError, match="decision_margin_threshold"):
+        RepairConfig(decision_margin_threshold=-0.1)

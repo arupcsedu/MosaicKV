@@ -1,0 +1,11 @@
+{
+  "dataset_id": "lmms-lab/DocVQA",
+  "dataset_revision": "539088ef8a8ada01ac8e2e6d4e372586748a265e",
+  "materialization_model_name": "llava-hf/llava-1.5-7b-hf",
+  "sample_count": 1,
+  "sample_ids": ["docvqa:62404"],
+  "schema_version": 1,
+  "selection_rule": "mechanism_diagnostic_from_already_open_v11_internal_failure",
+  "split": "validation",
+  "task": "docvqa"
+}

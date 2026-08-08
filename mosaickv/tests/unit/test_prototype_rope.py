@@ -82,6 +82,32 @@ def test_rotary_key_transform_recovers_phase_neutral_weighted_mean() -> None:
     assert torch.allclose(merged.prototype_key, expected, atol=1e-5, rtol=0)
 
 
+def test_batched_anchor_phase_matches_individual_transform() -> None:
+    cos, sin = _phase(6)
+    transform = RotaryPrototypeKeyTransform(cos, sin, "synthetic_batched_phase_v1")
+    neutral = torch.tensor(
+        [
+            [[[1.0, 2.0, 3.0, 4.0]]],
+            [[[4.0, -1.0, 2.0, 0.5]]],
+            [[[-2.0, 3.0, 0.25, 7.0]]],
+        ],
+        dtype=torch.float32,
+    ).unsqueeze(1)
+    reference = neutral[0].to(torch.float16)
+    positions = (0, 3, 5)
+
+    batched = transform.apply_anchor_phase_batch(neutral, positions, reference)
+    individual = torch.stack(
+        tuple(
+            transform.apply_anchor_phase(neutral[index], position, reference)
+            for index, position in enumerate(positions)
+        )
+    )
+
+    assert batched.dtype == reference.dtype
+    assert torch.equal(batched, individual)
+
+
 def test_qwen_post_rope_construction_requires_and_accepts_exact_phase_transform() -> None:
     neutral = torch.tensor(
         [[[[-2.0, 1.0, 2.0, 3.0], [4.0, 2.0, -1.0, 5.0], [6.0, 7.0, 1.0, 2.0]]]]
@@ -174,3 +200,83 @@ def test_qwen_post_rope_construction_requires_and_accepts_exact_phase_transform(
     assert refreshed.record.assigned_node_ids == (1,)
     assert torch.allclose(refreshed.key, expected_remaining_key, atol=1e-4, rtol=0)
     assert torch.allclose(refreshed.value, neutral[..., 1:2, :], atol=1e-5, rtol=0)
+
+
+def test_partial_repair_keeps_weighted_medoid_anchor_identity() -> None:
+    neutral = torch.tensor(
+        [[[[-2.0, 1.0, 2.0, 3.0], [4.0, 2.0, -1.0, 5.0], [6.0, 7.0, 1.0, 2.0]]]],
+        dtype=torch.float32,
+    )
+    cos, sin = _phase(3)
+    post_rope = _rotate(neutral, cos, sin)
+    full = FullKVState.from_tensors(
+        ((post_rope, neutral.clone()),),
+        modality_spans=(ModalitySpan(0, 3, Modality.TEXT),),
+        block_size=1,
+        cached_key_state=CachedKeyState.POST_ROPE,
+    )
+    nodes = pool_block_descriptors(full)
+    graph = SparseEvidenceGraph(
+        nodes,
+        (1, 2),
+        (0, 0),
+        (0.25, 0.75),
+        (EdgeType.SEMANTIC_SIMILARITY, EdgeType.SEMANTIC_SIMILARITY),
+        GraphDiagnostics(
+            node_count=3,
+            edge_count=2,
+            connected_components=1,
+            modality_mixing=0.0,
+            average_degree=2 / 3,
+            evidence_cluster_coverage=None,
+            edge_counts=((EdgeType.SEMANTIC_SIMILARITY, 2),),
+            maximum_out_degree=1,
+            fallback_used=False,
+        ),
+    )
+    utilities = compute_block_utilities(
+        graph,
+        UtilityConfig(lambda_q=1.0, lambda_v=0.0, lambda_o=0.0),
+        forecast_attention_by_node=(0.98, 0.01, 0.01),
+        attention_provenance="synthetic_medoid_repair",
+        rope_aware=True,
+    )
+    selection = lazy_greedy_select(
+        BudgetedObjective(graph, utilities, SelectionConfig(lambda_g=0.0, lambda_m=0.0)),
+        SelectionBudget(1, BudgetUnit.BLOCKS),
+    )
+    selection = replace(selection, budget=SelectionBudget(2, BudgetUnit.BLOCKS))
+    transform = RotaryPrototypeKeyTransform(cos, sin, "synthetic_medoid_repair_v1")
+    construction = construct_three_tier_cache(
+        full,
+        graph,
+        selection,
+        Qwen25VLAdapter.capabilities,
+        prototype_config=PrototypeConfig(
+            group_size=2,
+            pooling_mode="forecast_attention_token",
+            attention_bias_basis="forecast_attention_entropy",
+            anchor_position_strategy="forecast_weighted_member_medoid",
+        ),
+        residual_config=ResidualConfig(enabled=False),
+        key_transform=transform,
+        prototype_token_weight_by_head={(0, 0): torch.tensor([0.01, 0.25, 0.75])},
+    )
+    record = construction.prototypes[0]
+    assert record.anchor_logical_position == 2
+
+    promoted = full.gather_exact_blocks((full.blocks[2],))
+    refreshed = refresh_prototype_after_promotions(
+        full,
+        record,
+        construction.state.prototypes.prototype_keys[0],
+        construction.state.prototypes.prototype_values[0],
+        {2: (promoted.key_blocks[0], promoted.value_blocks[0])},
+        key_transform=transform,
+    )
+
+    assert refreshed.record.assigned_node_ids == (1,)
+    assert refreshed.record.anchor_node_id == record.anchor_node_id
+    assert refreshed.record.anchor_logical_position == record.anchor_logical_position
+    expected = _rotate(neutral[..., 1:2, :], cos[..., 2:3, :], sin[..., 2:3, :])
+    assert torch.allclose(refreshed.key, expected, atol=1e-4, rtol=0)

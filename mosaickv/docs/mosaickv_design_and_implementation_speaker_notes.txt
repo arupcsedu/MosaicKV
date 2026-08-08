@@ -1,0 +1,1250 @@
+MOSAICKV DESIGN AND IMPLEMENTATION
+SLIDE-BY-SLIDE SPEAKER NOTES
+
+Companion deck:
+mosaickv/docs/mosaickv_design_and_implementation_slides.tex
+
+How to use these notes
+----------------------
+These notes are written as a suggested talk track, not as text to read word for word.
+Define each abbreviation the first time it is spoken. Pause at arrows in a figure and
+follow them from left to right. The deck explains design and implementation; it does not
+present exploratory numbers as paper-ready measurements. Never describe a conditional or
+unsupported path as verified. Fictional examples are teaching examples only.
+
+
+SLIDE 1 — MosaicKV: Design and Implementation
+Main message: MosaicKV makes a large model memory smaller without retraining the model.
+
+Speaker notes:
+Welcome the audience and say that this talk explains MosaicKV, abbreviated MKV. A
+Vision–Language Model, or VLM, reads both words and visual material such as images,
+documents, charts, or video. During answering, it stores a large working memory called the
+Key–Value cache, or KV cache. MKV tries to keep the evidence that matters, safely summarize
+some related evidence, and recover originals if a later answer step becomes risky. Emphasize
+that the goal today is understanding: what each part does, why it exists, and how the code
+keeps it correct.
+
+Transition: “First, let me explain how this deck should be read.”
+
+
+SLIDE 2 — How to Read This Deck
+Main message: The figures teach the idea first, while scientific boundaries prevent overclaiming.
+
+Speaker notes:
+Point to the blue box. Tell new learners that every important short form is defined, simple
+analogies are used, and equations are explained symbol by symbol. Then point to the orange
+box. This is a design and implementation presentation, not a claim that every possible
+experiment has already succeeded. Any made-up number is explicitly called a teaching
+example. Unsupported model or backend paths stay labeled unsupported. Read the green
+one-sentence summary slowly: MKV packs useful memories, summarizes compatible memories,
+and can restore originals when the next-token decision looks unsafe.
+
+Transition: “The next four slides are dictionaries; you do not need to memorize them.”
+
+
+SLIDE 3 — Abbreviations I: Model and Runtime Keywords
+Main message: Establish the basic language of model inference.
+
+Speaker notes:
+Use this slide as a reference rather than reading every row mechanically. Explain the four
+most important terms. A Vision–Language Model, or VLM, handles words and visuals. Query,
+Key, and Value—Q, K, and V—work like a search request, an index label, and the information
+returned from that label. The KV cache stores earlier K and V tensors so they do not need to
+be recomputed. FullKV means the untouched, full-cache reference. Briefly note that Rotary
+Position Embedding, or RoPE, records token position by rotating vector coordinates, and that
+Grouped-Query Attention, or GQA, lets several Q heads share one KV head.
+
+Transition: “Now we can name the six pieces that make MKV different.”
+
+
+SLIDE 4 — Abbreviations II: The Six MosaicKV Components
+Main message: MKV is a pipeline of prediction, connection, scoring, selection, storage, and repair.
+
+Speaker notes:
+Walk down the table in order. Future-Query Forecasting, or FQF, predicts what future answer
+steps may search for. The Sparse Cross-Modal Evidence Graph, or SCEG, connects related
+evidence across text, image, layout, and time. Value-Aware Block Utility, or VBU, scores each
+memory block. Budgeted Submodular Selection, or BSS, chooses a useful and diverse set under
+a hard memory limit. The Three-Tier Cache, or TTC, separates exact blocks, prototypes, and
+recoverable residuals. Uncertainty-Guided Residual Repair, or UGRR, restores originals when a
+decode step looks risky. Stress that removing one component creates a named ablation, not the
+complete method.
+
+Transition: “Correctness also needs a vocabulary for positions, budgets, and evaluation.”
+
+
+SLIDE 5 — Abbreviations III: Safety, Evaluation, and Storage
+Main message: These terms describe how MKV stays correct and how it is measured fairly.
+
+Speaker notes:
+Highlight the Logical Position Map, or LPM. It remembers where a packed cache item came
+from in the original sequence. Highlight the KV Block Descriptor, or KVBD, which is an
+identity card for a selectable block. Explain that the Prototype Key Transform, or PKT,
+handles RoPE safely before keys are merged. Retention Ratio, or RR, is measured active KV
+bytes divided by FullKV bytes; it is not merely a claimed percentage of tokens. Finally,
+define Time To First Token, Inter-Token Latency, and End-To-End latency—TTFT, ITL, and
+E2E—because they answer different performance questions.
+
+Transition: “A few file, number, and hardware terms complete our dictionary.”
+
+
+SLIDE 6 — Abbreviations IV: Data, Numbers, and Software
+Main message: Reproducible experiments depend on precise data formats, number formats, and software records.
+
+Speaker notes:
+Explain only the rows needed later. Optical Character Recognition, or OCR, describes text
+and layout detected in images. Coordinate and Compressed Sparse Row, COO and CSR, are
+compact ways to store a sparse graph. FP32, FP16, BF16, FP8, and INT8 are number formats
+with different size and precision. JSONL stores one structured record per line; YAML stores
+human-readable configuration. A Secure Hash Algorithm identifier, or SHA, fingerprints
+code or configuration. CUDA is NVIDIA’s GPU platform. Not a Number and Infinity, NaN and
+Inf, are invalid numerical outputs that the runtime rejects.
+
+Transition: “With the language established, here is the route through the talk.”
+
+
+SLIDE 7 — Roadmap
+Main message: The talk moves from foundations, through the six-part design, to implementation and limits.
+
+Speaker notes:
+Point to the three columns. Part 1 explains tokens, attention, the KV cache, and the memory
+problem. Part 2 follows the MKV pipeline: forecasting, the evidence graph, utility, selection,
+the three storage tiers, and repair. Part 3 shows how these ideas become safe software,
+including model adapters, measurements, testing, and backend boundaries. Tell the audience
+that the first section may feel basic, but it is important because every later correctness rule
+comes from how attention and position actually work.
+
+Transition: “Let us begin with what a multimodal model really receives.”
+
+
+SLIDE 8 — A VLM Turns Everything into Tokens
+Main message: Text and visual inputs become one long logical token sequence.
+
+Speaker notes:
+Follow the top arrow from the text request through many image tokens and toward the answer.
+A tokenizer splits words into small text tokens. A vision encoder divides an image or video
+into patches or frames, and a projector turns those visual features into language-side visual
+tokens. One image may produce hundreds of tokens; several images, a document, or a video
+can produce far more. The model therefore sees a long ordered sequence even when the user
+sees only one prompt and one picture. This long prefix is the source of the KV memory
+pressure that MKV addresses.
+
+Transition: “How does the model search through that long sequence?”
+
+
+SLIDE 9 — Attention Is a Search through Stored Notes
+Main message: Q asks a question, K identifies relevant memories, and V returns their content.
+
+Speaker notes:
+Use the notebook analogy. Imagine each old note has a label and some written content. The
+current Query, Q, describes what the model wants now. Each Key, K, is compared with that
+query. A strong match gives the corresponding Value, V, more influence. In the figure, a
+question about a chart total should match the chart title or total row more strongly than an
+unrelated logo. Attention does not literally read words from an index card, but the analogy
+captures the three roles. Compression becomes dangerous if it removes a small note that is
+essential to the answer.
+
+Transition: “The next slide turns that story into a small equation.”
+
+
+SLIDE 10 — The Attention Equation—One Step at a Time
+Main message: Attention converts Q–K similarity into weights and mixes V using those weights.
+
+Speaker notes:
+Explain the equation in three steps. First, compare the current query q with every key k. The
+dot product measures how well their directions match, and the square-root scaling prevents
+numbers from becoming too large. Second, softmax converts the comparison scores into
+nonnegative probabilities that sum to one. Third, multiply every value v by its probability
+and add the results. The output is therefore a weighted mixture of stored evidence. Point to
+the warning: deleting a key or value can remove its probability mass or its information, even
+if that token looked unimportant earlier.
+
+Transition: “Because old keys and values are reused, models save them in a cache.”
+
+
+SLIDE 11 — Why the KV Cache Exists
+Main message: The KV cache saves computation but consumes memory.
+
+Speaker notes:
+Trace the figure from prefill to saved K and V, then to several generated tokens. Prefill reads
+the entire prompt and media once. Without a cache, every new answer token would require the
+model to recompute all earlier keys and values. Saving them makes decoding much faster.
+However, the saved tensors remain on the GPU for every layer and KV head. Long multimodal
+prompts therefore exchange repeated computation for a large memory footprint. FullKV keeps
+everything; MKV asks whether the active portion can be smaller while preserving the answer.
+
+Transition: “Multimodal input makes this memory growth especially steep.”
+
+
+SLIDE 12 — Why Multimodal KV Memory Grows Quickly
+Main message: KV memory multiplies across layers, heads, tokens, K/V tensors, and bytes per number.
+
+Speaker notes:
+Read the formula as a multiplication story, not as something to memorize. Memory grows with
+the number of layers, the number of KV heads, the length of the cached sequence, the head
+dimension, two tensors—K and V—and the bytes used by each number. A longer prompt affects
+every layer and every KV head, so one extra group of visual tokens is copied throughout the
+model’s cache structure. Batch size and multiple requests multiply the cost again. This is why
+reducing active cache bytes can allow longer inputs, larger batches, or more simultaneous
+users.
+
+Transition: “That leads directly to our research question.”
+
+
+SLIDE 13 — Research Problem
+Main message: Compress the active cache under a hard byte budget without losing necessary evidence or positional correctness.
+
+Speaker notes:
+State the challenge in one sentence: after one full multimodal prefill, keep enough evidence
+for accurate deterministic decoding while obeying a measured active-KV byte budget. Then
+separate the three goals. Quality means retaining information needed by future answer steps.
+Systems means reducing real GPU bytes, not just reporting a nominal token fraction.
+Correctness means preserving original positions, attention masks, mandatory tokens, and
+deterministic behavior. These goals can conflict. A method may save bytes but lose evidence,
+or preserve tokens logically while failing to reduce the memory that the backend actually
+allocates.
+
+Transition: “We need an uncompromised reference before judging any compression.”
+
+
+SLIDE 14 — FullKV Is the Ground Truth
+Main message: FullKV is an untouched reference, and RR equals 1.0 must reproduce it.
+
+Speaker notes:
+Explain what FullKV does: one ordinary full-cache prefill, deterministic greedy decoding,
+synchronized measurement, and exact memory accounting. Explain what it never does: no
+pruning, prototypes, quantization, offloading, or repair. This makes FullKV the quality and
+systems reference. At Retention Ratio 1.0, MKV must keep every source block exact; the
+prototype and residual tiers must be empty and repair must be inactive. Token outputs should
+match FullKV, and logit differences must stay inside a documented numerical tolerance. If
+this identity test fails, lower-retention results are not trustworthy.
+
+Transition: “Why not simply keep the tokens with the largest old attention scores?”
+
+
+SLIDE 15 — Why Simple Top-k Pruning Is Not Enough
+Main message: A single ranking score cannot represent future need, diversity, structure, and recoverability.
+
+Speaker notes:
+Walk through the possible failures. Prompt attention describes what the prompt searched for,
+not necessarily what future answer tokens will search for. Separate blocks may repeat the
+same fact, so keeping all of them wastes budget. Averaging arbitrary K and V vectors can blur
+different meanings or mix incompatible RoPE phases. Compressing once forever gives the
+system no recovery path if a later token needs discarded evidence. MKV answers these gaps
+with forecasting, typed evidence connections, value-aware utility, diversity-aware selection,
+safe prototypes, recoverable residuals, and bounded repair.
+
+Transition: “Here is that complete design in one line.”
+
+
+SLIDE 16 — The Six-Part MosaicKV Design
+Main message: Each component gives information or a safety guarantee to the next component.
+
+Speaker notes:
+Follow the boxes from left to right. FQF predicts future need. SCEG connects evidence that
+belongs together. VBU scores attention, content contribution, novelty, and evidence value.
+BSS chooses a diverse set under a fixed budget. TTC decides which information stays exact,
+which can be safely summarized, and which originals remain recoverable on the CPU. UGRR
+monitors decoding and restores residuals if needed. Explain that order matters: later stages
+depend on facts produced by earlier stages. Also repeat the system contract: a partial pipeline
+must receive its own method name and cannot silently be reported as complete MKV.
+
+Transition: “Now we will follow the same stages during one actual request.”
+
+
+SLIDE 17 — End-to-End Runtime
+Main message: MKV performs one prefill, builds a compression plan, then uses an explicit decode-and-repair loop.
+
+Speaker notes:
+Trace the upper row first. The runtime receives prompt and media, performs one FullKV
+prefill, forecasts future queries, divides the cache into blocks, constructs the evidence graph,
+and performs scoring and selection. It then creates an active GPU cache containing Exact Tier
+and possibly Prototype Tier entries, while Residual Tier originals live on the CPU. Trace the
+lower row backward from active cache to one-token decode, a repair-risk check, and the final
+answer. The dashed line means a risky step may restore residuals and recompute that same
+token once. All methods share this owned path for fair accounting.
+
+Transition: “Owning the decode loop is essential because the cache must be editable.”
+
+
+SLIDE 18 — The Explicit HF Runtime Owns the Cache
+Main message: The MKV path does not hide cache changes inside model.generate().
+
+Speaker notes:
+Explain that Hugging Face, abbreviated HF, provides the model implementation, but MKV uses
+an explicit prefill and token-by-token decoding loop. It does not call model.generate() for the
+compressed path because the cache must be inspected and possibly changed between steps.
+The runtime prepares model-specific inputs, performs prefill once, extracts the correct cache
+object, captures query vectors and attention where supported, updates the active cache, and
+decodes greedily. Temperature is zero, sampling is disabled, and the maximum output length
+is fixed. This explicit ownership makes timing, repair, and parity checks visible.
+
+Transition: “Different model families still expose their caches differently, so we need adapters.”
+
+
+SLIDE 19 — Model Adapter Contract
+Main message: Every model adapter must describe its real input, query, position, and cache behavior.
+
+Speaker notes:
+Do not read every operation; group them into responsibilities. Input preparation applies the
+checkpoint’s exact chat template and media processor. Prefill and one-token decode expose
+the model’s real forward path. Cache extraction and injection respect the model-specific
+cache class and tensor layout. Query capture uses hooks without changing weights. The
+adapter also reports modality spans, logical sequence length, and whether cached keys are
+before or after RoPE. Capabilities explicitly say whether prototype merging and residual
+repair are safe. This prevents the runtime from assuming that Qwen, LLaVA, and InternVL
+store identical cache tensors.
+
+Transition: “One distinction is so important that it deserves its own picture: logical versus physical position.”
+
+
+SLIDE 20 — Logical Position Is Not Physical Storage Position
+Main message: Packing memory must not renumber the sequence.
+
+Speaker notes:
+Use the top row as the original story positions: zero through seven. Suppose compression
+keeps only original positions zero, two, five, and seven. The GPU may pack those items into
+physical slots zero through three, but their logical labels remain zero, two, five, and seven.
+The next generated token still receives logical position eight, not physical position four.
+RoPE and causal masking depend on logical positions. Renumbering packed items would change
+their positional phases and could change the answer even if their K and V contents were
+untouched.
+
+Transition: “The Logical Position Map records this relationship.”
+
+
+SLIDE 21 — The Logical Position Map (LPM)
+Main message: The LPM is the translation table between packed cache slots and original sequence positions.
+
+Speaker notes:
+Describe the LPM as a backpack inventory. A student may move pages into a smaller bag, but
+the page numbers printed on those pages do not change. Likewise, the LPM stores the mapping
+from each active physical slot to its original logical position. It also stores the original
+prompt length, the packed active length, and the next decode position. Invariant checks require
+positions to remain strictly increasing within each block. Every generated token advances
+from the original prompt length, not from the packed length. This mapping is passed into
+RoPE-aware attention and mask construction.
+
+Transition: “Rather than selecting one token at a time, MKV forms fixed-size blocks.”
+
+
+SLIDE 22 — Fixed-Size Blockization
+Main message: Blocks are built independently for every layer and KV head.
+
+Speaker notes:
+Point to the rows. A block is a consecutive group of cache positions, such as four tokens in
+the teaching figure. The same position range appears separately in each layer and KV head
+because those tensors represent different computations. MKV never combines different
+layers or heads into one block. Required modality or metadata boundaries can split a block
+early, and mandatory tokens are never hidden inside a removable mixed block. Fixed-size
+blocks make the main budget close to a cardinality problem, while byte-budget logic handles
+variable-sized edge cases.
+
+Transition: “Each block receives a detailed identity card.”
+
+
+SLIDE 23 — What a KV Block Descriptor (KVBD) Records
+Main message: A KVBD joins tensor identity with evidence identity.
+
+Speaker notes:
+Explain the two halves. Cache identity records the layer, KV head, physical indices, logical
+positions, tensor type, device, and exact byte size. Evidence identity records modality,
+available token identifiers, image or frame identifiers, OCR boxes, page or region metadata,
+and whether the block is mandatory. This metadata supports fair byte accounting, graph
+construction, prototype compatibility, repair indexing, and debugging. If metadata is not
+available, the field remains absent and the graph uses documented fallback behavior; the
+runtime must not invent an OCR box, page number, or frame identity.
+
+Transition: “These objects are protected by invariants that fail early when state becomes inconsistent.”
+
+
+SLIDE 24 — Block-State Invariants
+Main message: Every cache position and every tier membership must have one consistent owner.
+
+Speaker notes:
+Walk through the checks. Every source position belongs to exactly one block for its layer and
+head. Exact, prototype, and residual memberships cannot contradict one another. Prototype
+members must link to their exact anchor and recoverable residuals. Active-byte accounting
+must equal the underlying tensor storage. Retention Ratio 1.0 must reconstruct the source
+cache exactly. Mandatory blocks remain exact, and logical positions stay monotonic. Explain
+why this matters: a late decoding failure is difficult to diagnose, but an invariant failure at
+compression time points directly to the broken ownership or mapping.
+
+Transition: “With safe block state in place, the first design component predicts future searches.”
+
+
+SLIDE 25 — Component 1: Future-Query Forecasting (FQF)
+Main message: FQF estimates what evidence future answer tokens may request.
+
+Speaker notes:
+Ask the audience to imagine beginning a homework answer. Before writing, they can guess
+whether they will soon need a number, a label, or a definition. FQF does a mathematical
+version of that guess using query vectors. Prompt attention alone describes searches already
+made while reading the input. Future answer tokens can ask different questions. FQF builds a
+distribution of likely future queries for each layer and KV head, giving the selector a better
+signal of what may become important during generation. It remains a forecast, so later slides
+measure its error and provide repair.
+
+Transition: “MKV supports three ways to form this forecast.”
+
+
+SLIDE 26 — Three FQF Modes
+Main message: Prompt Window is cheap, Draft Rollout is more direct, and Hybrid combines both.
+
+Speaker notes:
+Explain Prompt Window, or PW, first. It uses queries and attention near the end of the prompt,
+which often reveal what kind of answer is needed. Draft Rollout, or DR, temporarily generates
+a small number of greedy tokens using FullKV and records their queries. DR costs more but
+can resemble real answer-time searches. Hybrid Query Forecast, or HQF, combines the stable
+prompt anchor with draft samples. State the valid zero settings: PW needs a positive window,
+DR needs positive draft steps, and HQF needs both. Invalid empty forecasts fail validation
+rather than returning meaningless scores.
+
+Transition: “Drafting must be temporary and must not repeat or damage the original prefill.”
+
+
+SLIDE 27 — Draft Rollout Reuses One Prefill
+Main message: Draft queries come from a cloned state, while the final cache remains unchanged.
+
+Speaker notes:
+Trace the straight path: perform the original prefill, clone the cache and associated decode
+state, run a few deterministic greedy steps, capture Q and attention, and then discard the
+draft tokens and cloned cache. The dashed arrow shows that final generation starts from the
+original prefill state. There is no second prefill. The clone must not share mutable K/V tensors,
+masks, or position state with the final run. Tests fingerprint the original cache before and
+after drafting. If any original tensor changes, the forecast path fails.
+
+Transition: “The captured information is summarized in a Query Forecast object.”
+
+
+SLIDE 28 — What the Query Forecast (QF) Stores
+Main message: QF stores per-layer, per-KV-head statistics, samples, weights, provenance, and cost.
+
+Speaker notes:
+For every decoder layer and KV head, the Query Forecast stores a prompt mean, a covariance
+or lower-memory diagonal variance, draft query samples when available, normalized
+centroids, and forecast weights. It also records where each signal came from, which layer/KV
+head it represents, how much prompt and draft evidence was used, and the measured forecast
+overhead. The low-memory mode avoids storing a full covariance matrix when that would be
+too expensive. Provenance is important because a selector score is only interpretable when
+we know which forecast created it.
+
+Transition: “Grouped-Query Attention makes per-head routing more subtle.”
+
+
+SLIDE 29 — GQA and Per-Head Forecast Routing
+Main message: Each KV head receives forecast evidence from the Q heads that actually share it.
+
+Speaker notes:
+Define Grouped-Query Attention, or GQA, again. A model may have more Query heads than Key–Value
+heads, so several Q heads search one shared KV head. MKV groups those Q samples using the model’s
+true head mapping. If the Q-head count is not divisible by the KV-head count, validation fails
+instead of guessing. Then explain adaptive routing. Some heads keep searching for the same prompt
+evidence, while others change during draft decoding. Per-head routing can give stable heads more
+Prompt Window weight and shifted heads more Draft Rollout weight. One global mixture would hide
+these differences.
+
+Transition: “Head routing is not enough; Q and K must also be compared in compatible positional coordinates.”
+
+
+SLIDE 30 — Important RoPE Boundary in FQF
+Main message: Never directly compare a pre-RoPE query with a post-RoPE cached key.
+
+Speaker notes:
+Point to the two orange boxes. A captured query may be taken before Rotary Position Embedding,
+while the cached key may already include its position-dependent rotation. Their coordinates no
+longer match, so a direct dot product is not a valid attention score. The safe current path uses
+actual eager Prompt Window or Draft Rollout attention that has already applied the correct
+positions. Every VBU attention signal records its provenance. If the adapter cannot prove that a
+comparison is RoPE-aware, that signal is rejected rather than silently treated as valid.
+
+Transition: “Because a forecast can still be wrong, we measure its quality directly.”
+
+
+SLIDE 31 — How FQF Quality Is Diagnosed
+Main message: Internal metrics test whether FQF predicted the evidence used by the real future decode.
+
+Speaker notes:
+Explain the four diagnostics. Query cosine similarity asks whether forecast and true future query
+vectors point in similar directions. Attention rank correlation asks whether they order blocks in
+the same way. Selected-block recall asks how many blocks chosen by an oracle future view were also
+kept by the online forecast. Forecast regret measures true future attention mass that was missed.
+The oracle comes from a cloned FullKV decode and lives only in evaluation code. It can grade the
+forecast, but it can never influence online compression. A correct final answer alone is not enough,
+because it might be correct by chance.
+
+Transition: “Forecasting predicts need; the next component connects pieces of the same evidence.”
+
+
+SLIDE 32 — Component 2: Sparse Cross-Modal Evidence Graph (SCEG)
+Main message: SCEG represents relationships that sequence order alone cannot express.
+
+Speaker notes:
+Ask the slide’s question aloud: which cache blocks may be different pieces of the same evidence?
+Use a chart example. A legend, colored bar, axis label, numeric cell, and words in the question may
+be far apart in token order, yet they form one fact. A document’s row header and answer cell can
+also be distant. Video evidence may span nearby frames. SCEG creates typed links among such blocks.
+It does not modify K or V; it gives selection and prototype assignment a structured map of how
+evidence relates across modalities.
+
+Transition: “This small teaching graph makes the idea concrete.”
+
+
+SLIDE 33 — A Small SCEG Example
+Main message: Typed edges distinguish meaningful evidence relationships from weak fallback links.
+
+Speaker notes:
+State clearly that this is a teaching example, not a measurement. The text question “2025 total?”
+has a cross-modal connection to the OCR column label “2025” and a semantic connection to the image
+cell containing 42. Layout links connect that cell to its row and column labels. The unrelated logo
+has only a weak dashed fallback link. The edge color and label explain why two nodes are connected.
+This matters because two blocks with the same similarity score may have very different structural
+roles in a chart or document.
+
+Transition: “The real graph supports several independently configurable edge sources.”
+
+
+SLIDE 34 — SCEG Edge Types
+Main message: Each edge type captures one kind of evidence relationship.
+
+Speaker notes:
+Group the rows rather than reading every cell. Semantic and attention co-activation edges come from
+model representations or prompt behavior. Spatial, OCR/layout, temporal, and same-region edges come
+from available media metadata. Cross-modal edges connect question text to visual evidence. A
+fallback connects nearby compatible blocks only when richer metadata is unavailable. Each source
+has its own weight and can be removed in an ablation without breaking the others. Typed edges make
+diagnosis possible: we can ask whether a result came from semantic similarity, document layout,
+time adjacency, or another source.
+
+Transition: “Before adding any edge, the runtime checks that the connection is legal.”
+
+
+SLIDE 35 — SCEG Compatibility Filters Prevent Invalid Links
+Main message: Graph edges obey layer, head, modality, position, and metadata constraints.
+
+Speaker notes:
+Explain that normal graph links remain within the same decoder layer and KV head. Allowed modality
+pairs are directional, so text-to-image can be configured separately from image-to-text. Edge
+sources that imply locality also obey a maximum logical-position span. Spatial, layout, page, or
+temporal edges require real corresponding metadata. Missing metadata never creates imaginary OCR
+boxes, page regions, or frame numbers. Instead, the graph records that it used a fallback. These
+filters prevent plausible-looking but scientifically invalid connections.
+
+Transition: “A useful graph must also remain much smaller than a dense all-pairs matrix.”
+
+
+SLIDE 36 — How the SCEG Stays Sparse
+Main message: The normal graph stores only a bounded number of neighbors per node.
+
+Speaker notes:
+If there are n nodes, comparing and storing every pair would require roughly n squared space. That
+could erase the memory saved by cache compression. SCEG instead keeps the top d neighbors per node
+and edge source, computes similarity in chunks, and uses bounded spatial, layout, and temporal
+neighborhoods. The result is stored in Coordinate or Compressed Sparse Row form—COO or CSR. With a
+fixed d, graph storage grows like n times d. Say this plainly: doubling the blocks roughly doubles,
+rather than quadruples, normal graph memory.
+
+Transition: “The trace records enough graph statistics to catch a bad construction.”
+
+
+SLIDE 37 — SCEG Diagnostics
+Main message: Diagnostics show whether the graph is connected, diverse, and using real metadata.
+
+Speaker notes:
+The debug trace records node and edge counts, average degree, connected components, modality mixing,
+edge-source counts, and evidence coverage. It also states whether structural metadata or fallback
+logic created the links. Give three failure examples. An empty graph may mean filters are too strict
+or metadata is missing. A nearly dense graph may mean thresholds are too loose. A graph with no
+cross-modal edges may reveal an incorrect modality map. These checks separate a genuine algorithmic
+effect from a graph-building bug.
+
+Transition: “The graph describes relationships; VBU turns forecast and graph evidence into block scores.”
+
+
+SLIDE 38 — Component 3: Value-Aware Block Utility (VBU)
+Main message: VBU asks not only whether a block will be viewed, but whether it is useful and nonredundant.
+
+Speaker notes:
+Explain the seven signals in three groups. Future attention estimates likely viewing. Expected
+attention-output contribution estimates how much the block’s value could change the result. Novelty,
+centrality, modality rarity, and redundancy describe whether the block adds distinct or structurally
+important evidence. Mandatory priority overrides ordinary ranking for protected content. Use the
+three questions in the orange box: will the model look at it, could it change the output, and is
+another selected block already saying the same thing? Keeping these signals separate allows clean
+ablations and debugging.
+
+Transition: “The local utility equation combines three normalized signals with recorded signs.”
+
+
+SLIDE 39 — VBU Local Utility Equation
+Main message: The resolved coefficient signs make attention, contribution, and novelty rewards.
+
+Speaker notes:
+Read u sub i as the local utility of block i. The terms are future attention p, value contribution c,
+and novelty n. The written equation contains minus signs, while the default value and novelty
+coefficients are negative. Subtracting a negative number makes those terms positive rewards. This
+looks unusual, so the exact resolved coefficients are stored in every configuration and trace. Each
+signal is normalized to a nonnegative unit-sum scale within one layer and KV-head group. That avoids
+letting a naturally larger numerical scale dominate simply because of units.
+
+Transition: “Two small safety reservations protect evidence before ordinary greedy selection begins.”
+
+
+SLIDE 40 — Prompt and Evidence Safety Reservations
+Main message: PAR and EPR reserve part of the same byte budget for prompt anchors and fine-grained evidence.
+
+Speaker notes:
+Prompt-Anchor Reservation, or PAR, keeps a configured fraction of blocks with strong prompt-only
+attention. It protects against an inaccurate future forecast. Evidence-Preservation Reservation, or
+EPR, keeps blocks with strong fine-grained graph evidence, such as a chart cell or document row that
+a broad semantic representative might blur. These reservations are not free memory. They consume
+the same active-byte budget used by all selected blocks, and each block records why it was reserved.
+This makes their cost visible and allows a fair ablation.
+
+Transition: “BSS now fills the remaining budget while rewarding both utility and coverage.”
+
+
+SLIDE 41 — Component 4: Budgeted Submodular Selection (BSS)
+Main message: BSS prefers useful blocks that cover new evidence rather than repeated copies of one fact.
+
+Speaker notes:
+Describe the set S as the blocks chosen for the active cache. The first term adds their local
+utilities. Facility-location coverage rewards selected blocks that represent nearby graph nodes.
+Modality coverage rewards representing available modalities. As with the local equation, the
+resolved negative lambda values combined with written minus signs turn coverage into rewards.
+Explain “submodular” using diminishing returns: the first block covering a fact is valuable, while a
+second nearly identical block adds less. BSS therefore spends a limited budget on both strength and
+diversity.
+
+Transition: “The implementation uses a deterministic lazy-greedy approximation.”
+
+
+SLIDE 42 — Deterministic Lazy-Greedy BSS
+Main message: Mandatory and reserved blocks enter first; a priority queue adds the best affordable marginal gain.
+
+Speaker notes:
+Follow the diagram. Mandatory Exact Tier blocks are selected first, followed by Prompt-Anchor,
+Evidence-Preservation, and required prototype anchors. Remaining candidates enter a priority queue
+with a cached marginal gain per cost. Before selection, a stale gain is recomputed because earlier
+choices may have reduced its coverage benefit. If it remains best and fits, select it; otherwise
+update or skip it. Ties are broken deterministically by gain per cost, raw gain, cost, and node ID.
+Every accepted and rejected block receives a reason record.
+
+Transition: “The selector can count blocks, slots, or exact bytes, but the paper comparison uses measured bytes.”
+
+
+SLIDE 43 — Budgets, Retention Ratio, and Exact Checks
+Main message: Requested retention and realized active-byte retention are not always identical.
+
+Speaker notes:
+Explain the three cost units. Fixed blocks can cost one each, retained-slot mode counts source
+positions, and the byte path uses exact K and V payload bytes. Realized Retention Ratio divides
+measured Exact Tier plus Prototype Tier bytes by measured FullKV bytes. Whole blocks, mandatory
+content, and dense backend layouts may make the realized ratio differ from the request. Mandatory
+blocks are chosen first; if they alone exceed the limit, the run fails. For tiny graphs, an exhaustive
+solver checks the lazy-greedy result against the exact best feasible set.
+
+Transition: “Selection decides what matters; the Three-Tier Cache decides how selected and omitted evidence is represented.”
+
+
+SLIDE 44 — Component 5: Three-Tier Cache (TTC)
+Main message: Active GPU memory contains exact and prototype entries, while recoverable originals remain visible CPU residual memory.
+
+Speaker notes:
+Use the three horizontal boxes. Exact Tier, or ET, keeps mandatory and high-utility blocks unchanged
+on the GPU. Prototype Tier, or PT, keeps one safe summary for a compatible group of unselected
+blocks. Residual Tier, or RT, stores those groups’ original blocks on the CPU for possible recovery.
+The dashed arrow shows restoration from RT to ET. ET plus PT is the active GPU KV budget. RT is
+reported separately as CPU residual memory and must never be hidden inside the active-memory number.
+
+Transition: “The Exact Tier is the non-approximate safety anchor.”
+
+
+SLIDE 45 — Exact Tier (ET): The Safety Anchor
+Main message: ET preserves selected K and V numbers and their complete identity unchanged.
+
+Speaker notes:
+List what “exact” means: the original K and V values, dtype, device, logical positions, layer and
+head identity, and mandatory metadata are preserved. The most important evidence should not pay an
+approximation error. ET entries also provide stable anchors for prototype clusters and causal
+generation. Repeat the identity rule: at Retention Ratio 1.0, every source block goes to ET, PT and
+RT remain empty, and reinjection reconstructs FullKV. This is the strongest end-to-end correctness
+test for cache extraction, packing, and positions.
+
+Transition: “Only compatible unselected blocks may be summarized in the Prototype Tier.”
+
+
+SLIDE 46 — Prototype Tier (PT): Assign to Compatible Anchors
+Main message: Prototype membership is restricted by layer, head, modality, position span, and error guards.
+
+Speaker notes:
+An unselected block may join a selected ET anchor only in the same decoder layer and KV head. The
+source-to-anchor modality pair must be allowed, its logical position span must be bounded, and any
+enabled K/V error or group-size guards must pass. Prefer the strongest real SCEG relationship when
+choosing an anchor. A bounded positional scaffold may make representation feasible, but it is
+labeled as fallback rather than evidence. If a block has no safe anchor, or ET plus PT exceeds the
+budget, the runtime uses an explicit exact-only fallback or stops. It never claims incomplete
+prototype coverage as full TTC.
+
+Transition: “For a legal cluster, K and V are pooled with normalized weights.”
+
+
+SLIDE 47 — How a Weighted Prototype Is Computed
+Main message: Compatible members are averaged accurately in FP32 and stored as one cache slot.
+
+Speaker notes:
+First normalize each positive cluster weight so all alpha values sum to one. Then pool each member
+block and compute weighted means for K and V. The pooling and averaging use 32-bit floating point,
+or FP32, to reduce rounding error. The finished prototype is cast back to the cache dtype and device.
+One prototype consumes one active cache slot. Its selected ET anchor stays exact and is not mixed
+into the mean of omitted members. The purpose is to retain a compact trace of compatible omitted
+evidence rather than deleting it entirely.
+
+Transition: “Keys need an additional safety step because their vectors may already contain position rotations.”
+
+
+SLIDE 48 — Why Directly Averaging Post-RoPE Keys Is Unsafe
+Main message: A naive average mixes semantic content with different positional phases.
+
+Speaker notes:
+Use the paper-arrow analogy. Draw the same kind of arrow on two transparent sheets, rotate the
+sheets differently, and then average the visible coordinates. The average combines arrow content
+with sheet rotation and no longer cleanly represents either. Post-RoPE keys behave similarly: keys
+from positions a and b have different rotations. Direct averaging can destroy both content and
+position meaning. This is why “same layer and head” is necessary but not sufficient for safe key
+merging.
+
+Transition: “PKT removes the source phases before averaging and applies one audited anchor phase afterward.”
+
+
+SLIDE 49 — Prototype Key Transform (PKT): RoPE-Safe Merging
+Main message: PKT averages keys in phase-neutral space using the exact model-specific RoPE transform.
+
+Speaker notes:
+Follow the boxes left to right. Start with post-RoPE keys carrying different phases. Invert each
+source’s exact phase, compute the FP32 weighted mean in phase-neutral coordinates, and then apply the
+exact phase of the selected anchor. The result is a cache-ready prototype key. This operation is
+architecture-, library-version-, and position-layout-specific. Qwen2.5-VL requires its temporal,
+height, and width Multimodal RoPE; LLaVA families use their audited standard RoPE paths. Any mismatch
+disables PT. The runtime never substitutes a generic rotation and calls it safe.
+
+Transition: “Even with correct phases, some heads tolerate merging better than others.”
+
+
+SLIDE 50 — Adaptive PT and Per-Head Routing (PHR)
+Main message: PHR spends exact memory on sensitive heads and compresses robust heads more strongly.
+
+Speaker notes:
+Per-Head Routing, or PHR, uses label-free calibration to choose a safe policy for each layer and KV
+head. A sensitive head may be ET-only, use a smaller prototype group, require a shorter logical
+position span, or enforce tighter reconstruction-error limits. Diagnostics include K and V
+dispersion, per-member error, position span, cluster size, modality composition, and bytes saved.
+One global group size assumes every head is equally tolerant, which is rarely justified. PHR turns
+prototype merging into an adaptive decision rather than an all-or-nothing switch.
+
+Transition: “The originals represented by prototypes remain recoverable in the Residual Tier.”
+
+
+SLIDE 51 — Residual Tier (RT): Recoverable Originals
+Main message: RT preserves original prototype members in indexed CPU storage.
+
+Speaker notes:
+The Residual Tier stores original K and V for unselected PT members, together with layer, KV head,
+prototype identifier, logical positions, dtype, device, and byte offsets. Contiguous CPU storage
+makes later transfers efficient. The first and default path is lossless. Controlled experiments may
+try FP16, BF16, FP8, or symmetric INT8 with stored scales, but their memory and quality effects are
+reported explicitly. Production UGRR requires pinned CPU memory for asynchronous transfer. If
+pinning is unavailable, repair support fails rather than pretending that an ordinary blocking copy
+is the same mechanism.
+
+Transition: “UGRR now monitors whether the current prototype-based decision looks risky.”
+
+
+SLIDE 52 — Component 6: UGRR Signals
+Main message: Repair risk combines uncertainty, prototype attention, dispersion, and decision margin.
+
+Speaker notes:
+Normalized entropy measures how spread out the next-token probabilities are, scaled by vocabulary
+size. A value near zero means one token dominates; a larger value means the model is less certain.
+For each prototype cluster, risk equals its current attention mass times its K/V dispersion. The
+runtime also records the probability gap between the two leading tokens and may compare against a
+cheap draft distribution using Kullback–Leibler divergence. No single signal is sufficient: entropy
+can be high for reasons unrelated to prototypes, while prototype risk can be high even when the
+token decision is stable.
+
+Transition: “Different named policies turn these signals into repair decisions.”
+
+
+SLIDE 53 — UGRR Policies
+Main message: Every repair policy has an explicit trigger, and oracle repair is evaluation-only.
+
+Speaker notes:
+Start with the required control: policy none never repairs. Entropy triggers on normalized entropy.
+Prototype risk triggers when the maximum cluster risk passes its threshold and any entropy guard.
+The combined policy fires when either online condition holds. Decision-Aware Repair, or DAR, uses
+very high risk alone or moderate risk plus a small top-two token margin. Oracle repair asks whether a
+FullKV counterfactual would help, but only in isolated evaluation code. Run labels record the actual
+policy so oracle and deployable online results can never be mixed.
+
+Transition: “When a policy triggers, repair is a small transaction with hard bounds.”
+
+
+SLIDE 54 — A Repair Event Is a Bounded Transaction
+Main message: Rank, restore, budget, and recompute the current token at most once.
+
+Speaker notes:
+The runtime first computes provisional logits and a token. It measures entropy, token margin, and
+prototype risk, then applies the configured policy. If no trigger occurs, accept the token. If repair
+triggers, rank residual clusters by attention mass times dispersion and select at most R originals.
+Before transferring data, plan any required prototype eviction so the active budget remains valid.
+Promote restored blocks to ET and recompute the same decode step once. Promoted blocks remain exact
+for later steps. The event records its reason, blocks, bytes, transfer time, re-decode time, logit
+change, and token change.
+
+Transition: “A partial restoration must also update the prototype left behind.”
+
+
+SLIDE 55 — Partial PT Refresh and Budget Enforcement
+Main message: Restoring some members subtracts them from the prototype without losing the remaining evidence.
+
+Speaker notes:
+Suppose a prototype summarizes four original blocks and repair restores only one. MKV subtracts that
+member from the FP32 weighted sum, renormalizes the remaining weights, and refreshes dispersion. It
+does not discard the other three members. For post-RoPE keys, this refresh occurs in phase-neutral
+space through the same audited PKT. If promotion would exceed the active budget, evict the
+lowest-utility nonprotected prototype. If no feasible plan exists, perform no transfer and record
+budget infeasibility. Budget enforcement therefore happens before, not after, moving data.
+
+Transition: “Decision-aware thresholds are frozen using disjoint calibration data.”
+
+
+SLIDE 56 — Decision-Aware Repair (DAR) Calibration
+Main message: DAR is enabled only when disjoint calibration predicts selective, beneficial repair.
+
+Speaker notes:
+On calibration examples, record normalized prototype risk, token margin, and whether a FullKV
+counterfactual repair would have helped. Search moderate-risk, high-risk, and margin thresholds while
+enforcing a preregistered maximum trigger rate and minimum predicted precision. Freeze the resulting
+profile and the calibration/evaluation ledgers before held-out testing. If no threshold set passes,
+the safe outcome is a profile that disables online repair and predicts zero triggers. Explain why:
+repair can change a correct token incorrectly and may cost more latency than it saves. Uncalibrated
+repair is not automatically trustworthy.
+
+Transition: “With all six components defined, we can name the three public MKV methods precisely.”
+
+
+SLIDE 57 — Three Public MKV Methods
+Main message: Exact, Prototype, and Full are distinct methods with distinct verified capabilities.
+
+Speaker notes:
+MosaicKV Exact uses forecasting, the evidence graph, value-aware utility, and budgeted selection,
+but keeps only exact blocks. MosaicKV Prototype adds prototype summaries only when the adapter and
+request pass every PKT safety gate. MosaicKV Full adds recoverable residuals and configured UGRR,
+again only when the complete path is safe. The effective method label records what actually ran. If
+PT is unsafe, the runtime records an exact-only safety fallback. A fallback is not prototype
+evidence. Likewise, a zero-trigger or unsupported repair path must not be described as a successful
+repair experiment.
+
+Transition: “These methods are compared with baselines that make different choices.”
+
+
+SLIDE 58 — Baseline (BL) Landscape
+Main message: Each baseline must retain its own algorithmic identity and implementation status.
+
+Speaker notes:
+FullKV keeps everything. Random KV keeps random exact blocks under the same budget and records its
+seed. Prompt Attention Top-k uses only prompt-window attention. LOOK-M reimplementation uses its
+paper’s text prior, pivot selection, and merge. PrefixKV reimplementation uses offline layer-wise
+prefix budgets. VL-Cache reimplementation uses its paper’s modality sparsity and layer allocation.
+The last three local methods end with “reimpl” because they are reimplementations, not official
+code. Do not blend their scoring or merging with MKV. A fair comparison preserves each method’s
+defined behavior while holding shared inputs and budgets constant.
+
+Transition: “The point is not that MKV has more boxes; the question is whether those boxes earn their cost.”
+
+
+SLIDE 59 — What Is Structurally Different about MKV?
+Main message: MKV adds future need, typed evidence, value/diversity, safe representation, and recovery.
+
+Speaker notes:
+Compare the left-side methods with the MKV box. Prompt Top-k uses one past-attention score and keeps
+exact blocks. LOOK-M reimplementation uses a text prior and its own pivot merge. PrefixKV and
+VL-Cache reimplementations use offline or layer-level policies. MKV instead combines forecasted
+future need, typed cross-modal evidence, value and diversity, exact blocks, RoPE-safe prototypes,
+recoverable residuals, and calibrated repair. Then state the real research question: after counting
+forecast, graph, prototype, and repair overhead, does this extra structure preserve more quality at
+the same active bytes or lower active bytes at the same quality? The answer must come from data.
+
+Transition: “That data is meaningful only under an apples-to-apples protocol.”
+
+
+SLIDE 60 — Fair Comparison Uses Measured Active KV Bytes
+Main message: Methods share identical inputs, generation, backend, and measured active-byte budgets.
+
+Speaker notes:
+Summarize the two columns as an equality checklist. Use the same model weights and revision,
+precision, processor, chat template, tokenization, prompt, media preprocessing, output length,
+deterministic decoding, attention backend, warmups, timing protocol, and paired sample identifiers.
+Use the same mandatory-token policy and block granularity where the algorithms permit. The primary
+budget is measured active ET/PT KV bytes, not a nominal token-retention label. Report RT and metadata
+separately. If two “40 percent” methods allocate different bytes, do not treat them as equal-budget
+points.
+
+Transition: “The next two teaching slides show how the full pipeline might handle four simple blocks.”
+
+
+SLIDE 61 — Worked Example, Part 1: Predict, Connect, Score, Choose
+Main message: Forecasting and graph structure can preserve a useful number cell and its mandatory context.
+
+Speaker notes:
+Say twice if needed: this is a fictional teaching example, not a measured result. There are four
+blocks: decoration B0, row label B1, number cell B2, and mandatory block B3. FQF predicts that B1 and
+B2 may matter. SCEG connects the row label to the number cell because they are parts of the same
+evidence. The active budget holds two exact blocks plus one prototype slot. BSS retains B2 and the
+mandatory B3 exactly. This illustrates how future need, graph relationships, and hard mandatory
+priority jointly affect selection.
+
+Transition: “Now we decide what happens to the compatible evidence that was not kept exact.”
+
+
+SLIDE 62 — Worked Example, Part 2: Store and Repair
+Main message: A prototype can retain compact evidence, while its residual enables bounded recovery.
+
+Speaker notes:
+Continue the fictional example. B2 and B3 remain exact on the GPU. A safe prototype summarizes B1,
+and the original B1 is stored in the CPU residual tier. If a decode step assigns high attention to
+that dispersed prototype and the decision looks risky, UGRR restores B1 to ET and recomputes the
+current token once. Then emphasize the completeness rule. If omitted B0 has no safe exact,
+prototype, or residual relationship, the planner must find a feasible exact-only alternative or
+fail. It cannot silently discard B0 and call the Three-Tier Cache complete.
+
+Transition: “Calibration chooses robust settings without using benchmark answer labels.”
+
+
+SLIDE 63 — Label-Free Fidelity Calibration (LFC)
+Main message: LFC chooses a frozen profile using FullKV fidelity signals on disjoint calibration examples.
+
+Speaker notes:
+Read the loss as four understandable penalties. One minus token agreement penalizes changed tokens.
+Log of one plus KL divergence penalizes changes in the next-token probability distribution.
+Attention-output error measures internal reconstruction error. Forecast regret measures missed
+future attention. Label-Free Fidelity Calibration, or LFC, selects the lowest mean plus tail loss
+under the same measured byte ceiling, and bootstrap resampling tests profile stability. Calibration
+and evaluation identifiers are disjoint. Benchmark answer labels never choose the profile. This
+separates algorithmic calibration from tuning directly on test answers.
+
+Transition: “LFC is one of six safeguards surrounding the core pipeline.”
+
+
+SLIDE 64 — Six Quality Safeguards around the Core Design
+Main message: The safeguards address forecast error, structural evidence loss, phase safety, and harmful repair.
+
+Speaker notes:
+Review the safeguards as a chain. PAR protects direct prompt evidence. LFC freezes a stable
+label-free profile. PHR routes forecast and prototype behavior per head. EPR protects fine chart and
+document evidence. PKT makes post-RoPE key merging phase-aware. DAR restricts restoration to
+calibrated risk and decision conditions. Then read the scientific warning: these are implemented
+mechanisms, not proof that MKV is generally superior. Clean-worktree, held-out, byte-matched
+experiments must show whether they improve the quality–memory and quality–latency frontiers.
+
+Transition: “Here is how the implementation connects those safeguards in code.”
+
+
+SLIDE 65 — Runtime Pseudocode
+Main message: The pseudocode mirrors the runtime from input preparation through one-redecode repair.
+
+Speaker notes:
+Walk through the code in four chunks. First, the adapter prepares messages and media and performs one
+prefill while capturing supported evidence. Second, the runtime blockizes the extracted cache,
+performs isolated forecast rollout, and obtains RoPE-aware prompt and draft attention. Third, it
+builds the graph, computes utilities, selects within the active-byte budget, constructs tiers, packs
+them, and injects the new cache while preserving logical positions. Fourth, explicit one-token
+decoding computes a provisional result, optionally restores residuals, and either accepts or
+re-decodes once. Explain that the pseudocode omits error handling for readability; the real runtime
+records all failures and invariants.
+
+Transition: “Logical selection alone may not equal the bytes allocated by a dense HF tensor.”
+
+
+SLIDE 66 — Dense Physical Cache Budget (DPCB)
+Main message: DPCB converts a requested logical budget into a physically representable dense-cache budget.
+
+Speaker notes:
+BSS may choose different numbers of positions for different layer and head pairs. A dense Hugging
+Face tensor, however, may allocate every pair using one common maximum length. Counting only the
+selected positions would then overstate memory savings. Dense Physical Cache Budget, or DPCB,
+quantizes the request to whole-block capacity, sets representable per-layer and per-head limits,
+packs the tensors, and verifies their actual bytes. Both requested and realized Retention Ratios are
+reported. This makes physical allocation, rather than an abstract selection count, the final memory
+truth.
+
+Transition: “After capacity is planned, packing and masks preserve the original causal sequence.”
+
+
+SLIDE 67 — Packing and Decode Masks
+Main message: Packed tensors remain position-aware and numerically valid.
+
+Speaker notes:
+Exact entries are sorted by original logical position inside each layer and head. Prototype entries
+use the logical position of their selected anchor. When all packed capacities align, an audited
+all-valid fast path may be used. Otherwise, eager attention receives checked per-layer and per-head
+validity masks. Generated physical slots are appended while logical position continues from the
+original sequence. Before decoding, the runtime rejects Not a Number or Infinity in K/V, masks,
+prefill logits, or decode logits. A compressed cache without a valid logical-position mask is not
+allowed to run.
+
+Transition: “Correctness is only half the claim; timing also needs exact boundaries.”
+
+
+SLIDE 68 — Measurement Boundaries
+Main message: Every GPU stage is synchronized and measured separately.
+
+Speaker notes:
+Follow the timeline: vision encoder, projector, language-model prefill, MKV compression, Time To
+First Token, per-token decode, and repair. Compression includes forecasting, graph construction,
+selection, and tier construction. GPU work is asynchronous, meaning the CPU can continue before the
+GPU finishes. Therefore the measurement code uses CUDA events and synchronizes at every timing
+boundary. It retains every trial rather than only an average, then reports median, fifth and
+ninety-fifth percentiles, mean, standard deviation, and bootstrap confidence intervals. Unsynchronized
+host timing could create a false speedup.
+
+Transition: “Memory also has several different meanings that should not be mixed.”
+
+
+SLIDE 69 — Memory Accounting
+Main message: Active KV, CPU residual, allocated GPU, and reserved GPU memory are separate measurements.
+
+Speaker notes:
+Active bytes are ET and PT K/V tensor storage used during attention. CPU residual bytes come from
+the actual RT encoding. Peak allocated GPU memory counts live tensor allocations, while peak
+reserved memory includes the caching allocator’s reserved pool. Exact tensor bytes equal the number
+of elements times bytes per element, with views and underlying storage handled consistently across
+methods. Every repair event additionally records restored bytes, transfer time, re-decode time, and
+active cost before and after. Never add or remove one of these categories silently to make a method
+look smaller.
+
+Transition: “Every measurement must be traceable to immutable code, data, hardware, and configuration.”
+
+
+SLIDE 70 — Every Run Has an Immutable Manifest
+Main message: A manifest records enough provenance to reproduce and classify every experimental row.
+
+Speaker notes:
+Group the fields into software, data, hardware, and protocol. Record Git and configuration SHA,
+dirty-worktree patch identity, model and dataset identifiers with immutable revisions, seeds,
+measurement type, prompt/media/tokenization identity, CUDA and driver versions, Python-package
+versions, GPU type and count, clocks, power state, background processes, backend, attention path,
+precision, and generation policy. A dirty-worktree run remains exploratory even when its patch is
+saved. Missing values are explicit, such as “not_used,” rather than blank. This prevents an old row
+from later being mistaken for a canonical paper result.
+
+Transition: “The manifest says what ran; the debug trace explains what it decided.”
+
+
+SLIDE 71 — The Debug Trace Explains Every Decision
+Main message: Each sample has a complete decision trail, including failures.
+
+Speaker notes:
+The trace stores forecast statistics and attention provenance, graph nodes and typed edges, every
+utility signal, every selector marginal gain and reason, tier membership, PKT provenance, packed
+slots, logical positions, repair signals, restored blocks, re-decode results, tokens, bytes, and
+timings. This lets a researcher follow an unexpected token back to a forecast, edge, score, merge,
+or repair event. A failed sample writes both an error result and a failed trace. It never silently
+vanishes from the sample ledger, because silent disappearance can bias aggregate quality upward.
+
+Transition: “Evidence for correctness is built from small deterministic tests toward real checkpoints and datasets.”
+
+
+SLIDE 72 — Testing Progression
+Main message: Different test levels prove different things.
+
+Speaker notes:
+Follow the arrows. CPU unit tests verify formulas and state transitions. Property-based tests try
+many random shapes and block sizes to find invariant violations. GPU smoke tests verify CUDA timing,
+copies, and pinned storage without requiring a full campaign. Checkpoint parity tests compare at
+least sixteen greedy tokens against ordinary generation and test retention-one reinjection. Fixed
+dataset progression then tests repeated real samples. Synthetic tests can prove formulas, but they
+cannot prove model compatibility or benchmark quality. Real checkpoints and clean, sufficiently
+sized held-out datasets remain necessary.
+
+Transition: “Several gates must pass before any compressed result is considered scientifically usable.”
+
+
+SLIDE 73 — Key Correctness Gates
+Main message: Parity, isolation, budget, phase, repair, and oracle boundaries are mandatory gates.
+
+Speaker notes:
+Summarize each row as a yes-or-no test. The explicit FullKV loop matches ordinary greedy generation.
+Extracting and reinjecting the cache preserves tokens and bounded logits. Retention Ratio 1.0 uses
+only ET. Draft Rollout leaves the original prefill unchanged. Selection is deterministic, retains
+mandatory blocks, and stays within bytes. Prototypes remain within layer and head and use compatible
+RoPE phases. Policy none never repairs, a repair re-decodes once at most, and the budget remains
+valid. True future queries and oracle repair decisions are unreachable from online code. Failure at
+one gate blocks the corresponding claim.
+
+Transition: “Support is therefore a capability matrix, not one blanket yes-or-no statement.”
+
+
+SLIDE 74 — Current HF Model Support Boundary
+Main message: Exact HF support is broader than conditional prototype and repair support.
+
+Speaker notes:
+Read “conditional” carefully. Qwen2.5-VL, LLaVA-1.5, and LLaVA-OneVision have exact HF paths, while
+PT and UGRR require the audited model-specific RoPE transform and owned eager runtime. InternVL2.5
+is an optional remote-code exact-only adapter; prototype and repair are unsupported. Even for a
+listed conditional family, the runtime checks the installed Transformers version, attention path,
+padding and position layout, cached-key state, and PKT provenance. Any mismatch fails closed. Do not
+convert a family-level design capability into a claim that every checkpoint and environment has
+passed.
+
+Transition: “Attention implementations have their own boundary.”
+
+
+SLIDE 75 — Attention Backend Boundary
+Main message: Faster attention paths are enabled only where the adapter and installed environment pass parity.
+
+Speaker notes:
+FullKV may use eager attention, Scaled Dot-Product Attention—SDPA—or FlashAttention-2, abbreviated
+FA2, when declared and verified. SCEG and VBU signals that need explicit prompt attention begin with
+eager prefill evidence. Prototype Tier and live UGRR currently require the owned eager path. An
+all-valid exact cache may switch to an audited faster decode path, but padded per-head prototype or
+repair fused paths remain unsupported until parity is proven. Both prefill and decode attention
+implementations are recorded; the runtime cannot secretly switch backends to improve a number.
+
+Transition: “Serving engines such as vLLM and SGLang own even more cache state.”
+
+
+SLIDE 76 — vLLM and SGLang Boundary
+Main message: Measurement wrappers and transport tests do not equal a verified native MKV integration.
+
+Speaker notes:
+State what exists: FullKV measurement wrappers, version-pinned whole-block transport tests, and
+checks for logical positions and request isolation. Then state what is not a paper MKV row: a
+fallback-selector transport test, an unverified common-selector bridge, serving prototype
+injection, or serving residual repair. Native integration is difficult because these engines jointly
+own physical K/V memory, block tables, scheduler state, prefix or Radix cache metadata, and logical
+positions. Changing tensors alone could leave the engine inconsistent or leak cache across requests.
+Until an atomic safe transaction passes parity, simulated native rows are forbidden.
+
+Transition: “These boundaries are part of a larger list of known limitations.”
+
+
+SLIDE 77 — Known Limitations and Risks
+Main message: MKV has visible quality, memory, latency, metadata, and backend risks.
+
+Speaker notes:
+Be direct rather than defensive. Forecasting, graph construction, selection, PKT, packing, and
+repair add latency. A short draft can miss evidence needed later. Graph value depends on real
+metadata. Even phase-safe prototypes can blur distinct content. Repair may trigger on a correct but
+uncertain token, and calibrated DAR may correctly disable itself. Dense layouts can reduce physical
+savings. Residuals move memory from GPU to CPU and add transfer work. Full serving-engine TTC and
+UGRR remain unsupported. Finally, a small or dirty-worktree run cannot prove general superiority.
+These are measurable research questions, not details to hide.
+
+Transition: “This checklist helps readers decide whether a future result supports its claim.”
+
+
+SLIDE 78 — How to Read a Future MKV Result
+Main message: Validate identity, fairness, real method execution, full accounting, and statistical evidence—in that order.
+
+Speaker notes:
+Use the list as a reviewer’s checklist. First ask whether retention one passed token and logit parity.
+Then check identical model, media, prompt, processor, output, and deterministic decoding. Confirm
+that the budget is measured active bytes and that real PT, RT, and UGRR ran rather than a fallback.
+Verify that compression and repair are included in E2E latency and RT is reported separately. Keep
+official task metrics separate before any normalized macro average. Preserve failed samples, seeds,
+and trials. Require a clean Git SHA, immutable revisions, and held-out paired confidence intervals.
+
+Transition: “We can now summarize the design in six statements.”
+
+
+SLIDE 79 — Final Takeaways
+Main message: MKV is a correctness-gated pipeline whose benefits must be demonstrated under measured byte parity.
+
+Speaker notes:
+Summarize slowly. MKV is not one Top-k score; it combines prediction, evidence, utility, selection,
+representation, and correction. Logical positions, exact storage bytes, and RoPE phase are hard
+correctness requirements. ET is universal, while PT and UGRR need audited model-specific support.
+RT makes some approximation errors recoverable but has visible memory and latency cost. A safe
+fallback is better than an invalid prototype or simulated native row. General superiority requires
+clean, held-out, byte-matched experiments. End with the notebook analogy: predict future questions,
+connect related notes, pack diverse evidence, summarize compatible pages, and reopen the drawer only
+when the answer looks fragile.
+
+Transition: “The remaining slides are appendices for implementation questions.”
+
+
+SLIDE 80 — Appendix: Source Map I
+Main message: Core design concepts map to named source directories and objects.
+
+Speaker notes:
+Use this slide during questions from implementers. Configuration lives in config.py. Hugging Face
+adapter contracts and decode state live under adapters/huggingface. The synchronized FullKV runner
+is in fullkv.py. Cache state contains KVBD, LPM, FullKVState, and MosaicKVState. Forecasting contains
+QueryForecast and isolated rollout. Graph code contains SparseEvidenceGraph, descriptor pooling, and
+diagnostics. Selection contains utility, objective, and both lazy and exhaustive solvers. Explain
+that the source map makes the conceptual diagram auditable rather than merely aspirational.
+
+Transition: “The second source map covers tiers, repair, runtime, measurement, and evaluation.”
+
+
+SLIDE 81 — Appendix: Source Map II
+Main message: Representation, repair, and evaluation components also have explicit code ownership.
+
+Speaker notes:
+Point out selection/calibration.py for frozen fidelity profiles and per-head routing. The prototypes
+directory owns TTC and PT records, while prototypes/rope.py owns RotaryPrototypeKeyTransform. The
+residual directory owns pinned and quantized CPU storage. The repair directory owns UGRR, DAR,
+calibration, and oracle isolation. hf_runtime.py owns compression planning, packing, and explicit
+decode. Measurements owns CUDA timing, byte accounting, telemetry, and statistics. Evaluation owns
+task registration, JSONL and Parquet results, resume, and duplicate-safe merging. Each boundary
+supports testing and prevents one module from silently changing another’s semantics.
+
+Transition: “A validated YAML file selects these components for a run.”
+
+
+SLIDE 82 — Appendix: YAML Configuration Shape
+Main message: Configuration is explicit, validated, and recorded; the shown values are illustrative only.
+
+Speaker notes:
+State clearly that this is a schema example, not a recommended paper configuration. The YAML selects
+MosaicKV Full, block size, requested retention, and byte budgeting. It configures Hybrid forecasting,
+prompt window, draft steps, graph neighbor count, lazy-greedy selection, prompt and evidence
+reservations, prototypes, residual storage, decision-aware repair, and the maximum restored blocks.
+Strict validation rejects impossible combinations, such as an empty Hybrid forecast or repair
+without residual storage. The resolved configuration receives a SHA and is copied into the run
+manifest so command-line overrides cannot disappear.
+
+Transition: “Adding a new model family requires a deliberate adapter checklist.”
+
+
+SLIDE 83 — Appendix: Checklist for a New Model Adapter
+Main message: New adapters earn capabilities through source inspection and parity tests.
+
+Speaker notes:
+First pin the exact model and processor revisions and inspect their public source. Record media
+support, attention behavior, cache class, tensor layout, and sequence axis. Implement the exact chat
+template, processor, one prefill, and deterministic one-token decode. Capture Q at q_proj without
+changing weights and determine whether cached keys are before or after RoPE. Pass ordinary
+generation parity, cache extraction and reinjection, and Retention Ratio 1.0. Enable prototypes only
+after an audited PKT and TTC gate. Enable repair only after pinned residuals, partial refresh,
+one-redecode, and budget tests. Finally, update capability matrices with the exact boundary.
+
+Transition: “The final appendix points to the documents that contain the complete technical detail.”
+
+
+SLIDE 84 — Appendix: Detailed Design References
+Main message: The deck is a guide; the listed documents are the detailed, version-controlled specification.
+
+Speaker notes:
+Explain that the full LaTeX design document gives the broad narrative. The cache-state, forecasting,
+evidence-graph, block-utility, three-tier-cache, and decode-repair documents specify individual
+components. The adapter and runtime documents explain model integration. Model and backend
+capability matrices record what is supported, conditional, or unsupported. Scientific Integrity and
+Reproducibility define the rules for claims, provenance, environments, and fair comparison. Invite
+technical readers to use these files together with manifests and traces. End by thanking the
+audience and asking for questions.
+
+
+END OF SPEAKER NOTES

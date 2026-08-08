@@ -272,6 +272,26 @@ def test_qwen_visual_grid_mismatch_fails_instead_of_guessing_metadata() -> None:
         )
 
 
+def test_llava_patch_runs_gain_authoritative_spatial_metadata() -> None:
+    spans = (
+        ModalitySpan(0, 1, Modality.TEXT),
+        ModalitySpan(1, 9, Modality.IMAGE),
+        ModalitySpan(9, 10, Modality.TEXT),
+    )
+
+    enriched = Llava15Adapter._enrich_image_grid_spans(spans, rows=2, columns=2)
+
+    assert enriched == (
+        spans[0],
+        ModalitySpan(1, 5, Modality.IMAGE, image_index=0, grid_shape=(2, 2)),
+        ModalitySpan(5, 9, Modality.IMAGE, image_index=1, grid_shape=(2, 2)),
+        spans[2],
+    )
+    assert Llava15Adapter._enrich_image_grid_spans(
+        (ModalitySpan(0, 3, Modality.IMAGE),), rows=2, columns=2
+    ) == (ModalitySpan(0, 3, Modality.IMAGE),)
+
+
 def test_prepare_inputs_maps_expanded_image_tokens_without_torch() -> None:
     model = _FakeModel()
     processor = _FakeProcessor()
