@@ -29,8 +29,10 @@ from mosaickv.backends.hf_runtime import (
     _plan_has_live_residual_repair,
     _refined_budget_candidates,
     _route_head_attention,
+    _selection_decision_evidence,
     _trace_catalog,
     _uncertainty_exact_head_routes,
+    pack_runtime_payloads,
 )
 from mosaickv.cache_state import FullKVState, Modality, ModalitySpan
 from mosaickv.config import (
@@ -43,6 +45,7 @@ from mosaickv.config import (
     synthetic_smoke_config,
 )
 from mosaickv.forecasting import QueryForecast, build_query_forecast
+from mosaickv.selection import SelectionDecision, SelectionReason
 from mosaickv.types import BudgetUnit, ForecastMode, MosaicKVMethod, RepairPolicy
 
 
@@ -110,6 +113,69 @@ def _config(method: MosaicKVMethod, ratio: float) -> RunConfig:
         ),
         residual=ResidualConfig(require_pinned_memory=False),
     )
+
+
+def test_batched_mixed_tier_packing_is_byte_exact_with_reference_and_tail() -> None:
+    key = torch.arange(1 * 2 * 4 * 3, dtype=torch.float32).reshape(1, 2, 4, 3)
+    value = key.add(100)
+    full = FullKVState.from_tensors(
+        ((key, value),),
+        block_size=1,
+        cached_key_state=CachedKeyState.NOT_APPLICABLE,
+    )
+    payloads = {
+        (0, 0): (
+            (0, "exact", 0, key[:, 0:1, 0:1, :], value[:, 0:1, 0:1, :]),
+            (3, "prototype", 7, key[:, 0:1, 3:4, :], value[:, 0:1, 3:4, :]),
+        ),
+        (0, 1): (
+            (2, "exact", 1, key[:, 1:2, 2:3, :], value[:, 1:2, 2:3, :]),
+        ),
+    }
+    tail_key = torch.cat((key, key[:, :, :2, :].add(1_000)), dim=2)
+    tail_value = torch.cat((value, value[:, :, :2, :].add(1_000)), dim=2)
+    tail = CacheSnapshot(
+        (CacheLayerSnapshot(tail_key, tail_value, -2),),
+        tuple,
+        "tuple",
+        6,
+        CachedKeyState.NOT_APPLICABLE,
+    )
+    adapter = SimpleNamespace(
+        capabilities=SimpleNamespace(cached_key_state=CachedKeyState.NOT_APPLICABLE)
+    )
+    kwargs = {
+        "tail_snapshot": tail,
+        "old_prompt_capacity": 4,
+        "physical_prompt_capacity": 3,
+        "prototype_log_bias_by_id": {7: 0.25},
+    }
+
+    reference = pack_runtime_payloads(
+        adapter,
+        full,
+        payloads,
+        (),
+        packing_mode="per_head_reference",
+        **kwargs,
+    )
+    batched = pack_runtime_payloads(
+        adapter,
+        full,
+        payloads,
+        (),
+        packing_mode="batched_layer",
+        **kwargs,
+    )
+
+    assert torch.equal(reference.snapshot.layers[0].key, batched.snapshot.layers[0].key)
+    assert torch.equal(reference.snapshot.layers[0].value, batched.snapshot.layers[0].value)
+    assert torch.equal(reference.validity_masks[0], batched.validity_masks[0])
+    assert reference.snapshot.active_sequence_length == batched.snapshot.active_sequence_length
+    assert reference.prompt_capacity == batched.prompt_capacity
+    assert reference.all_slots_valid == batched.all_slots_valid
+    assert reference.prototype_slots == batched.prototype_slots
+    assert reference.prototype_attention_biases == batched.prototype_attention_biases
 
 
 def test_packed_decode_mask_adds_prototype_multiplicity_bias_to_shared_query_heads() -> None:
@@ -218,7 +284,7 @@ def test_prototype_search_reserves_anchor_slots_before_first_selection(
     assert plan.construction.state.statistics.active_kv_bytes <= _full().active_bytes // 2
     # Target=4 blocks and the two mandatory blocks are also the lower-bound
     # prototype anchors, so the first exact budget is 4-2 rather than 4-1.
-    assert requested_budgets[0] == 2
+    assert requested_budgets == [2]
 
 
 def test_prompt_anchor_reservation_uses_prompt_only_scores_inside_same_budget() -> None:
@@ -244,6 +310,30 @@ def test_prompt_anchor_reservation_uses_prompt_only_scores_inside_same_budget() 
     assert 6 in plan.selection.selected_node_ids
     assert plan.selection.decisions[6].reason.value == "prompt_anchor"
     assert plan.selection.budget_spent <= plan.active_budget_value
+
+
+def test_prompt_ranked_similarity_shortlist_is_bounded_and_keeps_mandatory_nodes() -> None:
+    full = _full()
+    base = _config(MosaicKVMethod.MOSAICKV_EXACT, 0.25)
+    config = replace(
+        base,
+        graph=replace(
+            base.graph,
+            similarity_shortlist_multiplier=2.0,
+            similarity_shortlist_min_nodes=0,
+        ),
+    )
+    selected = hf_runtime._similarity_shortlist(
+        full,
+        config,
+        source_budget=8,
+        target_budget=2,
+        prompt_attention_by_node={node_id: float(node_id) for node_id in range(8)},
+    )
+
+    # Two retained blocks times a 2x candidate multiplier, with mandatory
+    # nodes 0/7 always represented in the candidate set.
+    assert selected == (0, 5, 6, 7)
 
 
 def test_prompt_reservation_respects_dense_per_head_capacity() -> None:
@@ -461,11 +551,13 @@ def test_full_method_materializes_prototypes_and_residuals_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls = 0
+    exact_gather_modes: list[object] = []
     implementation = hf_runtime.construct_three_tier_cache
 
     def counted_construction(*args: object, **kwargs: object) -> object:
         nonlocal calls
         calls += 1
+        exact_gather_modes.append(kwargs.get("exact_gather_mode"))
         return implementation(*args, **kwargs)
 
     monkeypatch.setattr(hf_runtime, "construct_three_tier_cache", counted_construction)
@@ -481,6 +573,7 @@ def test_full_method_materializes_prototypes_and_residuals_once(
     assert plan.construction.prototypes
     assert plan.construction.residual_storage.payloads
     assert calls == 1
+    assert exact_gather_modes == ["batched_layer"]
 
 
 def test_prototype_budget_refinement_scans_only_transition_interval() -> None:
@@ -791,3 +884,53 @@ def test_streaming_trace_catalog_matches_post_materialization_compaction() -> No
     assert _trace_catalog(iter(records), compact=True) == payload["graph_edges"]
     assert _trace_catalog(iter(records), compact=False) == records
     assert _trace_catalog(iter(()), compact=True) == []
+
+
+def test_selection_decision_evidence_is_lossless_and_ordered() -> None:
+    selection = SimpleNamespace(
+        decisions=(
+            SelectionDecision(
+                node_id=0,
+                selected=True,
+                selection_rank=0,
+                marginal_gain=1.25,
+                marginal_gain_per_cost=0.625,
+                cost=2,
+                reason=SelectionReason.LAZY_GREEDY,
+            ),
+            SelectionDecision(
+                node_id=1,
+                selected=False,
+                selection_rank=None,
+                marginal_gain=0.125,
+                marginal_gain_per_cost=0.0625,
+                cost=2,
+                reason=SelectionReason.NOT_SELECTED_LOWER_GAIN,
+            ),
+        )
+    )
+
+    evidence = _selection_decision_evidence(selection)  # type: ignore[arg-type]
+
+    assert evidence["schema_version"] == 1
+    assert evidence["record_count"] == 2
+    assert evidence["records"] == [
+        {
+            "node_id": 0,
+            "selected": True,
+            "selection_rank": 0,
+            "marginal_gain": 1.25,
+            "marginal_gain_per_cost": 0.625,
+            "cost": 2,
+            "reason": "lazy_greedy",
+        },
+        {
+            "node_id": 1,
+            "selected": False,
+            "selection_rank": None,
+            "marginal_gain": 0.125,
+            "marginal_gain_per_cost": 0.0625,
+            "cost": 2,
+            "reason": "not_selected_lower_gain",
+        },
+    ]

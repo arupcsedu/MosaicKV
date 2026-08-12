@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import math
-from bisect import bisect_left
+from bisect import bisect_left, bisect_right
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, overload
 
 from mosaickv.cache_state import ResidualTier
 from mosaickv.types import ResidualStorageDType
@@ -76,12 +77,173 @@ class ResidualIndexEntry:
 
 
 @dataclass(frozen=True, slots=True)
+class _ResidualIndexSpan:
+    """Compact index payload for all positions in one residual source block."""
+
+    layer: int
+    kv_head: int
+    prototype_id: int
+    original_positions: tuple[int, ...]
+    physical_positions: tuple[int, ...]
+    payload_index: int
+
+    @property
+    def identity(self) -> tuple[int, int, int, int]:
+        return (self.layer, self.kv_head, self.prototype_id, self.original_positions[0])
+
+
+@dataclass(frozen=True, slots=True)
+class ResidualPositionIndex(Sequence[ResidualIndexEntry]):
+    """Lazy position index backed by one compact span per residual block.
+
+    Long visual prompts contain hundreds of thousands of residual positions.
+    Materializing a Python dataclass for every position added seconds to the
+    online compression path and hundreds of MiB of transient host memory.  A
+    block already stores two monotonic position tuples, so the index can retain
+    those tuples and instantiate an entry only when a caller iterates or looks
+    up a position.  The public sequence/lookup semantics remain unchanged.
+    """
+
+    spans: tuple[_ResidualIndexSpan, ...] = ()
+    cumulative_lengths: tuple[int, ...] = (0,)
+
+    def __post_init__(self) -> None:
+        if len(self.cumulative_lengths) != len(self.spans) + 1:
+            raise ValueError("residual compact-index offsets must align with spans")
+        if not self.cumulative_lengths or self.cumulative_lengths[0] != 0:
+            raise ValueError("residual compact-index offsets must start at zero")
+        if any(
+            left >= right
+            for left, right in zip(
+                self.cumulative_lengths,
+                self.cumulative_lengths[1:],
+                strict=False,
+            )
+        ):
+            raise ValueError("residual compact-index offsets must be strictly increasing")
+        identities = tuple(span.identity for span in self.spans)
+        if identities != tuple(sorted(identities)) or len(set(identities)) != len(identities):
+            raise ValueError("residual compact-index spans must be sorted and unique")
+        for span in self.spans:
+            if not span.original_positions or len(span.original_positions) != len(
+                span.physical_positions
+            ):
+                raise ValueError("residual compact-index positions must be nonempty and aligned")
+            if any(
+                left >= right
+                for left, right in zip(
+                    span.original_positions,
+                    span.original_positions[1:],
+                    strict=False,
+                )
+            ):
+                raise ValueError("residual compact-index logical positions must be monotonic")
+
+    @classmethod
+    def from_tier_metadata(
+        cls,
+        tier: ResidualTier,
+        payloads: Sequence[ResidualPayloadMetadata],
+    ) -> ResidualPositionIndex:
+        if len(tier.source_blocks) != len(payloads):
+            raise ValueError("residual tier and payload metadata must align")
+        spans = tuple(
+            sorted(
+                (
+                    _ResidualIndexSpan(
+                        block.layer,
+                        block.kv_head,
+                        payload.prototype_id,
+                        block.original_logical_positions,
+                        block.physical_cache_indices,
+                        payload.payload_index,
+                    )
+                    for block, payload in zip(
+                        tier.source_blocks,
+                        payloads,
+                        strict=True,
+                    )
+                ),
+                key=lambda span: span.identity,
+            )
+        )
+        cumulative = [0]
+        for span in spans:
+            cumulative.append(cumulative[-1] + len(span.original_positions))
+        return cls(spans, tuple(cumulative))
+
+    def __len__(self) -> int:
+        return self.cumulative_lengths[-1]
+
+    @staticmethod
+    def _entry(span: _ResidualIndexSpan, block_offset: int) -> ResidualIndexEntry:
+        return ResidualIndexEntry(
+            layer=span.layer,
+            kv_head=span.kv_head,
+            prototype_id=span.prototype_id,
+            original_position=span.original_positions[block_offset],
+            physical_position=span.physical_positions[block_offset],
+            payload_index=span.payload_index,
+            block_offset=block_offset,
+        )
+
+    def __iter__(self) -> Iterator[ResidualIndexEntry]:
+        for span in self.spans:
+            for offset in range(len(span.original_positions)):
+                yield self._entry(span, offset)
+
+    @overload
+    def __getitem__(self, index: int, /) -> ResidualIndexEntry: ...
+
+    @overload
+    def __getitem__(self, index: slice, /) -> tuple[ResidualIndexEntry, ...]: ...
+
+    def __getitem__(
+        self, index: int | slice, /
+    ) -> ResidualIndexEntry | tuple[ResidualIndexEntry, ...]:
+        if isinstance(index, slice):
+            return tuple(self[position] for position in range(*index.indices(len(self))))
+        normalized = index + len(self) if index < 0 else index
+        if normalized < 0 or normalized >= len(self):
+            raise IndexError("residual position index is out of range")
+        span_index = bisect_right(self.cumulative_lengths, normalized) - 1
+        return self._entry(
+            self.spans[span_index],
+            normalized - self.cumulative_lengths[span_index],
+        )
+
+    def lookup(
+        self,
+        layer: int,
+        kv_head: int,
+        prototype_id: int,
+        original_position: int,
+    ) -> ResidualIndexEntry:
+        prefix = (layer, kv_head, prototype_id)
+        target = (*prefix, original_position)
+        identities = tuple(span.identity for span in self.spans)
+        offset = bisect_right(identities, target) - 1
+        if offset < 0:
+            raise KeyError(f"residual position does not exist: {target}")
+        span = self.spans[offset]
+        if (span.layer, span.kv_head, span.prototype_id) != prefix:
+            raise KeyError(f"residual position does not exist: {target}")
+        block_offset = bisect_left(span.original_positions, original_position)
+        if (
+            block_offset >= len(span.original_positions)
+            or span.original_positions[block_offset] != original_position
+        ):
+            raise KeyError(f"residual position does not exist: {target}")
+        return self._entry(span, block_offset)
+
+
+@dataclass(frozen=True, slots=True)
 class ResidualStorageReport:
     """Pinned CPU tier plus its payload and original-position indices."""
 
     tier: ResidualTier
     payloads: tuple[ResidualPayloadMetadata, ...]
-    index: tuple[ResidualIndexEntry, ...]
+    index: Sequence[ResidualIndexEntry]
     cpu_bytes: int
 
     def __post_init__(self) -> None:
@@ -96,6 +258,23 @@ class ResidualStorageReport:
         expected_entries = sum(block.position_count for block in self.tier.source_blocks)
         if len(self.index) != expected_entries:
             raise ValueError("residual index must cover every original source position")
+        if isinstance(self.index, ResidualPositionIndex):
+            if len(self.index.spans) != len(self.payloads):
+                raise ValueError("residual compact index must contain one span per payload")
+            for span in self.index.spans:
+                if span.payload_index >= len(self.payloads):
+                    raise ValueError("residual index references an unknown payload")
+                payload = self.payloads[span.payload_index]
+                block = self.tier.source_blocks[span.payload_index]
+                if payload.prototype_id != span.prototype_id:
+                    raise ValueError("residual index prototype differs from payload metadata")
+                if block.layer != span.layer or block.kv_head != span.kv_head:
+                    raise ValueError("residual index layer/head differs from its source block")
+                if block.original_logical_positions != span.original_positions:
+                    raise ValueError("residual compact-index logical positions differ")
+                if block.physical_cache_indices != span.physical_positions:
+                    raise ValueError("residual compact-index physical positions differ")
+            return
         identities = {entry.identity for entry in self.index}
         if len(identities) != len(self.index):
             raise ValueError("residual original-position index contains duplicates")
@@ -131,6 +310,8 @@ class ResidualStorageReport:
         """Find one residual position by its complete cache identity in O(log n)."""
 
         identity = (layer, kv_head, prototype_id, original_position)
+        if isinstance(self.index, ResidualPositionIndex):
+            return self.index.lookup(layer, kv_head, prototype_id, original_position)
         offset = bisect_left(self.index, identity, key=lambda entry: entry.identity)
         if offset >= len(self.index) or self.index[offset].identity != identity:
             raise KeyError(f"residual position does not exist: {identity}")
@@ -159,6 +340,7 @@ class ResidualTransferBatch:
 __all__ = [
     "ResidualIndexEntry",
     "ResidualPayloadMetadata",
+    "ResidualPositionIndex",
     "ResidualStorageReport",
     "ResidualTransferBatch",
 ]

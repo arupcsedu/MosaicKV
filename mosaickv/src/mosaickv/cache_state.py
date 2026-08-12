@@ -381,6 +381,60 @@ def _gather_tensor(
     return _clone_tensor(tensor[index])
 
 
+def _gather_torch_heads_by_count(
+    tensor: Any,
+    *,
+    head_axis: int,
+    sequence_axis: int,
+    positions_by_head: Mapping[int, Sequence[int]],
+) -> dict[int, Any] | None:
+    """Gather equal-length KV-head rows together without changing their order.
+
+    ``torch.gather`` can copy many heads in one device launch. Heads with
+    different selected lengths are grouped separately so the result contains
+    no padding and retains the exact per-head storage/accounting contract.
+    Non-torch tensors return ``None`` and use the portable reference path.
+    """
+
+    if not tensor.__class__.__module__.startswith("torch"):
+        return None
+    import torch
+
+    if not isinstance(tensor, torch.Tensor):
+        return None
+    rank = int(tensor.ndim)
+    normalized_head = _normalize_axis(head_axis, rank, "head")
+    normalized_sequence = _normalize_axis(sequence_axis, rank, "sequence")
+    moved = tensor.movedim((normalized_head, normalized_sequence), (0, 1))
+    grouped_heads: dict[int, list[int]] = {}
+    for head, positions in positions_by_head.items():
+        if not positions:
+            raise ValueError("batched head gather requires at least one position")
+        grouped_heads.setdefault(len(positions), []).append(head)
+
+    gathered_by_head: dict[int, Any] = {}
+    for position_count, raw_heads in sorted(grouped_heads.items()):
+        heads = tuple(sorted(raw_heads))
+        head_indices = torch.tensor(heads, dtype=torch.long, device=tensor.device)
+        selected_heads = moved.index_select(0, head_indices)
+        position_rows = torch.tensor(
+            tuple(tuple(int(position) for position in positions_by_head[head]) for head in heads),
+            dtype=torch.long,
+            device=tensor.device,
+        )
+        expanded_positions = position_rows.reshape(
+            len(heads), position_count, *([1] * (rank - 2))
+        ).expand(len(heads), position_count, *selected_heads.shape[2:])
+        gathered = torch.gather(selected_heads, 1, expanded_positions)
+        for local_index, head in enumerate(heads):
+            canonical = gathered[local_index : local_index + 1]
+            gathered_by_head[head] = canonical.movedim(
+                (0, 1),
+                (normalized_head, normalized_sequence),
+            )
+    return gathered_by_head
+
+
 @dataclass(frozen=True, slots=True)
 class KVLayerStorage:
     """One layer's K/V tensors plus explicit head and sequence axes."""
@@ -1075,7 +1129,16 @@ class FullKVState:
         if block.mandatory != expected_mandatory:
             raise ValueError("block mandatory flag differs from the source cache")
 
-    def _gather_descriptors(self, descriptors: Sequence[KVBlockDescriptor]) -> ExactTier:
+    def _gather_descriptors(
+        self,
+        descriptors: Sequence[KVBlockDescriptor],
+        *,
+        gather_mode: str,
+    ) -> ExactTier:
+        if gather_mode not in {"per_head_reference", "batched_layer"}:
+            raise ValueError(
+                "gather_mode must be 'per_head_reference' or 'batched_layer'"
+            )
         selected = tuple(descriptors)
         grouped: dict[tuple[int, int], list[tuple[int, KVBlockDescriptor]]] = {}
         for block_index, block in enumerate(selected):
@@ -1083,6 +1146,41 @@ class FullKVState:
             grouped.setdefault((block.layer, block.kv_head), []).append((block_index, block))
         key_blocks: list[Any | None] = [None] * len(selected)
         value_blocks: list[Any | None] = [None] * len(selected)
+        gathered_pairs: dict[tuple[int, int], tuple[Any, Any]] = {}
+        if gather_mode == "batched_layer":
+            identities_by_layer: dict[int, list[int]] = {}
+            for layer_index, kv_head in grouped:
+                identities_by_layer.setdefault(layer_index, []).append(kv_head)
+            for layer_index, raw_heads in identities_by_layer.items():
+                layer = self.layers[layer_index]
+                heads = tuple(sorted(raw_heads))
+                positions_by_head = {
+                    head: tuple(
+                        position
+                        for _block_index, block in grouped[(layer_index, head)]
+                        for position in block.physical_cache_indices
+                    )
+                    for head in heads
+                }
+                gathered_keys = _gather_torch_heads_by_count(
+                    layer.key,
+                    head_axis=layer.key_head_dimension,
+                    sequence_axis=layer.key_sequence_dimension,
+                    positions_by_head=positions_by_head,
+                )
+                gathered_values = _gather_torch_heads_by_count(
+                    layer.value,
+                    head_axis=layer.value_head_dimension,
+                    sequence_axis=layer.value_sequence_dimension,
+                    positions_by_head=positions_by_head,
+                )
+                if gathered_keys is None or gathered_values is None:
+                    continue
+                for head in heads:
+                    gathered_pairs[(layer_index, head)] = (
+                        gathered_keys[head],
+                        gathered_values[head],
+                    )
         # Gather all selected positions for a layer/head once, then expose
         # block-sized views.  Launching one advanced-index operation per block
         # dominated LLaVA construction because it has 32 KV heads per layer.
@@ -1093,20 +1191,24 @@ class FullKVState:
                 for _block_index, block in indexed_blocks
                 for position in block.physical_cache_indices
             )
-            gathered_key = _gather_tensor(
-                layer.key,
-                head_axis=layer.key_head_dimension,
-                head=kv_head,
-                sequence_axis=layer.key_sequence_dimension,
-                positions=positions,
-            )
-            gathered_value = _gather_tensor(
-                layer.value,
-                head_axis=layer.value_head_dimension,
-                head=kv_head,
-                sequence_axis=layer.value_sequence_dimension,
-                positions=positions,
-            )
+            pair = gathered_pairs.get((layer_index, kv_head))
+            if pair is None:
+                gathered_key = _gather_tensor(
+                    layer.key,
+                    head_axis=layer.key_head_dimension,
+                    head=kv_head,
+                    sequence_axis=layer.key_sequence_dimension,
+                    positions=positions,
+                )
+                gathered_value = _gather_tensor(
+                    layer.value,
+                    head_axis=layer.value_head_dimension,
+                    head=kv_head,
+                    sequence_axis=layer.value_sequence_dimension,
+                    positions=positions,
+                )
+            else:
+                gathered_key, gathered_value = pair
             offset = 0
             for block_index, block in indexed_blocks:
                 end = offset + block.position_count
@@ -1121,14 +1223,18 @@ class FullKVState:
             raise RuntimeError("exact-tier grouped gather left an uninitialized block")
         return ExactTier(selected, tuple(key_blocks), tuple(value_blocks))
 
-    def gather_exact_blocks(self, blocks: Sequence[KVBlockDescriptor]) -> ExactTier:
+    def gather_exact_blocks(
+        self,
+        blocks: Sequence[KVBlockDescriptor],
+        *,
+        gather_mode: str = "batched_layer",
+    ) -> ExactTier:
         """Copy complete selected source blocks into the lossless exact tier."""
 
-        source = set(self.blocks)
         selected = tuple(blocks)
-        if any(block not in source for block in selected):
+        if any(block not in self._source_block_set for block in selected):
             raise ValueError("exact block selection contains a non-source descriptor")
-        return self._gather_descriptors(selected)
+        return self._gather_descriptors(selected, gather_mode=gather_mode)
 
     def gather_selected_positions(
         self,
@@ -1206,7 +1312,7 @@ class FullKVState:
                     )
                 )
                 offset = end
-        return self._gather_descriptors(descriptors)
+        return self._gather_descriptors(descriptors, gather_mode="batched_layer")
 
     def reinject_exact(self, exact: ExactTier) -> FullKVState:
         """Reconstruct the complete source cache from exact-tier payloads only."""

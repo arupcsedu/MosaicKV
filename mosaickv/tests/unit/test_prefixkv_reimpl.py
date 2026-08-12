@@ -244,7 +244,10 @@ def test_retention_one_is_exact_and_does_not_need_attention() -> None:
     assert plan.implementation_label == "generalized_prefixkv_reimpl"
 
 
-def test_decode_maintenance_prunes_at_most_one_fixed_offset_per_layer() -> None:
+@pytest.mark.parametrize("dense_all_valid", [False, True])
+def test_decode_maintenance_prunes_at_most_one_fixed_offset_per_layer(
+    dense_all_valid: bool,
+) -> None:
     torch = pytest.importorskip("torch")
     source = FullKVState.from_tensors(
         tuple(
@@ -291,6 +294,13 @@ def test_decode_maintenance_prunes_at_most_one_fixed_offset_per_layer() -> None:
         def inject_past_key_values(self, snapshot: CacheSnapshot) -> object:
             return tuple((layer.key, layer.value) for layer in snapshot.layers)
 
+    model_state: dict[str, Any] = {"mosaickv_prompt_capacity": 3}
+    if dense_all_valid:
+        model_state["mosaickv_packed_all_valid"] = True
+    else:
+        model_state["mosaickv_validity_masks"] = tuple(
+            torch.ones((1, 5), dtype=torch.bool) for _ in range(2)
+        )
     state = DecodeState(
         past_key_values=cache,
         attention_mask=torch.ones((1, 5), dtype=torch.long),
@@ -298,12 +308,7 @@ def test_decode_maintenance_prunes_at_most_one_fixed_offset_per_layer() -> None:
         logical_sequence_length=8,
         next_decode_position=8,
         modality_map=(),
-        model_state={
-            "mosaickv_validity_masks": tuple(
-                torch.ones((1, 5), dtype=torch.bool) for _ in range(2)
-            ),
-            "mosaickv_prompt_capacity": 3,
-        },
+        model_state=model_state,
     )
     updated, events = maintain_prefixkv_decode_cache(
         FakeAdapter(),  # type: ignore[arg-type]
@@ -312,5 +317,6 @@ def test_decode_maintenance_prunes_at_most_one_fixed_offset_per_layer() -> None:
         step_index=2,
     )
     assert updated.active_cache_length == 4
+    assert len(updated.model_state["mosaickv_validity_masks"]) == 2
     assert all(event["removed_physical_position"] == 1 for event in events)
     assert all(event["active_positions_after"] == 4 for event in events)

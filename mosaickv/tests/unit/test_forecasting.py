@@ -21,9 +21,20 @@ from mosaickv.evaluation.forecast_diagnostics import (
     evaluate_forecast_quality,
 )
 from mosaickv.evaluation.oracle_queries import EvaluationOnlyOracleQueries
-from mosaickv.forecasting import build_query_forecast, forecast_from_prefill
-from mosaickv.forecasting.core import _normalize_rows, _streaming_spherical
-from mosaickv.forecasting.huggingface import run_isolated_greedy_query_rollout
+from mosaickv.forecasting import (
+    build_query_forecast,
+    forecast_from_prefill,
+    forecast_with_rollout,
+)
+from mosaickv.forecasting.core import (
+    _batched_numpy_streaming_spherical,
+    _normalize_rows,
+    _streaming_spherical,
+)
+from mosaickv.forecasting.huggingface import (
+    _prompt_directional_uncertainty,
+    run_isolated_greedy_query_rollout,
+)
 from mosaickv.types import ForecastCovariance, ForecastMode
 
 
@@ -39,6 +50,7 @@ def _queries(*, layers: int = 2, sequence: int = 6) -> tuple[np.ndarray, ...]:
 class _DraftIsolationAdapter:
     def __init__(self) -> None:
         self.prefill_calls = 0
+        self.decode_calls = 0
 
     def prefill(self, *_args: object, **_kwargs: object) -> None:
         self.prefill_calls += 1
@@ -59,10 +71,18 @@ class _DraftIsolationAdapter:
     def inject_past_key_values(self, snapshot: CacheSnapshot) -> CacheSnapshot:
         return snapshot
 
+    def get_cache_layout(self, cache: CacheSnapshot) -> object:
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            layers=tuple(SimpleNamespace(key_shape=layer.key.shape) for layer in cache.layers)
+        )
+
     def decode_one_token(
         self, token: np.ndarray, state: DecodeState, *, capture_queries: bool
     ) -> DecodeOutput:
         assert capture_queries
+        self.decode_calls += 1
         snapshot = state.past_key_values
         assert isinstance(snapshot, CacheSnapshot)
         # Deliberately mutate the supplied draft cache to prove it is not shared.
@@ -190,6 +210,77 @@ def test_draft_forecast_reuses_prefill_and_does_not_mutate_original_cache() -> N
     assert draft_samples.shape == (12, 3)
 
 
+def test_conditional_draft_skips_low_uncertainty_without_cache_clone_or_decode() -> None:
+    adapter = _DraftIsolationAdapter()
+    aligned = np.ones((1, 4, 4, 3), dtype=np.float32)
+    prefill = replace(_fake_prefill(), query_vectors=QueryVectors((aligned,)))
+
+    forecast, rollout = forecast_with_rollout(
+        adapter,
+        prefill,
+        ForecastingConfig(
+            mode=ForecastMode.HYBRID,
+            prompt_window=4,
+            draft_steps=3,
+            centroid_count=2,
+            conditional_draft_enabled=True,
+            conditional_draft_uncertainty_threshold=0.5,
+        ),
+        capture_attentions=False,
+    )
+
+    assert adapter.decode_calls == 0
+    assert rollout.token_ids == ()
+    assert rollout.cache_clone_seconds == 0
+    assert forecast.provenance.mode is ForecastMode.PROMPT_WINDOW
+    assert forecast.provenance.configured_mode is ForecastMode.HYBRID
+    assert forecast.provenance.requested_draft_steps == 3
+    assert forecast.provenance.completed_draft_steps == 0
+    assert forecast.provenance.conditional_draft_decision == (
+        "skipped_low_prompt_uncertainty"
+    )
+    assert forecast.provenance.prompt_uncertainty == pytest.approx(0.0, abs=1e-6)
+
+
+def test_conditional_draft_executes_for_high_prompt_uncertainty() -> None:
+    adapter = _DraftIsolationAdapter()
+    opposed = np.zeros((1, 4, 4, 3), dtype=np.float32)
+    opposed[:, :, ::2, 0] = 1
+    opposed[:, :, 1::2, 0] = -1
+    prefill = replace(_fake_prefill(), query_vectors=QueryVectors((opposed,)))
+
+    forecast, rollout = forecast_with_rollout(
+        adapter,
+        prefill,
+        ForecastingConfig(
+            mode=ForecastMode.HYBRID,
+            prompt_window=4,
+            draft_steps=2,
+            centroid_count=2,
+            conditional_draft_enabled=True,
+            conditional_draft_uncertainty_threshold=0.5,
+        ),
+    )
+
+    assert adapter.decode_calls == 2
+    assert rollout.token_ids == (2, 3)
+    assert forecast.provenance.mode is ForecastMode.HYBRID
+    assert forecast.provenance.completed_draft_steps == 2
+    assert forecast.provenance.conditional_draft_decision == (
+        "executed_high_prompt_uncertainty"
+    )
+    assert forecast.provenance.prompt_uncertainty == pytest.approx(1.0, abs=1e-6)
+
+
+def test_prompt_directional_uncertainty_is_scale_invariant_and_bounded() -> None:
+    values = _queries(layers=1, sequence=4)
+    original = _prompt_directional_uncertainty(values, 3)
+    scaled = _prompt_directional_uncertainty((values[0] * 17.0,), 3)
+
+    assert 0 <= original <= 1
+    assert scaled == pytest.approx(original, abs=1e-7)
+
+
 def test_evaluation_rollout_does_not_require_prompt_queries() -> None:
     adapter = _DraftIsolationAdapter()
     prefill = replace(_fake_prefill(), query_vectors=QueryVectors(()))
@@ -268,6 +359,41 @@ def test_low_memory_centroid_fast_path_is_bitwise_reference_equivalent() -> None
     assert np.array_equal(actual_weights, expected_weights)
 
 
+def test_layer_batched_centroids_are_bitwise_per_head_equivalent() -> None:
+    rng = np.random.default_rng(31)
+    samples = rng.normal(size=(12, 24, 17)).astype(np.float32)
+    expected = tuple(
+        _streaming_spherical((samples[head_index],), 4)
+        for head_index in range(samples.shape[0])
+    )
+
+    actual = _batched_numpy_streaming_spherical(samples, 4)
+
+    assert len(actual) == len(expected)
+    for (actual_centroids, actual_weights), (expected_centroids, expected_weights) in zip(
+        actual,
+        expected,
+        strict=True,
+    ):
+        assert np.array_equal(actual_centroids, expected_centroids)
+        assert np.array_equal(actual_weights, expected_weights)
+
+
+def test_layer_batched_centroids_fall_back_exactly_for_zero_queries() -> None:
+    samples = np.ones((3, 8, 5), dtype=np.float32)
+    samples[1, 2] = 0
+    expected = tuple(
+        _streaming_spherical((samples[head_index],), 3)
+        for head_index in range(samples.shape[0])
+    )
+
+    actual = _batched_numpy_streaming_spherical(samples, 3)
+
+    for actual_head, expected_head in zip(actual, expected, strict=True):
+        assert np.array_equal(actual_head[0], expected_head[0])
+        assert np.array_equal(actual_head[1], expected_head[1])
+
+
 @pytest.mark.parametrize(
     ("kwargs", "message"),
     [
@@ -290,6 +416,15 @@ def test_low_memory_centroid_fast_path_is_bitwise_reference_equivalent() -> None
         (
             {"mode": ForecastMode.HYBRID, "prompt_window": 2, "draft_steps": 0},
             "hybrid forecasting",
+        ),
+        (
+            {
+                "mode": ForecastMode.PROMPT_WINDOW,
+                "prompt_window": 2,
+                "draft_steps": 0,
+                "conditional_draft_enabled": True,
+            },
+            "conditional_draft_enabled requires hybrid",
         ),
     ],
 )

@@ -181,6 +181,21 @@ def test_manual_cluster_matches_expected_fp32_weighted_prototype() -> None:
     assert result.active_layouts[0].prototype_anchor_positions == (2,)
 
 
+def test_three_tier_rejects_unknown_exact_gather_mode() -> None:
+    full = _full()
+    graph = _graph(full)
+    selection = _selection(graph, 2, (1.0, 0.0, 0.0))
+
+    with pytest.raises(ValueError, match="exact_gather_mode"):
+        construct_three_tier_cache(
+            full,
+            graph,
+            selection,
+            _safe_capabilities(),
+            exact_gather_mode="per_block",
+        )
+
+
 def test_dispersion_guard_rejects_lossy_cluster_without_unsafe_merge() -> None:
     full = _full()
     graph = _graph(full)
@@ -261,9 +276,7 @@ def test_forecast_attention_pooling_preserves_token_mass_and_uses_member_medoid(
     assert record.members[0].normalized_weight == pytest.approx(5.0 / 6.0)
     assert record.members[0].position_weights == pytest.approx((0.9, 0.1))
     assert record.members[1].position_weights == pytest.approx((0.5, 0.5))
-    expected_entropy = -(
-        0.75 * np.log(0.75) + 3 * (1.0 / 12.0) * np.log(1.0 / 12.0)
-    )
+    expected_entropy = -(0.75 * np.log(0.75) + 3 * (1.0 / 12.0) * np.log(1.0 / 12.0))
     assert record.attention_log_bias == pytest.approx(expected_entropy)
 
 
@@ -309,6 +322,80 @@ def test_lossless_residuals_preserve_and_index_every_original_position() -> None
         expected = full.gather_exact_blocks((full.blocks[node_id],))
         assert np.array_equal(restored_key, expected.key_blocks[0])
         assert np.array_equal(restored_value, expected.value_blocks[0])
+
+
+def test_total_storage_budget_keeps_only_high_risk_repairable_sources() -> None:
+    full = _full()
+    graph = _graph(full)
+    selection = _selection(graph, 2, (1.0, 0.0, 0.0))
+
+    # One exact block and one prototype consume eight bytes in this fixture.
+    # A twelve-byte total cap therefore permits exactly one four-byte residual.
+    result = construct_three_tier_cache(
+        full,
+        graph,
+        selection,
+        _safe_capabilities(),
+        prototype_config=PrototypeConfig(group_size=2),
+        residual_config=ResidualConfig(
+            storage_dtype=ResidualStorageDType.LOSSLESS,
+            require_pinned_memory=False,
+        ),
+        total_storage_budget_bytes=12,
+    )
+
+    assert result.mode is TierConstructionMode.THREE_TIER
+    assert result.active_device_bytes == 8
+    assert result.cpu_residual_bytes == 4
+    assert result.state.statistics.total_stored_bytes == 12
+    assert len(result.residual_storage.payloads) == 1
+    assert result.residual_storage.tier.source_memberships <= (
+        result.state.prototypes.source_memberships
+    )
+    assert "residuals stored for 1/2" in result.reason
+
+
+def test_zero_residual_budget_preserves_prototypes_without_dead_storage() -> None:
+    full = _full()
+    graph = _graph(full)
+    selection = _selection(graph, 2, (1.0, 0.0, 0.0))
+
+    result = construct_three_tier_cache(
+        full,
+        graph,
+        selection,
+        _safe_capabilities(),
+        prototype_config=PrototypeConfig(group_size=2),
+        residual_config=ResidualConfig(
+            storage_dtype=ResidualStorageDType.LOSSLESS,
+            require_pinned_memory=False,
+        ),
+        total_storage_budget_bytes=8,
+    )
+
+    assert result.mode is TierConstructionMode.THREE_TIER
+    assert result.state.prototypes.prototype_keys
+    assert not result.residual_storage.payloads
+    assert result.state.statistics.total_stored_bytes == 8
+
+
+def test_compact_and_materialized_residual_indices_are_semantically_identical() -> None:
+    full = _full()
+    assignments = {1: 0, 2: 0}
+    compact = build_residual_storage(
+        full,
+        assignments,
+        ResidualConfig(require_pinned_memory=False, index_mode="compact"),
+    )
+    materialized = build_residual_storage(
+        full,
+        assignments,
+        ResidualConfig(require_pinned_memory=False, index_mode="materialized"),
+    )
+
+    assert tuple(compact.index) == tuple(materialized.index)
+    for entry in materialized.index:
+        assert compact.lookup(*entry.identity) == entry
 
 
 @pytest.mark.parametrize(

@@ -278,8 +278,67 @@ def _streaming_spherical(sources: Sequence[Any], centroid_count: int) -> tuple[A
     return result, _weights(counts, result)
 
 
+def _batched_numpy_streaming_spherical(
+    samples: Any,
+    centroid_count: int,
+) -> tuple[tuple[Any, Any], ...]:
+    """Run the reference online update for every head in one layer at once.
+
+    ``samples`` has shape ``[kv_heads, query_samples, head_dim]``. The update
+    order within every head is unchanged, but NumPy performs normalization,
+    assignment, and centroid updates across all KV heads in one operation per
+    query sample. Zero rows are uncommon for model queries and use the scalar
+    reference so its independently advancing centroid counts remain exact.
+    """
+
+    import numpy as np
+
+    array = np.asarray(samples, dtype=np.float32)
+    if array.ndim != 3 or array.shape[0] == 0 or array.shape[1] == 0:
+        raise ValueError("batched centroid samples must have shape [heads, samples, features]")
+    norms = np.linalg.norm(array, axis=-1)
+    if not bool(np.all(np.isfinite(norms))):
+        raise ValueError("query samples contain non-finite norms")
+    if bool(np.any(norms == 0)):
+        return tuple(
+            _streaming_spherical((array[head_index],), centroid_count)
+            for head_index in range(array.shape[0])
+        )
+    normalized = array / norms[..., None]
+    head_count, sample_count, _feature_count = normalized.shape
+    cluster_count = min(centroid_count, sample_count)
+    sums = normalized[:, :cluster_count].copy()
+    centroids = normalized[:, :cluster_count].copy()
+    counts = np.ones((head_count, cluster_count), dtype=np.int64)
+    head_indices = np.arange(head_count)
+    for sample_index in range(cluster_count, sample_count):
+        sample = normalized[:, sample_index]
+        similarities = np.matmul(centroids, sample[..., None]).squeeze(-1)
+        assignments = similarities.argmax(axis=1)
+        updated = sums[head_indices, assignments] + sample
+        sums[head_indices, assignments] = updated
+        counts[head_indices, assignments] += 1
+        centroids[head_indices, assignments] = updated / np.linalg.norm(
+            updated,
+            axis=-1,
+        )[:, None]
+    return tuple(
+        (
+            centroids[head_index].copy(),
+            _weights(
+                tuple(int(value) for value in counts[head_index]),
+                centroids[head_index],
+            ),
+        )
+        for head_index in range(head_count)
+    )
+
+
 def _layer_streaming_spherical(
-    layer: Sequence[_HeadSamples], centroid_count: int
+    layer: Sequence[_HeadSamples],
+    centroid_count: int,
+    *,
+    execution_mode: str,
 ) -> tuple[tuple[Any, Any], ...]:
     """Construct one layer's online centroids with one bounded CUDA staging copy.
 
@@ -293,6 +352,8 @@ def _layer_streaming_spherical(
 
     if not layer:
         return ()
+    if execution_mode not in {"reference_per_head", "batched_layer"}:
+        raise ValueError("unsupported centroid execution mode")
     first_sources = layer[0].sources
     cuda_sources = bool(
         first_sources
@@ -323,10 +384,12 @@ def _layer_streaming_spherical(
         torch.stack(combined, dim=0).detach().float().cpu().numpy(),
         dtype=np.float32,
     )
-    return tuple(
-        _streaming_spherical((staged[head_index],), centroid_count)
-        for head_index in range(len(layer))
-    )
+    if execution_mode == "reference_per_head":
+        return tuple(
+            _streaming_spherical((staged[head_index],), centroid_count)
+            for head_index in range(len(layer))
+        )
+    return _batched_numpy_streaming_spherical(staged, centroid_count)
 
 
 def _measure(exemplar: Any, action: Callable[[], ResultT]) -> tuple[ResultT, float, int, str]:
@@ -487,7 +550,15 @@ def build_query_forecast(
     def construct_centroids() -> None:
         for layer in head_samples:
             if config.low_memory_centroids:
-                centroids.append(list(_layer_streaming_spherical(layer, config.centroid_count)))
+                centroids.append(
+                    list(
+                        _layer_streaming_spherical(
+                            layer,
+                            config.centroid_count,
+                            execution_mode=config.centroid_execution_mode,
+                        )
+                    )
+                )
                 continue
             centroid_layer: list[tuple[Any, Any]] = []
             for samples in layer:
@@ -543,6 +614,7 @@ def build_query_forecast(
         reused_original_prefill=True,
         draft_cache_isolated=draft_cache_isolated or config.draft_steps == 0,
         original_logical_sequence_length=original_logical_sequence_length,
+        configured_mode=config.mode,
     )
     return QueryForecast(tuple(forecast_layers), provenance, timing)
 

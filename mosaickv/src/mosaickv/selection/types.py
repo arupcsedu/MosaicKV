@@ -288,10 +288,15 @@ class SelectionResult:
     def remaining_budget(self) -> int:
         return self.budget.value - self.budget_spent
 
-    def to_exact_tier(self, full_state: FullKVState) -> ExactTier:
+    def to_exact_tier(
+        self,
+        full_state: FullKVState,
+        *,
+        gather_mode: str = "batched_layer",
+    ) -> ExactTier:
         """Gather the selected block payloads from their unchanged source cache."""
 
-        return full_state.gather_exact_blocks(self.selected_blocks)
+        return full_state.gather_exact_blocks(self.selected_blocks, gather_mode=gather_mode)
 
 
 @dataclass(frozen=True, slots=True)

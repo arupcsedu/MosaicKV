@@ -1,0 +1,40 @@
+schema_version: 1
+experiment_id: llava_full_quality_prefixkv_repair_v1
+classification: exploratory_dirty_tree_prefixkv_failed_shard_repair
+source_continuation_index: /scratch/djy8hg/runs/mosaickv/campaigns/llava-full-quality-continuation-6gpu-v1/jobs.jsonl
+source_continuation_index_sha256: ff324e336ca914cd17ebfac0420d0d4c098f46ecbdbcfd93666c3ec51883ad54
+source_output_root: /scratch/djy8hg/runs/mosaickv/llava-full-quality-continuation-6gpu-v1
+campaign_destination: /scratch/djy8hg/runs/mosaickv/campaigns/llava-full-quality-prefixkv-repair-v1
+repair_output_root: /scratch/djy8hg/runs/mosaickv/llava-full-quality-prefixkv-repair-v1
+workers: 6
+expected_failed_shards: 144
+expected_failed_rows: 576
+expected_failed_logical_cells: 12
+expected_error: "RuntimeError: HuggingFaceRuntimeError: PrefixKV decode validity metadata is incomplete"
+expected_methods:
+  - prefixkv_reimpl
+expected_tasks:
+  - chartqa
+  - docvqa
+  - mmstar
+  - textvqa
+expected_retention_ratios:
+  - 0.1
+  - 0.2
+  - 0.5
+runtime_identity:
+  hf_runtime_sha256: c6098a2e7223a884979b4e516c0007a008daed67c85038e7d2cabe0415938663
+  config_sha256: 9559feb1bdd2baa187f25695c3aa8e8b64ded0822cf07d7102ed8e6166a82c93
+smoke_evidence:
+  slurm_job_id: 18353661
+  result: /scratch/djy8hg/runs/mosaickv/prefixkv-fix-smoke-v1/prefixkv-fix-smoke-v1/results.jsonl
+  method: prefixkv_reimpl
+  retention_ratio: 0.1
+  generated_tokens: 64
+resume_contract:
+  preserve_all_6912_completed_rows: true
+  rerun_only_explicit_failed_shards: true
+  never_overwrite_source_artifacts: true
+  preserve_config_shas: true
+  preserve_sample_ledgers: true
+  preserve_run_ids_in_new_output_namespace: true

@@ -121,7 +121,9 @@ def _neighbor_sets(graph: SparseEvidenceGraph) -> tuple[frozenset[int], ...]:
     return tuple(frozenset(values) for values in neighbors)
 
 
-def _value_novelty(graph: SparseEvidenceGraph) -> tuple[tuple[float, ...], tuple[float, ...]]:
+def _value_novelty_reference(
+    graph: SparseEvidenceGraph,
+) -> tuple[tuple[float, ...], tuple[float, ...], tuple[float, ...]]:
     """Compute the reference novelty while caching each vector norm exactly once."""
 
     values = [np.asarray(node.pooled_value, dtype=np.float64).reshape(-1) for node in graph.nodes]
@@ -150,7 +152,59 @@ def _value_novelty(graph: SparseEvidenceGraph) -> tuple[tuple[float, ...], tuple
             maximum_similarity = max(maximum_similarity, min(1.0, similarity))
         redundancy.append(maximum_similarity)
         novelty.append(1.0 - maximum_similarity)
-    return tuple(novelty), tuple(redundancy)
+    return tuple(novelty), tuple(redundancy), norms
+
+
+def _value_novelty_vectorized(
+    graph: SparseEvidenceGraph,
+    *,
+    edge_chunk_size: int = 16_384,
+) -> tuple[tuple[float, ...], tuple[float, ...], tuple[float, ...]]:
+    """Compute the same neighbor novelty with bounded vectorized edge tiles.
+
+    A normal VLM graph contains one common value width but hundreds of
+    thousands of typed edges. The scalar reference dispatches a small
+    ``np.dot`` for every unique neighbor pair. This path evaluates bounded
+    edge tiles and uses ``np.maximum.at`` to preserve the undirected maximum
+    similarity reduction without materializing an ``n x n`` matrix.
+    """
+
+    if edge_chunk_size < 1:
+        raise ValueError("edge_chunk_size must be positive")
+    values = [np.asarray(node.pooled_value, dtype=np.float64).reshape(-1) for node in graph.nodes]
+    feature_sizes = {int(value.size) for value in values}
+    if len(feature_sizes) != 1:
+        return _value_novelty_reference(graph)
+    matrix = np.stack(values, axis=0)
+    norms_array = np.linalg.norm(matrix, axis=1)
+    maximum_similarity = np.zeros(len(values), dtype=np.float64)
+    rows = np.asarray(graph.row_indices, dtype=np.int64)
+    columns = np.asarray(graph.column_indices, dtype=np.int64)
+    for start in range(0, len(rows), edge_chunk_size):
+        source = rows[start : start + edge_chunk_size]
+        target = columns[start : start + edge_chunk_size]
+        denominator = norms_array[source] * norms_array[target]
+        dot_products = np.einsum(
+            "ij,ij->i",
+            matrix[source],
+            matrix[target],
+            optimize=False,
+        )
+        similarities = np.divide(
+            dot_products,
+            denominator,
+            out=np.zeros_like(dot_products),
+            where=denominator != 0,
+        )
+        similarities = np.minimum(1.0, similarities)
+        np.maximum.at(maximum_similarity, source, similarities)
+        np.maximum.at(maximum_similarity, target, similarities)
+    novelty = 1.0 - maximum_similarity
+    return (
+        tuple(float(value) for value in novelty),
+        tuple(float(value) for value in maximum_similarity),
+        tuple(float(value) for value in norms_array),
+    )
 
 
 def _centrality_and_singleton_coverage(
@@ -246,12 +300,16 @@ def compute_block_utilities(
         forecast_attention_by_node=forecast_attention_by_node,
         forecast_attention_by_head=forecast_attention_by_head,
     )
-    raw_novelty, _raw_redundancy = _value_novelty(graph)
+    if weights.execution_mode == "reference_sparse":
+        raw_novelty, _raw_redundancy, value_norms = _value_novelty_reference(graph)
+    elif weights.execution_mode == "vectorized_edges":
+        raw_novelty, _raw_redundancy, value_norms = _value_novelty_vectorized(graph)
+    else:  # pragma: no cover - strict config validation guards this
+        raise ValueError(f"unsupported utility execution mode: {weights.execution_mode}")
     centrality, coverage = _centrality_and_singleton_coverage(graph)
     rarity = _modality_rarity(graph)
     raw_contribution = tuple(
-        probabilities[node.node_id]
-        * float(np.linalg.norm(np.asarray(node.pooled_value, dtype=np.float64)))
+        probabilities[node.node_id] * value_norms[node.node_id]
         for node in graph.nodes
     )
     if weights.normalization != "layer_head_l1":  # pragma: no cover - strict config guards this

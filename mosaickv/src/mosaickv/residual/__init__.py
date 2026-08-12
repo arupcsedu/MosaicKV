@@ -13,6 +13,7 @@ from mosaickv.residual.storage import (
 from mosaickv.residual.types import (
     ResidualIndexEntry,
     ResidualPayloadMetadata,
+    ResidualPositionIndex,
     ResidualStorageReport,
     ResidualTransferBatch,
 )
@@ -21,6 +22,7 @@ __all__ = [
     "PinnedMemoryUnavailableError",
     "ResidualIndexEntry",
     "ResidualPayloadMetadata",
+    "ResidualPositionIndex",
     "ResidualStorageError",
     "ResidualStorageReport",
     "ResidualTier",

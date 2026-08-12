@@ -1,0 +1,1 @@
+{"dataset_id":"lmms-lab/ChartQA","dataset_revision":"9e63b7df1592a1c2158e735cc1725454aef0d6d9","parent_sample_id_file":"/scratch/djy8hg/runs/mosaickv/campaigns/llava-full-quality-continuation-6gpu-v1/sample_shards/chartqa/02.json","sample_ids":["chartqa:1143"],"schema_version":1,"split":"test","task":"chartqa"}

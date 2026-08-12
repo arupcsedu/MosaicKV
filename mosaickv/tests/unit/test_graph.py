@@ -137,6 +137,81 @@ def test_vectorized_pooling_preserves_batch_head_and_partial_block_means() -> No
         )
 
 
+def test_fused_torch_kv_descriptor_transfer_is_bitwise_reference_equivalent() -> None:
+    torch = pytest.importorskip("torch")
+    key = torch.arange(2 * 3 * 5 * 4, dtype=torch.float32).reshape(2, 3, 5, 4)
+    value = torch.arange(2 * 3 * 5 * 6, dtype=torch.float32).reshape(2, 3, 5, 6)
+    full = FullKVState.from_tensors(((key, value),), block_size=3)
+
+    fused = pool_block_descriptors(full, host_transfer_mode="deferred_layer")
+    reference = pool_block_descriptors(full, host_transfer_mode="per_group_reference")
+
+    assert len(fused) == len(reference)
+    for observed, expected in zip(fused, reference, strict=True):
+        assert np.array_equal(observed.pooled_key, expected.pooled_key)
+        assert np.array_equal(observed.pooled_value, expected.pooled_value)
+        assert np.array_equal(observed.semantic_embedding, expected.semantic_embedding)
+
+
+def test_vectorized_torch_descriptor_normalization_matches_deferred_values() -> None:
+    torch = pytest.importorskip("torch")
+    key = torch.arange(2 * 3 * 5 * 4, dtype=torch.float32).reshape(2, 3, 5, 4)
+    value = torch.arange(2 * 3 * 5 * 6, dtype=torch.float32).reshape(2, 3, 5, 6)
+    full = FullKVState.from_tensors(((key, value),), block_size=3)
+
+    candidate = pool_block_descriptors(
+        full,
+        host_transfer_mode="deferred_layer_vectorized",
+    )
+    reference = pool_block_descriptors(full, host_transfer_mode="deferred_layer")
+
+    assert len(candidate) == len(reference)
+    for observed, expected in zip(candidate, reference, strict=True):
+        assert np.array_equal(observed.pooled_key, expected.pooled_key)
+        assert np.array_equal(observed.pooled_value, expected.pooled_value)
+        assert np.array_equal(observed.semantic_embedding, expected.semantic_embedding)
+
+
+def test_optimized_graph_pipeline_is_bitwise_reference_equivalent() -> None:
+    torch = pytest.importorskip("torch")
+    generator = torch.Generator().manual_seed(541)
+    key = torch.randn((1, 2, 9, 7), generator=generator, dtype=torch.float32)
+    value = torch.randn((1, 2, 9, 5), generator=generator, dtype=torch.float32)
+    attention = torch.rand((1, 4, 9, 9), generator=generator, dtype=torch.float32)
+    full = FullKVState.from_tensors(((key, value),), block_size=2)
+    reference_config = GraphConfig(
+        attention_host_transfer_mode="deferred_layer",
+        edge_accumulation_mode="dictionary",
+        similarity_chunk_size=3,
+    )
+    optimized_config = replace(
+        reference_config,
+        attention_host_transfer_mode="deferred_layer_vectorized",
+        edge_accumulation_mode="preselected",
+    )
+
+    reference = build_evidence_graph(
+        full,
+        reference_config,
+        prompt_attentions=(attention,),
+    )
+    optimized = build_evidence_graph(
+        full,
+        optimized_config,
+        prompt_attentions=(attention,),
+    )
+
+    assert optimized.row_indices == reference.row_indices
+    assert optimized.column_indices == reference.column_indices
+    assert optimized.edge_types == reference.edge_types
+    assert optimized.weights == reference.weights
+    assert optimized.diagnostics == reference.diagnostics
+    for observed, expected in zip(optimized.nodes, reference.nodes, strict=True):
+        assert np.array_equal(observed.pooled_key, expected.pooled_key)
+        assert np.array_equal(observed.pooled_value, expected.pooled_value)
+        assert np.array_equal(observed.semantic_embedding, expected.semantic_embedding)
+
+
 def test_synthetic_chart_has_spatial_and_cross_modal_connections() -> None:
     full = _full_state((Modality.TEXT, Modality.IMAGE, Modality.IMAGE, Modality.TEXT))
     metadata = {
@@ -316,6 +391,51 @@ def test_prompt_attention_maps_pool_query_heads_by_kv_head() -> None:
     )
 
 
+def test_similarity_shortlist_preserves_all_nodes_and_fallback_edges() -> None:
+    full = _full_state((Modality.TEXT,) * 6)
+    attention = np.arange(1 * 1 * 2 * 6, dtype=np.float32).reshape(1, 1, 2, 6) + 1
+    candidates = (1, 2, 4)
+
+    pooled = pool_prompt_attention_coactivation(
+        full,
+        (attention,),
+        eligible_node_ids=candidates,
+    )
+    graph = build_evidence_graph(
+        full,
+        _isolated_config(
+            semantic_weight=1.0,
+            attention_weight=1.0,
+            fallback_weight=0.25,
+            max_neighbors=2,
+        ),
+        prompt_attentions=(attention,),
+        similarity_candidate_node_ids=candidates,
+    )
+
+    assert set(pooled) == set(candidates)
+    assert len(graph.nodes) == len(full.blocks)
+    similarity_edges = _edge_pairs(graph, EdgeType.SEMANTIC_SIMILARITY) | _edge_pairs(
+        graph,
+        EdgeType.ATTENTION_COACTIVATION,
+    )
+    assert similarity_edges
+    assert all(source in candidates and target in candidates for source, target in similarity_edges)
+    assert {source for source, _target in _edge_pairs(graph, EdgeType.FALLBACK_POSITIONAL)} == set(
+        range(len(full.blocks))
+    )
+
+
+def test_similarity_shortlist_rejects_unknown_nodes() -> None:
+    full = _full_state((Modality.TEXT,) * 2)
+    with pytest.raises(ValueError, match="unknown graph nodes"):
+        build_evidence_graph(
+            full,
+            GraphConfig(),
+            similarity_candidate_node_ids=(99,),
+        )
+
+
 def test_batched_torch_prompt_attention_pool_matches_numpy_reference() -> None:
     torch = pytest.importorskip("torch")
     full = _full_state((Modality.TEXT,) * 5, heads=2, block_size=2)
@@ -333,11 +453,30 @@ def test_batched_torch_prompt_attention_pool_matches_numpy_reference() -> None:
     attention = np.arange(1 * 4 * 3 * 5, dtype=np.float32).reshape(1, 4, 3, 5)
 
     expected = pool_prompt_attention_coactivation(full, (attention,))
-    observed = pool_prompt_attention_coactivation(torch_full, (torch.as_tensor(attention),))
+    tensor_attention = torch.as_tensor(attention)
+    observed = pool_prompt_attention_coactivation(torch_full, (tensor_attention,))
+    per_group = pool_prompt_attention_coactivation(
+        torch_full,
+        (tensor_attention,),
+        host_transfer_mode="per_group_reference",
+    )
 
     assert set(observed) == set(expected)
     for node_id in expected:
         assert np.allclose(observed[node_id], expected[node_id], atol=1e-6, rtol=0)
+        assert np.array_equal(observed[node_id], per_group[node_id])
+
+
+def test_prompt_attention_pool_rejects_unknown_host_transfer_mode() -> None:
+    full = _full_state((Modality.TEXT,) * 2)
+    attention = np.ones((1, 1, 1, 2), dtype=np.float32)
+
+    with pytest.raises(ValueError, match="host_transfer_mode"):
+        pool_prompt_attention_coactivation(
+            full,
+            (attention,),
+            host_transfer_mode="unknown",
+        )
 
 
 def test_missing_metadata_uses_local_fallback_and_csr_is_valid() -> None:

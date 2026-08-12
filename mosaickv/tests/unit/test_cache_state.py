@@ -156,6 +156,36 @@ def test_selected_position_gather_preserves_values_and_logical_positions() -> No
         assert np.array_equal(value_block, expected_value)
 
 
+def test_batched_torch_head_gather_matches_reference_with_variable_counts() -> None:
+    torch = pytest.importorskip("torch")
+    key = torch.arange(1 * 3 * 9 * 4, dtype=torch.float32).reshape(1, 3, 9, 4)
+    value = (key + 10_000).clone()
+    full = FullKVState.from_tensors(((key, value),), block_size=2)
+    by_head = {
+        head: tuple(block for block in full.blocks if block.kv_head == head)
+        for head in range(3)
+    }
+    selected = (
+        *by_head[0][:2],
+        *by_head[1][1:3],
+        *by_head[2][:3],
+    )
+
+    reference = full.gather_exact_blocks(selected, gather_mode="per_head_reference")
+    candidate = full.gather_exact_blocks(selected, gather_mode="batched_layer")
+
+    assert candidate.blocks == reference.blocks
+    assert candidate.active_bytes == reference.active_bytes
+    assert all(
+        torch.equal(expected, observed)
+        for expected, observed in zip(reference.key_blocks, candidate.key_blocks, strict=True)
+    )
+    assert all(
+        torch.equal(expected, observed)
+        for expected, observed in zip(reference.value_blocks, candidate.value_blocks, strict=True)
+    )
+
+
 def test_blockization_preserves_media_source_boundaries_and_metadata() -> None:
     key = np.zeros((1, 1, 6, 2), dtype=np.float32)
     value = np.ones_like(key)

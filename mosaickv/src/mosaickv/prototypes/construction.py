@@ -6,7 +6,7 @@ import math
 from bisect import bisect_left
 from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, cast
 
 import numpy as np
@@ -154,8 +154,9 @@ def _exact_only(
     *,
     mode: TierConstructionMode,
     reason: str,
+    exact_gather_mode: str,
 ) -> ThreeTierCacheConstruction:
-    exact = selection.to_exact_tier(full_state)
+    exact = selection.to_exact_tier(full_state, gather_mode=exact_gather_mode)
     residual_report = empty_residual_storage()
     state = MosaicKVState.create(full_state, exact=exact, residuals=residual_report.tier)
     return ThreeTierCacheConstruction(
@@ -179,8 +180,13 @@ def _retention_one(
     safety: PrototypeSafetyAssessment,
     selection: SelectionResult,
     adapter_declares_residual_repair: bool,
+    *,
+    exact_gather_mode: str,
 ) -> ThreeTierCacheConstruction:
-    exact = full_state.gather_exact_blocks(full_state.blocks)
+    exact = full_state.gather_exact_blocks(
+        full_state.blocks,
+        gather_mode=exact_gather_mode,
+    )
     residual_report = empty_residual_storage()
     state = MosaicKVState.create(full_state, exact=exact, residuals=residual_report.tier)
     state.reconstruct_full_state(full_state)
@@ -288,7 +294,12 @@ def _assign_to_anchors(
     graph: SparseEvidenceGraph,
     selected: frozenset[int],
     config: PrototypeConfig,
+    *,
+    prototype_anchor_node_ids: frozenset[int] | None = None,
 ) -> tuple[dict[int, tuple[int, float]], str | None]:
+    anchors = selected if prototype_anchor_node_ids is None else prototype_anchor_node_ids
+    if not anchors <= selected:
+        return {}, "prototype anchor allowlist contains a non-selected source node"
     missing_exact_routes = tuple(
         node.node_id
         for node in graph.nodes
@@ -307,13 +318,13 @@ def _assign_to_anchors(
         if first != second:
             neighbors[second].append((first, weight))
     selected_by_identity: dict[tuple[int, int, object], list[tuple[float, int]]] = defaultdict(list)
-    for anchor_id in selected:
+    for anchor_id in anchors:
         anchor = graph.nodes[anchor_id]
         selected_by_identity[
             (anchor.block.layer, anchor.block.kv_head, anchor.block.modality)
         ].append((anchor.logical_center, anchor_id))
-    for anchors in selected_by_identity.values():
-        anchors.sort()
+    for identity_anchors in selected_by_identity.values():
+        identity_anchors.sort()
     allowed_anchor_modalities: dict[str, set[str]] = defaultdict(set)
     for pair in config.allowed_modality_pairs:
         source_modality, anchor_modality = pair.split(":", maxsplit=1)
@@ -360,7 +371,7 @@ def _assign_to_anchors(
             continue
         weights_by_anchor: dict[int, float] = {}
         for anchor_id, weight in neighbors.get(node_id, ()):
-            if anchor_id not in selected:
+            if anchor_id not in anchors:
                 continue
             anchor = graph.nodes[anchor_id]
             if (
@@ -388,13 +399,15 @@ def _assign_to_anchors(
         result: dict[int, tuple[int, float]] = {}
 
         def assign_segment(member_ids: Sequence[int]) -> str | None:
-            anchors = frozenset(node_id for node_id in member_ids if node_id in selected)
-            if not anchors:
+            segment_anchors = frozenset(node_id for node_id in member_ids if node_id in anchors)
+            if not segment_anchors:
                 return f"prototype anchor-cover segment {tuple(member_ids)} has no selected anchor"
             for node_id in member_ids:
                 if node_id in selected:
                     continue
-                candidates = tuple(item for item in preferences[node_id] if item[1] in anchors)
+                candidates = tuple(
+                    item for item in preferences[node_id] if item[1] in segment_anchors
+                )
                 if not candidates:
                     return (
                         f"unselected node {node_id} has no compatible selected anchor "
@@ -1142,7 +1155,10 @@ def _prototype_payloads(
     # prototype cluster at a time launches thousands of small indexing kernels
     # for long documents and videos.  The views below retain the identical
     # block order and feed both prototype construction and residual storage.
-    gathered_sources = full_state.gather_exact_blocks(ordered_member_blocks)
+    gathered_sources = full_state.gather_exact_blocks(
+        ordered_member_blocks,
+        gather_mode=config.source_gather_mode,
+    )
     gathered_by_node = {
         node_id: (key, value)
         for node_id, key, value in zip(
@@ -1438,6 +1454,7 @@ def estimate_prototype_active_cost(
     config: PrototypeConfig,
     *,
     position_limits: Mapping[tuple[int, int], int] | None = None,
+    prototype_anchor_node_ids: Sequence[int] | None = None,
 ) -> tuple[int | None, str | None]:
     """Validate assignments and estimate exact prototype cost without tensor copies.
 
@@ -1452,6 +1469,11 @@ def estimate_prototype_active_cost(
         graph,
         frozenset(selection.selected_node_ids),
         config,
+        prototype_anchor_node_ids=(
+            None
+            if prototype_anchor_node_ids is None
+            else frozenset(int(node_id) for node_id in prototype_anchor_node_ids)
+        ),
     )
     if reason is not None:
         return None, reason
@@ -1498,10 +1520,13 @@ def construct_three_tier_cache(
     prototype_config: PrototypeConfig | None = None,
     residual_config: ResidualConfig | None = None,
     active_byte_budget: int | None = None,
+    total_storage_budget_bytes: int | None = None,
     retention_ratio: float | None = None,
     key_transform: RotaryPrototypeKeyTransform | None = None,
     prototype_weight_by_node: Mapping[int, float] | None = None,
     prototype_token_weight_by_head: Mapping[tuple[int, int], Any] | None = None,
+    exact_gather_mode: str = "batched_layer",
+    prototype_anchor_node_ids: Sequence[int] | None = None,
 ) -> ThreeTierCacheConstruction:
     """Build exact, prototype, and CPU residual tiers or safely select exact-only.
 
@@ -1512,6 +1537,10 @@ def construct_three_tier_cache(
 
     prototypes = prototype_config or PrototypeConfig()
     residuals = residual_config or ResidualConfig()
+    if exact_gather_mode not in {"per_head_reference", "batched_layer"}:
+        raise ValueError(
+            "exact_gather_mode must be 'per_head_reference' or 'batched_layer'"
+        )
     _validate_inputs(full_state, graph, selection)
     if retention_ratio is not None and (
         not math.isfinite(retention_ratio) or not 0 < retention_ratio <= 1
@@ -1519,6 +1548,8 @@ def construct_three_tier_cache(
         raise ValueError("retention_ratio must be finite and in the interval (0, 1]")
     if active_byte_budget is not None and active_byte_budget < 1:
         raise ValueError("active_byte_budget must be positive when provided")
+    if total_storage_budget_bytes is not None and total_storage_budget_bytes < 1:
+        raise ValueError("total_storage_budget_bytes must be positive when provided")
     if selection.budget.unit is BudgetUnit.BYTES:
         active_byte_budget = (
             selection.budget.value
@@ -1529,6 +1560,14 @@ def construct_three_tier_cache(
         raise PrototypeConstructionError(
             "selected exact blocks already exceed active_byte_budget: "
             f"exact={selection.active_bytes}, budget={active_byte_budget}"
+        )
+    if (
+        total_storage_budget_bytes is not None
+        and selection.active_bytes > total_storage_budget_bytes
+    ):
+        raise PrototypeConstructionError(
+            "selected exact blocks already exceed total_storage_budget_bytes: "
+            f"exact={selection.active_bytes}, budget={total_storage_budget_bytes}"
         )
     safety = assess_prototype_safety(full_state, capabilities, key_transform)
     all_node_ids = tuple(range(len(graph.nodes)))
@@ -1542,6 +1581,7 @@ def construct_three_tier_cache(
             safety,
             selection,
             capabilities.supports_residual_repair,
+            exact_gather_mode=exact_gather_mode,
         )
     if not prototypes.enabled:
         return _exact_only(
@@ -1551,6 +1591,7 @@ def construct_three_tier_cache(
             capabilities.supports_residual_repair,
             mode=TierConstructionMode.EXACT_ONLY_DISABLED,
             reason="prototype construction is disabled by configuration",
+            exact_gather_mode=exact_gather_mode,
         )
     if not safety.safe:
         return _exact_only(
@@ -1560,10 +1601,20 @@ def construct_three_tier_cache(
             capabilities.supports_residual_repair,
             mode=TierConstructionMode.EXACT_ONLY_UNSAFE,
             reason=safety.reason,
+            exact_gather_mode=exact_gather_mode,
         )
 
     selected = frozenset(selection.selected_node_ids)
-    assignments, incompatibility = _assign_to_anchors(graph, selected, prototypes)
+    assignments, incompatibility = _assign_to_anchors(
+        graph,
+        selected,
+        prototypes,
+        prototype_anchor_node_ids=(
+            None
+            if prototype_anchor_node_ids is None
+            else frozenset(int(node_id) for node_id in prototype_anchor_node_ids)
+        ),
+    )
     if incompatibility is not None:
         return _exact_only(
             full_state,
@@ -1572,8 +1623,9 @@ def construct_three_tier_cache(
             capabilities.supports_residual_repair,
             mode=TierConstructionMode.EXACT_ONLY_INCOMPATIBLE,
             reason=incompatibility,
+            exact_gather_mode=exact_gather_mode,
         )
-    exact = selection.to_exact_tier(full_state)
+    exact = selection.to_exact_tier(full_state, gather_mode=exact_gather_mode)
     prototype_tier, records, source_to_prototype, gathered_sources = _prototype_payloads(
         full_state,
         graph,
@@ -1606,6 +1658,7 @@ def construct_three_tier_cache(
             reason=(
                 f"prototype dispersion guard rejected cluster IDs {list(excessive_dispersion)}"
             ),
+            exact_gather_mode=exact_gather_mode,
         )
     budget_violation = _selection_budget_violation(exact, prototype_tier, selection)
     if budget_violation is not None:
@@ -1616,6 +1669,7 @@ def construct_three_tier_cache(
             capabilities.supports_residual_repair,
             mode=TierConstructionMode.EXACT_ONLY_INCOMPATIBLE,
             reason=budget_violation,
+            exact_gather_mode=exact_gather_mode,
         )
     if active_byte_budget is not None:
         active_bytes = exact.active_bytes + prototype_tier.active_bytes
@@ -1630,16 +1684,45 @@ def construct_three_tier_cache(
                     f"exact plus prototype active bytes ({active_bytes}) exceed the "
                     f"configured budget ({active_byte_budget})"
                 ),
+                exact_gather_mode=exact_gather_mode,
             )
     residual_node_order = tuple(
         node_id for record in records for node_id in record.assigned_node_ids
     )
+    active_storage_bytes = exact.active_bytes + prototype_tier.active_bytes
+    if (
+        total_storage_budget_bytes is not None
+        and active_storage_bytes > total_storage_budget_bytes
+    ):
+        raise PrototypeConstructionError(
+            "active exact/prototype cache exceeds total storage budget: "
+            f"active={active_storage_bytes}, total={total_storage_budget_bytes}"
+        )
+    residual_byte_limit = residuals.max_bytes
+    if total_storage_budget_bytes is not None:
+        remaining = total_storage_budget_bytes - active_storage_bytes
+        residual_byte_limit = (
+            remaining
+            if residual_byte_limit is None
+            else min(residual_byte_limit, remaining)
+        )
+    bounded_residuals = replace(residuals, max_bytes=residual_byte_limit)
+    residual_priority_by_node = {
+        member.node_id: (
+            member.normalized_weight
+            * member.reconstruction_error
+            * (1.0 + member.value_output_norm)
+        )
+        for record in records
+        for member in record.members
+    }
     residual_report = build_residual_storage(
         full_state,
         source_to_prototype,
-        residuals,
+        bounded_residuals,
         node_order=residual_node_order,
         gathered=gathered_sources,
+        priority_by_node=residual_priority_by_node,
     )
     state = MosaicKVState.create(
         full_state,
@@ -1650,7 +1733,11 @@ def construct_three_tier_cache(
     return ThreeTierCacheConstruction(
         state=state,
         mode=TierConstructionMode.THREE_TIER,
-        reason="all unselected blocks were assigned to compatible selected anchors",
+        reason=(
+            "all unselected blocks were assigned to compatible selected anchors; "
+            f"residuals stored for {len(residual_report.payloads)}/"
+            f"{len(residual_node_order)} prototyped source blocks"
+        ),
         safety=safety,
         adapter_declares_residual_repair=capabilities.supports_residual_repair,
         active_budget=selection.budget,

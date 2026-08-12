@@ -12,11 +12,13 @@ from mosaickv.config import (
     ConfigurationError,
     FidelityDiagnosticsConfig,
     ForecastingConfig,
+    GraphConfig,
     LookMConfig,
     PrefixKVConfig,
     PrototypeConfig,
     ResidualConfig,
     RunConfig,
+    UtilityConfig,
     VLCacheConfig,
     canonical_config_json,
     config_sha256,
@@ -73,6 +75,12 @@ def test_fidelity_diagnostic_ledger_is_strict_and_hashed() -> None:
         FidelityDiagnosticsConfig(forecast_oracle_steps=1)
 
 
+def test_selection_evidence_can_be_captured_without_oracle_diagnostics() -> None:
+    config = FidelityDiagnosticsConfig.from_mapping({"capture_selection_evidence": True})
+    assert not config.enabled
+    assert config.capture_selection_evidence
+
+
 def test_per_head_prototype_routes_are_strict_and_resolved() -> None:
     config = PrototypeConfig(
         group_size=15,
@@ -116,6 +124,14 @@ def test_forecast_attention_prototype_controls_are_strictly_coupled() -> None:
         PrototypeConfig(attention_bias_basis="forecast_attention_entropy")
     with pytest.raises(ConfigurationError, match="anchor_position_strategy"):
         PrototypeConfig(anchor_position_strategy="free_rope_phase")
+    with pytest.raises(ConfigurationError, match="source_gather_mode"):
+        PrototypeConfig(source_gather_mode="per_block")
+
+    gather_config = PrototypeConfig.from_mapping({"source_gather_mode": "per_head_reference"})
+    assert gather_config.source_gather_mode == "per_head_reference"
+    assert PrototypeConfig().budget_planning_mode == "one_pass_anchor_cover"
+    with pytest.raises(ConfigurationError, match="budget_planning_mode"):
+        PrototypeConfig(budget_planning_mode="unbounded_retry")
 
 
 @pytest.mark.parametrize("ratio", [0.0, -0.1, 1.1])
@@ -128,11 +144,128 @@ def test_invalid_retention_ratio_has_useful_path(ratio: float) -> None:
         )
 
 
+def test_exact_tier_gather_mode_is_strict_and_resolved() -> None:
+    resolved = CacheConfig.from_mapping(
+        {
+            "budget_value": 8,
+            "budget_unit": "retained_slots",
+            "retention_ratio": 0.5,
+            "exact_gather_mode": "per_head_reference",
+        }
+    )
+    assert resolved.exact_gather_mode == "per_head_reference"
+    with pytest.raises(ConfigurationError, match="exact_gather_mode"):
+        CacheConfig(
+            budget_value=8,
+            budget_unit=BudgetUnit.RETAINED_SLOTS,
+            retention_ratio=0.5,
+            exact_gather_mode="per_block",
+        )
+
+
+def test_runtime_packing_mode_is_strict_and_resolved() -> None:
+    assert CacheConfig(
+        budget_value=8,
+        budget_unit=BudgetUnit.RETAINED_SLOTS,
+        retention_ratio=0.5,
+    ).packing_mode == "per_head_reference"
+    resolved = CacheConfig.from_mapping(
+        {
+            "budget_value": 8,
+            "budget_unit": "retained_slots",
+            "retention_ratio": 0.5,
+            "packing_mode": "per_head_reference",
+        }
+    )
+    assert resolved.packing_mode == "per_head_reference"
+    with pytest.raises(ConfigurationError, match="packing_mode"):
+        CacheConfig(
+            budget_value=8,
+            budget_unit=BudgetUnit.RETAINED_SLOTS,
+            retention_ratio=0.5,
+            packing_mode="per_block",
+        )
+
+
+def test_total_and_residual_storage_budgets_are_strict() -> None:
+    cache = CacheConfig.from_mapping(
+        {
+            "budget_value": 8,
+            "budget_unit": "bytes",
+            "retention_ratio": 0.5,
+            "total_storage_budget_bytes": 12,
+        }
+    )
+    assert cache.total_storage_budget_bytes == 12
+    with pytest.raises(ConfigurationError, match="total_storage_budget_bytes"):
+        CacheConfig(
+            budget_value=8,
+            budget_unit=BudgetUnit.BYTES,
+            retention_ratio=0.5,
+            total_storage_budget_bytes=0,
+        )
+
+    residual = ResidualConfig.from_mapping(
+        {
+            "max_bytes": 4,
+            "max_source_blocks": 1,
+            "selection_policy": "risk_weighted_reconstruction_error",
+        }
+    )
+    assert residual.max_bytes == 4
+    assert residual.max_source_blocks == 1
+    with pytest.raises(ConfigurationError, match=r"residual\.max_bytes"):
+        ResidualConfig(max_bytes=-1)
+    with pytest.raises(ConfigurationError, match=r"residual\.selection_policy"):
+        ResidualConfig(selection_policy="highest_node_id")
+
+
 def test_unknown_configuration_field_is_rejected() -> None:
     payload = json.loads(canonical_config_json(synthetic_smoke_config()))
     payload["model"]["typo_revision"] = "bad"
     with pytest.raises(ConfigurationError, match=r"model contains unknown field.*typo_revision"):
         RunConfig.from_mapping(payload)
+
+
+def test_graph_attention_host_transfer_mode_is_strict() -> None:
+    assert GraphConfig().attention_host_transfer_mode == "deferred_layer"
+    assert (
+        GraphConfig.from_mapping(
+            {"attention_host_transfer_mode": "per_group_reference"}
+        ).attention_host_transfer_mode
+        == "per_group_reference"
+    )
+    with pytest.raises(ConfigurationError, match="attention_host_transfer_mode"):
+        GraphConfig(attention_host_transfer_mode="unknown")
+    shortlist = GraphConfig.from_mapping(
+        {
+            "similarity_shortlist_multiplier": 4.0,
+            "similarity_shortlist_min_nodes": 32,
+        }
+    )
+    assert shortlist.similarity_shortlist_multiplier == 4.0
+    assert shortlist.similarity_shortlist_min_nodes == 32
+    with pytest.raises(ConfigurationError, match="similarity_shortlist_multiplier"):
+        GraphConfig(similarity_shortlist_multiplier=-1)
+
+
+def test_compute_execution_modes_are_strict() -> None:
+    assert ForecastingConfig().centroid_execution_mode == "batched_layer"
+    assert UtilityConfig().execution_mode == "vectorized_edges"
+    assert (
+        ForecastingConfig.from_mapping(
+            {"centroid_execution_mode": "reference_per_head"}
+        ).centroid_execution_mode
+        == "reference_per_head"
+    )
+    assert (
+        UtilityConfig.from_mapping({"execution_mode": "reference_sparse"}).execution_mode
+        == "reference_sparse"
+    )
+    with pytest.raises(ConfigurationError, match="centroid_execution_mode"):
+        ForecastingConfig(centroid_execution_mode="per_query")
+    with pytest.raises(ConfigurationError, match="execution_mode"):
+        UtilityConfig(execution_mode="scalar_dense")
 
 
 def test_common_physical_budget_controls_are_strict() -> None:
@@ -210,6 +343,20 @@ def test_load_simple_baseline_yaml_example() -> None:
     assert not config.prototypes.enabled
     assert not config.residual.enabled
     assert not config.repair.enabled
+
+
+def test_residual_index_mode_is_strict() -> None:
+    assert ResidualConfig().index_mode == "compact"
+    assert ResidualConfig(index_mode="materialized").index_mode == "materialized"
+    with pytest.raises(ConfigurationError, match=r"residual\.index_mode"):
+        ResidualConfig(index_mode="unknown")
+
+
+def test_graph_edge_accumulation_mode_is_strict() -> None:
+    assert GraphConfig().edge_accumulation_mode == "preselected"
+    assert GraphConfig(edge_accumulation_mode="dictionary").edge_accumulation_mode == ("dictionary")
+    with pytest.raises(ConfigurationError, match=r"graph\.edge_accumulation_mode"):
+        GraphConfig(edge_accumulation_mode="unknown")
 
 
 def test_load_prefixkv_yaml_example() -> None:
@@ -293,6 +440,22 @@ def test_forecasting_configuration_rejects_ambiguous_unused_sources() -> None:
             prompt_window=4,
             draft_steps=1,
         )
+
+
+def test_forecasting_configuration_parses_conditional_draft_gate_strictly() -> None:
+    config = ForecastingConfig.from_mapping(
+        {
+            "mode": "hybrid",
+            "prompt_window": 8,
+            "draft_steps": 2,
+            "conditional_draft_enabled": True,
+            "conditional_draft_uncertainty_threshold": 0.2,
+        }
+    )
+    assert config.conditional_draft_enabled
+    assert config.conditional_draft_uncertainty_threshold == 0.2
+    with pytest.raises(ConfigurationError, match="must be in \\[0, 1\\]"):
+        ForecastingConfig(conditional_draft_uncertainty_threshold=1.01)
 
 
 def test_prototype_configuration_rejects_invalid_modality_pairs() -> None:

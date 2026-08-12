@@ -9,11 +9,12 @@ from typing import Any
 
 import numpy as np
 
-from mosaickv.cache_state import ExactTier, FullKVState, ResidualTier
+from mosaickv.cache_state import ExactTier, FullKVState, ResidualTier, tensor_storage_bytes
 from mosaickv.config import ResidualConfig
 from mosaickv.residual.types import (
     ResidualIndexEntry,
     ResidualPayloadMetadata,
+    ResidualPositionIndex,
     ResidualStorageReport,
     ResidualTransferBatch,
 )
@@ -191,6 +192,71 @@ def empty_residual_storage() -> ResidualStorageReport:
     return ResidualStorageReport(ResidualTier(), (), (), 0)
 
 
+def _encoded_payload_bytes(
+    key: Any,
+    value: Any,
+    storage_dtype: ResidualStorageDType,
+) -> int:
+    """Return the exact tensor-payload bytes before allocating host storage."""
+
+    if storage_dtype is ResidualStorageDType.LOSSLESS:
+        return tensor_storage_bytes(key) + tensor_storage_bytes(value)
+    bytes_per_element = (
+        2
+        if storage_dtype in {ResidualStorageDType.FP16, ResidualStorageDType.BF16}
+        else 1
+    )
+
+    def numel(tensor: Any) -> int:
+        method = getattr(tensor, "numel", None)
+        if method is not None:
+            return int(method())
+        return int(np.asarray(tensor).size)
+
+    return (numel(key) + numel(value)) * bytes_per_element
+
+
+def _bounded_residual_node_ids(
+    node_ids: Sequence[int],
+    payloads: Mapping[int, tuple[Any, Any]],
+    config: ResidualConfig,
+    priority_by_node: Mapping[int, float] | None,
+) -> tuple[int, ...]:
+    """Choose a deterministic repairable subset without allocating it first."""
+
+    if config.max_bytes is None and config.max_source_blocks is None:
+        return tuple(node_ids)
+    priorities = {} if priority_by_node is None else {
+        int(node_id): float(priority) for node_id, priority in priority_by_node.items()
+    }
+    if any(not np.isfinite(priority) or priority < 0 for priority in priorities.values()):
+        raise ValueError("residual priorities must be finite and nonnegative")
+    unknown = set(priorities) - set(node_ids)
+    if unknown:
+        raise ValueError(f"residual priorities reference unknown source nodes: {sorted(unknown)}")
+    ranked = (
+        tuple(node_ids)
+        if config.selection_policy == "source_order"
+        else tuple(sorted(node_ids, key=lambda node_id: (-priorities.get(node_id, 0.0), node_id)))
+    )
+    maximum_blocks = len(ranked) if config.max_source_blocks is None else config.max_source_blocks
+    maximum_bytes = float("inf") if config.max_bytes is None else config.max_bytes
+    selected: set[int] = set()
+    consumed = 0
+    for node_id in ranked:
+        if len(selected) >= maximum_blocks:
+            break
+        key, value = payloads[node_id]
+        cost = _encoded_payload_bytes(key, value, config.storage_dtype)
+        if consumed + cost > maximum_bytes:
+            continue
+        selected.add(node_id)
+        consumed += cost
+    # Physical/index order remains the declared prototype-member order even
+    # when risk scores determined which members survived the storage cap.
+    return tuple(node_id for node_id in node_ids if node_id in selected)
+
+
 def build_residual_storage(
     full_state: FullKVState,
     assignments: Mapping[int, int],
@@ -198,6 +264,7 @@ def build_residual_storage(
     *,
     node_order: Sequence[int] | None = None,
     gathered: ExactTier | None = None,
+    priority_by_node: Mapping[int, float] | None = None,
 ) -> ResidualStorageReport:
     """Preserve assigned source blocks on CPU, indexed by original position.
 
@@ -224,6 +291,29 @@ def build_residual_storage(
         raise ValueError(
             "pre-gathered residual payloads must align exactly with residual node_order"
         )
+    payload_by_node = {
+        node_id: (key, value)
+        for node_id, key, value in zip(
+            node_ids,
+            gathered.key_blocks,
+            gathered.value_blocks,
+            strict=True,
+        )
+    }
+    node_ids = _bounded_residual_node_ids(
+        node_ids,
+        payload_by_node,
+        config,
+        priority_by_node,
+    )
+    if not node_ids:
+        return empty_residual_storage()
+    blocks = tuple(full_state.blocks[node_id] for node_id in node_ids)
+    gathered = ExactTier(
+        blocks,
+        tuple(payload_by_node[node_id][0] for node_id in node_ids),
+        tuple(payload_by_node[node_id][1] for node_id in node_ids),
+    )
     batched_lossless = bool(
         config.storage_dtype is ResidualStorageDType.LOSSLESS
         and gathered.key_blocks
@@ -246,8 +336,7 @@ def build_residual_storage(
     key_payloads: list[Any] = []
     value_payloads: list[Any] = []
     metadata: list[ResidualPayloadMetadata] = []
-    index: list[ResidualIndexEntry] = []
-    for payload_index, (node_id, block, key, value) in enumerate(
+    for payload_index, (node_id, _block, key, value) in enumerate(
         zip(node_ids, blocks, gathered.key_blocks, gathered.value_blocks, strict=True)
     ):
         if batched_lossless:
@@ -276,27 +365,44 @@ def build_residual_storage(
                 value_pinned=value_pinned,
             )
         )
-        for offset, (physical, logical) in enumerate(
-            zip(
-                block.physical_cache_indices,
-                block.original_logical_positions,
-                strict=True,
+    tier = ResidualTier(blocks, tuple(key_payloads), tuple(value_payloads))
+    payload_metadata = tuple(metadata)
+    if config.index_mode == "compact":
+        index: Sequence[ResidualIndexEntry] = ResidualPositionIndex.from_tier_metadata(
+            tier,
+            payload_metadata,
+        )
+    else:
+        materialized = [
+            ResidualIndexEntry(
+                layer=block.layer,
+                kv_head=block.kv_head,
+                prototype_id=payload.prototype_id,
+                original_position=logical,
+                physical_position=physical,
+                payload_index=payload.payload_index,
+                block_offset=offset,
             )
-        ):
-            index.append(
-                ResidualIndexEntry(
-                    layer=block.layer,
-                    kv_head=block.kv_head,
-                    prototype_id=prototype_id,
-                    original_position=logical,
-                    physical_position=physical,
-                    payload_index=payload_index,
-                    block_offset=offset,
+            for block, payload in zip(blocks, payload_metadata, strict=True)
+            for offset, (physical, logical) in enumerate(
+                zip(
+                    block.physical_cache_indices,
+                    block.original_logical_positions,
+                    strict=True,
                 )
             )
-    tier = ResidualTier(blocks, tuple(key_payloads), tuple(value_payloads))
-    index.sort(key=lambda item: item.identity)
-    return ResidualStorageReport(tier, tuple(metadata), tuple(index), tier.active_bytes)
+        ]
+        materialized.sort(key=lambda entry: entry.identity)
+        index = tuple(materialized)
+    report = ResidualStorageReport(tier, payload_metadata, index, tier.active_bytes)
+    if config.max_bytes is not None and report.cpu_bytes > config.max_bytes:
+        raise RuntimeError("encoded residual payloads exceeded residual.max_bytes")
+    if (
+        config.max_source_blocks is not None
+        and len(report.payloads) > config.max_source_blocks
+    ):
+        raise RuntimeError("encoded residual payloads exceeded residual.max_source_blocks")
+    return report
 
 
 def _decode_payload(
@@ -484,24 +590,14 @@ def discard_residual_payloads(
     if any(index < 0 or index >= len(report.payloads) for index in removed):
         raise IndexError("cannot discard an unknown residual payload")
     kept = tuple(index for index in range(len(report.payloads)) if index not in removed)
-    old_to_new = {old: new for new, old in enumerate(kept)}
     blocks = tuple(report.tier.source_blocks[index] for index in kept)
     keys = tuple(report.tier.key_residuals[index] for index in kept)
     values = tuple(report.tier.value_residuals[index] for index in kept)
     payloads = tuple(
         replace(report.payloads[old], payload_index=new) for new, old in enumerate(kept)
     )
-    index = tuple(
-        sorted(
-            (
-                replace(entry, payload_index=old_to_new[entry.payload_index])
-                for entry in report.index
-                if entry.payload_index in old_to_new
-            ),
-            key=lambda entry: entry.identity,
-        )
-    )
     tier = ResidualTier(blocks, keys, values)
+    index = ResidualPositionIndex.from_tier_metadata(tier, payloads)
     return ResidualStorageReport(tier, payloads, index, tier.active_bytes)
 
 

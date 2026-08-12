@@ -213,6 +213,43 @@ def test_value_signals_share_the_attention_l1_scale_within_each_head() -> None:
     assert all(0 <= item.uniqueness <= 1 for item in table.blocks)
 
 
+def test_vectorized_value_novelty_matches_sparse_reference() -> None:
+    rng = np.random.default_rng(29)
+    values = rng.normal(size=(31, 19)).astype(np.float32)
+    full = _full((Modality.TEXT,) * len(values), values=values)
+    graph = build_evidence_graph(
+        full,
+        _isolated_graph_config(semantic_weight=1.0, max_neighbors=6),
+    )
+    probabilities = tuple(float(value) for value in rng.uniform(0.1, 1.0, len(values)))
+    common = {
+        "forecast_attention_by_node": probabilities,
+        "attention_provenance": "synthetic_vectorized_parity_fixture",
+        "rope_aware": True,
+    }
+
+    reference = compute_block_utilities(
+        graph,
+        UtilityConfig(execution_mode="reference_sparse"),
+        **common,
+    )
+    vectorized = compute_block_utilities(
+        graph,
+        UtilityConfig(execution_mode="vectorized_edges"),
+        **common,
+    )
+
+    for left, right in zip(reference.blocks, vectorized.blocks, strict=True):
+        assert left.node_id == right.node_id
+        assert left.value_novelty == pytest.approx(right.value_novelty, abs=1e-12)
+        assert left.redundancy_penalty == pytest.approx(
+            right.redundancy_penalty,
+            abs=1e-12,
+        )
+        assert left.value_contribution == pytest.approx(right.value_contribution, abs=1e-12)
+        assert left.local_utility == pytest.approx(right.local_utility, abs=1e-12)
+
+
 def test_lazy_greedy_is_deterministic_and_selects_mandatory_blocks_first() -> None:
     full = _full((Modality.TEXT,) * 5, mandatory=(2,))
     graph, _utilities, objective = _utilities_and_objective(full)

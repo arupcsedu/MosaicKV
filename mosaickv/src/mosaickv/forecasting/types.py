@@ -88,6 +88,10 @@ class ForecastProvenance:
     reused_original_prefill: bool
     draft_cache_isolated: bool
     original_logical_sequence_length: int
+    configured_mode: ForecastMode | None = None
+    conditional_draft_enabled: bool = False
+    conditional_draft_decision: str = "disabled"
+    prompt_uncertainty: float | None = None
 
     def __post_init__(self) -> None:
         integer_fields = (
@@ -102,8 +106,14 @@ class ForecastProvenance:
             raise ValueError("forecast provenance counts must be nonnegative")
         if self.actual_prompt_window > self.requested_prompt_window:
             raise ValueError("actual prompt window exceeds its request")
-        if self.completed_draft_steps != self.requested_draft_steps:
-            raise ValueError("online draft rollout must complete its configured fixed horizon")
+        skipped = self.conditional_draft_decision == "skipped_low_prompt_uncertainty"
+        if self.completed_draft_steps != self.requested_draft_steps and not (
+            skipped and self.completed_draft_steps == 0
+        ):
+            raise ValueError(
+                "online draft rollout must complete its configured fixed horizon unless its "
+                "disclosed conditional gate skips the rollout"
+            )
         if self.centroid_count_requested < 1:
             raise ValueError("centroid_count_requested must be positive")
         if self.original_logical_sequence_length < 1:
@@ -114,6 +124,27 @@ class ForecastProvenance:
             raise ValueError("draft forecasting requires an isolated cache")
         if self.centroid_method not in {"deterministic_spherical_kmeans", "streaming_spherical"}:
             raise ValueError("unsupported centroid method")
+        if self.configured_mode is None:
+            object.__setattr__(self, "configured_mode", self.mode)
+        if self.conditional_draft_decision not in {
+            "disabled",
+            "executed_high_prompt_uncertainty",
+            "skipped_low_prompt_uncertainty",
+        }:
+            raise ValueError("unsupported conditional draft decision")
+        if self.conditional_draft_enabled != (
+            self.conditional_draft_decision != "disabled"
+        ):
+            raise ValueError("conditional draft provenance is internally inconsistent")
+        if self.conditional_draft_enabled:
+            if self.configured_mode is not ForecastMode.HYBRID:
+                raise ValueError("conditional draft provenance requires configured hybrid mode")
+            if self.prompt_uncertainty is None or not math.isfinite(self.prompt_uncertainty):
+                raise ValueError("conditional draft provenance requires finite prompt uncertainty")
+            if not 0 <= self.prompt_uncertainty <= 1:
+                raise ValueError("prompt uncertainty must be in [0, 1]")
+        elif self.prompt_uncertainty is not None:
+            raise ValueError("disabled conditional draft must not record prompt uncertainty")
 
 
 @dataclass(frozen=True, slots=True)

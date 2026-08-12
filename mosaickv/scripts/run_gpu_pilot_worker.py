@@ -129,6 +129,43 @@ def _load_job(index: Path, array_index: int) -> tuple[dict[str, Any], dict[str, 
     return cast("dict[str, Any]", rows[array_index]), cast("dict[str, Any]", manifest)
 
 
+def _explicit_sample_ids(job: dict[str, Any]) -> tuple[str, ...] | None:
+    """Verify and return an immutable explicit-sample ledger when configured."""
+
+    path_value = job.get("sample_id_file")
+    expected_sha = job.get("sample_id_file_sha")
+    if path_value is None:
+        if expected_sha is not None:
+            raise RuntimeError("sample_id_file_sha requires sample_id_file")
+        return None
+    if not isinstance(path_value, str) or not isinstance(expected_sha, str):
+        raise RuntimeError("sample ledger path and SHA must both be strings")
+    path = Path(path_value).resolve()
+    payload = path.read_bytes()
+    if hashlib.sha256(payload).hexdigest() != expected_sha:
+        raise RuntimeError(f"sample ledger SHA mismatch: {path}")
+    value = json.loads(payload)
+    expected = {
+        "schema_version": 1,
+        "task": job["task"],
+        "dataset_id": job["dataset_id"],
+        "dataset_revision": job["dataset_revision"],
+    }
+    if not isinstance(value, dict) or any(value.get(key) != item for key, item in expected.items()):
+        raise RuntimeError(f"sample ledger identity mismatch: {path}")
+    raw_ids = value.get("sample_ids")
+    if (
+        not isinstance(raw_ids, list)
+        or not raw_ids
+        or not all(isinstance(sample_id, str) and sample_id.strip() for sample_id in raw_ids)
+    ):
+        raise RuntimeError(f"sample ledger contains invalid sample IDs: {path}")
+    sample_ids = tuple(cast("list[str]", raw_ids))
+    if len(sample_ids) != len(set(sample_ids)):
+        raise RuntimeError(f"sample ledger contains duplicate sample IDs: {path}")
+    return sample_ids
+
+
 def _git_sha() -> str:
     return subprocess.run(
         ["git", "rev-parse", "HEAD"], check=True, capture_output=True, text=True
@@ -147,6 +184,10 @@ def _ordinary_reference(
     provenance_path = root / "provenance.json"
     raw_path = root / "results.jsonl"
     parquet_path = root / "aggregate.parquet"
+    explicit_sample_ids = _explicit_sample_ids(job)
+    expected_count = (
+        len(explicit_sample_ids) if explicit_sample_ids is not None else int(job["subset_size"])
+    )
     provenance = {
         "classification": "evaluation_only_ordinary_generation_reference",
         "git_sha": _git_sha(),
@@ -159,10 +200,13 @@ def _ordinary_reference(
         "precision": first_config.model.precision.value,
         "seed": int(job["seed"]),
         "max_new_tokens": first_config.generation.max_new_tokens,
+        "sample_id_file": job.get("sample_id_file", "not_used"),
+        "sample_id_file_sha": job.get("sample_id_file_sha", "not_used"),
+        "campaign_source_patch_sha256": job.get("source_patch_sha256", "not_used"),
     }
     if provenance_path.exists() and parquet_path.exists():
         rows = load_jsonl(raw_path)
-        if len(rows) != int(job["subset_size"]):
+        if len(rows) != expected_count:
             raise RuntimeError("ordinary reference has an incomplete immutable result set")
         return {
             "run_id": run_id,
@@ -185,7 +229,8 @@ def _ordinary_reference(
         raw_output=raw_path,
         manifest_path=str(provenance_path.resolve()),
         seed=int(job["seed"]),
-        subset_size=int(job["subset_size"]),
+        subset_size=(None if explicit_sample_ids is not None else int(job["subset_size"])),
+        explicit_sample_ids=explicit_sample_ids,
         parquet_output=parquet_path,
         dataset_revision=str(job["dataset_revision"]),
     )
@@ -202,6 +247,7 @@ def run(index: Path, array_index: int) -> int:
         if config.dataset.revision != job["dataset_revision"]:
             raise RuntimeError("worker config dataset revision mismatch")
     first = configs[0]
+    explicit_sample_ids = _explicit_sample_ids(job)
     adapter = load_hf_adapter(
         first.model.id,
         revision=first.model.revision,
@@ -212,17 +258,19 @@ def run(index: Path, array_index: int) -> int:
     output_root.mkdir(parents=True, exist_ok=True)
     errors: list[dict[str, str]] = []
     summaries: list[dict[str, object]] = []
-    try:
-        summaries.append(_ordinary_reference(job, adapter, first))
-    except Exception as error:  # preserve task-level reference failure and continue cells
-        errors.append(
-            {
-                "run_id": (
-                    f"ordinary-generate-reference-v{int(job['pilot_revision'])}-{job['task_key']}"
-                ),
-                "error": f"{type(error).__name__}: {error}",
-            }
-        )
+    if bool(job.get("ordinary_reference", True)):
+        try:
+            summaries.append(_ordinary_reference(job, adapter, first))
+        except Exception as error:  # preserve task-level reference failure and continue cells
+            errors.append(
+                {
+                    "run_id": (
+                        f"ordinary-generate-reference-v{int(job['pilot_revision'])}-"
+                        f"{job['task_key']}"
+                    ),
+                    "error": f"{type(error).__name__}: {error}",
+                }
+            )
     for cell, config in zip(cells, configs, strict=True):
         args = argparse.Namespace(
             task=job["task"],
@@ -232,7 +280,11 @@ def run(index: Path, array_index: int) -> int:
             parquet_output=None,
             manifest=None,
             trace_directory=job["trace_directory"],
-            subset_size=job["subset_size"],
+            subset_size=(None if explicit_sample_ids is not None else job["subset_size"]),
+            sample_id_file=job.get("sample_id_file"),
+            sample_id_file_sha=job.get("sample_id_file_sha"),
+            full_dataset=False,
+            sample_offset=0,
             local_files_only=True,
         )
         try:

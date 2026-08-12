@@ -774,6 +774,47 @@ def _resolve_budget(full_state: FullKVState, config: RunConfig) -> tuple[int, in
     return source, target
 
 
+def _similarity_shortlist(
+    full_state: FullKVState,
+    config: RunConfig,
+    *,
+    source_budget: int,
+    target_budget: int,
+    prompt_attention_by_node: Mapping[int, float] | None,
+) -> tuple[int, ...] | None:
+    """Return prompt-ranked nodes for expensive graph similarity sources."""
+
+    multiplier = config.graph.similarity_shortlist_multiplier
+    if multiplier <= 0:
+        return None
+    if prompt_attention_by_node is None:
+        raise HuggingFaceRuntimeError(
+            "graph similarity shortlisting requires prompt-only block attention"
+        )
+    expected = set(range(len(full_state.blocks)))
+    if set(prompt_attention_by_node) != expected:
+        raise HuggingFaceRuntimeError(
+            "graph similarity shortlist scores must cover every source block"
+        )
+    values = {node_id: float(prompt_attention_by_node[node_id]) for node_id in expected}
+    if any(not math.isfinite(value) or value < 0 for value in values.values()):
+        raise HuggingFaceRuntimeError(
+            "graph similarity shortlist scores must be finite and nonnegative"
+        )
+    estimated_selected_blocks = max(
+        1,
+        math.ceil(len(full_state.blocks) * target_budget / source_budget),
+    )
+    requested = max(
+        config.graph.similarity_shortlist_min_nodes,
+        math.ceil(estimated_selected_blocks * multiplier),
+    )
+    mandatory = {index for index, block in enumerate(full_state.blocks) if block.mandatory}
+    ranked = sorted(expected - mandatory, key=lambda node_id: (-values[node_id], node_id))
+    selected = set(ranked[: max(0, requested - len(mandatory))]) | mandatory
+    return tuple(sorted(selected))
+
+
 def _selection(
     objective: BudgetedObjective,
     value: int,
@@ -1047,7 +1088,138 @@ def _exact_construction(
         residual_config=replace(config.residual, enabled=False),
         retention_ratio=config.cache.retention_ratio,
         key_transform=key_transform,
+        exact_gather_mode=config.cache.exact_gather_mode,
+        total_storage_budget_bytes=config.cache.total_storage_budget_bytes,
     )
+
+
+def _one_pass_prototype_construction(
+    full_state: FullKVState,
+    graph: SparseEvidenceGraph,
+    objective: BudgetedObjective,
+    capabilities: AdapterCapabilities,
+    config: RunConfig,
+    target: int,
+    position_limits: Mapping[tuple[int, int], int] | None,
+    key_transform: RotaryPrototypeKeyTransform | None,
+    required_anchors: tuple[int, ...],
+    prompt_anchor_node_ids: tuple[int, ...],
+    evidence_node_ids: tuple[int, ...],
+    prototype_weight_by_node: Mapping[int, float],
+    prototype_token_weight_by_head: Mapping[tuple[int, int], Any] | None,
+) -> tuple[SelectionResult, ThreeTierCacheConstruction, float, float]:
+    """Plan exact anchors and prototype slots as one deterministic transaction."""
+
+    unit = config.cache.budget_unit
+    mandatory_ids = tuple(node.node_id for node in graph.nodes if node.block.mandatory)
+    anchor_allowlist = tuple(
+        sorted(
+            node_id
+            for node_id in {*required_anchors, *mandatory_ids}
+            if not config.prototypes.requires_exact_head(
+                graph.nodes[node_id].block.layer,
+                graph.nodes[node_id].block.kv_head,
+            )
+        )
+    )
+    if unit is BudgetUnit.BLOCKS or unit is BudgetUnit.RETAINED_SLOTS:
+        prototype_reserve = len(anchor_allowlist)
+    elif unit is BudgetUnit.BYTES:
+        prototype_reserve = sum(
+            graph.nodes[node_id].block.byte_size
+            // graph.nodes[node_id].block.position_count
+            for node_id in anchor_allowlist
+        )
+    else:  # pragma: no cover - controlled vocabulary
+        raise HuggingFaceRuntimeError(f"unsupported prototype budget unit: {unit}")
+    exact_budget = target - prototype_reserve
+    selection_seconds = 0.0
+    tier_seconds = 0.0
+    failure: str | None = None
+    candidate: SelectionResult | None = None
+    started = time.perf_counter()
+    if exact_budget < _mandatory_cost(full_state, unit):
+        failure = (
+            f"prototype anchor reserve {prototype_reserve} leaves exact budget "
+            f"{exact_budget} below mandatory cost"
+        )
+    else:
+        try:
+            candidate = _selection(
+                objective,
+                exact_budget,
+                unit,
+                retention_one=False,
+                position_limits=position_limits,
+                required_node_ids=required_anchors,
+                prompt_anchor_node_ids=prompt_anchor_node_ids,
+                evidence_node_ids=evidence_node_ids,
+            )
+        except InfeasibleSelectionBudgetError as error:
+            failure = f"one-pass exact-anchor selection is infeasible: {error}"
+    selection_seconds += time.perf_counter() - started
+    if candidate is not None:
+        candidate = replace(candidate, budget=SelectionBudget(target, unit))
+        estimated_cost, incompatibility = estimate_prototype_active_cost(
+            graph,
+            candidate,
+            config.prototypes,
+            position_limits=position_limits,
+            prototype_anchor_node_ids=anchor_allowlist,
+        )
+        if estimated_cost is None:
+            failure = incompatibility or "prototype assignment is incompatible"
+        elif estimated_cost > target:
+            failure = f"prototype active cost {estimated_cost} exceeds target {target}"
+        else:
+            started = time.perf_counter()
+            construction = construct_three_tier_cache(
+                full_state,
+                graph,
+                candidate,
+                capabilities,
+                prototype_config=config.prototypes,
+                residual_config=config.residual,
+                retention_ratio=config.cache.retention_ratio,
+                key_transform=key_transform,
+                prototype_weight_by_node=prototype_weight_by_node,
+                prototype_token_weight_by_head=prototype_token_weight_by_head,
+                exact_gather_mode=config.cache.exact_gather_mode,
+                total_storage_budget_bytes=config.cache.total_storage_budget_bytes,
+                prototype_anchor_node_ids=anchor_allowlist,
+            )
+            tier_seconds += time.perf_counter() - started
+            if construction.mode is TierConstructionMode.THREE_TIER:
+                return candidate, construction, selection_seconds, tier_seconds
+            failure = f"construction: {construction.reason}"
+
+    started = time.perf_counter()
+    fallback = _selection(
+        objective,
+        target,
+        unit,
+        retention_one=False,
+        position_limits=position_limits,
+        prompt_anchor_node_ids=prompt_anchor_node_ids,
+        evidence_node_ids=evidence_node_ids,
+    )
+    selection_seconds += time.perf_counter() - started
+    started = time.perf_counter()
+    construction = _exact_construction(
+        full_state,
+        graph,
+        fallback,
+        capabilities,
+        config,
+        key_transform,
+    )
+    construction = replace(
+        construction,
+        mode=TierConstructionMode.EXACT_ONLY_INCOMPATIBLE,
+        reason=f"one-pass prototype plan rejected: {failure or 'unknown incompatibility'}",
+    )
+    tier_seconds += time.perf_counter() - started
+    return fallback, construction, selection_seconds, tier_seconds
 
 
 def _prototype_construction(
@@ -1099,9 +1271,28 @@ def _prototype_construction(
             key_transform=key_transform,
             prototype_weight_by_node=prototype_weight_by_node,
             prototype_token_weight_by_head=prototype_token_weight_by_head,
+            exact_gather_mode=config.cache.exact_gather_mode,
+            total_storage_budget_bytes=config.cache.total_storage_budget_bytes,
         )
         tier_seconds += time.perf_counter() - started
         return selection, construction, selection_seconds, tier_seconds
+
+    if config.prototypes.budget_planning_mode == "one_pass_anchor_cover":
+        return _one_pass_prototype_construction(
+            full_state,
+            graph,
+            objective,
+            capabilities,
+            config,
+            target,
+            position_limits,
+            key_transform,
+            required_anchors,
+            prompt_anchor_node_ids,
+            evidence_node_ids,
+            prototype_weight_by_node,
+            prototype_token_weight_by_head,
+        )
 
     failures: Counter[str] = Counter()
     # Reserve the deterministic lower bound for one prototype slot per anchor
@@ -1210,6 +1401,8 @@ def _prototype_construction(
             key_transform=key_transform,
             prototype_weight_by_node=prototype_weight_by_node,
             prototype_token_weight_by_head=prototype_token_weight_by_head,
+            exact_gather_mode=config.cache.exact_gather_mode,
+            total_storage_budget_bytes=config.cache.total_storage_budget_bytes,
         )
         tier_seconds += time.perf_counter() - started
         if construction.mode is TierConstructionMode.THREE_TIER:
@@ -1262,11 +1455,20 @@ def build_compression_plan(
 
     if config.method.is_full_cache:
         raise ValueError("FullKV does not run the MosaicKV compression planner")
+    source_budget, target = _resolve_budget(full_state, config)
+    similarity_candidate_node_ids = _similarity_shortlist(
+        full_state,
+        config,
+        source_budget=source_budget,
+        target_budget=target,
+        prompt_attention_by_node=prompt_attention_by_node,
+    )
     graph_started = time.perf_counter()
     graph = build_evidence_graph(
         full_state,
         config.graph,
         prompt_attentions=prompt_attentions,
+        similarity_candidate_node_ids=similarity_candidate_node_ids,
     )
     graph_seconds = time.perf_counter() - graph_started
     selection_started = time.perf_counter()
@@ -1279,7 +1481,6 @@ def build_compression_plan(
     )
     objective = BudgetedObjective(graph, utilities, config.selection)
     utility_seconds = time.perf_counter() - selection_started
-    source_budget, target = _resolve_budget(full_state, config)
     if config.selection.prompt_anchor_fraction and prompt_attention_by_node is None:
         raise HuggingFaceRuntimeError(
             "prompt-anchored selection requires prompt-only block attention"
@@ -1341,6 +1542,8 @@ def build_compression_plan(
             residual_config=config.residual,
             retention_ratio=1.0,
             key_transform=key_transform,
+            exact_gather_mode=config.cache.exact_gather_mode,
+            total_storage_budget_bytes=config.cache.total_storage_budget_bytes,
         )
     elif config.method is MosaicKVMethod.MOSAICKV_EXACT:
         selection = _selection(
@@ -1511,6 +1714,7 @@ def compare_runtime_retention_one(
             mosaic_plan.construction.state,
             mosaic_plan.construction.prototypes,
             (),
+            packing_mode=config.cache.packing_mode,
         )
     elif config.method.is_compressed_baseline:
         prompt_attention = (
@@ -1544,6 +1748,7 @@ def compare_runtime_retention_one(
             full_state,
             payloads,
             slot_records,
+            packing_mode=config.cache.packing_mode,
         )
     elif config.method.is_prefixkv_reimplementation:
         prefix_profile = (
@@ -1568,7 +1773,13 @@ def compare_runtime_retention_one(
             profile=prefix_profile,
         )
         payloads, slot_records = prefixkv_runtime_payloads(prefix_plan)
-        packed = pack_runtime_payloads(adapter, full_state, payloads, slot_records)
+        packed = pack_runtime_payloads(
+            adapter,
+            full_state,
+            payloads,
+            slot_records,
+            packing_mode=config.cache.packing_mode,
+        )
     else:
         vl_cache_plan = build_vl_cache_reimpl_plan(
             full_state,
@@ -1577,7 +1788,13 @@ def compare_runtime_retention_one(
             config.cache,
         )
         payloads, slot_records = vl_cache_runtime_payloads(vl_cache_plan)
-        packed = pack_runtime_payloads(adapter, full_state, payloads, slot_records)
+        packed = pack_runtime_payloads(
+            adapter,
+            full_state,
+            payloads,
+            slot_records,
+            packing_mode=config.cache.packing_mode,
+        )
     reference_state = _clone_decode_state(adapter, prefill.state)
     candidate_state = _state_from_packed(adapter, prefill.state, packed)
     reference_token = prefill.next_token_id
@@ -1698,10 +1915,13 @@ def pack_runtime_payloads(
     old_prompt_capacity: int | None = None,
     physical_prompt_capacity: int | None = None,
     prototype_log_bias_by_id: Mapping[int, float] | None = None,
+    packing_mode: str = "per_head_reference",
 ) -> PackedRuntimeCache:
     """Pack algorithm-owned head payloads through the common HF cache interface."""
 
     torch = _torch()
+    if packing_mode not in {"per_head_reference", "batched_layer"}:
+        raise ValueError("packing_mode must be 'per_head_reference' or 'batched_layer'")
     selected_capacity = max((len(items) for items in payloads.values()), default=0)
     if selected_capacity < 1:
         raise HuggingFaceRuntimeError("packed runtime cache has no active prompt slots")
@@ -1722,6 +1942,60 @@ def pack_runtime_payloads(
     prototype_attention_biases: list[tuple[int, int, int, int, float]] = []
     finite_flags: list[Any] = []
     for layer_index, source_layer in enumerate(full_state.layers):
+        if packing_mode == "batched_layer":
+            entries_by_head: list[Sequence[tuple[int, str, int, Any, Any]]] = []
+            for kv_head in range(source_layer.kv_heads):
+                entries = payloads.get((layer_index, kv_head), [])
+                if not entries:
+                    raise HuggingFaceRuntimeError(
+                        f"packed cache removed every slot for layer={layer_index}, head={kv_head}"
+                    )
+                entries_by_head.append(entries)
+                all_slots_valid = all_slots_valid and len(entries) == prompt_capacity
+                for slot, entry in enumerate(entries):
+                    if entry[1] == "prototype":
+                        prototype_id = int(entry[2])
+                        prototype_slots.append((prototype_id, layer_index, kv_head, slot))
+                        bias = float((prototype_log_bias_by_id or {}).get(prototype_id, 0.0))
+                        if not math.isfinite(bias) or bias < 0:
+                            raise HuggingFaceRuntimeError(
+                                "prototype attention log bias must be finite and nonnegative"
+                            )
+                        if bias > 0:
+                            prototype_attention_biases.append(
+                                (prototype_id, layer_index, kv_head, slot, bias)
+                            )
+            tail_layer = None if tail_snapshot is None else tail_snapshot.layers[layer_index]
+            packed_key, validity = _pack_mixed_payload_heads(
+                tuple(entries_by_head),
+                payload_index=3,
+                head_axis=source_layer.key_head_dimension,
+                sequence_axis=source_layer.key_sequence_dimension,
+                prompt_capacity=prompt_capacity,
+                tail_tensor=None if tail_layer is None else tail_layer.key,
+                old_prompt_capacity=old_prompt_capacity,
+            )
+            packed_value, _value_validity = _pack_mixed_payload_heads(
+                tuple(entries_by_head),
+                payload_index=4,
+                head_axis=source_layer.value_head_dimension,
+                sequence_axis=source_layer.value_sequence_dimension,
+                prompt_capacity=prompt_capacity,
+                tail_tensor=None if tail_layer is None else tail_layer.value,
+                old_prompt_capacity=old_prompt_capacity,
+            )
+            finite_flags.extend(
+                (torch.isfinite(packed_key).all(), torch.isfinite(packed_value).all())
+            )
+            layers.append(
+                CacheLayerSnapshot(
+                    packed_key,
+                    packed_value,
+                    source_layer.key_sequence_dimension,
+                )
+            )
+            validity_masks.append(validity)
+            continue
         head_keys: list[Any] = []
         head_values: list[Any] = []
         head_validity: list[Any] = []
@@ -1818,6 +2092,103 @@ def pack_runtime_payloads(
         tuple(sorted(prototype_attention_biases)),
         slot_records,
     )
+
+
+def _pack_mixed_payload_heads(
+    entries_by_head: Sequence[Sequence[tuple[int, str, int, Any, Any]]],
+    *,
+    payload_index: int,
+    head_axis: int,
+    sequence_axis: int,
+    prompt_capacity: int,
+    tail_tensor: Any | None,
+    old_prompt_capacity: int | None,
+) -> tuple[Any, Any]:
+    """Pack exact/prototype slots with one scatter and optional tail append.
+
+    Every runtime payload represents one KV head and one sequence position.
+    Canonicalizing those singleton axes lets us concatenate the payload rows
+    once per layer, then scatter them into the padded ``[head, slot, ...]``
+    storage.  This replaces per-head concatenation, padding, and final head
+    concatenation while preserving the reference slot order byte-for-byte.
+    """
+
+    torch = _torch()
+    if not entries_by_head or any(not entries for entries in entries_by_head):
+        raise HuggingFaceRuntimeError("mixed cache packing requires every KV head")
+    first: Any = entries_by_head[0][0][payload_index]
+    rank = int(first.ndim)
+    normalized_head = _axis(head_axis, rank)
+    normalized_sequence = _axis(sequence_axis, rank)
+    if normalized_head == normalized_sequence:
+        raise HuggingFaceRuntimeError("packed cache head and sequence axes must differ")
+    canonical_rows: list[Any] = []
+    raw_counts: list[int] = []
+    expected_feature_shape = tuple(
+        first.movedim((normalized_head, normalized_sequence), (0, 1)).shape[2:]
+    )
+    for entries in entries_by_head:
+        raw_counts.append(len(entries))
+        for entry in entries:
+            payload: Any = entry[payload_index]
+            canonical = payload.movedim(
+                (normalized_head, normalized_sequence),
+                (0, 1),
+            )
+            if int(canonical.shape[0]) != 1 or int(canonical.shape[1]) != 1:
+                raise HuggingFaceRuntimeError(
+                    "mixed runtime payloads must contain one KV head and one position"
+                )
+            if tuple(canonical.shape[2:]) != expected_feature_shape:
+                raise HuggingFaceRuntimeError("mixed runtime payload feature shapes differ")
+            canonical_rows.append(canonical)
+    if any(count > prompt_capacity for count in raw_counts):
+        raise HuggingFaceRuntimeError("selected positions exceed the physical prompt capacity")
+    rows = torch.cat(tuple(canonical_rows), dim=1).squeeze(0)
+    device = rows.device
+    head_indices = torch.tensor(
+        tuple(head for head, count in enumerate(raw_counts) for _slot in range(count)),
+        dtype=torch.long,
+        device=device,
+    )
+    slot_indices = torch.tensor(
+        tuple(slot for count in raw_counts for slot in range(count)),
+        dtype=torch.long,
+        device=device,
+    )
+    packed = rows.new_zeros((len(raw_counts), prompt_capacity, *rows.shape[1:]))
+    packed[head_indices, slot_indices] = rows
+    counts = torch.tensor(raw_counts, dtype=torch.long, device=device)
+    validity = torch.arange(prompt_capacity, device=device).unsqueeze(0) < counts.unsqueeze(1)
+    if tail_tensor is not None:
+        if old_prompt_capacity is None:
+            raise HuggingFaceRuntimeError("tail packing requires the old prompt capacity")
+        tail = tail_tensor.movedim(
+            (normalized_head, normalized_sequence),
+            (0, 1),
+        )
+        if int(tail.shape[0]) != len(raw_counts):
+            raise HuggingFaceRuntimeError("tail cache KV-head count changed during repair")
+        tail_length = int(tail.shape[1]) - old_prompt_capacity
+        if tail_length < 0:
+            raise HuggingFaceRuntimeError("old prompt capacity exceeds the tail cache")
+        packed = torch.cat((packed, tail[:, old_prompt_capacity:, ...]), dim=1)
+        if tail_length:
+            validity = torch.cat(
+                (
+                    validity,
+                    torch.ones(
+                        (len(raw_counts), tail_length),
+                        dtype=torch.bool,
+                        device=device,
+                    ),
+                ),
+                dim=1,
+            )
+    return packed.movedim(
+        (0, 1),
+        (normalized_head, normalized_sequence),
+    ), validity
 
 
 def _gather_dense_heads(
@@ -1998,6 +2369,7 @@ def pack_runtime_cache(
     tail_snapshot: CacheSnapshot | None = None,
     old_prompt_capacity: int | None = None,
     physical_prompt_capacity: int | None = None,
+    packing_mode: str = "per_head_reference",
 ) -> PackedRuntimeCache:
     """Pack MosaicKV/simple-baseline tiers through the common HF interface."""
 
@@ -2029,6 +2401,7 @@ def pack_runtime_cache(
             prototype_id: record_by_id[prototype_id].attention_log_bias
             for prototype_id in active_prototype_ids
         },
+        packing_mode=packing_mode,
     )
 
 
@@ -2084,10 +2457,26 @@ def maintain_prefixkv_decode_cache(
     """Apply PrefixKV's at-most-one fixed-offset eviction per layer after a decode."""
 
     torch = _torch()
+    snapshot = adapter.extract_past_key_values(state.past_key_values)
     raw_masks = state.model_state.get("mosaickv_validity_masks")
+    if raw_masks is None and state.model_state.get("mosaickv_packed_all_valid") is True:
+        raw_masks = tuple(
+            torch.ones(
+                (
+                    plan.full_state.layers[layer_plan.layer].kv_heads,
+                    int(
+                        snapshot.layers[layer_plan.layer].key.shape[
+                            plan.full_state.layers[layer_plan.layer].key_sequence_dimension
+                        ]
+                    ),
+                ),
+                dtype=torch.bool,
+                device=snapshot.layers[layer_plan.layer].key.device,
+            )
+            for layer_plan in plan.layers
+        )
     if not isinstance(raw_masks, tuple) or len(raw_masks) != len(plan.layers):
         raise HuggingFaceRuntimeError("PrefixKV decode validity metadata is incomplete")
-    snapshot = adapter.extract_past_key_values(state.past_key_values)
     keep_by_layer: list[tuple[int, ...]] = []
     events: list[JsonObject] = []
     for layer_plan, validity in zip(plan.layers, raw_masks, strict=True):
@@ -2504,6 +2893,38 @@ def _trace_catalog(
     }
 
 
+def _selection_decision_evidence(selection: SelectionResult) -> JsonObject:
+    """Retain lossless per-node selection evidence for explicit parity runs.
+
+    Normal evaluation traces keep only compact catalog hashes.  A parity run
+    can opt into this payload so exact semantic decisions can be compared
+    separately from floating-point marginal gains without rerunning the
+    compressor or weakening identity checks.
+    """
+
+    records: list[JsonValue] = []
+    for decision in selection.decisions:
+        records.append(
+            cast(
+                "JsonObject",
+                {
+                    "node_id": decision.node_id,
+                    "selected": decision.selected,
+                    "selection_rank": decision.selection_rank,
+                    "marginal_gain": decision.marginal_gain,
+                    "marginal_gain_per_cost": decision.marginal_gain_per_cost,
+                    "cost": decision.cost,
+                    "reason": decision.reason.value,
+                },
+            )
+        )
+    return {
+        "schema_version": 1,
+        "record_count": len(records),
+        "records": records,
+    }
+
+
 def _forecast_trace(
     forecast: QueryForecast | None,
     *,
@@ -2621,6 +3042,7 @@ def _plan_trace(
     plan: MosaicKVCompressionPlan,
     *,
     compact_catalogs: bool = False,
+    capture_selection_evidence: bool = False,
 ) -> JsonObject:
     selection = (
         {
@@ -2669,6 +3091,10 @@ def _plan_trace(
             strict=True,
         )
     )
+    active_bytes = plan.construction.state.statistics.active_kv_bytes
+    residual_bytes = plan.construction.residual_storage.cpu_bytes
+    eligible_residual_blocks = len(plan.construction.state.prototypes.source_blocks)
+    stored_residual_blocks = len(plan.construction.residual_storage.payloads)
     return cast(
         "JsonObject",
         {
@@ -2689,7 +3115,29 @@ def _plan_trace(
             ),
             "utility_diagnostics": _utility_trace(plan),
             "prototype_diagnostics_by_kv_head": _prototype_diagnostics_by_head(plan),
+            "tier_storage_accounting": {
+                "source_kv_bytes": plan.full_state.active_bytes,
+                "exact_active_bytes": plan.construction.state.statistics.exact_kv_bytes,
+                "prototype_active_bytes": (
+                    plan.construction.state.statistics.prototype_kv_bytes
+                ),
+                "active_gpu_bytes": active_bytes,
+                "residual_cpu_bytes": residual_bytes,
+                "total_active_plus_residual_bytes": active_bytes + residual_bytes,
+                "eligible_residual_source_blocks": eligible_residual_blocks,
+                "stored_residual_source_blocks": stored_residual_blocks,
+                "residual_source_block_fraction": (
+                    0.0
+                    if eligible_residual_blocks == 0
+                    else stored_residual_blocks / eligible_residual_blocks
+                ),
+            },
             "selection_objective": cast("JsonObject", asdict(plan.selection.objective)),
+            "selection_decision_evidence": (
+                _selection_decision_evidence(plan.selection)
+                if capture_selection_evidence
+                else {"status": "not_captured"}
+            ),
         },
     )
 
@@ -3123,6 +3571,7 @@ class HuggingFaceMosaicKVModel:
                     and (
                         not no_forecast_ablation
                         or (self.config.graph.enabled and self.config.graph.attention_weight > 0)
+                        or self.config.graph.similarity_shortlist_multiplier > 0
                     )
                 )
                 or method is MosaicKVMethod.PROMPT_ATTENTION_TOPK
@@ -3243,9 +3692,7 @@ class HuggingFaceMosaicKVModel:
                 )
                 mandatory_positions: tuple[int, ...]
                 if self.config.cache.physical_budget_mandatory_policy == "last_token":
-                    mandatory_positions = (
-                        int(prefill.state.logical_sequence_length) - 1,
-                    )
+                    mandatory_positions = (int(prefill.state.logical_sequence_length) - 1,)
                 elif method.is_lookm_reimplementation:
                     mandatory_positions = tuple(
                         range(
@@ -3535,6 +3982,7 @@ class HuggingFaceMosaicKVModel:
                             physical_prompt_capacity=(
                                 None if dense_budget is None else dense_budget.prompt_capacity
                             ),
+                            packing_mode=self.config.cache.packing_mode,
                         ),
                     )
                 elif prefixkv_plan is not None:
@@ -3549,6 +3997,7 @@ class HuggingFaceMosaicKVModel:
                             physical_prompt_capacity=(
                                 None if dense_budget is None else dense_budget.prompt_capacity
                             ),
+                            packing_mode=self.config.cache.packing_mode,
                         ),
                     )
                 elif vl_cache_plan is not None:
@@ -3563,6 +4012,7 @@ class HuggingFaceMosaicKVModel:
                             physical_prompt_capacity=(
                                 None if dense_budget is None else dense_budget.prompt_capacity
                             ),
+                            packing_mode=self.config.cache.packing_mode,
                         ),
                     )
                 else:
@@ -3577,6 +4027,7 @@ class HuggingFaceMosaicKVModel:
                             prototype_records,
                             tuple(record.prototype_id for record in prototype_records),
                             physical_prompt_capacity=physical_prompt_capacity,
+                            packing_mode=self.config.cache.packing_mode,
                         ),
                     )
                 state = _state_from_packed(self.adapter, prefill.state, packed)
@@ -3611,6 +4062,9 @@ class HuggingFaceMosaicKVModel:
                         _plan_trace(
                             plan,
                             compact_catalogs=not full_debug_trace,
+                            capture_selection_evidence=(
+                                self.config.diagnostics.capture_selection_evidence
+                            ),
                         )
                     )
                 elif baseline_plan is not None:
@@ -3954,6 +4408,7 @@ class HuggingFaceMosaicKVModel:
                         updated_repair.active_prototype_ids,
                         tail_snapshot=old_snapshot,
                         old_prompt_capacity=old_capacity,
+                        packing_mode=self.config.cache.packing_mode,
                     )
                     repacked_state = _state_from_packed(self.adapter, base_state, repacked)
                     output = self.adapter.decode_one_token(
@@ -4076,7 +4531,7 @@ class HuggingFaceMosaicKVModel:
                 ]
             )
             residual_configuration: JsonObject | None = None
-            if plan is not None and plan.construction.residual_storage.payloads:
+            if plan is not None:
                 residual_payloads = plan.construction.residual_storage.payloads
                 actual_placements = sorted(
                     {
@@ -4096,8 +4551,34 @@ class HuggingFaceMosaicKVModel:
                         else "cpu_pageable"
                     ),
                     "actual_placements": cast("list[JsonValue]", actual_placements),
-                    "all_payloads_pinned": (plan.construction.residual_storage.all_payloads_pinned),
+                    "all_payloads_pinned": (
+                        plan.construction.residual_storage.all_payloads_pinned
+                        if residual_payloads
+                        else None
+                    ),
                     "cpu_bytes_initial": plan.construction.residual_storage.cpu_bytes,
+                    "eligible_source_blocks": len(
+                        plan.construction.state.prototypes.source_blocks
+                    ),
+                    "stored_source_blocks": len(residual_payloads),
+                    "max_bytes": self.config.residual.max_bytes,
+                    "max_source_blocks": self.config.residual.max_source_blocks,
+                    "selection_policy": self.config.residual.selection_policy,
+                    "total_storage_budget_bytes": (
+                        self.config.cache.total_storage_budget_bytes
+                    ),
+                    "active_plus_residual_bytes_initial": (
+                        plan.construction.state.statistics.active_kv_bytes
+                        + plan.construction.residual_storage.cpu_bytes
+                    ),
+                    "total_storage_budget_satisfied": (
+                        self.config.cache.total_storage_budget_bytes is None
+                        or (
+                            plan.construction.state.statistics.active_kv_bytes
+                            + plan.construction.residual_storage.cpu_bytes
+                            <= self.config.cache.total_storage_budget_bytes
+                        )
+                    ),
                 }
             trace.update(
                 {

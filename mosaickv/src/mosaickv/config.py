@@ -272,6 +272,7 @@ class FidelityDiagnosticsConfig:
     sample_ledger_sha: str | None = None
     forecast_oracle_steps: int = 0
     capture_full_trace: bool = False
+    capture_selection_evidence: bool = False
 
     def __post_init__(self) -> None:
         if len(self.sample_ids) != len(set(self.sample_ids)):
@@ -314,6 +315,7 @@ class FidelityDiagnosticsConfig:
                 "sample_ledger_sha",
                 "forecast_oracle_steps",
                 "capture_full_trace",
+                "capture_selection_evidence",
             },
             "diagnostics",
         )
@@ -331,6 +333,12 @@ class FidelityDiagnosticsConfig:
             sample_ledger_sha=raw_sha,
             forecast_oracle_steps=_int(data, "forecast_oracle_steps", 0, "diagnostics"),
             capture_full_trace=_bool(data, "capture_full_trace", False, "diagnostics"),
+            capture_selection_evidence=_bool(
+                data,
+                "capture_selection_evidence",
+                False,
+                "diagnostics",
+            ),
         )
 
 
@@ -377,6 +385,15 @@ class CacheConfig:
     accounting_spec_sha: str = _SYNTHETIC_ACCOUNTING_SHA
     physical_budget_block_size: int | None = None
     physical_budget_mandatory_policy: str = "method"
+    exact_gather_mode: str = "batched_layer"
+    # The layer-batched mixed-tier scatter is retained for controlled
+    # experiments, but A100 measurements showed that its extra full-cache
+    # copy and indexed scatter are slower than contiguous per-head packing.
+    packing_mode: str = "per_head_reference"
+    # Optional hard cap over active device K/V plus encoded CPU residual K/V.
+    # The ordinary selection budget remains the active-cache constraint; this
+    # second boundary is required for claims about total compressed storage.
+    total_storage_budget_bytes: int | None = None
 
     def __post_init__(self) -> None:
         if self.budget_value < 1:
@@ -390,6 +407,18 @@ class CacheConfig:
         if self.physical_budget_mandatory_policy not in {"method", "last_token"}:
             raise ConfigurationError(
                 "cache.physical_budget_mandatory_policy must be 'method' or 'last_token'"
+            )
+        if self.exact_gather_mode not in {"per_head_reference", "batched_layer"}:
+            raise ConfigurationError(
+                "cache.exact_gather_mode must be 'per_head_reference' or 'batched_layer'"
+            )
+        if self.packing_mode not in {"per_head_reference", "batched_layer"}:
+            raise ConfigurationError(
+                "cache.packing_mode must be 'per_head_reference' or 'batched_layer'"
+            )
+        if self.total_storage_budget_bytes is not None and self.total_storage_budget_bytes < 1:
+            raise ConfigurationError(
+                "cache.total_storage_budget_bytes must be >= 1 or null"
             )
         if len(self.accounting_spec_sha) != 64 or any(
             char not in "0123456789abcdef" for char in self.accounting_spec_sha
@@ -407,6 +436,9 @@ class CacheConfig:
             "accounting_spec_sha",
             "physical_budget_block_size",
             "physical_budget_mandatory_policy",
+            "exact_gather_mode",
+            "packing_mode",
+            "total_storage_budget_bytes",
         }
         _reject_unknown(data, allowed, "cache")
         return cls(
@@ -422,6 +454,24 @@ class CacheConfig:
             ),
             physical_budget_mandatory_policy=_optional_str(
                 data, "physical_budget_mandatory_policy", "method", "cache"
+            ),
+            exact_gather_mode=_optional_str(
+                data,
+                "exact_gather_mode",
+                "batched_layer",
+                "cache",
+            ),
+            packing_mode=_optional_str(
+                data,
+                "packing_mode",
+                "per_head_reference",
+                "cache",
+            ),
+            total_storage_budget_bytes=_optional_int(
+                data,
+                "total_storage_budget_bytes",
+                None,
+                "cache",
             ),
         )
 
@@ -443,6 +493,9 @@ class ForecastingConfig:
     stable_head_prompt_weight: float = 1.0
     shifted_head_prompt_weight: float = 0.25
     uncertainty_exact_head_fraction: float = 0.0
+    centroid_execution_mode: str = "batched_layer"
+    conditional_draft_enabled: bool = False
+    conditional_draft_uncertainty_threshold: float = 0.15
 
     def __post_init__(self) -> None:
         if self.prompt_window < 0:
@@ -466,6 +519,15 @@ class ForecastingConfig:
             raise ConfigurationError(
                 "forecasting.uncertainty_exact_head_fraction requires adaptive_head_routing"
             )
+        if self.centroid_execution_mode not in {"reference_per_head", "batched_layer"}:
+            raise ConfigurationError(
+                "forecasting.centroid_execution_mode must be 'reference_per_head' or "
+                "'batched_layer'"
+            )
+        if not 0 <= self.conditional_draft_uncertainty_threshold <= 1:
+            raise ConfigurationError(
+                "forecasting.conditional_draft_uncertainty_threshold must be in [0, 1]"
+            )
         if not self.enabled:
             return
         if self.mode is ForecastMode.PROMPT_WINDOW and (
@@ -483,6 +545,10 @@ class ForecastingConfig:
         if self.mode is ForecastMode.HYBRID and (self.prompt_window == 0 or self.draft_steps == 0):
             raise ConfigurationError(
                 "hybrid forecasting requires prompt_window > 0 and draft_steps > 0"
+            )
+        if self.conditional_draft_enabled and self.mode is not ForecastMode.HYBRID:
+            raise ConfigurationError(
+                "forecasting.conditional_draft_enabled requires hybrid forecasting"
             )
 
     @classmethod
@@ -502,6 +568,9 @@ class ForecastingConfig:
             "stable_head_prompt_weight",
             "shifted_head_prompt_weight",
             "uncertainty_exact_head_fraction",
+            "centroid_execution_mode",
+            "conditional_draft_enabled",
+            "conditional_draft_uncertainty_threshold",
         }
         _reject_unknown(data, allowed, "forecasting")
         return cls(
@@ -525,6 +594,24 @@ class ForecastingConfig:
             ),
             uncertainty_exact_head_fraction=_float(
                 data, "uncertainty_exact_head_fraction", 0.0, "forecasting"
+            ),
+            centroid_execution_mode=_optional_str(
+                data,
+                "centroid_execution_mode",
+                "batched_layer",
+                "forecasting",
+            ),
+            conditional_draft_enabled=_bool(
+                data,
+                "conditional_draft_enabled",
+                False,
+                "forecasting",
+            ),
+            conditional_draft_uncertainty_threshold=_float(
+                data,
+                "conditional_draft_uncertainty_threshold",
+                0.15,
+                "forecasting",
             ),
         )
 
@@ -563,6 +650,13 @@ class GraphConfig:
     fallback_max_position_span: int | None = 128
     spatial_max_distance: float = 0.125
     temporal_window: int = 1
+    attention_host_transfer_mode: str = "deferred_layer"
+    edge_accumulation_mode: str = "preselected"
+    # When positive, prompt attention chooses a bounded candidate set for the
+    # expensive semantic/co-activation similarity sources. Every cache block
+    # remains a graph node and still receives structural/fallback edges.
+    similarity_shortlist_multiplier: float = 0.0
+    similarity_shortlist_min_nodes: int = 0
 
     def __post_init__(self) -> None:
         if self.max_neighbors < 1:
@@ -614,6 +708,30 @@ class GraphConfig:
             )
         if self.temporal_window < 1:
             raise ConfigurationError("graph.temporal_window must be >= 1")
+        if self.attention_host_transfer_mode not in {
+            "deferred_layer",
+            "deferred_layer_vectorized",
+            "per_group_reference",
+        }:
+            raise ConfigurationError(
+                "graph.attention_host_transfer_mode must be 'deferred_layer', "
+                "'deferred_layer_vectorized', or 'per_group_reference'"
+            )
+        if self.edge_accumulation_mode not in {"dictionary", "preselected"}:
+            raise ConfigurationError(
+                "graph.edge_accumulation_mode must be 'dictionary' or 'preselected'"
+            )
+        if (
+            not math.isfinite(self.similarity_shortlist_multiplier)
+            or self.similarity_shortlist_multiplier < 0
+        ):
+            raise ConfigurationError(
+                "graph.similarity_shortlist_multiplier must be finite and >= 0"
+            )
+        if self.similarity_shortlist_min_nodes < 0:
+            raise ConfigurationError(
+                "graph.similarity_shortlist_min_nodes must be >= 0"
+            )
 
     @classmethod
     def from_mapping(cls, value: object) -> GraphConfig:
@@ -639,6 +757,10 @@ class GraphConfig:
             "fallback_max_position_span",
             "spatial_max_distance",
             "temporal_window",
+            "attention_host_transfer_mode",
+            "edge_accumulation_mode",
+            "similarity_shortlist_multiplier",
+            "similarity_shortlist_min_nodes",
         }
         _reject_unknown(data, allowed, "graph")
         defaults = cls()
@@ -674,6 +796,30 @@ class GraphConfig:
             ),
             spatial_max_distance=_float(data, "spatial_max_distance", 0.125, "graph"),
             temporal_window=_int(data, "temporal_window", 1, "graph"),
+            attention_host_transfer_mode=_optional_str(
+                data,
+                "attention_host_transfer_mode",
+                "deferred_layer",
+                "graph",
+            ),
+            edge_accumulation_mode=_optional_str(
+                data,
+                "edge_accumulation_mode",
+                "preselected",
+                "graph",
+            ),
+            similarity_shortlist_multiplier=_float(
+                data,
+                "similarity_shortlist_multiplier",
+                0.0,
+                "graph",
+            ),
+            similarity_shortlist_min_nodes=_int(
+                data,
+                "similarity_shortlist_min_nodes",
+                0,
+                "graph",
+            ),
         )
 
 
@@ -692,6 +838,7 @@ class UtilityConfig:
     lambda_v: float = -0.25
     lambda_o: float = -0.25
     normalization: str = "layer_head_l1"
+    execution_mode: str = "vectorized_edges"
 
     def __post_init__(self) -> None:
         if not math.isfinite(self.lambda_q) or self.lambda_q < 0:
@@ -701,13 +848,17 @@ class UtilityConfig:
                 raise ConfigurationError(f"utility.{name} must be finite")
         if self.normalization != "layer_head_l1":
             raise ConfigurationError("utility.normalization must be 'layer_head_l1'")
+        if self.execution_mode not in {"reference_sparse", "vectorized_edges"}:
+            raise ConfigurationError(
+                "utility.execution_mode must be 'reference_sparse' or 'vectorized_edges'"
+            )
 
     @classmethod
     def from_mapping(cls, value: object) -> UtilityConfig:
         data = _mapping(value, "utility")
         _reject_unknown(
             data,
-            {"lambda_q", "lambda_v", "lambda_o", "normalization"},
+            {"lambda_q", "lambda_v", "lambda_o", "normalization", "execution_mode"},
             "utility",
         )
         return cls(
@@ -715,6 +866,12 @@ class UtilityConfig:
             lambda_v=_float(data, "lambda_v", -0.25, "utility"),
             lambda_o=_float(data, "lambda_o", -0.25, "utility"),
             normalization=_optional_str(data, "normalization", "layer_head_l1", "utility"),
+            execution_mode=_optional_str(
+                data,
+                "execution_mode",
+                "vectorized_edges",
+                "utility",
+            ),
         )
 
 
@@ -802,6 +959,8 @@ class PrototypeConfig:
     exact_head_routes: tuple[str, ...] = ()
     head_group_sizes: tuple[str, ...] = ()
     head_position_spans: tuple[str, ...] = ()
+    source_gather_mode: str = "batched_layer"
+    budget_planning_mode: str = "one_pass_anchor_cover"
     allowed_modality_pairs: tuple[str, ...] = (
         "text:text",
         "image:image",
@@ -855,6 +1014,18 @@ class PrototypeConfig:
             raise ConfigurationError(
                 "prototypes.anchor_position_strategy must be "
                 "'selected_anchor_start' or 'forecast_weighted_member_medoid'"
+            )
+        if self.source_gather_mode not in {"per_head_reference", "batched_layer"}:
+            raise ConfigurationError(
+                "prototypes.source_gather_mode must be 'per_head_reference' or 'batched_layer'"
+            )
+        if self.budget_planning_mode not in {
+            "one_pass_anchor_cover",
+            "bounded_search_reference",
+        }:
+            raise ConfigurationError(
+                "prototypes.budget_planning_mode must be 'one_pass_anchor_cover' or "
+                "'bounded_search_reference'"
             )
         if (
             self.pooling_mode == "forecast_attention_token"
@@ -930,6 +1101,8 @@ class PrototypeConfig:
             "exact_head_routes",
             "head_group_sizes",
             "head_position_spans",
+            "source_gather_mode",
+            "budget_planning_mode",
         }
         _reject_unknown(data, allowed, "prototypes")
         defaults = cls()
@@ -987,6 +1160,18 @@ class PrototypeConfig:
             exact_head_routes=_string_tuple(data, "exact_head_routes", (), "prototypes"),
             head_group_sizes=_string_tuple(data, "head_group_sizes", (), "prototypes"),
             head_position_spans=_string_tuple(data, "head_position_spans", (), "prototypes"),
+            source_gather_mode=_optional_str(
+                data,
+                "source_gather_mode",
+                "batched_layer",
+                "prototypes",
+            ),
+            budget_planning_mode=_optional_str(
+                data,
+                "budget_planning_mode",
+                "one_pass_anchor_cover",
+                "prototypes",
+            ),
             allowed_modality_pairs=_string_tuple(
                 data,
                 "allowed_modality_pairs",
@@ -1048,17 +1233,50 @@ class ResidualConfig:
     rank: int = 8
     storage_dtype: ResidualStorageDType = ResidualStorageDType.LOSSLESS
     require_pinned_memory: bool = True
+    index_mode: str = "compact"
+    # These limits are applied before CPU allocation. ``None`` preserves the
+    # original paper-faithful behavior in which every prototyped source block
+    # remains repairable. Setting either limit creates an explicitly bounded
+    # residual tier whose stored members are chosen by the declared policy.
+    max_bytes: int | None = None
+    max_source_blocks: int | None = None
+    selection_policy: str = "risk_weighted_reconstruction_error"
 
     def __post_init__(self) -> None:
         if self.rank < 1:
             raise ConfigurationError("residual.rank must be >= 1")
+        if self.index_mode not in {"materialized", "compact"}:
+            raise ConfigurationError("residual.index_mode must be 'materialized' or 'compact'")
+        if self.max_bytes is not None and self.max_bytes < 0:
+            raise ConfigurationError("residual.max_bytes must be >= 0 or null")
+        if self.max_source_blocks is not None and self.max_source_blocks < 0:
+            raise ConfigurationError(
+                "residual.max_source_blocks must be >= 0 or null"
+            )
+        if self.selection_policy not in {
+            "source_order",
+            "risk_weighted_reconstruction_error",
+        }:
+            raise ConfigurationError(
+                "residual.selection_policy must be 'source_order' or "
+                "'risk_weighted_reconstruction_error'"
+            )
 
     @classmethod
     def from_mapping(cls, value: object) -> ResidualConfig:
         data = _mapping(value, "residual")
         _reject_unknown(
             data,
-            {"enabled", "rank", "storage_dtype", "require_pinned_memory"},
+            {
+                "enabled",
+                "rank",
+                "storage_dtype",
+                "require_pinned_memory",
+                "index_mode",
+                "max_bytes",
+                "max_source_blocks",
+                "selection_policy",
+            },
             "residual",
         )
         return cls(
@@ -1070,6 +1288,20 @@ class ResidualConfig:
                 "residual.storage_dtype",
             ),
             require_pinned_memory=_bool(data, "require_pinned_memory", True, "residual"),
+            index_mode=_optional_str(data, "index_mode", "compact", "residual"),
+            max_bytes=_optional_int(data, "max_bytes", None, "residual"),
+            max_source_blocks=_optional_int(
+                data,
+                "max_source_blocks",
+                None,
+                "residual",
+            ),
+            selection_policy=_optional_str(
+                data,
+                "selection_policy",
+                "risk_weighted_reconstruction_error",
+                "residual",
+            ),
         )
 
 

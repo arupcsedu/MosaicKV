@@ -11,6 +11,7 @@ from mosaickv.adapters.huggingface.types import DecodeState, PrefillOutput
 from mosaickv.config import ForecastingConfig
 from mosaickv.forecasting.core import _measure, build_query_forecast
 from mosaickv.forecasting.types import ForecastTiming, QueryForecast
+from mosaickv.types import ForecastMode
 
 
 def _clone_value(value: Any) -> Any:
@@ -144,6 +145,64 @@ def _kv_head_counts(snapshot: Any) -> tuple[int, ...]:
     return tuple(counts)
 
 
+def _layout_kv_head_counts(adapter: Any, cache: Any) -> tuple[int, ...]:
+    """Read KV-head counts from layout metadata without copying cache tensors."""
+
+    layout = adapter.get_cache_layout(cache)
+    counts = tuple(int(layer.key_shape[-3]) for layer in layout.layers)
+    if not counts or any(count <= 0 for count in counts):
+        raise RuntimeError("cache layout does not expose positive KV-head counts")
+    return counts
+
+
+def _prompt_directional_uncertainty(
+    prompt_query_layers: tuple[Any, ...],
+    prompt_window: int,
+) -> float:
+    """Return scale-invariant prompt-query dispersion in ``[0, 1]``.
+
+    A value near zero means the normalized queries in the prompt window point
+    in nearly the same direction. A value near one means their mean direction
+    largely cancels, so a temporary draft is more likely to add information.
+    """
+
+    if not prompt_query_layers:
+        raise ValueError("conditional draft gating requires captured prompt queries")
+    if prompt_window < 1:
+        raise ValueError("conditional draft gating requires a positive prompt window")
+    first = prompt_query_layers[0]
+    if type(first).__module__.startswith("torch"):
+        import torch
+
+        scores = []
+        for layer in prompt_query_layers:
+            selected = layer[..., -min(prompt_window, int(layer.shape[-2])) :, :]
+            rows = selected.detach().float().reshape(-1, int(selected.shape[-1]))
+            normalized = torch.nn.functional.normalize(rows, p=2, dim=-1, eps=1e-12)
+            coherence = torch.linalg.vector_norm(normalized.mean(dim=0)).clamp(0.0, 1.0)
+            scores.append(1.0 - coherence)
+        combined = torch.stack(scores).mean()
+        if not bool(torch.isfinite(combined).item()):
+            raise ValueError("prompt queries produced non-finite uncertainty")
+        return float(combined.item())
+
+    import numpy as np
+
+    scores = []
+    for layer in prompt_query_layers:
+        array = np.asarray(layer, dtype=np.float32)
+        selected = array[..., -min(prompt_window, int(array.shape[-2])) :, :]
+        rows = selected.reshape(-1, int(selected.shape[-1]))
+        norms = np.linalg.norm(rows, axis=-1, keepdims=True)
+        normalized = rows / np.maximum(norms, np.float32(1e-12))
+        coherence = float(np.clip(np.linalg.norm(normalized.mean(axis=0)), 0.0, 1.0))
+        scores.append(1.0 - coherence)
+    result = float(np.mean(np.asarray(scores, dtype=np.float64)))
+    if not np.isfinite(result):
+        raise ValueError("prompt queries produced non-finite uncertainty")
+    return min(1.0, max(0.0, result))
+
+
 def run_isolated_greedy_query_rollout(
     adapter: Any,
     prefill: PrefillOutput,
@@ -253,6 +312,69 @@ def forecast_with_rollout(
 
     if not config.enabled:
         raise ValueError("forecasting is disabled")
+    exemplar = prefill.query_vectors.layers[0]
+    decision_seconds = 0.0
+    decision_syncs = 0
+    decision_backend: str | None = None
+    prompt_uncertainty: float | None = None
+    if config.conditional_draft_enabled:
+        prompt_layers = tuple(prefill.query_vectors.layers)
+        (
+            prompt_uncertainty,
+            decision_seconds,
+            decision_syncs,
+            decision_backend,
+        ) = _measure(
+            exemplar,
+            lambda: _prompt_directional_uncertainty(prompt_layers, config.prompt_window),
+        )
+        if prompt_uncertainty < config.conditional_draft_uncertainty_threshold:
+            effective_config = replace(
+                config,
+                mode=ForecastMode.PROMPT_WINDOW,
+                draft_steps=0,
+                conditional_draft_enabled=False,
+            )
+            forecast = build_query_forecast(
+                prompt_layers,
+                (),
+                _layout_kv_head_counts(adapter, prefill.state.past_key_values),
+                effective_config,
+                original_logical_sequence_length=prefill.state.logical_sequence_length,
+                draft_cache_isolated=True,
+            )
+            if decision_backend != forecast.timing.timing_backend:
+                raise RuntimeError("draft gate and forecast used inconsistent timing backends")
+            timing = replace(
+                forecast.timing,
+                query_preparation=forecast.timing.query_preparation + decision_seconds,
+                total=forecast.timing.total + decision_seconds,
+                synchronization_calls=(
+                    forecast.timing.synchronization_calls + decision_syncs
+                ),
+            )
+            provenance = replace(
+                forecast.provenance,
+                requested_draft_steps=config.draft_steps,
+                configured_mode=config.mode,
+                conditional_draft_enabled=True,
+                conditional_draft_decision="skipped_low_prompt_uncertainty",
+                prompt_uncertainty=prompt_uncertainty,
+            )
+            rollout = IsolatedQueryRollout(
+                query_layers=(),
+                attention_steps=(),
+                token_ids=(),
+                kv_head_counts=_layout_kv_head_counts(
+                    adapter, prefill.state.past_key_values
+                ),
+                cache_clone_seconds=0.0,
+                draft_decode_seconds=0.0,
+                synchronization_calls=0,
+                timing_backend=forecast.timing.timing_backend,
+                original_cache_unchanged=True,
+            )
+            return replace(forecast, provenance=provenance, timing=timing), rollout
     rollout = run_isolated_greedy_query_rollout(
         adapter,
         prefill,
@@ -270,18 +392,21 @@ def forecast_with_rollout(
     timing = ForecastTiming(
         cache_clone=rollout.cache_clone_seconds,
         draft_decode=rollout.draft_decode_seconds,
-        query_preparation=forecast.timing.query_preparation,
+        query_preparation=forecast.timing.query_preparation + decision_seconds,
         prompt_statistics=forecast.timing.prompt_statistics,
         centroid_construction=forecast.timing.centroid_construction,
         total=(
             rollout.cache_clone_seconds
             + rollout.draft_decode_seconds
+            + decision_seconds
             + forecast.timing.query_preparation
             + forecast.timing.prompt_statistics
             + forecast.timing.centroid_construction
         ),
         synchronization_calls=(
-            rollout.synchronization_calls + forecast.timing.synchronization_calls
+            rollout.synchronization_calls
+            + forecast.timing.synchronization_calls
+            + decision_syncs
         ),
         timing_backend=(
             forecast.timing.timing_backend if config.draft_steps == 0 else rollout.timing_backend
@@ -289,7 +414,18 @@ def forecast_with_rollout(
     )
     if config.draft_steps and rollout.timing_backend != forecast.timing.timing_backend:
         raise RuntimeError("draft and forecast construction used inconsistent timing backends")
-    return replace(forecast, timing=timing), rollout
+    provenance = forecast.provenance
+    if config.conditional_draft_enabled:
+        if decision_backend != forecast.timing.timing_backend:
+            raise RuntimeError("draft gate and forecast used inconsistent timing backends")
+        provenance = replace(
+            provenance,
+            configured_mode=config.mode,
+            conditional_draft_enabled=True,
+            conditional_draft_decision="executed_high_prompt_uncertainty",
+            prompt_uncertainty=prompt_uncertainty,
+        )
+    return replace(forecast, provenance=provenance, timing=timing), rollout
 
 
 def forecast_from_prefill(
@@ -305,6 +441,7 @@ def forecast_from_prefill(
 
 __all__ = [
     "IsolatedQueryRollout",
+    "_prompt_directional_uncertainty",
     "forecast_from_prefill",
     "forecast_with_rollout",
     "run_isolated_greedy_query_rollout",

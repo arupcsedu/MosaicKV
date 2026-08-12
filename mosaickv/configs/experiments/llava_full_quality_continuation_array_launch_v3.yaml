@@ -1,0 +1,29 @@
+schema_version: 1
+launch_revision: 3
+classification: resource_only_relaunch_same_immutable_continuation
+cancelled_job_ids:
+  - 18259925
+  - 18261301
+continuation_index: /scratch/djy8hg/runs/mosaickv/campaigns/llava-full-quality-continuation-6gpu-v1/jobs.jsonl
+continuation_index_sha256: ff324e336ca914cd17ebfac0420d0d4c098f46ecbdbcfd93666c3ec51883ad54
+continuation_output_root: /scratch/djy8hg/runs/mosaickv/llava-full-quality-continuation-6gpu-v1
+scientific_configuration_change: false
+resource_change:
+  scheduling: slurm_job_array
+  array_indices: 0-5
+  maximum_concurrent_tasks: 6
+  nodes_per_task: 1
+  gpus_per_task: 1
+  gpu_type: a100
+  cpus_per_task: 16
+  host_memory_per_task: 80G
+  time_limit_per_task: "48:00:00"
+reason: avoid_six_gpu_gang_scheduling_and_start_each_worker_when_one_a100_is_available
+invariants:
+  model_config_and_revision_unchanged: true
+  resolved_config_shas_unchanged: true
+  sample_shards_unchanged: true
+  worker_queue_assignment_unchanged: true
+  output_length_and_decoding_unchanged: true
+  cache_budgets_unchanged: true
+  runtime_behavior_file_hashes_unchanged: true

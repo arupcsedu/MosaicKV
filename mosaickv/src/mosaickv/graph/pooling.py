@@ -164,13 +164,13 @@ def _torch_token_feature_matrix(
     )
 
 
-def _pool_torch_token_feature_batch(
+def _pool_torch_token_feature_batch_device(
     matrix: Any,
     *,
     positions: tuple[tuple[int, ...], ...],
     heads: tuple[int, ...] | None,
-) -> np.ndarray[Any, np.dtype[np.float32]]:
-    """Pool one equal-width block batch on its source device, then copy only descriptors."""
+) -> Any:
+    """Pool one equal-width block batch without synchronizing it to the host."""
 
     import torch
 
@@ -193,7 +193,22 @@ def _pool_torch_token_feature_batch(
         if int(head_index.min()) < 0 or int(head_index.max()) >= int(matrix.shape[0]):
             raise ValueError("graph block KV head lies outside descriptor source tensor")
         selected = matrix[head_index[:, None], position_index]
-    pooled = selected.reshape(len(positions), -1, selected.shape[-1]).mean(dim=1)
+    return selected.reshape(len(positions), -1, selected.shape[-1]).mean(dim=1)
+
+
+def _pool_torch_token_feature_batch(
+    matrix: Any,
+    *,
+    positions: tuple[tuple[int, ...], ...],
+    heads: tuple[int, ...] | None,
+) -> np.ndarray[Any, np.dtype[np.float32]]:
+    """Pool one equal-width block batch on its device, then copy its descriptors."""
+
+    pooled = _pool_torch_token_feature_batch_device(
+        matrix,
+        positions=positions,
+        heads=heads,
+    )
     result: np.ndarray[Any, np.dtype[np.float32]] = (
         pooled.detach().cpu().numpy().astype(np.float32, copy=False)
     )
@@ -273,6 +288,37 @@ def _readonly_row(
     return result
 
 
+def _readonly_view(
+    matrix: np.ndarray[Any, np.dtype[np.float32]], index: int
+) -> np.ndarray[Any, np.dtype[np.float32]]:
+    """Return an immutable row view while retaining the owning matrix as its base."""
+
+    result = np.asarray(matrix[index], dtype=np.float32)
+    result.setflags(write=False)
+    return result
+
+
+def _unit_rows(
+    value: np.ndarray[Any, np.dtype[np.float32]],
+) -> np.ndarray[Any, np.dtype[np.float32]]:
+    """Normalize a descriptor matrix in the scalar reference reduction order.
+
+    ``np.linalg.norm(matrix, axis=1)`` is mathematically equivalent to calling
+    :func:`_unit` for every row, but NumPy may use a different reduction order.
+    The resulting few-ULP drift is enough to violate MosaicKV's deliberately
+    strict decision-parity gate.  Descriptor transfer remains layer-batched;
+    only this inexpensive host-side reduction follows the reference order.
+    """
+
+    source = np.asarray(value, dtype=np.float32)
+    if source.ndim != 2:
+        raise ValueError("descriptor normalization requires a rank-two matrix")
+    result = np.empty_like(source)
+    for row_index, row in enumerate(source):
+        result[row_index] = _unit(row)
+    return np.asarray(result, dtype=np.float32)
+
+
 def _unit(value: np.ndarray[Any, np.dtype[np.float32]]) -> np.ndarray[Any, np.dtype[np.float32]]:
     norm = float(np.linalg.norm(value))
     result = value.copy() if norm == 0 else value / norm
@@ -287,6 +333,7 @@ def pool_block_descriptors(
     hidden_states: Sequence[Any] | None = None,
     hidden_sequence_dimension: int = -2,
     metadata_by_node: Mapping[int, BlockEvidenceMetadata] | None = None,
+    host_transfer_mode: str = "deferred_layer",
 ) -> tuple[PooledBlockDescriptor, ...]:
     """Pool K, V, and optional hidden states for every cache block.
 
@@ -298,6 +345,15 @@ def pool_block_descriptors(
     construction does not retain accelerator tensors or autograd state.
     """
 
+    if host_transfer_mode not in {
+        "deferred_layer",
+        "deferred_layer_vectorized",
+        "per_group_reference",
+    }:
+        raise ValueError(
+            "host_transfer_mode must be 'deferred_layer', "
+            "'deferred_layer_vectorized', or 'per_group_reference'"
+        )
     hidden = tuple(hidden_states) if hidden_states is not None else None
     if hidden is not None and len(hidden) != len(full_state.layers):
         raise ValueError("hidden_states must contain exactly one tensor per cache layer")
@@ -365,18 +421,41 @@ def pool_block_descriptors(
             width_groups[len(block.physical_cache_indices)].append((node_id, block))
         pooled_keys: dict[int, np.ndarray[Any, np.dtype[np.float32]]] = {}
         pooled_values: dict[int, np.ndarray[Any, np.dtype[np.float32]]] = {}
+        semantic_by_node: dict[int, np.ndarray[Any, np.dtype[np.float32]]] = {}
         hidden_by_positions: dict[tuple[int, ...], np.ndarray[Any, np.dtype[np.float32]]] = {}
+        deferred_kv_batches: list[Any] = []
+        deferred_kv_groups: list[list[tuple[int, Any]]] = []
+        deferred_key_width: int | None = None
         for group in width_groups.values():
             positions = tuple(block.physical_cache_indices for _node_id, block in group)
             heads = tuple(block.kv_head for _node_id, block in group)
-            batch_pool = (
-                _pool_torch_token_feature_batch if torch_sources else _pool_token_feature_batch
-            )
-            key_batch = batch_pool(key_tokens, positions=positions, heads=heads)
-            value_batch = batch_pool(value_tokens, positions=positions, heads=heads)
-            for batch_index, (node_id, _block) in enumerate(group):
-                pooled_keys[node_id] = _readonly_row(key_batch, batch_index)
-                pooled_values[node_id] = _readonly_row(value_batch, batch_index)
+            if torch_sources and host_transfer_mode.startswith("deferred_layer"):
+                key_device = _pool_torch_token_feature_batch_device(
+                    key_tokens,
+                    positions=positions,
+                    heads=heads,
+                )
+                value_device = _pool_torch_token_feature_batch_device(
+                    value_tokens,
+                    positions=positions,
+                    heads=heads,
+                )
+                key_width = int(key_device.shape[-1])
+                if deferred_key_width is None:
+                    deferred_key_width = key_width
+                elif deferred_key_width != key_width:
+                    raise RuntimeError("one cache layer produced inconsistent key descriptors")
+                deferred_kv_batches.append((key_device, value_device))
+                deferred_kv_groups.append(group)
+            else:
+                batch_pool = (
+                    _pool_torch_token_feature_batch if torch_sources else _pool_token_feature_batch
+                )
+                key_batch = batch_pool(key_tokens, positions=positions, heads=heads)
+                value_batch = batch_pool(value_tokens, positions=positions, heads=heads)
+                for batch_index, (node_id, _block) in enumerate(group):
+                    pooled_keys[node_id] = _readonly_row(key_batch, batch_index)
+                    pooled_values[node_id] = _readonly_row(value_batch, batch_index)
             if hidden_tokens is not None:
                 unique_positions = tuple(dict.fromkeys(positions))
                 hidden_batch = (
@@ -389,16 +468,49 @@ def pool_block_descriptors(
                         hidden_batch,
                         batch_index,
                     )
+        if deferred_kv_batches:
+            import torch
+
+            key_device = torch.cat(tuple(item[0] for item in deferred_kv_batches), dim=0)
+            value_device = torch.cat(tuple(item[1] for item in deferred_kv_batches), dim=0)
+            combined = torch.cat((key_device, value_device), dim=-1)
+            host = combined.detach().cpu().numpy().astype(np.float32, copy=False)
+            key_width = int(deferred_key_width or 0)
+            key_matrix = host[:, :key_width]
+            value_matrix = host[:, key_width:]
+            semantic_matrix = None
+            if host_transfer_mode == "deferred_layer_vectorized" and hidden_tokens is None:
+                semantic_matrix = _unit_rows(
+                    np.concatenate(
+                        (_unit_rows(key_matrix), _unit_rows(value_matrix)),
+                        axis=1,
+                    )
+                )
+            offset = 0
+            for group in deferred_kv_groups:
+                for node_id, _block in group:
+                    if semantic_matrix is None:
+                        pooled_keys[node_id] = _readonly_row(key_matrix, offset)
+                        pooled_values[node_id] = _readonly_row(value_matrix, offset)
+                    else:
+                        pooled_keys[node_id] = _readonly_view(key_matrix, offset)
+                        pooled_values[node_id] = _readonly_view(value_matrix, offset)
+                        semantic_by_node[node_id] = _readonly_view(semantic_matrix, offset)
+                    offset += 1
+            if offset != len(host):
+                raise RuntimeError("deferred K/V descriptors lost block alignment")
         for node_id, block in layer_blocks:
             key = pooled_keys[node_id]
             value = pooled_values[node_id]
             pooled_hidden = None
             if hidden_tokens is not None:
                 pooled_hidden = hidden_by_positions[block.physical_cache_indices]
-            semantic_parts = [_unit(key), _unit(value)]
-            if pooled_hidden is not None:
-                semantic_parts.append(_unit(pooled_hidden))
-            semantic = _unit(np.concatenate(semantic_parts).astype(np.float32, copy=False))
+            semantic = semantic_by_node.get(node_id)
+            if semantic is None:
+                semantic_parts = [_unit(key), _unit(value)]
+                if pooled_hidden is not None:
+                    semantic_parts.append(_unit(pooled_hidden))
+                semantic = _unit(np.concatenate(semantic_parts).astype(np.float32, copy=False))
             override = overrides.get(node_id)
             evidence = (
                 BlockEvidenceMetadata.from_block(block)
@@ -428,6 +540,9 @@ def pool_block_descriptors(
 def pool_prompt_attention_coactivation(
     full_state: FullKVState,
     prompt_attentions: Sequence[Any],
+    *,
+    host_transfer_mode: str = "deferred_layer",
+    eligible_node_ids: Sequence[int] | None = None,
 ) -> dict[int, np.ndarray[Any, np.dtype[np.float32]]]:
     """Pool prompt attention maps into one co-activation signature per block.
 
@@ -438,9 +553,29 @@ def pool_prompt_attention_coactivation(
     vector is the block's prompt-side co-activation signature.
     """
 
+    if host_transfer_mode not in {
+        "deferred_layer",
+        "deferred_layer_vectorized",
+        "per_group_reference",
+    }:
+        raise ValueError(
+            "host_transfer_mode must be 'deferred_layer', "
+            "'deferred_layer_vectorized', or 'per_group_reference'"
+        )
     attention_layers = tuple(prompt_attentions)
     if len(attention_layers) != len(full_state.layers):
         raise ValueError("prompt_attentions must contain exactly one tensor per cache layer")
+    eligible = (
+        None
+        if eligible_node_ids is None
+        else frozenset(int(node_id) for node_id in eligible_node_ids)
+    )
+    if eligible is not None:
+        unknown = eligible - set(range(len(full_state.blocks)))
+        if unknown:
+            raise ValueError(
+                f"attention co-activation shortlist contains unknown nodes: {sorted(unknown)}"
+            )
     result: dict[int, np.ndarray[Any, np.dtype[np.float32]]] = {}
     for layer_index, (attention, layer) in enumerate(
         zip(attention_layers, full_state.layers, strict=True)
@@ -467,8 +602,12 @@ def pool_prompt_attention_coactivation(
             query_heads_per_kv = query_heads // layer.kv_heads
             by_head_width: dict[tuple[int, int], list[tuple[int, Any]]] = defaultdict(list)
             for node_id, block in enumerate(full_state.blocks):
-                if block.layer == layer_index:
+                if block.layer == layer_index and (
+                    eligible is None or node_id in eligible
+                ):
                     by_head_width[(block.kv_head, block.position_count)].append((node_id, block))
+            deferred_batches: list[Any] = []
+            deferred_node_ids: list[int] = []
             for (kv_head, _width), indexed_blocks in by_head_width.items():
                 positions = torch.as_tensor(
                     tuple(block.physical_cache_indices for _node_id, block in indexed_blocks),
@@ -480,8 +619,23 @@ def pool_prompt_attention_coactivation(
                 source = tensor[:, query_start:query_end, :, :]
                 selected = source[..., positions]
                 pooled = selected.mean(dim=(0, 1, 4)).transpose(0, 1)
-                host = pooled.detach().cpu().numpy().astype(np.float32, copy=False)
-                for row, (node_id, _block) in enumerate(indexed_blocks):
+                if host_transfer_mode.startswith("deferred_layer"):
+                    # Preserve the original independent per-head reduction,
+                    # but defer its synchronizing device-to-host copy. Long
+                    # VLM prompts otherwise issue one CPU synchronization per
+                    # KV-head/block-width group (often thousands per sample).
+                    deferred_batches.append(pooled)
+                    deferred_node_ids.extend(node_id for node_id, _block in indexed_blocks)
+                else:
+                    host = pooled.detach().cpu().numpy().astype(np.float32, copy=False)
+                    for row, (node_id, _block) in enumerate(indexed_blocks):
+                        result[node_id] = _readonly_row(host, row)
+            if deferred_batches:
+                deferred = torch.cat(tuple(deferred_batches), dim=0)
+                host = deferred.detach().cpu().numpy().astype(np.float32, copy=False)
+                if len(host) != len(deferred_node_ids):
+                    raise RuntimeError("deferred attention descriptors lost block alignment")
+                for row, node_id in enumerate(deferred_node_ids):
                     result[node_id] = _readonly_row(host, row)
             continue
         array = _as_numpy_float(attention)
@@ -500,7 +654,9 @@ def pool_prompt_attention_coactivation(
             )
         query_heads_per_kv = query_heads // layer.kv_heads
         for node_id, block in enumerate(full_state.blocks):
-            if block.layer != layer_index:
+            if block.layer != layer_index or (
+                eligible is not None and node_id not in eligible
+            ):
                 continue
             query_start = block.kv_head * query_heads_per_kv
             query_end = query_start + query_heads_per_kv

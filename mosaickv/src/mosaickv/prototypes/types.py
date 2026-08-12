@@ -356,11 +356,14 @@ class ThreeTierCacheConstruction:
             raise ValueError("prototype records do not match tier assignments")
         if len(self.state.prototypes.prototype_keys) != len(self.prototypes):
             raise ValueError("prototype records and active payload counts differ")
-        residual_blocks = self.residual_storage.tier.source_blocks
         if self.state.residuals is not self.residual_storage.tier:
             raise ValueError("state residual tier and residual storage report must be identical")
-        if residual_blocks and residual_blocks != self.state.prototypes.source_blocks:
-            raise ValueError("residual storage must preserve every prototyped source block")
+        prototype_memberships = self.state.prototypes.source_memberships
+        residual_memberships = self.state.residuals.source_memberships
+        if not residual_memberships <= prototype_memberships:
+            raise ValueError(
+                "bounded residual storage may contain only prototyped source blocks"
+            )
         source_layouts = {(block.layer, block.kv_head) for block in self.state.source_blocks}
         active_layout_ids = tuple((layout.layer, layout.kv_head) for layout in self.active_layouts)
         if len(set(active_layout_ids)) != len(active_layout_ids):

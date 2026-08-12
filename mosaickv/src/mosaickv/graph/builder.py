@@ -36,6 +36,26 @@ class _EdgeAccumulator:
     def __init__(self, config: GraphConfig) -> None:
         self._config = config
         self._edges: dict[tuple[int, EdgeType], dict[int, float]] = defaultdict(dict)
+        self._preselected: dict[int, list[_CandidateEdge]] = defaultdict(list)
+
+    def add_preselected(
+        self,
+        source: int,
+        target: int,
+        edge_type: EdgeType,
+        score: float,
+        source_weight: float,
+    ) -> None:
+        """Append an already top-k, duplicate-free candidate without a trim dictionary."""
+
+        if source == target or source_weight == 0:
+            return
+        if not math.isfinite(score):
+            raise ValueError(f"non-finite {edge_type.value} edge score")
+        weighted = max(0.0, min(1.0, score)) * source_weight
+        if weighted <= 0 or weighted < self._config.min_edge_weight:
+            return
+        self._preselected[source].append(_CandidateEdge(source, target, edge_type, weighted))
 
     def add(
         self,
@@ -60,10 +80,12 @@ class _EdgeAccumulator:
 
     def finalize(self) -> tuple[_CandidateEdge, ...]:
         by_source: dict[int, list[_CandidateEdge]] = defaultdict(list)
-        for (source, edge_type), candidates in self._edges.items():
+        for source, preselected_candidates in self._preselected.items():
+            by_source[source].extend(preselected_candidates)
+        for (source, edge_type), edge_candidates in self._edges.items():
             by_source[source].extend(
                 _CandidateEdge(source, target, edge_type, weight)
-                for target, weight in candidates.items()
+                for target, weight in edge_candidates.items()
             )
         return tuple(
             edge
@@ -121,6 +143,7 @@ def _add_cosine_edges(
 ) -> None:
     if source_weight == 0 or not features:
         return
+    add_preselected = config.edge_accumulation_mode == "preselected"
     feature_groups: dict[tuple[int, int, int], list[int]] = defaultdict(list)
     normalized: dict[int, np.ndarray[Any, Any]] = {}
     for node_id, feature in features.items():
@@ -168,7 +191,10 @@ def _add_cosine_edges(
                     for column in ranked[row]:
                         if not positive[row, column]:
                             continue
-                        accumulator.add(
+                        add_edge = (
+                            accumulator.add_preselected if add_preselected else accumulator.add
+                        )
+                        add_edge(
                             source_id,
                             node_ids[int(column)],
                             edge_type,
@@ -485,6 +511,11 @@ def _add_fallback_edges(
 ) -> None:
     if config.fallback_weight == 0:
         return
+    add_edge = (
+        accumulator.add_preselected
+        if config.edge_accumulation_mode == "preselected"
+        else accumulator.add
+    )
     groups: dict[tuple[int, int], list[int]] = defaultdict(list)
     for node in nodes:
         if eligible_node_ids is not None and node.node_id not in eligible_node_ids:
@@ -528,7 +559,7 @@ def _add_fallback_edges(
                 candidates,
                 key=lambda item: (-item[1], item[0]),
             )[: config.max_neighbors]:
-                accumulator.add(
+                add_edge(
                     source_id,
                     target_id,
                     EdgeType.FALLBACK_POSITIONAL,
@@ -643,6 +674,7 @@ def build_evidence_graph(
     attention_coactivation: Any | Mapping[int, Any] | None = None,
     prompt_attentions: Sequence[Any] | None = None,
     metadata_by_node: Mapping[int, BlockEvidenceMetadata] | None = None,
+    similarity_candidate_node_ids: Sequence[int] | None = None,
 ) -> SparseEvidenceGraph:
     """Construct all enabled evidence sources in bounded sparse form.
 
@@ -661,7 +693,19 @@ def build_evidence_graph(
         hidden_states=hidden_states,
         hidden_sequence_dimension=hidden_sequence_dimension,
         metadata_by_node=metadata_by_node,
+        host_transfer_mode=config.attention_host_transfer_mode,
     )
+    similarity_candidates = (
+        None
+        if similarity_candidate_node_ids is None
+        else frozenset(int(node_id) for node_id in similarity_candidate_node_ids)
+    )
+    if similarity_candidates is not None:
+        unknown = similarity_candidates - set(range(len(nodes)))
+        if unknown:
+            raise ValueError(
+                f"similarity shortlist contains unknown graph nodes: {sorted(unknown)}"
+            )
     if not config.enabled:
         edges: tuple[_CandidateEdge, ...] = ()
         return SparseEvidenceGraph(
@@ -675,7 +719,11 @@ def build_evidence_graph(
     accumulator = _EdgeAccumulator(config)
     _add_cosine_edges(
         nodes,
-        {node.node_id: np.asarray(node.semantic_embedding) for node in nodes},
+        {
+            node.node_id: np.asarray(node.semantic_embedding)
+            for node in nodes
+            if similarity_candidates is None or node.node_id in similarity_candidates
+        },
         edge_type=EdgeType.SEMANTIC_SIMILARITY,
         source_weight=config.semantic_weight,
         maximum_position_span=config.semantic_max_position_span,
@@ -685,9 +733,21 @@ def build_evidence_graph(
     _add_cosine_edges(
         nodes,
         (
-            pool_prompt_attention_coactivation(full_state, prompt_attentions)
+            pool_prompt_attention_coactivation(
+                full_state,
+                prompt_attentions,
+                host_transfer_mode=config.attention_host_transfer_mode,
+                eligible_node_ids=similarity_candidate_node_ids,
+            )
             if prompt_attentions is not None
-            else _attention_features(attention_coactivation, len(nodes))
+            else {
+                node_id: feature
+                for node_id, feature in _attention_features(
+                    attention_coactivation,
+                    len(nodes),
+                ).items()
+                if similarity_candidates is None or node_id in similarity_candidates
+            }
         ),
         edge_type=EdgeType.ATTENTION_COACTIVATION,
         source_weight=config.attention_weight,
