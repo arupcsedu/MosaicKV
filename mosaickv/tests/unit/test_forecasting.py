@@ -260,10 +260,13 @@ def test_conditional_draft_executes_for_high_prompt_uncertainty() -> None:
             conditional_draft_enabled=True,
             conditional_draft_uncertainty_threshold=0.5,
         ),
+        capture_distributions=True,
     )
 
     assert adapter.decode_calls == 2
     assert rollout.token_ids == (2, 3)
+    assert len(rollout.draft_distributions) == 2
+    assert np.allclose(rollout.draft_distributions[0].sum(axis=-1), 1.0)
     assert forecast.provenance.mode is ForecastMode.HYBRID
     assert forecast.provenance.completed_draft_steps == 2
     assert forecast.provenance.conditional_draft_decision == (
@@ -288,6 +291,7 @@ def test_evaluation_rollout_does_not_require_prompt_queries() -> None:
     rollout = run_isolated_greedy_query_rollout(adapter, prefill, steps=2)
 
     assert rollout.token_ids == (2, 3)
+    assert rollout.draft_distributions == ()
     assert rollout.original_cache_unchanged
 
 

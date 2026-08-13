@@ -26,6 +26,7 @@ from mosaickv.prototypes import (
     TierConstructionMode,
     construct_three_tier_cache,
     estimate_prototype_active_cost,
+    estimate_prototype_assignment_anchor_ids,
 )
 from mosaickv.residual import (
     PinnedMemoryUnavailableError,
@@ -179,6 +180,91 @@ def test_manual_cluster_matches_expected_fp32_weighted_prototype() -> None:
     assert result.next_decode_position == 9
     assert result.active_layouts[0].active_cache_length == 2
     assert result.active_layouts[0].prototype_anchor_positions == (2,)
+
+
+def test_prototype_anchor_index_is_undirected_and_keeps_maximum_pair_weight() -> None:
+    full = _full()
+    graph = _graph(full, ((0, 1, 0.2), (1, 0, 0.8), (2, 0, 0.5)))
+    selection = _selection(graph, 2, (1.0, 0.0, 0.0))
+
+    result = construct_three_tier_cache(
+        full,
+        graph,
+        selection,
+        _safe_capabilities(),
+        prototype_config=PrototypeConfig(group_size=2),
+        residual_config=ResidualConfig(enabled=False),
+    )
+
+    assert result.mode is TierConstructionMode.THREE_TIER
+    assert [member.raw_weight for member in result.prototypes[0].members] == pytest.approx(
+        [0.8, 0.5]
+    )
+
+
+def test_torch_fused_layer_pooling_matches_manual_weighted_prototype() -> None:
+    torch = pytest.importorskip("torch")
+    key = torch.tensor([[[[10.0], [20.0], [30.0]]]], dtype=torch.float16)
+    value = torch.tensor([[[[1.0], [3.0], [7.0]]]], dtype=torch.float16)
+    full = FullKVState.from_tensors(
+        ((key, value),),
+        modality_spans=(ModalitySpan(0, 8, Modality.TEXT),),
+        block_size=1,
+        logical_positions=(2, 4, 6),
+        original_logical_sequence_length=8,
+        next_decode_position=9,
+        cached_key_state=CachedKeyState.NOT_APPLICABLE,
+    )
+    graph = _graph(full)
+    selection = _selection(graph, 2, (1.0, 0.0, 0.0))
+
+    result = construct_three_tier_cache(
+        full,
+        graph,
+        selection,
+        _safe_capabilities(),
+        prototype_config=PrototypeConfig(group_size=2, max_position_span=8),
+        residual_config=ResidualConfig(enabled=False),
+    )
+
+    assert result.mode is TierConstructionMode.THREE_TIER
+    assert torch.equal(
+        result.state.prototypes.prototype_keys[0],
+        torch.tensor([[[[27.5]]]], dtype=torch.float16),
+    )
+    assert torch.equal(
+        result.state.prototypes.prototype_values[0],
+        torch.tensor([[[[6.0]]]], dtype=torch.float16),
+    )
+    assert result.prototypes[0].diagnostics.key_dispersion == pytest.approx(18.75)
+    assert result.prototypes[0].diagnostics.value_dispersion == pytest.approx(3.0)
+
+
+def test_torch_fused_layer_pooling_zero_pads_ragged_tail_without_bias() -> None:
+    torch = pytest.importorskip("torch")
+    key = torch.tensor([[[[0.0], [2.0], [10.0], [14.0], [20.0]]]])
+    value = key + 100.0
+    full = FullKVState.from_tensors(
+        ((key, value),),
+        block_size=2,
+        cached_key_state=CachedKeyState.NOT_APPLICABLE,
+    )
+    graph = _graph(full, ((1, 0, 0.25), (2, 0, 0.75)))
+    selection = _selection(graph, 2, (1.0, 0.0, 0.0))
+
+    result = construct_three_tier_cache(
+        full,
+        graph,
+        selection,
+        _safe_capabilities(),
+        prototype_config=PrototypeConfig(group_size=2),
+        residual_config=ResidualConfig(enabled=False),
+    )
+
+    # The source member means are 12 and 20. The repeated tail element has a
+    # zero internal weight, leaving the paper-defined 0.25/0.75 merge intact.
+    assert torch.equal(result.state.prototypes.prototype_keys[0], torch.tensor([[[[18.0]]]]))
+    assert torch.equal(result.state.prototypes.prototype_values[0], torch.tensor([[[[118.0]]]]))
 
 
 def test_three_tier_rejects_unknown_exact_gather_mode() -> None:
@@ -644,6 +730,22 @@ def test_prototype_cost_estimate_rejects_dense_head_overflow() -> None:
     assert reason is not None and "dense layer/head capacities" in reason
 
 
+def test_prototype_assignment_anchor_estimate_excludes_empty_allowed_anchor() -> None:
+    full = _full()
+    graph = _graph(full)
+    selection = _selection(graph, 2, (1.0, 0.0, 0.9))
+
+    anchor_ids, reason = estimate_prototype_assignment_anchor_ids(
+        graph,
+        selection,
+        PrototypeConfig(group_size=2),
+        prototype_anchor_node_ids=(0, 2),
+    )
+
+    assert reason is None
+    assert anchor_ids == (0,)
+
+
 def test_explicit_byte_budget_rejects_prototype_growth() -> None:
     full = _full()
     graph = _graph(full)
@@ -738,6 +840,39 @@ def test_torch_pageable_placement_is_not_silently_pinned() -> None:
     assert not report.all_payloads_pinned
     assert not report.tier.key_residuals[0].is_pinned()
     assert not report.tier.value_residuals[0].is_pinned()
+
+
+def test_bounded_residuals_can_cover_prototypes_before_repeating_a_cluster() -> None:
+    key = np.arange(6, dtype=np.float32).reshape(1, 1, 6, 1)
+    value = key + 100
+    full = FullKVState.from_tensors(((key, value),), block_size=1)
+    assignments = {0: 10, 1: 10, 2: 10, 3: 20, 4: 20, 5: 30}
+    priorities = {0: 10.0, 1: 9.0, 2: 8.0, 3: 7.0, 4: 6.0, 5: 5.0}
+
+    global_report = build_residual_storage(
+        full,
+        assignments,
+        ResidualConfig(
+            require_pinned_memory=False,
+            max_source_blocks=3,
+            selection_policy="risk_weighted_reconstruction_error",
+        ),
+        priority_by_node=priorities,
+    )
+    coverage_report = build_residual_storage(
+        full,
+        assignments,
+        ResidualConfig(
+            require_pinned_memory=False,
+            max_source_blocks=3,
+            selection_policy="prototype_coverage_then_risk",
+        ),
+        priority_by_node=priorities,
+    )
+
+    assert tuple(item.source_node_id for item in global_report.payloads) == (0, 1, 2)
+    assert tuple(item.source_node_id for item in coverage_report.payloads) == (0, 3, 5)
+    assert {item.prototype_id for item in coverage_report.payloads} == {10, 20, 30}
 
 
 def test_residual_storage_reuses_only_aligned_pre_gathered_payloads() -> None:

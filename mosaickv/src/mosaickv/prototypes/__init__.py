@@ -6,6 +6,7 @@ from mosaickv.prototypes.construction import (
     assess_prototype_safety,
     construct_three_tier_cache,
     estimate_prototype_active_cost,
+    estimate_prototype_assignment_anchor_ids,
 )
 from mosaickv.prototypes.refresh import (
     PrototypeRefreshError,
@@ -37,5 +38,6 @@ __all__ = [
     "assess_prototype_safety",
     "construct_three_tier_cache",
     "estimate_prototype_active_cost",
+    "estimate_prototype_assignment_anchor_ids",
     "refresh_prototype_after_promotions",
 ]

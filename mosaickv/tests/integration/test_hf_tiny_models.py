@@ -558,6 +558,10 @@ def test_unified_runtime_methods_decode_and_write_complete_traces(
     assert "forecast_statistics" in trace
     assert "repair_events" in trace
     assert "timing_breakdown" in trace
+    timings = trace["timing_breakdown"]
+    assert timings["host_orchestration"] >= 0
+    assert timings["first_decode_step"] == timings["per_token_decode"][0]
+    assert timings["steady_state_decode_mean"] >= 0
     if method is MosaicKVMethod.MOSAICKV_EXACT:
         assert trace["prototypes"] == []
         assert trace["repair_events"] == []
@@ -698,6 +702,9 @@ def test_full_kv_baseline_is_unmodified_reference_path(tmp_path: Path) -> None:
     assert trace["tier_mode"] == "full_cache"
     assert trace["prototypes"] == []
     assert trace["repair_events"] == []
+    assert trace["packed_prompt_capacity"] > 0
+    assert trace["hard_prompt_capacity"] is None
+    assert trace["tier_active_cache_lengths"] == []
 
 
 @pytest.mark.hf

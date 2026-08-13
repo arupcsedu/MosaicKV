@@ -114,6 +114,7 @@ class IsolatedQueryRollout:
     query_layers: tuple[Any, ...]
     attention_steps: tuple[tuple[Any, ...], ...]
     token_ids: tuple[int, ...]
+    draft_distributions: tuple[Any, ...]
     kv_head_counts: tuple[int, ...]
     cache_clone_seconds: float
     draft_decode_seconds: float
@@ -124,6 +125,8 @@ class IsolatedQueryRollout:
     def __post_init__(self) -> None:
         if not self.query_layers and self.token_ids:
             raise ValueError("rollout tokens require captured query layers")
+        if self.draft_distributions and len(self.draft_distributions) != len(self.token_ids):
+            raise ValueError("captured rollout distributions must align with draft token inputs")
         if self.cache_clone_seconds < 0 or self.draft_decode_seconds < 0:
             raise ValueError("rollout timings must be nonnegative")
         if not self.kv_head_counts or any(count <= 0 for count in self.kv_head_counts):
@@ -209,6 +212,7 @@ def run_isolated_greedy_query_rollout(
     *,
     steps: int,
     capture_attentions: bool = False,
+    capture_distributions: bool = False,
 ) -> IsolatedQueryRollout:
     """Collect future queries without another prefill or shared mutable cache state."""
 
@@ -225,6 +229,7 @@ def run_isolated_greedy_query_rollout(
             lambda: adapter.extract_past_key_values(prefill.state.past_key_values),
         )
         return IsolatedQueryRollout(
+            (),
             (),
             (),
             (),
@@ -251,6 +256,7 @@ def run_isolated_greedy_query_rollout(
     query_steps: list[tuple[Any, ...]] = []
     attention_steps: list[tuple[Any, ...]] = []
     tokens: list[int] = []
+    draft_distributions: list[Any] = []
 
     def draft_phase() -> None:
         nonlocal draft_state
@@ -268,6 +274,23 @@ def run_isolated_greedy_query_rollout(
             if capture_attentions:
                 attention_steps.append(output.attention_weights)
             tokens.append(_scalar_token_id(token))
+            if not capture_distributions:
+                token = output.next_token_id
+                draft_state = output.state
+                continue
+            if output.logits.__class__.__module__.startswith("torch"):
+                import torch
+
+                draft_distributions.append(
+                    torch.softmax(output.logits.detach().float(), dim=-1)
+                )
+            else:
+                import numpy as np
+
+                logits = np.asarray(output.logits, dtype=np.float64)
+                shifted = logits - np.max(logits, axis=-1, keepdims=True)
+                weights = np.exp(shifted)
+                draft_distributions.append(weights / weights.sum(axis=-1, keepdims=True))
             token = output.next_token_id
             draft_state = output.state
 
@@ -292,6 +315,7 @@ def run_isolated_greedy_query_rollout(
         query_layers=_concatenate_query_steps(query_steps),
         attention_steps=tuple(attention_steps),
         token_ids=tuple(tokens),
+        draft_distributions=tuple(draft_distributions),
         kv_head_counts=kv_head_counts,
         cache_clone_seconds=clone_seconds + integrity_seconds,
         draft_decode_seconds=draft_seconds,
@@ -307,6 +331,7 @@ def forecast_with_rollout(
     config: ForecastingConfig,
     *,
     capture_attentions: bool = False,
+    capture_distributions: bool = False,
 ) -> tuple[QueryForecast, IsolatedQueryRollout]:
     """Return a forecast and its one isolated rollout without a second prefill."""
 
@@ -328,6 +353,8 @@ def forecast_with_rollout(
             exemplar,
             lambda: _prompt_directional_uncertainty(prompt_layers, config.prompt_window),
         )
+        if prompt_uncertainty is None:  # pragma: no cover - measured callback returns float
+            raise RuntimeError("conditional draft uncertainty measurement returned no value")
         if prompt_uncertainty < config.conditional_draft_uncertainty_threshold:
             effective_config = replace(
                 config,
@@ -365,6 +392,7 @@ def forecast_with_rollout(
                 query_layers=(),
                 attention_steps=(),
                 token_ids=(),
+                draft_distributions=(),
                 kv_head_counts=_layout_kv_head_counts(
                     adapter, prefill.state.past_key_values
                 ),
@@ -380,6 +408,7 @@ def forecast_with_rollout(
         prefill,
         steps=config.draft_steps,
         capture_attentions=capture_attentions,
+        capture_distributions=capture_distributions,
     )
     forecast = build_query_forecast(
         prefill.query_vectors.layers,

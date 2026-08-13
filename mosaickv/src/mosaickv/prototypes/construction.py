@@ -228,19 +228,52 @@ def _validate_inputs(
         )
 
 
-def _undirected_anchor_weights(graph: SparseEvidenceGraph) -> Mapping[tuple[int, int], float]:
-    weights: dict[tuple[int, int], float] = {}
+def _selected_anchor_neighbors(
+    graph: SparseEvidenceGraph,
+    anchors: frozenset[int],
+    selected: frozenset[int],
+) -> Mapping[int, tuple[tuple[int, float], ...]]:
+    """Index only graph edges that can route an unselected node to an anchor.
+
+    The prior implementation materialized an undirected copy of every graph
+    edge and then discarded all neighbors that were not selected anchors.
+    Selection ratios are small, so most of that allocation and traversal could
+    never affect a prototype assignment. Pairwise maximum weights retain the
+    exact undirected pairwise-maximum semantics of the previous full index.
+    """
+
+    weights_by_source: dict[int, dict[int, float]] = defaultdict(dict)
     for source, target, weight in zip(
-        graph.row_indices, graph.column_indices, graph.weights, strict=True
+        graph.row_indices,
+        graph.column_indices,
+        graph.weights,
+        strict=True,
     ):
-        identity = (min(source, target), max(source, target))
-        weights[identity] = max(weights.get(identity, 0.0), float(weight))
-    return weights
+        numeric_weight = float(weight)
+        if source in anchors and target not in selected:
+            current = weights_by_source[target].get(source, 0.0)
+            weights_by_source[target][source] = max(current, numeric_weight)
+        if target in anchors and source not in selected:
+            current = weights_by_source[source].get(target, 0.0)
+            weights_by_source[source][target] = max(current, numeric_weight)
+    return {
+        source_id: tuple(anchor_weights.items())
+        for source_id, anchor_weights in weights_by_source.items()
+    }
 
 
 def _pair_span(first: KVBlockDescriptor, second: KVBlockDescriptor) -> int:
-    positions = (*first.original_logical_positions, *second.original_logical_positions)
-    return max(positions) - min(positions)
+    # Descriptor invariants guarantee strictly monotonic positions. Prototype
+    # assignment calls this millions of times for long documents, so scanning
+    # and allocating both complete position tuples here is unnecessarily
+    # expensive; their endpoints determine the exact same union span.
+    return max(
+        first.original_logical_positions[-1],
+        second.original_logical_positions[-1],
+    ) - min(
+        first.original_logical_positions[0],
+        second.original_logical_positions[0],
+    )
 
 
 def _compatible(
@@ -311,12 +344,7 @@ def _assign_to_anchors(
             "per-head exact prototype policy requires source nodes to be selected exact: "
             f"{missing_exact_routes[:8]}"
         )
-    weights = _undirected_anchor_weights(graph)
-    neighbors: dict[int, list[tuple[int, float]]] = defaultdict(list)
-    for (first, second), weight in weights.items():
-        neighbors[first].append((second, weight))
-        if first != second:
-            neighbors[second].append((first, weight))
+    neighbors = _selected_anchor_neighbors(graph, anchors, selected)
     selected_by_identity: dict[tuple[int, int, object], list[tuple[float, int]]] = defaultdict(list)
     for anchor_id in anchors:
         anchor = graph.nodes[anchor_id]
@@ -325,6 +353,10 @@ def _assign_to_anchors(
         ].append((anchor.logical_center, anchor_id))
     for identity_anchors in selected_by_identity.values():
         identity_anchors.sort()
+    selected_centers_by_identity = {
+        identity: tuple(center for center, _anchor_id in identity_anchors)
+        for identity, identity_anchors in selected_by_identity.items()
+    }
     allowed_anchor_modalities: dict[str, set[str]] = defaultdict(set)
     for pair in config.allowed_modality_pairs:
         source_modality, anchor_modality = pair.split(":", maxsplit=1)
@@ -345,7 +377,9 @@ def _assign_to_anchors(
             )
             if not anchors:
                 continue
-            centers = [center for center, _anchor_id in anchors]
+            centers = selected_centers_by_identity[
+                (source.block.layer, source.block.kv_head, modality)
+            ]
             insertion = bisect_left(centers, source.logical_center)
             first = max(0, insertion - window)
             last = min(len(anchors), insertion + window)
@@ -371,8 +405,6 @@ def _assign_to_anchors(
             continue
         weights_by_anchor: dict[int, float] = {}
         for anchor_id, weight in neighbors.get(node_id, ()):
-            if anchor_id not in anchors:
-                continue
             anchor = graph.nodes[anchor_id]
             if (
                 weight > 0
@@ -751,29 +783,38 @@ class _PrototypeRecipe:
 
 def _batched_pool_source_members(
     full_state: FullKVState,
-    gathered_by_node: Mapping[int, tuple[Any, Any]],
     blocks_by_node: Mapping[int, KVBlockDescriptor],
     position_weights_by_node: Mapping[int, tuple[float, ...]],
     key_transform: RotaryPrototypeKeyTransform | None,
 ) -> tuple[dict[int, Any], dict[int, Any]]:
-    """Pool all source blocks in shape-compatible batches.
+    """Pool source blocks directly from fused layer/head tensors.
 
     Long visual/document prompts can contain tens of thousands of block/head
-    pairs.  Pooling each independently is launch-bound on a GPU.  Shape
-    grouping preserves every source block and its local attention weights
-    while reducing the launch count to the number of distinct block shapes.
+    pairs. Materializing one tensor per block, casting each to FP32, and then
+    stacking those tensors is launch- and Python-bound. Torch caches are
+    instead indexed once per layer and block width, then reduced as one
+    ``[block, position, ...]`` tensor. NumPy keeps the simple reference path.
     """
 
-    node_ids = tuple(sorted(gathered_by_node))
+    node_ids = tuple(sorted(blocks_by_node))
     if not node_ids:
         return {}, {}
-    first_key = gathered_by_node[node_ids[0]][0]
+    first_block = blocks_by_node[node_ids[0]]
+    first_key = full_state.layers[first_block.layer].key
     if not first_key.__class__.__module__.startswith("torch"):
+        gathered = full_state.gather_exact_blocks(
+            tuple(blocks_by_node[node_id] for node_id in node_ids),
+            gather_mode="batched_layer",
+        )
         numpy_pooled_keys: dict[int, Any] = {}
         numpy_pooled_values: dict[int, Any] = {}
-        for node_id in node_ids:
+        for node_id, key, value in zip(
+            node_ids,
+            gathered.key_blocks,
+            gathered.value_blocks,
+            strict=True,
+        ):
             block = blocks_by_node[node_id]
-            key, value = gathered_by_node[node_id]
             layer = full_state.layers[block.layer]
             local_weights = position_weights_by_node[node_id]
             if key_transform is None:
@@ -800,102 +841,106 @@ def _batched_pool_source_members(
 
     pooled_keys: dict[int, Any] = {}
     pooled_values: dict[int, Any] = {}
-    shape_groups: dict[tuple[Any, ...], list[int]] = defaultdict(list)
+    shape_groups: dict[tuple[int, int], list[int]] = defaultdict(list)
     for node_id in node_ids:
         block = blocks_by_node[node_id]
-        key, value = gathered_by_node[node_id]
-        layer = full_state.layers[block.layer]
-        shape_groups[
-            (
-                tuple(int(size) for size in key.shape),
-                tuple(int(size) for size in value.shape),
-                layer.key_sequence_dimension % int(key.ndim),
-                layer.value_sequence_dimension % int(value.ndim),
-                str(key.device),
-                str(value.device),
-            )
-        ].append(node_id)
-    for signature in sorted(shape_groups, key=str):
-        members = tuple(shape_groups[signature])
-        keys = torch.stack(
-            tuple(gathered_by_node[node_id][0].detach().float() for node_id in members),
-            dim=0,
+        shape_groups[(block.layer, block.position_count)].append(node_id)
+    for layer_index, width in sorted(shape_groups):
+        members = tuple(shape_groups[(layer_index, width)])
+        layer = full_state.layers[layer_index]
+        key_head_axis = layer.key_head_dimension % int(layer.key.ndim)
+        key_sequence_axis = layer.key_sequence_dimension % int(layer.key.ndim)
+        value_head_axis = layer.value_head_dimension % int(layer.value.ndim)
+        value_sequence_axis = layer.value_sequence_dimension % int(layer.value.ndim)
+        key_source = layer.key.movedim((key_head_axis, key_sequence_axis), (0, 1))
+        value_source = layer.value.movedim((value_head_axis, value_sequence_axis), (0, 1))
+        heads = torch.as_tensor(
+            tuple(blocks_by_node[node_id].kv_head for node_id in members),
+            dtype=torch.long,
+            device=layer.key.device,
         )
-        values = torch.stack(
-            tuple(gathered_by_node[node_id][1].detach().float() for node_id in members),
-            dim=0,
+        positions = torch.as_tensor(
+            tuple(blocks_by_node[node_id].physical_cache_indices for node_id in members),
+            dtype=torch.long,
+            device=layer.key.device,
         )
-        key_axis = int(signature[2]) + 1
-        value_axis = int(signature[3]) + 1
+        # Advanced indices consume the canonical head/sequence axes and leave
+        # ``[member, position, remaining source axes...]``.
+        keys = key_source[heads[:, None], positions].detach().float()
+        value_positions = positions.to(device=layer.value.device)
+        value_heads = heads.to(device=layer.value.device)
+        values = value_source[value_heads[:, None], value_positions].detach().float()
         local_position_weights_batch = tuple(
             position_weights_by_node[node_id] for node_id in members
         )
+        weights = torch.as_tensor(
+            local_position_weights_batch,
+            dtype=keys.dtype,
+            device=keys.device,
+        )
+        key_weight = weights.reshape((len(members), width) + (1,) * (keys.ndim - 2))
 
         if key_transform is None:
-            key_width = int(keys.shape[key_axis])
-            key_weight = torch.as_tensor(
-                local_position_weights_batch,
-                dtype=keys.dtype,
-                device=keys.device,
-            ).reshape(
-                (len(members),)
-                + (1,) * (key_axis - 1)
-                + (key_width,)
-                + (1,) * (keys.ndim - key_axis - 1)
-            )
-            pooled_key_batch = torch.sum(keys * key_weight, dim=key_axis, keepdim=True)
+            pooled_key_batch = torch.sum(keys * key_weight, dim=1, keepdim=True)
         else:
-            if key_axis != keys.ndim - 2:
+            if key_sequence_axis != int(layer.key.ndim) - 2:
                 raise PrototypeConstructionError(
                     "batched RoPE prototype pooling requires the cache sequence axis at -2"
                 )
-            positions = torch.as_tensor(
+            logical_positions = torch.as_tensor(
                 tuple(blocks_by_node[node_id].original_logical_positions for node_id in members),
                 dtype=torch.long,
                 device=key_transform.cos.device,
             )
-            if int(positions.min()) < 0 or int(positions.max()) >= int(key_transform.cos.shape[-2]):
+            if int(logical_positions.min()) < 0 or int(logical_positions.max()) >= int(
+                key_transform.cos.shape[-2]
+            ):
                 raise PrototypeConstructionError(
                     "prototype logical position lies outside the captured prefill RoPE phase"
                 )
-            cos = key_transform.cos[0, 0][positions].to(device=keys.device, dtype=torch.float32)
-            sin = key_transform.sin[0, 0][positions].to(device=keys.device, dtype=torch.float32)
-            phase_shape = (len(members),) + (1,) * (keys.ndim - 3) + tuple(cos.shape[-2:])
+            cos = key_transform.cos[0, 0][logical_positions].to(
+                device=keys.device,
+                dtype=torch.float32,
+            )
+            sin = key_transform.sin[0, 0][logical_positions].to(
+                device=keys.device,
+                dtype=torch.float32,
+            )
+            phase_shape = (len(members), width) + (1,) * (keys.ndim - 3) + (int(cos.shape[-1]),)
             cos = cos.reshape(phase_shape)
             sin = sin.reshape(phase_shape)
             denominator = (cos * cos + sin * sin).clamp_min(1e-12)
             neutral = (keys * cos - key_transform._rotate_half(keys) * sin) / denominator
-            key_width = int(keys.shape[-2])
-            key_weight = torch.as_tensor(
-                local_position_weights_batch,
-                dtype=neutral.dtype,
-                device=neutral.device,
-            ).reshape((len(members),) + (1,) * (neutral.ndim - 3) + (key_width, 1))
-            pooled_key_batch = torch.sum(neutral * key_weight, dim=-2, keepdim=True)
+            pooled_key_batch = torch.sum(neutral * key_weight, dim=1, keepdim=True)
 
-        value_width = int(values.shape[value_axis])
-        value_weight = torch.as_tensor(
-            local_position_weights_batch,
-            dtype=values.dtype,
-            device=values.device,
-        ).reshape(
-            (len(members),)
-            + (1,) * (value_axis - 1)
-            + (value_width,)
-            + (1,) * (values.ndim - value_axis - 1)
+        value_weight = weights.to(device=values.device, dtype=values.dtype).reshape(
+            (len(members), width) + (1,) * (values.ndim - 2)
         )
-        pooled_value_batch = torch.sum(values * value_weight, dim=value_axis, keepdim=True)
+        pooled_value_batch = torch.sum(values * value_weight, dim=1, keepdim=True)
+        # Restore one singleton head axis and return each payload in the exact
+        # source cache axis order. The leading dimension remains the member
+        # batch until rows are exposed below.
+        canonical_keys = pooled_key_batch.unsqueeze(1)
+        canonical_values = pooled_value_batch.unsqueeze(1)
+        restored_keys = canonical_keys.movedim(
+            (1, 2),
+            (key_head_axis + 1, key_sequence_axis + 1),
+        )
+        restored_values = canonical_values.movedim(
+            (1, 2),
+            (value_head_axis + 1, value_sequence_axis + 1),
+        )
         for index, node_id in enumerate(members):
-            pooled_keys[node_id] = pooled_key_batch[index]
-            pooled_values[node_id] = pooled_value_batch[index]
+            pooled_keys[node_id] = restored_keys[index]
+            pooled_values[node_id] = restored_values[index]
     return pooled_keys, pooled_values
 
 
 def _batched_torch_prototypes(
+    full_state: FullKVState,
     recipes: Sequence[_PrototypeRecipe],
     pooled_keys_by_node: Mapping[int, Any],
     pooled_values_by_node: Mapping[int, Any],
-    gathered_by_node: Mapping[int, tuple[Any, Any]],
     key_transform: RotaryPrototypeKeyTransform | None,
 ) -> tuple[tuple[Any, ...], tuple[Any, ...], tuple[_DeviceMemberStatistics, ...]]:
     """Compute ordered per-cluster reductions in count-compatible batches."""
@@ -910,15 +955,16 @@ def _batched_torch_prototypes(
         first_id = recipe.member_ids[0]
         key = pooled_keys_by_node[first_id]
         value = pooled_values_by_node[first_id]
-        reference_key, reference_value = gathered_by_node[first_id]
+        layer = full_state.layers[recipe.anchor.layer]
         groups[
             (
+                recipe.anchor.layer,
                 tuple(int(size) for size in key.shape),
                 tuple(int(size) for size in value.shape),
                 str(key.device),
                 str(value.device),
-                str(reference_key.dtype),
-                str(reference_value.dtype),
+                str(layer.key.dtype),
+                str(layer.value.dtype),
                 len(recipe.member_ids),
             )
         ].append(recipe_index)
@@ -993,8 +1039,9 @@ def _batched_torch_prototypes(
             dim=1,
         )
 
-        first_reference_key = gathered_by_node[recipes[recipe_indices[0]].member_ids[0]][0]
-        first_reference_value = gathered_by_node[recipes[recipe_indices[0]].member_ids[0]][1]
+        reference_layer = full_state.layers[recipes[recipe_indices[0]].anchor.layer]
+        first_reference_key = reference_layer.key
+        first_reference_value = reference_layer.value
         if key_transform is None:
             key_batch = key_averages.to(
                 dtype=first_reference_key.dtype,
@@ -1025,6 +1072,242 @@ def _batched_torch_prototypes(
             )
     if any(value is None for value in (*prototype_keys, *prototype_values, *statistics)):
         raise RuntimeError("batched prototype reduction left an uninitialized payload")
+    return (
+        tuple(value for value in prototype_keys if value is not None),
+        tuple(value for value in prototype_values if value is not None),
+        tuple(value for value in statistics if value is not None),
+    )
+
+
+def _fused_torch_prototypes(
+    full_state: FullKVState,
+    recipes: Sequence[_PrototypeRecipe],
+    key_transform: RotaryPrototypeKeyTransform | None,
+) -> tuple[tuple[Any, ...], tuple[Any, ...], tuple[_DeviceMemberStatistics, ...]]:
+    """Pool source positions and reduce prototype members in one layer batch.
+
+    The reference batched path first exposed one Python tensor view for every
+    source block and then stacked those views again by prototype. A document
+    cache contains tens of thousands of layer/head blocks, so Python object
+    creation and the second stack dominated otherwise small GPU reductions.
+    This path indexes the source cache once per layer/member-count group and
+    applies the exact same normalized position and member weights directly to
+    ``[prototype, member, position, ...]`` tensors. Ragged tail blocks are
+    padded with zero-weight copies and therefore cannot affect the result.
+    """
+
+    import torch
+
+    if not recipes:
+        return (), (), ()
+    prototype_keys: list[Any | None] = [None] * len(recipes)
+    prototype_values: list[Any | None] = [None] * len(recipes)
+    statistics: list[_DeviceMemberStatistics | None] = [None] * len(recipes)
+    groups: dict[tuple[int, int], list[int]] = defaultdict(list)
+    for recipe_index, recipe in enumerate(recipes):
+        groups[(recipe.anchor.layer, len(recipe.member_ids))].append(recipe_index)
+
+    for layer_index, member_count in sorted(groups):
+        recipe_indices = tuple(groups[(layer_index, member_count)])
+        layer = full_state.layers[layer_index]
+        key_head_axis = layer.key_head_dimension % int(layer.key.ndim)
+        key_sequence_axis = layer.key_sequence_dimension % int(layer.key.ndim)
+        value_head_axis = layer.value_head_dimension % int(layer.value.ndim)
+        value_sequence_axis = layer.value_sequence_dimension % int(layer.value.ndim)
+        key_source = layer.key.movedim((key_head_axis, key_sequence_axis), (0, 1))
+        value_source = layer.value.movedim((value_head_axis, value_sequence_axis), (0, 1))
+        maximum_width = max(
+            block.position_count
+            for recipe_index in recipe_indices
+            for block in recipes[recipe_index].member_blocks
+        )
+
+        head_rows: list[tuple[int, ...]] = []
+        physical_rows: list[tuple[tuple[int, ...], ...]] = []
+        logical_rows: list[tuple[tuple[int, ...], ...]] = []
+        position_weight_rows: list[tuple[tuple[float, ...], ...]] = []
+        member_weight_rows: list[tuple[float, ...]] = []
+        for recipe_index in recipe_indices:
+            recipe = recipes[recipe_index]
+            total = float(sum(recipe.raw_weights))
+            if not math.isfinite(total) or total <= 0:
+                raise PrototypeConstructionError(
+                    "prototype weights must sum to a finite positive value"
+                )
+            head_rows.append(tuple(block.kv_head for block in recipe.member_blocks))
+            physical_members: list[tuple[int, ...]] = []
+            logical_members: list[tuple[int, ...]] = []
+            weight_members: list[tuple[float, ...]] = []
+            for block, local_weights in zip(
+                recipe.member_blocks,
+                recipe.position_weights,
+                strict=True,
+            ):
+                padding = maximum_width - block.position_count
+                physical_members.append(
+                    (*block.physical_cache_indices, *(block.physical_cache_indices[-1],) * padding)
+                )
+                logical_members.append(
+                    (
+                        *block.original_logical_positions,
+                        *(block.original_logical_positions[-1],) * padding,
+                    )
+                )
+                weight_members.append((*local_weights, *(0.0,) * padding))
+            physical_rows.append(tuple(physical_members))
+            logical_rows.append(tuple(logical_members))
+            position_weight_rows.append(tuple(weight_members))
+            member_weight_rows.append(tuple(weight / total for weight in recipe.raw_weights))
+
+        heads = torch.as_tensor(head_rows, dtype=torch.long, device=layer.key.device)
+        physical = torch.as_tensor(
+            physical_rows,
+            dtype=torch.long,
+            device=layer.key.device,
+        )
+        # Advanced indices consume canonical head/sequence axes and yield
+        # [prototype, member, position, remaining source axes...].
+        keys = key_source[heads[..., None], physical].detach().float()
+        values = value_source[
+            heads.to(device=layer.value.device)[..., None],
+            physical.to(device=layer.value.device),
+        ].detach().float()
+        position_weights = torch.as_tensor(
+            position_weight_rows,
+            dtype=keys.dtype,
+            device=keys.device,
+        )
+        key_position_weight = position_weights.reshape(
+            (*position_weights.shape,) + (1,) * (keys.ndim - 3)
+        )
+        if key_transform is None:
+            neutral_keys = keys
+        else:
+            if key_sequence_axis != int(layer.key.ndim) - 2:
+                raise PrototypeConstructionError(
+                    "fused RoPE prototype pooling requires the cache sequence axis at -2"
+                )
+            logical = torch.as_tensor(
+                logical_rows,
+                dtype=torch.long,
+                device=key_transform.cos.device,
+            )
+            if int(logical.min()) < 0 or int(logical.max()) >= int(
+                key_transform.cos.shape[-2]
+            ):
+                raise PrototypeConstructionError(
+                    "prototype logical position lies outside the captured prefill RoPE phase"
+                )
+            cos = key_transform.cos[0, 0][logical].to(device=keys.device, dtype=torch.float32)
+            sin = key_transform.sin[0, 0][logical].to(device=keys.device, dtype=torch.float32)
+            phase_shape = tuple(logical.shape) + (1,) * (keys.ndim - 4) + (
+                int(cos.shape[-1]),
+            )
+            cos = cos.reshape(phase_shape)
+            sin = sin.reshape(phase_shape)
+            denominator = (cos * cos + sin * sin).clamp_min(1e-12)
+            neutral_keys = (
+                keys * cos - key_transform._rotate_half(keys) * sin
+            ) / denominator
+        pooled_keys = torch.sum(
+            neutral_keys * key_position_weight,
+            dim=2,
+            keepdim=True,
+        )
+        value_position_weight = position_weights.to(
+            device=values.device,
+            dtype=values.dtype,
+        ).reshape((*position_weights.shape,) + (1,) * (values.ndim - 3))
+        pooled_values = torch.sum(
+            values * value_position_weight,
+            dim=2,
+            keepdim=True,
+        )
+        member_weights = torch.as_tensor(
+            member_weight_rows,
+            dtype=pooled_keys.dtype,
+            device=pooled_keys.device,
+        )
+        key_member_weight = member_weights.reshape(
+            (*member_weights.shape,) + (1,) * (pooled_keys.ndim - 2)
+        )
+        key_averages_canonical = torch.sum(
+            pooled_keys * key_member_weight,
+            dim=1,
+        )
+        value_member_weight = member_weights.to(
+            device=pooled_values.device,
+            dtype=pooled_values.dtype,
+        ).reshape((*member_weights.shape,) + (1,) * (pooled_values.ndim - 2))
+        value_averages_canonical = torch.sum(
+            pooled_values * value_member_weight,
+            dim=1,
+        )
+
+        key_error_axes = tuple(range(2, pooled_keys.ndim))
+        value_error_axes = tuple(range(2, pooled_values.ndim))
+        key_errors = torch.mean(
+            (pooled_keys - key_averages_canonical.unsqueeze(1)) ** 2,
+            dim=key_error_axes,
+        )
+        value_errors = torch.mean(
+            (pooled_values - value_averages_canonical.unsqueeze(1)) ** 2,
+            dim=value_error_axes,
+        )
+        value_norms = torch.sqrt(
+            torch.mean(pooled_values * pooled_values, dim=value_error_axes).clamp_min(0)
+        )
+        key_dispersion = torch.sum(key_errors * member_weights, dim=1)
+        value_dispersion = torch.sum(
+            value_errors
+            * member_weights.to(device=value_errors.device, dtype=value_errors.dtype),
+            dim=1,
+        )
+
+        canonical_keys = key_averages_canonical.unsqueeze(1)
+        canonical_values = value_averages_canonical.unsqueeze(1)
+        restored_key_averages = canonical_keys.movedim(
+            (1, 2),
+            (key_head_axis + 1, key_sequence_axis + 1),
+        )
+        restored_value_averages = canonical_values.movedim(
+            (1, 2),
+            (value_head_axis + 1, value_sequence_axis + 1),
+        )
+        if key_transform is None:
+            key_batch = restored_key_averages.to(
+                dtype=layer.key.dtype,
+                device=layer.key.device,
+            )
+        else:
+            key_batch = key_transform.apply_anchor_phase_batch(
+                restored_key_averages,
+                tuple(
+                    recipes[index].prototype_logical_position for index in recipe_indices
+                ),
+                layer.key,
+            )
+        value_batch = restored_value_averages.to(
+            dtype=layer.value.dtype,
+            device=layer.value.device,
+        )
+        for local_cluster, recipe_index in enumerate(recipe_indices):
+            prototype_keys[recipe_index] = key_batch[local_cluster]
+            prototype_values[recipe_index] = value_batch[local_cluster]
+            statistics[recipe_index] = _DeviceMemberStatistics(
+                torch.stack(
+                    (
+                        0.5 * (key_errors[local_cluster] + value_errors[local_cluster]),
+                        value_norms[local_cluster],
+                    ),
+                    dim=-1,
+                ),
+                torch.stack(
+                    (key_dispersion[local_cluster], value_dispersion[local_cluster])
+                ),
+            )
+    if any(value is None for value in (*prototype_keys, *prototype_values, *statistics)):
+        raise RuntimeError("fused prototype reduction left an uninitialized payload")
     return (
         tuple(value for value in prototype_keys if value is not None),
         tuple(value for value in prototype_values if value is not None),
@@ -1143,31 +1426,13 @@ def _prototype_payloads(
     config: PrototypeConfig,
     prototype_weight_by_node: Mapping[int, float] | None,
     prototype_token_weight_by_head: Mapping[tuple[int, int], Any] | None,
-) -> tuple[PrototypeTier, tuple[PrototypeRecord, ...], dict[int, int], ExactTier]:
+) -> tuple[PrototypeTier, tuple[PrototypeRecord, ...], dict[int, int]]:
     grouped: dict[int, list[int]] = defaultdict(list)
     for node_id, (anchor_id, _weight) in assignments.items():
         grouped[anchor_id].append(node_id)
     ordered_member_ids = tuple(
         node_id for anchor_id in sorted(grouped) for node_id in sorted(grouped[anchor_id])
     )
-    ordered_member_blocks = tuple(graph.nodes[node_id].block for node_id in ordered_member_ids)
-    # Gather every unselected source block once per layer/head.  Gathering one
-    # prototype cluster at a time launches thousands of small indexing kernels
-    # for long documents and videos.  The views below retain the identical
-    # block order and feed both prototype construction and residual storage.
-    gathered_sources = full_state.gather_exact_blocks(
-        ordered_member_blocks,
-        gather_mode=config.source_gather_mode,
-    )
-    gathered_by_node = {
-        node_id: (key, value)
-        for node_id, key, value in zip(
-            ordered_member_ids,
-            gathered_sources.key_blocks,
-            gathered_sources.value_blocks,
-            strict=True,
-        )
-    }
     recipes: list[_PrototypeRecipe] = []
     position_weights_by_node: dict[int, tuple[float, ...]] = {}
     for prototype_id, anchor_id in enumerate(sorted(grouped)):
@@ -1231,34 +1496,44 @@ def _prototype_payloads(
         position_weights_by_node.update(zip(member_ids, position_weights, strict=True))
 
     blocks_by_node = {node_id: graph.nodes[node_id].block for node_id in ordered_member_ids}
-    pooled_keys_by_node, pooled_values_by_node = _batched_pool_source_members(
-        full_state,
-        gathered_by_node,
-        blocks_by_node,
-        position_weights_by_node,
-        key_transform,
-    )
-    first_pooled = pooled_keys_by_node[ordered_member_ids[0]]
+    first_source = full_state.layers[recipes[0].anchor.layer].key
     prototype_keys_tuple: tuple[Any, ...]
     prototype_values_tuple: tuple[Any, ...]
     statistics_tuple: tuple[_DeviceMemberStatistics | _ResolvedMemberStatistics, ...]
-    if first_pooled.__class__.__module__.startswith("torch"):
+    if first_source.__class__.__module__.startswith("torch"):
         (
             prototype_keys_tuple,
             prototype_values_tuple,
             device_statistics,
-        ) = _batched_torch_prototypes(
+        ) = _fused_torch_prototypes(
+            full_state,
             recipes,
-            pooled_keys_by_node,
-            pooled_values_by_node,
-            gathered_by_node,
             key_transform,
         )
         statistics_tuple = tuple(device_statistics)
     else:
+        pooled_keys_by_node, pooled_values_by_node = _batched_pool_source_members(
+            full_state,
+            blocks_by_node,
+            position_weights_by_node,
+            key_transform,
+        )
         prototype_keys: list[Any] = []
         prototype_values: list[Any] = []
         numpy_statistics: list[_ResolvedMemberStatistics] = []
+        gathered_sources = full_state.gather_exact_blocks(
+            tuple(blocks_by_node[node_id] for node_id in ordered_member_ids),
+            gather_mode=config.source_gather_mode,
+        )
+        gathered_by_node = {
+            node_id: (key, value)
+            for node_id, key, value in zip(
+                ordered_member_ids,
+                gathered_sources.key_blocks,
+                gathered_sources.value_blocks,
+                strict=True,
+            )
+        }
         for recipe in recipes:
             pooled_keys = tuple(pooled_keys_by_node[node_id] for node_id in recipe.member_ids)
             pooled_values = tuple(pooled_values_by_node[node_id] for node_id in recipe.member_ids)
@@ -1421,7 +1696,7 @@ def _prototype_payloads(
         prototype_values_tuple,
         tuple(tier_assignments),
     )
-    return tier, tuple(records), source_to_prototype, gathered_sources
+    return tier, tuple(records), source_to_prototype
 
 
 def _selection_budget_violation(
@@ -1511,6 +1786,37 @@ def estimate_prototype_active_cost(
     raise PrototypeConstructionError(f"unsupported selection budget unit: {selection.budget.unit}")
 
 
+def estimate_prototype_assignment_anchor_ids(
+    graph: SparseEvidenceGraph,
+    selection: SelectionResult,
+    config: PrototypeConfig,
+    *,
+    prototype_anchor_node_ids: Sequence[int] | None = None,
+) -> tuple[tuple[int, ...] | None, str | None]:
+    """Return only anchors that would materialize a non-empty prototype.
+
+    An anchor allowlist is a feasibility scaffold, not a prototype count.
+    Mandatory terminal blocks, in particular, may anchor an otherwise empty
+    tail segment. Reserving an active prototype slot for every allowed anchor
+    therefore overstates the layout. This descriptor-only query uses the exact
+    construction assignment rules without gathering or copying K/V tensors.
+    """
+
+    assignments, reason = _assign_to_anchors(
+        graph,
+        frozenset(selection.selected_node_ids),
+        config,
+        prototype_anchor_node_ids=(
+            None
+            if prototype_anchor_node_ids is None
+            else frozenset(int(node_id) for node_id in prototype_anchor_node_ids)
+        ),
+    )
+    if reason is not None:
+        return None, reason
+    return tuple(sorted({anchor_id for anchor_id, _weight in assignments.values()})), None
+
+
 def construct_three_tier_cache(
     full_state: FullKVState,
     graph: SparseEvidenceGraph,
@@ -1537,9 +1843,13 @@ def construct_three_tier_cache(
 
     prototypes = prototype_config or PrototypeConfig()
     residuals = residual_config or ResidualConfig()
-    if exact_gather_mode not in {"per_head_reference", "batched_layer"}:
+    if exact_gather_mode not in {
+        "per_head_reference",
+        "batched_layer",
+        "source_views",
+    }:
         raise ValueError(
-            "exact_gather_mode must be 'per_head_reference' or 'batched_layer'"
+            "exact_gather_mode must be 'per_head_reference', 'batched_layer', or 'source_views'"
         )
     _validate_inputs(full_state, graph, selection)
     if retention_ratio is not None and (
@@ -1626,7 +1936,7 @@ def construct_three_tier_cache(
             exact_gather_mode=exact_gather_mode,
         )
     exact = selection.to_exact_tier(full_state, gather_mode=exact_gather_mode)
-    prototype_tier, records, source_to_prototype, gathered_sources = _prototype_payloads(
+    prototype_tier, records, source_to_prototype = _prototype_payloads(
         full_state,
         graph,
         assignments,
@@ -1690,10 +2000,7 @@ def construct_three_tier_cache(
         node_id for record in records for node_id in record.assigned_node_ids
     )
     active_storage_bytes = exact.active_bytes + prototype_tier.active_bytes
-    if (
-        total_storage_budget_bytes is not None
-        and active_storage_bytes > total_storage_budget_bytes
-    ):
+    if total_storage_budget_bytes is not None and active_storage_bytes > total_storage_budget_bytes:
         raise PrototypeConstructionError(
             "active exact/prototype cache exceeds total storage budget: "
             f"active={active_storage_bytes}, total={total_storage_budget_bytes}"
@@ -1702,9 +2009,7 @@ def construct_three_tier_cache(
     if total_storage_budget_bytes is not None:
         remaining = total_storage_budget_bytes - active_storage_bytes
         residual_byte_limit = (
-            remaining
-            if residual_byte_limit is None
-            else min(residual_byte_limit, remaining)
+            remaining if residual_byte_limit is None else min(residual_byte_limit, remaining)
         )
     bounded_residuals = replace(residuals, max_bytes=residual_byte_limit)
     residual_priority_by_node = {
@@ -1721,7 +2026,6 @@ def construct_three_tier_cache(
         source_to_prototype,
         bounded_residuals,
         node_order=residual_node_order,
-        gathered=gathered_sources,
         priority_by_node=residual_priority_by_node,
     )
     state = MosaicKVState.create(

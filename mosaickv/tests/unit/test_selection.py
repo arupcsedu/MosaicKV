@@ -498,6 +498,36 @@ def test_dense_fill_removes_padding_even_after_nonpositive_stop() -> None:
     )
 
 
+def test_dense_fill_completes_partial_prototype_anchor_on_block_lattice() -> None:
+    key = np.arange(10 * 2, dtype=np.float32).reshape(1, 1, 10, 2)
+    full = FullKVState.from_tensors(
+        ((key, key.copy()),),
+        modality_spans=(
+            ModalitySpan(0, 2, Modality.TEXT),
+            ModalitySpan(2, 5, Modality.IMAGE),
+            ModalitySpan(5, 9, Modality.VIDEO),
+            ModalitySpan(9, 10, Modality.TEXT),
+        ),
+        block_size=4,
+        mandatory_logical_positions=(9,),
+    )
+    _graph, _utilities, objective = _utilities_and_objective(full)
+
+    result = lazy_greedy_select(
+        objective,
+        SelectionBudget(10, BudgetUnit.RETAINED_SLOTS),
+        position_limits={(0, 0): 10},
+        fill_position_limits=True,
+        position_fill_quantum=4,
+        required_node_ids=(0,),
+    )
+
+    assert result.selected_node_ids == (0, 1, 2, 3)
+    assert result.decisions[0].reason is SelectionReason.PROTOTYPE_ANCHOR
+    assert result.decisions[1].reason is SelectionReason.DENSE_CACHE_FILL
+    assert sum(block.position_count for block in result.selected_blocks) == 10
+
+
 def test_mandatory_blocks_that_exceed_budget_fail_closed() -> None:
     full = _full((Modality.TEXT,) * 3, mandatory=(0, 1))
     _graph, _utilities, objective = _utilities_and_objective(full)

@@ -426,6 +426,35 @@ def test_similarity_shortlist_preserves_all_nodes_and_fallback_edges() -> None:
     )
 
 
+def test_candidate_descriptor_pooling_keeps_lightweight_structural_nodes() -> None:
+    full = _full_state((Modality.TEXT,) * 6)
+    candidates = (1, 2, 4)
+    graph = build_evidence_graph(
+        full,
+        _isolated_config(
+            semantic_weight=1.0,
+            fallback_weight=0.25,
+            max_neighbors=2,
+            similarity_shortlist_multiplier=2.0,
+            candidate_descriptor_pooling=True,
+        ),
+        similarity_candidate_node_ids=candidates,
+    )
+
+    assert len(graph.nodes) == len(full.blocks)
+    assert all(
+        np.any(graph.nodes[node_id].semantic_embedding)
+        for node_id in candidates
+    )
+    assert all(
+        not np.any(graph.nodes[node_id].semantic_embedding)
+        for node_id in set(range(len(full.blocks))) - set(candidates)
+    )
+    assert {source for source, _target in _edge_pairs(graph, EdgeType.FALLBACK_POSITIONAL)} == set(
+        range(len(full.blocks))
+    )
+
+
 def test_similarity_shortlist_rejects_unknown_nodes() -> None:
     full = _full_state((Modality.TEXT,) * 2)
     with pytest.raises(ValueError, match="unknown graph nodes"):

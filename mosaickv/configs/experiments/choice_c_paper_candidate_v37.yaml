@@ -1,0 +1,92 @@
+schema_version: 1
+revision: 37
+experiment_id: choice_c_paper_candidate
+classification: preregistered_design_protocol_not_yet_executed
+execution_status: blocked_until_clean_commit_and_fresh_heldout_ledger
+frozen_before_execution: true
+
+scope:
+  design_model: llava-hf/llava-1.5-7b-hf
+  design_backend: hf_eager
+  design_task: docvqa
+  design_ledger: configs/ledgers/choice_c_v15_design_docvqa.json
+  task_labels_used_for_design: false
+  opened_evaluation_ledgers_must_not_be_reused: true
+
+candidate_sequence:
+  - id: coverage_residual
+    change: prototype_coverage_then_risk residual allocation
+    purpose: keep at least one repairable source block in more prototype clusters
+  - id: prefix_safe_draft_kl
+    change: calibrated FullKV-draft KL trigger while draft and online prefixes match
+    purpose: identify confident but compression-induced token changes missed by entropy
+  - id: light_graph
+    change: reduce graph degree and candidate shortlist only if fidelity gates remain satisfied
+    purpose: reduce graph construction and host orchestration
+  - id: larger_prototype_groups
+    change: compare group sizes 15 and 31 with matching RoPE-safe position spans
+    purpose: trade fewer prototype payloads for more exact slots and lower construction cost
+  - id: common_sdpa_decode
+    change: use SDPA decode for every compared repair-disabled method after eager parity
+    purpose: test a common faster decode backend without giving MosaicKV a backend advantage
+
+residual_storage:
+  accounting: active_kv_plus_encoded_residual_payload_bytes
+  policy: prototype_coverage_then_risk
+  dtype: lossless
+  total_storage_ceiling_rule: at_most_70_percent_of_paired_nearest_competitor
+  note: resolve the byte ceiling per paired source cache before residual allocation
+
+repair_calibration:
+  labels_or_task_scores_used: false
+  oracle_signal: same_prefix_fullkv_next_token_counterfactual
+  online_policy: decision_aware
+  candidate_ranking: decision_influence
+  draft_distribution_use: only_while_online_prefix_matches_isolated_fullkv_draft
+  maximum_trigger_rate: 0.10
+  minimum_precision: 0.50
+  minimum_positive_recall: true
+  fail_closed: true
+
+latency_protocol:
+  warmups: 5
+  timed_repetitions: 20
+  pairing: blocked_alternating_method_order_on_same_gpu
+  require_isolated_gpu: true
+  require_background_process_audit: true
+  primary_metric: end_to_end_time
+  diagnostic_metrics:
+    - compression_time
+    - host_orchestration
+    - first_decode_step
+    - steady_state_decode_mean
+  minimum_point_reduction: 0.05
+  require_paired_bootstrap_lower_bound_above_zero: true
+
+paper_gate:
+  require_clean_worktree: true
+  require_immutable_config_sha: true
+  require_fresh_disjoint_evaluation_ledger: true
+  require_retention_one_identity: true
+  require_all_rows_complete: true
+  primary_budget: measured_active_kv_bytes
+  maximum_equal_budget_mismatch: 0.02
+  relative_fidelity_error_improvement_target: 0.30
+  task_score_noninferiority_margin: 0.05
+  require_total_storage_accounting: true
+  require_genuine_three_tier_rows: true
+  require_beneficial_online_repair_rows: true
+  prohibit_mean_only_claims: true
+  full_sweep_action_on_failure: stop
+
+fresh_evaluation_requirements:
+  ledger_materialization: after_candidate_freeze_from_clean_committed_tree
+  exclude_every_existing_ledger: true
+  minimum_task_families:
+    - general_vqa
+    - ocr_or_document
+    - chart
+  minimum_model_families:
+    - llava
+    - qwen_vl
+  sample_count: determine_by_power_analysis_before_materialization

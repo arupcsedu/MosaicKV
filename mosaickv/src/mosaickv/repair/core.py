@@ -208,6 +208,14 @@ def _trigger_reason(
         )
         if high_risk:
             return RepairTriggerReason.HIGH_PROTOTYPE_RISK
+        draft_divergence = bool(
+            risk
+            and config.draft_kl_threshold is not None
+            and signals.draft_kl_divergence is not None
+            and signals.draft_kl_divergence >= config.draft_kl_threshold
+        )
+        if draft_divergence:
+            return RepairTriggerReason.DRAFT_DIVERGENCE
         decision_risk = risk and (
             signals.next_token_probability_margin <= config.decision_margin_threshold
         )
@@ -233,6 +241,7 @@ def _reason_triggers(reason: RepairTriggerReason) -> bool:
         RepairTriggerReason.PROTOTYPE_RISK,
         RepairTriggerReason.ENTROPY_AND_PROTOTYPE_RISK,
         RepairTriggerReason.DECISION_RISK,
+        RepairTriggerReason.DRAFT_DIVERGENCE,
         RepairTriggerReason.HIGH_PROTOTYPE_RISK,
         RepairTriggerReason.ORACLE,
     }

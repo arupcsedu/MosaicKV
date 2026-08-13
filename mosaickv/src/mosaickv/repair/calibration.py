@@ -18,6 +18,7 @@ class RepairCalibrationObservation:
     normalized_prototype_risk: float
     next_token_probability_margin: float
     oracle_beneficial: bool
+    draft_kl_divergence: float | None = None
 
     def __post_init__(self) -> None:
         if not self.sample_id.strip() or self.step < 0:
@@ -26,6 +27,11 @@ class RepairCalibrationObservation:
             raise ValueError("normalized prototype risk must lie in [0, 1]")
         if not 0 <= self.next_token_probability_margin <= 1:
             raise ValueError("next-token probability margin must lie in [0, 1]")
+        if self.draft_kl_divergence is not None and (
+            not math.isfinite(self.draft_kl_divergence)
+            or self.draft_kl_divergence < 0
+        ):
+            raise ValueError("draft KL divergence must be finite and nonnegative")
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,6 +41,7 @@ class CalibratedRepairPolicy:
     prototype_risk_threshold: float
     decision_margin_threshold: float
     decision_high_risk_threshold: float
+    draft_kl_threshold: float | None
     enabled: bool
     target_trigger_rate: float
     observed_trigger_rate: float
@@ -45,7 +52,9 @@ class CalibratedRepairPolicy:
     predicted_recall: float
     calibration_sample_ids: tuple[str, ...]
     evaluation_sample_ids: tuple[str, ...]
-    calibration_rule: str = "fullkv_token_counterfactual_without_task_labels_v1"
+    calibration_rule: str = (
+        "fullkv_token_counterfactual_with_prefix_safe_draft_kl_without_task_labels_v2"
+    )
 
     def __post_init__(self) -> None:
         if set(self.calibration_sample_ids) & set(self.evaluation_sample_ids):
@@ -64,6 +73,10 @@ class CalibratedRepairPolicy:
             value = getattr(self, name)
             if not math.isfinite(value) or not 0 <= value <= 1:
                 raise ValueError(f"calibrated repair {name} must lie in [0, 1]")
+        if self.draft_kl_threshold is not None and (
+            not math.isfinite(self.draft_kl_threshold) or self.draft_kl_threshold < 0
+        ):
+            raise ValueError("calibrated repair draft_kl_threshold must be finite and >= 0")
 
     @property
     def sha256(self) -> str:
@@ -117,42 +130,62 @@ def calibrate_decision_repair(
         raise ValueError("repair calibration and evaluation sample IDs must be disjoint")
     risks = tuple(row.normalized_prototype_risk for row in observations)
     margins = tuple(row.next_token_probability_margin for row in observations)
+    draft_kls = tuple(
+        row.draft_kl_divergence
+        for row in observations
+        if row.draft_kl_divergence is not None
+    )
+    kl_thresholds: tuple[float | None, ...] = (
+        (None, *_quantiles(draft_kls)) if draft_kls else (None,)
+    )
     beneficial = sum(row.oracle_beneficial for row in observations)
     maximum_triggers = max(1, math.floor(len(observations) * target_trigger_rate))
-    candidates: list[tuple[float, float, int, float, float, float, int, int]] = []
+    candidates: list[
+        tuple[float, float, int, float, float, float, int, float, int, int]
+    ] = []
     for moderate in _quantiles(risks):
         for high in _quantiles(risks):
             if high < moderate:
                 continue
             for margin in _quantiles(margins):
-                triggered = tuple(
-                    row
-                    for row in observations
-                    if row.normalized_prototype_risk >= high
-                    or (
-                        row.normalized_prototype_risk >= moderate
-                        and row.next_token_probability_margin <= margin
+                for kl_index, kl_threshold in enumerate(kl_thresholds):
+                    triggered = tuple(
+                        row
+                        for row in observations
+                        if row.normalized_prototype_risk >= high
+                        or (
+                            row.normalized_prototype_risk >= moderate
+                            and (
+                                row.next_token_probability_margin <= margin
+                                or (
+                                    kl_threshold is not None
+                                    and row.draft_kl_divergence is not None
+                                    and row.draft_kl_divergence >= kl_threshold
+                                )
+                            )
+                        )
                     )
-                )
-                if not triggered or len(triggered) > maximum_triggers:
-                    continue
-                true_positive = sum(row.oracle_beneficial for row in triggered)
-                precision = true_positive / len(triggered)
-                recall = true_positive / beneficial if beneficial else 0.0
-                if beneficial and precision < minimum_precision:
-                    continue
-                candidates.append(
-                    (
-                        -recall,
-                        -precision,
-                        len(triggered),
-                        moderate,
-                        margin,
-                        high,
-                        true_positive,
-                        len(triggered),
+                    if not triggered or len(triggered) > maximum_triggers:
+                        continue
+                    true_positive = sum(row.oracle_beneficial for row in triggered)
+                    precision = true_positive / len(triggered)
+                    recall = true_positive / beneficial if beneficial else 0.0
+                    if beneficial and precision < minimum_precision:
+                        continue
+                    candidates.append(
+                        (
+                            -recall,
+                            -precision,
+                            len(triggered),
+                            moderate,
+                            margin,
+                            high,
+                            kl_index,
+                            0.0 if kl_threshold is None else kl_threshold,
+                            true_positive,
+                            len(triggered),
+                        )
                     )
-                )
     if candidates:
         (
             _negative_recall,
@@ -161,14 +194,18 @@ def calibrate_decision_repair(
             moderate,
             margin,
             high,
+            kl_index,
+            kl_value,
             true_positive,
             triggered_count,
         ) = min(candidates)
+        kl_threshold = None if kl_index == 0 else kl_value
         enabled = True
     else:
         # A zero-trigger frozen policy is preferable to uncalibrated repair.
         moderate = high = 1.0
         margin = 0.0
+        kl_threshold = None
         true_positive = triggered_count = 0
         enabled = False
     precision = true_positive / triggered_count if triggered_count else 0.0
@@ -177,6 +214,7 @@ def calibrate_decision_repair(
         prototype_risk_threshold=moderate,
         decision_margin_threshold=margin,
         decision_high_risk_threshold=high,
+        draft_kl_threshold=kl_threshold,
         enabled=enabled,
         target_trigger_rate=target_trigger_rate,
         observed_trigger_rate=triggered_count / len(observations),

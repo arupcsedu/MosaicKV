@@ -1,0 +1,52 @@
+schema_version: 1
+revision: 39
+experiment_id: choice_c_bottleneck_validation
+classification: exploratory_dirty_tree_retrospective_non_claim_validation
+purpose: validate implementation-preserving compression phase optimizations
+model: llava-hf/llava-1.5-7b-hf
+backend: hf_eager
+task: docvqa
+output_length: 16
+seed: 17
+sample_ledger: configs/ledgers/choice_c_v36_retrospective_docvqa.json
+fidelity_profile_source: configs/experiments/choice_c_forecast_stability_design_v15.yaml
+parameters:
+  graph:
+    max_neighbors: 4
+    spatial_weight: 0.0
+  prototypes:
+    anchor_position_strategy: forecast_weighted_member_medoid
+    attention_bias_basis: forecast_attention_entropy
+    attention_log_bias_scale: 1.0
+    forecast_weight: 0.5
+    group_size: 15
+    max_position_span: 255
+    pooling_mode: forecast_attention_token
+  repair:
+    decision_margin_threshold: 0.1
+    max_blocks_per_step: 2
+    policy: none
+    prototype_risk_threshold: 0.01
+  routing:
+    draft_steps: 8
+    head_shift_threshold: 0.15
+    prompt_window: 16
+    shifted_head_prompt_weight: 0.0
+    stable_head_prompt_weight: 1.0
+    uncertainty_exact_head_fraction: 0.0
+  selection:
+    evidence_preservation_fraction: 0.15
+    minimum_stratum_fraction: 0.1
+    prompt_anchor_fraction: 0.15
+  utility:
+    lambda_o: -0.3
+    lambda_q: 1.0
+    lambda_v: -0.3
+candidate_order:
+  - implementation_only
+  - light_graph
+acceptance:
+  require_genuine_three_tier_rows: true
+  require_identical_fixed_sample_answers: true
+  require_equal_active_and_residual_bytes: true
+  prohibit_paper_claims: true

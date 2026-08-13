@@ -73,6 +73,7 @@ from mosaickv.prototypes import (
     TierConstructionMode,
     construct_three_tier_cache,
     estimate_prototype_active_cost,
+    estimate_prototype_assignment_anchor_ids,
 )
 from mosaickv.prototypes.rope import RotaryPrototypeKeyTransform
 from mosaickv.repair import (
@@ -121,8 +122,11 @@ class RuntimePhaseTimings:
     cache_packing: float
     decode: float
     per_token_decode: tuple[float, ...]
+    first_decode_step: float | None
+    steady_state_decode_mean: float | None
     repair_transfer: float
     repair_redecode: float
+    host_orchestration: float
     total: float
 
     def __post_init__(self) -> None:
@@ -136,12 +140,15 @@ class RuntimePhaseTimings:
             self.decode,
             self.repair_transfer,
             self.repair_redecode,
+            self.host_orchestration,
             self.total,
         )
         optional_values = (
             self.image_video_encoder,
             self.projector,
             self.language_model_prefill,
+            self.first_decode_step,
+            self.steady_state_decode_mean,
         )
         if any(not math.isfinite(value) or value < 0 for value in scalar_values):
             raise ValueError("runtime timings must be finite and nonnegative")
@@ -967,6 +974,7 @@ def _required_prototype_anchors(
     config: RunConfig,
     *,
     existing_anchor_ids: Iterable[int] = (),
+    position_fill_quantum: int | None = None,
 ) -> tuple[int, ...]:
     """Choose a sparse deterministic anchor cover for prototype feasibility.
 
@@ -979,6 +987,8 @@ def _required_prototype_anchors(
     """
 
     graph = objective.graph
+    if position_fill_quantum is not None and position_fill_quantum < 1:
+        raise ValueError("prototype-anchor position_fill_quantum must be positive")
     groups: dict[tuple[int, int, object], list[int]] = {}
     for node in graph.nodes:
         block = node.block
@@ -1006,9 +1016,20 @@ def _required_prototype_anchors(
                 graph.nodes[node_id].block.mandatory or node_id in existing for node_id in members
             ):
                 return
+            aligned = tuple(
+                node_id
+                for node_id in members
+                if position_fill_quantum is None
+                or graph.nodes[node_id].block.position_count % position_fill_quantum == 0
+            )
+            # Prefer a full fixed-size block for mask-free dense packing. If a
+            # segment contains only modality-boundary fragments, retain the
+            # ordinary best anchor and let the selector's residue-completion
+            # pass find complementary fragments explicitly.
+            candidates = aligned or tuple(members)
             required.append(
                 min(
-                    members,
+                    candidates,
                     key=lambda node_id: (
                         -objective.utilities.for_node(node_id).local_utility,
                         node_id,
@@ -1093,6 +1114,139 @@ def _exact_construction(
     )
 
 
+def _uniform_attainable_prototype_position_limits(
+    graph: SparseEvidenceGraph,
+    position_limits: Mapping[tuple[int, int], int],
+    reserved_slots_by_identity: Mapping[tuple[int, int], int],
+    *,
+    block_size: int,
+    required_node_ids: Iterable[int],
+    prompt_anchor_node_ids: Iterable[int],
+    evidence_node_ids: Iterable[int],
+) -> tuple[dict[tuple[int, int], int], int]:
+    """Choose the largest padding-free final length shared by every head.
+
+    The dense HF cache has one physical sequence dimension, while modality
+    boundaries can produce short source blocks. Reserving a one-token
+    prototype slot can therefore leave an exact-cache limit (for example 62)
+    that cannot be composed from required fragments and 16-token blocks. This
+    planner intersects the position sums attainable by every layer/head and
+    safely underfills the physical cap instead of asking the selector to solve
+    an impossible equality.
+
+    Optional boundary fragments are considered only for residue completion,
+    matching :func:`lazy_greedy_select`; ordinary optional blocks must be
+    aligned to ``block_size``. The returned exact limits include neither the
+    reserved prototype slots nor padding.
+    """
+
+    if block_size < 1:
+        raise ValueError("prototype layout block_size must be positive")
+    identities = tuple(sorted(position_limits))
+    if not identities:
+        raise InfeasibleSelectionBudgetError(
+            "prototype layout planning requires at least one layer/head limit"
+        )
+    graph_identities = {(node.block.layer, node.block.kv_head) for node in graph.nodes}
+    missing = set(identities) - graph_identities
+    if missing:
+        raise InfeasibleSelectionBudgetError(
+            f"prototype layout limits reference missing layer/head identities: {sorted(missing)}"
+        )
+
+    mandatory = {node.node_id for node in graph.nodes if node.block.mandatory}
+    required = {int(node_id) for node_id in required_node_ids}
+    prompt = {int(node_id) for node_id in prompt_anchor_node_ids}
+    evidence = {int(node_id) for node_id in evidence_node_ids}
+    hard = mandatory | required | prompt | evidence
+    if any(node_id < 0 or node_id >= len(graph.nodes) for node_id in hard):
+        raise ValueError("prototype layout required IDs reference a node outside the graph")
+
+    # Prompt/evidence reservations are admitted by the selector only when
+    # block-aligned (mandatory nodes have already been selected). Prototype
+    # anchors alone may be short modality-boundary fragments.
+    incompatible_required = tuple(
+        sorted(
+            node_id
+            for node_id in (prompt | evidence) - mandatory
+            if graph.nodes[node_id].block.position_count % block_size
+        )
+    )
+    if incompatible_required:
+        raise InfeasibleSelectionBudgetError(
+            "prompt/evidence reservations contain non-aligned dense-cache fragments: "
+            f"node_ids={incompatible_required}"
+        )
+
+    nodes_by_identity: defaultdict[tuple[int, int], list[int]] = defaultdict(list)
+    for node in graph.nodes:
+        nodes_by_identity[(node.block.layer, node.block.kv_head)].append(node.node_id)
+
+    feasibility: dict[tuple[int, int], tuple[int, int, dict[int, int]]] = {}
+    for identity in identities:
+        identity_nodes = nodes_by_identity[identity]
+        hard_positions = sum(
+            graph.nodes[node_id].block.position_count
+            for node_id in identity_nodes
+            if node_id in hard
+        )
+        aligned_capacity = sum(
+            graph.nodes[node_id].block.position_count
+            for node_id in identity_nodes
+            if node_id not in hard and graph.nodes[node_id].block.position_count % block_size == 0
+        )
+        # Store the smallest optional boundary footprint for each residue. It
+        # leaves the greatest possible capacity for utility-ranked full blocks
+        # and exactly mirrors the selector's deterministic completion rule.
+        minimum_partial_positions: dict[int, int] = {0: 0}
+        for node_id in identity_nodes:
+            if node_id in hard:
+                continue
+            positions = graph.nodes[node_id].block.position_count
+            if positions % block_size == 0:
+                continue
+            updates = dict(minimum_partial_positions)
+            for residue, current_positions in minimum_partial_positions.items():
+                candidate_positions = current_positions + positions
+                candidate_residue = (residue + positions) % block_size
+                previous = updates.get(candidate_residue)
+                if previous is None or candidate_positions < previous:
+                    updates[candidate_residue] = candidate_positions
+            minimum_partial_positions = updates
+        feasibility[identity] = (
+            hard_positions,
+            aligned_capacity,
+            minimum_partial_positions,
+        )
+
+    maximum_final_length = min(int(position_limits[identity]) for identity in identities)
+    for final_length in range(maximum_final_length, 0, -1):
+        exact_limits: dict[tuple[int, int], int] = {}
+        viable = True
+        for identity in identities:
+            reserve = int(reserved_slots_by_identity.get(identity, 0))
+            exact_length = final_length - reserve
+            hard_positions, aligned_capacity, partial_positions = feasibility[identity]
+            remaining = exact_length - hard_positions
+            if remaining < 0:
+                viable = False
+                break
+            partial = partial_positions.get(remaining % block_size)
+            if partial is None or partial > remaining or remaining - partial > aligned_capacity:
+                viable = False
+                break
+            exact_limits[identity] = exact_length
+        if viable:
+            return exact_limits, final_length
+
+    required_positions = {identity: feasibility[identity][0] for identity in identities}
+    raise InfeasibleSelectionBudgetError(
+        "no uniform padding-free prototype layout is attainable under the physical caps: "
+        f"caps={dict(position_limits)}, prototype_slots={dict(reserved_slots_by_identity)}, "
+        f"required_positions={required_positions}, block_size={block_size}"
+    )
+
+
 def _one_pass_prototype_construction(
     full_state: FullKVState,
     graph: SparseEvidenceGraph,
@@ -1122,44 +1276,143 @@ def _one_pass_prototype_construction(
             )
         )
     )
-    if unit is BudgetUnit.BLOCKS or unit is BudgetUnit.RETAINED_SLOTS:
-        prototype_reserve = len(anchor_allowlist)
-    elif unit is BudgetUnit.BYTES:
-        prototype_reserve = sum(
-            graph.nodes[node_id].block.byte_size
-            // graph.nodes[node_id].block.position_count
-            for node_id in anchor_allowlist
-        )
-    else:  # pragma: no cover - controlled vocabulary
-        raise HuggingFaceRuntimeError(f"unsupported prototype budget unit: {unit}")
-    exact_budget = target - prototype_reserve
     selection_seconds = 0.0
     tier_seconds = 0.0
     failure: str | None = None
     candidate: SelectionResult | None = None
-    started = time.perf_counter()
-    if exact_budget < _mandatory_cost(full_state, unit):
-        failure = (
-            f"prototype anchor reserve {prototype_reserve} leaves exact budget "
-            f"{exact_budget} below mandatory cost"
-        )
-    else:
+    planned_final_length: int | None = None
+    # First plan conservatively for every allowed anchor. Once selection is
+    # known, descriptor-only assignment reveals which anchors actually own an
+    # unselected member. Replan until that materialized anchor set is stable;
+    # this removes phantom slots without risking a budget underestimate.
+    planned_prototype_anchor_ids = anchor_allowlist
+    seen_anchor_plans: set[tuple[int, ...]] = set()
+    maximum_planning_rounds = len(anchor_allowlist) + 2
+    for _planning_round in range(maximum_planning_rounds):
+        if planned_prototype_anchor_ids in seen_anchor_plans:
+            failure = (
+                "prototype active-anchor planning did not reach a stable assignment: "
+                f"repeated={planned_prototype_anchor_ids}"
+            )
+            candidate = None
+            break
+        seen_anchor_plans.add(planned_prototype_anchor_ids)
+        if unit is BudgetUnit.BLOCKS or unit is BudgetUnit.RETAINED_SLOTS:
+            prototype_reserve = len(planned_prototype_anchor_ids)
+        elif unit is BudgetUnit.BYTES:
+            prototype_reserve = sum(
+                graph.nodes[node_id].block.byte_size // graph.nodes[node_id].block.position_count
+                for node_id in planned_prototype_anchor_ids
+            )
+        else:  # pragma: no cover - controlled vocabulary
+            raise HuggingFaceRuntimeError(f"unsupported prototype budget unit: {unit}")
+        exact_budget = target - prototype_reserve
+        exact_position_limits = position_limits
+        if position_limits is not None:
+            reserved_slots_by_identity: Counter[tuple[int, int]] = Counter(
+                (
+                    graph.nodes[node_id].block.layer,
+                    graph.nodes[node_id].block.kv_head,
+                )
+                for node_id in planned_prototype_anchor_ids
+            )
+            try:
+                exact_position_limits, planned_final_length = (
+                    _uniform_attainable_prototype_position_limits(
+                        graph,
+                        position_limits,
+                        reserved_slots_by_identity,
+                        block_size=full_state.block_size,
+                        required_node_ids=required_anchors,
+                        prompt_anchor_node_ids=prompt_anchor_node_ids,
+                        evidence_node_ids=evidence_node_ids,
+                    )
+                )
+            except InfeasibleSelectionBudgetError as error:
+                failure = f"uniform attainable-length planning failed: {error}"
+                candidate = None
+                break
+        if exact_budget < _mandatory_cost(full_state, unit):
+            failure = (
+                f"prototype anchor reserve {prototype_reserve} leaves exact budget "
+                f"{exact_budget} below mandatory cost"
+            )
+            candidate = None
+            break
+        started = time.perf_counter()
         try:
             candidate = _selection(
                 objective,
                 exact_budget,
                 unit,
                 retention_one=False,
-                position_limits=position_limits,
+                position_limits=exact_position_limits,
+                fill_position_limits=exact_position_limits is not None,
+                position_fill_quantum=(
+                    full_state.block_size if exact_position_limits is not None else None
+                ),
                 required_node_ids=required_anchors,
                 prompt_anchor_node_ids=prompt_anchor_node_ids,
                 evidence_node_ids=evidence_node_ids,
             )
         except InfeasibleSelectionBudgetError as error:
             failure = f"one-pass exact-anchor selection is infeasible: {error}"
-    selection_seconds += time.perf_counter() - started
-    if candidate is not None:
+            candidate = None
+        selection_seconds += time.perf_counter() - started
+        if candidate is None:
+            break
         candidate = replace(candidate, budget=SelectionBudget(target, unit))
+        materialized_anchor_ids, incompatibility = estimate_prototype_assignment_anchor_ids(
+            graph,
+            candidate,
+            config.prototypes,
+            prototype_anchor_node_ids=anchor_allowlist,
+        )
+        if materialized_anchor_ids is None:
+            failure = incompatibility or "prototype assignment is incompatible"
+            candidate = None
+            break
+        if materialized_anchor_ids == planned_prototype_anchor_ids:
+            break
+        if position_limits is not None:
+            materialized_slots_by_identity: Counter[tuple[int, int]] = Counter(
+                (
+                    graph.nodes[node_id].block.layer,
+                    graph.nodes[node_id].block.kv_head,
+                )
+                for node_id in materialized_anchor_ids
+            )
+            try:
+                materialized_exact_limits, materialized_final_length = (
+                    _uniform_attainable_prototype_position_limits(
+                        graph,
+                        position_limits,
+                        materialized_slots_by_identity,
+                        block_size=full_state.block_size,
+                        required_node_ids=required_anchors,
+                        prompt_anchor_node_ids=prompt_anchor_node_ids,
+                        evidence_node_ids=evidence_node_ids,
+                    )
+                )
+            except InfeasibleSelectionBudgetError as error:
+                failure = f"materialized-anchor layout planning failed: {error}"
+                candidate = None
+                break
+            # A smaller anchor count often changes only the nominal final
+            # length, not the attainable exact-block lattice. Preserve the
+            # already computed selection in that case and avoid a redundant
+            # full lazy-greedy pass.
+            if materialized_exact_limits == exact_position_limits:
+                planned_prototype_anchor_ids = materialized_anchor_ids
+                planned_final_length = materialized_final_length
+                break
+        planned_prototype_anchor_ids = materialized_anchor_ids
+        candidate = None
+    else:  # pragma: no cover - bounded defensive guard
+        failure = "prototype active-anchor planning exceeded its convergence bound"
+        candidate = None
+
+    if candidate is not None:
         estimated_cost, incompatibility = estimate_prototype_active_cost(
             graph,
             candidate,
@@ -1190,8 +1443,51 @@ def _one_pass_prototype_construction(
             )
             tier_seconds += time.perf_counter() - started
             if construction.mode is TierConstructionMode.THREE_TIER:
-                return candidate, construction, selection_seconds, tier_seconds
-            failure = f"construction: {construction.reason}"
+                if position_limits is None:
+                    return candidate, construction, selection_seconds, tier_seconds
+                active_lengths = {
+                    (layout.layer, layout.kv_head): layout.active_cache_length
+                    for layout in construction.active_layouts
+                }
+                missing = set(position_limits) - set(active_lengths)
+                over_limit = {
+                    identity: (active_lengths[identity], limit)
+                    for identity, limit in position_limits.items()
+                    if identity in active_lengths and active_lengths[identity] > limit
+                }
+                distinct_lengths = set(active_lengths.values())
+                measured_final_length = (
+                    next(iter(distinct_lengths)) if len(distinct_lengths) == 1 else None
+                )
+                planned_mismatch = bool(
+                    planned_final_length is not None
+                    and measured_final_length != planned_final_length
+                )
+                if (
+                    not missing
+                    and not over_limit
+                    and measured_final_length is not None
+                    and not planned_mismatch
+                ):
+                    physical_cap = min(position_limits.values())
+                    if measured_final_length < physical_cap:
+                        construction = replace(
+                            construction,
+                            reason=(
+                                f"{construction.reason}; uniform attainable-length planner "
+                                f"underfilled the padding-free physical cap from "
+                                f"{physical_cap} to {measured_final_length} positions"
+                            ),
+                        )
+                    return candidate, construction, selection_seconds, tier_seconds
+                failure = (
+                    "one-pass prototype layout is not a uniform padding-free dense cache: "
+                    f"missing={sorted(missing)}, over_limit={over_limit}, "
+                    f"active_lengths={sorted(distinct_lengths)}, "
+                    f"planned_final_length={planned_final_length}"
+                )
+            else:
+                failure = f"construction: {construction.reason}"
 
     started = time.perf_counter()
     fallback = _selection(
@@ -1200,6 +1496,8 @@ def _one_pass_prototype_construction(
         unit,
         retention_one=False,
         position_limits=position_limits,
+        fill_position_limits=position_limits is not None,
+        position_fill_quantum=(full_state.block_size if position_limits is not None else None),
         prompt_anchor_node_ids=prompt_anchor_node_ids,
         evidence_node_ids=evidence_node_ids,
     )
@@ -1495,7 +1793,13 @@ def build_compression_plan(
         )
     )
     required_prototype_anchor_ids = (
-        _required_prototype_anchors(objective, config) if prototype_path_enabled else ()
+        _required_prototype_anchors(
+            objective,
+            config,
+            position_fill_quantum=(full_state.block_size if position_limits is not None else None),
+        )
+        if prototype_path_enabled
+        else ()
     )
     reservation_fill_quantum = (
         full_state.block_size
@@ -1902,6 +2206,295 @@ def _tier_payloads(
     return payloads, tuple(trace)
 
 
+def _pack_three_tier_from_source(
+    adapter: HuggingFaceMultimodalAdapter,
+    full_state: FullKVState,
+    state: MosaicKVState,
+    records: Sequence[PrototypeRecord],
+    active_prototype_ids: Sequence[int],
+    *,
+    tail_snapshot: CacheSnapshot | None,
+    old_prompt_capacity: int | None,
+    physical_prompt_capacity: int | None,
+) -> PackedRuntimeCache:
+    """Fuse exact gathering and prototype insertion once per source layer.
+
+    Exact-tier payloads are unchanged views/copies of ``full_state``.  The
+    generic mixed-tier packer expands them into one singleton tensor per
+    retained position and concatenates those rows again.  On many-head VLMs
+    that creates tens of thousands of Python objects and small CUDA launches.
+    This path builds the identical logical slot table on the host, gathers all
+    exact positions with one layer operation, then inserts the already-built
+    prototypes with one indexed write.  It is deliberately limited to the
+    optimized preallocated mode; the scalar packer remains the parity oracle.
+    """
+
+    torch = _torch()
+    if tail_snapshot is not None and old_prompt_capacity is None:
+        raise ValueError("tail packing requires the previous prompt capacity")
+    active_ids = tuple(int(prototype_id) for prototype_id in active_prototype_ids)
+    if len(active_ids) != len(set(active_ids)):
+        raise HuggingFaceRuntimeError("active prototype IDs must be unique")
+    if len(active_ids) != len(state.prototypes.prototype_keys):
+        raise HuggingFaceRuntimeError(
+            "active prototype IDs must align with compact prototype payloads"
+        )
+    record_by_id = {record.prototype_id: record for record in records}
+    unknown = set(active_ids) - set(record_by_id)
+    if unknown:
+        raise HuggingFaceRuntimeError(
+            f"active prototype IDs have no construction record: {sorted(unknown)}"
+        )
+    prototype_payloads = {
+        prototype_id: (
+            state.prototypes.prototype_keys[offset],
+            state.prototypes.prototype_values[offset],
+        )
+        for offset, prototype_id in enumerate(active_ids)
+    }
+
+    # Entries are (logical position, tier, source ID, physical position).
+    # Prototype rows have no source position and use ``None``.
+    entries: dict[tuple[int, int], list[tuple[int, str, int, int | None]]] = {}
+    for block_id, block in enumerate(state.exact.blocks):
+        destination = entries.setdefault((block.layer, block.kv_head), [])
+        destination.extend(
+            (logical, "exact", block_id, physical)
+            for logical, physical in zip(
+                block.original_logical_positions,
+                block.physical_cache_indices,
+                strict=True,
+            )
+        )
+    for prototype_id in active_ids:
+        record = record_by_id[prototype_id]
+        entries.setdefault((record.layer, record.kv_head), []).append(
+            (record.anchor_logical_position, "prototype", prototype_id, None)
+        )
+    for values in entries.values():
+        values.sort(key=lambda item: (item[0], item[1] != "exact", item[2]))
+
+    selected_capacity = max((len(values) for values in entries.values()), default=0)
+    if selected_capacity < 1:
+        raise HuggingFaceRuntimeError("packed runtime cache has no active prompt slots")
+    prompt_capacity = (
+        selected_capacity if physical_prompt_capacity is None else physical_prompt_capacity
+    )
+    if prompt_capacity < selected_capacity:
+        raise HuggingFaceRuntimeError(
+            "selected cache exceeds the dense physical prompt capacity: "
+            f"selected={selected_capacity}, capacity={prompt_capacity}"
+        )
+
+    layers: list[CacheLayerSnapshot] = []
+    validity_masks: list[Any] = []
+    prototype_slots: list[tuple[int, int, int, int]] = []
+    prototype_attention_biases: list[tuple[int, int, int, int, float]] = []
+    slot_records: list[JsonObject] = []
+    finite_flags: list[Any] = []
+    all_slots_valid = True
+
+    def pack_tensor(
+        source: Any,
+        *,
+        layer_entries: Sequence[Sequence[tuple[int, str, int, int | None]]],
+        payload_index: int,
+        head_axis: int,
+        sequence_axis: int,
+        tail: Any | None,
+    ) -> tuple[Any, Any]:
+        rank = int(source.ndim)
+        normalized_head = _axis(head_axis, rank)
+        normalized_sequence = _axis(sequence_axis, rank)
+        canonical = source.movedim((normalized_head, normalized_sequence), (0, 1))
+        head_count = int(canonical.shape[0])
+        if len(layer_entries) != head_count:
+            raise HuggingFaceRuntimeError("fused packing entries do not match KV heads")
+        counts = tuple(len(values) for values in layer_entries)
+        if any(count < 1 or count > prompt_capacity for count in counts):
+            raise HuggingFaceRuntimeError(
+                "fused packed head is empty or exceeds the physical prompt capacity"
+            )
+        physical_rows = tuple(
+            tuple(0 if item[3] is None else int(item[3]) for item in values)
+            + (0,) * (prompt_capacity - len(values))
+            for values in layer_entries
+        )
+        indices = torch.as_tensor(physical_rows, dtype=torch.long, device=source.device)
+        expanded = indices.reshape(
+            head_count,
+            prompt_capacity,
+            *([1] * (rank - 2)),
+        ).expand(head_count, prompt_capacity, *canonical.shape[2:])
+        packed = torch.gather(canonical, 1, expanded)
+        count_tensor = torch.as_tensor(counts, dtype=torch.long, device=source.device)
+        validity = torch.arange(prompt_capacity, device=source.device).unsqueeze(
+            0
+        ) < count_tensor.unsqueeze(1)
+        expanded_validity = validity.reshape(
+            head_count,
+            prompt_capacity,
+            *([1] * (rank - 2)),
+        )
+        packed = packed.masked_fill(~expanded_validity, 0)
+
+        prototype_indices: list[tuple[int, int, int]] = []
+        for head, values in enumerate(layer_entries):
+            prototype_indices.extend(
+                (head, slot, int(item[2]))
+                for slot, item in enumerate(values)
+                if item[1] == "prototype"
+            )
+        if prototype_indices:
+            prototype_rows: list[Any] = []
+            for _head, _slot, prototype_id in prototype_indices:
+                payload = prototype_payloads[prototype_id][payload_index]
+                payload_canonical = payload.movedim(
+                    (normalized_head, normalized_sequence),
+                    (0, 1),
+                )
+                if (
+                    int(payload_canonical.shape[0]) != 1
+                    or int(payload_canonical.shape[1]) != 1
+                    or tuple(payload_canonical.shape[2:]) != tuple(canonical.shape[2:])
+                ):
+                    raise HuggingFaceRuntimeError(
+                        "prototype payload shape differs from its source cache layer"
+                    )
+                prototype_rows.append(payload_canonical[0, 0])
+            head_indices = torch.as_tensor(
+                tuple(item[0] for item in prototype_indices),
+                dtype=torch.long,
+                device=source.device,
+            )
+            slot_indices = torch.as_tensor(
+                tuple(item[1] for item in prototype_indices),
+                dtype=torch.long,
+                device=source.device,
+            )
+            packed[head_indices, slot_indices] = torch.stack(prototype_rows, dim=0)
+
+        if tail is not None:
+            if old_prompt_capacity is None:  # pragma: no cover - checked by caller
+                raise ValueError("tail packing requires the previous prompt capacity")
+            canonical_tail = tail.movedim(
+                (normalized_head, normalized_sequence),
+                (0, 1),
+            )
+            if int(canonical_tail.shape[0]) != head_count:
+                raise HuggingFaceRuntimeError("tail cache KV-head count changed during packing")
+            tail_length = int(canonical_tail.shape[1]) - old_prompt_capacity
+            if tail_length < 0:
+                raise HuggingFaceRuntimeError("old prompt capacity exceeds the tail cache")
+            if tail_length:
+                packed = torch.cat(
+                    (packed, canonical_tail[:, old_prompt_capacity:]),
+                    dim=1,
+                )
+                validity = torch.cat(
+                    (
+                        validity,
+                        torch.ones(
+                            (head_count, tail_length),
+                            dtype=torch.bool,
+                            device=source.device,
+                        ),
+                    ),
+                    dim=1,
+                )
+        return packed.movedim(
+            (0, 1),
+            (normalized_head, normalized_sequence),
+        ), validity
+
+    for layer_index, source_layer in enumerate(full_state.layers):
+        layer_entries: list[Sequence[tuple[int, str, int, int | None]]] = []
+        for kv_head in range(source_layer.kv_heads):
+            values = entries.get((layer_index, kv_head), [])
+            if not values:
+                raise HuggingFaceRuntimeError(
+                    f"packed cache removed every slot for layer={layer_index}, head={kv_head}"
+                )
+            layer_entries.append(values)
+            all_slots_valid = all_slots_valid and len(values) == prompt_capacity
+            for slot, item in enumerate(values):
+                slot_record: JsonObject = {
+                    "layer": layer_index,
+                    "kv_head": kv_head,
+                    "slot": slot,
+                    "logical_position": item[0],
+                    "tier": item[1],
+                    "source_id": item[2],
+                }
+                if item[1] == "prototype":
+                    prototype_id = int(item[2])
+                    prototype = record_by_id[prototype_id]
+                    slot_record["represented_source_positions"] = (
+                        prototype.represented_source_positions
+                    )
+                    slot_record["attention_log_bias"] = prototype.attention_log_bias
+                    slot_record["attention_log_bias_scale"] = prototype.attention_log_bias_scale
+                    prototype_slots.append((prototype_id, layer_index, kv_head, slot))
+                    bias = float(prototype.attention_log_bias)
+                    if not math.isfinite(bias) or bias < 0:
+                        raise HuggingFaceRuntimeError(
+                            "prototype attention log bias must be finite and nonnegative"
+                        )
+                    if bias > 0:
+                        prototype_attention_biases.append(
+                            (prototype_id, layer_index, kv_head, slot, bias)
+                        )
+                slot_records.append(slot_record)
+        tail_layer = None if tail_snapshot is None else tail_snapshot.layers[layer_index]
+        packed_key, validity = pack_tensor(
+            source_layer.key,
+            layer_entries=tuple(layer_entries),
+            payload_index=0,
+            head_axis=source_layer.key_head_dimension,
+            sequence_axis=source_layer.key_sequence_dimension,
+            tail=None if tail_layer is None else tail_layer.key,
+        )
+        packed_value, value_validity = pack_tensor(
+            source_layer.value,
+            layer_entries=tuple(layer_entries),
+            payload_index=1,
+            head_axis=source_layer.value_head_dimension,
+            sequence_axis=source_layer.value_sequence_dimension,
+            tail=None if tail_layer is None else tail_layer.value,
+        )
+        if not torch.equal(validity, value_validity):
+            raise HuggingFaceRuntimeError("fused K/V packing produced different validity masks")
+        finite_flags.extend((torch.isfinite(packed_key).all(), torch.isfinite(packed_value).all()))
+        layers.append(
+            CacheLayerSnapshot(
+                packed_key,
+                packed_value,
+                source_layer.key_sequence_dimension,
+            )
+        )
+        validity_masks.append(validity)
+
+    if not bool(torch.stack(finite_flags).all().item()):
+        raise HuggingFaceRuntimeError("packed cache contains NaN or infinity")
+    active_length = int(layers[0].key.shape[full_state.layers[0].key_sequence_dimension])
+    snapshot = CacheSnapshot(
+        tuple(layers),
+        full_state.source_class,
+        full_state.source_kind,
+        active_length,
+        adapter.capabilities.cached_key_state,
+    )
+    return PackedRuntimeCache(
+        snapshot,
+        tuple(validity_masks),
+        prompt_capacity,
+        all_slots_valid,
+        tuple(sorted(prototype_slots)),
+        tuple(sorted(prototype_attention_biases)),
+        tuple(slot_records),
+    )
+
+
 def pack_runtime_payloads(
     adapter: HuggingFaceMultimodalAdapter,
     full_state: FullKVState,
@@ -1920,8 +2513,14 @@ def pack_runtime_payloads(
     """Pack algorithm-owned head payloads through the common HF cache interface."""
 
     torch = _torch()
-    if packing_mode not in {"per_head_reference", "batched_layer"}:
-        raise ValueError("packing_mode must be 'per_head_reference' or 'batched_layer'")
+    if packing_mode not in {
+        "per_head_reference",
+        "batched_layer",
+        "preallocated_layer",
+    }:
+        raise ValueError(
+            "packing_mode must be 'per_head_reference', 'batched_layer', or 'preallocated_layer'"
+        )
     selected_capacity = max((len(items) for items in payloads.values()), default=0)
     if selected_capacity < 1:
         raise HuggingFaceRuntimeError("packed runtime cache has no active prompt slots")
@@ -1942,7 +2541,7 @@ def pack_runtime_payloads(
     prototype_attention_biases: list[tuple[int, int, int, int, float]] = []
     finite_flags: list[Any] = []
     for layer_index, source_layer in enumerate(full_state.layers):
-        if packing_mode == "batched_layer":
+        if packing_mode in {"batched_layer", "preallocated_layer"}:
             entries_by_head: list[Sequence[tuple[int, str, int, Any, Any]]] = []
             for kv_head in range(source_layer.kv_heads):
                 entries = payloads.get((layer_index, kv_head), [])
@@ -1966,7 +2565,12 @@ def pack_runtime_payloads(
                                 (prototype_id, layer_index, kv_head, slot, bias)
                             )
             tail_layer = None if tail_snapshot is None else tail_snapshot.layers[layer_index]
-            packed_key, validity = _pack_mixed_payload_heads(
+            pack_layer = (
+                _pack_preallocated_payload_heads
+                if packing_mode == "preallocated_layer"
+                else _pack_mixed_payload_heads
+            )
+            packed_key, validity = pack_layer(
                 tuple(entries_by_head),
                 payload_index=3,
                 head_axis=source_layer.key_head_dimension,
@@ -1975,7 +2579,7 @@ def pack_runtime_payloads(
                 tail_tensor=None if tail_layer is None else tail_layer.key,
                 old_prompt_capacity=old_prompt_capacity,
             )
-            packed_value, _value_validity = _pack_mixed_payload_heads(
+            packed_value, _value_validity = pack_layer(
                 tuple(entries_by_head),
                 payload_index=4,
                 head_axis=source_layer.value_head_dimension,
@@ -2191,6 +2795,105 @@ def _pack_mixed_payload_heads(
     ), validity
 
 
+def _pack_preallocated_payload_heads(
+    entries_by_head: Sequence[Sequence[tuple[int, str, int, Any, Any]]],
+    *,
+    payload_index: int,
+    head_axis: int,
+    sequence_axis: int,
+    prompt_capacity: int,
+    tail_tensor: Any | None,
+    old_prompt_capacity: int | None,
+) -> tuple[Any, Any]:
+    """Pack a layer into one preallocated tensor without padded concatenations.
+
+    The reference path constructs and pads one tensor per KV head, then
+    concatenates every head. The older batched path performs a large indexed
+    scatter. This path allocates the final layer tensor once and copies each
+    head's already ordered rows into its contiguous slice. Equal head counts
+    therefore produce an all-valid dense cache with no decode-time mask hook.
+    """
+
+    torch = _torch()
+    if not entries_by_head or any(not entries for entries in entries_by_head):
+        raise HuggingFaceRuntimeError("preallocated packing requires every KV head")
+    first: Any = entries_by_head[0][0][payload_index]
+    rank = int(first.ndim)
+    normalized_head = _axis(head_axis, rank)
+    normalized_sequence = _axis(sequence_axis, rank)
+    if normalized_head == normalized_sequence:
+        raise HuggingFaceRuntimeError("packed cache head and sequence axes must differ")
+    canonical_first = first.movedim(
+        (normalized_head, normalized_sequence),
+        (0, 1),
+    )
+    if int(canonical_first.shape[0]) != 1 or int(canonical_first.shape[1]) != 1:
+        raise HuggingFaceRuntimeError(
+            "preallocated runtime payloads must contain one KV head and one position"
+        )
+    feature_shape = tuple(int(size) for size in canonical_first.shape[2:])
+    counts = tuple(len(entries) for entries in entries_by_head)
+    if any(count > prompt_capacity for count in counts):
+        raise HuggingFaceRuntimeError("selected positions exceed the physical prompt capacity")
+    tail_length = 0
+    canonical_tail = None
+    if tail_tensor is not None:
+        if old_prompt_capacity is None:
+            raise HuggingFaceRuntimeError("tail packing requires the old prompt capacity")
+        canonical_tail = tail_tensor.movedim(
+            (normalized_head, normalized_sequence),
+            (0, 1),
+        )
+        tail_length = int(canonical_tail.shape[1]) - old_prompt_capacity
+        if tail_length < 0:
+            raise HuggingFaceRuntimeError("old prompt capacity exceeds the tail cache")
+        if int(canonical_tail.shape[0]) != len(entries_by_head):
+            raise HuggingFaceRuntimeError("tail cache KV-head count changed during packing")
+        if tuple(int(size) for size in canonical_tail.shape[2:]) != feature_shape:
+            raise HuggingFaceRuntimeError("tail cache feature shape changed during packing")
+    packed = canonical_first.new_zeros(
+        (len(entries_by_head), prompt_capacity + tail_length, *feature_shape)
+    )
+    for head, entries in enumerate(entries_by_head):
+        canonical_entries: list[Any] = []
+        for entry in entries:
+            payload: Any = entry[payload_index]
+            canonical_entries.append(
+                payload.movedim(
+                    (normalized_head, normalized_sequence),
+                    (0, 1),
+                )
+            )
+        rows = torch.cat(tuple(canonical_entries), dim=1).squeeze(0)
+        if tuple(int(size) for size in rows.shape[1:]) != feature_shape:
+            raise HuggingFaceRuntimeError("mixed runtime payload feature shapes differ")
+        packed[head, : len(entries)].copy_(rows)
+    if canonical_tail is not None and tail_length:
+        packed[:, prompt_capacity:].copy_(canonical_tail[:, old_prompt_capacity:])
+    count_tensor = torch.as_tensor(counts, dtype=torch.long, device=packed.device)
+    validity = torch.arange(
+        prompt_capacity,
+        dtype=torch.long,
+        device=packed.device,
+    ).unsqueeze(0) < count_tensor.unsqueeze(1)
+    if tail_length:
+        validity = torch.cat(
+            (
+                validity,
+                torch.ones(
+                    (len(entries_by_head), tail_length),
+                    dtype=torch.bool,
+                    device=packed.device,
+                ),
+            ),
+            dim=1,
+        )
+    return packed.movedim(
+        (0, 1),
+        (normalized_head, normalized_sequence),
+    ), validity
+
+
 def _gather_dense_heads(
     tensor: Any,
     *,
@@ -2383,6 +3086,17 @@ def pack_runtime_cache(
             adapter,
             full_state,
             state.exact.blocks,
+            tail_snapshot=tail_snapshot,
+            old_prompt_capacity=old_prompt_capacity,
+            physical_prompt_capacity=physical_prompt_capacity,
+        )
+    if packing_mode == "preallocated_layer":
+        return _pack_three_tier_from_source(
+            adapter,
+            full_state,
+            state,
+            records,
+            active_prototype_ids,
             tail_snapshot=tail_snapshot,
             old_prompt_capacity=old_prompt_capacity,
             physical_prompt_capacity=physical_prompt_capacity,
@@ -3118,9 +3832,7 @@ def _plan_trace(
             "tier_storage_accounting": {
                 "source_kv_bytes": plan.full_state.active_bytes,
                 "exact_active_bytes": plan.construction.state.statistics.exact_kv_bytes,
-                "prototype_active_bytes": (
-                    plan.construction.state.statistics.prototype_kv_bytes
-                ),
+                "prototype_active_bytes": (plan.construction.state.statistics.prototype_kv_bytes),
                 "active_gpu_bytes": active_bytes,
                 "residual_cpu_bytes": residual_bytes,
                 "total_active_plus_residual_bytes": active_bytes + residual_bytes,
@@ -3663,6 +4375,7 @@ class HuggingFaceMosaicKVModel:
             )
             logical_prefill_active_kv_bytes = source_prefill_kv_bytes
             packed_prefill_active_kv_bytes = source_prefill_kv_bytes
+            packed_prompt_capacity = prefill.state.active_cache_length
             forecast_seconds = 0.0
             graph_seconds = 0.0
             selection_seconds = 0.0
@@ -3673,6 +4386,8 @@ class HuggingFaceMosaicKVModel:
             predicted_token_attention: dict[tuple[int, int], np.ndarray[Any, Any]] | None = None
             online_head_shifts: dict[tuple[int, int], float] = {}
             online_exact_head_routes: tuple[str, ...] = ()
+            draft_repair_distributions: tuple[Any, ...] = ()
+            draft_repair_token_ids: tuple[int, ...] = ()
             dense_budget: DensePhysicalCacheBudget | None = None
             physical_prompt_capacity: int | None = None
             plan: MosaicKVCompressionPlan | None = None
@@ -3805,8 +4520,14 @@ class HuggingFaceMosaicKVModel:
                             prefill,
                             self.config.forecasting,
                             capture_attentions=True,
+                            capture_distributions=(
+                                self.config.repair.policy
+                                in {RepairPolicy.DECISION_AWARE, RepairPolicy.ORACLE}
+                            ),
                         )
                         forecast_seconds = forecast.timing.total
+                        draft_repair_distributions = rollout.draft_distributions
+                        draft_repair_token_ids = rollout.token_ids
                         (
                             predicted_token_attention,
                             online_head_shifts,
@@ -3863,6 +4584,27 @@ class HuggingFaceMosaicKVModel:
                         ),
                         prototype_token_weight_by_head=predicted_token_attention,
                     )
+                    if (
+                        dense_budget is not None
+                        and plan.construction.mode is TierConstructionMode.THREE_TIER
+                    ):
+                        active_lengths = {
+                            layout.active_cache_length
+                            for layout in plan.construction.active_layouts
+                        }
+                        if len(active_lengths) != 1:
+                            raise HuggingFaceRuntimeError(
+                                "three-tier cache cannot be packed without padding because "
+                                f"layer/head lengths differ: {sorted(active_lengths)}"
+                            )
+                        measured_capacity = next(iter(active_lengths))
+                        if measured_capacity > dense_budget.prompt_capacity:
+                            raise HuggingFaceRuntimeError(
+                                "three-tier measured physical capacity exceeds its hard cap: "
+                                f"active={measured_capacity}, "
+                                f"cap={dense_budget.prompt_capacity}"
+                            )
+                        physical_prompt_capacity = measured_capacity
                     graph_seconds = plan.graph_seconds
                     selection_seconds = plan.selection_seconds
                     tier_seconds = plan.tier_seconds + key_transform_seconds
@@ -4031,6 +4773,7 @@ class HuggingFaceMosaicKVModel:
                         ),
                     )
                 state = _state_from_packed(self.adapter, prefill.state, packed)
+                packed_prompt_capacity = packed.prompt_capacity
                 packed_prefill_active_kv_bytes = _cache_payload_bytes(
                     self.adapter,
                     packed.snapshot,
@@ -4040,7 +4783,7 @@ class HuggingFaceMosaicKVModel:
                     and packed_prefill_active_kv_bytes > dense_budget.target_bytes
                 ):
                     raise HuggingFaceRuntimeError(
-                        "materialized cache exceeded its hard physical byte budget: "
+                        "materialized cache exceeds its hard physical byte budget: "
                         f"active={packed_prefill_active_kv_bytes}, "
                         f"budget={dense_budget.target_bytes}"
                     )
@@ -4277,6 +5020,7 @@ class HuggingFaceMosaicKVModel:
             per_token_decode_seconds: list[float] = []
             decode_finite_flags: list[Any] = []
             repair_events: list[RepairEvent] = []
+            draft_repair_prefix_matches = True
             prefixkv_decode_events: list[JsonObject] = []
             oracle_reference_state = (
                 _clone_decode_state(self.adapter, prefill.state)
@@ -4391,6 +5135,22 @@ class HuggingFaceMosaicKVModel:
                 repair_base_state = state
                 repair_token = token
                 repair_sink = repaired_output
+                draft_distribution = None
+                draft_offset = step_index - 1
+                if draft_offset < len(draft_repair_distributions):
+                    if draft_offset >= len(draft_repair_token_ids):
+                        raise HuggingFaceRuntimeError(
+                            "captured draft distributions are missing their prefix token IDs"
+                        )
+                    draft_input_id = int(decode_token.detach().reshape(-1)[0].item())
+                    draft_repair_prefix_matches = bool(
+                        draft_repair_prefix_matches
+                        and draft_input_id == draft_repair_token_ids[draft_offset]
+                    )
+                    if draft_repair_prefix_matches:
+                        draft_distribution = draft_repair_distributions[draft_offset]
+                else:
+                    draft_repair_prefix_matches = False
 
                 def re_decode(
                     updated_repair: RepairCacheState,
@@ -4436,6 +5196,7 @@ class HuggingFaceMosaicKVModel:
                         re_decode=re_decode,
                         reference_token_id=reference_id,
                         oracle_should_repair=provisional_id != reference_id,
+                        draft_distribution=draft_distribution,
                         key_transform=key_transform,
                     )
                 else:
@@ -4446,6 +5207,7 @@ class HuggingFaceMosaicKVModel:
                         provisional_logits=provisional.logits,
                         prototype_attention_mass=masses,
                         re_decode=re_decode,
+                        draft_distribution=draft_distribution,
                         key_transform=key_transform,
                     )
                 repair_state = repair.state
@@ -4502,6 +5264,29 @@ class HuggingFaceMosaicKVModel:
             )
             repair_transfer = sum(event.transfer_time_ms for event in repair_events) / 1000.0
             repair_redecode = sum(event.re_decode_time_ms for event in repair_events) / 1000.0
+            first_decode_step = per_token_decode_seconds[0] if per_token_decode_seconds else None
+            steady_state_decode_mean = (
+                float(np.mean(per_token_decode_seconds[1:]))
+                if len(per_token_decode_seconds) > 1
+                else None
+            )
+            # CUDA-event phase timings intentionally exclude host-only work in
+            # mixed Python/CUDA actions.  Preserve that difference explicitly
+            # instead of allowing the named phases to appear to sum to total
+            # latency.  Repair transfer and re-decode are not included in
+            # ``decode_seconds`` and therefore belong in the accounted sum.
+            accounted_seconds = (
+                prefill_seconds
+                + forecast_seconds
+                + graph_seconds
+                + selection_seconds
+                + tier_seconds
+                + packing_seconds
+                + decode_seconds
+                + repair_transfer
+                + repair_redecode
+            )
+            host_orchestration_seconds = max(0.0, total_seconds - accounted_seconds)
             timings = RuntimePhaseTimings(
                 prefill=prefill_seconds,
                 image_video_encoder=image_video_encoder_seconds,
@@ -4514,8 +5299,11 @@ class HuggingFaceMosaicKVModel:
                 cache_packing=packing_seconds,
                 decode=decode_seconds,
                 per_token_decode=tuple(per_token_decode_seconds),
+                first_decode_step=first_decode_step,
+                steady_state_decode_mean=steady_state_decode_mean,
                 repair_transfer=repair_transfer,
                 repair_redecode=repair_redecode,
+                host_orchestration=host_orchestration_seconds,
                 total=total_seconds,
             )
             timing_payload = cast("JsonObject", asdict(timings))
@@ -4557,16 +5345,12 @@ class HuggingFaceMosaicKVModel:
                         else None
                     ),
                     "cpu_bytes_initial": plan.construction.residual_storage.cpu_bytes,
-                    "eligible_source_blocks": len(
-                        plan.construction.state.prototypes.source_blocks
-                    ),
+                    "eligible_source_blocks": len(plan.construction.state.prototypes.source_blocks),
                     "stored_source_blocks": len(residual_payloads),
                     "max_bytes": self.config.residual.max_bytes,
                     "max_source_blocks": self.config.residual.max_source_blocks,
                     "selection_policy": self.config.residual.selection_policy,
-                    "total_storage_budget_bytes": (
-                        self.config.cache.total_storage_budget_bytes
-                    ),
+                    "total_storage_budget_bytes": (self.config.cache.total_storage_budget_bytes),
                     "active_plus_residual_bytes_initial": (
                         plan.construction.state.statistics.active_kv_bytes
                         + plan.construction.residual_storage.cpu_bytes
@@ -4606,6 +5390,11 @@ class HuggingFaceMosaicKVModel:
                             else None
                         ),
                     },
+                    "repair_draft_distribution": {
+                        "available_steps": len(draft_repair_distributions),
+                        "used_only_while_prefix_matches": True,
+                        "final_prefix_match_state": draft_repair_prefix_matches,
+                    },
                     "prefixkv_decode_events": cast("list[JsonValue]", prefixkv_decode_events),
                     "timing_breakdown": timing_payload,
                     "source_prefill_kv_bytes": source_prefill_kv_bytes,
@@ -4624,6 +5413,21 @@ class HuggingFaceMosaicKVModel:
                     ),
                     "hard_active_kv_budget_bytes": (
                         None if dense_budget is None else dense_budget.target_bytes
+                    ),
+                    "packed_prompt_capacity": packed_prompt_capacity,
+                    "hard_prompt_capacity": (
+                        None if dense_budget is None else dense_budget.prompt_capacity
+                    ),
+                    "tier_active_cache_lengths": cast(
+                        "list[JsonValue]",
+                        []
+                        if plan is None
+                        else sorted(
+                            {
+                                layout.active_cache_length
+                                for layout in plan.construction.active_layouts
+                            }
+                        ),
                     ),
                     "online_uncertainty_routing": cast(
                         "JsonObject",

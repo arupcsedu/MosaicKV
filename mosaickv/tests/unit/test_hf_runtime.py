@@ -32,6 +32,7 @@ from mosaickv.backends.hf_runtime import (
     _selection_decision_evidence,
     _trace_catalog,
     _uncertainty_exact_head_routes,
+    _uniform_attainable_prototype_position_limits,
     pack_runtime_payloads,
 )
 from mosaickv.cache_state import FullKVState, Modality, ModalitySpan
@@ -128,9 +129,7 @@ def test_batched_mixed_tier_packing_is_byte_exact_with_reference_and_tail() -> N
             (0, "exact", 0, key[:, 0:1, 0:1, :], value[:, 0:1, 0:1, :]),
             (3, "prototype", 7, key[:, 0:1, 3:4, :], value[:, 0:1, 3:4, :]),
         ),
-        (0, 1): (
-            (2, "exact", 1, key[:, 1:2, 2:3, :], value[:, 1:2, 2:3, :]),
-        ),
+        (0, 1): ((2, "exact", 1, key[:, 1:2, 2:3, :], value[:, 1:2, 2:3, :]),),
     }
     tail_key = torch.cat((key, key[:, :, :2, :].add(1_000)), dim=2)
     tail_value = torch.cat((value, value[:, :, :2, :].add(1_000)), dim=2)
@@ -167,15 +166,76 @@ def test_batched_mixed_tier_packing_is_byte_exact_with_reference_and_tail() -> N
         packing_mode="batched_layer",
         **kwargs,
     )
+    preallocated = pack_runtime_payloads(
+        adapter,
+        full,
+        payloads,
+        (),
+        packing_mode="preallocated_layer",
+        **kwargs,
+    )
 
     assert torch.equal(reference.snapshot.layers[0].key, batched.snapshot.layers[0].key)
     assert torch.equal(reference.snapshot.layers[0].value, batched.snapshot.layers[0].value)
     assert torch.equal(reference.validity_masks[0], batched.validity_masks[0])
+    assert torch.equal(reference.snapshot.layers[0].key, preallocated.snapshot.layers[0].key)
+    assert torch.equal(reference.snapshot.layers[0].value, preallocated.snapshot.layers[0].value)
+    assert torch.equal(reference.validity_masks[0], preallocated.validity_masks[0])
     assert reference.snapshot.active_sequence_length == batched.snapshot.active_sequence_length
     assert reference.prompt_capacity == batched.prompt_capacity
     assert reference.all_slots_valid == batched.all_slots_valid
     assert reference.prototype_slots == batched.prototype_slots
     assert reference.prototype_attention_biases == batched.prototype_attention_biases
+    assert reference.prototype_slots == preallocated.prototype_slots
+    assert reference.prototype_attention_biases == preallocated.prototype_attention_biases
+
+
+def test_fused_three_tier_source_packing_matches_scalar_payload_oracle() -> None:
+    key = torch.arange(8 * 4, dtype=torch.float32).reshape(1, 1, 8, 4) + 1
+    full = FullKVState.from_tensors(
+        ((key, key.flip(-1)),),
+        block_size=1,
+        mandatory_logical_positions=(0, 7),
+        cached_key_state=CachedKeyState.NOT_APPLICABLE,
+    )
+    plan = build_compression_plan(
+        full,
+        _forecast(),
+        {node_id: float(8 - node_id) for node_id in range(8)},
+        _capabilities(safe=True),
+        _config(MosaicKVMethod.MOSAICKV_PROTO, 0.5),
+    )
+    assert plan.construction.prototypes
+    adapter = SimpleNamespace(
+        capabilities=SimpleNamespace(cached_key_state=CachedKeyState.NOT_APPLICABLE)
+    )
+    prototype_ids = tuple(record.prototype_id for record in plan.construction.prototypes)
+
+    reference = hf_runtime.pack_runtime_cache(
+        adapter,
+        full,
+        plan.construction.state,
+        plan.construction.prototypes,
+        prototype_ids,
+        packing_mode="per_head_reference",
+    )
+    fused = hf_runtime.pack_runtime_cache(
+        adapter,
+        full,
+        plan.construction.state,
+        plan.construction.prototypes,
+        prototype_ids,
+        packing_mode="preallocated_layer",
+    )
+
+    assert torch.equal(reference.snapshot.layers[0].key, fused.snapshot.layers[0].key)
+    assert torch.equal(reference.snapshot.layers[0].value, fused.snapshot.layers[0].value)
+    assert torch.equal(reference.validity_masks[0], fused.validity_masks[0])
+    assert reference.prompt_capacity == fused.prompt_capacity
+    assert reference.all_slots_valid == fused.all_slots_valid
+    assert reference.prototype_slots == fused.prototype_slots
+    assert reference.prototype_attention_biases == fused.prototype_attention_biases
+    assert reference.slot_records == fused.slot_records
 
 
 def test_packed_decode_mask_adds_prototype_multiplicity_bias_to_shared_query_heads() -> None:
@@ -334,6 +394,49 @@ def test_prompt_ranked_similarity_shortlist_is_bounded_and_keeps_mandatory_nodes
     # Two retained blocks times a 2x candidate multiplier, with mandatory
     # nodes 0/7 always represented in the candidate set.
     assert selected == (0, 5, 6, 7)
+
+
+def test_prototype_anchor_cover_prefers_aligned_modality_block() -> None:
+    key = np.arange(11 * 4, dtype=np.float32).reshape(1, 1, 11, 4) + 1
+    full = FullKVState.from_tensors(
+        ((key, np.flip(key, axis=-1).copy()),),
+        modality_spans=(
+            ModalitySpan(0, 2, Modality.TEXT),
+            ModalitySpan(2, 6, Modality.IMAGE),
+            ModalitySpan(6, 10, Modality.TEXT),
+            ModalitySpan(10, 11, Modality.VIDEO),
+        ),
+        block_size=4,
+        mandatory_logical_positions=(10,),
+        cached_key_state=CachedKeyState.NOT_APPLICABLE,
+    )
+    config = _config(MosaicKVMethod.MOSAICKV_PROTO, 0.5)
+    graph = hf_runtime.build_evidence_graph(
+        full,
+        replace(config.graph, enabled=False),
+    )
+    utilities = hf_runtime.compute_block_utilities(
+        graph,
+        UtilityConfig(lambda_q=1.0, lambda_v=0.0, lambda_o=0.0),
+        forecast_attention_by_node={0: 100.0, 1: 1.0, 2: 1.0, 3: 1.0},
+        attention_provenance="synthetic_anchor_alignment_fixture",
+        rope_aware=True,
+    )
+    objective = hf_runtime.BudgetedObjective(
+        graph,
+        utilities,
+        SelectionConfig(lambda_g=0.0, lambda_m=0.0),
+    )
+
+    anchors = hf_runtime._required_prototype_anchors(
+        objective,
+        config,
+        position_fill_quantum=4,
+    )
+
+    assert anchors == (1, 2)
+    assert full.blocks[0].position_count == 2
+    assert all(full.blocks[node_id].position_count == 4 for node_id in anchors)
 
 
 def test_prompt_reservation_respects_dense_per_head_capacity() -> None:
@@ -606,6 +709,110 @@ def test_dense_physical_byte_budget_supports_fixed_multitoken_blocks() -> None:
     assert dense.minimum_block_representable_fill(4) == (
         dense.target_bytes - 3 * dense.bytes_per_position
     )
+
+
+def test_three_tier_uniform_layout_may_underfill_hard_physical_cap() -> None:
+    sequence = 67
+    key = np.arange(sequence * 4, dtype=np.float32).reshape(1, 1, sequence, 4) + 1
+    full = FullKVState.from_tensors(
+        ((key, np.flip(key, axis=-1).copy()),),
+        modality_spans=(
+            ModalitySpan(0, 12, Modality.TEXT),
+            ModalitySpan(12, 60, Modality.IMAGE),
+            ModalitySpan(60, 67, Modality.TEXT),
+        ),
+        block_size=16,
+        mandatory_logical_positions=(66,),
+        cached_key_state=CachedKeyState.NOT_APPLICABLE,
+    )
+    target_positions = 37
+    config = replace(
+        _config(MosaicKVMethod.MOSAICKV_PROTO, target_positions / sequence),
+        cache=CacheConfig(
+            full.active_bytes,
+            BudgetUnit.BYTES,
+            target_positions / sequence,
+            16,
+        ),
+        prototypes=replace(
+            _config(MosaicKVMethod.MOSAICKV_PROTO, 0.5).prototypes,
+            group_size=15,
+            max_position_span=256,
+            budget_planning_mode="one_pass_anchor_cover",
+        ),
+        residual=ResidualConfig(enabled=False, require_pinned_memory=False),
+    )
+
+    plan = build_compression_plan(
+        full,
+        None,
+        {node_id: float(len(full.blocks) - node_id) for node_id in range(len(full.blocks))},
+        _capabilities(safe=True),
+        config,
+        position_limits={(0, 0): target_positions},
+    )
+
+    assert plan.construction.mode.value == "three_tier"
+    assert len(plan.construction.prototypes) == 1
+    assert plan.construction.active_layouts[0].active_cache_length == 36
+    assert plan.construction.active_layouts[0].active_cache_length < target_positions
+    assert plan.construction.active_device_bytes < plan.active_budget_value
+    assert "physical cap from 37 to 36 positions" in plan.construction.reason
+
+
+@pytest.mark.parametrize(
+    ("modality_spans", "required_node_ids", "physical_cap", "expected_exact"),
+    (
+        (
+            (
+                ModalitySpan(0, 8, Modality.TEXT),
+                ModalitySpan(8, 72, Modality.IMAGE),
+                ModalitySpan(72, 80, Modality.TEXT),
+                ModalitySpan(80, 96, Modality.IMAGE),
+            ),
+            (0, 1, 2, 3),
+            63,
+            56,
+        ),
+        (
+            (ModalitySpan(0, 96, Modality.IMAGE),),
+            (0, 1, 2, 3),
+            71,
+            64,
+        ),
+    ),
+)
+def test_uniform_prototype_layout_steps_down_to_attainable_common_length(
+    modality_spans: tuple[ModalitySpan, ...],
+    required_node_ids: tuple[int, ...],
+    physical_cap: int,
+    expected_exact: int,
+) -> None:
+    key = np.arange(96 * 4, dtype=np.float32).reshape(1, 1, 96, 4) + 1
+    full = FullKVState.from_tensors(
+        ((key, np.flip(key, axis=-1).copy()),),
+        modality_spans=modality_spans,
+        block_size=16,
+        cached_key_state=CachedKeyState.NOT_APPLICABLE,
+    )
+    graph = hf_runtime.build_evidence_graph(
+        full,
+        _config(MosaicKVMethod.MOSAICKV_PROTO, 0.5).graph,
+    )
+
+    exact_limits, final_length = _uniform_attainable_prototype_position_limits(
+        graph,
+        {(0, 0): physical_cap},
+        {(0, 0): 1},
+        block_size=16,
+        required_node_ids=required_node_ids,
+        prompt_anchor_node_ids=(),
+        evidence_node_ids=(),
+    )
+
+    assert exact_limits == {(0, 0): expected_exact}
+    assert final_length == expected_exact + 1
+    assert final_length < physical_cap
 
 
 def test_dense_physical_byte_budget_aligns_capacity_after_mandatory_fragments() -> None:

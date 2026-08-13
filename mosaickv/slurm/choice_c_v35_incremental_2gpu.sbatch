@@ -1,15 +1,14 @@
 #!/bin/bash
-#SBATCH --job-name=mosaickv-v35-inc
+#SBATCH --job-name=mosaickv-v35-v100
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=170G
-#SBATCH --time=00:45:00
+#SBATCH --time=01:30:00
 #SBATCH --partition=bii-gpu
-#SBATCH --reservation=bi_fox_dgx
-#SBATCH --gres=gpu:1
+#SBATCH --gres=gpu:v100:1
 #SBATCH --array=0-1
-#SBATCH --output=/scratch/djy8hg/runs/mosaickv/slurm/choice-c-v35-inc-%A-%a.log
+#SBATCH --output=/scratch/djy8hg/runs/mosaickv/slurm/choice-c-v35-v100-%A-%a.log
 
 set -euo pipefail
 
@@ -19,7 +18,7 @@ export MOSAICKV_CACHE_ROOT=/scratch/djy8hg/cache/mosaickv
 SPEC=configs/experiments/choice_c_batched_prototype_system_v16.yaml
 PROFILE=/scratch/djy8hg/runs/mosaickv/choice-c-forecast-stability-design-v15/frozen_fidelity_profile.json
 LEDGER=configs/ledgers/choice_c_incremental_latency_v35_docvqa.json
-OUTPUT_ROOT=/scratch/djy8hg/runs/mosaickv/choice-c-incremental-v35-${SLURM_ARRAY_JOB_ID}
+OUTPUT_ROOT=/scratch/djy8hg/runs/mosaickv/choice-c-incremental-v35-v100-${SLURM_ARRAY_JOB_ID}
 
 # shellcheck source=../scripts/cache_env.sh
 source "${PROJECT_ROOT}/scripts/cache_env.sh"
@@ -29,10 +28,8 @@ export TOKENIZERS_PARALLELISM=false
 export PYTHONPATH="${PROJECT_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
 cd "${PROJECT_ROOT}"
 
-if [[ -e ${OUTPUT_ROOT} ]]; then
-  echo "refusing to overwrite immutable output root: ${OUTPUT_ROOT}" >&2
-  exit 2
-fi
+# The Slurm array-job ID creates a fresh namespace. Both ranks deliberately
+# share that namespace, while every run/config/trace filename contains rank.
 mkdir -p "${OUTPUT_ROOT}"
 
 sha256sum \

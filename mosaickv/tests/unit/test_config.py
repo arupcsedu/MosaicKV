@@ -32,6 +32,7 @@ from mosaickv.types import (
     LookMMergeStrategy,
     MosaicKVMethod,
     PrefixKVProfileMode,
+    RepairPolicy,
     ResidualStorageDType,
 )
 
@@ -154,6 +155,17 @@ def test_exact_tier_gather_mode_is_strict_and_resolved() -> None:
         }
     )
     assert resolved.exact_gather_mode == "per_head_reference"
+    assert (
+        CacheConfig.from_mapping(
+            {
+                "budget_value": 8,
+                "budget_unit": "retained_slots",
+                "retention_ratio": 0.5,
+                "exact_gather_mode": "source_views",
+            }
+        ).exact_gather_mode
+        == "source_views"
+    )
     with pytest.raises(ConfigurationError, match="exact_gather_mode"):
         CacheConfig(
             budget_value=8,
@@ -164,11 +176,14 @@ def test_exact_tier_gather_mode_is_strict_and_resolved() -> None:
 
 
 def test_runtime_packing_mode_is_strict_and_resolved() -> None:
-    assert CacheConfig(
-        budget_value=8,
-        budget_unit=BudgetUnit.RETAINED_SLOTS,
-        retention_ratio=0.5,
-    ).packing_mode == "per_head_reference"
+    assert (
+        CacheConfig(
+            budget_value=8,
+            budget_unit=BudgetUnit.RETAINED_SLOTS,
+            retention_ratio=0.5,
+        ).packing_mode
+        == "per_head_reference"
+    )
     resolved = CacheConfig.from_mapping(
         {
             "budget_value": 8,
@@ -178,6 +193,17 @@ def test_runtime_packing_mode_is_strict_and_resolved() -> None:
         }
     )
     assert resolved.packing_mode == "per_head_reference"
+    assert (
+        CacheConfig.from_mapping(
+            {
+                "budget_value": 8,
+                "budget_unit": "retained_slots",
+                "retention_ratio": 0.5,
+                "packing_mode": "preallocated_layer",
+            }
+        ).packing_mode
+        == "preallocated_layer"
+    )
     with pytest.raises(ConfigurationError, match="packing_mode"):
         CacheConfig(
             budget_value=8,
@@ -214,10 +240,33 @@ def test_total_and_residual_storage_budgets_are_strict() -> None:
     )
     assert residual.max_bytes == 4
     assert residual.max_source_blocks == 1
+    assert (
+        ResidualConfig(selection_policy="prototype_coverage_then_risk").selection_policy
+        == "prototype_coverage_then_risk"
+    )
     with pytest.raises(ConfigurationError, match=r"residual\.max_bytes"):
         ResidualConfig(max_bytes=-1)
     with pytest.raises(ConfigurationError, match=r"residual\.selection_policy"):
         ResidualConfig(selection_policy="highest_node_id")
+
+
+def test_draft_kl_repair_requires_an_online_draft_forecast() -> None:
+    config = synthetic_smoke_config()
+    with pytest.raises(ConfigurationError, match="draft_steps >= 1"):
+        replace(
+            config,
+            method=MosaicKVMethod.MOSAICKV_FULL,
+            forecasting=ForecastingConfig(
+                mode=ForecastMode.PROMPT_WINDOW,
+                prompt_window=4,
+                draft_steps=0,
+            ),
+            repair=replace(
+                config.repair,
+                policy=RepairPolicy.DECISION_AWARE,
+                draft_kl_threshold=0.1,
+            ),
+        )
 
 
 def test_unknown_configuration_field_is_rejected() -> None:
@@ -241,12 +290,16 @@ def test_graph_attention_host_transfer_mode_is_strict() -> None:
         {
             "similarity_shortlist_multiplier": 4.0,
             "similarity_shortlist_min_nodes": 32,
+            "candidate_descriptor_pooling": True,
         }
     )
     assert shortlist.similarity_shortlist_multiplier == 4.0
     assert shortlist.similarity_shortlist_min_nodes == 32
+    assert shortlist.candidate_descriptor_pooling is True
     with pytest.raises(ConfigurationError, match="similarity_shortlist_multiplier"):
         GraphConfig(similarity_shortlist_multiplier=-1)
+    with pytest.raises(ConfigurationError, match="candidate_descriptor_pooling"):
+        GraphConfig(candidate_descriptor_pooling=True)
 
 
 def test_compute_execution_modes_are_strict() -> None:

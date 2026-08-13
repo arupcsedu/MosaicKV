@@ -408,18 +408,26 @@ class CacheConfig:
             raise ConfigurationError(
                 "cache.physical_budget_mandatory_policy must be 'method' or 'last_token'"
             )
-        if self.exact_gather_mode not in {"per_head_reference", "batched_layer"}:
+        if self.exact_gather_mode not in {
+            "per_head_reference",
+            "batched_layer",
+            "source_views",
+        }:
             raise ConfigurationError(
-                "cache.exact_gather_mode must be 'per_head_reference' or 'batched_layer'"
+                "cache.exact_gather_mode must be 'per_head_reference', 'batched_layer', "
+                "or 'source_views'"
             )
-        if self.packing_mode not in {"per_head_reference", "batched_layer"}:
+        if self.packing_mode not in {
+            "per_head_reference",
+            "batched_layer",
+            "preallocated_layer",
+        }:
             raise ConfigurationError(
-                "cache.packing_mode must be 'per_head_reference' or 'batched_layer'"
+                "cache.packing_mode must be 'per_head_reference', 'batched_layer', "
+                "or 'preallocated_layer'"
             )
         if self.total_storage_budget_bytes is not None and self.total_storage_budget_bytes < 1:
-            raise ConfigurationError(
-                "cache.total_storage_budget_bytes must be >= 1 or null"
-            )
+            raise ConfigurationError("cache.total_storage_budget_bytes must be >= 1 or null")
         if len(self.accounting_spec_sha) != 64 or any(
             char not in "0123456789abcdef" for char in self.accounting_spec_sha
         ):
@@ -657,6 +665,11 @@ class GraphConfig:
     # remains a graph node and still receives structural/fallback edges.
     similarity_shortlist_multiplier: float = 0.0
     similarity_shortlist_min_nodes: int = 0
+    # Pool learned K/V descriptors only for the prompt-ranked shortlist while
+    # retaining every source block as a lightweight structural/fallback node.
+    # This is an explicit approximation because excluded nodes no longer
+    # contribute learned semantic/value descriptors.
+    candidate_descriptor_pooling: bool = False
 
     def __post_init__(self) -> None:
         if self.max_neighbors < 1:
@@ -729,8 +742,11 @@ class GraphConfig:
                 "graph.similarity_shortlist_multiplier must be finite and >= 0"
             )
         if self.similarity_shortlist_min_nodes < 0:
+            raise ConfigurationError("graph.similarity_shortlist_min_nodes must be >= 0")
+        if self.candidate_descriptor_pooling and self.similarity_shortlist_multiplier <= 0:
             raise ConfigurationError(
-                "graph.similarity_shortlist_min_nodes must be >= 0"
+                "graph.candidate_descriptor_pooling requires a positive "
+                "similarity_shortlist_multiplier"
             )
 
     @classmethod
@@ -761,6 +777,7 @@ class GraphConfig:
             "edge_accumulation_mode",
             "similarity_shortlist_multiplier",
             "similarity_shortlist_min_nodes",
+            "candidate_descriptor_pooling",
         }
         _reject_unknown(data, allowed, "graph")
         defaults = cls()
@@ -818,6 +835,12 @@ class GraphConfig:
                 data,
                 "similarity_shortlist_min_nodes",
                 0,
+                "graph",
+            ),
+            candidate_descriptor_pooling=_bool(
+                data,
+                "candidate_descriptor_pooling",
+                False,
                 "graph",
             ),
         )
@@ -1250,16 +1273,16 @@ class ResidualConfig:
         if self.max_bytes is not None and self.max_bytes < 0:
             raise ConfigurationError("residual.max_bytes must be >= 0 or null")
         if self.max_source_blocks is not None and self.max_source_blocks < 0:
-            raise ConfigurationError(
-                "residual.max_source_blocks must be >= 0 or null"
-            )
+            raise ConfigurationError("residual.max_source_blocks must be >= 0 or null")
         if self.selection_policy not in {
             "source_order",
             "risk_weighted_reconstruction_error",
+            "prototype_coverage_then_risk",
         }:
             raise ConfigurationError(
                 "residual.selection_policy must be 'source_order' or "
-                "'risk_weighted_reconstruction_error'"
+                "'risk_weighted_reconstruction_error' or "
+                "'prototype_coverage_then_risk'"
             )
 
     @classmethod
@@ -1556,6 +1579,7 @@ class RepairConfig:
     prototype_risk_threshold: float = 0.25
     prototype_risk_min_entropy: float = 0.0
     decision_margin_threshold: float = 0.15
+    draft_kl_threshold: float | None = None
     normalize_prototype_risk: bool = False
     decision_high_risk_threshold: float | None = None
     max_blocks_per_step: int = 2
@@ -1576,6 +1600,12 @@ class RepairConfig:
             )
         if not 0 <= self.decision_margin_threshold <= 1:
             raise ConfigurationError("repair.decision_margin_threshold must be in [0, 1]")
+        if self.draft_kl_threshold is not None and (
+            not math.isfinite(self.draft_kl_threshold) or self.draft_kl_threshold < 0
+        ):
+            raise ConfigurationError("repair.draft_kl_threshold must be finite and >= 0 or null")
+        if self.draft_kl_threshold is not None and self.policy is not RepairPolicy.DECISION_AWARE:
+            raise ConfigurationError("repair.draft_kl_threshold requires policy='decision_aware'")
         if self.decision_high_risk_threshold is not None and (
             not math.isfinite(self.decision_high_risk_threshold)
             or self.decision_high_risk_threshold < 0
@@ -1602,6 +1632,7 @@ class RepairConfig:
             "prototype_risk_threshold",
             "prototype_risk_min_entropy",
             "decision_margin_threshold",
+            "draft_kl_threshold",
             "normalize_prototype_risk",
             "decision_high_risk_threshold",
             "max_blocks_per_step",
@@ -1621,6 +1652,11 @@ class RepairConfig:
             prototype_risk_threshold=_float(data, "prototype_risk_threshold", 0.25, "repair"),
             prototype_risk_min_entropy=_float(data, "prototype_risk_min_entropy", 0.0, "repair"),
             decision_margin_threshold=_float(data, "decision_margin_threshold", 0.15, "repair"),
+            draft_kl_threshold=(
+                None
+                if data.get("draft_kl_threshold") is None
+                else _float(data, "draft_kl_threshold", 0.0, "repair")
+            ),
             normalize_prototype_risk=_bool(data, "normalize_prototype_risk", False, "repair"),
             decision_high_risk_threshold=(
                 None
@@ -1682,6 +1718,14 @@ class RunConfig:
         ):
             raise ConfigurationError(
                 "MosaicKV requires forecasting unless the declared ablation removes it"
+            )
+        if self.repair.draft_kl_threshold is not None and (
+            not self.method.is_mosaickv
+            or not self.forecasting.enabled
+            or self.forecasting.draft_steps < 1
+        ):
+            raise ConfigurationError(
+                "repair.draft_kl_threshold requires a MosaicKV forecast with draft_steps >= 1"
             )
         variant = self.ablation.variant
         if variant is AblationVariant.NO_EVIDENCE_GRAPH and self.graph.enabled:

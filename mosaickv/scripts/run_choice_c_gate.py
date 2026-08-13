@@ -362,6 +362,11 @@ def _repair_calibration_observations(
                     normalized_prototype_risk=float(event["maximum_prototype_risk"]),
                     next_token_probability_margin=float(event["next_token_probability_margin"]),
                     oracle_beneficial=event.get("quality_recovered") is True,
+                    draft_kl_divergence=(
+                        None
+                        if event.get("draft_kl_divergence") is None
+                        else float(event["draft_kl_divergence"])
+                    ),
                 )
             )
     if not observations:
@@ -1042,6 +1047,7 @@ def run(
             "prototype_risk_threshold": repair_profile.prototype_risk_threshold,
             "decision_margin_threshold": repair_profile.decision_margin_threshold,
             "decision_high_risk_threshold": repair_profile.decision_high_risk_threshold,
+            "draft_kl_threshold": repair_profile.draft_kl_threshold,
             "candidate_ranking": RepairCandidateRanking.DECISION_INFLUENCE.value,
             "policy": (
                 RepairPolicy.DECISION_AWARE.value
@@ -1062,6 +1068,7 @@ def run(
     )
     repair_gate = {
         "enabled": repair_profile.enabled,
+        "draft_kl_threshold": repair_profile.draft_kl_threshold,
         "predicted_precision": repair_profile.predicted_precision,
         "predicted_recall": repair_profile.predicted_recall,
         "predicted_triggered_repairs": repair_profile.predicted_triggered_repairs,

@@ -162,8 +162,7 @@ def test_batched_torch_head_gather_matches_reference_with_variable_counts() -> N
     value = (key + 10_000).clone()
     full = FullKVState.from_tensors(((key, value),), block_size=2)
     by_head = {
-        head: tuple(block for block in full.blocks if block.kv_head == head)
-        for head in range(3)
+        head: tuple(block for block in full.blocks if block.kv_head == head) for head in range(3)
     }
     selected = (
         *by_head[0][:2],
@@ -173,6 +172,7 @@ def test_batched_torch_head_gather_matches_reference_with_variable_counts() -> N
 
     reference = full.gather_exact_blocks(selected, gather_mode="per_head_reference")
     candidate = full.gather_exact_blocks(selected, gather_mode="batched_layer")
+    aliased = full.gather_exact_blocks(selected, gather_mode="source_views")
 
     assert candidate.blocks == reference.blocks
     assert candidate.active_bytes == reference.active_bytes
@@ -183,6 +183,24 @@ def test_batched_torch_head_gather_matches_reference_with_variable_counts() -> N
     assert all(
         torch.equal(expected, observed)
         for expected, observed in zip(reference.value_blocks, candidate.value_blocks, strict=True)
+    )
+    assert aliased.blocks == reference.blocks
+    assert aliased.active_bytes == reference.active_bytes
+    assert all(
+        torch.equal(expected, observed)
+        for expected, observed in zip(reference.key_blocks, aliased.key_blocks, strict=True)
+    )
+    assert all(
+        torch.equal(expected, observed)
+        for expected, observed in zip(reference.value_blocks, aliased.value_blocks, strict=True)
+    )
+    assert all(
+        block.untyped_storage().data_ptr() == key.untyped_storage().data_ptr()
+        for block in aliased.key_blocks
+    )
+    assert all(
+        block.untyped_storage().data_ptr() == value.untyped_storage().data_ptr()
+        for block in aliased.value_blocks
     )
 
 

@@ -1,0 +1,16 @@
+{
+  "classification": "retrospective_non_claim_system_validation",
+  "dataset_id": "lmms-lab/DocVQA",
+  "dataset_revision": "539088ef8a8ada01ac8e2e6d4e372586748a265e",
+  "materialization_model_name": "llava-hf/llava-1.5-7b-hf",
+  "parent_fullkv_artifact": "/scratch/djy8hg/runs/mosaickv/llava-full-quality-8gpu-v1/llava-full-q-v1-283548a923-docvqa-full_kv-r1p0-s17/aggregate.parquet",
+  "sample_count": 2,
+  "sample_ids": [
+    "docvqa:50803",
+    "docvqa:56457"
+  ],
+  "schema_version": 1,
+  "selection_rule": "both DocVQA samples with previously observed FullKV score 1.0; selected retrospectively only to avoid a degenerate all-zero implementation smoke and forbidden for held-out quality claims",
+  "split": "validation",
+  "task": "docvqa"
+}

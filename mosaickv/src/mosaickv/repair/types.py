@@ -24,6 +24,7 @@ class RepairTriggerReason(StrEnum):
     PROTOTYPE_RISK = "prototype_risk_threshold"
     ENTROPY_AND_PROTOTYPE_RISK = "entropy_and_prototype_risk_thresholds"
     DECISION_RISK = "low_margin_prototype_risk"
+    DRAFT_DIVERGENCE = "fullkv_draft_kl_prototype_risk"
     HIGH_PROTOTYPE_RISK = "calibrated_high_prototype_risk"
     ORACLE = "oracle_evaluation_only"
     ORACLE_NO_REPAIR = "oracle_no_repair"

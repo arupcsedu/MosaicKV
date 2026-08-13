@@ -688,24 +688,31 @@ def build_evidence_graph(
         raise ValueError(
             "provide either pre-pooled attention_coactivation or prompt_attentions, not both"
         )
-    nodes = pool_block_descriptors(
-        full_state,
-        hidden_states=hidden_states,
-        hidden_sequence_dimension=hidden_sequence_dimension,
-        metadata_by_node=metadata_by_node,
-        host_transfer_mode=config.attention_host_transfer_mode,
-    )
     similarity_candidates = (
         None
         if similarity_candidate_node_ids is None
         else frozenset(int(node_id) for node_id in similarity_candidate_node_ids)
     )
     if similarity_candidates is not None:
-        unknown = similarity_candidates - set(range(len(nodes)))
+        unknown = similarity_candidates - set(range(len(full_state.blocks)))
         if unknown:
             raise ValueError(
                 f"similarity shortlist contains unknown graph nodes: {sorted(unknown)}"
             )
+    if config.candidate_descriptor_pooling and similarity_candidates is None:
+        raise ValueError(
+            "candidate descriptor pooling requires explicit similarity candidate node IDs"
+        )
+    nodes = pool_block_descriptors(
+        full_state,
+        hidden_states=hidden_states,
+        hidden_sequence_dimension=hidden_sequence_dimension,
+        metadata_by_node=metadata_by_node,
+        host_transfer_mode=config.attention_host_transfer_mode,
+        eligible_node_ids=(
+            similarity_candidate_node_ids if config.candidate_descriptor_pooling else None
+        ),
+    )
     if not config.enabled:
         edges: tuple[_CandidateEdge, ...] = ()
         return SparseEvidenceGraph(

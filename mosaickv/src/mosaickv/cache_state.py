@@ -1135,11 +1135,62 @@ class FullKVState:
         *,
         gather_mode: str,
     ) -> ExactTier:
-        if gather_mode not in {"per_head_reference", "batched_layer"}:
+        if gather_mode not in {"per_head_reference", "batched_layer", "source_views"}:
             raise ValueError(
-                "gather_mode must be 'per_head_reference' or 'batched_layer'"
+                "gather_mode must be 'per_head_reference', 'batched_layer', or 'source_views'"
             )
         selected = tuple(descriptors)
+        if gather_mode == "source_views":
+            aliased_key_blocks: list[Any] = []
+            aliased_value_blocks: list[Any] = []
+            for block in selected:
+                self._validate_descriptor(block)
+                positions = block.physical_cache_indices
+                if positions != tuple(range(positions[0], positions[-1] + 1)):
+                    raise ValueError(
+                        "source-view exact gathering requires contiguous source blocks"
+                    )
+                layer = self.layers[block.layer]
+
+                def source_view(
+                    tensor: Any,
+                    head_axis: int,
+                    sequence_axis: int,
+                    *,
+                    head: int,
+                    start: int,
+                    end: int,
+                ) -> Any:
+                    index: list[Any] = [slice(None)] * _ndim(tensor)
+                    index[head_axis] = slice(head, head + 1)
+                    index[sequence_axis] = slice(start, end)
+                    return tensor[tuple(index)]
+
+                aliased_key_blocks.append(
+                    source_view(
+                        layer.key,
+                        layer.key_head_dimension,
+                        layer.key_sequence_dimension,
+                        head=block.kv_head,
+                        start=positions[0],
+                        end=positions[-1] + 1,
+                    )
+                )
+                aliased_value_blocks.append(
+                    source_view(
+                        layer.value,
+                        layer.value_head_dimension,
+                        layer.value_sequence_dimension,
+                        head=block.kv_head,
+                        start=positions[0],
+                        end=positions[-1] + 1,
+                    )
+                )
+            return ExactTier(
+                selected,
+                tuple(aliased_key_blocks),
+                tuple(aliased_value_blocks),
+            )
         grouped: dict[tuple[int, int], list[tuple[int, KVBlockDescriptor]]] = {}
         for block_index, block in enumerate(selected):
             self._validate_descriptor(block)

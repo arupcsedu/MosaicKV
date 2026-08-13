@@ -216,11 +216,57 @@ def _encoded_payload_bytes(
     return (numel(key) + numel(value)) * bytes_per_element
 
 
+def _encoded_descriptor_bytes(
+    full_state: FullKVState,
+    node_id: int,
+    storage_dtype: ResidualStorageDType,
+) -> int:
+    """Predict encoded payload bytes without gathering a source block.
+
+    Residual caps must be resolved before device gathering, otherwise a small
+    repair tier still materializes every unselected K/V block. Source block
+    descriptors contain exact lossless bytes. For converted dtypes, the layer
+    layout gives the exact per-head/per-position element count.
+    """
+
+    block = full_state.blocks[node_id]
+    if storage_dtype is ResidualStorageDType.LOSSLESS:
+        return block.byte_size
+    layer = full_state.layers[block.layer]
+
+    def elements_per_block(tensor: Any, head_axis: int, sequence_axis: int) -> int:
+        shape = tuple(int(size) for size in tensor.shape)
+        total = int(np.prod(shape, dtype=np.int64))
+        denominator = shape[head_axis % len(shape)] * shape[sequence_axis % len(shape)]
+        if denominator < 1 or total % denominator:
+            raise ResidualStorageError(
+                "cache tensor elements are not divisible by head/sequence dimensions"
+            )
+        return total // denominator * block.position_count
+
+    elements = elements_per_block(
+        layer.key,
+        layer.key_head_dimension,
+        layer.key_sequence_dimension,
+    ) + elements_per_block(
+        layer.value,
+        layer.value_head_dimension,
+        layer.value_sequence_dimension,
+    )
+    bytes_per_element = (
+        2
+        if storage_dtype in {ResidualStorageDType.FP16, ResidualStorageDType.BF16}
+        else 1
+    )
+    return elements * bytes_per_element
+
+
 def _bounded_residual_node_ids(
     node_ids: Sequence[int],
-    payloads: Mapping[int, tuple[Any, Any]],
+    encoded_bytes_by_node: Mapping[int, int],
     config: ResidualConfig,
     priority_by_node: Mapping[int, float] | None,
+    prototype_id_by_node: Mapping[int, int],
 ) -> tuple[int, ...]:
     """Choose a deterministic repairable subset without allocating it first."""
 
@@ -234,11 +280,49 @@ def _bounded_residual_node_ids(
     unknown = set(priorities) - set(node_ids)
     if unknown:
         raise ValueError(f"residual priorities reference unknown source nodes: {sorted(unknown)}")
-    ranked = (
-        tuple(node_ids)
-        if config.selection_policy == "source_order"
-        else tuple(sorted(node_ids, key=lambda node_id: (-priorities.get(node_id, 0.0), node_id)))
-    )
+    if set(prototype_id_by_node) != set(node_ids):
+        raise ValueError("residual prototype IDs must cover every source node exactly once")
+    if config.selection_policy == "source_order":
+        ranked = tuple(node_ids)
+    elif config.selection_policy == "risk_weighted_reconstruction_error":
+        ranked = tuple(
+            sorted(node_ids, key=lambda node_id: (-priorities.get(node_id, 0.0), node_id))
+        )
+    else:
+        # A globally sorted residual cap can spend every slot on a small
+        # number of difficult clusters.  Decode-time repair can then observe a
+        # risky prototype but have no original member available to restore.
+        # Allocate one member per highest-priority prototype before taking a
+        # second member from any cluster.  This is deterministic, label-free,
+        # and uses the same reconstruction/value priority as the global path.
+        grouped: dict[int, list[int]] = {}
+        for node_id in node_ids:
+            grouped.setdefault(int(prototype_id_by_node[node_id]), []).append(node_id)
+        ordered_groups = tuple(
+            sorted(
+                grouped,
+                key=lambda prototype_id: (
+                    -max(priorities.get(node_id, 0.0) for node_id in grouped[prototype_id]),
+                    prototype_id,
+                ),
+            )
+        )
+        members = {
+            prototype_id: tuple(
+                sorted(
+                    grouped[prototype_id],
+                    key=lambda node_id: (-priorities.get(node_id, 0.0), node_id),
+                )
+            )
+            for prototype_id in ordered_groups
+        }
+        largest_group = max((len(group) for group in members.values()), default=0)
+        ranked = tuple(
+            members[prototype_id][member_rank]
+            for member_rank in range(largest_group)
+            for prototype_id in ordered_groups
+            if member_rank < len(members[prototype_id])
+        )
     maximum_blocks = len(ranked) if config.max_source_blocks is None else config.max_source_blocks
     maximum_bytes = float("inf") if config.max_bytes is None else config.max_bytes
     selected: set[int] = set()
@@ -246,8 +330,7 @@ def _bounded_residual_node_ids(
     for node_id in ranked:
         if len(selected) >= maximum_blocks:
             break
-        key, value = payloads[node_id]
-        cost = _encoded_payload_bytes(key, value, config.storage_dtype)
+        cost = encoded_bytes_by_node[node_id]
         if consumed + cost > maximum_bytes:
             continue
         selected.add(node_id)
@@ -284,36 +367,53 @@ def build_residual_storage(
         raise ValueError("residual node_order must contain every assigned source node exactly once")
     if any(node_id < 0 or node_id >= len(full_state.blocks) for node_id in node_ids):
         raise ValueError("residual assignment references a non-source graph node")
-    blocks = tuple(full_state.blocks[node_id] for node_id in node_ids)
-    if gathered is None:
-        gathered = full_state.gather_exact_blocks(blocks)
-    elif gathered.blocks != blocks:
+    all_blocks = tuple(full_state.blocks[node_id] for node_id in node_ids)
+    if gathered is not None and gathered.blocks != all_blocks:
         raise ValueError(
             "pre-gathered residual payloads must align exactly with residual node_order"
         )
-    payload_by_node = {
-        node_id: (key, value)
-        for node_id, key, value in zip(
-            node_ids,
-            gathered.key_blocks,
-            gathered.value_blocks,
-            strict=True,
-        )
+    encoded_bytes_by_node = {
+        node_id: _encoded_descriptor_bytes(full_state, node_id, config.storage_dtype)
+        for node_id in node_ids
     }
     node_ids = _bounded_residual_node_ids(
         node_ids,
-        payload_by_node,
+        encoded_bytes_by_node,
         config,
         priority_by_node,
+        assignments,
     )
     if not node_ids:
         return empty_residual_storage()
     blocks = tuple(full_state.blocks[node_id] for node_id in node_ids)
-    gathered = ExactTier(
-        blocks,
-        tuple(payload_by_node[node_id][0] for node_id in node_ids),
-        tuple(payload_by_node[node_id][1] for node_id in node_ids),
-    )
+    if gathered is None:
+        gathered = full_state.gather_exact_blocks(blocks)
+    else:
+        payload_by_node = {
+            node_id: (key, value)
+            for node_id, key, value in zip(
+                tuple(int(node_id) for node_id in node_order or sorted(assignments)),
+                gathered.key_blocks,
+                gathered.value_blocks,
+                strict=True,
+            )
+        }
+        gathered = ExactTier(
+            blocks,
+            tuple(payload_by_node[node_id][0] for node_id in node_ids),
+            tuple(payload_by_node[node_id][1] for node_id in node_ids),
+        )
+    for node_id, key, value in zip(
+        node_ids,
+        gathered.key_blocks,
+        gathered.value_blocks,
+        strict=True,
+    ):
+        measured = _encoded_payload_bytes(key, value, config.storage_dtype)
+        if measured != encoded_bytes_by_node[node_id]:
+            raise RuntimeError(
+                "descriptor-derived residual bytes disagree with gathered tensor bytes"
+            )
     batched_lossless = bool(
         config.storage_dtype is ResidualStorageDType.LOSSLESS
         and gathered.key_blocks

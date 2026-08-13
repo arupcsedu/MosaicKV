@@ -334,6 +334,7 @@ def pool_block_descriptors(
     hidden_sequence_dimension: int = -2,
     metadata_by_node: Mapping[int, BlockEvidenceMetadata] | None = None,
     host_transfer_mode: str = "deferred_layer",
+    eligible_node_ids: Sequence[int] | None = None,
 ) -> tuple[PooledBlockDescriptor, ...]:
     """Pool K, V, and optional hidden states for every cache block.
 
@@ -362,6 +363,19 @@ def pool_block_descriptors(
     unknown = sorted(set(overrides) - valid_node_ids)
     if unknown:
         raise ValueError(f"metadata overrides reference unknown graph node(s): {unknown}")
+    eligible = (
+        None
+        if eligible_node_ids is None
+        else frozenset(int(node_id) for node_id in eligible_node_ids)
+    )
+    if eligible is not None:
+        unknown_eligible = eligible - valid_node_ids
+        if unknown_eligible:
+            raise ValueError(
+                f"descriptor shortlist references unknown graph node(s): {sorted(unknown_eligible)}"
+            )
+        if not eligible:
+            raise ValueError("descriptor shortlist cannot be empty")
 
     blocks_by_layer: dict[int, list[tuple[int, Any]]] = defaultdict(list)
     for node_id, block in enumerate(full_state.blocks):
@@ -418,6 +432,8 @@ def pool_block_descriptors(
         layer_blocks = blocks_by_layer[layer_index]
         width_groups: dict[int, list[tuple[int, Any]]] = defaultdict(list)
         for node_id, block in layer_blocks:
+            if eligible is not None and node_id not in eligible:
+                continue
             width_groups[len(block.physical_cache_indices)].append((node_id, block))
         pooled_keys: dict[int, np.ndarray[Any, np.dtype[np.float32]]] = {}
         pooled_values: dict[int, np.ndarray[Any, np.dtype[np.float32]]] = {}
@@ -499,18 +515,28 @@ def pool_block_descriptors(
                     offset += 1
             if offset != len(host):
                 raise RuntimeError("deferred K/V descriptors lost block alignment")
+        zero_key = np.zeros(int(key_tokens.shape[-1]), dtype=np.float32)
+        zero_value = np.zeros(int(value_tokens.shape[-1]), dtype=np.float32)
+        zero_key.setflags(write=False)
+        zero_value.setflags(write=False)
+        zero_semantic = np.zeros(zero_key.size + zero_value.size, dtype=np.float32)
+        zero_semantic.setflags(write=False)
         for node_id, block in layer_blocks:
-            key = pooled_keys[node_id]
-            value = pooled_values[node_id]
+            pooled = eligible is None or node_id in eligible
+            key = pooled_keys[node_id] if pooled else zero_key
+            value = pooled_values[node_id] if pooled else zero_value
             pooled_hidden = None
-            if hidden_tokens is not None:
+            if hidden_tokens is not None and pooled:
                 pooled_hidden = hidden_by_positions[block.physical_cache_indices]
             semantic = semantic_by_node.get(node_id)
             if semantic is None:
-                semantic_parts = [_unit(key), _unit(value)]
-                if pooled_hidden is not None:
-                    semantic_parts.append(_unit(pooled_hidden))
-                semantic = _unit(np.concatenate(semantic_parts).astype(np.float32, copy=False))
+                if not pooled:
+                    semantic = zero_semantic
+                else:
+                    semantic_parts = [_unit(key), _unit(value)]
+                    if pooled_hidden is not None:
+                        semantic_parts.append(_unit(pooled_hidden))
+                    semantic = _unit(np.concatenate(semantic_parts).astype(np.float32, copy=False))
             override = overrides.get(node_id)
             evidence = (
                 BlockEvidenceMetadata.from_block(block)
@@ -602,9 +628,7 @@ def pool_prompt_attention_coactivation(
             query_heads_per_kv = query_heads // layer.kv_heads
             by_head_width: dict[tuple[int, int], list[tuple[int, Any]]] = defaultdict(list)
             for node_id, block in enumerate(full_state.blocks):
-                if block.layer == layer_index and (
-                    eligible is None or node_id in eligible
-                ):
+                if block.layer == layer_index and (eligible is None or node_id in eligible):
                     by_head_width[(block.kv_head, block.position_count)].append((node_id, block))
             deferred_batches: list[Any] = []
             deferred_node_ids: list[int] = []
@@ -654,9 +678,7 @@ def pool_prompt_attention_coactivation(
             )
         query_heads_per_kv = query_heads // layer.kv_heads
         for node_id, block in enumerate(full_state.blocks):
-            if block.layer != layer_index or (
-                eligible is not None and node_id not in eligible
-            ):
+            if block.layer != layer_index or (eligible is not None and node_id not in eligible):
                 continue
             query_start = block.kv_head * query_heads_per_kv
             query_end = query_start + query_heads_per_kv

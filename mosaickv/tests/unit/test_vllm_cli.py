@@ -39,6 +39,8 @@ def test_native_flag_fails_closed_before_cache_or_weight_loading(capsys: object)
             "schema-v1",
             "--task",
             "synthetic_smoke",
+            "--attention-backend",
+            "sdpa",
             "--method",
             "mosaickv_exact",
             "--retention-ratio",

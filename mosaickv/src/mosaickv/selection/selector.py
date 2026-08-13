@@ -178,6 +178,8 @@ def lazy_greedy_select(
         node_ids: Iterable[int],
         reason: SelectionReason,
         label: str,
+        *,
+        allow_partial: bool = False,
     ) -> None:
         nonlocal spent
         for node_id in node_ids:
@@ -187,7 +189,7 @@ def lazy_greedy_select(
             identity = (block.layer, block.kv_head)
             limit = None if position_limits is None else position_limits.get(identity)
             cost = costs[node_id]
-            if not is_position_representable(node_id):
+            if not allow_partial and not is_position_representable(node_id):
                 raise InfeasibleSelectionBudgetError(
                     f"required {label} {node_id} is not representable in the dense cache"
                 )
@@ -225,7 +227,95 @@ def lazy_greedy_select(
         SelectionReason.EVIDENCE_PRESERVATION,
         "evidence-preservation block",
     )
-    select_required_nodes(required, SelectionReason.PROTOTYPE_ANCHOR, "prototype anchor")
+    # A modality boundary may leave a short source block. Prototype planning
+    # prefers aligned anchors, but an unavoidable partial anchor remains a
+    # valid exact payload. A deterministic residue-completion pass below adds
+    # complementary boundary blocks before the ordinary fixed-block greedy
+    # sweep, preserving an exactly filled dense head layout.
+    select_required_nodes(
+        required,
+        SelectionReason.PROTOTYPE_ANCHOR,
+        "prototype anchor",
+        allow_partial=True,
+    )
+
+    if position_fill_quantum is not None:
+        if position_limits is None:  # pragma: no cover - validated above
+            raise ValueError("dense residue completion requires position limits")
+        nodes_by_identity: defaultdict[tuple[int, int], list[int]] = defaultdict(list)
+        for node in graph.nodes:
+            nodes_by_identity[(node.block.layer, node.block.kv_head)].append(node.node_id)
+        for identity in sorted(position_limits):
+            limit = position_limits[identity]
+            residue = (limit - selected_positions[identity]) % position_fill_quantum
+            if residue == 0:
+                continue
+            remaining_positions = limit - selected_positions[identity]
+            remaining_budget = budget.value - spent
+            # residue -> (positions, budget cost, negative static gain, IDs).
+            # The smallest completing boundary footprint leaves the most room
+            # for fixed blocks; utility and node IDs make the choice stable.
+            best: dict[int, tuple[int, int, float, tuple[int, ...]]] = {
+                0: (0, 0, 0.0, ())
+            }
+            for node_id in sorted(nodes_by_identity.get(identity, ())):
+                if node_id in selected:
+                    continue
+                block = graph.nodes[node_id].block
+                local_residue = block.position_count % position_fill_quantum
+                if local_residue == 0:
+                    continue
+                cost = costs[node_id]
+                static_gain = incremental.marginal_gain(node_id)
+                updates = dict(best)
+                for current_residue, state in best.items():
+                    positions, current_cost, negative_gain, identifiers = state
+                    candidate_positions = positions + block.position_count
+                    candidate_cost = current_cost + cost
+                    if (
+                        candidate_positions > remaining_positions
+                        or candidate_cost > remaining_budget
+                    ):
+                        continue
+                    candidate = (
+                        candidate_positions,
+                        candidate_cost,
+                        negative_gain - static_gain,
+                        (*identifiers, node_id),
+                    )
+                    candidate_residue = (
+                        current_residue + local_residue
+                    ) % position_fill_quantum
+                    previous = updates.get(candidate_residue)
+                    if previous is None or candidate < previous:
+                        updates[candidate_residue] = candidate
+                best = updates
+            completion = best.get(residue)
+            if completion is None or not completion[3]:
+                raise InfeasibleSelectionBudgetError(
+                    "required dense-cache fragments cannot be completed on the fixed-block "
+                    f"lattice: identity={identity}, selected_positions="
+                    f"{selected_positions[identity]}, limit={limit}, "
+                    f"quantum={position_fill_quantum}"
+                )
+            for node_id in completion[3]:
+                block = graph.nodes[node_id].block
+                cost = costs[node_id]
+                gain = incremental.select(node_id)
+                rank = len(selection_order)
+                selected.add(node_id)
+                selection_order.append(node_id)
+                spent += cost
+                selected_positions[identity] += block.position_count
+                decisions[node_id] = SelectionDecision(
+                    node_id=node_id,
+                    selected=True,
+                    selection_rank=rank,
+                    marginal_gain=gain,
+                    marginal_gain_per_cost=gain / cost,
+                    cost=cost,
+                    reason=SelectionReason.DENSE_CACHE_FILL,
+                )
 
     if position_limits is not None and objective.config.minimum_stratum_fraction > 0:
         groups: defaultdict[tuple[int, int], list[int]] = defaultdict(list)

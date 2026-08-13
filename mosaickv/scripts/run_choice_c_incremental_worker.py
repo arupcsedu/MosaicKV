@@ -20,6 +20,7 @@ from mosaickv.adapters.huggingface import load_hf_adapter
 from mosaickv.config import FidelityDiagnosticsConfig
 from mosaickv.hf_cli import _model_kwargs
 from mosaickv.measurements.telemetry import capture_gpu_environment
+from mosaickv.types import Precision
 
 MODES = (
     "prompt_topk_rr20",
@@ -37,6 +38,7 @@ def _optimized_common(config: Any) -> Any:
 
     return replace(
         config,
+        model=replace(config.model, precision=Precision.FP16),
         diagnostics=FidelityDiagnosticsConfig(),
         forecasting=replace(config.forecasting, centroid_execution_mode="batched_layer"),
         utility=replace(config.utility, execution_mode="vectorized_edges"),
@@ -199,6 +201,10 @@ def main() -> int:
         "rank": args.rank,
         "mode_order": list(order),
         "sample_ids": list(sample_ids),
+        "precision_policy": {
+            "configured": "fp16",
+            "reason": "V100 does not support BF16; every compared method uses FP16",
+        },
         "before_model_load": asdict(capture_gpu_environment(torch)),
         "slurm": {
             "job_id": os.environ.get("SLURM_JOB_ID", "not_used"),

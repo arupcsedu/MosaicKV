@@ -36,3 +36,29 @@ def test_repair_calibration_rejects_evaluation_leakage() -> None:
             ),
             evaluation_sample_ids=("same",),
         )
+
+
+def test_repair_calibration_can_select_draft_kl_when_margin_is_uninformative() -> None:
+    observations = tuple(
+        RepairCalibrationObservation(
+            sample_id=f"cal-{index // 5}",
+            step=index,
+            normalized_prototype_risk=0.8,
+            next_token_probability_margin=0.5,
+            oracle_beneficial=index in {2, 7},
+            draft_kl_divergence=(0.9 if index in {2, 7} else 0.01),
+        )
+        for index in range(20)
+    )
+
+    profile = calibrate_decision_repair(
+        observations,
+        evaluation_sample_ids=("eval-1",),
+        target_trigger_rate=0.1,
+        minimum_precision=1.0,
+    )
+
+    assert profile.enabled
+    assert profile.draft_kl_threshold is not None
+    assert profile.predicted_precision == pytest.approx(1.0)
+    assert profile.predicted_recall == pytest.approx(1.0)

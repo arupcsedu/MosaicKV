@@ -404,6 +404,30 @@ def test_decision_aware_repair_only_triggers_for_low_margin_risky_decisions() ->
     assert confident.event.signals.next_token_probability_margin > 0.9
 
 
+def test_decision_aware_repair_can_use_fullkv_draft_divergence() -> None:
+    state = _fixture()
+    result = repair_decode_step(
+        state,
+        RepairConfig(
+            policy=RepairPolicy.DECISION_AWARE,
+            prototype_risk_threshold=0.1,
+            decision_margin_threshold=0.0,
+            draft_kl_threshold=0.1,
+            max_blocks_per_step=1,
+        ),
+        step_index=0,
+        provisional_logits=np.asarray([4.0, 0.0], dtype=np.float32),
+        prototype_attention_mass={0: 0.9},
+        draft_distribution=np.asarray([0.1, 0.9], dtype=np.float32),
+        re_decode=lambda _state: np.asarray([0.0, 4.0], dtype=np.float32),
+    )
+
+    assert result.event.triggered
+    assert result.event.trigger_reason is RepairTriggerReason.DRAFT_DIVERGENCE
+    assert result.event.signals.draft_kl_divergence is not None
+    assert result.event.signals.draft_kl_divergence > 0.1
+
+
 @pytest.mark.parametrize(
     "budget_unit",
     (BudgetUnit.BLOCKS, BudgetUnit.RETAINED_SLOTS, BudgetUnit.BYTES),
