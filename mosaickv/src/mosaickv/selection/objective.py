@@ -5,6 +5,8 @@ from __future__ import annotations
 import math
 from collections.abc import Iterable
 
+import numpy as np
+
 from mosaickv.config import SelectionConfig
 from mosaickv.graph import SparseEvidenceGraph
 from mosaickv.selection.types import (
@@ -39,6 +41,27 @@ class BudgetedObjective:
         self.config = config
         self._facility: tuple[dict[int, float], ...] = self._build_facility()
         self._modalities = frozenset(node.block.modality for node in graph.nodes)
+        offsets = [0]
+        targets: list[int] = []
+        weights: list[float] = []
+        for row in self._facility:
+            for target, weight in sorted(row.items()):
+                targets.append(target)
+                weights.append(weight)
+            offsets.append(len(targets))
+        self._facility_offsets = np.asarray(offsets, dtype=np.int64)
+        self._facility_targets = np.asarray(targets, dtype=np.int64)
+        self._facility_weights = np.asarray(weights, dtype=np.float64)
+        self._local_utilities = np.asarray(
+            tuple(block.local_utility for block in utilities.blocks),
+            dtype=np.float64,
+        )
+        ordered_modalities = tuple(sorted(self._modalities, key=str))
+        modality_ids = {modality: index for index, modality in enumerate(ordered_modalities)}
+        self._node_modality_ids = np.asarray(
+            tuple(modality_ids[node.block.modality] for node in graph.nodes),
+            dtype=np.int64,
+        )
 
     def _build_facility(self) -> tuple[dict[int, float], ...]:
         facilities: list[dict[int, float]] = [{node.node_id: 1.0} for node in self.graph.nodes]
@@ -143,7 +166,7 @@ class IncrementalObjectiveState:
 
     def __init__(self, objective: BudgetedObjective) -> None:
         self._objective = objective
-        self._covered = [0.0] * len(objective.graph.nodes)
+        self._covered = np.zeros(len(objective.graph.nodes), dtype=np.float64)
         self._selected: set[int] = set()
         self._selected_modalities: set[object] = set()
 
@@ -168,6 +191,43 @@ class IncrementalObjectiveState:
             - objective.config.lambda_m * modality_delta
         )
 
+    def marginal_gains(self, candidates: Iterable[int]) -> tuple[float, ...]:
+        """Return exact gains for many candidates from one sparse array pass."""
+
+        objective = self._objective
+        identifiers = np.asarray(tuple(int(value) for value in candidates), dtype=np.int64)
+        if identifiers.size == 0:
+            return ()
+        if bool(np.any(identifiers < 0)) or bool(
+            np.any(identifiers >= len(objective.graph.nodes))
+        ):
+            raise IndexError("objective candidate does not exist")
+        if any(int(candidate) in self._selected for candidate in identifiers):
+            raise ValueError("candidate is already selected")
+        edge_delta = np.maximum(
+            self._covered[objective._facility_targets],
+            objective._facility_weights,
+        ) - self._covered[objective._facility_targets]
+        # Every row contains at least its unit-weight self edge.
+        facility_delta = np.add.reduceat(
+            edge_delta,
+            objective._facility_offsets[:-1],
+        ) / len(self._covered)
+        modality_missing = np.asarray(
+            tuple(
+                objective.graph.nodes[int(candidate)].block.modality
+                not in self._selected_modalities
+                for candidate in identifiers
+            ),
+            dtype=np.float64,
+        ) / len(objective._modalities)
+        gains = (
+            objective._local_utilities[identifiers]
+            - objective.config.lambda_g * facility_delta[identifiers]
+            - objective.config.lambda_m * modality_missing
+        )
+        return tuple(float(value) for value in gains)
+
     def select(self, candidate: int) -> float:
         """Add one node, update sparse coverage, and return its exact gain."""
 
@@ -178,6 +238,45 @@ class IncrementalObjectiveState:
         self._selected_modalities.add(objective.graph.nodes[candidate].block.modality)
         self._selected.add(candidate)
         return gain
+
+    def reserve_many(self, candidates: Iterable[int]) -> tuple[float, ...]:
+        """Atomically add hard-reserved nodes and return snapshot marginals.
+
+        Hard reservations are constraints, not greedy choices.  Their order
+        must therefore not change which nodes survive.  This operation records
+        every node's exact marginal gain against the same pre-reservation
+        snapshot, then applies the set-union coverage update in one vectorized
+        transaction.  The resulting objective state is exactly the same as
+        selecting the nodes sequentially because facility and modality
+        coverage depend only on the selected set.
+        """
+
+        objective = self._objective
+        identifiers = tuple(int(value) for value in candidates)
+        if not identifiers:
+            return ()
+        if len(set(identifiers)) != len(identifiers):
+            raise ValueError("reserved objective candidates must be unique")
+        gains = self.marginal_gains(identifiers)
+        edge_segments = tuple(
+            slice(
+                int(objective._facility_offsets[candidate]),
+                int(objective._facility_offsets[candidate + 1]),
+            )
+            for candidate in identifiers
+        )
+        targets = np.concatenate(
+            tuple(objective._facility_targets[segment] for segment in edge_segments)
+        )
+        weights = np.concatenate(
+            tuple(objective._facility_weights[segment] for segment in edge_segments)
+        )
+        np.maximum.at(self._covered, targets, weights)
+        self._selected.update(identifiers)
+        self._selected_modalities.update(
+            objective.graph.nodes[candidate].block.modality for candidate in identifiers
+        )
+        return gains
 
 
 def audit_objective_properties(

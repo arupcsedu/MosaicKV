@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import cProfile
 import gc
 import json
 import os
@@ -179,16 +180,32 @@ def main() -> int:
             )
             _settle(adapter)
         telemetry["before_measurement"] = asdict(capture_gpu_environment(torch))
-        for mode in modes:
-            _run_online(
-                configs[mode],
-                adapter,
-                run_id=f"v38-measured-{mode}-rank{args.rank}-{_sha(spec_path)[:10]}",
-                output_root=output_root,
-                ledger_path=ledger_path,
-                ledger_sha=ledger_sha,
-                expected_sample_ids=sample_ids,
+        profile_mode = os.environ.get("MOSAICKV_CPROFILE_MODE")
+        if profile_mode is not None and profile_mode not in modes:
+            raise RuntimeError(
+                f"MOSAICKV_CPROFILE_MODE={profile_mode!r} is not assigned to rank {args.rank}"
             )
+        for mode in modes:
+            run_kwargs = {
+                "run_id": f"v38-measured-{mode}-rank{args.rank}-{_sha(spec_path)[:10]}",
+                "output_root": output_root,
+                "ledger_path": ledger_path,
+                "ledger_sha": ledger_sha,
+                "expected_sample_ids": sample_ids,
+            }
+            if mode == profile_mode:
+                profiler = cProfile.Profile()
+                profiler.runcall(_run_online, configs[mode], adapter, **run_kwargs)
+                profile_path = output_root / "profiles" / f"{mode}-rank{args.rank}.prof"
+                profile_path.parent.mkdir(parents=True, exist_ok=True)
+                profiler.dump_stats(profile_path)
+                telemetry["cprofile"] = {
+                    "mode": mode,
+                    "path": str(profile_path),
+                    "scope": "measured_online_run",
+                }
+            else:
+                _run_online(configs[mode], adapter, **run_kwargs)
             _settle(adapter)
         telemetry["status"] = "completed"
     except Exception as error:

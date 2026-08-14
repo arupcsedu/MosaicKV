@@ -131,8 +131,13 @@ def refresh_prototype_after_promotions(
 
     layer = full_state.layers[record.layer]
     key_state = str(getattr(full_state.cached_key_state, "value", full_state.cached_key_state))
+    exact_medoid_key = record.pooling_mode == "exact_medoid_key_forecast_value"
     old_key_mean = _fp32(prototype_key)
-    if key_state == "post_rope":
+    if exact_medoid_key and key_transform is not None:
+        raise PrototypeRefreshError(
+            "exact-medoid prototype refresh cannot apply a rotary averaging transform"
+        )
+    if key_state == "post_rope" and not exact_medoid_key:
         if key_transform is None:
             raise PrototypeRefreshError(
                 "post-RoPE partial prototype refresh requires the audited key transform"
@@ -173,7 +178,16 @@ def refresh_prototype_after_promotions(
     old_value_mean = _fp32(prototype_value)
     key_members = tuple(removed_keys)
     value_members = tuple(removed_values)
-    new_key_mean = _subtract_members(old_key_mean, key_members) / remaining_weight
+    # Exact-medoid mode deliberately keeps one source key unchanged.  It is
+    # phase-safe even when the medoid's source block is promoted: the exact
+    # tier and prototype may then share that semantic key, but no incompatible
+    # RoPE phases are ever averaged.  Values remain a faithful weighted mean
+    # of only the unpromoted members.
+    new_key_mean = (
+        old_key_mean
+        if exact_medoid_key
+        else _subtract_members(old_key_mean, key_members) / remaining_weight
+    )
     new_value_mean = _subtract_members(old_value_mean, value_members) / remaining_weight
     normalized_members = tuple(
         PrototypeMember(
@@ -192,15 +206,16 @@ def refresh_prototype_after_promotions(
     # Removing members may change the statistical medoid, but moving an active
     # cache entry would invalidate the packed layout and the next decode mask.
     refreshed_anchor_position = record.anchor_logical_position
-    refreshed_key = (
-        key_transform.apply_anchor_phase(
+    if exact_medoid_key:
+        refreshed_key = prototype_key
+    elif key_transform is not None:
+        refreshed_key = key_transform.apply_anchor_phase(
             new_key_mean,
             refreshed_anchor_position,
             prototype_key,
         )
-        if key_transform is not None
-        else _cast_like(new_key_mean, prototype_key)
-    )
+    else:
+        refreshed_key = _cast_like(new_key_mean, prototype_key)
     refreshed_value = _cast_like(new_value_mean, prototype_value)
 
     positions = tuple(position for block in blocks for position in block.original_logical_positions)
@@ -209,12 +224,16 @@ def refresh_prototype_after_promotions(
     prototype_bytes = tensor_storage_bytes(refreshed_key) + tensor_storage_bytes(refreshed_value)
     diagnostics = PrototypeDiagnostics(
         cluster_size=len(normalized_members),
-        key_dispersion=_remaining_dispersion(
-            record.diagnostics.key_dispersion,
-            old_key_mean,
-            new_key_mean,
-            key_members,
-            remaining_weight,
+        key_dispersion=(
+            record.diagnostics.key_dispersion
+            if exact_medoid_key
+            else _remaining_dispersion(
+                record.diagnostics.key_dispersion,
+                old_key_mean,
+                new_key_mean,
+                key_members,
+                remaining_weight,
+            )
         ),
         value_dispersion=_remaining_dispersion(
             record.diagnostics.value_dispersion,
@@ -247,7 +266,14 @@ def refresh_prototype_after_promotions(
             pooling_mode=record.pooling_mode,
             anchor_position_strategy=record.anchor_position_strategy,
             eviction_utility=record.eviction_utility,
-            utility_provenance=f"{record.utility_provenance};partial_residual_downdate_v1",
+            utility_provenance=(
+                f"{record.utility_provenance};"
+                + (
+                    "exact_medoid_key_value_only_partial_downdate_v1"
+                    if exact_medoid_key
+                    else "partial_residual_downdate_v1"
+                )
+            ),
         ),
         refreshed_key,
         refreshed_value,

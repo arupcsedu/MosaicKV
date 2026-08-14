@@ -50,7 +50,7 @@ def select_all_exact(
     for rank, node_id in enumerate(order):
         gain = incremental.select(node_id)
         cost = costs[node_id]
-        decisions_by_id[node_id] = SelectionDecision(
+        decisions_by_id[node_id] = SelectionDecision._from_validated(
             node_id=node_id,
             selected=True,
             selection_rank=rank,
@@ -100,6 +100,7 @@ def lazy_greedy_select(
     required_node_ids: Iterable[int] = (),
     prompt_anchor_node_ids: Iterable[int] = (),
     evidence_node_ids: Iterable[int] = (),
+    optimization_node_ids: Iterable[int] | None = None,
 ) -> SelectionResult:
     """Select mandatory blocks, then maximize cached marginal-gain density.
 
@@ -117,6 +118,17 @@ def lazy_greedy_select(
         if position_fill_quantum < 1:
             raise ValueError("position_fill_quantum must be positive")
     graph = objective.graph
+    optimization_nodes = (
+        frozenset(range(len(graph.nodes)))
+        if optimization_node_ids is None
+        else frozenset(int(node_id) for node_id in optimization_node_ids)
+    )
+    unknown_optimization_nodes = optimization_nodes - set(range(len(graph.nodes)))
+    if unknown_optimization_nodes:
+        raise ValueError(
+            "selector optimization IDs reference nodes outside the evidence graph: "
+            f"{sorted(unknown_optimization_nodes)}"
+        )
     required = tuple(sorted(set(int(node_id) for node_id in required_node_ids)))
     prompt_anchors = tuple(sorted(set(int(node_id) for node_id in prompt_anchor_node_ids)))
     evidence_nodes = tuple(sorted(set(int(node_id) for node_id in evidence_node_ids)))
@@ -164,7 +176,7 @@ def lazy_greedy_select(
         selection_order.append(node_id)
         spent += cost
         selected_positions[identity] += block.position_count
-        decisions[node_id] = SelectionDecision(
+        decisions[node_id] = SelectionDecision._from_validated(
             node_id=node_id,
             selected=True,
             selection_rank=rank,
@@ -180,8 +192,10 @@ def lazy_greedy_select(
         label: str,
         *,
         allow_partial: bool = False,
+        atomic: bool = False,
     ) -> None:
         nonlocal spent
+        pending: list[tuple[int, int]] = []
         for node_id in node_ids:
             if node_id in selected:
                 continue
@@ -202,16 +216,44 @@ def lazy_greedy_select(
                     f"required {label}s exceed the dense cache capacity: "
                     f"layer={block.layer}, kv_head={block.kv_head}, limit={limit}"
                 )
+            if atomic:
+                pending.append((node_id, cost))
+                selected.add(node_id)
+                selection_order.append(node_id)
+                spent += cost
+                selected_positions[identity] += block.position_count
+                continue
             gain = incremental.select(node_id)
             rank = len(selection_order)
             selected.add(node_id)
             selection_order.append(node_id)
             spent += cost
             selected_positions[identity] += block.position_count
-            decisions[node_id] = SelectionDecision(
+            decisions[node_id] = SelectionDecision._from_validated(
                 node_id=node_id,
                 selected=True,
                 selection_rank=rank,
+                marginal_gain=gain,
+                marginal_gain_per_cost=gain / cost,
+                cost=cost,
+                reason=reason,
+            )
+        if not pending:
+            return
+        # Prompt anchors form one simultaneous quality constraint.  Apply
+        # their set-union coverage update atomically instead of replaying tens
+        # of thousands of sparse Python updates.  Deterministic ranks retain
+        # the sorted input order; recorded gains share the documented
+        # pre-reservation objective snapshot.
+        gains = incremental.reserve_many(node_id for node_id, _cost in pending)
+        first_rank = len(selection_order) - len(pending)
+        for offset, ((node_id, cost), gain) in enumerate(
+            zip(pending, gains, strict=True)
+        ):
+            decisions[node_id] = SelectionDecision._from_validated(
+                node_id=node_id,
+                selected=True,
+                selection_rank=first_rank + offset,
                 marginal_gain=gain,
                 marginal_gain_per_cost=gain / cost,
                 cost=cost,
@@ -221,7 +263,17 @@ def lazy_greedy_select(
     # Prompt anchors are a quality guard, evidence nodes preserve fine local
     # structure, and prototype anchors are representation constraints. All are
     # auditable hard reservations inside the same active budget.
-    select_required_nodes(prompt_anchors, SelectionReason.PROMPT_ANCHOR, "prompt anchor")
+    # A modality boundary can produce a short block that is nevertheless the
+    # highest-attention Prompt Top-K choice. Preserve it exactly and let the
+    # deterministic residue-completion pass below fill the remaining dense
+    # head capacity, just as it already does for partial prototype anchors.
+    select_required_nodes(
+        prompt_anchors,
+        SelectionReason.PROMPT_ANCHOR,
+        "prompt anchor",
+        allow_partial=True,
+        atomic=True,
+    )
     select_required_nodes(
         evidence_nodes,
         SelectionReason.EVIDENCE_PRESERVATION,
@@ -260,6 +312,8 @@ def lazy_greedy_select(
             }
             for node_id in sorted(nodes_by_identity.get(identity, ())):
                 if node_id in selected:
+                    continue
+                if node_id not in optimization_nodes:
                     continue
                 block = graph.nodes[node_id].block
                 local_residue = block.position_count % position_fill_quantum
@@ -307,7 +361,7 @@ def lazy_greedy_select(
                 selection_order.append(node_id)
                 spent += cost
                 selected_positions[identity] += block.position_count
-                decisions[node_id] = SelectionDecision(
+                decisions[node_id] = SelectionDecision._from_validated(
                     node_id=node_id,
                     selected=True,
                     selection_rank=rank,
@@ -328,6 +382,8 @@ def lazy_greedy_select(
                 candidates: list[tuple[float, float, int, int, float]] = []
                 for node_id in groups.get(identity, ()):
                     if node_id in selected:
+                        continue
+                    if node_id not in optimization_nodes:
                         continue
                     if not is_position_representable(node_id):
                         constrained.add(node_id)
@@ -355,7 +411,7 @@ def lazy_greedy_select(
                 selection_order.append(node_id)
                 spent += cost
                 selected_positions[identity] += block.position_count
-                decisions[node_id] = SelectionDecision(
+                decisions[node_id] = SelectionDecision._from_validated(
                     node_id=node_id,
                     selected=True,
                     selection_rank=rank,
@@ -365,54 +421,153 @@ def lazy_greedy_select(
                     reason=SelectionReason.STRATUM_RESERVE,
                 )
 
-    heap: list[tuple[float, float, int, int, int, float]] = []
-    state_version = len(selection_order)
-    for node in graph.nodes:
-        node_id = node.node_id
-        if node_id in selected:
-            continue
-        if not is_position_representable(node_id):
-            constrained.add(node_id)
-            continue
-        gain = incremental.marginal_gain(node_id)
-        heapq.heappush(heap, _entry(node_id, gain, costs[node_id], state_version))
-
     heap_pops = 0
     marginal_recomputations = 0
-    while heap and spent < budget.value:
-        _negative_density, _negative_gain, cost, node_id, cached_version, gain = heapq.heappop(heap)
-        heap_pops += 1
-        block = graph.nodes[node_id].block
-        identity = (block.layer, block.kv_head)
-        limit = None if position_limits is None else position_limits.get(identity)
-        if limit is not None and selected_positions[identity] + block.position_count > limit:
-            constrained.add(node_id)
-            continue
-        if cost > budget.value - spent:
-            continue
-        if cached_version != state_version:
+    if objective.config.algorithm == "lazy_greedy":
+        heap: list[tuple[float, float, int, int, int, float]] = []
+        state_version = len(selection_order)
+        for node in graph.nodes:
+            node_id = node.node_id
+            if node_id in selected:
+                continue
+            if node_id not in optimization_nodes:
+                continue
+            if not is_position_representable(node_id):
+                constrained.add(node_id)
+                continue
             gain = incremental.marginal_gain(node_id)
-            marginal_recomputations += 1
-            heapq.heappush(heap, _entry(node_id, gain, cost, state_version))
-            continue
-        if objective.config.stop_on_nonpositive_gain and gain <= 0:
-            break
-        gain = incremental.select(node_id)
-        rank = len(selection_order)
-        selected.add(node_id)
-        selection_order.append(node_id)
-        spent += cost
-        selected_positions[identity] += block.position_count
-        decisions[node_id] = SelectionDecision(
-            node_id=node_id,
-            selected=True,
-            selection_rank=rank,
-            marginal_gain=gain,
-            marginal_gain_per_cost=gain / cost,
-            cost=cost,
-            reason=SelectionReason.LAZY_GREEDY,
-        )
-        state_version += 1
+            heapq.heappush(heap, _entry(node_id, gain, costs[node_id], state_version))
+
+        while heap and spent < budget.value:
+            (
+                _negative_density,
+                _negative_gain,
+                cost,
+                node_id,
+                cached_version,
+                gain,
+            ) = heapq.heappop(heap)
+            heap_pops += 1
+            block = graph.nodes[node_id].block
+            identity = (block.layer, block.kv_head)
+            limit = None if position_limits is None else position_limits.get(identity)
+            if limit is not None and selected_positions[identity] + block.position_count > limit:
+                constrained.add(node_id)
+                continue
+            if cost > budget.value - spent:
+                continue
+            if cached_version != state_version:
+                gain = incremental.marginal_gain(node_id)
+                marginal_recomputations += 1
+                heapq.heappush(heap, _entry(node_id, gain, cost, state_version))
+                continue
+            if objective.config.stop_on_nonpositive_gain and gain <= 0:
+                break
+            gain = incremental.select(node_id)
+            rank = len(selection_order)
+            selected.add(node_id)
+            selection_order.append(node_id)
+            spent += cost
+            selected_positions[identity] += block.position_count
+            decisions[node_id] = SelectionDecision._from_validated(
+                node_id=node_id,
+                selected=True,
+                selection_rank=rank,
+                marginal_gain=gain,
+                marginal_gain_per_cost=gain / cost,
+                cost=cost,
+                reason=SelectionReason.LAZY_GREEDY,
+            )
+            state_version += 1
+    else:
+        # Re-rank a bounded number of batches. Each pass computes all sparse
+        # marginal gains against one coverage snapshot, selects a deterministic
+        # budget slice, and then refreshes coverage before the next pass. This
+        # removes the per-selected-node heap invalidation storm while retaining
+        # one or more explicit facility-coverage correction rounds.
+        rounds = objective.config.coverage_correction_rounds + 1
+        for round_index in range(rounds):
+            if spent >= budget.value:
+                break
+            ranked: list[tuple[float, float, int, int]] = []
+            candidate_ids: list[int] = []
+            for node in graph.nodes:
+                node_id = node.node_id
+                if node_id in selected:
+                    continue
+                if node_id not in optimization_nodes:
+                    continue
+                if not is_position_representable(node_id):
+                    constrained.add(node_id)
+                    continue
+                block = node.block
+                identity = (block.layer, block.kv_head)
+                limit = None if position_limits is None else position_limits.get(identity)
+                if limit is not None and (
+                    selected_positions[identity] + block.position_count > limit
+                ):
+                    constrained.add(node_id)
+                    continue
+                cost = costs[node_id]
+                if cost > budget.value - spent:
+                    continue
+                candidate_ids.append(node_id)
+            candidate_gains = incremental.marginal_gains(candidate_ids)
+            for node_id, gain in zip(candidate_ids, candidate_gains, strict=True):
+                cost = costs[node_id]
+                ranked.append((-gain / cost, -gain, cost, node_id))
+            if not ranked:
+                break
+            ranked.sort()
+            remaining_rounds = rounds - round_index
+            remaining_budget = budget.value - spent
+            round_allowance = (
+                remaining_budget
+                if remaining_rounds == 1
+                else max(1, math.ceil(remaining_budget / remaining_rounds))
+            )
+            round_spent = 0
+            made_progress = False
+            for _density, _negative_gain, cost, node_id in ranked:
+                if spent >= budget.value:
+                    break
+                if round_spent and round_spent + cost > round_allowance:
+                    continue
+                block = graph.nodes[node_id].block
+                identity = (block.layer, block.kv_head)
+                limit = None if position_limits is None else position_limits.get(identity)
+                if limit is not None and (
+                    selected_positions[identity] + block.position_count > limit
+                ):
+                    constrained.add(node_id)
+                    continue
+                if cost > budget.value - spent:
+                    continue
+                gain = incremental.marginal_gain(node_id)
+                marginal_recomputations += 1
+                if objective.config.stop_on_nonpositive_gain and gain <= 0:
+                    continue
+                gain = incremental.select(node_id)
+                rank = len(selection_order)
+                selected.add(node_id)
+                selection_order.append(node_id)
+                spent += cost
+                round_spent += cost
+                selected_positions[identity] += block.position_count
+                decisions[node_id] = SelectionDecision._from_validated(
+                    node_id=node_id,
+                    selected=True,
+                    selection_rank=rank,
+                    marginal_gain=gain,
+                    marginal_gain_per_cost=gain / cost,
+                    cost=cost,
+                    reason=SelectionReason.VECTORIZED_COVERAGE,
+                )
+                made_progress = True
+                if round_spent >= round_allowance:
+                    break
+            if not made_progress:
+                break
 
     if fill_position_limits:
         if position_limits is None:
@@ -426,6 +581,8 @@ def lazy_greedy_select(
                 fill_candidates: list[tuple[float, float, int, int, float]] = []
                 for node_id in fill_groups.get(identity, ()):
                     if node_id in selected:
+                        continue
+                    if node_id not in optimization_nodes:
                         continue
                     if not is_position_representable(node_id):
                         constrained.add(node_id)
@@ -448,7 +605,7 @@ def lazy_greedy_select(
                 selection_order.append(node_id)
                 spent += cost
                 selected_positions[identity] += block.position_count
-                decisions[node_id] = SelectionDecision(
+                decisions[node_id] = SelectionDecision._from_validated(
                     node_id=node_id,
                     selected=True,
                     selection_rank=rank,
@@ -468,11 +625,21 @@ def lazy_greedy_select(
             )
 
     remaining = budget.value - spent
+    undecided_ids = tuple(
+        node.node_id for node in graph.nodes if node.node_id not in decisions
+    )
+    final_gains = dict(
+        zip(
+            undecided_ids,
+            incremental.marginal_gains(undecided_ids),
+            strict=True,
+        )
+    )
     for node in graph.nodes:
         node_id = node.node_id
         if node_id in decisions:
             continue
-        gain = incremental.marginal_gain(node_id)
+        gain = final_gains[node_id]
         cost = costs[node_id]
         block = graph.nodes[node_id].block
         identity = (block.layer, block.kv_head)
@@ -487,7 +654,7 @@ def lazy_greedy_select(
             reason = SelectionReason.NONPOSITIVE_MARGINAL_GAIN
         else:
             reason = SelectionReason.NOT_SELECTED_LOWER_GAIN
-        decisions[node_id] = SelectionDecision(
+        decisions[node_id] = SelectionDecision._from_validated(
             node_id=node_id,
             selected=False,
             selection_rank=None,

@@ -1,0 +1,65 @@
+schema_version: 1
+revision: 72
+experiment_id: choice_c_v72_heldout_quality_memory
+classification: exploratory_dirty_tree_preregistered_heldout_quality_memory_validation
+frozen_before_sample_materialization: true
+
+candidate_config: configs/experiments/choice_c_v72_frozen_candidate.yaml
+model_id: llava-hf/llava-1.5-7b-hf
+model_revision: b234b804b114d9e37bb655e11cbbb5f5e971b7a9
+backend: hf_eager_prefill_sdpa_decode
+methods: [prompt_attention_topk, mosaickv_full]
+seed: 17
+output_length: 64
+warmups_per_method: 1
+measured_repetitions_per_method: 3
+
+tasks:
+  - task: docvqa
+    dataset_id: lmms-lab/DocVQA
+    dataset_revision: 539088ef8a8ada01ac8e2e6d4e372586748a265e
+    split: validation
+    ledger: configs/ledgers/choice_c_v72_heldout_docvqa.json
+    selection_seed: 20270814
+    sample_count: 8
+  - task: mmstar
+    dataset_id: Lin-Chen/MMStar
+    dataset_revision: bc98d668301da7b14f648724866e57302778ab27
+    split: test
+    ledger: configs/ledgers/choice_c_v72_heldout_mmstar.json
+    selection_seed: 20270814
+    sample_count: 8
+  - task: chartqa
+    dataset_id: lmms-lab/ChartQA
+    dataset_revision: 9e63b7df1592a1c2158e735cc1725454aef0d6d9
+    split: test
+    ledger: configs/ledgers/choice_c_v72_heldout_chartqa.json
+    selection_seed: 20270814
+    sample_count: 8
+
+primary_gate:
+  comparison: paired_mosaickv_full_vs_prompt_attention_topk
+  accounting_boundary: measured_active_kv_bytes
+  minimum_active_memory_reduction_fraction: 0.30
+  task_score_noninferiority_margin: 0.0
+  require_each_task_to_pass: true
+  require_all_rows_complete: true
+  require_deterministic_answers_across_repetitions: true
+
+latency_report:
+  policy: informational_not_a_rejection_criterion
+  metrics: [compression_time, decode_time, end_to_end_time]
+  statistics: [mean, p50, p95, paired_ratio]
+
+statistics:
+  paired_bootstrap_resamples: 10000
+  paired_bootstrap_seed: 20270814
+
+sample_policy:
+  materialize_after_protocol_freeze: true
+  exclude_every_matching_declared_ledger: true
+  labels_used_for_selection: false
+  outcomes_used_for_selection: false
+  canonical_eligible_only_if_worktree_clean: true
+
+output_root: /scratch/djy8hg/runs/mosaickv/choice-c-v72-heldout-quality-memory-v1

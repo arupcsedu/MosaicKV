@@ -42,10 +42,14 @@ from mosaickv.baselines.prefixkv_parity import (
     prefixkv_control_mismatches,
 )
 from mosaickv.baselines.selectors import (
+    HeadLocalCapacityRecord,
+    HeadLocalPromptSelection,
     InfeasibleBaselineBudgetError,
     build_exact_baseline_plan,
     resolve_baseline_budget,
     select_exact_baseline,
+    select_prompt_attention_topk_ids,
+    select_prompt_attention_topk_ids_by_head,
     value_novelty_scores,
 )
 from mosaickv.baselines.types import (
@@ -78,6 +82,8 @@ __all__ = [
     "BaselineSelectionReason",
     "BaselineSelectionResult",
     "BaselineStratum",
+    "HeadLocalCapacityRecord",
+    "HeadLocalPromptSelection",
     "InfeasibleBaselineBudgetError",
     "LookMAssignment",
     "LookMCompressionPlan",
@@ -127,6 +133,8 @@ __all__ = [
     "resolve_baseline_budget",
     "search_prefixkv_layer_sizes",
     "select_exact_baseline",
+    "select_prompt_attention_topk_ids",
+    "select_prompt_attention_topk_ids_by_head",
     "threshold_filter",
     "value_novelty_scores",
     "vl_cache_runtime_payloads",

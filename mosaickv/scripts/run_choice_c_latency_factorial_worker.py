@@ -54,6 +54,7 @@ def _run_online(
     ledger_path: Path,
     ledger_sha: str,
     expected_sample_ids: tuple[str, ...],
+    task: str = "docvqa",
 ) -> pd.DataFrame:
     if config.diagnostics.enabled:
         raise RuntimeError("online-only timing requires evaluation diagnostics to be disabled")
@@ -65,7 +66,7 @@ def _run_online(
     config_path = output_root / "configs" / f"{run_id}-{config_sha256(config)}.yaml"
     _write_config(config, config_path)
     args = argparse.Namespace(
-        task="docvqa",
+        task=task,
         run_id=run_id,
         output_dir=str(output_root),
         raw_output=None,

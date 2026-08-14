@@ -26,6 +26,7 @@ from mosaickv.backends.hf_runtime import (
     _dense_physical_cache_budget,
     _gather_dense_heads,
     _logit_kl,
+    _mosaickv_effective_capacity,
     _plan_has_live_residual_repair,
     _refined_budget_candidates,
     _route_head_attention,
@@ -33,6 +34,7 @@ from mosaickv.backends.hf_runtime import (
     _trace_catalog,
     _uncertainty_exact_head_routes,
     _uniform_attainable_prototype_position_limits,
+    _validate_combined_active_layouts,
     pack_runtime_payloads,
 )
 from mosaickv.cache_state import FullKVState, Modality, ModalitySpan
@@ -114,6 +116,322 @@ def _config(method: MosaicKVMethod, ratio: float) -> RunConfig:
         ),
         residual=ResidualConfig(require_pinned_memory=False),
     )
+
+
+def test_routed_head_only_plan_bypasses_stable_graph_utility_and_selection() -> None:
+    sequence = 8
+    key = np.arange(2 * sequence * 4, dtype=np.float32).reshape(
+        1, 2, sequence, 4
+    ) + 1
+    full = FullKVState.from_tensors(
+        ((key, np.flip(key, axis=-1).copy()),),
+        block_size=1,
+        cached_key_state=CachedKeyState.NOT_APPLICABLE,
+    )
+    base = _config(MosaicKVMethod.MOSAICKV_EXACT, 10 / 16)
+    config = replace(
+        base,
+        cache=CacheConfig(16, BudgetUnit.BLOCKS, 10 / 16, 1),
+        graph=replace(
+            base.graph,
+            similarity_shortlist_multiplier=2.0,
+            candidate_descriptor_pooling=True,
+            candidate_graph_mode="shortlist_rerank",
+            uncertain_head_only=True,
+            uncertain_head_fraction=0.5,
+            uncertain_head_threshold=0.0,
+        ),
+        selection=replace(
+            base.selection,
+            algorithm="vectorized_coverage",
+            minimum_stratum_fraction=0.0,
+            coverage_correction_rounds=0,
+            stable_head_prompt_routing=True,
+            routed_head_only_planning=True,
+        ),
+        prototypes=replace(
+            base.prototypes,
+            uncertain_head_only=True,
+            uncertain_head_fraction=0.5,
+            uncertain_head_threshold=0.0,
+        ),
+    )
+    prompt_attention = {
+        node_id: (100.0 - node_id if block.kv_head == 1 else 1.0)
+        for node_id, block in enumerate(full.blocks)
+    }
+    forecast_attention = {
+        node_id: (100.0 - node_id if block.kv_head == 0 else 1.0)
+        for node_id, block in enumerate(full.blocks)
+    }
+
+    plan = build_compression_plan(
+        full,
+        None,
+        forecast_attention,
+        _capabilities(safe=False),
+        config,
+        prompt_attention_by_node=prompt_attention,
+        graph_head_uncertainty={(0, 0): 1.0, (0, 1): 0.0},
+    )
+
+    routed_ids = tuple(
+        node_id for node_id, block in enumerate(full.blocks) if block.kv_head == 0
+    )
+    assert plan.optimization_node_ids == routed_ids
+    assert plan.graph_head_routes == ((0, 0),)
+    assert all(
+        full.blocks[source].kv_head == 0 and full.blocks[target].kv_head == 0
+        for source, target in zip(
+            plan.graph.row_indices,
+            plan.graph.column_indices,
+            strict=True,
+        )
+    )
+    stable_ids = tuple(
+        node_id for node_id, block in enumerate(full.blocks) if block.kv_head == 1
+    )
+    assert all(
+        plan.utilities.for_node(node_id).expected_attention_output_contribution == 0
+        for node_id in stable_ids
+    )
+    assert all(
+        plan.selection.decisions[node_id].reason is SelectionReason.PROMPT_ANCHOR
+        for node_id in stable_ids
+    )
+    assert len(plan.selection.decisions) == len(full.blocks)
+    assert plan.selection.budget_spent <= plan.selection.budget.value
+
+
+def test_routed_head_only_plan_compacts_and_defers_source_audit() -> None:
+    sequence = 16
+    key = np.arange(2 * sequence * 4, dtype=np.float32).reshape(
+        1, 2, sequence, 4
+    ) + 1
+    full = FullKVState.from_tensors(
+        ((key, np.flip(key, axis=-1).copy()),),
+        block_size=1,
+        cached_key_state=CachedKeyState.NOT_APPLICABLE,
+    )
+    base = _config(MosaicKVMethod.MOSAICKV_EXACT, 12 / 32)
+    config = replace(
+        base,
+        cache=CacheConfig(32, BudgetUnit.BLOCKS, 12 / 32, 1),
+        graph=replace(
+            base.graph,
+            similarity_shortlist_multiplier=2.0,
+            candidate_descriptor_pooling=True,
+            candidate_graph_mode="shortlist_rerank",
+            uncertain_head_only=True,
+            uncertain_head_fraction=0.5,
+            uncertain_head_threshold=0.0,
+        ),
+        selection=replace(
+            base.selection,
+            algorithm="vectorized_coverage",
+            minimum_stratum_fraction=0.0,
+            coverage_correction_rounds=0,
+            stable_head_prompt_routing=True,
+            routed_head_only_planning=True,
+        ),
+        prototypes=replace(
+            base.prototypes,
+            uncertain_head_only=True,
+            uncertain_head_fraction=0.5,
+            uncertain_head_threshold=0.0,
+        ),
+    )
+    prompt_attention = {
+        node_id: (100.0 - node_id if block.kv_head == 1 else 1.0)
+        for node_id, block in enumerate(full.blocks)
+    }
+    forecast_attention = {
+        node_id: (100.0 - node_id if block.kv_head == 0 else 1.0)
+        for node_id, block in enumerate(full.blocks)
+    }
+
+    plan = build_compression_plan(
+        full,
+        None,
+        forecast_attention,
+        _capabilities(safe=False),
+        config,
+        prompt_attention_by_node=prompt_attention,
+        graph_head_uncertainty={(0, 0): 1.0, (0, 1): 0.0},
+    )
+
+    assert plan.uses_compact_node_ids
+    assert plan.planner_source_node_ids is not None
+    assert len(plan.graph.nodes) < len(full.blocks)
+    assert tuple(node.node_id for node in plan.graph.nodes) == tuple(
+        range(len(plan.graph.nodes))
+    )
+    assert tuple(node.source_id for node in plan.graph.nodes) == (
+        plan.planner_source_node_ids
+    )
+    assert tuple(
+        sorted(plan.source_node_id(node_id) for node_id in plan.selection.selected_node_ids)
+    ) == plan.construction.exact_node_ids
+    trace = hf_runtime._plan_trace(plan, capture_selection_evidence=True)
+    evidence = trace["selection_decision_evidence"]
+    assert isinstance(evidence, dict)
+    assert evidence["record_count"] == len(full.blocks)
+
+
+def test_dense_routed_plan_keeps_stable_exact_blocks_outside_objective() -> None:
+    sequence = 16
+    key = np.arange(2 * sequence * 4, dtype=np.float32).reshape(
+        1, 2, sequence, 4
+    ) + 1
+    full = FullKVState.from_tensors(
+        ((key, np.flip(key, axis=-1).copy()),),
+        block_size=1,
+        cached_key_state=CachedKeyState.NOT_APPLICABLE,
+    )
+    base = _config(MosaicKVMethod.MOSAICKV_EXACT, 12 / 32)
+    config = replace(
+        base,
+        cache=CacheConfig(32, BudgetUnit.BLOCKS, 12 / 32, 1),
+        graph=replace(
+            base.graph,
+            similarity_shortlist_multiplier=2.0,
+            candidate_descriptor_pooling=True,
+            candidate_graph_mode="shortlist_rerank",
+            uncertain_head_only=True,
+            uncertain_head_fraction=0.5,
+            uncertain_head_threshold=0.0,
+        ),
+        selection=replace(
+            base.selection,
+            algorithm="vectorized_coverage",
+            minimum_stratum_fraction=0.0,
+            coverage_correction_rounds=0,
+            stable_head_prompt_routing=True,
+            routed_head_only_planning=True,
+        ),
+        prototypes=replace(
+            base.prototypes,
+            uncertain_head_only=True,
+            uncertain_head_fraction=0.5,
+            uncertain_head_threshold=0.0,
+        ),
+    )
+    prompt_attention = {
+        node_id: (100.0 - node_id if block.kv_head == 1 else 1.0)
+        for node_id, block in enumerate(full.blocks)
+    }
+    forecast_attention = {
+        node_id: (100.0 - node_id if block.kv_head == 0 else 1.0)
+        for node_id, block in enumerate(full.blocks)
+    }
+
+    plan = build_compression_plan(
+        full,
+        None,
+        forecast_attention,
+        _capabilities(safe=False),
+        config,
+        position_limits={(0, 0): 6, (0, 1): 6},
+        prompt_attention_by_node=prompt_attention,
+        graph_head_uncertainty={(0, 0): 1.0, (0, 1): 0.0},
+    )
+
+    assert len(plan.graph.nodes) == sequence
+    assert {node.block.kv_head for node in plan.graph.nodes} == {0}
+    assert len(plan.external_exact_node_ids) == 6
+    assert len(plan.external_exact_capacity_records) == 1
+    assert plan.external_exact_capacity_records[0].shortfall_positions == 0
+    assert all(full.blocks[node_id].kv_head == 1 for node_id in plan.external_exact_node_ids)
+    assert len(plan.construction.exact_node_ids) == 12
+    assert set(plan.external_exact_node_ids) <= set(plan.construction.exact_node_ids)
+    assert plan.construction.active_budget.value == 12
+    assert plan.selection.budget.value == 6
+    trace = hf_runtime._plan_trace(plan, capture_selection_evidence=False)
+    routing = trace["candidate_graph_routing"]
+    assert isinstance(routing, dict)
+    capacity = routing["external_stable_capacity"]
+    assert isinstance(capacity, dict)
+    assert capacity["selected_positions"] == 6
+    assert capacity["shortfall_positions"] == 0
+
+    scaled = build_compression_plan(
+        full,
+        None,
+        forecast_attention,
+        _capabilities(safe=False),
+        replace(
+            config,
+            selection=replace(config.selection, physical_capacity_fraction=0.5),
+        ),
+        position_limits={(0, 0): 6, (0, 1): 6},
+        prompt_attention_by_node=prompt_attention,
+        graph_head_uncertainty={(0, 0): 1.0, (0, 1): 0.0},
+    )
+    assert scaled.shared_active_budget_value == 12
+    assert scaled.active_budget_value == 6
+    assert scaled.configured_physical_capacity_fraction == 0.5
+    assert len(scaled.external_exact_node_ids) == 3
+    assert scaled.external_exact_capacity_records[0].position_limit == 3
+    assert len(scaled.construction.exact_node_ids) == 6
+    assert scaled.selection.budget.value == 3
+
+
+def test_external_stable_exact_blocks_coexist_with_routed_prototype_members() -> None:
+    key = np.arange(2 * 4 * 4, dtype=np.float32).reshape(1, 2, 4, 4) + 1
+    full = FullKVState.from_tensors(
+        ((key, np.flip(key, axis=-1).copy()),),
+        block_size=1,
+        cached_key_state=CachedKeyState.NOT_APPLICABLE,
+    )
+    routed = tuple(
+        node_id for node_id, block in enumerate(full.blocks) if block.kv_head == 0
+    )
+    external = tuple(
+        node_id for node_id, block in enumerate(full.blocks) if block.kv_head == 1
+    )[:1]
+    base = _config(MosaicKVMethod.MOSAICKV_PROTO, 3 / 8)
+    graph = hf_runtime.build_evidence_graph(
+        full,
+        base.graph,
+        source_node_ids=routed,
+    )
+    utilities = hf_runtime.compute_block_utilities(
+        graph,
+        UtilityConfig(lambda_q=1.0, lambda_v=0.0, lambda_o=0.0),
+        forecast_attention_by_node={node_id: float(4 - node_id) for node_id in range(4)},
+        attention_provenance="synthetic_external_exact_test",
+        rope_aware=True,
+    )
+    objective = hf_runtime.BudgetedObjective(
+        graph,
+        utilities,
+        replace(base.selection, stop_on_nonpositive_gain=False),
+    )
+    selection = hf_runtime.lazy_greedy_select(
+        objective,
+        hf_runtime.SelectionBudget(1, BudgetUnit.BLOCKS),
+    )
+
+    construction = hf_runtime.construct_three_tier_cache(
+        full,
+        graph,
+        selection,
+        _capabilities(safe=True),
+        prototype_config=replace(
+            base.prototypes,
+            source_modalities=("text",),
+            group_size=4,
+            max_position_span=16,
+        ),
+        residual_config=ResidualConfig(enabled=False, require_pinned_memory=False),
+        additional_exact_source_node_ids=external,
+        active_budget=hf_runtime.SelectionBudget(3, BudgetUnit.BLOCKS),
+    )
+
+    assert construction.mode.value == "three_tier"
+    assert set(external) <= set(construction.exact_node_ids)
+    assert construction.prototypes[0].assigned_node_ids == (1, 2, 3)
+    assert not set(external).intersection(construction.prototypes[0].assigned_node_ids)
 
 
 def test_batched_mixed_tier_packing_is_byte_exact_with_reference_and_tail() -> None:
@@ -269,6 +587,31 @@ def test_packed_decode_mask_adds_prototype_multiplicity_bias_to_shared_query_hea
     assert torch.equal(mask[..., 3], torch.zeros((1, 4, 1)))
 
 
+def test_device_prototype_attention_reduction_matches_numpy_reference() -> None:
+    attention = torch.tensor(
+        [
+            [
+                [[0.2, 0.3, 0.5]],
+                [[0.1, 0.4, 0.5]],
+                [[0.6, 0.2, 0.2]],
+                [[0.5, 0.3, 0.2]],
+            ]
+        ],
+        dtype=torch.float32,
+    )
+    slots = ((7, 0, 0, 1), (8, 0, 1, 2))
+    masks = (torch.ones((2, 3), dtype=torch.bool),)
+
+    device = hf_runtime._prototype_attention_mass((attention,), slots, masks)
+    reference = hf_runtime._prototype_attention_mass(
+        (attention.numpy(),),
+        slots,
+        (masks[0].numpy(),),
+    )
+
+    assert device == pytest.approx(reference, abs=1e-7)
+
+
 def test_log_multiplicity_bias_exactly_preserves_identical_member_attention() -> None:
     query = torch.tensor([0.75, -0.25], dtype=torch.float64)
     exact_key = torch.tensor([-0.5, 0.5], dtype=torch.float64)
@@ -394,6 +737,52 @@ def test_prompt_ranked_similarity_shortlist_is_bounded_and_keeps_mandatory_nodes
     # Two retained blocks times a 2x candidate multiplier, with mandatory
     # nodes 0/7 always represented in the candidate set.
     assert selected == (0, 5, 6, 7)
+
+
+def test_similarity_shortlist_caps_nonmandatory_candidates_independently() -> None:
+    full = _full()
+    base = _config(MosaicKVMethod.MOSAICKV_EXACT, 0.5)
+    config = replace(
+        base,
+        graph=replace(
+            base.graph,
+            similarity_shortlist_multiplier=4.0,
+            candidate_nonmandatory_fraction=0.25,
+        ),
+    )
+
+    selected = hf_runtime._similarity_shortlist(
+        full,
+        config,
+        source_budget=8,
+        target_budget=4,
+        prompt_attention_by_node={node_id: float(node_id) for node_id in range(8)},
+    )
+
+    # Six blocks are non-mandatory, so ceil(6 * .25) admits exactly two in
+    # addition to mandatory source blocks 0 and 7.
+    assert selected == (0, 5, 6, 7)
+
+
+def test_selection_only_prototype_head_drops_unselected_blocks_without_merging() -> None:
+    full = _full()
+    base = _config(MosaicKVMethod.MOSAICKV_PROTO, 0.25)
+    config = replace(
+        base,
+        prototypes=replace(base.prototypes, selection_only_head_routes=("0:0",)),
+    )
+
+    plan = build_compression_plan(
+        full,
+        _forecast(),
+        {node_id: float(8 - node_id) for node_id in range(8)},
+        _capabilities(safe=True),
+        config,
+    )
+
+    assert len(plan.selection.selected_node_ids) == 2
+    assert not plan.construction.prototypes
+    assert plan.construction.state.exact.blocks == plan.selection.selected_blocks
 
 
 def test_prototype_anchor_cover_prefers_aligned_modality_block() -> None:
@@ -711,6 +1100,43 @@ def test_dense_physical_byte_budget_supports_fixed_multitoken_blocks() -> None:
     )
 
 
+def test_mosaickv_capacity_fraction_scales_every_dense_head_and_byte_budget() -> None:
+    sequence = 67
+    key = np.arange(2 * sequence * 4, dtype=np.float32).reshape(
+        1, 2, sequence, 4
+    ) + 1
+    full = FullKVState.from_tensors(
+        ((key, np.flip(key, axis=-1).copy()),),
+        modality_spans=(
+            ModalitySpan(0, 12, Modality.TEXT),
+            ModalitySpan(12, 60, Modality.IMAGE),
+            ModalitySpan(60, 67, Modality.TEXT),
+        ),
+        block_size=16,
+        mandatory_logical_positions=(66,),
+        cached_key_state=CachedKeyState.NOT_APPLICABLE,
+    )
+    base = _config(MosaicKVMethod.MOSAICKV_PROTO, 37 / sequence)
+    config = replace(
+        base,
+        cache=CacheConfig(full.active_bytes, BudgetUnit.BYTES, 37 / sequence, 16),
+        selection=replace(base.selection, physical_capacity_fraction=0.70),
+    )
+    bytes_per_position = full.active_bytes // sequence
+    shared_target = 37 * bytes_per_position
+
+    effective, limits = _mosaickv_effective_capacity(
+        full,
+        config,
+        shared_target,
+        {(0, 0): 37, (0, 1): 37},
+    )
+
+    assert limits == {(0, 0): 25, (0, 1): 25}
+    assert effective == 25 * bytes_per_position
+    assert effective / shared_target < 0.70
+
+
 def test_three_tier_uniform_layout_may_underfill_hard_physical_cap() -> None:
     sequence = 67
     key = np.arange(sequence * 4, dtype=np.float32).reshape(1, 1, sequence, 4) + 1
@@ -813,6 +1239,36 @@ def test_uniform_prototype_layout_steps_down_to_attainable_common_length(
     assert exact_limits == {(0, 0): expected_exact}
     assert final_length == expected_exact + 1
     assert final_length < physical_cap
+
+
+def test_routed_prototype_layout_uses_maskable_per_head_padding() -> None:
+    key = np.arange(2 * 64 * 4, dtype=np.float32).reshape(1, 2, 64, 4) + 1
+    full = FullKVState.from_tensors(
+        ((key, np.flip(key, axis=-1).copy()),),
+        modality_spans=(ModalitySpan(0, 64, Modality.IMAGE),),
+        block_size=16,
+        mandatory_logical_positions=(63,),
+        cached_key_state=CachedKeyState.NOT_APPLICABLE,
+    )
+    graph = hf_runtime.build_evidence_graph(
+        full,
+        replace(_config(MosaicKVMethod.MOSAICKV_PROTO, 1.0).graph, enabled=False),
+    )
+
+    exact_limits, physical_length = _uniform_attainable_prototype_position_limits(
+        graph,
+        {(0, 0): 64, (0, 1): 64},
+        {(0, 0): 2},
+        block_size=16,
+        required_node_ids=(),
+        prompt_anchor_node_ids=(),
+        evidence_node_ids=(),
+        allow_head_padding=True,
+    )
+
+    assert exact_limits == {(0, 0): 48, (0, 1): 64}
+    assert physical_length == 64
+    assert exact_limits[(0, 0)] + 2 < physical_length
 
 
 def test_dense_physical_byte_budget_aligns_capacity_after_mandatory_fragments() -> None:
@@ -954,6 +1410,194 @@ def test_dense_mask_free_selection_excludes_optional_partial_fragments() -> None
     assert all(
         block.mandatory or block.position_count == 16 for block in plan.selection.selected_blocks
     )
+
+
+def test_routed_prototype_prompt_reservation_excludes_modality_fragments() -> None:
+    key = np.arange(64 * 4, dtype=np.float32).reshape(1, 1, 64, 4) + 1
+    full = FullKVState.from_tensors(
+        ((key, np.flip(key, axis=-1).copy()),),
+        modality_spans=(
+            ModalitySpan(0, 15, Modality.IMAGE),
+            ModalitySpan(15, 48, Modality.TEXT),
+            ModalitySpan(48, 64, Modality.IMAGE),
+        ),
+        block_size=16,
+        mandatory_logical_positions=(63,),
+        cached_key_state=CachedKeyState.NOT_APPLICABLE,
+    )
+    base = _config(MosaicKVMethod.MOSAICKV_PROTO, 0.75)
+    config = replace(
+        base,
+        cache=CacheConfig(full.active_bytes, BudgetUnit.BYTES, 0.75, 16),
+        selection=replace(base.selection, prompt_anchor_fraction=0.5),
+        prototypes=replace(
+            base.prototypes,
+            group_size=31,
+            max_position_span=128,
+            source_modalities=("image",),
+            maximum_prototypes_per_head=2,
+        ),
+        residual=ResidualConfig(enabled=False, require_pinned_memory=False),
+    )
+    dense = _dense_physical_cache_budget(full, config)
+    assert dense is not None
+    attention = {
+        node_id: (100.0 if block.position_count < 16 else float(len(full.blocks) - node_id))
+        for node_id, block in enumerate(full.blocks)
+    }
+
+    plan = build_compression_plan(
+        full,
+        _forecast(),
+        attention,
+        _capabilities(safe=True),
+        replace(config, cache=replace(config.cache, budget_value=dense.target_bytes)),
+        position_limits=dense.position_limits,
+        prompt_attention_by_node=attention,
+    )
+
+    assert config.prototypes.source_modalities == ("image",)
+    assert config.prototypes.maximum_prototypes_per_head == 2
+    assert all(
+        block.mandatory or block.position_count == full.block_size
+        for block in plan.selection.selected_blocks
+    )
+    assert 0 not in plan.selection.selected_node_ids
+
+
+def test_mixed_head_routed_prototypes_pack_with_auditable_validity_masks() -> None:
+    sequence = 96
+    key = torch.arange(2 * sequence * 4, dtype=torch.float32).reshape(
+        1, 2, sequence, 4
+    ) + 1
+    full = FullKVState.from_tensors(
+        ((key, key.flip(-1)),),
+        modality_spans=(
+            ModalitySpan(0, 85, Modality.IMAGE),
+            ModalitySpan(85, 96, Modality.TEXT),
+        ),
+        block_size=16,
+        mandatory_logical_positions=(95,),
+        cached_key_state=CachedKeyState.NOT_APPLICABLE,
+    )
+    base = _config(MosaicKVMethod.MOSAICKV_PROTO, 75 / sequence)
+    config = replace(
+        base,
+        cache=CacheConfig(full.active_bytes, BudgetUnit.BYTES, 75 / sequence, 16),
+        selection=replace(base.selection, prompt_anchor_fraction=0.75),
+        prototypes=replace(
+            base.prototypes,
+            group_size=31,
+            max_position_span=2048,
+            source_modalities=("image",),
+            selection_only_head_routes=("0:1",),
+            maximum_prototypes_per_head=2,
+        ),
+        residual=ResidualConfig(enabled=False, require_pinned_memory=False),
+    )
+    dense = _dense_physical_cache_budget(full, config)
+    assert dense is not None and dense.prompt_capacity == 75
+    attention = {
+        node_id: float(len(full.blocks) - node_id) for node_id in range(len(full.blocks))
+    }
+
+    plan = build_compression_plan(
+        full,
+        None,
+        attention,
+        _capabilities(safe=True),
+        replace(config, cache=replace(config.cache, budget_value=dense.target_bytes)),
+        position_limits=dense.position_limits,
+        prompt_attention_by_node=attention,
+    )
+
+    assert plan.construction.mode.value == "three_tier"
+    assert plan.construction.prototypes
+    lengths = {
+        (layout.layer, layout.kv_head): layout.active_cache_length
+        for layout in plan.construction.active_layouts
+    }
+    assert lengths[(0, 0)] < lengths[(0, 1)]
+    assert max(lengths.values()) <= dense.prompt_capacity
+    adapter = SimpleNamespace(
+        capabilities=SimpleNamespace(cached_key_state=CachedKeyState.NOT_APPLICABLE)
+    )
+    packed = hf_runtime.pack_runtime_cache(
+        adapter,
+        full,
+        plan.construction.state,
+        plan.construction.prototypes,
+        tuple(record.prototype_id for record in plan.construction.prototypes),
+        physical_prompt_capacity=max(lengths.values()),
+        packing_mode="preallocated_layer",
+    )
+
+    assert not packed.all_slots_valid
+    assert packed.prompt_capacity == max(lengths.values())
+    assert tuple(packed.validity_masks[0].sum(dim=-1).tolist()) == (
+        lengths[(0, 0)],
+        lengths[(0, 1)],
+    )
+    assert not bool(packed.validity_masks[0][0, -1])
+    assert bool(packed.validity_masks[0][1, -1])
+
+
+def test_combined_routed_75_and_external_64_layout_uses_planned_padding() -> None:
+    key = torch.arange(2 * 80 * 2, dtype=torch.float32).reshape(1, 2, 80, 2)
+    full = FullKVState.from_tensors(
+        ((key, key.flip(-1)),),
+        block_size=16,
+        cached_key_state=CachedKeyState.NOT_APPLICABLE,
+    )
+    external = hf_runtime.HeadLocalCapacityRecord(
+        layer=0,
+        kv_head=1,
+        position_limit=75,
+        selected_positions=64,
+        shortfall_positions=11,
+        selected_bytes=64 * 2 * 2 * key.element_size(),
+    )
+
+    maximum, distinct, padding = _validate_combined_active_layouts(
+        {(0, 0): 75, (0, 1): 64},
+        {(0, 0): 75},
+        {(0, 0): 75},
+        (external,),
+    )
+
+    assert maximum == 75
+    assert distinct == {64, 75}
+    assert padding
+    payloads = {
+        (0, head): tuple(
+            (
+                position,
+                "exact",
+                position,
+                key[:, head : head + 1, position : position + 1, :],
+                key[:, head : head + 1, position : position + 1, :].flip(-1),
+            )
+            for position in range(count)
+        )
+        for head, count in ((0, 75), (1, 64))
+    }
+    adapter = SimpleNamespace(
+        capabilities=SimpleNamespace(cached_key_state=CachedKeyState.NOT_APPLICABLE)
+    )
+    packed = pack_runtime_payloads(
+        adapter,
+        full,
+        payloads,
+        (),
+        physical_prompt_capacity=75,
+        packing_mode="preallocated_layer",
+    )
+
+    assert packed.prompt_capacity == 75
+    assert not packed.all_slots_valid
+    assert tuple(packed.validity_masks[0].sum(dim=-1).tolist()) == (75, 64)
+    assert bool(packed.validity_masks[0][0, -1])
+    assert not bool(packed.validity_masks[0][1, -1])
 
 
 def test_fidelity_formulas_match_known_attention_and_logit_patterns() -> None:

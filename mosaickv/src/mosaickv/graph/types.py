@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any
+from typing import Any, Self
 
 from mosaickv.cache_state import KVBlockDescriptor, Modality
 
@@ -140,12 +140,15 @@ class PooledBlockDescriptor:
     pooled_hidden_state: Any | None
     semantic_embedding: Any
     evidence: BlockEvidenceMetadata
+    source_node_id: int | None = None
 
     def __post_init__(self) -> None:
         import numpy as np
 
         if self.node_id < 0:
             raise ValueError("graph node_id must be nonnegative")
+        if self.source_node_id is not None and self.source_node_id < 0:
+            raise ValueError("graph source_node_id must be nonnegative when provided")
         vectors = tuple(
             np.asarray(vector)
             for vector in (self.pooled_key, self.pooled_value, self.semantic_embedding)
@@ -159,6 +162,44 @@ class PooledBlockDescriptor:
             raise ValueError("pooled block vectors must be finite")
         if vectors[-1].size == 0:
             raise ValueError("semantic_embedding cannot be empty")
+
+    @classmethod
+    def _from_validated(
+        cls,
+        *,
+        node_id: int,
+        block: KVBlockDescriptor,
+        pooled_key: Any,
+        pooled_value: Any,
+        pooled_hidden_state: Any | None,
+        semantic_embedding: Any,
+        evidence: BlockEvidenceMetadata,
+        source_node_id: int | None = None,
+    ) -> Self:
+        """Build from batch-validated pooling output without rescanning vectors.
+
+        This private constructor is intentionally limited to the pooling
+        module, which validates source tensors before batching and produces
+        one-dimensional, nonempty float32 rows by construction.  The public
+        dataclass constructor retains the full fail-closed validation contract.
+        """
+
+        instance = object.__new__(cls)
+        object.__setattr__(instance, "node_id", node_id)
+        object.__setattr__(instance, "block", block)
+        object.__setattr__(instance, "pooled_key", pooled_key)
+        object.__setattr__(instance, "pooled_value", pooled_value)
+        object.__setattr__(instance, "pooled_hidden_state", pooled_hidden_state)
+        object.__setattr__(instance, "semantic_embedding", semantic_embedding)
+        object.__setattr__(instance, "evidence", evidence)
+        object.__setattr__(instance, "source_node_id", source_node_id)
+        return instance
+
+    @property
+    def source_id(self) -> int:
+        """Original FullKV block ID represented by this planner node."""
+
+        return self.node_id if self.source_node_id is None else self.source_node_id
 
     @property
     def logical_center(self) -> float:
@@ -179,6 +220,9 @@ class GraphDiagnostics:
     edge_counts: tuple[tuple[EdgeType, int], ...]
     maximum_out_degree: int
     fallback_used: bool
+    candidate_node_count: int | None = None
+    candidate_fraction: float | None = None
+    candidate_graph_mode: str = "full"
 
     def __post_init__(self) -> None:
         if self.node_count < 0 or self.edge_count < 0 or self.connected_components < 0:
@@ -195,6 +239,26 @@ class GraphDiagnostics:
             raise ValueError("per-type edge counts do not sum to edge_count")
         if self.maximum_out_degree < 0:
             raise ValueError("maximum_out_degree must be nonnegative")
+        if self.candidate_node_count is not None and not (
+            0 <= self.candidate_node_count <= self.node_count
+        ):
+            raise ValueError("candidate_node_count must lie within the graph node table")
+        if self.candidate_fraction is not None and not 0 <= self.candidate_fraction <= 1:
+            raise ValueError("candidate_fraction must lie in [0, 1]")
+        if self.candidate_graph_mode not in {"full", "shortlist_rerank"}:
+            raise ValueError("unsupported candidate graph mode")
+        expected_fraction = (
+            None
+            if self.candidate_node_count is None or self.node_count == 0
+            else self.candidate_node_count / self.node_count
+        )
+        if expected_fraction is not None and not math.isclose(
+            self.candidate_fraction or 0.0,
+            expected_fraction,
+            rel_tol=0,
+            abs_tol=1e-12,
+        ):
+            raise ValueError("candidate_fraction does not match candidate_node_count")
 
 
 @dataclass(frozen=True, slots=True)
@@ -257,6 +321,28 @@ class SparseEvidenceGraph:
             raise ValueError("diagnostic node count does not match the node table")
         if self.diagnostics.edge_count != edge_count:
             raise ValueError("diagnostic edge count does not match COO storage")
+
+    @classmethod
+    def _from_validated(
+        cls,
+        *,
+        nodes: tuple[PooledBlockDescriptor, ...],
+        row_indices: tuple[int, ...],
+        column_indices: tuple[int, ...],
+        weights: tuple[float, ...],
+        edge_types: tuple[EdgeType, ...],
+        diagnostics: GraphDiagnostics,
+    ) -> Self:
+        """Build the graph from the builder's already-validated sparse arrays."""
+
+        instance = object.__new__(cls)
+        object.__setattr__(instance, "nodes", nodes)
+        object.__setattr__(instance, "row_indices", row_indices)
+        object.__setattr__(instance, "column_indices", column_indices)
+        object.__setattr__(instance, "weights", weights)
+        object.__setattr__(instance, "edge_types", edge_types)
+        object.__setattr__(instance, "diagnostics", diagnostics)
+        return instance
 
     def to_csr(self) -> SparseCSRGraph:
         """Return a stable row-major CSR view without densifying the graph."""

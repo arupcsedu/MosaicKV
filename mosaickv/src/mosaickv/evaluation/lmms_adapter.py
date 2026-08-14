@@ -323,6 +323,7 @@ def _prepare_task(
     sample_offset: int,
     explicit_sample_ids: tuple[str, ...] | None,
     excluded: frozenset[str],
+    prepare_samples: bool,
 ) -> tuple[Any | None, tuple[PreparedLmmsSample, ...], tuple[str, ...]]:
     split = task.config.test_split or task.config.validation_split
     if not isinstance(split, str):
@@ -347,6 +348,8 @@ def _prepare_task(
         if unknown:
             raise ValueError(f"explicit sample IDs are absent from the pinned split: {unknown[:5]}")
         selected_ids = explicit_sample_ids
+    if not prepare_samples:
+        return None, (), selected_ids
     index_by_id = {sample_id: index for index, sample_id in enumerate(source_ids)}
     pending_ids = tuple(sample_id for sample_id in selected_ids if sample_id not in excluded)
     if not pending_ids:
@@ -383,6 +386,7 @@ def prepare_seeded_lmms_tasks(
     excluded: frozenset[str] = frozenset(),
     model_name: str | None = None,
     dataset_revisions: Mapping[str, str] | None = None,
+    prepare_samples: bool = True,
 ) -> tuple[tuple[object, ...], tuple[PreparedLmmsSample, ...], tuple[str, ...], object]:
     """Load lmms task objects and replace their eval splits with seeded subsets."""
 
@@ -449,6 +453,7 @@ def prepare_seeded_lmms_tasks(
             sample_offset=sample_offset,
             explicit_sample_ids=explicit_sample_ids,
             excluded=excluded,
+            prepare_samples=prepare_samples,
         )
         if subset_task is not None:
             selected_tasks.append(subset_task)

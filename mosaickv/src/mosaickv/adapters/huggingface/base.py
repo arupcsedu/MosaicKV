@@ -101,13 +101,24 @@ class QueryCapture(AbstractContextManager["QueryCapture"]):
 class AttentionCapture(AbstractContextManager["AttentionCapture"]):
     """Capture eager self-attention probabilities without changing model weights."""
 
-    def __init__(self, attentions: Sequence[Any], *, query_window: int | None = None) -> None:
+    def __init__(
+        self,
+        attentions: Sequence[Any],
+        *,
+        query_window: int | None = None,
+        kv_heads: Sequence[int] | None = None,
+    ) -> None:
         self._attentions = tuple(attentions)
         self._query_window = query_window
+        self._kv_heads = None if kv_heads is None else tuple(int(value) for value in kv_heads)
         self._handles: list[Any] = []
         self._layers: list[Any | None] = [None] * len(self._attentions)
         if query_window is not None and query_window < 1:
             raise ValueError("attention capture query_window must be positive")
+        if self._kv_heads is not None and (
+            len(self._kv_heads) != len(self._attentions) or min(self._kv_heads) < 1
+        ):
+            raise ValueError("attention capture KV-head geometry must cover every layer")
 
     def __enter__(self) -> Self:
         if self._handles:
@@ -128,6 +139,20 @@ class AttentionCapture(AbstractContextManager["AttentionCapture"]):
                 probabilities = output[1]
                 if self._query_window is not None:
                     probabilities = probabilities[..., -self._query_window :, :]
+                if self._kv_heads is not None:
+                    batch, query_heads, query_count, key_count = probabilities.shape
+                    local_kv_heads = self._kv_heads[index]
+                    if query_heads % local_kv_heads:
+                        raise RuntimeError(
+                            "query attention heads are not divisible by cache KV heads"
+                        )
+                    probabilities = probabilities.reshape(
+                        batch,
+                        local_kv_heads,
+                        query_heads // local_kv_heads,
+                        query_count,
+                        key_count,
+                    ).mean(dim=2)
                 # Clone so a narrow query slice does not retain the full QxK backing storage.
                 self._layers[index] = probabilities.detach().clone()
 
@@ -363,7 +388,12 @@ class HuggingFaceMultimodalAdapter(ABC):
             projections.append((projection, int(num_heads), int(head_dim)))
         return QueryCapture(projections)
 
-    def capture_attention_weights(self, *, query_window: int | None = None) -> AttentionCapture:
+    def capture_attention_weights(
+        self,
+        *,
+        query_window: int | None = None,
+        reduce_query_heads: bool = False,
+    ) -> AttentionCapture:
         """Return a context that captures every eager language attention map."""
 
         if self._attention_implementation() != "eager":
@@ -373,7 +403,25 @@ class HuggingFaceMultimodalAdapter(ABC):
         attentions = tuple(getattr(layer, "self_attn", None) for layer in self._language_layers())
         if any(attention is None for attention in attentions):
             raise RuntimeError("a decoder layer has no self_attn module")
-        return AttentionCapture(attentions, query_window=query_window)
+        kv_heads: tuple[int, ...] | None = None
+        if reduce_query_heads:
+            counts: list[int] = []
+            for index, attention in enumerate(attentions):
+                value = getattr(attention, "num_key_value_heads", None)
+                config = getattr(attention, "config", None)
+                if value is None and config is not None:
+                    value = getattr(config, "num_key_value_heads", None)
+                if value is None:
+                    raise RuntimeError(
+                        f"decoder layer {index} has no auditable KV-head geometry"
+                    )
+                counts.append(int(value))
+            kv_heads = tuple(counts)
+        return AttentionCapture(
+            attentions,
+            query_window=query_window,
+            kv_heads=kv_heads,
+        )
 
     def get_profiling_modules(self) -> AdapterProfilingModules:
         """Return audited modules used for synchronized phase measurements."""
@@ -717,6 +765,7 @@ class HuggingFaceMultimodalAdapter(ABC):
         capture_queries: bool = True,
         capture_attentions: bool = False,
         attention_query_window: int | None = None,
+        reduce_attention_to_kv_heads: bool = False,
     ) -> PrefillOutput:
         """Run one full prefill without calling GenerationMixin.generate."""
 
@@ -740,6 +789,11 @@ class HuggingFaceMultimodalAdapter(ABC):
             attention_capture = (
                 stack.enter_context(
                     self.capture_attention_weights(query_window=attention_query_window)
+                    if not reduce_attention_to_kv_heads
+                    else self.capture_attention_weights(
+                        query_window=attention_query_window,
+                        reduce_query_heads=True,
+                    )
                 )
                 if capture_attentions
                 else None
@@ -1194,6 +1248,47 @@ class HuggingFaceMultimodalAdapter(ABC):
             raise RuntimeError("preallocation changed the occupied cache length")
         state.model_state["mosaickv_decode_cache_storage"] = "preallocated_append_only"
         state.model_state["mosaickv_decode_cache_reserved_positions"] = additional_positions
+        return True
+
+    def rollback_preallocated_decode_step(
+        self,
+        state: DecodeState,
+        *,
+        active_cache_length: int,
+        logical_sequence_length: int,
+        next_decode_position: int,
+    ) -> bool:
+        """Rollback one provisional append without copying the prompt cache.
+
+        This is intentionally limited to MosaicKV's append-only preallocated
+        cache. Ordinary Hugging Face cache implementations may alias or
+        reallocate storage in undocumented ways and therefore return ``False``.
+        """
+
+        if state.model_state.get("mosaickv_decode_cache_storage") != (
+            "preallocated_append_only"
+        ):
+            return False
+        layers = getattr(state.past_key_values, "layers", None)
+        if not layers or any(
+            layer.__class__.__name__ != "PreallocatedDynamicLayer" for layer in layers
+        ):
+            return False
+        if state.active_cache_length != active_cache_length + 1:
+            raise RuntimeError("preallocated rollback expects exactly one provisional append")
+        crop = getattr(state.past_key_values, "crop", None)
+        if crop is None:
+            return False
+        crop(active_cache_length)
+        state.attention_mask = state.attention_mask[..., :active_cache_length]
+        state.active_cache_length = active_cache_length
+        state.logical_sequence_length = logical_sequence_length
+        state.next_decode_position = next_decode_position
+        buffers = state.model_state.get("mosaickv_validity_buffers")
+        if isinstance(buffers, tuple):
+            state.model_state["mosaickv_validity_masks"] = tuple(
+                buffer[..., :active_cache_length] for buffer in buffers
+            )
         return True
 
     def get_cache_layout(self, cache: Any) -> CacheLayout:

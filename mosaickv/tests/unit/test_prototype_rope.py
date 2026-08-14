@@ -173,10 +173,49 @@ def test_qwen_post_rope_construction_requires_and_accepts_exact_phase_transform(
         residual_config=ResidualConfig(enabled=False),
         key_transform=RotaryPrototypeKeyTransform(cos, sin, "synthetic_qwen_mrope_v1"),
     )
+    exact_medoid = construct_three_tier_cache(
+        full,
+        graph,
+        selection,
+        Qwen25VLAdapter.capabilities,
+        prototype_config=PrototypeConfig(
+            group_size=2,
+            pooling_mode="exact_medoid_key_forecast_value",
+            attention_bias_basis="forecast_attention_entropy",
+            anchor_position_strategy="forecast_weighted_member_medoid",
+        ),
+        residual_config=ResidualConfig(enabled=False),
+        prototype_token_weight_by_head={(0, 0): torch.tensor([0.0, 0.25, 0.75])},
+    )
 
     assert without_transform.mode is TierConstructionMode.EXACT_ONLY_UNSAFE
     assert with_transform.mode is TierConstructionMode.THREE_TIER
     assert with_transform.safety.phase_transform_provenance == "synthetic_qwen_mrope_v1"
+    assert exact_medoid.mode is TierConstructionMode.THREE_TIER
+    assert (
+        exact_medoid.safety.phase_transform_provenance
+        == "exact_post_rope_medoid_key_no_phase_average_v1"
+    )
+    assert torch.equal(
+        exact_medoid.state.prototypes.prototype_keys[0],
+        post_rope[..., 2:3, :],
+    )
+    expected_medoid_value = neutral[..., 1:2, :] * 0.25 + neutral[..., 2:3, :] * 0.75
+    assert torch.allclose(
+        exact_medoid.state.prototypes.prototype_values[0],
+        expected_medoid_value,
+        atol=1e-5,
+        rtol=0,
+    )
+    medoid_refreshed = refresh_prototype_after_promotions(
+        full,
+        exact_medoid.prototypes[0],
+        exact_medoid.state.prototypes.prototype_keys[0],
+        exact_medoid.state.prototypes.prototype_values[0],
+        {2: (post_rope[..., 2:3, :], neutral[..., 2:3, :])},
+    )
+    assert torch.equal(medoid_refreshed.key, post_rope[..., 2:3, :])
+    assert torch.allclose(medoid_refreshed.value, neutral[..., 1:2, :], atol=1e-5, rtol=0)
     expected_neutral = neutral[..., 1:2, :] * 0.25 + neutral[..., 2:3, :] * 0.75
     expected = _rotate(expected_neutral, cos[..., :1, :], sin[..., :1, :])
     assert torch.allclose(

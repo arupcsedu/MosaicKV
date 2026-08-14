@@ -28,6 +28,7 @@ from mosaickv.repair import (
     calculate_repair_signals,
     normalized_next_token_entropy,
     repair_decode_step,
+    stage_gpu_rescue_payloads,
 )
 from mosaickv.repair.oracle import evaluate_repair_decode_step
 from mosaickv.selection import (
@@ -223,6 +224,35 @@ def test_removed_critical_block_is_restored_and_recovers_current_token() -> None
             prototype_attention_mass={},
             re_decode=_must_not_redecode,
         )
+
+
+def test_gpu_rescue_stages_high_risk_block_and_avoids_trigger_transfer() -> None:
+    state, staging_ms, asynchronous = stage_gpu_rescue_payloads(
+        _fixture(),
+        max_blocks=1,
+    )
+
+    assert staging_ms >= 0
+    assert asynchronous is False  # CPU fixture; GPU integration covers pinned async copies.
+    assert tuple(payload.source_node_id for payload in state.gpu_rescue_payloads) == (2,)
+    assert state.gpu_rescue_bytes == state.full_state.blocks[2].byte_size
+
+    result = repair_decode_step(
+        state,
+        RepairConfig(
+            policy=RepairPolicy.PROTOTYPE_RISK,
+            prototype_risk_threshold=0.1,
+            max_blocks_per_step=1,
+        ),
+        step_index=0,
+        provisional_logits=np.asarray([4.0, 1.0], dtype=np.float32),
+        prototype_attention_mass={0: 0.9},
+        re_decode=lambda _state: np.asarray([1.0, 4.0], dtype=np.float32),
+    )
+
+    assert result.event.restored_block_ids == (2,)
+    assert result.event.transfer_time_ms == 0
+    assert result.state.gpu_rescue_payloads == ()
 
 
 def test_entropy_signals_and_optional_draft_kl_are_deterministic() -> None:
@@ -426,6 +456,87 @@ def test_decision_aware_repair_can_use_fullkv_draft_divergence() -> None:
     assert result.event.trigger_reason is RepairTriggerReason.DRAFT_DIVERGENCE
     assert result.event.signals.draft_kl_divergence is not None
     assert result.event.signals.draft_kl_divergence > 0.1
+
+
+def test_draft_divergence_catches_confident_low_prototype_risk_failure() -> None:
+    state = _fixture()
+    result = repair_decode_step(
+        state,
+        RepairConfig(
+            policy=RepairPolicy.DECISION_AWARE,
+            prototype_risk_threshold=10.0,
+            prototype_risk_min_entropy=0.99,
+            decision_margin_threshold=0.0,
+            draft_kl_threshold=0.1,
+            max_blocks_per_step=1,
+        ),
+        step_index=0,
+        provisional_logits=np.asarray([8.0, 0.0], dtype=np.float32),
+        prototype_attention_mass={0: 0.01},
+        draft_distribution=np.asarray([0.01, 0.99], dtype=np.float32),
+        re_decode=lambda _state: np.asarray([0.0, 8.0], dtype=np.float32),
+    )
+
+    assert result.event.triggered
+    assert result.event.trigger_reason is RepairTriggerReason.DRAFT_DIVERGENCE
+    assert result.event.signals.maximum_prototype_risk < 10.0
+
+
+def test_draft_divergence_without_prototype_mass_cannot_trigger_repair() -> None:
+    state = _fixture()
+    result = repair_decode_step(
+        state,
+        RepairConfig(
+            policy=RepairPolicy.DECISION_AWARE,
+            prototype_risk_threshold=10.0,
+            decision_margin_threshold=0.0,
+            draft_kl_threshold=0.1,
+            max_blocks_per_step=1,
+        ),
+        step_index=0,
+        provisional_logits=np.asarray([8.0, 0.0], dtype=np.float32),
+        prototype_attention_mass={0: 0.0},
+        draft_distribution=np.asarray([0.01, 0.99], dtype=np.float32),
+        re_decode=_must_not_redecode,
+    )
+
+    assert not result.event.triggered
+    assert result.event.trigger_reason is RepairTriggerReason.THRESHOLD_NOT_MET
+
+
+def test_draft_repair_can_require_top_token_disagreement() -> None:
+    state = _fixture()
+    config = RepairConfig(
+        policy=RepairPolicy.DECISION_AWARE,
+        prototype_risk_threshold=10.0,
+        decision_margin_threshold=0.0,
+        draft_kl_threshold=0.01,
+        draft_require_token_mismatch=True,
+        max_blocks_per_step=1,
+    )
+    agreed = repair_decode_step(
+        state,
+        config,
+        step_index=0,
+        provisional_logits=np.asarray([8.0, 0.0], dtype=np.float32),
+        prototype_attention_mass={0: 0.5},
+        draft_distribution=np.asarray([0.6, 0.4], dtype=np.float32),
+        re_decode=_must_not_redecode,
+    )
+    assert agreed.event.signals.draft_top_token_agreement is True
+    assert not agreed.event.triggered
+
+    disagreed = repair_decode_step(
+        state,
+        config,
+        step_index=0,
+        provisional_logits=np.asarray([8.0, 0.0], dtype=np.float32),
+        prototype_attention_mass={0: 0.5},
+        draft_distribution=np.asarray([0.1, 0.9], dtype=np.float32),
+        re_decode=lambda _state: np.asarray([0.0, 8.0], dtype=np.float32),
+    )
+    assert disagreed.event.signals.draft_top_token_agreement is False
+    assert disagreed.event.triggered
 
 
 @pytest.mark.parametrize(

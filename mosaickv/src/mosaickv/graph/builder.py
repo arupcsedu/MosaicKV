@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from itertools import pairwise
 from typing import Any
 
 import numpy as np
@@ -22,21 +22,16 @@ from mosaickv.graph.types import (
 )
 
 
-@dataclass(frozen=True, slots=True)
-class _CandidateEdge:
-    source: int
-    target: int
-    edge_type: EdgeType
-    weight: float
-
-
 class _EdgeAccumulator:
     """Deduplicate candidates, then enforce a per-node/per-source degree cap."""
 
     def __init__(self, config: GraphConfig) -> None:
         self._config = config
         self._edges: dict[tuple[int, EdgeType], dict[int, float]] = defaultdict(dict)
-        self._preselected: dict[int, list[_CandidateEdge]] = defaultdict(list)
+        self._preselected_rows: list[int] = []
+        self._preselected_columns: list[int] = []
+        self._preselected_types: list[EdgeType] = []
+        self._preselected_weights: list[float] = []
 
     def add_preselected(
         self,
@@ -55,7 +50,49 @@ class _EdgeAccumulator:
         weighted = max(0.0, min(1.0, score)) * source_weight
         if weighted <= 0 or weighted < self._config.min_edge_weight:
             return
-        self._preselected[source].append(_CandidateEdge(source, target, edge_type, weighted))
+        self._preselected_rows.append(source)
+        self._preselected_columns.append(target)
+        self._preselected_types.append(edge_type)
+        self._preselected_weights.append(weighted)
+
+    def add_preselected_many(
+        self,
+        sources: Sequence[int],
+        targets: Sequence[int],
+        edge_type: EdgeType,
+        scores: Sequence[float],
+        source_weight: float,
+    ) -> None:
+        """Append one duplicate-free top-k batch with vectorized validation."""
+
+        if source_weight == 0 or not sources:
+            return
+        if not (len(sources) == len(targets) == len(scores)):
+            raise ValueError("preselected edge batches must align")
+        score_array = np.asarray(scores, dtype=np.float64)
+        if not bool(np.all(np.isfinite(score_array))):
+            raise ValueError(f"non-finite {edge_type.value} edge score")
+        weighted = np.clip(score_array, 0.0, 1.0) * source_weight
+        minimum_weight = float(
+            max(self._config.min_edge_weight, float(np.finfo(np.float64).tiny))
+        )
+        retained = weighted >= minimum_weight
+        retained_sources = tuple(
+            source for source, keep in zip(sources, retained, strict=True) if keep
+        )
+        retained_targets = tuple(
+            target for target, keep in zip(targets, retained, strict=True) if keep
+        )
+        retained_weights = tuple(float(value) for value in weighted[retained])
+        if any(
+            source == target
+            for source, target in zip(retained_sources, retained_targets, strict=True)
+        ):
+            raise ValueError("preselected edge batches cannot contain self edges")
+        self._preselected_rows.extend(retained_sources)
+        self._preselected_columns.extend(retained_targets)
+        self._preselected_types.extend((edge_type,) * len(retained_sources))
+        self._preselected_weights.extend(retained_weights)
 
     def add(
         self,
@@ -78,22 +115,41 @@ class _EdgeAccumulator:
             worst_target = min(candidates, key=lambda item: (candidates[item], -item))
             del candidates[worst_target]
 
-    def finalize(self) -> tuple[_CandidateEdge, ...]:
-        by_source: dict[int, list[_CandidateEdge]] = defaultdict(list)
-        for source, preselected_candidates in self._preselected.items():
-            by_source[source].extend(preselected_candidates)
+    def finalize(
+        self,
+    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[float, ...], tuple[EdgeType, ...]]:
+        rows = self._preselected_rows
+        columns = self._preselected_columns
+        edge_types = self._preselected_types
+        weights = self._preselected_weights
         for (source, edge_type), edge_candidates in self._edges.items():
-            by_source[source].extend(
-                _CandidateEdge(source, target, edge_type, weight)
-                for target, weight in edge_candidates.items()
+            for target, weight in edge_candidates.items():
+                rows.append(source)
+                columns.append(target)
+                edge_types.append(edge_type)
+                weights.append(weight)
+        if not rows:
+            return (), (), (), ()
+        type_codes = {
+            edge_type: index
+            for index, edge_type in enumerate(sorted(EdgeType, key=lambda item: item.value))
+        }
+        order = np.lexsort(
+            (
+                np.fromiter(
+                    (type_codes[edge_type] for edge_type in edge_types),
+                    dtype=np.int16,
+                    count=len(edge_types),
+                ),
+                np.asarray(columns, dtype=np.int64),
+                np.asarray(rows, dtype=np.int64),
             )
-        return tuple(
-            edge
-            for source in sorted(by_source)
-            for edge in sorted(
-                by_source[source],
-                key=lambda item: (item.target, item.edge_type.value),
-            )
+        )
+        return (
+            tuple(rows[int(index)] for index in order),
+            tuple(columns[int(index)] for index in order),
+            tuple(weights[int(index)] for index in order),
+            tuple(edge_types[int(index)] for index in order),
         )
 
 
@@ -144,6 +200,9 @@ def _add_cosine_edges(
     if source_weight == 0 or not features:
         return
     add_preselected = config.edge_accumulation_mode == "preselected"
+    batch_sources: list[int] = []
+    batch_targets: list[int] = []
+    batch_scores: list[float] = []
     feature_groups: dict[tuple[int, int, int], list[int]] = defaultdict(list)
     normalized: dict[int, np.ndarray[Any, Any]] = {}
     for node_id, feature in features.items():
@@ -186,24 +245,34 @@ def _add_cosine_edges(
                 for row in range(len(source_ids)):
                     positive[row, start + row] = False
                 ranked = np.argsort(-score_tile, axis=1, kind="stable")
-                for row, source_id in enumerate(source_ids):
-                    retained = 0
-                    for column in ranked[row]:
-                        if not positive[row, column]:
-                            continue
-                        add_edge = (
-                            accumulator.add_preselected if add_preselected else accumulator.add
-                        )
-                        add_edge(
-                            source_id,
-                            node_ids[int(column)],
-                            edge_type,
-                            float(score_tile[row, column]),
-                            source_weight,
-                        )
-                        retained += 1
-                        if retained == config.max_neighbors:
-                            break
+                if add_preselected:
+                    ranked_positive = np.take_along_axis(positive, ranked, axis=1)
+                    retained_rank = np.cumsum(ranked_positive, axis=1) <= config.max_neighbors
+                    retained = ranked_positive & retained_rank
+                    row_indices, rank_indices = np.nonzero(retained)
+                    columns = ranked[row_indices, rank_indices]
+                    batch_sources.extend(source_ids[int(row)] for row in row_indices)
+                    batch_targets.extend(node_ids[int(column)] for column in columns)
+                    batch_scores.extend(
+                        float(score_tile[row, column])
+                        for row, column in zip(row_indices, columns, strict=True)
+                    )
+                else:
+                    for row, source_id in enumerate(source_ids):
+                        retained_count = 0
+                        for column in ranked[row]:
+                            if not positive[row, column]:
+                                continue
+                            accumulator.add(
+                                source_id,
+                                node_ids[int(column)],
+                                edge_type,
+                                float(score_tile[row, column]),
+                                source_weight,
+                            )
+                            retained_count += 1
+                            if retained_count == config.max_neighbors:
+                                break
                 continue
             for row, source_id in enumerate(source_ids):
                 source = nodes[source_id]
@@ -230,6 +299,14 @@ def _add_cosine_edges(
                         float(candidate_scores[selected_index]),
                         source_weight,
                     )
+    if batch_sources:
+        accumulator.add_preselected_many(
+            batch_sources,
+            batch_targets,
+            edge_type,
+            batch_scores,
+            source_weight,
+        )
 
 
 def _compatibility_prefix(node: PooledBlockDescriptor, config: GraphConfig) -> tuple[int, int]:
@@ -256,11 +333,15 @@ def _add_spatial_edges(
     nodes: tuple[PooledBlockDescriptor, ...],
     config: GraphConfig,
     accumulator: _EdgeAccumulator,
+    *,
+    eligible_node_ids: frozenset[int] | None = None,
 ) -> None:
     if config.spatial_weight == 0:
         return
     groups: dict[tuple[Any, ...], list[int]] = defaultdict(list)
     for node in nodes:
+        if eligible_node_ids is not None and node.node_id not in eligible_node_ids:
+            continue
         if node.evidence.normalized_box is not None:
             groups[(*_compatibility_prefix(node, config), *_container_key(node))].append(
                 node.node_id
@@ -345,12 +426,16 @@ def _add_layout_edges(
     nodes: tuple[PooledBlockDescriptor, ...],
     config: GraphConfig,
     accumulator: _EdgeAccumulator,
+    *,
+    eligible_node_ids: frozenset[int] | None = None,
 ) -> None:
     if config.layout_weight == 0:
         return
     groups: dict[tuple[Any, ...], list[int]] = defaultdict(list)
     box_groups: dict[tuple[Any, ...], list[int]] = defaultdict(list)
     for node in nodes:
+        if eligible_node_ids is not None and node.node_id not in eligible_node_ids:
+            continue
         metadata = node.evidence
         prefix = (*_compatibility_prefix(node, config), *_container_key(node))
         if metadata.row_index is not None:
@@ -423,11 +508,15 @@ def _add_temporal_edges(
     nodes: tuple[PooledBlockDescriptor, ...],
     config: GraphConfig,
     accumulator: _EdgeAccumulator,
+    *,
+    eligible_node_ids: frozenset[int] | None = None,
 ) -> None:
     if config.temporal_weight == 0:
         return
     groups: dict[tuple[int, int, int], list[int]] = defaultdict(list)
     for node in nodes:
+        if eligible_node_ids is not None and node.node_id not in eligible_node_ids:
+            continue
         metadata = node.evidence
         if metadata.frame_index is None:
             continue
@@ -468,10 +557,14 @@ def _add_identifier_edges(
     nodes: tuple[PooledBlockDescriptor, ...],
     config: GraphConfig,
     accumulator: _EdgeAccumulator,
+    *,
+    eligible_node_ids: frozenset[int] | None = None,
 ) -> None:
     evidence_groups: dict[tuple[Any, ...], list[int]] = defaultdict(list)
     alignment_groups: dict[tuple[Any, ...], list[int]] = defaultdict(list)
     for node in nodes:
+        if eligible_node_ids is not None and node.node_id not in eligible_node_ids:
+            continue
         prefix = _compatibility_prefix(node, config)
         if node.evidence.evidence_region is not None:
             evidence_groups[(*prefix, node.evidence.evidence_region)].append(node.node_id)
@@ -521,42 +614,98 @@ def _add_fallback_edges(
         if eligible_node_ids is not None and node.node_id not in eligible_node_ids:
             continue
         groups[_compatibility_prefix(node, config)].append(node.node_id)
+    unrestricted_templates: dict[
+        tuple[tuple[float, ...], int | None, int],
+        tuple[tuple[int, ...], tuple[int, ...], tuple[float, ...]],
+    ] = {}
+    batch_sources: list[int] = []
+    batch_targets: list[int] = []
+    batch_scores: list[float] = []
     for node_ids in groups.values():
-        ordered = sorted(node_ids, key=lambda node_id: (nodes[node_id].logical_center, node_id))
+        # FullKV blockization emits each layer/head group in logical order.
+        # Retain a defensive fallback for independently constructed test graphs
+        # without paying for an unconditional sort in normal runs.
+        ordered = node_ids
+        if any(
+            (nodes[left].logical_center, left) > (nodes[right].logical_center, right)
+            for left, right in pairwise(node_ids)
+        ):
+            ordered = sorted(
+                node_ids,
+                key=lambda node_id: (nodes[node_id].logical_center, node_id),
+            )
+        centers = tuple(nodes[node_id].logical_center for node_id in ordered)
         unrestricted_group = (
             config.require_same_layer
             and config.require_same_kv_head
             and len(config.allowed_modality_pairs) == 9
         )
+        if unrestricted_group:
+            template_key = (
+                centers,
+                config.fallback_max_position_span,
+                config.max_neighbors,
+            )
+            template = unrestricted_templates.get(template_key)
+            if template is None:
+                template_sources: list[int] = []
+                template_targets: list[int] = []
+                template_scores: list[float] = []
+                for index, source_center in enumerate(centers):
+                    neighbor_candidates = tuple(
+                        sorted(
+                            (
+                                (abs(source_center - target_center), target_index)
+                                for target_index, target_center in enumerate(centers)
+                                if target_index != index
+                                and (
+                                    config.fallback_max_position_span is None
+                                    or abs(source_center - target_center)
+                                    <= config.fallback_max_position_span
+                                )
+                            ),
+                            key=lambda item: (item[0], item[1]),
+                        )[: config.max_neighbors]
+                    )
+                    for distance, target_index in neighbor_candidates:
+                        template_sources.append(index)
+                        template_targets.append(target_index)
+                        span = config.fallback_max_position_span
+                        template_scores.append(
+                            1.0 if span is None else 1.0 - distance / (span + 1)
+                        )
+                template = (
+                    tuple(template_sources),
+                    tuple(template_targets),
+                    tuple(template_scores),
+                )
+                unrestricted_templates[template_key] = template
+            local_source_indices, local_target_indices, local_edge_scores = template
+            batch_sources.extend(ordered[index] for index in local_source_indices)
+            batch_targets.extend(ordered[index] for index in local_target_indices)
+            batch_scores.extend(local_edge_scores)
+            continue
         for index, source_id in enumerate(ordered):
+            source = nodes[source_id]
+            source_center = centers[index]
             first = max(0, index - config.max_neighbors)
             last = min(len(ordered), index + config.max_neighbors + 1)
-            candidates: list[tuple[int, float]] = []
-            for target_id in ordered[first:last]:
-                source = nodes[source_id]
+            compatible_candidates: list[tuple[int, float]] = []
+            for target_index, target_id in enumerate(ordered[first:last], start=first):
                 target = nodes[target_id]
-                compatible = (
-                    source_id != target_id
-                    and (
-                        config.fallback_max_position_span is None
-                        or abs(source.logical_center - target.logical_center)
-                        <= config.fallback_max_position_span
-                    )
-                    if unrestricted_group
-                    else _compatible(
-                        source,
-                        target,
-                        config,
-                        maximum_position_span=config.fallback_max_position_span,
-                    )
+                compatible = _compatible(
+                    source,
+                    target,
+                    config,
+                    maximum_position_span=config.fallback_max_position_span,
                 )
                 if compatible:
-                    distance = abs(source.logical_center - target.logical_center)
+                    distance = abs(source_center - centers[target_index])
                     span = config.fallback_max_position_span
                     score = 1.0 if span is None else 1.0 - distance / (span + 1)
-                    candidates.append((target_id, score))
+                    compatible_candidates.append((target_id, score))
             for target_id, score in sorted(
-                candidates,
+                compatible_candidates,
                 key=lambda item: (-item[1], item[0]),
             )[: config.max_neighbors]:
                 add_edge(
@@ -566,6 +715,14 @@ def _add_fallback_edges(
                     score,
                     config.fallback_weight,
                 )
+    if batch_sources:
+        accumulator.add_preselected_many(
+            batch_sources,
+            batch_targets,
+            EdgeType.FALLBACK_POSITIONAL,
+            batch_scores,
+            config.fallback_weight,
+        )
 
 
 def _attention_features(
@@ -610,19 +767,53 @@ class _DisjointSet:
 
 def _diagnostics(
     nodes: tuple[PooledBlockDescriptor, ...],
-    edges: tuple[_CandidateEdge, ...],
+    rows: Sequence[int],
+    columns: Sequence[int],
+    edge_types: Sequence[EdgeType],
     *,
     fallback_used: bool,
+    candidate_node_ids: frozenset[int] | None = None,
+    candidate_graph_mode: str = "full",
 ) -> GraphDiagnostics:
-    disjoint = _DisjointSet(len(nodes))
-    out_degrees = [0] * len(nodes)
-    mixing = 0
-    for edge in edges:
-        disjoint.union(edge.source, edge.target)
-        out_degrees[edge.source] += 1
-        if nodes[edge.source].block.modality is not nodes[edge.target].block.modality:
-            mixing += 1
-    components = len({disjoint.find(node_id) for node_id in range(len(nodes))})
+    edge_count = len(rows)
+    row_array = np.asarray(rows, dtype=np.int64)
+    column_array = np.asarray(columns, dtype=np.int64)
+    out_degrees = np.bincount(row_array, minlength=len(nodes))
+    modality_codes = (
+        {modality: index for index, modality in enumerate(type(nodes[0].block.modality))}
+        if nodes
+        else {}
+    )
+    modalities = (
+        np.fromiter(
+            (modality_codes[node.block.modality] for node in nodes),
+            dtype=np.int8,
+            count=len(nodes),
+        )
+        if nodes
+        else np.empty(0, dtype=np.int8)
+    )
+    mixing = int(np.count_nonzero(modalities[row_array] != modalities[column_array]))
+    try:
+        from scipy.sparse import coo_matrix  # type: ignore[import-untyped]
+        from scipy.sparse.csgraph import connected_components  # type: ignore[import-untyped]
+
+        adjacency = coo_matrix(
+            (np.ones(edge_count, dtype=np.int8), (row_array, column_array)),
+            shape=(len(nodes), len(nodes)),
+        )
+        components = int(
+            connected_components(
+                adjacency,
+                directed=False,
+                return_labels=False,
+            )
+        )
+    except ImportError:  # pragma: no cover - minimal installs use the reference fallback
+        disjoint = _DisjointSet(len(nodes))
+        for source, target in zip(rows, columns, strict=True):
+            disjoint.union(source, target)
+        components = len({disjoint.find(node_id) for node_id in range(len(nodes))})
     evidence_groups: dict[tuple[int, int, str], list[int]] = defaultdict(list)
     for node in nodes:
         if node.evidence.evidence_region is not None:
@@ -637,12 +828,12 @@ def _diagnostics(
         local_sets[cluster] = _DisjointSet(len(node_ids))
         local_ids[cluster] = {node_id: index for index, node_id in enumerate(node_ids)}
         node_clusters.update({node_id: cluster for node_id in node_ids})
-    for edge in edges:
-        source_cluster = node_clusters.get(edge.source)
-        if source_cluster is not None and source_cluster == node_clusters.get(edge.target):
+    for source, target in zip(rows, columns, strict=True):
+        source_cluster = node_clusters.get(source)
+        if source_cluster is not None and source_cluster == node_clusters.get(target):
             local_sets[source_cluster].union(
-                local_ids[source_cluster][edge.source],
-                local_ids[source_cluster][edge.target],
+                local_ids[source_cluster][source],
+                local_ids[source_cluster][target],
             )
     for cluster, node_ids in evidence_groups.items():
         if len(node_ids) == 1:
@@ -651,18 +842,75 @@ def _diagnostics(
         local = local_sets[cluster]
         if len({local.find(index) for index in range(len(node_ids))}) == 1:
             covered += 1
-    edge_counts = Counter(edge.edge_type for edge in edges)
+    edge_counts = Counter(edge_types)
     return GraphDiagnostics(
         node_count=len(nodes),
-        edge_count=len(edges),
+        edge_count=edge_count,
         connected_components=components,
-        modality_mixing=(mixing / len(edges) if edges else 0.0),
-        average_degree=(len(edges) / len(nodes) if nodes else 0.0),
+        modality_mixing=(mixing / edge_count if edge_count else 0.0),
+        average_degree=(edge_count / len(nodes) if nodes else 0.0),
         evidence_cluster_coverage=(covered / len(evidence_groups) if evidence_groups else None),
         edge_counts=tuple((edge_type, edge_counts[edge_type]) for edge_type in EdgeType),
-        maximum_out_degree=max(out_degrees, default=0),
+        maximum_out_degree=int(out_degrees.max(initial=0)),
         fallback_used=fallback_used,
+        candidate_node_count=(
+            None if candidate_node_ids is None else len(candidate_node_ids)
+        ),
+        candidate_fraction=(
+            None
+            if candidate_node_ids is None or not nodes
+            else len(candidate_node_ids) / len(nodes)
+        ),
+        candidate_graph_mode=candidate_graph_mode,
     )
+
+
+def _expand_candidate_neighbors(
+    nodes: tuple[PooledBlockDescriptor, ...],
+    candidate_node_ids: frozenset[int],
+    hops: int,
+) -> frozenset[int]:
+    """Add bounded positional and explicit-evidence neighbors to a shortlist.
+
+    Image/page identity alone is intentionally not a grouping key because it
+    would commonly expand one visual candidate to every patch in the image.
+    Fine region, OCR/layout, alignment, and frame identifiers are selective
+    enough to preserve local evidence without recreating the full graph.
+    """
+
+    if hops < 0:
+        raise ValueError("candidate neighbor hops must be nonnegative")
+    selected = set(candidate_node_ids)
+    ordered_by_head: dict[tuple[int, int], list[int]] = defaultdict(list)
+    evidence_groups: dict[tuple[Any, ...], list[int]] = defaultdict(list)
+    for node in nodes:
+        block = node.block
+        ordered_by_head[(block.layer, block.kv_head)].append(node.node_id)
+        evidence = node.evidence
+        for kind, value in (
+            ("region", evidence.evidence_region),
+            ("page_region", evidence.page_region),
+            ("row", evidence.row_index),
+            ("column", evidence.column_index),
+            ("frame", evidence.frame_index),
+        ):
+            if value is not None:
+                evidence_groups[(block.layer, block.kv_head, kind, value)].append(node.node_id)
+        for alignment_id in evidence.alignment_ids:
+            evidence_groups[(block.layer, block.kv_head, "alignment", alignment_id)].append(
+                node.node_id
+            )
+    for group in ordered_by_head.values():
+        group.sort(key=lambda node_id: (nodes[node_id].logical_center, node_id))
+        offsets = {node_id: index for index, node_id in enumerate(group)}
+        for node_id in tuple(selected.intersection(offsets)):
+            center = offsets[node_id]
+            selected.update(group[max(0, center - hops) : center + hops + 1])
+    selected_snapshot = frozenset(selected)
+    for members in evidence_groups.values():
+        if selected_snapshot.intersection(members):
+            selected.update(members)
+    return frozenset(selected)
 
 
 def build_evidence_graph(
@@ -673,8 +921,10 @@ def build_evidence_graph(
     hidden_sequence_dimension: int = -2,
     attention_coactivation: Any | Mapping[int, Any] | None = None,
     prompt_attentions: Sequence[Any] | None = None,
+    prompt_attention_query_window: int | None = None,
     metadata_by_node: Mapping[int, BlockEvidenceMetadata] | None = None,
     similarity_candidate_node_ids: Sequence[int] | None = None,
+    source_node_ids: Sequence[int] | None = None,
 ) -> SparseEvidenceGraph:
     """Construct all enabled evidence sources in bounded sparse form.
 
@@ -688,17 +938,36 @@ def build_evidence_graph(
         raise ValueError(
             "provide either pre-pooled attention_coactivation or prompt_attentions, not both"
         )
-    similarity_candidates = (
+    source_table = (
+        tuple(range(len(full_state.blocks)))
+        if source_node_ids is None
+        else tuple(int(node_id) for node_id in source_node_ids)
+    )
+    if len(source_table) != len(set(source_table)) or tuple(sorted(source_table)) != source_table:
+        raise ValueError("graph source node IDs must be unique and ordered")
+    unknown_sources = set(source_table) - set(range(len(full_state.blocks)))
+    if unknown_sources:
+        raise ValueError(f"graph contains unknown source nodes: {sorted(unknown_sources)}")
+    source_to_local = {
+        source_node_id: local_node_id
+        for local_node_id, source_node_id in enumerate(source_table)
+    }
+    similarity_source_candidates = (
         None
         if similarity_candidate_node_ids is None
         else frozenset(int(node_id) for node_id in similarity_candidate_node_ids)
     )
-    if similarity_candidates is not None:
-        unknown = similarity_candidates - set(range(len(full_state.blocks)))
+    if similarity_source_candidates is not None:
+        unknown = similarity_source_candidates - set(source_table)
         if unknown:
             raise ValueError(
                 f"similarity shortlist contains unknown graph nodes: {sorted(unknown)}"
             )
+    similarity_candidates = (
+        None
+        if similarity_source_candidates is None
+        else frozenset(source_to_local[node_id] for node_id in similarity_source_candidates)
+    )
     if config.candidate_descriptor_pooling and similarity_candidates is None:
         raise ValueError(
             "candidate descriptor pooling requires explicit similarity candidate node IDs"
@@ -712,16 +981,39 @@ def build_evidence_graph(
         eligible_node_ids=(
             similarity_candidate_node_ids if config.candidate_descriptor_pooling else None
         ),
+        node_table_ids=source_table,
     )
+    graph_candidates = similarity_candidates
+    if graph_candidates is not None and config.candidate_graph_mode == "shortlist_rerank":
+        graph_candidates = _expand_candidate_neighbors(
+            nodes,
+            graph_candidates,
+            config.candidate_neighbor_hops,
+        )
+        # Candidate expansion occurs after the first pooled pass. Structural
+        # neighbors can participate through metadata edges, but deliberately
+        # retain zero learned descriptors unless they were in the original
+        # prompt shortlist. This avoids a second device-to-host cache scan.
     if not config.enabled:
-        edges: tuple[_CandidateEdge, ...] = ()
-        return SparseEvidenceGraph(
+        rows: tuple[int, ...] = ()
+        columns: tuple[int, ...] = ()
+        weights: tuple[float, ...] = ()
+        edge_types: tuple[EdgeType, ...] = ()
+        return SparseEvidenceGraph._from_validated(
             nodes=nodes,
-            row_indices=(),
-            column_indices=(),
-            weights=(),
-            edge_types=(),
-            diagnostics=_diagnostics(nodes, edges, fallback_used=False),
+            row_indices=rows,
+            column_indices=columns,
+            weights=weights,
+            edge_types=edge_types,
+            diagnostics=_diagnostics(
+                nodes,
+                rows,
+                columns,
+                edge_types,
+                fallback_used=False,
+                candidate_node_ids=graph_candidates,
+                candidate_graph_mode=config.candidate_graph_mode,
+            ),
         )
     accumulator = _EdgeAccumulator(config)
     _add_cosine_edges(
@@ -737,51 +1029,91 @@ def build_evidence_graph(
         config=config,
         accumulator=accumulator,
     )
-    _add_cosine_edges(
-        nodes,
-        (
-            pool_prompt_attention_coactivation(
+    coactivation_features = (
+        {
+            source_to_local[source_node_id]: feature
+            for source_node_id, feature in pool_prompt_attention_coactivation(
                 full_state,
                 prompt_attentions,
                 host_transfer_mode=config.attention_host_transfer_mode,
                 eligible_node_ids=similarity_candidate_node_ids,
-            )
-            if prompt_attentions is not None
-            else {
-                node_id: feature
-                for node_id, feature in _attention_features(
-                    attention_coactivation,
-                    len(nodes),
-                ).items()
-                if similarity_candidates is None or node_id in similarity_candidates
-            }
-        ),
+                query_window=prompt_attention_query_window,
+            ).items()
+            if source_node_id in source_to_local
+        }
+        if prompt_attentions is not None
+        else {
+            node_id: feature
+            for node_id, feature in _attention_features(
+                attention_coactivation,
+                len(nodes),
+            ).items()
+            if similarity_candidates is None or node_id in similarity_candidates
+        }
+    )
+    _add_cosine_edges(
+        nodes,
+        coactivation_features,
         edge_type=EdgeType.ATTENTION_COACTIVATION,
         source_weight=config.attention_weight,
         maximum_position_span=config.attention_max_position_span,
         config=config,
         accumulator=accumulator,
     )
-    _add_spatial_edges(nodes, config, accumulator)
-    _add_layout_edges(nodes, config, accumulator)
-    _add_temporal_edges(nodes, config, accumulator)
-    _add_identifier_edges(nodes, config, accumulator)
+    structural_candidates = (
+        graph_candidates if config.candidate_graph_mode == "shortlist_rerank" else None
+    )
+    _add_spatial_edges(
+        nodes,
+        config,
+        accumulator,
+        eligible_node_ids=structural_candidates,
+    )
+    _add_layout_edges(
+        nodes,
+        config,
+        accumulator,
+        eligible_node_ids=structural_candidates,
+    )
+    _add_temporal_edges(
+        nodes,
+        config,
+        accumulator,
+        eligible_node_ids=structural_candidates,
+    )
+    _add_identifier_edges(
+        nodes,
+        config,
+        accumulator,
+        eligible_node_ids=structural_candidates,
+    )
     # Positional locality is an independent sparse evidence source, not a
     # replacement for semantic/structural metadata.  Keeping it for every node
     # gives downstream prototype construction a bounded local compatibility
     # path even when learned descriptors select mutually dissimilar neighbors.
     # Each source still contributes at most ``max_neighbors`` outgoing edges,
     # so the graph remains O(n*d).
-    fallback_used = config.fallback_weight > 0
-    _add_fallback_edges(nodes, config, accumulator)
-    edges = accumulator.finalize()
-    diagnostics = _diagnostics(nodes, edges, fallback_used=fallback_used)
-    return SparseEvidenceGraph(
+    fallback_used = bool(
+        config.candidate_graph_mode == "full" and config.fallback_weight > 0
+    )
+    if config.candidate_graph_mode == "full":
+        _add_fallback_edges(nodes, config, accumulator)
+    rows, columns, weights, edge_types = accumulator.finalize()
+    diagnostics = _diagnostics(
+        nodes,
+        rows,
+        columns,
+        edge_types,
+        fallback_used=fallback_used,
+        candidate_node_ids=graph_candidates,
+        candidate_graph_mode=config.candidate_graph_mode,
+    )
+    return SparseEvidenceGraph._from_validated(
         nodes=nodes,
-        row_indices=tuple(edge.source for edge in edges),
-        column_indices=tuple(edge.target for edge in edges),
-        weights=tuple(edge.weight for edge in edges),
-        edge_types=tuple(edge.edge_type for edge in edges),
+        row_indices=rows,
+        column_indices=columns,
+        weights=weights,
+        edge_types=edge_types,
         diagnostics=diagnostics,
     )
 

@@ -18,6 +18,7 @@ from mosaickv.config import (
     PrototypeConfig,
     ResidualConfig,
     RunConfig,
+    SelectionConfig,
     UtilityConfig,
     VLCacheConfig,
     canonical_config_json,
@@ -95,8 +96,26 @@ def test_per_head_prototype_routes_are_strict_and_resolved() -> None:
     assert config.group_size_for(0, 2) == 11
     assert config.group_size_for(1, 2) == 15
     assert config.position_span_for(0, 2) == 127
+    assert config.uses_prototype_head(0, 2)
+    routed = PrototypeConfig(
+        selection_only_head_routes=("0:2",),
+        maximum_prototypes_per_head=2,
+        uncertain_head_only=True,
+        uncertain_head_fraction=0.25,
+        source_modalities=("image",),
+    )
+    assert not routed.uses_prototype_head(0, 2)
+    assert routed.maximum_prototypes_per_head == 2
+    assert routed.uses_prototype_block(0, 1, "image")
+    assert not routed.uses_prototype_block(0, 1, "text")
     with pytest.raises(ConfigurationError, match="cannot repeat"):
         PrototypeConfig(head_group_sizes=("0:1:4", "0:1:8"))
+    with pytest.raises(ConfigurationError, match="must be disjoint"):
+        PrototypeConfig(exact_head_routes=("0:1",), selection_only_head_routes=("0:1",))
+    with pytest.raises(ConfigurationError, match="maximum_prototypes_per_head"):
+        PrototypeConfig(maximum_prototypes_per_head=0)
+    with pytest.raises(ConfigurationError, match="source_modalities"):
+        PrototypeConfig(source_modalities=("audio",))
 
 
 @pytest.mark.parametrize("scale", [-0.1, 1.1, float("inf")])
@@ -269,6 +288,59 @@ def test_draft_kl_repair_requires_an_online_draft_forecast() -> None:
         )
 
 
+def test_draft_kl_repair_accepts_independent_counterfactual_draft() -> None:
+    config = synthetic_smoke_config()
+    resolved = replace(
+        config,
+        method=MosaicKVMethod.MOSAICKV_FULL,
+        forecasting=ForecastingConfig(
+            mode=ForecastMode.PROMPT_WINDOW,
+            prompt_window=4,
+            draft_steps=0,
+        ),
+        repair=replace(
+            config.repair,
+            policy=RepairPolicy.DECISION_AWARE,
+            draft_kl_threshold=0.1,
+            counterfactual_draft_steps=4,
+            draft_require_token_mismatch=True,
+            counterfactual_route_heads=True,
+        ),
+    )
+    assert resolved.repair.counterfactual_draft_steps == 4
+    assert resolved.repair.draft_require_token_mismatch
+    assert resolved.repair.counterfactual_route_heads
+
+
+def test_stable_head_prompt_routing_is_strictly_serialized() -> None:
+    selection = SelectionConfig.from_mapping(
+        {
+            "stable_head_prompt_routing": True,
+            "physical_capacity_fraction": 0.7,
+        }
+    )
+    assert selection.stable_head_prompt_routing
+    assert selection.physical_capacity_fraction == 0.7
+
+
+@pytest.mark.parametrize("value", (0.0, -0.1, 1.01, float("inf"), float("nan")))
+def test_physical_capacity_fraction_is_strict(value: float) -> None:
+    with pytest.raises(ConfigurationError, match="physical_capacity_fraction"):
+        SelectionConfig(physical_capacity_fraction=value)
+
+
+def test_routed_head_only_planning_requires_stable_head_routing() -> None:
+    with pytest.raises(ConfigurationError, match="requires stable_head_prompt_routing"):
+        SelectionConfig.from_mapping({"routed_head_only_planning": True})
+    selection = SelectionConfig.from_mapping(
+        {
+            "stable_head_prompt_routing": True,
+            "routed_head_only_planning": True,
+        }
+    )
+    assert selection.routed_head_only_planning
+
+
 def test_unknown_configuration_field_is_rejected() -> None:
     payload = json.loads(canonical_config_json(synthetic_smoke_config()))
     payload["model"]["typo_revision"] = "bad"
@@ -300,6 +372,25 @@ def test_graph_attention_host_transfer_mode_is_strict() -> None:
         GraphConfig(similarity_shortlist_multiplier=-1)
     with pytest.raises(ConfigurationError, match="candidate_descriptor_pooling"):
         GraphConfig(candidate_descriptor_pooling=True)
+    routed = GraphConfig.from_mapping(
+        {
+            "similarity_shortlist_multiplier": 3.0,
+            "candidate_descriptor_pooling": True,
+            "candidate_graph_mode": "shortlist_rerank",
+            "candidate_neighbor_hops": 1,
+            "screening_group_blocks": 4,
+            "uncertain_head_only": True,
+            "uncertain_head_fraction": 0.5,
+            "uncertain_head_threshold": 0.25,
+        }
+    )
+    assert routed.candidate_graph_mode == "shortlist_rerank"
+    assert routed.screening_group_blocks == 4
+    assert routed.uncertain_head_only is True
+    with pytest.raises(ConfigurationError, match="shortlist_rerank"):
+        GraphConfig(candidate_graph_mode="shortlist_rerank")
+    with pytest.raises(ConfigurationError, match="uncertain_head_only"):
+        GraphConfig(uncertain_head_only=True)
 
 
 def test_compute_execution_modes_are_strict() -> None:
@@ -319,6 +410,37 @@ def test_compute_execution_modes_are_strict() -> None:
         ForecastingConfig(centroid_execution_mode="per_query")
     with pytest.raises(ConfigurationError, match="execution_mode"):
         UtilityConfig(execution_mode="scalar_dense")
+
+
+def test_vectorized_selector_and_gpu_rescue_configuration_is_strict() -> None:
+    selection = SelectionConfig.from_mapping(
+        {"algorithm": "vectorized_coverage", "coverage_correction_rounds": 3}
+    )
+    assert selection.algorithm == "vectorized_coverage"
+    assert selection.coverage_correction_rounds == 3
+    with pytest.raises(ConfigurationError, match=r"selection\.algorithm"):
+        SelectionConfig(algorithm="beam_search")
+    with pytest.raises(ConfigurationError, match="coverage_correction_rounds"):
+        SelectionConfig(coverage_correction_rounds=9)
+
+    residual = ResidualConfig.from_mapping(
+        {"gpu_rescue_max_blocks": 2, "gpu_rescue_max_bytes": 4096}
+    )
+    assert residual.gpu_rescue_max_blocks == 2
+    assert residual.gpu_rescue_max_bytes == 4096
+    with pytest.raises(ConfigurationError, match="gpu_rescue_max_bytes"):
+        ResidualConfig(gpu_rescue_max_bytes=0)
+    medoid = PrototypeConfig(
+        pooling_mode="exact_medoid_key_forecast_value",
+        attention_bias_basis="forecast_attention_entropy",
+        anchor_position_strategy="forecast_weighted_member_medoid",
+    )
+    assert medoid.pooling_mode == "exact_medoid_key_forecast_value"
+    with pytest.raises(ConfigurationError, match="anchor_position_strategy"):
+        PrototypeConfig(
+            pooling_mode="exact_medoid_key_forecast_value",
+            attention_bias_basis="forecast_attention_entropy",
+        )
 
 
 def test_common_physical_budget_controls_are_strict() -> None:

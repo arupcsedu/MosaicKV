@@ -22,6 +22,10 @@ from mosaickv.backends import (  # noqa: E402
     HuggingFaceMosaicKVModel,
     compare_runtime_retention_one,
 )
+from mosaickv.backends.hf_runtime import (  # noqa: E402
+    PackedRuntimeCache,
+    _state_from_packed,
+)
 from mosaickv.config import (  # noqa: E402
     CacheConfig,
     DatasetConfig,
@@ -196,6 +200,67 @@ def test_qwen_eager_prefill_can_switch_to_sdpa_decode() -> None:
     hybrid_step = hybrid.decode_one_token(
         hybrid_prefill.next_token_id,
         hybrid_prefill.state,
+        capture_queries=False,
+    )
+
+    assert int(eager_step.next_token_id.item()) == int(hybrid_step.next_token_id.item())
+    assert float((eager_step.logits - hybrid_step.logits).abs().max()) <= 1e-5
+
+
+@pytest.mark.hf
+@pytest.mark.integration
+def test_llava_padded_per_head_cache_sdpa_matches_eager() -> None:
+    """Admit SDPA only with the exact additive mask used by eager decode."""
+
+    torch.manual_seed(23)
+    eager = _llava(kv_heads=2)
+    torch.manual_seed(23)
+    hybrid = _llava(kv_heads=2)
+    messages = [{"role": "user", "content": "tiny prompt"}]
+    eager_prefill = eager.prefill(eager.prepare_inputs(messages), capture_queries=False)
+    hybrid_prefill = hybrid.prefill(hybrid.prepare_inputs(messages), capture_queries=False)
+    eager_snapshot = eager.extract_past_key_values(eager_prefill.state.past_key_values)
+    hybrid_snapshot = hybrid.extract_past_key_values(hybrid_prefill.state.past_key_values)
+    masks = tuple(
+        torch.tensor(
+            [[True, False, True, True], [True, True, False, True]],
+            device=layer.key.device,
+        )
+        for layer in eager_snapshot.layers
+    )
+    eager_packed = PackedRuntimeCache(
+        eager_snapshot,
+        masks,
+        eager_snapshot.active_sequence_length,
+        False,
+        (),
+        (),
+        (),
+    )
+    hybrid_packed = PackedRuntimeCache(
+        hybrid_snapshot,
+        tuple(
+            mask.to(layer.key.device)
+            for mask, layer in zip(masks, hybrid_snapshot.layers, strict=True)
+        ),
+        hybrid_snapshot.active_sequence_length,
+        False,
+        (),
+        (),
+        (),
+    )
+    eager_state = _state_from_packed(eager, eager_prefill.state, eager_packed)
+    hybrid_state = _state_from_packed(hybrid, hybrid_prefill.state, hybrid_packed)
+
+    hybrid.set_attention_implementation("sdpa")
+    eager_step = eager.decode_one_token(
+        eager_prefill.next_token_id,
+        eager_state,
+        capture_queries=False,
+    )
+    hybrid_step = hybrid.decode_one_token(
+        hybrid_prefill.next_token_id,
+        hybrid_state,
         capture_queries=False,
     )
 

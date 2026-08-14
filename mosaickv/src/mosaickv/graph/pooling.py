@@ -180,18 +180,20 @@ def _pool_torch_token_feature_batch_device(
         or any(len(item) != len(positions[0]) for item in positions)
     ):
         raise ValueError("graph pooling batches require one nonzero block width")
-    position_index = torch.as_tensor(positions, dtype=torch.long, device=matrix.device)
     sequence_length = int(matrix.shape[0] if heads is None else matrix.shape[1])
-    if int(position_index.min()) < 0 or int(position_index.max()) >= sequence_length:
+    minimum_position = min(min(row) for row in positions)
+    maximum_position = max(max(row) for row in positions)
+    if minimum_position < 0 or maximum_position >= sequence_length:
         raise ValueError("graph block position lies outside descriptor source tensor")
+    position_index = torch.as_tensor(positions, dtype=torch.long, device=matrix.device)
     if heads is None:
         selected = matrix[position_index]
     else:
         if len(heads) != len(positions):
             raise ValueError("graph pooling heads and position rows must align")
-        head_index = torch.as_tensor(heads, dtype=torch.long, device=matrix.device)
-        if int(head_index.min()) < 0 or int(head_index.max()) >= int(matrix.shape[0]):
+        if min(heads) < 0 or max(heads) >= int(matrix.shape[0]):
             raise ValueError("graph block KV head lies outside descriptor source tensor")
+        head_index = torch.as_tensor(heads, dtype=torch.long, device=matrix.device)
         selected = matrix[head_index[:, None], position_index]
     return selected.reshape(len(positions), -1, selected.shape[-1]).mean(dim=1)
 
@@ -327,6 +329,158 @@ def _unit(value: np.ndarray[Any, np.dtype[np.float32]]) -> np.ndarray[Any, np.dt
     return result
 
 
+def _pool_torch_descriptors_one_transfer(
+    full_state: FullKVState,
+    *,
+    metadata_by_node: Mapping[int, BlockEvidenceMetadata],
+    eligible_node_ids: frozenset[int] | None,
+    node_table_ids: tuple[int, ...],
+) -> tuple[PooledBlockDescriptor, ...]:
+    """Pool all torch cache layers, then synchronize descriptor storage once."""
+
+    import torch
+
+    device_batches: dict[tuple[int, int], list[Any]] = defaultdict(list)
+    batch_node_ids: dict[tuple[int, int], list[int]] = defaultdict(list)
+    feature_width_by_layer: dict[int, tuple[int, int]] = {}
+    blocks_by_layer: dict[int, list[tuple[int, Any]]] = defaultdict(list)
+    for source_node_id in node_table_ids:
+        block = full_state.blocks[source_node_id]
+        blocks_by_layer[block.layer].append((source_node_id, block))
+    for layer_index, layer in enumerate(full_state.layers):
+        key_tokens = _torch_token_feature_matrix(
+            layer.key,
+            sequence_axis=layer.key_sequence_dimension,
+            head_axis=layer.key_head_dimension,
+        )
+        value_tokens = _torch_token_feature_matrix(
+            layer.value,
+            sequence_axis=layer.value_sequence_dimension,
+            head_axis=layer.value_head_dimension,
+        )
+        key_width = int(key_tokens.shape[-1])
+        value_width = int(value_tokens.shape[-1])
+        feature_width_by_layer[layer_index] = (key_width, value_width)
+        width_groups: dict[int, list[tuple[int, Any]]] = defaultdict(list)
+        for node_id, block in blocks_by_layer[layer_index]:
+            if eligible_node_ids is None or node_id in eligible_node_ids:
+                width_groups[block.position_count].append((node_id, block))
+        signature = (key_width, value_width)
+        for group in width_groups.values():
+            positions = tuple(block.physical_cache_indices for _node_id, block in group)
+            heads = tuple(block.kv_head for _node_id, block in group)
+            keys = _pool_torch_token_feature_batch_device(
+                key_tokens,
+                positions=positions,
+                heads=heads,
+            )
+            values = _pool_torch_token_feature_batch_device(
+                value_tokens,
+                positions=positions,
+                heads=heads,
+            )
+            device_batches[signature].append(torch.cat((keys, values), dim=-1))
+            batch_node_ids[signature].extend(node_id for node_id, _block in group)
+    pooled_keys: dict[int, np.ndarray[Any, np.dtype[np.float32]]] = {}
+    pooled_values: dict[int, np.ndarray[Any, np.dtype[np.float32]]] = {}
+    semantic_by_node: dict[int, np.ndarray[Any, np.dtype[np.float32]]] = {}
+    packed_groups: list[Any] = []
+    packed_signatures: list[tuple[int, int]] = []
+    packed_counts: list[int] = []
+    for signature in sorted(device_batches):
+        packed = torch.cat(tuple(device_batches[signature]), dim=0)
+        packed_groups.append(packed.reshape(-1))
+        packed_signatures.append(signature)
+        packed_counts.append(int(packed.shape[0]))
+    combined = torch.cat(tuple(packed_groups), dim=0)
+    host = combined.detach().cpu().numpy().astype(np.float32, copy=False)
+    offset = 0
+    for signature, count in zip(packed_signatures, packed_counts, strict=True):
+        key_width, value_width = signature
+        width = key_width + value_width
+        scalar_count = count * width
+        matrix = host[offset : offset + scalar_count].reshape(count, width)
+        offset += scalar_count
+        if not bool(np.all(np.isfinite(matrix))):
+            raise ValueError("graph descriptor source tensors must be finite")
+        key_matrix = matrix[:, :key_width]
+        value_matrix = matrix[:, key_width:]
+        semantic_matrix = _unit_rows(
+            np.concatenate((_unit_rows(key_matrix), _unit_rows(value_matrix)), axis=1)
+        )
+        identifiers = batch_node_ids[signature]
+        if len(identifiers) != count:
+            raise RuntimeError("deferred K/V descriptors lost block alignment")
+        for row, node_id in enumerate(identifiers):
+            pooled_keys[node_id] = _readonly_view(key_matrix, row)
+            pooled_values[node_id] = _readonly_view(value_matrix, row)
+            semantic_by_node[node_id] = _readonly_view(semantic_matrix, row)
+    if offset != len(host):
+        raise RuntimeError("deferred descriptor transfer has trailing storage")
+
+    zero_by_layer: dict[
+        int,
+        tuple[
+            np.ndarray[Any, np.dtype[np.float32]],
+            np.ndarray[Any, np.dtype[np.float32]],
+            np.ndarray[Any, np.dtype[np.float32]],
+        ],
+    ] = {}
+    for layer_index, (key_width, value_width) in feature_width_by_layer.items():
+        zero_key = np.zeros(key_width, dtype=np.float32)
+        zero_value = np.zeros(value_width, dtype=np.float32)
+        zero_semantic = np.zeros(key_width + value_width, dtype=np.float32)
+        for value in (zero_key, zero_value, zero_semantic):
+            value.setflags(write=False)
+        zero_by_layer[layer_index] = zero_key, zero_value, zero_semantic
+    derived_evidence_cache: dict[
+        tuple[
+            object,
+            int | None,
+            int | None,
+            int | None,
+            tuple[float, float, float, float] | None,
+        ],
+        BlockEvidenceMetadata,
+    ] = {}
+    result: list[PooledBlockDescriptor] = []
+    for local_node_id, source_node_id in enumerate(node_table_ids):
+        block = full_state.blocks[source_node_id]
+        pooled = eligible_node_ids is None or source_node_id in eligible_node_ids
+        zero_key, zero_value, zero_semantic = zero_by_layer[block.layer]
+        key = pooled_keys[source_node_id] if pooled else zero_key
+        value = pooled_values[source_node_id] if pooled else zero_value
+        semantic = semantic_by_node[source_node_id] if pooled else zero_semantic
+        override = metadata_by_node.get(source_node_id)
+        if override is None:
+            evidence_identity = (
+                block.modality,
+                block.image_index,
+                block.frame_index,
+                block.page_index,
+                block.region,
+            )
+            evidence = derived_evidence_cache.get(evidence_identity)
+            if evidence is None:
+                evidence = BlockEvidenceMetadata.from_block(block)
+                derived_evidence_cache[evidence_identity] = evidence
+        else:
+            evidence = override.with_block_defaults(block)
+        result.append(
+            PooledBlockDescriptor._from_validated(
+                node_id=local_node_id,
+                block=block,
+                pooled_key=key,
+                pooled_value=value,
+                pooled_hidden_state=None,
+                semantic_embedding=semantic,
+                evidence=evidence,
+                source_node_id=source_node_id,
+            )
+        )
+    return tuple(result)
+
+
 def pool_block_descriptors(
     full_state: FullKVState,
     *,
@@ -335,6 +489,7 @@ def pool_block_descriptors(
     metadata_by_node: Mapping[int, BlockEvidenceMetadata] | None = None,
     host_transfer_mode: str = "deferred_layer",
     eligible_node_ids: Sequence[int] | None = None,
+    node_table_ids: Sequence[int] | None = None,
 ) -> tuple[PooledBlockDescriptor, ...]:
     """Pool K, V, and optional hidden states for every cache block.
 
@@ -360,6 +515,20 @@ def pool_block_descriptors(
         raise ValueError("hidden_states must contain exactly one tensor per cache layer")
     overrides = dict(metadata_by_node or {})
     valid_node_ids = set(range(len(full_state.blocks)))
+    table_ids = (
+        tuple(range(len(full_state.blocks)))
+        if node_table_ids is None
+        else tuple(int(node_id) for node_id in node_table_ids)
+    )
+    if len(table_ids) != len(set(table_ids)) or tuple(sorted(table_ids)) != table_ids:
+        raise ValueError("graph node table IDs must be unique and source-ordered")
+    unknown_table_ids = set(table_ids) - valid_node_ids
+    if unknown_table_ids:
+        raise ValueError(
+            f"graph node table references unknown source node(s): {sorted(unknown_table_ids)}"
+        )
+    if not table_ids:
+        raise ValueError("graph node table cannot be empty")
     unknown = sorted(set(overrides) - valid_node_ids)
     if unknown:
         raise ValueError(f"metadata overrides reference unknown graph node(s): {unknown}")
@@ -376,15 +545,45 @@ def pool_block_descriptors(
             )
         if not eligible:
             raise ValueError("descriptor shortlist cannot be empty")
+    if (
+        hidden is None
+        and host_transfer_mode == "deferred_layer_vectorized"
+        and all(
+            layer.key.__class__.__module__.startswith("torch")
+            and layer.value.__class__.__module__.startswith("torch")
+            for layer in full_state.layers
+        )
+    ):
+        return _pool_torch_descriptors_one_transfer(
+            full_state,
+            metadata_by_node=overrides,
+            eligible_node_ids=eligible,
+            node_table_ids=table_ids,
+        )
 
     blocks_by_layer: dict[int, list[tuple[int, Any]]] = defaultdict(list)
-    for node_id, block in enumerate(full_state.blocks):
-        blocks_by_layer[block.layer].append((node_id, block))
+    for source_node_id in table_ids:
+        block = full_state.blocks[source_node_id]
+        blocks_by_layer[block.layer].append((source_node_id, block))
+    local_by_source = {
+        source_node_id: local_node_id
+        for local_node_id, source_node_id in enumerate(table_ids)
+    }
 
     # Stage each layer on CPU once.  The previous block-at-a-time path issued
     # one synchronizing device transfer for every pooled K and V block, which
     # is prohibitive for multi-head VLMs while producing identical values.
     indexed_result: list[tuple[int, PooledBlockDescriptor]] = []
+    derived_evidence_cache: dict[
+        tuple[
+            object,
+            int | None,
+            int | None,
+            int | None,
+            tuple[float, float, float, float] | None,
+        ],
+        BlockEvidenceMetadata,
+    ] = {}
     for layer_index, layer in enumerate(full_state.layers):
         torch_sources = layer.key.__class__.__module__.startswith("torch") and (
             layer.value.__class__.__module__.startswith("torch")
@@ -538,27 +737,37 @@ def pool_block_descriptors(
                         semantic_parts.append(_unit(pooled_hidden))
                     semantic = _unit(np.concatenate(semantic_parts).astype(np.float32, copy=False))
             override = overrides.get(node_id)
-            evidence = (
-                BlockEvidenceMetadata.from_block(block)
-                if override is None
-                else override.with_block_defaults(block)
-            )
+            if override is None:
+                evidence_identity = (
+                    block.modality,
+                    block.image_index,
+                    block.frame_index,
+                    block.page_index,
+                    block.region,
+                )
+                evidence = derived_evidence_cache.get(evidence_identity)
+                if evidence is None:
+                    evidence = BlockEvidenceMetadata.from_block(block)
+                    derived_evidence_cache[evidence_identity] = evidence
+            else:
+                evidence = override.with_block_defaults(block)
             indexed_result.append(
                 (
                     node_id,
-                    PooledBlockDescriptor(
-                        node_id=node_id,
+                    PooledBlockDescriptor._from_validated(
+                        node_id=local_by_source[node_id],
                         block=block,
                         pooled_key=key,
                         pooled_value=value,
                         pooled_hidden_state=pooled_hidden,
                         semantic_embedding=semantic,
                         evidence=evidence,
+                        source_node_id=node_id,
                     ),
                 )
             )
     indexed_result.sort(key=lambda item: item[0])
-    if tuple(item[0] for item in indexed_result) != tuple(range(len(full_state.blocks))):
+    if tuple(item[0] for item in indexed_result) != table_ids:
         raise RuntimeError("pooled graph descriptors do not cover every cache block")
     return tuple(item[1] for item in indexed_result)
 
@@ -569,6 +778,7 @@ def pool_prompt_attention_coactivation(
     *,
     host_transfer_mode: str = "deferred_layer",
     eligible_node_ids: Sequence[int] | None = None,
+    query_window: int | None = None,
 ) -> dict[int, np.ndarray[Any, np.dtype[np.float32]]]:
     """Pool prompt attention maps into one co-activation signature per block.
 
@@ -588,6 +798,8 @@ def pool_prompt_attention_coactivation(
             "host_transfer_mode must be 'deferred_layer', "
             "'deferred_layer_vectorized', or 'per_group_reference'"
         )
+    if query_window is not None and query_window < 1:
+        raise ValueError("prompt attention co-activation query_window must be positive")
     attention_layers = tuple(prompt_attentions)
     if len(attention_layers) != len(full_state.layers):
         raise ValueError("prompt_attentions must contain exactly one tensor per cache layer")
@@ -603,6 +815,9 @@ def pool_prompt_attention_coactivation(
                 f"attention co-activation shortlist contains unknown nodes: {sorted(unknown)}"
             )
     result: dict[int, np.ndarray[Any, np.dtype[np.float32]]] = {}
+    global_deferred_batches: list[Any] = []
+    global_deferred_node_ids: list[int] = []
+    global_deferred_minima: list[Any] = []
     for layer_index, (attention, layer) in enumerate(
         zip(attention_layers, full_state.layers, strict=True)
     ):
@@ -616,33 +831,45 @@ def pool_prompt_attention_coactivation(
                 raise ValueError(
                     "prompt attention must have shape [batch, query_heads, queries, keys]"
                 )
+            if query_window is not None:
+                tensor = tensor[..., -min(query_window, int(tensor.shape[-2])) :, :]
             query_heads = int(tensor.shape[1])
             if query_heads % layer.kv_heads:
                 raise ValueError("prompt query-head count must be divisible by KV-head count")
             if int(tensor.shape[-1]) < layer.sequence_length:
                 raise ValueError("prompt attention key axis is shorter than the active KV cache")
-            if bool(torch.any(tensor < 0)):
-                raise ValueError(
-                    "prompt attention co-activation requires nonnegative attention weights"
-                )
             query_heads_per_kv = query_heads // layer.kv_heads
-            by_head_width: dict[tuple[int, int], list[tuple[int, Any]]] = defaultdict(list)
+            grouped = tensor.reshape(
+                int(tensor.shape[0]),
+                layer.kv_heads,
+                query_heads_per_kv,
+                int(tensor.shape[-2]),
+                int(tensor.shape[-1]),
+            ).mean(dim=(0, 2))
+            by_width: dict[int, list[tuple[int, Any]]] = defaultdict(list)
             for node_id, block in enumerate(full_state.blocks):
                 if block.layer == layer_index and (eligible is None or node_id in eligible):
-                    by_head_width[(block.kv_head, block.position_count)].append((node_id, block))
+                    by_width[block.position_count].append((node_id, block))
             deferred_batches: list[Any] = []
             deferred_node_ids: list[int] = []
-            for (kv_head, _width), indexed_blocks in by_head_width.items():
+            for _width, indexed_blocks in by_width.items():
                 positions = torch.as_tensor(
                     tuple(block.physical_cache_indices for _node_id, block in indexed_blocks),
                     dtype=torch.long,
                     device=tensor.device,
                 )
-                query_start = kv_head * query_heads_per_kv
-                query_end = query_start + query_heads_per_kv
-                source = tensor[:, query_start:query_end, :, :]
-                selected = source[..., positions]
-                pooled = selected.mean(dim=(0, 1, 4)).transpose(0, 1)
+                heads = torch.as_tensor(
+                    tuple(block.kv_head for _node_id, block in indexed_blocks),
+                    dtype=torch.long,
+                    device=tensor.device,
+                )
+                source = grouped[heads]
+                selected = torch.gather(
+                    source,
+                    2,
+                    positions[:, None, :].expand(-1, int(source.shape[1]), -1),
+                )
+                pooled = selected.mean(dim=2)
                 if host_transfer_mode.startswith("deferred_layer"):
                     # Preserve the original independent per-head reduction,
                     # but defer its synchronizing device-to-host copy. Long
@@ -655,18 +882,17 @@ def pool_prompt_attention_coactivation(
                     for row, (node_id, _block) in enumerate(indexed_blocks):
                         result[node_id] = _readonly_row(host, row)
             if deferred_batches:
-                deferred = torch.cat(tuple(deferred_batches), dim=0)
-                host = deferred.detach().cpu().numpy().astype(np.float32, copy=False)
-                if len(host) != len(deferred_node_ids):
-                    raise RuntimeError("deferred attention descriptors lost block alignment")
-                for row, node_id in enumerate(deferred_node_ids):
-                    result[node_id] = _readonly_row(host, row)
+                global_deferred_batches.append(torch.cat(tuple(deferred_batches), dim=0))
+                global_deferred_node_ids.extend(deferred_node_ids)
+                global_deferred_minima.append(tensor.amin())
             continue
         array = _as_numpy_float(attention)
         if array.ndim == 3:
             array = array[None, ...]
         if array.ndim != 4:
             raise ValueError("prompt attention must have shape [batch, query_heads, queries, keys]")
+        if query_window is not None:
+            array = array[..., -min(query_window, int(array.shape[-2])) :, :]
         query_heads = int(array.shape[1])
         if query_heads % layer.kv_heads:
             raise ValueError("prompt query-head count must be divisible by KV-head count")
@@ -682,15 +908,34 @@ def pool_prompt_attention_coactivation(
                 continue
             query_start = block.kv_head * query_heads_per_kv
             query_end = query_start + query_heads_per_kv
-            selected = np.take(
+            selected_numpy = np.take(
                 array[:, query_start:query_end, :, :],
                 block.physical_cache_indices,
                 axis=-1,
             )
-            pooled = selected.mean(axis=(0, 1, 3), dtype=np.float32)
+            pooled = selected_numpy.mean(axis=(0, 1, 3), dtype=np.float32)
             signature = np.asarray(pooled, dtype=np.float32)
             signature.setflags(write=False)
             result[node_id] = signature
+    if global_deferred_batches:
+        import torch
+
+        deferred = torch.cat(tuple(global_deferred_batches), dim=0)
+        scalar_count = int(deferred.numel())
+        combined = torch.cat(
+            (deferred.reshape(-1), torch.stack(global_deferred_minima).reshape(-1))
+        )
+        host = combined.detach().cpu().numpy().astype(np.float32, copy=False)
+        descriptor_width = int(deferred.shape[-1])
+        descriptor_host = host[:scalar_count].reshape(-1, descriptor_width)
+        if len(descriptor_host) != len(global_deferred_node_ids):
+            raise RuntimeError("deferred attention descriptors lost block alignment")
+        if bool(np.any(host[scalar_count:] < 0)):
+            raise ValueError(
+                "prompt attention co-activation requires nonnegative attention weights"
+            )
+        for row, node_id in enumerate(global_deferred_node_ids):
+            result[node_id] = _readonly_row(descriptor_host, row)
     return result
 
 

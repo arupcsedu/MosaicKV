@@ -5,6 +5,11 @@ from dataclasses import replace
 import numpy as np
 import pytest
 
+from mosaickv.baselines import (
+    select_exact_baseline,
+    select_prompt_attention_topk_ids,
+    select_prompt_attention_topk_ids_by_head,
+)
 from mosaickv.cache_state import FullKVState, Modality, ModalitySpan
 from mosaickv.config import ConfigurationError, GraphConfig, SelectionConfig, UtilityConfig
 from mosaickv.graph import SparseEvidenceGraph, build_evidence_graph
@@ -21,7 +26,7 @@ from mosaickv.selection import (
     lazy_greedy_select,
     select_all_exact,
 )
-from mosaickv.types import BudgetUnit
+from mosaickv.types import BudgetUnit, MosaicKVMethod
 
 
 def _isolated_graph_config(**changes: object) -> GraphConfig:
@@ -160,6 +165,40 @@ def test_signed_value_coefficient_rewards_expected_output_contribution() -> None
 
     assert table.for_node(0).value_contribution > table.for_node(1).value_contribution
     assert table.for_node(0).local_utility > table.for_node(1).local_utility
+
+
+def test_value_aware_utility_only_materializes_routed_nodes() -> None:
+    full = _full(
+        (Modality.TEXT,) * 4,
+        values=np.asarray(
+            [[10.0, 0.0], [4.0, 0.0], [0.0, 3.0], [0.0, 1.0]],
+            dtype=np.float32,
+        ),
+    )
+    graph = build_evidence_graph(
+        full,
+        _isolated_graph_config(semantic_weight=1.0, max_neighbors=2),
+    )
+
+    table = compute_block_utilities(
+        graph,
+        UtilityConfig(lambda_q=1.0, lambda_v=-1.0, lambda_o=-1.0),
+        forecast_attention_by_node=(0.4, 0.3, 0.2, 0.1),
+        attention_provenance="synthetic_routed_utility_fixture",
+        rope_aware=True,
+        value_aware_node_ids=(2, 3),
+    )
+
+    for node_id in (0, 1):
+        block = table.for_node(node_id)
+        assert block.value_novelty == 0.0
+        assert block.expected_attention_output_contribution == 0.0
+        assert block.redundancy_penalty == 1.0
+        assert block.local_utility == pytest.approx(
+            block.forecast_attention_probability
+        )
+    assert table.for_node(2).expected_attention_output_contribution > 0
+    assert table.for_node(3).expected_attention_output_contribution > 0
 
 
 def test_token_attention_is_aggregated_and_normalized_by_layer_and_head() -> None:
@@ -301,6 +340,130 @@ def test_prompt_and_evidence_reservations_are_auditable_and_budgeted() -> None:
     assert result.budget_spent <= result.budget.value
 
 
+@pytest.mark.parametrize("with_position_limits", (False, True))
+def test_prompt_topk_id_only_path_matches_full_baseline(
+    with_position_limits: bool,
+) -> None:
+    full = _full(
+        (Modality.TEXT, Modality.TEXT, Modality.IMAGE, Modality.IMAGE, Modality.TEXT),
+        mandatory=(4,),
+    )
+    budget = SelectionBudget(3, BudgetUnit.BLOCKS)
+    scores = {0: 0.4, 1: 0.3, 2: 0.9, 3: 0.2, 4: 0.0}
+    limits = {(0, 0): 3} if with_position_limits else None
+    reference = select_exact_baseline(
+        full,
+        MosaicKVMethod.PROMPT_ATTENTION_TOPK,
+        budget,
+        seed=7,
+        prompt_attention_by_node=scores,
+        position_limits=limits,
+    )
+
+    assert select_prompt_attention_topk_ids(
+        full,
+        budget,
+        prompt_attention_by_node=scores,
+        position_limits=limits,
+    ) == reference.selected_node_ids
+
+
+def test_vectorized_head_local_prompt_topk_matches_canonical_dense_selection() -> None:
+    key = np.arange(2 * 6 * 2, dtype=np.float32).reshape(1, 2, 6, 2) + 1
+    full = FullKVState.from_tensors(
+        ((key, key.copy()),),
+        block_size=1,
+        mandatory_logical_positions=(5,),
+    )
+    scores = {
+        node_id: float((10 if block.kv_head == 1 else 1) * (12 - node_id))
+        for node_id, block in enumerate(full.blocks)
+    }
+    budget = SelectionBudget(6, BudgetUnit.BLOCKS)
+    limits = {(0, 0): 3, (0, 1): 3}
+    canonical = select_prompt_attention_topk_ids(
+        full,
+        budget,
+        prompt_attention_by_node=scores,
+        position_limits=limits,
+    )
+
+    local = select_prompt_attention_topk_ids_by_head(
+        full,
+        budget,
+        prompt_attention_by_node=scores,
+        head_routes=((0, 1),),
+        position_limits=limits,
+    )
+
+    assert local.selected_node_ids == tuple(
+        node_id for node_id in canonical if full.blocks[node_id].kv_head == 1
+    )
+    assert local.total_shortfall_positions == 0
+
+
+def test_head_local_prompt_topk_solves_the_previous_64_of_75_stranding_case() -> None:
+    sizes = (16, 16, 16, 16, 15, 15, 15, 15, 15)
+    sequence = sum(sizes)
+    key = np.arange(sequence * 2, dtype=np.float32).reshape(1, 1, sequence, 2)
+    spans: list[ModalitySpan] = []
+    offset = 0
+    for image_index, size in enumerate(sizes):
+        spans.append(
+            ModalitySpan(
+                offset,
+                offset + size,
+                Modality.IMAGE,
+                image_index=image_index,
+            )
+        )
+        offset += size
+    full = FullKVState.from_tensors(
+        ((key, key.copy()),),
+        modality_spans=tuple(spans),
+        block_size=16,
+    )
+    scores = {
+        node_id: (10.0 if block.position_count == 16 else 9.0)
+        for node_id, block in enumerate(full.blocks)
+    }
+
+    result = select_prompt_attention_topk_ids_by_head(
+        full,
+        SelectionBudget(full.active_bytes, BudgetUnit.BYTES),
+        prompt_attention_by_node=scores,
+        head_routes=((0, 0),),
+        position_limits={(0, 0): 75},
+    )
+
+    assert sum(full.blocks[node_id].position_count for node_id in result.selected_node_ids) == 75
+    assert sum(scores[node_id] for node_id in result.selected_node_ids) == 45.0
+    assert all(full.blocks[node_id].position_count == 15 for node_id in result.selected_node_ids)
+    assert result.capacity_records[0].shortfall_positions == 0
+
+
+def test_head_local_prompt_topk_records_unavoidable_capacity_shortfall() -> None:
+    sequence = 80
+    key = np.arange(sequence * 2, dtype=np.float32).reshape(1, 1, sequence, 2)
+    full = FullKVState.from_tensors(
+        ((key, key.copy()),),
+        block_size=16,
+    )
+
+    result = select_prompt_attention_topk_ids_by_head(
+        full,
+        SelectionBudget(full.active_bytes, BudgetUnit.BYTES),
+        prompt_attention_by_node={node_id: float(10 - node_id) for node_id in range(5)},
+        head_routes=((0, 0),),
+        position_limits={(0, 0): 75},
+    )
+
+    assert len(result.selected_node_ids) == 4
+    assert result.capacity_records[0].selected_positions == 64
+    assert result.capacity_records[0].shortfall_positions == 11
+    assert result.total_shortfall_positions == 11
+
+
 def test_required_prototype_anchor_budget_fails_closed() -> None:
     full = _full((Modality.TEXT,) * 4, mandatory=(3,))
     _graph, _utilities, objective = _utilities_and_objective(full)
@@ -347,11 +510,45 @@ def test_incremental_marginals_match_exact_objective_differences() -> None:
     selected: set[int] = set()
 
     for candidate in (2, 0, 3):
+        remaining = tuple(node_id for node_id in range(4) if node_id not in selected)
+        assert incremental.marginal_gains(remaining) == pytest.approx(
+            tuple(objective.marginal_gain(selected, node_id) for node_id in remaining),
+            abs=1e-12,
+        )
         assert incremental.marginal_gain(candidate) == pytest.approx(
             objective.marginal_gain(selected, candidate), abs=1e-12
         )
         incremental.select(candidate)
         selected.add(candidate)
+
+
+def test_atomic_reservation_matches_sequential_final_objective_state() -> None:
+    full = _full((Modality.TEXT, Modality.TEXT, Modality.IMAGE, Modality.VIDEO))
+    _graph, _utilities, objective = _utilities_and_objective(
+        full,
+        probabilities=(0.4, 0.3, 0.2, 0.1),
+        graph_config=_isolated_graph_config(semantic_weight=1.0, max_neighbors=2),
+    )
+    sequential = objective.incremental_state()
+    atomic = objective.incremental_state()
+
+    snapshot_gains = tuple(objective.marginal_gain((), node_id) for node_id in (2, 0))
+    assert atomic.reserve_many((2, 0)) == pytest.approx(snapshot_gains, abs=1e-12)
+    sequential.select(2)
+    sequential.select(0)
+
+    assert atomic.marginal_gain(3) == pytest.approx(
+        sequential.marginal_gain(3),
+        abs=1e-12,
+    )
+
+
+def test_atomic_reservation_rejects_duplicates() -> None:
+    full = _full((Modality.TEXT, Modality.IMAGE))
+    _graph, _utilities, objective = _utilities_and_objective(full)
+
+    with pytest.raises(ValueError, match="must be unique"):
+        objective.incremental_state().reserve_many((0, 0))
 
 
 def test_deterministic_tie_breaking_prefers_lower_node_id() -> None:
@@ -365,6 +562,75 @@ def test_deterministic_tie_breaking_prefers_lower_node_id() -> None:
 
     assert result.selected_node_ids == (0,)
     assert result.selection_order == (0,)
+
+
+def test_vectorized_coverage_selection_is_deterministic_and_budget_safe() -> None:
+    full = _full(
+        (Modality.TEXT, Modality.TEXT, Modality.IMAGE, Modality.IMAGE, Modality.VIDEO),
+        mandatory=(0,),
+    )
+    _graph, _utilities, objective = _utilities_and_objective(
+        full,
+        probabilities=(0.35, 0.25, 0.2, 0.15, 0.05),
+        graph_config=_isolated_graph_config(semantic_weight=1.0, max_neighbors=2),
+        selection_config=SelectionConfig(
+            algorithm="vectorized_coverage",
+            coverage_correction_rounds=2,
+            lambda_g=-0.5,
+            lambda_m=-0.25,
+        ),
+    )
+    budget = SelectionBudget(3, BudgetUnit.BLOCKS)
+
+    first = lazy_greedy_select(objective, budget)
+    second = lazy_greedy_select(objective, budget)
+
+    assert first.selected_node_ids == second.selected_node_ids
+    assert first.selection_order == second.selection_order
+    assert first.budget_spent <= budget.value
+    assert 0 in first.selected_node_ids
+    assert first.decisions[0].reason is SelectionReason.MANDATORY_EXACT
+    assert all(
+        decision.reason
+        in {
+            SelectionReason.MANDATORY_EXACT,
+            SelectionReason.VECTORIZED_COVERAGE,
+            SelectionReason.NOT_SELECTED_LOWER_GAIN,
+            SelectionReason.BUDGET_EXHAUSTED,
+        }
+        for decision in first.decisions
+    )
+
+
+def test_routed_selector_never_optimizes_stable_non_anchor_nodes() -> None:
+    full = _full(
+        (Modality.TEXT, Modality.TEXT, Modality.TEXT, Modality.IMAGE, Modality.IMAGE),
+        mandatory=(0,),
+    )
+    _graph, _utilities, objective = _utilities_and_objective(
+        full,
+        probabilities=(0.01, 0.01, 0.95, 0.02, 0.01),
+        selection_config=SelectionConfig(
+            algorithm="vectorized_coverage",
+            coverage_correction_rounds=0,
+            minimum_stratum_fraction=0.0,
+            lambda_g=-0.5,
+            lambda_m=-0.25,
+        ),
+    )
+
+    result = lazy_greedy_select(
+        objective,
+        SelectionBudget(3, BudgetUnit.BLOCKS),
+        prompt_anchor_node_ids=(1,),
+        optimization_node_ids=(3, 4),
+    )
+
+    assert result.selected_node_ids == (0, 1, 3)
+    assert not result.decisions[2].selected
+    assert result.decisions[1].reason is SelectionReason.PROMPT_ANCHOR
+    assert result.decisions[3].reason is SelectionReason.VECTORIZED_COVERAGE
+    assert len(result.decisions) == len(full.blocks)
 
 
 def test_byte_budget_never_exceeds_hard_limit_for_variable_size_blocks() -> None:
@@ -524,6 +790,36 @@ def test_dense_fill_completes_partial_prototype_anchor_on_block_lattice() -> Non
 
     assert result.selected_node_ids == (0, 1, 2, 3)
     assert result.decisions[0].reason is SelectionReason.PROTOTYPE_ANCHOR
+    assert result.decisions[1].reason is SelectionReason.DENSE_CACHE_FILL
+    assert sum(block.position_count for block in result.selected_blocks) == 10
+
+
+def test_dense_fill_completes_partial_prompt_anchor_on_block_lattice() -> None:
+    key = np.arange(10 * 2, dtype=np.float32).reshape(1, 1, 10, 2)
+    full = FullKVState.from_tensors(
+        ((key, key.copy()),),
+        modality_spans=(
+            ModalitySpan(0, 2, Modality.TEXT),
+            ModalitySpan(2, 5, Modality.IMAGE),
+            ModalitySpan(5, 9, Modality.VIDEO),
+            ModalitySpan(9, 10, Modality.TEXT),
+        ),
+        block_size=4,
+        mandatory_logical_positions=(9,),
+    )
+    _graph, _utilities, objective = _utilities_and_objective(full)
+
+    result = lazy_greedy_select(
+        objective,
+        SelectionBudget(10, BudgetUnit.RETAINED_SLOTS),
+        position_limits={(0, 0): 10},
+        fill_position_limits=True,
+        position_fill_quantum=4,
+        prompt_anchor_node_ids=(0,),
+    )
+
+    assert result.selected_node_ids == (0, 1, 2, 3)
+    assert result.decisions[0].reason is SelectionReason.PROMPT_ANCHOR
     assert result.decisions[1].reason is SelectionReason.DENSE_CACHE_FILL
     assert sum(block.position_count for block in result.selected_blocks) == 10
 

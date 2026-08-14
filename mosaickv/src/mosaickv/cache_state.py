@@ -207,6 +207,42 @@ class KVBlockDescriptor:
         if self.byte_size <= 0:
             raise ValueError("block byte_size must be positive")
 
+    @classmethod
+    def _from_validated(
+        cls,
+        *,
+        layer: int,
+        kv_head: int,
+        modality: Modality,
+        physical_cache_indices: tuple[int, ...],
+        original_logical_positions: tuple[int, ...],
+        token_ids: tuple[int, ...] | None,
+        media_metadata: tuple[MediaMetadata, ...],
+        key_dtype: str,
+        value_dtype: str,
+        key_device: str,
+        value_device: str,
+        byte_size: int,
+        mandatory: bool,
+    ) -> Self:
+        """Build one block from the already-validated blockization template."""
+
+        instance = object.__new__(cls)
+        object.__setattr__(instance, "layer", layer)
+        object.__setattr__(instance, "kv_head", kv_head)
+        object.__setattr__(instance, "modality", modality)
+        object.__setattr__(instance, "physical_cache_indices", physical_cache_indices)
+        object.__setattr__(instance, "original_logical_positions", original_logical_positions)
+        object.__setattr__(instance, "token_ids", token_ids)
+        object.__setattr__(instance, "media_metadata", media_metadata)
+        object.__setattr__(instance, "key_dtype", key_dtype)
+        object.__setattr__(instance, "value_dtype", value_dtype)
+        object.__setattr__(instance, "key_device", key_device)
+        object.__setattr__(instance, "value_device", value_device)
+        object.__setattr__(instance, "byte_size", byte_size)
+        object.__setattr__(instance, "mandatory", mandatory)
+        return instance
+
     @property
     def position_count(self) -> int:
         return len(self.physical_cache_indices)
@@ -486,6 +522,97 @@ def _memberships(blocks: Sequence[KVBlockDescriptor]) -> frozenset[tuple[int, in
     return frozenset(memberships)
 
 
+@dataclass(frozen=True, slots=True)
+class _MembershipIndex:
+    """Exact run-length index for block source memberships.
+
+    Normal cache blocks contain consecutive positions.  Keeping those positions
+    as merged inclusive intervals avoids allocating millions of redundant
+    ``(layer, head, position)`` tuples during every tier invariant check.  A
+    sparse descriptor is represented by multiple one-position runs, so this is
+    an exact representation rather than an interval approximation.
+    """
+
+    ranges_by_identity: Mapping[tuple[int, int], tuple[tuple[int, int], ...]]
+    count: int
+
+    @classmethod
+    def from_blocks(cls, blocks: Sequence[KVBlockDescriptor]) -> Self:
+        pending: dict[tuple[int, int], list[tuple[int, int]]] = {}
+        for block in blocks:
+            identity = (block.layer, block.kv_head)
+            runs = pending.setdefault(identity, [])
+            start = previous = block.physical_cache_indices[0]
+            for position in block.physical_cache_indices[1:]:
+                if position == previous + 1:
+                    previous = position
+                    continue
+                runs.append((start, previous))
+                start = previous = position
+            runs.append((start, previous))
+
+        normalized: dict[tuple[int, int], tuple[tuple[int, int], ...]] = {}
+        count = 0
+        for identity, raw_ranges in pending.items():
+            merged: list[tuple[int, int]] = []
+            for start, end in sorted(raw_ranges):
+                if merged and start <= merged[-1][1]:
+                    overlap = (identity[0], identity[1], start)
+                    raise ValueError(f"duplicate source membership within tier: {overlap}")
+                if merged and start == merged[-1][1] + 1:
+                    merged[-1] = (merged[-1][0], end)
+                else:
+                    merged.append((start, end))
+                count += end - start + 1
+            normalized[identity] = tuple(merged)
+        return cls(normalized, count)
+
+    def memberships(self) -> frozenset[tuple[int, int, int]]:
+        return frozenset(
+            (layer, head, position)
+            for (layer, head), ranges in self.ranges_by_identity.items()
+            for start, end in ranges
+            for position in range(start, end + 1)
+        )
+
+    def is_subset_of(self, other: _MembershipIndex) -> bool:
+        for identity, ranges in self.ranges_by_identity.items():
+            containers = other.ranges_by_identity.get(identity, ())
+            container_index = 0
+            for start, end in ranges:
+                while (
+                    container_index < len(containers)
+                    and containers[container_index][1] < start
+                ):
+                    container_index += 1
+                if container_index >= len(containers):
+                    return False
+                container_start, container_end = containers[container_index]
+                if start < container_start or end > container_end:
+                    return False
+        return True
+
+    def first_overlap(self, other: _MembershipIndex) -> tuple[int, int, int] | None:
+        for identity in self.ranges_by_identity.keys() & other.ranges_by_identity.keys():
+            left = self.ranges_by_identity[identity]
+            right = other.ranges_by_identity[identity]
+            left_index = right_index = 0
+            while left_index < len(left) and right_index < len(right):
+                left_start, left_end = left[left_index]
+                right_start, right_end = right[right_index]
+                start = max(left_start, right_start)
+                if start <= min(left_end, right_end):
+                    return identity[0], identity[1], start
+                if left_end < right_end:
+                    left_index += 1
+                else:
+                    right_index += 1
+        return None
+
+    def same_memberships(self, other: _MembershipIndex) -> bool:
+        return self.ranges_by_identity == other.ranges_by_identity
+
+
 def _ensure_unique_tensors(tensors: Sequence[Any], name: str) -> None:
     identities = [id(tensor) for tensor in tensors]
     if len(identities) != len(set(identities)):
@@ -499,14 +626,15 @@ class ExactTier:
     blocks: tuple[KVBlockDescriptor, ...] = ()
     key_blocks: tuple[Any, ...] = ()
     value_blocks: tuple[Any, ...] = ()
-    _source_memberships: frozenset[tuple[int, int, int]] = field(
-        init=False, repr=False, compare=False
+    _membership_index: _MembershipIndex = field(init=False, repr=False, compare=False)
+    _source_memberships: frozenset[tuple[int, int, int]] | None = field(
+        init=False, repr=False, compare=False, default=None
     )
 
     def __post_init__(self) -> None:
         if len(self.blocks) != len(self.key_blocks) or len(self.blocks) != len(self.value_blocks):
             raise ValueError("exact tier blocks and K/V payloads must align")
-        object.__setattr__(self, "_source_memberships", _memberships(self.blocks))
+        object.__setattr__(self, "_membership_index", _MembershipIndex.from_blocks(self.blocks))
         _ensure_unique_tensors((*self.key_blocks, *self.value_blocks), "exact tier")
         for index, (block, key, value) in enumerate(
             zip(self.blocks, self.key_blocks, self.value_blocks, strict=True)
@@ -534,7 +662,15 @@ class ExactTier:
 
     @property
     def source_memberships(self) -> frozenset[tuple[int, int, int]]:
-        return self._source_memberships
+        cached = self._source_memberships
+        if cached is None:
+            cached = self._membership_index.memberships()
+            object.__setattr__(self, "_source_memberships", cached)
+        return cached
+
+    @property
+    def source_membership_count(self) -> int:
+        return self._membership_index.count
 
     @property
     def active_bytes(self) -> int:
@@ -565,12 +701,17 @@ class PrototypeTier:
     prototype_keys: tuple[Any, ...] = ()
     prototype_values: tuple[Any, ...] = ()
     assignments: tuple[int, ...] = ()
-    _source_memberships: frozenset[tuple[int, int, int]] = field(
-        init=False, repr=False, compare=False
+    _membership_index: _MembershipIndex = field(init=False, repr=False, compare=False)
+    _source_memberships: frozenset[tuple[int, int, int]] | None = field(
+        init=False, repr=False, compare=False, default=None
     )
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "_source_memberships", _memberships(self.source_blocks))
+        object.__setattr__(
+            self,
+            "_membership_index",
+            _MembershipIndex.from_blocks(self.source_blocks),
+        )
         if len(self.prototype_keys) != len(self.prototype_values):
             raise ValueError("prototype K/V payload counts must match")
         if len(self.assignments) != len(self.source_blocks):
@@ -587,7 +728,15 @@ class PrototypeTier:
 
     @property
     def source_memberships(self) -> frozenset[tuple[int, int, int]]:
-        return self._source_memberships
+        cached = self._source_memberships
+        if cached is None:
+            cached = self._membership_index.memberships()
+            object.__setattr__(self, "_source_memberships", cached)
+        return cached
+
+    @property
+    def source_membership_count(self) -> int:
+        return self._membership_index.count
 
     @property
     def active_bytes(self) -> int:
@@ -603,12 +752,17 @@ class ResidualTier:
     source_blocks: tuple[KVBlockDescriptor, ...] = ()
     key_residuals: tuple[Any, ...] = ()
     value_residuals: tuple[Any, ...] = ()
-    _source_memberships: frozenset[tuple[int, int, int]] = field(
-        init=False, repr=False, compare=False
+    _membership_index: _MembershipIndex = field(init=False, repr=False, compare=False)
+    _source_memberships: frozenset[tuple[int, int, int]] | None = field(
+        init=False, repr=False, compare=False, default=None
     )
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "_source_memberships", _memberships(self.source_blocks))
+        object.__setattr__(
+            self,
+            "_membership_index",
+            _MembershipIndex.from_blocks(self.source_blocks),
+        )
         if len(self.source_blocks) != len(self.key_residuals) or len(self.source_blocks) != len(
             self.value_residuals
         ):
@@ -617,7 +771,18 @@ class ResidualTier:
 
     @property
     def source_memberships(self) -> frozenset[tuple[int, int, int]]:
-        return self._source_memberships
+        cached = self._source_memberships
+        if cached is None:
+            cached = self._membership_index.memberships()
+            object.__setattr__(self, "_source_memberships", cached)
+        return cached
+
+    @property
+    def source_membership_count(self) -> int:
+        return self._membership_index.count
+
+    def source_is_subset_of(self, prototypes: PrototypeTier) -> bool:
+        return self._membership_index.is_subset_of(prototypes._membership_index)
 
     @property
     def active_bytes(self) -> int:
@@ -689,10 +854,14 @@ class FullKVState:
     source_class: type[Any]
     source_kind: str
     cached_key_state: Any
-    _source_memberships: frozenset[tuple[int, int, int]] = field(
-        init=False, repr=False, compare=False
+    _membership_index: _MembershipIndex = field(init=False, repr=False, compare=False)
+    _source_memberships: frozenset[tuple[int, int, int]] | None = field(
+        init=False, repr=False, compare=False, default=None
     )
-    _source_block_set: frozenset[KVBlockDescriptor] = field(init=False, repr=False, compare=False)
+    _source_block_ids: frozenset[int] = field(init=False, repr=False, compare=False)
+    _source_blocks_by_membership: Mapping[
+        tuple[int, int, tuple[int, ...]], KVBlockDescriptor
+    ] = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if not self.layers:
@@ -708,7 +877,15 @@ class FullKVState:
             raise ValueError("source_kind must be non-empty")
         self._validate_spans()
         self._validate_block_partition()
-        object.__setattr__(self, "_source_block_set", frozenset(self.blocks))
+        object.__setattr__(self, "_source_block_ids", frozenset(id(block) for block in self.blocks))
+        object.__setattr__(
+            self,
+            "_source_blocks_by_membership",
+            {
+                (block.layer, block.kv_head, block.physical_cache_indices): block
+                for block in self.blocks
+            },
+        )
 
     @property
     def original_logical_sequence_length(self) -> int:
@@ -728,7 +905,15 @@ class FullKVState:
 
     @property
     def source_memberships(self) -> frozenset[tuple[int, int, int]]:
-        return self._source_memberships
+        cached = self._source_memberships
+        if cached is None:
+            cached = self._membership_index.memberships()
+            object.__setattr__(self, "_source_memberships", cached)
+        return cached
+
+    @property
+    def source_membership_count(self) -> int:
+        return self._membership_index.count
 
     def _validate_spans(self) -> None:
         ordered = sorted(self.modality_spans, key=lambda span: (span.start, span.end))
@@ -743,21 +928,25 @@ class FullKVState:
                 )
 
     def _validate_block_partition(self) -> None:
-        observed = _memberships(self.blocks)
-        expected = frozenset(
-            (layer_index, head, position)
+        observed = _MembershipIndex.from_blocks(self.blocks)
+        expected_identities = {
+            (layer_index, head)
             for layer_index, layer in enumerate(self.layers)
             for head in range(layer.kv_heads)
-            for position in range(layer.sequence_length)
+        }
+        observed_identities = set(observed.ranges_by_identity)
+        complete = observed_identities == expected_identities and all(
+            observed.ranges_by_identity[identity]
+            == ((0, self.layers[identity[0]].sequence_length - 1),)
+            for identity in expected_identities
         )
-        if observed != expected:
-            missing = expected - observed
-            extra = observed - expected
+        if not complete:
+            expected_count = sum(layer.kv_heads * layer.sequence_length for layer in self.layers)
             raise ValueError(
                 "every source cache position must belong to exactly one block; "
-                f"missing={len(missing)}, extra={len(extra)}"
+                f"expected={expected_count}, observed={observed.count}"
             )
-        object.__setattr__(self, "_source_memberships", observed)
+        object.__setattr__(self, "_membership_index", observed)
         expected_bytes = self.active_bytes
         descriptor_bytes = sum(block.byte_size for block in self.blocks)
         if descriptor_bytes != expected_bytes:
@@ -1000,57 +1189,118 @@ class FullKVState:
     ) -> tuple[KVBlockDescriptor, ...]:
         if block_size <= 0:
             raise ValueError("block_size must be positive")
+        if not layers:
+            return ()
+
+        # Physical/logical membership, modality boundaries, token IDs, media
+        # metadata, and the mandatory flag are identical for every layer/head.
+        # Build that sequence template once.  The previous implementation
+        # repeated span lookup and constructed/validated a MediaMetadata object
+        # for every source position in every layer/head (more than one million
+        # objects for a typical LLaVA document prompt) despite the immutable
+        # values being identical.
+        source_length = layers[0].sequence_length
+        if any(layer.sequence_length != source_length for layer in layers):
+            raise ValueError("all cache layers must share one sequence length for blockization")
+        ordered_spans = tuple(sorted(spans, key=lambda span: (span.start, span.end)))
+        mapped = positions.physical_to_logical
+        span_by_physical: list[ModalitySpan] = []
+        span_index = 0
+        for logical_position in mapped:
+            while (
+                span_index < len(ordered_spans)
+                and logical_position >= ordered_spans[span_index].end
+            ):
+                span_index += 1
+            if span_index >= len(ordered_spans) or not ordered_spans[span_index].contains(
+                logical_position
+            ):
+                raise ValueError(
+                    f"logical position {logical_position} must map to exactly one modality span"
+                )
+            span_by_physical.append(ordered_spans[span_index])
+
+        templates: list[
+            tuple[
+                tuple[int, ...],
+                tuple[int, ...],
+                ModalitySpan,
+                tuple[int, ...] | None,
+                tuple[MediaMetadata, ...],
+                bool,
+            ]
+        ] = []
+        physical = 0
+        while physical < source_length:
+            first_span = span_by_physical[physical]
+            first_signature = cls._span_signature(first_span)
+            end = physical + 1
+            while end < source_length and end - physical < block_size:
+                if cls._span_signature(span_by_physical[end]) != first_signature:
+                    break
+                end += 1
+            selected_physical = tuple(range(physical, end))
+            selected_logical = mapped[physical:end]
+            templates.append(
+                (
+                    selected_physical,
+                    selected_logical,
+                    first_span,
+                    None if token_ids is None else token_ids[physical:end],
+                    cls._block_metadata(first_span, selected_logical),
+                    any(logical in mandatory for logical in selected_logical),
+                )
+            )
+            physical = end
+
         blocks: list[KVBlockDescriptor] = []
         for layer_index, layer in enumerate(layers):
+            key_bytes_per_position = cls._position_bytes(
+                layer.key,
+                layer.key_head_dimension,
+                layer.key_sequence_dimension,
+                1,
+            )
+            value_bytes_per_position = cls._position_bytes(
+                layer.value,
+                layer.value_head_dimension,
+                layer.value_sequence_dimension,
+                1,
+            )
+            key_dtype = _dtype_name(layer.key)
+            value_dtype = _dtype_name(layer.value)
+            key_device = _device_name(layer.key)
+            value_device = _device_name(layer.value)
             for head in range(layer.kv_heads):
-                physical = 0
-                while physical < layer.sequence_length:
-                    first_logical = positions.logical_for_physical(physical)
-                    first_span = cls._span_for(spans, first_logical)
-                    end = physical + 1
-                    while end < layer.sequence_length and end - physical < block_size:
-                        logical = positions.logical_for_physical(end)
-                        following_span = cls._span_for(spans, logical)
-                        if cls._span_signature(following_span) != cls._span_signature(first_span):
-                            break
-                        end += 1
-                    selected_physical = tuple(range(physical, end))
-                    selected_logical = positions.gather(selected_physical)
-                    metadata = cls._block_metadata(first_span, selected_logical)
-                    key_bytes = cls._position_bytes(
-                        layer.key,
-                        layer.key_head_dimension,
-                        layer.key_sequence_dimension,
-                        len(selected_physical),
-                    )
-                    value_bytes = cls._position_bytes(
-                        layer.value,
-                        layer.value_head_dimension,
-                        layer.value_sequence_dimension,
-                        len(selected_physical),
-                    )
+                for (
+                    selected_physical,
+                    selected_logical,
+                    first_span,
+                    selected_tokens,
+                    metadata,
+                    is_mandatory,
+                ) in templates:
+                    position_count = len(selected_physical)
                     blocks.append(
-                        KVBlockDescriptor(
+                        KVBlockDescriptor._from_validated(
                             layer=layer_index,
                             kv_head=head,
                             modality=first_span.modality,
                             physical_cache_indices=selected_physical,
                             original_logical_positions=selected_logical,
-                            token_ids=(
-                                None
-                                if token_ids is None
-                                else tuple(token_ids[index] for index in selected_physical)
-                            ),
+                            token_ids=selected_tokens,
                             media_metadata=metadata,
-                            key_dtype=_dtype_name(layer.key),
-                            value_dtype=_dtype_name(layer.value),
-                            key_device=_device_name(layer.key),
-                            value_device=_device_name(layer.value),
-                            byte_size=key_bytes + value_bytes,
-                            mandatory=any(logical in mandatory for logical in selected_logical),
+                            key_dtype=key_dtype,
+                            value_dtype=value_dtype,
+                            key_device=key_device,
+                            value_device=value_device,
+                            byte_size=(
+                                (key_bytes_per_position + value_bytes_per_position)
+                                * position_count
+                            ),
+                            mandatory=is_mandatory,
                         )
                     )
-                    physical = end
         return tuple(blocks)
 
     @staticmethod
@@ -1064,7 +1314,7 @@ class FullKVState:
         return elements_per_head_position * position_count * _tensor_element_size(tensor)
 
     def _validate_descriptor(self, block: KVBlockDescriptor) -> None:
-        if block in self._source_block_set:
+        if id(block) in self._source_block_ids:
             return
         try:
             layer = self.layers[block.layer]
@@ -1283,7 +1533,13 @@ class FullKVState:
         """Copy complete selected source blocks into the lossless exact tier."""
 
         selected = tuple(blocks)
-        if any(block not in self._source_block_set for block in selected):
+        if any(
+            self._source_blocks_by_membership.get(
+                (block.layer, block.kv_head, block.physical_cache_indices)
+            )
+            != block
+            for block in selected
+        ):
             raise ValueError("exact block selection contains a non-source descriptor")
         return self._gather_descriptors(selected, gather_mode=gather_mode)
 
@@ -1368,7 +1624,7 @@ class FullKVState:
     def reinject_exact(self, exact: ExactTier) -> FullKVState:
         """Reconstruct the complete source cache from exact-tier payloads only."""
 
-        if exact.source_memberships != self.source_memberships:
+        if not exact._membership_index.same_memberships(self._membership_index):
             raise ValueError("full reinjection requires exact coverage of every source position")
         reconstructed = [
             (_empty_like(layer.key), _empty_like(layer.value)) for layer in self.layers
@@ -1447,17 +1703,25 @@ class MosaicKVState:
     residuals: ResidualTier
     logical_positions: LogicalPositionMap
     statistics: CompressionStatistics
+    _source_membership_index: _MembershipIndex = field(
+        init=False, repr=False, compare=False
+    )
 
     def __post_init__(self) -> None:
-        source = _memberships(self.source_blocks)
-        exact = self.exact.source_memberships
-        prototypes = self.prototypes.source_memberships
-        residuals = self.residuals.source_memberships
-        if not exact <= source or not prototypes <= source or not residuals <= source:
+        source = _MembershipIndex.from_blocks(self.source_blocks)
+        object.__setattr__(self, "_source_membership_index", source)
+        exact = self.exact._membership_index
+        prototypes = self.prototypes._membership_index
+        residuals = self.residuals._membership_index
+        if not (
+            exact.is_subset_of(source)
+            and prototypes.is_subset_of(source)
+            and residuals.is_subset_of(source)
+        ):
             raise ValueError("tier source membership is not part of the source cache")
-        conflicts = (exact & prototypes) | (exact & residuals)
-        if conflicts:
-            raise ValueError(f"exact memberships conflict with a compressed tier: {min(conflicts)}")
+        conflict = exact.first_overlap(prototypes) or exact.first_overlap(residuals)
+        if conflict is not None:
+            raise ValueError(f"exact memberships conflict with a compressed tier: {conflict}")
         _ensure_unique_tensors(
             (
                 *self.exact.key_blocks,
@@ -1469,23 +1733,20 @@ class MosaicKVState:
             ),
             "MosaicKV tiers",
         )
-        mandatory = frozenset(
-            membership
-            for block in self.source_blocks
-            if block.mandatory
-            for membership in block.source_memberships
+        mandatory = _MembershipIndex.from_blocks(
+            tuple(block for block in self.source_blocks if block.mandatory)
         )
-        if not mandatory <= exact:
+        if not mandatory.is_subset_of(exact):
             raise ValueError("mandatory/non-compressible source positions must remain exact")
         observed_active = self.exact.active_bytes + self.prototypes.active_bytes
         if observed_active != self.statistics.active_kv_bytes:
             raise ValueError("active byte accounting differs from underlying tier storage")
         if self.residuals.active_bytes != self.statistics.residual_kv_bytes:
             raise ValueError("residual byte accounting differs from CPU tier storage")
-        active_memberships = len(exact | prototypes)
+        active_memberships = exact.count + prototypes.count
         if active_memberships != self.statistics.active_source_memberships:
             raise ValueError("active source-membership accounting mismatch")
-        if len(source) != self.statistics.source_memberships:
+        if source.count != self.statistics.source_memberships:
             raise ValueError("source-membership accounting mismatch")
 
     @classmethod
@@ -1506,7 +1767,11 @@ class MosaicKVState:
             *residual_tier.source_blocks,
         ):
             full._validate_descriptor(descriptor)
-        active_memberships = exact_tier.source_memberships | prototype_tier.source_memberships
+        if exact_tier._membership_index.first_overlap(prototype_tier._membership_index):
+            raise ValueError("exact memberships conflict with prototype memberships")
+        active_memberships = (
+            exact_tier.source_membership_count + prototype_tier.source_membership_count
+        )
         active_bytes = exact_tier.active_bytes + prototype_tier.active_bytes
         statistics = CompressionStatistics(
             source_kv_bytes=full.active_bytes,
@@ -1518,8 +1783,8 @@ class MosaicKVState:
             exact_blocks=len(exact_tier.blocks),
             prototype_source_blocks=len(prototype_tier.source_blocks),
             residual_source_blocks=len(residual_tier.source_blocks),
-            source_memberships=len(full.source_memberships),
-            active_source_memberships=len(active_memberships),
+            source_memberships=full.source_membership_count,
+            active_source_memberships=active_memberships,
             byte_retention_ratio=active_bytes / full.active_bytes,
         )
         return cls(
@@ -1549,9 +1814,8 @@ class MosaicKVState:
 
     @property
     def is_retention_one(self) -> bool:
-        source = _memberships(self.source_blocks)
         return (
-            self.exact.source_memberships == source
+            self.exact._membership_index.same_memberships(self._source_membership_index)
             and not self.prototypes.source_blocks
             and not self.residuals.source_blocks
             and math.isclose(self.statistics.byte_retention_ratio, 1.0, rel_tol=0.0, abs_tol=1e-15)

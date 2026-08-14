@@ -424,6 +424,228 @@ def _flatten_group(value: Any, start: int, end: int, position_slice: slice) -> A
     return _working_float(selected).reshape(-1, int(_shape(selected)[-1]))
 
 
+def _uniform_batched_torch_forecast(
+    prompt_query_layers: Sequence[Any],
+    draft_query_layers: Sequence[Any],
+    kv_head_counts: Sequence[int],
+    config: ForecastingConfig,
+    *,
+    original_logical_sequence_length: int,
+    draft_cache_isolated: bool,
+) -> QueryForecast | None:
+    """Build the ordinary low-memory forecast with one cross-layer transfer.
+
+    Production decoder layers normally expose identical query geometry.  The
+    layer-at-a-time implementation staged the same bounded prompt window from
+    CUDA once per layer, creating dozens of synchronization boundaries.  This
+    path stacks those windows, performs the unchanged grouped-query-head
+    reductions, and runs the existing deterministic NumPy streaming update on
+    ``layer * KV-head`` rows at once.  Heterogeneous layouts and all reference
+    modes retain the scalar implementation below.
+    """
+
+    prompt_layers = tuple(prompt_query_layers)
+    draft_layers = tuple(draft_query_layers)
+    kv_counts = tuple(int(value) for value in kv_head_counts)
+    if (
+        not config.low_memory_centroids
+        or config.centroid_execution_mode != "batched_layer"
+        or config.covariance is not ForecastCovariance.DIAGONAL
+        or not prompt_layers
+        or not all(
+            _is_torch(layer) and bool(getattr(layer, "is_cuda", False))
+            for layer in prompt_layers
+        )
+    ):
+        return None
+    prompt_shapes = tuple(_shape(layer) for layer in prompt_layers)
+    if len(set(prompt_shapes)) != 1 or len(set(kv_counts)) != 1:
+        return None
+    prompt_shape = prompt_shapes[0]
+    if len(prompt_shape) != 4 or prompt_shape[0] != 1:
+        return None
+    layer_count = len(prompt_layers)
+    kv_heads = kv_counts[0]
+    query_heads = prompt_shape[1]
+    prompt_length = prompt_shape[2]
+    head_dim = prompt_shape[3]
+    if kv_heads <= 0 or query_heads % kv_heads:
+        return None
+    if len(kv_counts) != layer_count:
+        return None
+    if config.draft_steps:
+        if len(draft_layers) != layer_count:
+            return None
+        expected_draft_shape = (1, query_heads, config.draft_steps, head_dim)
+        if any(
+            not _is_torch(layer)
+            or not bool(getattr(layer, "is_cuda", False))
+            or _shape(layer) != expected_draft_shape
+            for layer in draft_layers
+        ):
+            return None
+    elif draft_layers:
+        return None
+    actual_window = min(config.prompt_window, prompt_length)
+    if actual_window == 0 and not draft_layers:
+        return None
+    exemplar = prompt_layers[0]
+    group_size = query_heads // kv_heads
+
+    def prepare_samples() -> tuple[Any | None, Any | None, Any]:
+        import torch
+
+        prompt_samples = None
+        if actual_window:
+            prompt_stack = torch.stack(
+                tuple(layer.detach().float() for layer in prompt_layers),
+                dim=0,
+            )[:, 0]
+            prompt_samples = prompt_stack.reshape(
+                layer_count,
+                kv_heads,
+                group_size,
+                prompt_length,
+                head_dim,
+            )[..., prompt_length - actual_window :, :].reshape(
+                layer_count,
+                kv_heads,
+                group_size * actual_window,
+                head_dim,
+            )
+        draft_samples = None
+        if draft_layers:
+            draft_stack = torch.stack(
+                tuple(layer.detach().float() for layer in draft_layers),
+                dim=0,
+            )[:, 0]
+            draft_samples = draft_stack.reshape(
+                layer_count,
+                kv_heads,
+                group_size * config.draft_steps,
+                head_dim,
+            )
+        available = tuple(
+            value for value in (prompt_samples, draft_samples) if value is not None
+        )
+        if not available:  # pragma: no cover - guarded above
+            raise ValueError("forecast has no mathematically valid query source")
+        combined = available[0] if len(available) == 1 else torch.cat(available, dim=2)
+        return prompt_samples, draft_samples, combined
+
+    (
+        (prompt_samples, draft_samples, combined),
+        preparation_seconds,
+        preparation_syncs,
+        timing_backend,
+    ) = _measure(exemplar, prepare_samples)
+
+    def statistics() -> tuple[Any | None, Any | None]:
+        if prompt_samples is None:
+            return None, None
+        return (
+            prompt_samples.mean(dim=2),
+            prompt_samples.var(dim=2, unbiased=False),
+        )
+
+    (
+        (prompt_means, prompt_variances),
+        statistics_seconds,
+        statistics_syncs,
+        statistics_backend,
+    ) = _measure(exemplar, statistics)
+    if statistics_backend != timing_backend:
+        raise RuntimeError("forecast phases used inconsistent timing backends")
+
+    def construct_centroids() -> tuple[tuple[Any, Any], ...]:
+        import numpy as np
+
+        staged = np.asarray(
+            combined.reshape(layer_count * kv_heads, int(combined.shape[2]), head_dim)
+            .detach()
+            .float()
+            .cpu()
+            .numpy(),
+            dtype=np.float32,
+        )
+        return _batched_numpy_streaming_spherical(staged, config.centroid_count)
+
+    (
+        flattened_centroids,
+        centroid_seconds,
+        centroid_syncs,
+        centroid_backend,
+    ) = _measure(exemplar, construct_centroids)
+    if centroid_backend != timing_backend:
+        raise RuntimeError("forecast phases used inconsistent timing backends")
+
+    prompt_positions = tuple(range(prompt_length - actual_window, prompt_length))
+    forecast_layers: list[tuple[KVHeadQueryForecast, ...]] = []
+    for layer_index in range(layer_count):
+        local: list[KVHeadQueryForecast] = []
+        for kv_head in range(kv_heads):
+            centroid, centroid_weights = flattened_centroids[
+                layer_index * kv_heads + kv_head
+            ]
+            query_start = kv_head * group_size
+            local.append(
+                KVHeadQueryForecast(
+                    prompt_mean=(
+                        None if prompt_means is None else prompt_means[layer_index, kv_head]
+                    ),
+                    prompt_covariance=None,
+                    prompt_diagonal_variance=(
+                        None
+                        if prompt_variances is None
+                        else prompt_variances[layer_index, kv_head]
+                    ),
+                    draft_query_samples=(
+                        None
+                        if draft_samples is None
+                        else draft_samples[layer_index, kv_head]
+                    ),
+                    normalized_centroids=centroid,
+                    forecast_weights=centroid_weights,
+                    provenance=HeadForecastProvenance(
+                        layer_index,
+                        kv_head,
+                        query_start,
+                        query_start + group_size,
+                        prompt_positions,
+                        0 if prompt_samples is None else int(prompt_samples.shape[2]),
+                        0 if draft_samples is None else int(draft_samples.shape[2]),
+                    ),
+                )
+            )
+        forecast_layers.append(tuple(local))
+    timing = ForecastTiming(
+        cache_clone=0.0,
+        draft_decode=0.0,
+        query_preparation=preparation_seconds,
+        prompt_statistics=statistics_seconds,
+        centroid_construction=centroid_seconds,
+        total=preparation_seconds + statistics_seconds + centroid_seconds,
+        synchronization_calls=preparation_syncs + statistics_syncs + centroid_syncs,
+        timing_backend=timing_backend,
+    )
+    provenance = ForecastProvenance(
+        mode=config.mode,
+        requested_prompt_window=config.prompt_window,
+        actual_prompt_window=actual_window,
+        requested_draft_steps=config.draft_steps,
+        completed_draft_steps=config.draft_steps,
+        covariance=config.covariance,
+        centroid_method="streaming_spherical",
+        centroid_count_requested=config.centroid_count,
+        deterministic_greedy=True,
+        reused_original_prefill=True,
+        draft_cache_isolated=draft_cache_isolated or config.draft_steps == 0,
+        original_logical_sequence_length=original_logical_sequence_length,
+        configured_mode=config.mode,
+    )
+    return QueryForecast(tuple(forecast_layers), provenance, timing)
+
+
 def build_query_forecast(
     prompt_query_layers: Sequence[Any],
     draft_query_layers: Sequence[Any],
@@ -437,6 +659,16 @@ def build_query_forecast(
 
     if not config.enabled:
         raise ValueError("cannot build a forecast when forecasting.enabled is false")
+    batched = _uniform_batched_torch_forecast(
+        prompt_query_layers,
+        draft_query_layers,
+        kv_head_counts,
+        config,
+        original_logical_sequence_length=original_logical_sequence_length,
+        draft_cache_isolated=draft_cache_isolated,
+    )
+    if batched is not None:
+        return batched
     prompt_layers = tuple(prompt_query_layers)
     draft_layers = tuple(draft_query_layers)
     kv_counts = tuple(int(value) for value in kv_head_counts)

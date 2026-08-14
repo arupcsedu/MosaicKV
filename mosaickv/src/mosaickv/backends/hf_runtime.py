@@ -9,7 +9,7 @@ import os
 import tempfile
 import time
 from collections import Counter, defaultdict, deque
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import ExitStack
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
@@ -29,6 +29,7 @@ from mosaickv.adapters.huggingface import (
 )
 from mosaickv.baselines import (
     BaselineCompressionPlan,
+    HeadLocalCapacityRecord,
     LookMCompressionPlan,
     PrefixKVCompressionPlan,
     PrefixKVOfflineProfile,
@@ -41,6 +42,8 @@ from mosaickv.baselines import (
     load_prefixkv_profile,
     lookm_runtime_payloads,
     prefixkv_runtime_payloads,
+    select_prompt_attention_topk_ids,
+    select_prompt_attention_topk_ids_by_head,
     vl_cache_runtime_payloads,
 )
 from mosaickv.cache_state import (
@@ -63,17 +66,21 @@ from mosaickv.evaluation.oracle_queries import (
     collect_evaluation_only_true_future_queries,
 )
 from mosaickv.forecasting import QueryForecast, build_query_forecast, forecast_with_rollout
-from mosaickv.forecasting.huggingface import IsolatedQueryRollout
+from mosaickv.forecasting.huggingface import (
+    IsolatedQueryRollout,
+    run_isolated_greedy_query_rollout,
+)
 from mosaickv.generation import decode_quality_output, terminal_token_ids
 from mosaickv.graph import SparseEvidenceGraph, build_evidence_graph
 from mosaickv.measurements.timing import ModuleCudaTimer, SynchronizationAudit
 from mosaickv.prototypes import (
+    PrototypeAssignmentPlan,
     PrototypeRecord,
     ThreeTierCacheConstruction,
     TierConstructionMode,
     construct_three_tier_cache,
     estimate_prototype_active_cost,
-    estimate_prototype_assignment_anchor_ids,
+    plan_prototype_assignments,
 )
 from mosaickv.prototypes.rope import RotaryPrototypeKeyTransform
 from mosaickv.repair import (
@@ -81,6 +88,7 @@ from mosaickv.repair import (
     RepairEvent,
     evaluate_repair_decode_step,
     repair_decode_step,
+    stage_gpu_rescue_payloads,
 )
 from mosaickv.selection import (
     BlockUtilityTable,
@@ -115,7 +123,9 @@ class RuntimePhaseTimings:
     image_video_encoder: float | None
     projector: float | None
     language_model_prefill: float | None
+    cache_state_construction: float
     forecast: float
+    planner_preparation: float
     graph: float
     utility_and_selection: float
     tier_construction: float
@@ -132,7 +142,9 @@ class RuntimePhaseTimings:
     def __post_init__(self) -> None:
         scalar_values = (
             self.prefill,
+            self.cache_state_construction,
             self.forecast,
+            self.planner_preparation,
             self.graph,
             self.utility_and_selection,
             self.tier_construction,
@@ -185,10 +197,38 @@ class MosaicKVCompressionPlan:
     selection: SelectionResult
     construction: ThreeTierCacheConstruction
     source_budget_value: int
+    shared_active_budget_value: int
     active_budget_value: int
+    configured_physical_capacity_fraction: float
     graph_seconds: float
     selection_seconds: float
+    utility_seconds: float
+    reservation_seconds: float
+    selector_seconds: float
     tier_seconds: float
+    similarity_candidate_node_ids: tuple[int, ...] | None
+    optimization_node_ids: tuple[int, ...] | None
+    planner_source_node_ids: tuple[int, ...] | None
+    external_exact_node_ids: tuple[int, ...]
+    external_exact_capacity_records: tuple[HeadLocalCapacityRecord, ...]
+    stable_routing_seconds: float
+    similarity_shortlist_seconds: float
+    planner_mapping_seconds: float
+    graph_head_routes: tuple[tuple[int, int], ...]
+    graph_routing_provenance: str
+
+    @property
+    def uses_compact_node_ids(self) -> bool:
+        """Whether graph/utility/selection IDs require source-ID translation."""
+
+        return self.planner_source_node_ids is not None
+
+    def source_node_id(self, planner_node_id: int) -> int:
+        """Translate one dense planner ID to its immutable FullKV block ID."""
+
+        if planner_node_id < 0 or planner_node_id >= len(self.graph.nodes):
+            raise IndexError("planner node ID lies outside the evidence graph")
+        return self.graph.nodes[planner_node_id].source_id
 
 
 @dataclass(frozen=True, slots=True)
@@ -305,18 +345,17 @@ def _dense_physical_cache_budget(
         # A dense cache is fastest when every layer/head has exactly the same
         # number of real positions. Quantize the target to a block-subset sum
         # so the selector can fill every physical slot without padding masks.
-        signatures: dict[tuple[int, int], tuple[tuple[int, bool], ...]] = {}
-        for identity in bytes_per_identity:
-            signatures[identity] = tuple(
-                sorted(
-                    (
-                        block.position_count,
-                        block.mandatory,
-                    )
-                    for block in accounting_state.blocks
-                    if (block.layer, block.kv_head) == identity
-                )
+        grouped_signatures: dict[tuple[int, int], list[tuple[int, bool]]] = {
+            identity: [] for identity in bytes_per_identity
+        }
+        for block in accounting_state.blocks:
+            grouped_signatures[(block.layer, block.kv_head)].append(
+                (block.position_count, block.mandatory)
             )
+        signatures = {
+            identity: tuple(sorted(values))
+            for identity, values in grouped_signatures.items()
+        }
         unique_signatures = set(signatures.values())
         if len(unique_signatures) != 1:
             raise HuggingFaceRuntimeError(
@@ -458,6 +497,116 @@ def _route_head_attention(
     return values, shift, prompt_weight
 
 
+def _prompt_token_attention_by_head(
+    full_state: FullKVState,
+    prefill: PrefillOutput,
+    *,
+    prompt_window: int,
+) -> dict[tuple[int, int], np.ndarray[Any, Any]]:
+    """Pool eager prompt attention on-device and synchronize it once.
+
+    The former path copied every complete ``[H,Q,K]`` attention tensor to the
+    host before reducing it.  MosaicKV consumes only one ``[KVH,K]`` prompt
+    window summary per layer, so the large transfer and its per-layer
+    synchronizations were pure orchestration overhead.  This reduction is the
+    same grouped-query-head/window mean and retains all token-level evidence.
+    """
+
+    if prompt_window < 1:
+        raise HuggingFaceRuntimeError("prompt attention pooling requires prompt_window >= 1")
+    if not prefill.attention_weights:
+        raise HuggingFaceRuntimeError("runtime prefill did not capture eager attention weights")
+    attention_layers = tuple(prefill.attention_weights)
+    if len(attention_layers) != len(full_state.layers):
+        raise HuggingFaceRuntimeError("prefill attention layer count does not match the cache")
+    if all(value.__class__.__module__.startswith("torch") for value in attention_layers):
+        import torch
+
+        pooled_layers: list[Any] = []
+        minima: list[Any] = []
+        shapes: list[tuple[int, int]] = []
+        for attention, layer in zip(attention_layers, full_state.layers, strict=True):
+            tensor = attention.detach().float()
+            if tensor.ndim != 4 or int(tensor.shape[0]) != 1:
+                raise HuggingFaceRuntimeError(
+                    "eager prompt attention must have shape [1,H,Q,K]"
+                )
+            query_heads = int(tensor.shape[1])
+            if query_heads % layer.kv_heads:
+                raise HuggingFaceRuntimeError(
+                    "query heads are not divisible by cache KV heads"
+                )
+            sequence_length = layer.sequence_length
+            if int(tensor.shape[-1]) < sequence_length:
+                raise HuggingFaceRuntimeError(
+                    "prompt attention key axis is shorter than the active cache"
+                )
+            window = min(prompt_window, int(tensor.shape[-2]))
+            grouped = tensor[
+                ...,
+                -window:,
+                :sequence_length,
+            ].reshape(
+                1,
+                layer.kv_heads,
+                query_heads // layer.kv_heads,
+                window,
+                sequence_length,
+            )
+            pooled = grouped.mean(dim=(0, 2, 3))
+            pooled_layers.append(pooled)
+            minima.append(tensor.amin())
+            shapes.append((layer.kv_heads, sequence_length))
+        flattened_counts = tuple(heads * length for heads, length in shapes)
+        combined = torch.cat(
+            (
+                *(value.reshape(-1) for value in pooled_layers),
+                torch.stack(minima),
+            )
+        )
+        host = combined.detach().cpu().numpy().astype(np.float32, copy=False)
+        pooled_count = sum(flattened_counts)
+        if not bool(np.all(np.isfinite(host[:pooled_count]))):
+            raise HuggingFaceRuntimeError("prompt token attention must be finite")
+        if bool(np.any(host[pooled_count:] < 0)):
+            raise HuggingFaceRuntimeError("prompt attention weights must be nonnegative")
+        result: dict[tuple[int, int], np.ndarray[Any, Any]] = {}
+        offset = 0
+        tiny = float(np.finfo(np.float64).tiny)
+        for layer_index, ((heads, length), count) in enumerate(
+            zip(shapes, flattened_counts, strict=True)
+        ):
+            matrix = host[offset : offset + count].reshape(heads, length)
+            for kv_head in range(heads):
+                result[(layer_index, kv_head)] = np.maximum(matrix[kv_head], tiny)
+            offset += count
+        return result
+    prompt_layers = tuple(_to_numpy(value) for value in attention_layers)
+    result = {}
+    for layer_index, layer in enumerate(full_state.layers):
+        prompt = prompt_layers[layer_index]
+        if prompt.ndim != 4 or prompt.shape[0] != 1:
+            raise HuggingFaceRuntimeError("eager prompt attention must have shape [1,H,Q,K]")
+        query_heads = int(prompt.shape[1])
+        if query_heads % layer.kv_heads:
+            raise HuggingFaceRuntimeError("query heads are not divisible by cache KV heads")
+        group = query_heads // layer.kv_heads
+        window = min(prompt_window, int(prompt.shape[-2]))
+        for kv_head in range(layer.kv_heads):
+            start = kv_head * group
+            values = prompt[
+                0,
+                start : start + group,
+                -window:,
+                : layer.sequence_length,
+            ].mean(axis=(0, 1))
+            result[(layer_index, kv_head)] = np.maximum(
+                values,
+                float(np.finfo(np.float64).tiny),
+            )
+    return result
+
+
 def _forecast_token_attention_and_shift_by_head(
     full_state: FullKVState,
     prefill: PrefillOutput,
@@ -471,6 +620,15 @@ def _forecast_token_attention_and_shift_by_head(
 
     if not prefill.attention_weights:
         raise HuggingFaceRuntimeError("runtime prefill did not capture eager attention weights")
+    if not rollout.attention_steps:
+        return (
+            _prompt_token_attention_by_head(
+                full_state,
+                prefill,
+                prompt_window=config.forecasting.prompt_window,
+            ),
+            {},
+        )
     prompt_layers = tuple(_to_numpy(value) for value in prefill.attention_weights)
     if len(prompt_layers) != len(full_state.layers):
         raise HuggingFaceRuntimeError("prefill attention layer count does not match the cache")
@@ -630,12 +788,16 @@ def _attention_diagnostic_inputs(
     full_state: FullKVState,
     predicted: Mapping[tuple[int, int], np.ndarray[Any, Any]],
     oracle: EvaluationOnlyOracleQueries,
-    selection: SelectionResult,
+    selection: SelectionResult | Iterable[int],
 ) -> dict[tuple[int, int], AttentionDiagnosticInput]:
     """Align actual selected blocks and oracle attention within each cache identity."""
 
     truth = _oracle_token_attention_by_head(full_state, oracle)
-    selected = set(selection.selected_node_ids)
+    selected = set(
+        selection.selected_node_ids
+        if isinstance(selection, SelectionResult)
+        else (int(node_id) for node_id in selection)
+    )
     inputs: dict[tuple[int, int], AttentionDiagnosticInput] = {}
     for identity in sorted(predicted):
         node_ids = tuple(
@@ -663,7 +825,7 @@ def _forecast_quality_from_oracle(
     forecast: QueryForecast,
     oracle: EvaluationOnlyOracleQueries,
     predicted: Mapping[tuple[int, int], np.ndarray[Any, Any]],
-    selection: SelectionResult,
+    selection: SelectionResult | Iterable[int],
 ) -> ForecastQualityDiagnostics:
     return evaluate_forecast_quality(
         forecast,
@@ -676,7 +838,7 @@ def _selection_quality_from_oracle(
     full_state: FullKVState,
     oracle: EvaluationOnlyOracleQueries,
     predicted: Mapping[tuple[int, int], np.ndarray[Any, Any]],
-    selection: SelectionResult,
+    selection: SelectionResult | Iterable[int],
 ) -> AttentionSelectionDiagnostics:
     return evaluate_attention_selection_quality(
         _attention_diagnostic_inputs(full_state, predicted, oracle, selection)
@@ -699,12 +861,52 @@ def _block_attention_from_token_attention(
     full_state: FullKVState,
     by_head: Mapping[tuple[int, int], np.ndarray[Any, Any]],
 ) -> dict[int, float]:
-    return {
-        node_id: float(
-            by_head[(block.layer, block.kv_head)][list(block.physical_cache_indices)].sum()
-        )
-        for node_id, block in enumerate(full_state.blocks)
-    }
+    # Cache blockization is normally contiguous. Pool every identity with one
+    # prefix-sum pass instead of dispatching tens of thousands of tiny NumPy
+    # reductions from Python. Retain an exact indexed fallback for deliberately
+    # noncontiguous synthetic descriptors.
+    grouped: dict[tuple[int, int], list[tuple[int, KVBlockDescriptor]]] = defaultdict(list)
+    for node_id, block in enumerate(full_state.blocks):
+        grouped[(block.layer, block.kv_head)].append((node_id, block))
+    result: dict[int, float] = {}
+    for identity, entries in grouped.items():
+        source = np.asarray(by_head[identity], dtype=np.float64)
+        prefix = np.empty(source.size + 1, dtype=np.float64)
+        prefix[0] = 0.0
+        np.cumsum(source, out=prefix[1:])
+        contiguous: list[tuple[int, int, int]] = []
+        irregular: list[tuple[int, KVBlockDescriptor]] = []
+        for node_id, block in entries:
+            positions = block.physical_cache_indices
+            if positions[-1] - positions[0] + 1 == len(positions):
+                contiguous.append((node_id, positions[0], positions[-1] + 1))
+            else:
+                irregular.append((node_id, block))
+        if contiguous:
+            starts = np.fromiter(
+                (start for _node_id, start, _end in contiguous),
+                dtype=np.intp,
+                count=len(contiguous),
+            )
+            ends = np.fromiter(
+                (end for _node_id, _start, end in contiguous),
+                dtype=np.intp,
+                count=len(contiguous),
+            )
+            masses = prefix[ends] - prefix[starts]
+            result.update(
+                (node_id, float(mass))
+                for (node_id, _start, _end), mass in zip(
+                    contiguous,
+                    masses,
+                    strict=True,
+                )
+            )
+        for node_id, block in irregular:
+            result[node_id] = float(
+                source[np.asarray(block.physical_cache_indices, dtype=np.intp)].sum()
+            )
+    return result
 
 
 def _prompt_attention_by_node(
@@ -717,36 +919,18 @@ def _prompt_attention_by_node(
 
     if prompt_window < 1:
         raise HuggingFaceRuntimeError("prompt_attention_topk requires prompt_window >= 1")
-    if not prefill.attention_weights:
-        raise HuggingFaceRuntimeError("prompt_attention_topk did not capture eager attention")
-    layers = tuple(_to_numpy(value) for value in prefill.attention_weights)
-    if len(layers) != len(full_state.layers):
-        raise HuggingFaceRuntimeError("prompt attention layer count does not match the cache")
-    result: dict[int, float] = {}
-    for node_id, block in enumerate(full_state.blocks):
-        layer = full_state.layers[block.layer]
-        attention = layers[block.layer]
-        if attention.ndim != 4 or attention.shape[0] != 1:
-            raise HuggingFaceRuntimeError("prompt attention must have shape [1,H,Q,K]")
-        query_heads = int(attention.shape[1])
-        if query_heads % layer.kv_heads:
-            raise HuggingFaceRuntimeError("query heads are not divisible by cache KV heads")
-        group_size = query_heads // layer.kv_heads
-        query_start = block.kv_head * group_size
-        query_end = query_start + group_size
-        window = min(prompt_window, int(attention.shape[-2]))
-        selected = attention[
-            0,
-            query_start:query_end,
-            -window:,
-            list(block.physical_cache_indices),
-        ]
-        score = float(selected.sum(axis=-1).mean())
-        if not math.isfinite(score) or score < 0:
-            raise HuggingFaceRuntimeError(
-                "prompt attention block mass must be finite and nonnegative"
-            )
-        result[node_id] = score
+    result = _block_attention_from_token_attention(
+        full_state,
+        _prompt_token_attention_by_head(
+            full_state,
+            prefill,
+            prompt_window=prompt_window,
+        ),
+    )
+    if any(not math.isfinite(score) or score < 0 for score in result.values()):
+        raise HuggingFaceRuntimeError(
+            "prompt attention block mass must be finite and nonnegative"
+        )
     return result
 
 
@@ -763,6 +947,67 @@ def _budget_source_cost(full_state: FullKVState, unit: BudgetUnit) -> int:
 def _mandatory_cost(full_state: FullKVState, unit: BudgetUnit) -> int:
     budget = SelectionBudget(1, unit)
     return sum(budget.cost(block) for block in full_state.blocks if block.mandatory)
+
+
+def _mosaickv_effective_capacity(
+    full_state: FullKVState,
+    config: RunConfig,
+    shared_target: int,
+    position_limits: Mapping[tuple[int, int], int] | None,
+) -> tuple[int, Mapping[tuple[int, int], int] | None]:
+    """Resolve MosaicKV's auditable utilization of the shared hard cache cap."""
+
+    fraction = config.selection.physical_capacity_fraction
+    if config.cache.retention_ratio == 1.0 or fraction == 1.0:
+        return shared_target, position_limits
+    mandatory_cost = _mandatory_cost(full_state, config.cache.budget_unit)
+    if position_limits is None:
+        return max(mandatory_cost, math.floor(shared_target * fraction)), None
+
+    mandatory_positions: Counter[tuple[int, int]] = Counter()
+    for block in full_state.blocks:
+        if block.mandatory:
+            mandatory_positions[(block.layer, block.kv_head)] += block.position_count
+    effective_limits = {
+        identity: max(
+            1,
+            int(mandatory_positions[identity]),
+            math.floor(int(limit) * fraction),
+        )
+        for identity, limit in position_limits.items()
+    }
+    if config.cache.budget_unit is BudgetUnit.BYTES:
+        bytes_per_position: dict[tuple[int, int], int] = {}
+        for block in full_state.blocks:
+            if block.byte_size % block.position_count:
+                raise HuggingFaceRuntimeError(
+                    "MosaicKV physical-capacity scaling requires position-aligned blocks"
+                )
+            identity = (block.layer, block.kv_head)
+            current = block.byte_size // block.position_count
+            previous = bytes_per_position.setdefault(identity, current)
+            if previous != current:
+                raise HuggingFaceRuntimeError(
+                    "MosaicKV KV bytes per position vary within one layer/head"
+                )
+        effective_target = sum(
+            bytes_per_position[identity] * limit
+            for identity, limit in effective_limits.items()
+        )
+    elif config.cache.budget_unit is BudgetUnit.RETAINED_SLOTS:
+        effective_target = sum(effective_limits.values())
+    else:
+        effective_target = max(mandatory_cost, math.floor(shared_target * fraction))
+    if effective_target > shared_target:
+        raise HuggingFaceRuntimeError(
+            "MosaicKV effective capacity exceeds the shared comparison budget"
+        )
+    return effective_target, effective_limits
+
+
+def _graph_mandatory_cost(graph: SparseEvidenceGraph, unit: BudgetUnit) -> int:
+    budget = SelectionBudget(1, unit)
+    return sum(budget.cost(node.block) for node in graph.nodes if node.block.mandatory)
 
 
 def _resolve_budget(full_state: FullKVState, config: RunConfig) -> tuple[int, int]:
@@ -788,6 +1033,8 @@ def _similarity_shortlist(
     source_budget: int,
     target_budget: int,
     prompt_attention_by_node: Mapping[int, float] | None,
+    head_uncertainty: Mapping[tuple[int, int], float] | None = None,
+    eligible_source_node_ids: Sequence[int] | None = None,
 ) -> tuple[int, ...] | None:
     """Return prompt-ranked nodes for expensive graph similarity sources."""
 
@@ -798,13 +1045,29 @@ def _similarity_shortlist(
         raise HuggingFaceRuntimeError(
             "graph similarity shortlisting requires prompt-only block attention"
         )
-    expected = set(range(len(full_state.blocks)))
-    if set(prompt_attention_by_node) != expected:
+    node_count = len(full_state.blocks)
+    if len(prompt_attention_by_node) != node_count or any(
+        node_id not in prompt_attention_by_node for node_id in range(node_count)
+    ):
         raise HuggingFaceRuntimeError(
             "graph similarity shortlist scores must cover every source block"
         )
-    values = {node_id: float(prompt_attention_by_node[node_id]) for node_id in expected}
-    if any(not math.isfinite(value) or value < 0 for value in values.values()):
+    eligible_source_ids = (
+        tuple(range(node_count))
+        if eligible_source_node_ids is None
+        else tuple(int(node_id) for node_id in eligible_source_node_ids)
+    )
+    if len(eligible_source_ids) != len(set(eligible_source_ids)) or any(
+        node_id < 0 or node_id >= node_count for node_id in eligible_source_ids
+    ):
+        raise HuggingFaceRuntimeError(
+            "graph similarity shortlist eligible source IDs are invalid"
+        )
+    if any(
+        not math.isfinite(float(prompt_attention_by_node[node_id]))
+        or float(prompt_attention_by_node[node_id]) < 0
+        for node_id in eligible_source_ids
+    ):
         raise HuggingFaceRuntimeError(
             "graph similarity shortlist scores must be finite and nonnegative"
         )
@@ -816,10 +1079,122 @@ def _similarity_shortlist(
         config.graph.similarity_shortlist_min_nodes,
         math.ceil(estimated_selected_blocks * multiplier),
     )
-    mandatory = {index for index, block in enumerate(full_state.blocks) if block.mandatory}
-    ranked = sorted(expected - mandatory, key=lambda node_id: (-values[node_id], node_id))
-    selected = set(ranked[: max(0, requested - len(mandatory))]) | mandatory
+    mandatory = {
+        node_id
+        for node_id in eligible_source_ids
+        if full_state.blocks[node_id].mandatory
+    }
+    eligible_heads = {(block.layer, block.kv_head) for block in full_state.blocks}
+    if config.graph.uncertain_head_only:
+        eligible_heads = set(
+            _uncertain_head_routes(
+                eligible_heads,
+                head_uncertainty,
+                fraction=config.graph.uncertain_head_fraction,
+                threshold=config.graph.uncertain_head_threshold,
+                label="graph",
+            )
+        )
+
+    # Screen coarse contiguous groups, then admit their original fixed-size
+    # blocks to graph reranking. Cache granularity and byte accounting remain
+    # identical to every baseline; only the inexpensive screening hierarchy is
+    # coarse.
+    groups: list[tuple[float, int, tuple[int, ...]]] = []
+    nodes_by_stratum: defaultdict[tuple[int, int, object], list[int]] = defaultdict(list)
+    for node_id in eligible_source_ids:
+        block = full_state.blocks[node_id]
+        if (block.layer, block.kv_head) in eligible_heads and node_id not in mandatory:
+            nodes_by_stratum[(block.layer, block.kv_head, block.modality)].append(node_id)
+    width = config.graph.screening_group_blocks
+    for node_ids in nodes_by_stratum.values():
+        ordered = sorted(
+            node_ids,
+            key=lambda node_id: (
+                full_state.blocks[node_id].original_logical_positions[0],
+                node_id,
+            ),
+        )
+        for start in range(0, len(ordered), width):
+            members = tuple(ordered[start : start + width])
+            groups.append(
+                (
+                    sum(float(prompt_attention_by_node[node_id]) for node_id in members),
+                    members[0],
+                    members,
+                )
+            )
+    groups.sort(key=lambda item: (-item[0], item[1]))
+    selected = set(mandatory)
+    nonmandatory_count = len(full_state.blocks) - sum(
+        block.mandatory for block in full_state.blocks
+    )
+    fraction_limit = math.ceil(
+        nonmandatory_count * config.graph.candidate_nonmandatory_fraction
+    )
+    candidate_limit = min(max(0, requested - len(mandatory)), fraction_limit)
+    admitted = 0
+    for _score, _tie, members in groups:
+        if admitted >= candidate_limit:
+            break
+        remaining = candidate_limit - admitted
+        accepted = members[:remaining]
+        selected.update(accepted)
+        admitted += len(accepted)
     return tuple(sorted(selected))
+
+
+def _uncertain_head_routes(
+    eligible_heads: Iterable[tuple[int, int]],
+    head_uncertainty: Mapping[tuple[int, int], float] | None,
+    *,
+    fraction: float,
+    threshold: float,
+    label: str,
+) -> tuple[tuple[int, int], ...]:
+    """Return the deterministic highest-uncertainty layer/head routes."""
+
+    expected = frozenset(eligible_heads)
+    if not expected:
+        return ()
+    if head_uncertainty is None or set(head_uncertainty) != expected:
+        raise HuggingFaceRuntimeError(
+            f"uncertain-head {label} routing requires one uncertainty value per layer/head"
+        )
+    if any(
+        not math.isfinite(value) or not 0 <= value <= 1
+        for value in head_uncertainty.values()
+    ):
+        raise HuggingFaceRuntimeError(f"{label} head uncertainty must lie in [0, 1]")
+    ordered = tuple(
+        sorted(expected, key=lambda identity: (-head_uncertainty[identity], identity))
+    )
+    count = max(1, math.ceil(len(ordered) * fraction))
+    routed = tuple(
+        identity for identity in ordered[:count] if head_uncertainty[identity] >= threshold
+    )
+    return routed or (ordered[0],)
+
+
+def _attention_uncertainty_by_head(
+    token_attention: Mapping[tuple[int, int], np.ndarray[Any, Any]],
+) -> dict[tuple[int, int], float]:
+    """Normalized entropy router computed from already-pooled prompt evidence."""
+
+    result: dict[tuple[int, int], float] = {}
+    tiny = float(np.finfo(np.float64).tiny)
+    for identity, raw in token_attention.items():
+        values = np.asarray(raw, dtype=np.float64).reshape(-1)
+        if not bool(np.all(np.isfinite(values))) or bool(np.any(values < 0)):
+            raise HuggingFaceRuntimeError("head-routing attention must be finite and nonnegative")
+        total = float(values.sum())
+        if values.size <= 1 or total <= 0:
+            result[identity] = 0.0
+            continue
+        probability = np.maximum(values / total, tiny)
+        entropy = -float(np.sum(probability * np.log(probability)))
+        result[identity] = min(1.0, max(0.0, entropy / math.log(values.size)))
+    return result
 
 
 def _selection(
@@ -834,6 +1209,7 @@ def _selection(
     required_node_ids: Iterable[int] = (),
     prompt_anchor_node_ids: Iterable[int] = (),
     evidence_node_ids: Iterable[int] = (),
+    optimization_node_ids: Iterable[int] | None = None,
 ) -> SelectionResult:
     if retention_one:
         return select_all_exact(objective, SelectionBudget(value, unit))
@@ -846,6 +1222,7 @@ def _selection(
         required_node_ids=required_node_ids,
         prompt_anchor_node_ids=prompt_anchor_node_ids,
         evidence_node_ids=evidence_node_ids,
+        optimization_node_ids=optimization_node_ids,
     )
 
 
@@ -997,6 +1374,14 @@ def _required_prototype_anchors(
     required: list[int] = []
     existing = frozenset(int(node_id) for node_id in existing_anchor_ids)
     for identity in sorted(groups, key=lambda item: (item[0], item[1], str(item[2]))):
+        if not config.prototypes.uses_prototype_block(
+            identity[0],
+            identity[1],
+            identity[2],
+        ):
+            if config.prototypes.requires_exact_head(identity[0], identity[1]):
+                required.extend(groups[identity])
+            continue
         maximum_members = config.prototypes.group_size_for(identity[0], identity[1])
         maximum_span = config.prototypes.position_span_for(identity[0], identity[1])
         ordered = sorted(
@@ -1006,9 +1391,6 @@ def _required_prototype_anchors(
                 node_id,
             ),
         )
-        if config.prototypes.requires_exact_head(identity[0], identity[1]):
-            required.extend(ordered)
-            continue
         segment: list[int] = []
 
         def reserve_anchor(members: Sequence[int]) -> None:
@@ -1039,14 +1421,12 @@ def _required_prototype_anchors(
 
         for node_id in ordered:
             trial = [*segment, node_id]
-            positions = [
-                position
-                for member_id in trial
-                for position in graph.nodes[member_id].block.original_logical_positions
-            ]
+            first_position = graph.nodes[trial[0]].block.original_logical_positions[0]
+            last_position = graph.nodes[node_id].block.original_logical_positions[-1]
             exceeds_capacity = len(trial) > maximum_members + 1
             exceeds_span = bool(
-                maximum_span is not None and max(positions) - min(positions) > maximum_span
+                maximum_span is not None
+                and last_position - first_position > maximum_span
             )
             if segment and (exceeds_capacity or exceeds_span):
                 reserve_anchor(segment)
@@ -1055,6 +1435,51 @@ def _required_prototype_anchors(
                 segment = trial
         reserve_anchor(segment)
     return tuple(sorted(required))
+
+
+def _prototype_aware_reservation_limits(
+    graph: SparseEvidenceGraph,
+    config: RunConfig,
+    position_limits: Mapping[tuple[int, int], int] | None,
+    required_anchor_ids: Iterable[int],
+) -> Mapping[tuple[int, int], int] | None:
+    """Leave physical room for provisional prototype slots during reservations.
+
+    Prompt and evidence reservations run before exact selection. They must not
+    consume slots already promised to the prototype anchors, otherwise the
+    later one-pass planner sees a fully occupied head and can only fall back to
+    exact selection. The reservation is conservative: assignment planning may
+    later remove an empty prototype, but it can never discover less capacity
+    than was advertised here.
+    """
+
+    if position_limits is None:
+        return None
+    candidate_anchor_ids = {
+        *(int(node_id) for node_id in required_anchor_ids),
+        *(node.node_id for node in graph.nodes if node.block.mandatory),
+    }
+    reserved_slots: Counter[tuple[int, int]] = Counter()
+    for node_id in candidate_anchor_ids:
+        if node_id < 0 or node_id >= len(graph.nodes):
+            raise ValueError("prototype reservation anchor references a node outside the graph")
+        block = graph.nodes[node_id].block
+        if config.prototypes.uses_prototype_block(
+            block.layer,
+            block.kv_head,
+            block.modality,
+        ):
+            reserved_slots[(block.layer, block.kv_head)] += 1
+    limits = {
+        identity: int(limit) - int(reserved_slots.get(identity, 0))
+        for identity, limit in position_limits.items()
+    }
+    if any(limit < 1 for limit in limits.values()):
+        raise InfeasibleSelectionBudgetError(
+            "prototype slots consume the complete dense-cache reservation capacity: "
+            f"limits={dict(position_limits)}, prototype_slots={dict(reserved_slots)}"
+        )
+    return limits
 
 
 def _refined_budget_candidates(
@@ -1099,6 +1524,9 @@ def _exact_construction(
     capabilities: AdapterCapabilities,
     config: RunConfig,
     key_transform: RotaryPrototypeKeyTransform | None,
+    *,
+    additional_exact_source_node_ids: Sequence[int] = (),
+    active_budget: SelectionBudget | None = None,
 ) -> ThreeTierCacheConstruction:
     return construct_three_tier_cache(
         full_state,
@@ -1111,6 +1539,8 @@ def _exact_construction(
         key_transform=key_transform,
         exact_gather_mode=config.cache.exact_gather_mode,
         total_storage_budget_bytes=config.cache.total_storage_budget_bytes,
+        additional_exact_source_node_ids=additional_exact_source_node_ids,
+        active_budget=active_budget,
     )
 
 
@@ -1123,8 +1553,9 @@ def _uniform_attainable_prototype_position_limits(
     required_node_ids: Iterable[int],
     prompt_anchor_node_ids: Iterable[int],
     evidence_node_ids: Iterable[int],
+    allow_head_padding: bool = False,
 ) -> tuple[dict[tuple[int, int], int], int]:
-    """Choose the largest padding-free final length shared by every head.
+    """Choose representable exact limits for a dense prototype cache.
 
     The dense HF cache has one physical sequence dimension, while modality
     boundaries can produce short source blocks. Reserving a one-token
@@ -1132,7 +1563,10 @@ def _uniform_attainable_prototype_position_limits(
     that cannot be composed from required fragments and 16-token blocks. This
     planner intersects the position sums attainable by every layer/head and
     safely underfills the physical cap instead of asking the selector to solve
-    an impossible equality.
+    an impossible equality. When explicitly enabled, a hybrid routed layout
+    that has no common attainable length falls back to the largest attainable
+    length in each head. The runtime then pads those heads to the returned
+    physical length and masks every padding slot during eager attention.
 
     Optional boundary fragments are considered only for residue completion,
     matching :func:`lazy_greedy_select`; ordinary optional blocks must be
@@ -1162,21 +1596,10 @@ def _uniform_attainable_prototype_position_limits(
     if any(node_id < 0 or node_id >= len(graph.nodes) for node_id in hard):
         raise ValueError("prototype layout required IDs reference a node outside the graph")
 
-    # Prompt/evidence reservations are admitted by the selector only when
-    # block-aligned (mandatory nodes have already been selected). Prototype
-    # anchors alone may be short modality-boundary fragments.
-    incompatible_required = tuple(
-        sorted(
-            node_id
-            for node_id in (prompt | evidence) - mandatory
-            if graph.nodes[node_id].block.position_count % block_size
-        )
-    )
-    if incompatible_required:
-        raise InfeasibleSelectionBudgetError(
-            "prompt/evidence reservations contain non-aligned dense-cache fragments: "
-            f"node_ids={incompatible_required}"
-        )
+    # Prompt, evidence, and prototype anchors may all be short
+    # modality-boundary fragments. They contribute to ``hard_positions``
+    # below; the same residue dynamic program used by the selector determines
+    # whether optional fragments can complete an attainable dense length.
 
     nodes_by_identity: defaultdict[tuple[int, int], list[int]] = defaultdict(list)
     for node in graph.nodes:
@@ -1239,11 +1662,103 @@ def _uniform_attainable_prototype_position_limits(
         if viable:
             return exact_limits, final_length
 
+    if allow_head_padding:
+        exact_limits = {}
+        final_lengths: dict[tuple[int, int], int] = {}
+        for identity in identities:
+            reserve = int(reserved_slots_by_identity.get(identity, 0))
+            maximum_exact_length = int(position_limits[identity]) - reserve
+            hard_positions, aligned_capacity, partial_positions = feasibility[identity]
+            for exact_length in range(maximum_exact_length, hard_positions - 1, -1):
+                remaining = exact_length - hard_positions
+                partial = partial_positions.get(remaining % block_size)
+                if (
+                    partial is not None
+                    and partial <= remaining
+                    and remaining - partial <= aligned_capacity
+                ):
+                    exact_limits[identity] = exact_length
+                    final_lengths[identity] = exact_length + reserve
+                    break
+            else:
+                raise InfeasibleSelectionBudgetError(
+                    "no head-padded prototype layout is attainable under the physical cap: "
+                    f"identity={identity}, cap={position_limits[identity]}, "
+                    f"prototype_slots={reserve}, required_positions={hard_positions}, "
+                    f"block_size={block_size}"
+                )
+        return exact_limits, max(final_lengths.values())
+
     required_positions = {identity: feasibility[identity][0] for identity in identities}
     raise InfeasibleSelectionBudgetError(
         "no uniform padding-free prototype layout is attainable under the physical caps: "
         f"caps={dict(position_limits)}, prototype_slots={dict(reserved_slots_by_identity)}, "
         f"required_positions={required_positions}, block_size={block_size}"
+    )
+
+
+def _validate_combined_active_layouts(
+    measured_active_lengths: Mapping[tuple[int, int], int],
+    routed_position_limits: Mapping[tuple[int, int], int],
+    planned_routed_active_lengths: Mapping[tuple[int, int], int],
+    external_capacity_records: Sequence[HeadLocalCapacityRecord],
+) -> tuple[int | None, set[int], bool]:
+    """Validate one atomic routed-plus-external dense-cache layout plan."""
+
+    routed_identities = set(routed_position_limits)
+    if set(planned_routed_active_lengths) != routed_identities:
+        raise HuggingFaceRuntimeError(
+            "routed prototype plan does not cover every routed layer/KV head"
+        )
+    external_by_identity = {
+        (record.layer, record.kv_head): record for record in external_capacity_records
+    }
+    if len(external_by_identity) != len(external_capacity_records):
+        raise HuggingFaceRuntimeError("external stable capacity routes must be unique")
+    overlap = routed_identities.intersection(external_by_identity)
+    if overlap:
+        raise HuggingFaceRuntimeError(
+            f"routed and external stable cache plans overlap: {sorted(overlap)}"
+        )
+
+    combined_limits = dict(routed_position_limits)
+    combined_limits.update(
+        {
+            identity: record.position_limit
+            for identity, record in external_by_identity.items()
+        }
+    )
+    planned_lengths = dict(planned_routed_active_lengths)
+    planned_lengths.update(
+        {
+            identity: record.selected_positions
+            for identity, record in external_by_identity.items()
+        }
+    )
+    missing = set(combined_limits) - set(measured_active_lengths)
+    unexpected = set(measured_active_lengths) - set(combined_limits)
+    over_limit = {
+        identity: (measured_active_lengths[identity], limit)
+        for identity, limit in combined_limits.items()
+        if identity in measured_active_lengths
+        and measured_active_lengths[identity] > limit
+    }
+    mismatches = {
+        identity: (measured_active_lengths.get(identity), planned)
+        for identity, planned in planned_lengths.items()
+        if measured_active_lengths.get(identity) != planned
+    }
+    if missing or unexpected or over_limit or mismatches:
+        raise HuggingFaceRuntimeError(
+            "combined routed/external prototype layout violates its plan: "
+            f"missing={sorted(missing)}, unexpected={sorted(unexpected)}, "
+            f"over_limit={over_limit}, length_mismatches={mismatches}"
+        )
+    distinct_lengths = set(measured_active_lengths.values())
+    return (
+        max(distinct_lengths) if distinct_lengths else None,
+        distinct_lengths,
+        len(set(planned_lengths.values())) > 1,
     )
 
 
@@ -1261,6 +1776,10 @@ def _one_pass_prototype_construction(
     evidence_node_ids: tuple[int, ...],
     prototype_weight_by_node: Mapping[int, float],
     prototype_token_weight_by_head: Mapping[tuple[int, int], Any] | None,
+    optimization_node_ids: tuple[int, ...] | None,
+    additional_exact_source_node_ids: tuple[int, ...],
+    external_exact_capacity_records: tuple[HeadLocalCapacityRecord, ...],
+    total_active_budget: SelectionBudget,
 ) -> tuple[SelectionResult, ThreeTierCacheConstruction, float, float]:
     """Plan exact anchors and prototype slots as one deterministic transaction."""
 
@@ -1274,13 +1793,23 @@ def _one_pass_prototype_construction(
                 graph.nodes[node_id].block.layer,
                 graph.nodes[node_id].block.kv_head,
             )
+            and config.prototypes.uses_prototype_head(
+                graph.nodes[node_id].block.layer,
+                graph.nodes[node_id].block.kv_head,
+            )
+            and config.prototypes.uses_prototype_block(
+                graph.nodes[node_id].block.layer,
+                graph.nodes[node_id].block.kv_head,
+                graph.nodes[node_id].block.modality,
+            )
         )
     )
     selection_seconds = 0.0
     tier_seconds = 0.0
     failure: str | None = None
     candidate: SelectionResult | None = None
-    planned_final_length: int | None = None
+    assignment_plan: PrototypeAssignmentPlan | None = None
+    planned_routed_active_lengths: dict[tuple[int, int], int] = {}
     # First plan conservatively for every allowed anchor. Once selection is
     # known, descriptor-only assignment reveals which anchors actually own an
     # unselected member. Replan until that materialized anchor set is stable;
@@ -1289,6 +1818,7 @@ def _one_pass_prototype_construction(
     seen_anchor_plans: set[tuple[int, ...]] = set()
     maximum_planning_rounds = len(anchor_allowlist) + 2
     for _planning_round in range(maximum_planning_rounds):
+        assignment_plan = None
         if planned_prototype_anchor_ids in seen_anchor_plans:
             failure = (
                 "prototype active-anchor planning did not reach a stable assignment: "
@@ -1316,8 +1846,13 @@ def _one_pass_prototype_construction(
                 )
                 for node_id in planned_prototype_anchor_ids
             )
+            routed_slot_counts = {
+                int(reserved_slots_by_identity.get(identity, 0))
+                for identity in position_limits
+            }
+            allow_head_padding = len(routed_slot_counts) > 1
             try:
-                exact_position_limits, planned_final_length = (
+                exact_position_limits, _planned_final_length = (
                     _uniform_attainable_prototype_position_limits(
                         graph,
                         position_limits,
@@ -1326,13 +1861,21 @@ def _one_pass_prototype_construction(
                         required_node_ids=required_anchors,
                         prompt_anchor_node_ids=prompt_anchor_node_ids,
                         evidence_node_ids=evidence_node_ids,
+                        allow_head_padding=allow_head_padding,
                     )
                 )
+                planned_routed_active_lengths = {
+                    identity: (
+                        exact_position_limits[identity]
+                        + int(reserved_slots_by_identity.get(identity, 0))
+                    )
+                    for identity in position_limits
+                }
             except InfeasibleSelectionBudgetError as error:
                 failure = f"uniform attainable-length planning failed: {error}"
                 candidate = None
                 break
-        if exact_budget < _mandatory_cost(full_state, unit):
+        if exact_budget < _graph_mandatory_cost(graph, unit):
             failure = (
                 f"prototype anchor reserve {prototype_reserve} leaves exact budget "
                 f"{exact_budget} below mandatory cost"
@@ -1354,6 +1897,7 @@ def _one_pass_prototype_construction(
                 required_node_ids=required_anchors,
                 prompt_anchor_node_ids=prompt_anchor_node_ids,
                 evidence_node_ids=evidence_node_ids,
+                optimization_node_ids=optimization_node_ids,
             )
         except InfeasibleSelectionBudgetError as error:
             failure = f"one-pass exact-anchor selection is infeasible: {error}"
@@ -1362,14 +1906,15 @@ def _one_pass_prototype_construction(
         if candidate is None:
             break
         candidate = replace(candidate, budget=SelectionBudget(target, unit))
-        materialized_anchor_ids, incompatibility = estimate_prototype_assignment_anchor_ids(
+        assignment_plan = plan_prototype_assignments(
             graph,
             candidate,
             config.prototypes,
             prototype_anchor_node_ids=anchor_allowlist,
         )
-        if materialized_anchor_ids is None:
-            failure = incompatibility or "prototype assignment is incompatible"
+        materialized_anchor_ids = assignment_plan.materialized_anchor_ids
+        if assignment_plan.incompatibility is not None:
+            failure = assignment_plan.incompatibility
             candidate = None
             break
         if materialized_anchor_ids == planned_prototype_anchor_ids:
@@ -1382,8 +1927,12 @@ def _one_pass_prototype_construction(
                 )
                 for node_id in materialized_anchor_ids
             )
+            materialized_slot_counts = {
+                int(materialized_slots_by_identity.get(identity, 0))
+                for identity in position_limits
+            }
             try:
-                materialized_exact_limits, materialized_final_length = (
+                materialized_exact_limits, _materialized_final_length = (
                     _uniform_attainable_prototype_position_limits(
                         graph,
                         position_limits,
@@ -1392,6 +1941,7 @@ def _one_pass_prototype_construction(
                         required_node_ids=required_anchors,
                         prompt_anchor_node_ids=prompt_anchor_node_ids,
                         evidence_node_ids=evidence_node_ids,
+                        allow_head_padding=len(materialized_slot_counts) > 1,
                     )
                 )
             except InfeasibleSelectionBudgetError as error:
@@ -1404,7 +1954,13 @@ def _one_pass_prototype_construction(
             # full lazy-greedy pass.
             if materialized_exact_limits == exact_position_limits:
                 planned_prototype_anchor_ids = materialized_anchor_ids
-                planned_final_length = materialized_final_length
+                planned_routed_active_lengths = {
+                    identity: (
+                        materialized_exact_limits[identity]
+                        + int(materialized_slots_by_identity.get(identity, 0))
+                    )
+                    for identity in position_limits
+                }
                 break
         planned_prototype_anchor_ids = materialized_anchor_ids
         candidate = None
@@ -1413,12 +1969,15 @@ def _one_pass_prototype_construction(
         candidate = None
 
     if candidate is not None:
+        if assignment_plan is None:  # pragma: no cover - candidate and plan are created together
+            raise HuggingFaceRuntimeError("prototype candidate is missing its assignment plan")
         estimated_cost, incompatibility = estimate_prototype_active_cost(
             graph,
             candidate,
             config.prototypes,
             position_limits=position_limits,
             prototype_anchor_node_ids=anchor_allowlist,
+            assignment_plan=assignment_plan,
         )
         if estimated_cost is None:
             failure = incompatibility or "prototype assignment is incompatible"
@@ -1440,6 +1999,9 @@ def _one_pass_prototype_construction(
                 exact_gather_mode=config.cache.exact_gather_mode,
                 total_storage_budget_bytes=config.cache.total_storage_budget_bytes,
                 prototype_anchor_node_ids=anchor_allowlist,
+                assignment_plan=assignment_plan,
+                additional_exact_source_node_ids=additional_exact_source_node_ids,
+                active_budget=total_active_budget,
             )
             tier_seconds += time.perf_counter() - started
             if construction.mode is TierConstructionMode.THREE_TIER:
@@ -1449,28 +2011,32 @@ def _one_pass_prototype_construction(
                     (layout.layer, layout.kv_head): layout.active_cache_length
                     for layout in construction.active_layouts
                 }
-                missing = set(position_limits) - set(active_lengths)
-                over_limit = {
-                    identity: (active_lengths[identity], limit)
-                    for identity, limit in position_limits.items()
-                    if identity in active_lengths and active_lengths[identity] > limit
-                }
-                distinct_lengths = set(active_lengths.values())
-                measured_final_length = (
-                    next(iter(distinct_lengths)) if len(distinct_lengths) == 1 else None
+                (
+                    measured_final_length,
+                    distinct_lengths,
+                    planned_head_padding,
+                ) = _validate_combined_active_layouts(
+                    active_lengths,
+                    position_limits,
+                    planned_routed_active_lengths,
+                    external_exact_capacity_records,
                 )
-                planned_mismatch = bool(
-                    planned_final_length is not None
-                    and measured_final_length != planned_final_length
-                )
-                if (
-                    not missing
-                    and not over_limit
-                    and measured_final_length is not None
-                    and not planned_mismatch
-                ):
+                if measured_final_length is not None:
                     physical_cap = min(position_limits.values())
-                    if measured_final_length < physical_cap:
+                    if len(distinct_lengths) > 1:
+                        if not planned_head_padding:  # pragma: no cover - mapping invariant
+                            raise HuggingFaceRuntimeError(
+                                "combined cache requires padding absent from its layout plan"
+                            )
+                        construction = replace(
+                            construction,
+                            reason=(
+                                f"{construction.reason}; routed heads use validity-masked "
+                                f"padding at physical length {measured_final_length}; logical "
+                                f"head lengths={sorted(distinct_lengths)}"
+                            ),
+                        )
+                    elif measured_final_length < physical_cap:
                         construction = replace(
                             construction,
                             reason=(
@@ -1480,12 +2046,7 @@ def _one_pass_prototype_construction(
                             ),
                         )
                     return candidate, construction, selection_seconds, tier_seconds
-                failure = (
-                    "one-pass prototype layout is not a uniform padding-free dense cache: "
-                    f"missing={sorted(missing)}, over_limit={over_limit}, "
-                    f"active_lengths={sorted(distinct_lengths)}, "
-                    f"planned_final_length={planned_final_length}"
-                )
+                failure = "one-pass prototype layout has no active KV heads"
             else:
                 failure = f"construction: {construction.reason}"
 
@@ -1500,6 +2061,7 @@ def _one_pass_prototype_construction(
         position_fill_quantum=(full_state.block_size if position_limits is not None else None),
         prompt_anchor_node_ids=prompt_anchor_node_ids,
         evidence_node_ids=evidence_node_ids,
+        optimization_node_ids=optimization_node_ids,
     )
     selection_seconds += time.perf_counter() - started
     started = time.perf_counter()
@@ -1510,6 +2072,8 @@ def _one_pass_prototype_construction(
         capabilities,
         config,
         key_transform,
+        additional_exact_source_node_ids=additional_exact_source_node_ids,
+        active_budget=total_active_budget,
     )
     construction = replace(
         construction,
@@ -1534,11 +2098,15 @@ def _prototype_construction(
     evidence_node_ids: tuple[int, ...],
     prototype_weight_by_node: Mapping[int, float],
     prototype_token_weight_by_head: Mapping[tuple[int, int], Any] | None,
+    optimization_node_ids: tuple[int, ...] | None,
+    additional_exact_source_node_ids: tuple[int, ...],
+    external_exact_capacity_records: tuple[HeadLocalCapacityRecord, ...],
+    total_active_budget: SelectionBudget,
 ) -> tuple[SelectionResult, ThreeTierCacheConstruction, float, float]:
     """Reserve active capacity for prototypes with bounded deterministic search."""
 
     unit = config.cache.budget_unit
-    mandatory = _mandatory_cost(full_state, unit)
+    mandatory = _graph_mandatory_cost(graph, unit)
     selection_seconds = 0.0
     tier_seconds = 0.0
     if not capabilities.supports_prototype_merge or (
@@ -1555,6 +2123,7 @@ def _prototype_construction(
             position_fill_quantum=(full_state.block_size if position_limits is not None else None),
             prompt_anchor_node_ids=prompt_anchor_node_ids,
             evidence_node_ids=evidence_node_ids,
+            optimization_node_ids=optimization_node_ids,
         )
         selection_seconds += time.perf_counter() - started
         started = time.perf_counter()
@@ -1571,6 +2140,8 @@ def _prototype_construction(
             prototype_token_weight_by_head=prototype_token_weight_by_head,
             exact_gather_mode=config.cache.exact_gather_mode,
             total_storage_budget_bytes=config.cache.total_storage_budget_bytes,
+            additional_exact_source_node_ids=additional_exact_source_node_ids,
+            active_budget=total_active_budget,
         )
         tier_seconds += time.perf_counter() - started
         return selection, construction, selection_seconds, tier_seconds
@@ -1590,6 +2161,10 @@ def _prototype_construction(
             evidence_node_ids,
             prototype_weight_by_node,
             prototype_token_weight_by_head,
+            optimization_node_ids,
+            additional_exact_source_node_ids,
+            external_exact_capacity_records,
+            total_active_budget,
         )
 
     failures: Counter[str] = Counter()
@@ -1649,6 +2224,7 @@ def _prototype_construction(
                 required_node_ids=required_anchors,
                 prompt_anchor_node_ids=prompt_anchor_node_ids,
                 evidence_node_ids=evidence_node_ids,
+                optimization_node_ids=optimization_node_ids,
             )
         except InfeasibleSelectionBudgetError as error:
             selection_seconds += time.perf_counter() - started
@@ -1701,6 +2277,8 @@ def _prototype_construction(
             prototype_token_weight_by_head=prototype_token_weight_by_head,
             exact_gather_mode=config.cache.exact_gather_mode,
             total_storage_budget_bytes=config.cache.total_storage_budget_bytes,
+            additional_exact_source_node_ids=additional_exact_source_node_ids,
+            active_budget=total_active_budget,
         )
         tier_seconds += time.perf_counter() - started
         if construction.mode is TierConstructionMode.THREE_TIER:
@@ -1716,11 +2294,19 @@ def _prototype_construction(
         position_limits=position_limits,
         prompt_anchor_node_ids=prompt_anchor_node_ids,
         evidence_node_ids=evidence_node_ids,
+        optimization_node_ids=optimization_node_ids,
     )
     selection_seconds += time.perf_counter() - started
     started = time.perf_counter()
     construction = _exact_construction(
-        full_state, graph, fallback, capabilities, config, key_transform
+        full_state,
+        graph,
+        fallback,
+        capabilities,
+        config,
+        key_transform,
+        additional_exact_source_node_ids=additional_exact_source_node_ids,
+        active_budget=total_active_budget,
     )
     summary = "; ".join(f"{count}x {reason}" for reason, count in failures.most_common(4))
     construction = replace(
@@ -1748,37 +2334,205 @@ def build_compression_plan(
     prompt_attentions: Sequence[Any] | None = None,
     prompt_attention_by_node: Mapping[int, float] | None = None,
     prototype_token_weight_by_head: Mapping[tuple[int, int], Any] | None = None,
+    graph_head_uncertainty: Mapping[tuple[int, int], float] | None = None,
 ) -> MosaicKVCompressionPlan:
     """Run graph, utility, selection, and tier construction for one prefill."""
 
     if config.method.is_full_cache:
         raise ValueError("FullKV does not run the MosaicKV compression planner")
-    source_budget, target = _resolve_budget(full_state, config)
+    source_budget, shared_target = _resolve_budget(full_state, config)
+    target, position_limits = _mosaickv_effective_capacity(
+        full_state,
+        config,
+        shared_target,
+        position_limits,
+    )
+    total_active_budget = SelectionBudget(target, config.cache.budget_unit)
+    planner_target = target
+    all_head_routes = {
+        (block.layer, block.kv_head) for block in full_state.blocks
+    }
+    routed_head_routes: set[tuple[int, int]] | None = None
+    optimization_node_ids: tuple[int, ...] | None = None
+    stable_prompt_reference_ids: tuple[int, ...] = ()
+    planner_source_node_ids: tuple[int, ...] | None = None
+    external_exact_node_ids: tuple[int, ...] = ()
+    external_exact_capacity_records: tuple[HeadLocalCapacityRecord, ...] = ()
+    stable_routing_seconds = 0.0
+    similarity_shortlist_seconds = 0.0
+    planner_mapping_seconds = 0.0
+    if config.selection.routed_head_only_planning:
+        if prompt_attention_by_node is None or graph_head_uncertainty is None:
+            raise HuggingFaceRuntimeError(
+                "routed-head-only planning requires prompt attention and head scores"
+            )
+        stable_routing_started = time.perf_counter()
+        routed_head_routes = set(
+            _uncertain_head_routes(
+                all_head_routes,
+                graph_head_uncertainty,
+                fraction=config.prototypes.uncertain_head_fraction,
+                threshold=config.prototypes.uncertain_head_threshold,
+                label="routed-head-only planner",
+            )
+        )
+        optimization_node_ids = tuple(
+            node_id
+            for node_id, block in enumerate(full_state.blocks)
+            if (block.layer, block.kv_head) in routed_head_routes
+        )
+        if config.cache.retention_ratio < 1.0:
+            exact_head_routes = {
+                (block.layer, block.kv_head)
+                for block in full_state.blocks
+                if config.prototypes.requires_exact_head(block.layer, block.kv_head)
+            }
+            can_externalize_stable = bool(
+                config.selection.stable_head_prompt_routing
+                and position_limits is not None
+                and not config.selection.stable_head_uniform_fill
+            )
+            if can_externalize_stable:
+                if position_limits is None:  # pragma: no cover - guarded above
+                    raise HuggingFaceRuntimeError(
+                        "external stable routing requires dense position limits"
+                    )
+                stable_head_routes = tuple(
+                    sorted(all_head_routes - routed_head_routes - exact_head_routes)
+                )
+                external_selection = select_prompt_attention_topk_ids_by_head(
+                    full_state,
+                    total_active_budget,
+                    prompt_attention_by_node=prompt_attention_by_node,
+                    head_routes=stable_head_routes,
+                    position_limits=position_limits,
+                )
+                external_exact_node_ids = external_selection.selected_node_ids
+                external_exact_capacity_records = external_selection.capacity_records
+                external_cost = sum(
+                    total_active_budget.cost(full_state.blocks[node_id])
+                    for node_id in external_exact_node_ids
+                )
+                planner_target = target - external_cost
+                if planner_target < 1:
+                    raise HuggingFaceRuntimeError(
+                        "stable-head exact routing consumed the complete active budget"
+                    )
+                planner_head_routes = routed_head_routes | exact_head_routes
+                planner_source_node_ids = tuple(
+                    node_id
+                    for node_id, block in enumerate(full_state.blocks)
+                    if (block.layer, block.kv_head) in planner_head_routes
+                )
+            else:
+                if config.selection.stable_head_prompt_routing:
+                    stable_prompt_reference_ids = select_prompt_attention_topk_ids(
+                        full_state,
+                        total_active_budget,
+                        prompt_attention_by_node=prompt_attention_by_node,
+                        position_limits=position_limits,
+                    )
+                    stable_source_node_ids = set(stable_prompt_reference_ids)
+                else:
+                    # Without stable Prompt routing, stable heads remain in the
+                    # ordinary planner so no source block becomes unreachable.
+                    stable_source_node_ids = {
+                        node_id
+                        for node_id, block in enumerate(full_state.blocks)
+                        if (block.layer, block.kv_head) not in routed_head_routes
+                    }
+                exact_route_source_node_ids = {
+                    node_id
+                    for node_id, block in enumerate(full_state.blocks)
+                    if (block.layer, block.kv_head) in exact_head_routes
+                }
+                planner_source_node_ids = tuple(
+                    sorted(
+                        set(optimization_node_ids)
+                        | stable_source_node_ids
+                        | exact_route_source_node_ids
+                    )
+                )
+        stable_routing_seconds = time.perf_counter() - stable_routing_started
+    shortlist_started = time.perf_counter()
     similarity_candidate_node_ids = _similarity_shortlist(
         full_state,
         config,
         source_budget=source_budget,
         target_budget=target,
         prompt_attention_by_node=prompt_attention_by_node,
+        head_uncertainty=graph_head_uncertainty,
+        eligible_source_node_ids=optimization_node_ids,
     )
+    similarity_shortlist_seconds = time.perf_counter() - shortlist_started
+    if optimization_node_ids is not None:
+        optimization_nodes = frozenset(optimization_node_ids)
+        similarity_candidate_node_ids = tuple(
+            node_id
+            for node_id in (
+                optimization_node_ids
+                if similarity_candidate_node_ids is None
+                else similarity_candidate_node_ids
+            )
+            if node_id in optimization_nodes
+        )
+    if planner_source_node_ids is not None:
+        planner_sources = frozenset(planner_source_node_ids)
+        similarity_candidate_node_ids = tuple(
+            node_id
+            for node_id in (
+                planner_source_node_ids
+                if similarity_candidate_node_ids is None
+                else similarity_candidate_node_ids
+            )
+            if node_id in planner_sources
+        )
     graph_started = time.perf_counter()
     graph = build_evidence_graph(
         full_state,
         config.graph,
         prompt_attentions=prompt_attentions,
+        prompt_attention_query_window=config.forecasting.prompt_window,
         similarity_candidate_node_ids=similarity_candidate_node_ids,
+        source_node_ids=planner_source_node_ids,
     )
     graph_seconds = time.perf_counter() - graph_started
-    selection_started = time.perf_counter()
+    mapping_started = time.perf_counter()
+    source_to_planner = {node.source_id: node.node_id for node in graph.nodes}
+    planner_optimization_node_ids = (
+        None
+        if optimization_node_ids is None
+        else tuple(
+            source_to_planner[node_id]
+            for node_id in optimization_node_ids
+            if node_id in source_to_planner
+        )
+    )
+    planner_forecast_attention_by_node = {
+        node.node_id: float(forecast_attention_by_node[node.source_id])
+        for node in graph.nodes
+    }
+    planner_prompt_attention_by_node = (
+        None
+        if prompt_attention_by_node is None
+        else {
+            node.node_id: float(prompt_attention_by_node[node.source_id])
+            for node in graph.nodes
+        }
+    )
+    planner_mapping_seconds = time.perf_counter() - mapping_started
+    utility_started = time.perf_counter()
     utilities = compute_block_utilities(
         graph,
         config.utility,
-        forecast_attention_by_node=forecast_attention_by_node,
+        forecast_attention_by_node=planner_forecast_attention_by_node,
         attention_provenance=attention_provenance,
         rope_aware=True,
+        value_aware_node_ids=planner_optimization_node_ids,
     )
     objective = BudgetedObjective(graph, utilities, config.selection)
-    utility_seconds = time.perf_counter() - selection_started
+    utility_seconds = time.perf_counter() - utility_started
+    reservation_started = time.perf_counter()
     if config.selection.prompt_anchor_fraction and prompt_attention_by_node is None:
         raise HuggingFaceRuntimeError(
             "prompt-anchored selection requires prompt-only block attention"
@@ -1801,32 +2555,132 @@ def build_compression_plan(
         if prototype_path_enabled
         else ()
     )
-    reservation_fill_quantum = (
-        full_state.block_size
-        if position_limits is not None and config.method is MosaicKVMethod.MOSAICKV_EXACT
-        else None
+    planner_head_routes = {
+        (node.block.layer, node.block.kv_head) for node in graph.nodes
+    }
+    routed_position_limits = (
+        None
+        if position_limits is None
+        else {
+            identity: int(limit)
+            for identity, limit in position_limits.items()
+            if identity in planner_head_routes
+        }
     )
+    reservation_position_limits = (
+        _prototype_aware_reservation_limits(
+            graph,
+            config,
+            routed_position_limits,
+            required_prototype_anchor_ids,
+        )
+        if prototype_path_enabled
+        else routed_position_limits
+    )
+    reservation_fill_quantum = (
+        full_state.block_size if routed_position_limits is not None else None
+    )
+    planning_position_limits = routed_position_limits
     prompt_anchor_node_ids = _bounded_reservation(
         objective,
-        target,
+        planner_target,
         config.cache.budget_unit,
         config.selection.prompt_anchor_fraction,
-        {} if prompt_attention_by_node is None else prompt_attention_by_node,
-        position_limits=position_limits,
+        (
+            {}
+            if planner_prompt_attention_by_node is None
+            else planner_prompt_attention_by_node
+        ),
+        position_limits=reservation_position_limits,
         position_fill_quantum=reservation_fill_quantum,
         reserved_node_ids=required_prototype_anchor_ids,
     )
+    if config.selection.stable_head_prompt_routing:
+        if (
+            prompt_attention_by_node is None
+            or planner_prompt_attention_by_node is None
+            or graph_head_uncertainty is None
+        ):
+            raise HuggingFaceRuntimeError(
+                "stable-head prompt routing requires prompt attention and head scores"
+            )
+        if routed_head_routes is None:
+            routed_head_routes = set(
+                _uncertain_head_routes(
+                    all_head_routes,
+                    graph_head_uncertainty,
+                    fraction=config.prototypes.uncertain_head_fraction,
+                    threshold=config.prototypes.uncertain_head_threshold,
+                    label="stable-head prompt reservation",
+                )
+            )
+        if external_exact_node_ids:
+            stable_prompt_ids: tuple[int, ...] = ()
+        elif not stable_prompt_reference_ids:
+            stable_prompt_reference_ids = select_prompt_attention_topk_ids(
+                full_state,
+                SelectionBudget(target, config.cache.budget_unit),
+                prompt_attention_by_node=prompt_attention_by_node,
+                position_limits=reservation_position_limits,
+            )
+        else:
+            stable_prompt_ids = tuple(
+                source_to_planner[node_id]
+                for node_id in stable_prompt_reference_ids
+                if node_id in source_to_planner
+                if (
+                    full_state.blocks[node_id].layer,
+                    full_state.blocks[node_id].kv_head,
+                )
+                not in routed_head_routes
+                and (
+                    not config.selection.stable_head_uniform_fill
+                    or full_state.blocks[node_id].mandatory
+                    or full_state.blocks[node_id].position_count % full_state.block_size == 0
+                )
+            )
+        if (
+            not external_exact_node_ids
+            and position_limits is not None
+            and not config.selection.stable_head_uniform_fill
+        ):
+            stable_positions: Counter[tuple[int, int]] = Counter()
+            for node_id in stable_prompt_ids:
+                block = graph.nodes[node_id].block
+                stable_positions[(block.layer, block.kv_head)] += block.position_count
+            planning_position_limits = dict(position_limits)
+            for identity in all_head_routes - routed_head_routes:
+                planning_position_limits[identity] = int(stable_positions[identity])
+            reservation_position_limits = planning_position_limits
+        additional_prompt_ids = _bounded_reservation(
+            objective,
+            planner_target,
+            config.cache.budget_unit,
+            config.selection.prompt_anchor_fraction,
+            planner_prompt_attention_by_node,
+            position_limits=reservation_position_limits,
+            position_fill_quantum=reservation_fill_quantum,
+            reserved_node_ids=(
+                *required_prototype_anchor_ids,
+                *stable_prompt_ids,
+            ),
+        )
+        prompt_anchor_node_ids = tuple(
+            sorted(set(stable_prompt_ids) | set(additional_prompt_ids))
+        )
     evidence_node_ids = _bounded_reservation(
         objective,
-        target,
+        planner_target,
         config.cache.budget_unit,
         config.selection.evidence_preservation_fraction,
         _evidence_preservation_scores(objective),
-        position_limits=position_limits,
+        position_limits=reservation_position_limits,
         position_fill_quantum=reservation_fill_quantum,
         reserved_node_ids=(*required_prototype_anchor_ids, *prompt_anchor_node_ids),
     )
+    reservation_seconds = time.perf_counter() - reservation_started
     if config.cache.retention_ratio == 1.0:
+        selector_started = time.perf_counter()
         selection = _selection(
             objective,
             source_budget,
@@ -1835,7 +2689,8 @@ def build_compression_plan(
         )
         if selection.selected_node_ids != tuple(range(len(full_state.blocks))):
             raise HuggingFaceRuntimeError("retention 1.0 did not select every source block")
-        selection_seconds = time.perf_counter() - selection_started
+        selector_seconds = time.perf_counter() - selector_started
+        selection_seconds = utility_seconds + reservation_seconds + selector_seconds
         tier_started = time.perf_counter()
         construction = construct_three_tier_cache(
             full_state,
@@ -1850,39 +2705,69 @@ def build_compression_plan(
             total_storage_budget_bytes=config.cache.total_storage_budget_bytes,
         )
     elif config.method is MosaicKVMethod.MOSAICKV_EXACT:
+        selector_started = time.perf_counter()
         selection = _selection(
             objective,
-            target,
+            planner_target,
             config.cache.budget_unit,
             retention_one=False,
-            position_limits=position_limits,
-            fill_position_limits=position_limits is not None,
-            position_fill_quantum=(full_state.block_size if position_limits is not None else None),
+            position_limits=planning_position_limits,
+            fill_position_limits=planning_position_limits is not None,
+            position_fill_quantum=(
+                full_state.block_size if planning_position_limits is not None else None
+            ),
             prompt_anchor_node_ids=prompt_anchor_node_ids,
             evidence_node_ids=evidence_node_ids,
+            optimization_node_ids=planner_optimization_node_ids,
         )
-        selection_seconds = time.perf_counter() - selection_started
+        selector_seconds = time.perf_counter() - selector_started
+        selection_seconds = utility_seconds + reservation_seconds + selector_seconds
         tier_started = time.perf_counter()
-        construction = _exact_construction(
-            full_state, graph, selection, capabilities, config, key_transform
-        )
+        try:
+            construction = _exact_construction(
+                full_state,
+                graph,
+                selection,
+                capabilities,
+                config,
+                key_transform,
+                additional_exact_source_node_ids=external_exact_node_ids,
+                active_budget=total_active_budget,
+            )
+        except Exception as error:
+            error.__dict__["mosaickv_external_exact_capacity_records"] = (
+                external_exact_capacity_records
+            )
+            raise
     else:
-        selection, construction, selector_seconds, tier_seconds = _prototype_construction(
-            full_state,
-            graph,
-            objective,
-            capabilities,
-            config,
-            target,
-            position_limits,
-            key_transform,
-            required_prototype_anchor_ids,
-            prompt_anchor_node_ids,
-            evidence_node_ids,
-            forecast_attention_by_node,
-            prototype_token_weight_by_head,
-        )
-        selection_seconds = utility_seconds + selector_seconds
+        try:
+            selection, construction, selector_seconds, tier_seconds = (
+                _prototype_construction(
+                    full_state,
+                    graph,
+                    objective,
+                    capabilities,
+                    config,
+                    planner_target,
+                    planning_position_limits,
+                    key_transform,
+                    required_prototype_anchor_ids,
+                    prompt_anchor_node_ids,
+                    evidence_node_ids,
+                    forecast_attention_by_node,
+                    prototype_token_weight_by_head,
+                    planner_optimization_node_ids,
+                    external_exact_node_ids,
+                    external_exact_capacity_records,
+                    total_active_budget,
+                )
+            )
+        except Exception as error:
+            error.__dict__["mosaickv_external_exact_capacity_records"] = (
+                external_exact_capacity_records
+            )
+            raise
+        selection_seconds = utility_seconds + reservation_seconds + selector_seconds
         tier_started = None
     if tier_started is not None:
         tier_seconds = time.perf_counter() - tier_started
@@ -1898,20 +2783,56 @@ def build_compression_plan(
         effective_method = f"{config.method.value}__{construction.mode.value}"
     if config.ablation.variant is not AblationVariant.NONE:
         effective_method = f"{effective_method}__ablation_{config.ablation.variant.value}"
+    graph_head_routes = tuple(
+        sorted(
+            {
+                (full_state.blocks[node_id].layer, full_state.blocks[node_id].kv_head)
+                for node_id in (similarity_candidate_node_ids or ())
+                if not full_state.blocks[node_id].mandatory
+            }
+        )
+    )
     return MosaicKVCompressionPlan(
-        config.method,
-        effective_method,
-        full_state,
-        forecast,
-        graph,
-        utilities,
-        selection,
-        construction,
-        source_budget,
-        target,
-        graph_seconds,
-        selection_seconds,
-        tier_seconds,
+        method=config.method,
+        effective_method=effective_method,
+        full_state=full_state,
+        forecast=forecast,
+        graph=graph,
+        utilities=utilities,
+        selection=selection,
+        construction=construction,
+        source_budget_value=source_budget,
+        shared_active_budget_value=shared_target,
+        active_budget_value=target,
+        configured_physical_capacity_fraction=(
+            config.selection.physical_capacity_fraction
+        ),
+        graph_seconds=graph_seconds,
+        selection_seconds=selection_seconds,
+        utility_seconds=utility_seconds,
+        reservation_seconds=reservation_seconds,
+        selector_seconds=selector_seconds,
+        tier_seconds=tier_seconds,
+        similarity_candidate_node_ids=similarity_candidate_node_ids,
+        optimization_node_ids=optimization_node_ids,
+        planner_source_node_ids=planner_source_node_ids,
+        external_exact_node_ids=external_exact_node_ids,
+        external_exact_capacity_records=external_exact_capacity_records,
+        stable_routing_seconds=stable_routing_seconds,
+        similarity_shortlist_seconds=similarity_shortlist_seconds,
+        planner_mapping_seconds=planner_mapping_seconds,
+        graph_head_routes=graph_head_routes,
+        graph_routing_provenance=(
+            "routed_head_only_prompt_shortlist_plus_normalized_head_entropy"
+            if config.selection.routed_head_only_planning
+            else "prompt_hierarchical_shortlist_plus_normalized_head_entropy"
+            if config.graph.uncertain_head_only
+            else (
+                "prompt_hierarchical_shortlist"
+                if similarity_candidate_node_ids is not None
+                else "full_graph"
+            )
+        ),
     )
 
 
@@ -3530,6 +4451,53 @@ def _prototype_attention_mass(
     prototype_slots: Sequence[tuple[int, int, int, int]],
     validity_masks: Sequence[Any],
 ) -> dict[int, float]:
+    if attention_weights and all(
+        value.__class__.__module__.startswith("torch") for value in attention_weights
+    ):
+        import torch
+
+        total_query_heads = sum(int(value.shape[1]) for value in attention_weights)
+        if total_query_heads <= 0:
+            raise HuggingFaceRuntimeError("decode attention exposes no query heads")
+        grouped: dict[tuple[int, int], list[tuple[int, int]]] = defaultdict(list)
+        for prototype_id, layer, kv_head, slot in prototype_slots:
+            grouped[(layer, kv_head)].append((prototype_id, slot))
+        identifiers: list[int] = []
+        device_masses: list[Any] = []
+        for (layer, kv_head), entries in sorted(grouped.items()):
+            attention = attention_weights[layer]
+            query_heads = int(attention.shape[1])
+            kv_heads = int(validity_masks[layer].shape[0])
+            if query_heads % kv_heads:
+                raise HuggingFaceRuntimeError(
+                    "prototype attention has incompatible head groups"
+                )
+            group = query_heads // kv_heads
+            start = kv_head * group
+            slots = torch.as_tensor(
+                tuple(slot for _prototype_id, slot in entries),
+                dtype=torch.long,
+                device=attention.device,
+            )
+            # Reduce grouped query heads and query positions on device. Only
+            # the compact prototype vector crosses the host boundary once.
+            values = attention[0, start : start + group].index_select(-1, slots)
+            normalized = values.sum(dim=(0, 1)) / (
+                total_query_heads * int(attention.shape[-2])
+            )
+            identifiers.extend(prototype_id for prototype_id, _slot in entries)
+            device_masses.append(normalized)
+        if not device_masses:
+            return {}
+        host = torch.cat(device_masses).detach().float().cpu().tolist()
+        device_result = dict(
+            zip(identifiers, (float(value) for value in host), strict=True)
+        )
+        total = sum(device_result.values())
+        if total > 1 + 1e-7:
+            raise HuggingFaceRuntimeError("normalized prototype attention mass exceeds one")
+        return device_result
+
     arrays = tuple(_to_numpy(value) for value in attention_weights)
     total_query_heads = sum(int(array.shape[1]) for array in arrays)
     if total_query_heads <= 0:
@@ -3607,7 +4575,70 @@ def _trace_catalog(
     }
 
 
-def _selection_decision_evidence(selection: SelectionResult) -> JsonObject:
+def _source_selection_records(
+    plan: MosaicKVCompressionPlan,
+    *,
+    include_cost_rate: bool,
+) -> Iterable[JsonObject]:
+    """Expand compact planner decisions into the immutable source-node space.
+
+    Expansion is intentionally invoked only by the deferred trace builder, so
+    stable-head bypass bookkeeping cannot inflate online compression latency.
+    Every omitted stable-head source block remains explicitly auditable.
+    """
+
+    decisions_by_source = {
+        plan.source_node_id(decision.node_id): decision
+        for decision in plan.selection.decisions
+    }
+    external_rank = {
+        node_id: len(plan.selection.selection_order) + rank
+        for rank, node_id in enumerate(plan.external_exact_node_ids)
+    }
+    for source_node_id, block in enumerate(plan.full_state.blocks):
+        decision = decisions_by_source.get(source_node_id)
+        if source_node_id in external_rank:
+            external_record: JsonObject = {
+                "node_id": source_node_id,
+                "selected": True,
+                "selection_rank": external_rank[source_node_id],
+                "marginal_gain": 0.0,
+                "cost": plan.selection.budget.cost(block),
+                "reason": "stable_head_prompt_exact",
+            }
+            if include_cost_rate:
+                external_record["marginal_gain_per_cost"] = 0.0
+            yield external_record
+            continue
+        if decision is None:
+            bypass_record: JsonObject = {
+                "node_id": source_node_id,
+                "selected": False,
+                "selection_rank": None,
+                "marginal_gain": 0.0,
+                "cost": plan.selection.budget.cost(block),
+                "reason": "routed_head_bypass_not_selected",
+            }
+            if include_cost_rate:
+                bypass_record["marginal_gain_per_cost"] = 0.0
+            yield bypass_record
+            continue
+        decision_record: JsonObject = {
+            "node_id": source_node_id,
+            "selected": decision.selected,
+            "selection_rank": decision.selection_rank,
+            "marginal_gain": decision.marginal_gain,
+            "cost": decision.cost,
+            "reason": decision.reason.value,
+        }
+        if include_cost_rate:
+            decision_record["marginal_gain_per_cost"] = decision.marginal_gain_per_cost
+        yield decision_record
+
+
+def _selection_decision_evidence(
+    plan: MosaicKVCompressionPlan | SelectionResult,
+) -> JsonObject:
     """Retain lossless per-node selection evidence for explicit parity runs.
 
     Normal evaluation traces keep only compact catalog hashes.  A parity run
@@ -3616,9 +4647,14 @@ def _selection_decision_evidence(selection: SelectionResult) -> JsonObject:
     compressor or weakening identity checks.
     """
 
-    records: list[JsonValue] = []
-    for decision in selection.decisions:
-        records.append(
+    if isinstance(plan, MosaicKVCompressionPlan):
+        records: list[JsonValue] = list(
+            _source_selection_records(plan, include_cost_rate=True)
+        )
+    else:
+        # Preserve the focused helper contract used by unit tests and callers
+        # that already own a source-space SelectionResult.
+        records = [
             cast(
                 "JsonObject",
                 {
@@ -3631,7 +4667,8 @@ def _selection_decision_evidence(selection: SelectionResult) -> JsonObject:
                     "reason": decision.reason.value,
                 },
             )
-        )
+            for decision in plan.decisions
+        ]
     return {
         "schema_version": 1,
         "record_count": len(records),
@@ -3752,22 +4789,32 @@ def _prototype_diagnostics_by_head(plan: MosaicKVCompressionPlan) -> list[JsonOb
     return result
 
 
+def _external_stable_capacity_trace(
+    records: Sequence[HeadLocalCapacityRecord],
+) -> JsonObject:
+    """Serialize stable-head physical-capacity use for success or failure traces."""
+
+    return {
+        "route_count": len(records),
+        "requested_positions": sum(record.position_limit for record in records),
+        "selected_positions": sum(record.selected_positions for record in records),
+        "shortfall_positions": sum(record.shortfall_positions for record in records),
+        "selected_bytes": sum(record.selected_bytes for record in records),
+        "routes_with_shortfall": [
+            cast("JsonObject", asdict(record))
+            for record in records
+            if record.shortfall_positions
+        ],
+    }
+
+
 def _plan_trace(
     plan: MosaicKVCompressionPlan,
     *,
     compact_catalogs: bool = False,
     capture_selection_evidence: bool = False,
 ) -> JsonObject:
-    selection = (
-        {
-            "node_id": decision.node_id,
-            "selected": decision.selected,
-            "selection_rank": decision.selection_rank,
-            "marginal_gain": decision.marginal_gain,
-            "reason": decision.reason.value,
-        }
-        for decision in plan.selection.decisions
-    )
+    selection = _source_selection_records(plan, include_cost_rate=False)
     prototypes = (
         {
             "prototype_id": record.prototype_id,
@@ -3792,8 +4839,8 @@ def _plan_trace(
     )
     edges = (
         {
-            "source": source,
-            "target": target,
+            "source": plan.source_node_id(source),
+            "target": plan.source_node_id(target),
             "weight": weight,
             "type": edge_type.value,
         }
@@ -3818,11 +4865,50 @@ def _plan_trace(
             "tier_reason": plan.construction.reason,
             "prototype_safety": cast("JsonObject", asdict(plan.construction.safety)),
             "source_budget_value": plan.source_budget_value,
+            "shared_active_budget_value": plan.shared_active_budget_value,
             "active_budget_value": plan.active_budget_value,
+            "configured_physical_capacity_fraction": (
+                plan.configured_physical_capacity_fraction
+            ),
+            "effective_budget_fraction": (
+                plan.active_budget_value / plan.shared_active_budget_value
+            ),
             "selected_blocks": _trace_catalog(selection, compact=compact_catalogs),
             "prototypes": _trace_catalog(prototypes, compact=compact_catalogs),
             "graph_edges": _trace_catalog(edges, compact=compact_catalogs),
             "graph_diagnostics": asdict(plan.graph.diagnostics),
+            "candidate_graph_routing": {
+                "provenance": plan.graph_routing_provenance,
+                "routed_head_only_planning": plan.optimization_node_ids is not None,
+                "planner_node_count": len(plan.graph.nodes),
+                "source_node_count": len(plan.full_state.blocks),
+                "compact_node_id_space": plan.uses_compact_node_ids,
+                "external_stable_exact_node_count": len(plan.external_exact_node_ids),
+                "external_stable_capacity": _external_stable_capacity_trace(
+                    plan.external_exact_capacity_records
+                ),
+                "optimization_node_count": (
+                    None
+                    if plan.optimization_node_ids is None
+                    else len(plan.optimization_node_ids)
+                ),
+                "optimization_node_ids": (
+                    None
+                    if compact_catalogs or plan.optimization_node_ids is None
+                    else list(plan.optimization_node_ids)
+                ),
+                "candidate_node_count": (
+                    None
+                    if plan.similarity_candidate_node_ids is None
+                    else len(plan.similarity_candidate_node_ids)
+                ),
+                "candidate_node_ids": (
+                    None
+                    if compact_catalogs or plan.similarity_candidate_node_ids is None
+                    else list(plan.similarity_candidate_node_ids)
+                ),
+                "graph_head_routes": [list(identity) for identity in plan.graph_head_routes],
+            },
             "forecast_statistics": _forecast_trace(
                 plan.forecast,
                 compact_catalogs=compact_catalogs,
@@ -3844,9 +4930,13 @@ def _plan_trace(
                     else stored_residual_blocks / eligible_residual_blocks
                 ),
             },
-            "selection_objective": cast("JsonObject", asdict(plan.selection.objective)),
+            "selection_objective": {
+                **cast("JsonObject", asdict(plan.selection.objective)),
+                "selected_node_ids": list(plan.construction.exact_node_ids),
+                "node_id_space": "full_kv_source",
+            },
             "selection_decision_evidence": (
-                _selection_decision_evidence(plan.selection)
+                _selection_decision_evidence(plan)
                 if capture_selection_evidence
                 else {"status": "not_captured"}
             ),
@@ -4248,6 +5338,7 @@ class HuggingFaceMosaicKVModel:
         }
         started = time.perf_counter()
         trace_instrumentation_seconds = 0.0
+        deferred_trace_builder: Callable[[], JsonObject] | None = None
         try:
             if self._prefixkv_profile is not None:
                 self._prefixkv_profile.assert_evaluation_disjoint((request.sample_id,))
@@ -4308,6 +5399,10 @@ class HuggingFaceMosaicKVModel:
                             if needs_prompt_attention
                             else None
                         )
+                    ),
+                    reduce_attention_to_kv_heads=(
+                        method.is_mosaickv
+                        or method is MosaicKVMethod.PROMPT_ATTENTION_TOPK
                     ),
                 )
 
@@ -4376,16 +5471,31 @@ class HuggingFaceMosaicKVModel:
             logical_prefill_active_kv_bytes = source_prefill_kv_bytes
             packed_prefill_active_kv_bytes = source_prefill_kv_bytes
             packed_prompt_capacity = prefill.state.active_cache_length
+            cache_state_construction_seconds = 0.0
             forecast_seconds = 0.0
+            planner_preparation_seconds = 0.0
+            forecast_attention_projection_seconds = 0.0
+            prompt_routing_evidence_seconds = 0.0
+            head_route_configuration_seconds = 0.0
             graph_seconds = 0.0
             selection_seconds = 0.0
             tier_seconds = 0.0
             packing_seconds = 0.0
             repair_state: RepairCacheState | None = None
+            gpu_rescue_staging_seconds = 0.0
+            gpu_rescue_transfer_ms = 0.0
+            gpu_rescue_transfer_async = False
+            gpu_rescue_initial_bytes = 0
             oracle_queries: EvaluationOnlyOracleQueries | None = None
+            rollout: IsolatedQueryRollout | None = None
             predicted_token_attention: dict[tuple[int, int], np.ndarray[Any, Any]] | None = None
+            prompt_token_attention: dict[tuple[int, int], np.ndarray[Any, Any]] | None = None
+            prompt_block_attention: dict[int, float] | None = None
+            graph_head_uncertainty: dict[tuple[int, int], float] | None = None
             online_head_shifts: dict[tuple[int, int], float] = {}
+            counterfactual_head_shifts: dict[tuple[int, int], float] = {}
             online_exact_head_routes: tuple[str, ...] = ()
+            online_prototype_head_routes: tuple[str, ...] = ()
             draft_repair_distributions: tuple[Any, ...] = ()
             draft_repair_token_ids: tuple[int, ...] = ()
             dense_budget: DensePhysicalCacheBudget | None = None
@@ -4398,6 +5508,7 @@ class HuggingFaceMosaicKVModel:
             vl_cache_plan: VLCacheCompressionPlan | None = None
             state = prefill.state
             if not is_full_cache and not retention_one_identity:
+                cache_state_started = time.perf_counter()
                 snapshot = self.adapter.extract_past_key_values(prefill.state.past_key_values)
                 input_ids = prepared.model_inputs["input_ids"]
                 recent_count = (
@@ -4439,6 +5550,9 @@ class HuggingFaceMosaicKVModel:
                     next_decode_position=prefill.state.next_decode_position,
                     mandatory_logical_positions=mandatory_positions,
                 )
+                cache_state_construction_seconds = (
+                    time.perf_counter() - cache_state_started
+                )
                 dense_budget = _dense_physical_cache_budget(full_state, self.config)
                 physical_prompt_capacity = (
                     None if dense_budget is None else dense_budget.prompt_capacity
@@ -4455,17 +5569,22 @@ class HuggingFaceMosaicKVModel:
                     )
                 )
                 if method.is_mosaickv:
+                    planner_wall_started = time.perf_counter()
                     key_transform_seconds = 0.0
                     if method in {
                         MosaicKVMethod.MOSAICKV_PROTO,
                         MosaicKVMethod.MOSAICKV_FULL,
-                    }:
+                    } and (
+                        self.config.prototypes.pooling_mode
+                        != "exact_medoid_key_forecast_value"
+                    ):
                         key_transform, key_transform_seconds = _timed(
                             prefill.logits,
                             lambda: self.adapter.build_prototype_key_transform(prepared),
                         )
                     attention_provenance = "eager_prompt_and_isolated_draft_attention_v1"
                     if no_forecast_ablation:
+                        projection_started = time.perf_counter()
                         forecast = None
                         predicted_token_attention = _uniform_token_attention_by_head(full_state)
                         attention = _block_attention_from_token_attention(
@@ -4473,6 +5592,9 @@ class HuggingFaceMosaicKVModel:
                             predicted_token_attention,
                         )
                         attention_provenance = "declared_no_forecast_uniform_position_control_v1"
+                        forecast_attention_projection_seconds += (
+                            time.perf_counter() - projection_started
+                        )
                     elif self.config.ablation.variant is AblationVariant.ORACLE_FUTURE_QUERY:
                         if not self.config.ablation.evaluation_only:
                             raise HuggingFaceRuntimeError(
@@ -4505,6 +5627,7 @@ class HuggingFaceMosaicKVModel:
                             prefill.logits,
                             build_oracle_forecast,
                         )
+                        projection_started = time.perf_counter()
                         predicted_token_attention = _oracle_token_attention_by_head(
                             full_state,
                             oracle_queries,
@@ -4514,6 +5637,9 @@ class HuggingFaceMosaicKVModel:
                             predicted_token_attention,
                         )
                         attention_provenance = "evaluation_only_fullkv_true_future_attention_v1"
+                        forecast_attention_projection_seconds += (
+                            time.perf_counter() - projection_started
+                        )
                     else:
                         forecast, rollout = forecast_with_rollout(
                             self.adapter,
@@ -4528,6 +5654,7 @@ class HuggingFaceMosaicKVModel:
                         forecast_seconds = forecast.timing.total
                         draft_repair_distributions = rollout.draft_distributions
                         draft_repair_token_ids = rollout.token_ids
+                        projection_started = time.perf_counter()
                         (
                             predicted_token_attention,
                             online_head_shifts,
@@ -4541,6 +5668,40 @@ class HuggingFaceMosaicKVModel:
                             full_state,
                             predicted_token_attention,
                         )
+                        forecast_attention_projection_seconds += (
+                            time.perf_counter() - projection_started
+                        )
+                    # Repair counterfactuals are deliberately independent of
+                    # the query distribution used for cache selection.  Run
+                    # this after every forecast branch so a prompt-window
+                    # selector can use an isolated FullKV draft solely as an
+                    # online repair reference.
+                    if self.config.repair.counterfactual_draft_steps:
+                        repair_rollout = run_isolated_greedy_query_rollout(
+                            self.adapter,
+                            prefill,
+                            steps=self.config.repair.counterfactual_draft_steps,
+                            capture_attentions=(
+                                self.config.repair.counterfactual_route_heads
+                            ),
+                            capture_distributions=True,
+                        )
+                        draft_repair_distributions = repair_rollout.draft_distributions
+                        draft_repair_token_ids = repair_rollout.token_ids
+                        forecast_seconds += (
+                            repair_rollout.cache_clone_seconds
+                            + repair_rollout.draft_decode_seconds
+                        )
+                        if self.config.repair.counterfactual_route_heads:
+                            _, counterfactual_head_shifts = (
+                                _forecast_token_attention_and_shift_by_head(
+                                    full_state,
+                                    prefill,
+                                    repair_rollout,
+                                    self.config,
+                                )
+                            )
+                    route_config_started = time.perf_counter()
                     online_exact_head_routes = _uncertainty_exact_head_routes(
                         online_head_shifts,
                         self.config.forecasting.uncertainty_exact_head_fraction,
@@ -4561,6 +5722,110 @@ class HuggingFaceMosaicKVModel:
                                 exact_head_routes=combined_routes,
                             ),
                         )
+                    head_route_configuration_seconds += (
+                        time.perf_counter() - route_config_started
+                    )
+                    needs_prompt_ranking = bool(
+                        self.config.selection.prompt_anchor_fraction > 0
+                        or self.config.graph.similarity_shortlist_multiplier > 0
+                        or self.config.prototypes.uncertain_head_only
+                    )
+                    if needs_prompt_ranking:
+                        prompt_evidence_started = time.perf_counter()
+                        prompt_token_attention = (
+                            predicted_token_attention
+                            if (
+                                predicted_token_attention is not None
+                                and rollout is not None
+                                and not rollout.attention_steps
+                                and self.config.forecasting.prompt_window > 0
+                            )
+                            else _prompt_token_attention_by_head(
+                                full_state,
+                                prefill,
+                                prompt_window=self.config.forecasting.prompt_window,
+                            )
+                        )
+                        prompt_block_attention = _block_attention_from_token_attention(
+                            full_state,
+                            prompt_token_attention,
+                        )
+                        graph_head_uncertainty = _attention_uncertainty_by_head(
+                            prompt_token_attention
+                        )
+                        if counterfactual_head_shifts:
+                            graph_head_uncertainty = counterfactual_head_shifts
+                        prompt_routing_evidence_seconds += (
+                            time.perf_counter() - prompt_evidence_started
+                        )
+                    if (
+                        self.config.prototypes.uncertain_head_only
+                        and method
+                        in {MosaicKVMethod.MOSAICKV_PROTO, MosaicKVMethod.MOSAICKV_FULL}
+                    ):
+                        route_config_started = time.perf_counter()
+                        all_head_routes = {
+                            (block.layer, block.kv_head) for block in full_state.blocks
+                        }
+                        routed = _uncertain_head_routes(
+                            all_head_routes,
+                            graph_head_uncertainty,
+                            fraction=self.config.prototypes.uncertain_head_fraction,
+                            threshold=self.config.prototypes.uncertain_head_threshold,
+                            label="prototype",
+                        )
+                        if (
+                            self.config.selection.stable_head_prompt_routing
+                            and not self.config.selection.routed_head_only_planning
+                        ):
+                            if prompt_block_attention is None:
+                                raise HuggingFaceRuntimeError(
+                                    "stable-head prompt routing requires prompt block attention"
+                                )
+                            routed_set = set(routed)
+                            routed_attention = dict(attention)
+                            for node_id, block in enumerate(full_state.blocks):
+                                identity = (block.layer, block.kv_head)
+                                if identity not in routed_set:
+                                    routed_attention[node_id] = prompt_block_attention[node_id]
+                            attention = routed_attention
+                        exact_routes = {
+                            tuple(int(value) for value in route.split(":"))
+                            for route in online_planning_config.prototypes.exact_head_routes
+                        }
+                        online_prototype_head_routes = tuple(
+                            f"{layer}:{head}"
+                            for layer, head in routed
+                            if (layer, head) not in exact_routes
+                        )
+                        selection_only = {
+                            route
+                            for route in (
+                                online_planning_config.prototypes.selection_only_head_routes
+                            )
+                        }
+                        selection_only.update(
+                            f"{layer}:{head}"
+                            for layer, head in all_head_routes
+                            if (layer, head) not in routed and (layer, head) not in exact_routes
+                        )
+                        online_planning_config = replace(
+                            online_planning_config,
+                            prototypes=replace(
+                                online_planning_config.prototypes,
+                                selection_only_head_routes=tuple(
+                                    sorted(
+                                        selection_only,
+                                        key=lambda route: tuple(
+                                            int(value) for value in route.split(":")
+                                        ),
+                                    )
+                                ),
+                            ),
+                        )
+                        head_route_configuration_seconds += (
+                            time.perf_counter() - route_config_started
+                        )
                     plan = build_compression_plan(
                         full_state,
                         forecast,
@@ -4573,16 +5838,19 @@ class HuggingFaceMosaicKVModel:
                         attention_provenance=attention_provenance,
                         key_transform=key_transform,
                         prompt_attentions=prefill.attention_weights,
-                        prompt_attention_by_node=(
-                            _prompt_attention_by_node(
-                                full_state,
-                                prefill,
-                                prompt_window=self.config.forecasting.prompt_window,
-                            )
-                            if self.config.selection.prompt_anchor_fraction > 0
-                            else None
-                        ),
+                        prompt_attention_by_node=prompt_block_attention,
                         prototype_token_weight_by_head=predicted_token_attention,
+                        graph_head_uncertainty=graph_head_uncertainty,
+                    )
+                    planner_wall_seconds = time.perf_counter() - planner_wall_started
+                    planner_preparation_seconds = max(
+                        0.0,
+                        planner_wall_seconds
+                        - forecast_seconds
+                        - key_transform_seconds
+                        - plan.graph_seconds
+                        - plan.selection_seconds
+                        - plan.tier_seconds,
                     )
                     if (
                         dense_budget is not None
@@ -4592,18 +5860,21 @@ class HuggingFaceMosaicKVModel:
                             layout.active_cache_length
                             for layout in plan.construction.active_layouts
                         }
-                        if len(active_lengths) != 1:
+                        if not active_lengths:
                             raise HuggingFaceRuntimeError(
-                                "three-tier cache cannot be packed without padding because "
-                                f"layer/head lengths differ: {sorted(active_lengths)}"
+                                "three-tier construction has no active layer/head layouts"
                             )
-                        measured_capacity = next(iter(active_lengths))
+                        measured_capacity = max(active_lengths)
                         if measured_capacity > dense_budget.prompt_capacity:
                             raise HuggingFaceRuntimeError(
                                 "three-tier measured physical capacity exceeds its hard cap: "
                                 f"active={measured_capacity}, "
                                 f"cap={dense_budget.prompt_capacity}"
                             )
+                        # The common HF tensors use the largest logical head
+                        # length as their physical sequence extent. Shorter
+                        # routed heads are zero padded by the common packer and
+                        # excluded with per-layer/head eager-attention masks.
                         physical_prompt_capacity = measured_capacity
                     graph_seconds = plan.graph_seconds
                     selection_seconds = plan.selection_seconds
@@ -4799,37 +6070,52 @@ class HuggingFaceMosaicKVModel:
                         full_state,
                         plan.construction,
                     )
-                trace_started = time.perf_counter()
-                if plan is not None:
-                    trace.update(
-                        _plan_trace(
+                    if self.config.residual.gpu_rescue_max_blocks > 0:
+                        rescue_started = time.perf_counter()
+                        (
+                            repair_state,
+                            gpu_rescue_transfer_ms,
+                            gpu_rescue_transfer_async,
+                        ) = stage_gpu_rescue_payloads(
+                            repair_state,
+                            max_blocks=self.config.residual.gpu_rescue_max_blocks,
+                            max_bytes=self.config.residual.gpu_rescue_max_bytes,
+                        )
+                        gpu_rescue_staging_seconds = time.perf_counter() - rescue_started
+                        gpu_rescue_initial_bytes = repair_state.gpu_rescue_bytes
+                        tier_seconds += gpu_rescue_staging_seconds
+                def build_deferred_cache_trace() -> JsonObject:
+                    payload: JsonObject
+                    if plan is not None:
+                        payload = _plan_trace(
                             plan,
                             compact_catalogs=not full_debug_trace,
                             capture_selection_evidence=(
                                 self.config.diagnostics.capture_selection_evidence
                             ),
                         )
-                    )
-                elif baseline_plan is not None:
-                    trace.update(
-                        _baseline_plan_trace(
+                    elif baseline_plan is not None:
+                        payload = _baseline_plan_trace(
                             baseline_plan,
                             compact_catalogs=not full_debug_trace,
                         )
+                    elif lookm_plan is not None:
+                        payload = _lookm_plan_trace(lookm_plan)
+                    elif prefixkv_plan is not None:
+                        payload = _prefixkv_plan_trace(prefixkv_plan)
+                    elif vl_cache_plan is not None:
+                        payload = _vl_cache_plan_trace(vl_cache_plan)
+                    else:  # pragma: no cover - compressed branch always has a plan
+                        raise HuggingFaceRuntimeError("compressed trace is missing its plan")
+                    payload["packed_slots"] = _trace_catalog(
+                        packed.slot_records,
+                        compact=not full_debug_trace,
                     )
-                elif lookm_plan is not None:
-                    trace.update(_lookm_plan_trace(lookm_plan))
-                elif prefixkv_plan is not None:
-                    trace.update(_prefixkv_plan_trace(prefixkv_plan))
-                elif vl_cache_plan is not None:
-                    trace.update(_vl_cache_plan_trace(vl_cache_plan))
-                trace["packed_slots"] = _trace_catalog(
-                    packed.slot_records,
-                    compact=not full_debug_trace,
-                )
-                trace["packed_cache_all_slots_valid"] = packed.all_slots_valid
+                    payload["packed_cache_all_slots_valid"] = packed.all_slots_valid
+                    return payload
+
+                deferred_trace_builder = build_deferred_cache_trace
             elif retention_one_identity:
-                trace_started = time.perf_counter()
                 trace.update(
                     {
                         "requested_method": method.value,
@@ -4852,7 +6138,6 @@ class HuggingFaceMosaicKVModel:
                     }
                 )
             else:
-                trace_started = time.perf_counter()
                 trace.update(
                     {
                         "requested_method": method.value,
@@ -4871,14 +6156,18 @@ class HuggingFaceMosaicKVModel:
                     }
                 )
 
-            if not full_debug_trace:
-                _compact_trace_records(trace)
-                trace["trace_detail"] = (
-                    "compact_diagnostic" if fixed_diagnostic_sample else "compact_non_diagnostic"
-                )
-            else:
-                trace["trace_detail"] = "full_debug"
-            trace_instrumentation_seconds += time.perf_counter() - trace_started
+            if deferred_trace_builder is None:
+                trace_started = time.perf_counter()
+                if not full_debug_trace:
+                    _compact_trace_records(trace)
+                    trace["trace_detail"] = (
+                        "compact_diagnostic"
+                        if fixed_diagnostic_sample
+                        else "compact_non_diagnostic"
+                    )
+                else:
+                    trace["trace_detail"] = "full_debug"
+                trace_instrumentation_seconds += time.perf_counter() - trace_started
 
             fidelity: FidelityDiagnostic | None = None
             fidelity_seconds = 0.0
@@ -4909,14 +6198,14 @@ class HuggingFaceMosaicKVModel:
                             plan.full_state,
                             oracle,
                             predicted_token_attention,
-                            plan.selection,
+                            plan.construction.exact_node_ids,
                         )
                     return _forecast_quality_from_oracle(
                         plan.full_state,
                         plan.forecast,
                         oracle,
                         predicted_token_attention,
-                        plan.selection,
+                        plan.construction.exact_node_ids,
                     )
 
                 forecast_diagnostic, forecast_diagnostic_seconds = _timed(
@@ -4984,7 +6273,7 @@ class HuggingFaceMosaicKVModel:
                 trace["fidelity_diagnostic"] = {"status": "disabled"}
 
             preallocated_decode_cache = False
-            if repair_state is None and prefixkv_plan is None:
+            if prefixkv_plan is None:
                 preallocated_decode_cache = self.adapter.preallocate_decode_cache(
                     state,
                     self.config.generation.max_new_tokens - 1,
@@ -5003,9 +6292,12 @@ class HuggingFaceMosaicKVModel:
                     raise HuggingFaceRuntimeError(
                         "residual repair requires eager decode attention capture"
                     )
-                if state.model_state.get("mosaickv_validity_masks") is not None:
+                if (
+                    state.model_state.get("mosaickv_validity_masks") is not None
+                    and decode_attention != "sdpa"
+                ):
                     raise HuggingFaceRuntimeError(
-                        "hybrid decode attention is not yet admitted for padded per-head caches"
+                        "padded per-head cache masks are admitted only for eager or SDPA decode"
                     )
                 self.adapter.set_attention_implementation(decode_attention)
             decode_runtime_policy["prefill_attention_implementation"] = (
@@ -5034,7 +6326,17 @@ class HuggingFaceMosaicKVModel:
                 # path can advance the live state directly.  Cloning the full
                 # cache unconditionally here made ordinary token decoding
                 # O(sequence_length) in host-side copy work per step.
-                before = state if repair_state is None else _clone_decode_state(self.adapter, state)
+                transactional_repair = bool(
+                    repair_state is not None and preallocated_decode_cache
+                )
+                previous_active_cache_length = state.active_cache_length
+                previous_logical_sequence_length = state.logical_sequence_length
+                previous_next_decode_position = state.next_decode_position
+                before = (
+                    state
+                    if repair_state is None or transactional_repair
+                    else _clone_decode_state(self.adapter, state)
+                )
                 decode_token = token
                 needs_attention = repair_state is not None
                 oracle_reference = None
@@ -5157,7 +6459,21 @@ class HuggingFaceMosaicKVModel:
                     base_state: DecodeState = repair_base_state,
                     decode_token: Any = repair_token,
                     sink: list[Any] = repair_sink,
+                    use_transaction: bool = transactional_repair,
+                    old_active_length: int = previous_active_cache_length,
+                    old_logical_length: int = previous_logical_sequence_length,
+                    old_next_position: int = previous_next_decode_position,
+                    current_step_index: int = step_index,
                 ) -> Any:
+                    if use_transaction and not self.adapter.rollback_preallocated_decode_step(
+                        base_state,
+                        active_cache_length=old_active_length,
+                        logical_sequence_length=old_logical_length,
+                        next_decode_position=old_next_position,
+                    ):
+                        raise HuggingFaceRuntimeError(
+                            "transactional repair could not rollback its provisional cache append"
+                        )
                     old_snapshot = self.adapter.extract_past_key_values(base_state.past_key_values)
                     old_capacity = int(base_state.model_state["mosaickv_prompt_capacity"])
                     repacked = pack_runtime_cache(
@@ -5171,6 +6487,10 @@ class HuggingFaceMosaicKVModel:
                         packing_mode=self.config.cache.packing_mode,
                     )
                     repacked_state = _state_from_packed(self.adapter, base_state, repacked)
+                    self.adapter.preallocate_decode_cache(
+                        repacked_state,
+                        max(1, self.config.generation.max_new_tokens - current_step_index),
+                    )
                     output = self.adapter.decode_one_token(
                         decode_token,
                         repacked_state,
@@ -5262,6 +6582,19 @@ class HuggingFaceMosaicKVModel:
                 - oracle_repair_diagnostic_seconds
                 - trace_instrumentation_seconds,
             )
+            if deferred_trace_builder is not None:
+                trace_started = time.perf_counter()
+                trace.update(deferred_trace_builder())
+                if not full_debug_trace:
+                    _compact_trace_records(trace)
+                    trace["trace_detail"] = (
+                        "compact_diagnostic"
+                        if fixed_diagnostic_sample
+                        else "compact_non_diagnostic"
+                    )
+                else:
+                    trace["trace_detail"] = "full_debug"
+                trace_instrumentation_seconds += time.perf_counter() - trace_started
             repair_transfer = sum(event.transfer_time_ms for event in repair_events) / 1000.0
             repair_redecode = sum(event.re_decode_time_ms for event in repair_events) / 1000.0
             first_decode_step = per_token_decode_seconds[0] if per_token_decode_seconds else None
@@ -5277,7 +6610,9 @@ class HuggingFaceMosaicKVModel:
             # ``decode_seconds`` and therefore belong in the accounted sum.
             accounted_seconds = (
                 prefill_seconds
+                + cache_state_construction_seconds
                 + forecast_seconds
+                + planner_preparation_seconds
                 + graph_seconds
                 + selection_seconds
                 + tier_seconds
@@ -5292,7 +6627,9 @@ class HuggingFaceMosaicKVModel:
                 image_video_encoder=image_video_encoder_seconds,
                 projector=projector_seconds,
                 language_model_prefill=language_model_prefill_seconds,
+                cache_state_construction=cache_state_construction_seconds,
                 forecast=forecast_seconds,
+                planner_preparation=planner_preparation_seconds,
                 graph=graph_seconds,
                 utility_and_selection=selection_seconds,
                 tier_construction=tier_seconds,
@@ -5397,6 +6734,48 @@ class HuggingFaceMosaicKVModel:
                     },
                     "prefixkv_decode_events": cast("list[JsonValue]", prefixkv_decode_events),
                     "timing_breakdown": timing_payload,
+                    "planner_subphases": cast(
+                        "JsonObject",
+                        {
+                            "utility": 0.0 if plan is None else plan.utility_seconds,
+                            "hard_reservations": (
+                                0.0 if plan is None else plan.reservation_seconds
+                            ),
+                            "budgeted_selector": (
+                                0.0 if plan is None else plan.selector_seconds
+                            ),
+                            "stable_head_routing": (
+                                0.0 if plan is None else plan.stable_routing_seconds
+                            ),
+                            "similarity_shortlist": (
+                                0.0 if plan is None else plan.similarity_shortlist_seconds
+                            ),
+                            "planner_source_mapping": (
+                                0.0 if plan is None else plan.planner_mapping_seconds
+                            ),
+                            "forecast_attention_projection": (
+                                forecast_attention_projection_seconds
+                            ),
+                            "prompt_routing_evidence": prompt_routing_evidence_seconds,
+                            "head_route_configuration": (
+                                head_route_configuration_seconds
+                            ),
+                            "unattributed_preparation": max(
+                                0.0,
+                                planner_preparation_seconds
+                                - forecast_attention_projection_seconds
+                                - prompt_routing_evidence_seconds
+                                - head_route_configuration_seconds
+                                - (0.0 if plan is None else plan.stable_routing_seconds)
+                                - (
+                                    0.0
+                                    if plan is None
+                                    else plan.similarity_shortlist_seconds
+                                )
+                                - (0.0 if plan is None else plan.planner_mapping_seconds),
+                            ),
+                        },
+                    ),
                     "source_prefill_kv_bytes": source_prefill_kv_bytes,
                     "logical_prefill_active_kv_bytes": logical_prefill_active_kv_bytes,
                     "packed_prefill_active_kv_bytes": packed_prefill_active_kv_bytes,
@@ -5438,14 +6817,50 @@ class HuggingFaceMosaicKVModel:
                             ),
                             "selected_exact_head_routes": cast(
                                 "list[JsonValue]",
-                                [list(route) for route in online_exact_head_routes],
+                                [
+                                    [int(value) for value in route.split(":")]
+                                    for route in online_exact_head_routes
+                                ],
                             ),
                             "head_shift_count": len(online_head_shifts),
+                            "prototype_head_routes": cast(
+                                "list[JsonValue]",
+                                [
+                                    [int(value) for value in route.split(":")]
+                                    for route in online_prototype_head_routes
+                                ],
+                            ),
+                            "stable_head_prompt_routing": (
+                                self.config.selection.stable_head_prompt_routing
+                            ),
+                            "stable_head_uniform_fill": (
+                                self.config.selection.stable_head_uniform_fill
+                            ),
+                            "routed_head_only_planning": (
+                                self.config.selection.routed_head_only_planning
+                            ),
+                            "counterfactual_draft_head_routing": bool(
+                                counterfactual_head_shifts
+                            ),
                         },
                     ),
                     "active_kv_bytes": packed_prefill_active_kv_bytes,
                     "final_active_kv_bytes": active_bytes,
                     "residual_kv_bytes": residual_bytes,
+                    "gpu_rescue_kv_bytes": (
+                        0 if repair_state is None else repair_state.gpu_rescue_bytes
+                    ),
+                    "gpu_rescue_initial_kv_bytes": gpu_rescue_initial_bytes,
+                    "initial_total_gpu_kv_bytes": (
+                        packed_prefill_active_kv_bytes + gpu_rescue_initial_bytes
+                    ),
+                    "gpu_rescue_staging": {
+                        "configured_max_blocks": self.config.residual.gpu_rescue_max_blocks,
+                        "configured_max_bytes": self.config.residual.gpu_rescue_max_bytes,
+                        "staging_seconds": gpu_rescue_staging_seconds,
+                        "transfer_time_ms": gpu_rescue_transfer_ms,
+                        "transfer_was_asynchronous": gpu_rescue_transfer_async,
+                    },
                     "peak_gpu_memory_allocated": (
                         int(torch.cuda.max_memory_allocated(self.adapter.device))
                         if is_cuda
@@ -5461,7 +6876,9 @@ class HuggingFaceMosaicKVModel:
             )
             _write_trace(trace_path, trace)
             compression_seconds = (
-                forecast_seconds
+                cache_state_construction_seconds
+                + forecast_seconds
+                + planner_preparation_seconds
                 + graph_seconds
                 + selection_seconds
                 + tier_seconds
@@ -5497,6 +6914,17 @@ class HuggingFaceMosaicKVModel:
                 effective_method=effective_method,
             )
         except Exception as error:
+            failure_capacity_records = cast(
+                "tuple[HeadLocalCapacityRecord, ...]",
+                getattr(error, "mosaickv_external_exact_capacity_records", ()),
+            )
+            if failure_capacity_records:
+                trace["candidate_graph_routing"] = {
+                    "status": "partial_failure_before_plan_completion",
+                    "external_stable_capacity": _external_stable_capacity_trace(
+                        failure_capacity_records
+                    ),
+                }
             trace.update(
                 {
                     "status": "failed",

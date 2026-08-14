@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import Self
 
 from mosaickv.cache_state import ExactTier, FullKVState, KVBlockDescriptor
 from mosaickv.config import UtilityConfig
@@ -86,6 +87,39 @@ class BlockUtility:
         ):
             raise ValueError("value novelty and redundancy penalty must be complements")
 
+    @classmethod
+    def _from_validated(
+        cls,
+        *,
+        node_id: int,
+        forecast_attention_probability: float,
+        value_novelty: float,
+        expected_attention_output_contribution: float,
+        graph_centrality: float,
+        singleton_coverage_gain: float,
+        modality_rarity: float,
+        redundancy_penalty: float,
+        mandatory_priority: float,
+        local_utility: float,
+    ) -> Self:
+        """Build one row from vectorized, node-aligned utility arrays."""
+
+        instance = object.__new__(cls)
+        for name, value in (
+            ("node_id", node_id),
+            ("forecast_attention_probability", forecast_attention_probability),
+            ("value_novelty", value_novelty),
+            ("expected_attention_output_contribution", expected_attention_output_contribution),
+            ("graph_centrality", graph_centrality),
+            ("singleton_coverage_gain", singleton_coverage_gain),
+            ("modality_rarity", modality_rarity),
+            ("redundancy_penalty", redundancy_penalty),
+            ("mandatory_priority", mandatory_priority),
+            ("local_utility", local_utility),
+        ):
+            object.__setattr__(instance, name, value)
+        return instance
+
     @property
     def value_contribution(self) -> float:
         """Formula alias for expected attention-output contribution."""
@@ -122,6 +156,22 @@ class BlockUtilityTable:
             )
             if not math.isclose(block.local_utility, expected, rel_tol=1e-12, abs_tol=1e-12):
                 raise ValueError("local utility does not match the configured equation")
+
+    @classmethod
+    def _from_validated(
+        cls,
+        *,
+        blocks: tuple[BlockUtility, ...],
+        weights: UtilityConfig,
+        attention_provenance: str,
+    ) -> Self:
+        """Build a table from the utility routine's validated aligned arrays."""
+
+        instance = object.__new__(cls)
+        object.__setattr__(instance, "blocks", blocks)
+        object.__setattr__(instance, "weights", weights)
+        object.__setattr__(instance, "attention_provenance", attention_provenance)
+        return instance
 
     def for_node(self, node_id: int) -> BlockUtility:
         try:
@@ -189,6 +239,7 @@ class SelectionReason(StrEnum):
     PROTOTYPE_ANCHOR = "prototype_anchor"
     STRATUM_RESERVE = "stratum_reserve"
     LAZY_GREEDY = "lazy_greedy"
+    VECTORIZED_COVERAGE = "vectorized_coverage"
     DENSE_CACHE_FILL = "dense_cache_fill"
     BUDGET_EXHAUSTED = "budget_exhausted"
     NONPOSITIVE_MARGINAL_GAIN = "nonpositive_marginal_gain"
@@ -223,12 +274,37 @@ class SelectionDecision:
             SelectionReason.PROTOTYPE_ANCHOR,
             SelectionReason.STRATUM_RESERVE,
             SelectionReason.LAZY_GREEDY,
+            SelectionReason.VECTORIZED_COVERAGE,
             SelectionReason.DENSE_CACHE_FILL,
         }:
             if not self.selected:
                 raise ValueError("selected reason cannot be assigned to an unselected block")
         elif self.selected:
             raise ValueError("unselected reason cannot be assigned to a selected block")
+
+    @classmethod
+    def _from_validated(
+        cls,
+        *,
+        node_id: int,
+        selected: bool,
+        selection_rank: int | None,
+        marginal_gain: float,
+        marginal_gain_per_cost: float,
+        cost: int,
+        reason: SelectionReason,
+    ) -> Self:
+        """Build one decision from the selector's validated state transition."""
+
+        instance = object.__new__(cls)
+        object.__setattr__(instance, "node_id", node_id)
+        object.__setattr__(instance, "selected", selected)
+        object.__setattr__(instance, "selection_rank", selection_rank)
+        object.__setattr__(instance, "marginal_gain", marginal_gain)
+        object.__setattr__(instance, "marginal_gain_per_cost", marginal_gain_per_cost)
+        object.__setattr__(instance, "cost", cost)
+        object.__setattr__(instance, "reason", reason)
+        return instance
 
 
 @dataclass(frozen=True, slots=True)

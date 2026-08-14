@@ -22,6 +22,7 @@ from mosaickv.prototypes.refresh import refresh_prototype_after_promotions
 from mosaickv.prototypes.rope import RotaryPrototypeKeyTransform
 from mosaickv.prototypes.types import PrototypeRecord
 from mosaickv.repair.types import (
+    GPURescuePayload,
     RepairCacheState,
     RepairEvent,
     RepairStepResult,
@@ -43,6 +44,103 @@ class _RepairPlan:
     active_prototype_ids: tuple[int, ...]
     superseded_prototype_ids: tuple[int, ...]
     budget_evicted_prototype_ids: tuple[int, ...]
+
+
+def stage_gpu_rescue_payloads(
+    state: RepairCacheState,
+    *,
+    max_blocks: int,
+    max_bytes: int | None = None,
+) -> tuple[RepairCacheState, float, bool]:
+    """Stage the highest-risk residual blocks on GPU before decoding.
+
+    The staged tensors are not part of the active attention cache, so they do
+    not change the selection budget or logical positions.  They are counted
+    separately as GPU rescue storage and become exact blocks only after a
+    repair trigger.
+    """
+
+    if max_blocks < 0:
+        raise ValueError("GPU rescue max_blocks must be nonnegative")
+    if max_bytes is not None and max_bytes <= 0:
+        raise ValueError("GPU rescue max_bytes must be positive when provided")
+    if max_blocks == 0 or not state.residual_storage.payloads:
+        return state, 0.0, False
+
+    payload_by_node = {
+        payload.source_node_id: payload for payload in state.residual_storage.payloads
+    }
+    parent_by_node: dict[int, int] = {}
+    priority_by_node: dict[int, float] = {}
+    for record in state.active_prototype_records:
+        for member in record.members:
+            if member.node_id not in payload_by_node:
+                continue
+            parent_by_node[member.node_id] = record.prototype_id
+            priority_by_node[member.node_id] = (
+                member.normalized_weight
+                * max(member.reconstruction_error, 1e-12)
+                * max(member.value_output_norm, 1e-12)
+            )
+    ranked = sorted(
+        parent_by_node,
+        key=lambda node_id: (-priority_by_node[node_id], node_id),
+    )
+    selected_nodes: list[int] = []
+    selected_bytes = 0
+    for node_id in ranked:
+        block_bytes = state.full_state.blocks[node_id].byte_size
+        if max_bytes is not None and selected_bytes + block_bytes > max_bytes:
+            continue
+        selected_nodes.append(node_id)
+        selected_bytes += block_bytes
+        if len(selected_nodes) >= max_blocks:
+            break
+    if not selected_nodes:
+        return state, 0.0, False
+
+    prototype_payloads = {
+        prototype_id: (
+            state.mosaic_state.prototypes.prototype_keys[offset],
+            state.mosaic_state.prototypes.prototype_values[offset],
+        )
+        for offset, prototype_id in enumerate(state.active_prototype_ids)
+    }
+    ordered = sorted(
+        (
+            payload_by_node[node_id].payload_index,
+            node_id,
+            parent_by_node[node_id],
+        )
+        for node_id in selected_nodes
+    )
+    transfer = restore_residual_payloads_async(
+        state.residual_storage,
+        tuple(payload_index for payload_index, _node_id, _parent_id in ordered),
+        tuple(prototype_payloads[parent_id] for _index, _node_id, parent_id in ordered),
+    )
+    rescue = tuple(
+        sorted(
+            (
+                GPURescuePayload(
+                    source_node_id=node_id,
+                    key_block=key,
+                    value_block=value,
+                    byte_size=tensor_storage_bytes(key) + tensor_storage_bytes(value),
+                )
+                for (_payload_index, node_id, _parent_id), key, value in zip(
+                    ordered,
+                    transfer.key_blocks,
+                    transfer.value_blocks,
+                    strict=True,
+                )
+            ),
+            key=lambda payload: payload.source_node_id,
+        )
+    )
+    return replace(state, gpu_rescue_payloads=rescue), transfer.transfer_time_ms, (
+        transfer.asynchronous
+    )
 
 
 def _to_numpy(value: Any) -> np.ndarray[Any, Any]:
@@ -116,6 +214,22 @@ def draft_kl_divergence(logits: Any, draft_distribution: Any | None) -> float | 
     )
 
 
+def draft_top_token_agreement(
+    logits: Any, draft_distribution: Any | None
+) -> bool | None:
+    """Return whether provisional and counterfactual draft argmax tokens agree."""
+
+    if draft_distribution is None:
+        return None
+    provisional = _softmax(logits)
+    draft = _to_numpy(draft_distribution).reshape(-1)
+    if draft.shape != provisional.shape:
+        raise ValueError("draft distribution vocabulary does not match provisional logits")
+    if bool(np.any(draft < 0)) or float(np.sum(draft)) <= 0:
+        raise ValueError("draft distribution must be nonnegative with positive total mass")
+    return int(np.argmax(provisional)) == int(np.argmax(draft))
+
+
 def calculate_repair_signals(
     state: RepairCacheState,
     provisional_logits: Any,
@@ -168,6 +282,9 @@ def calculate_repair_signals(
         prototype_risks=risks,
         maximum_prototype_risk=max((risk for _prototype_id, risk in risks), default=0.0),
         draft_kl_divergence=draft_kl_divergence(provisional_logits, draft_distribution),
+        draft_top_token_agreement=draft_top_token_agreement(
+            provisional_logits, draft_distribution
+        ),
         risk_normalization=(
             "sum_to_one" if normalize_prototype_risk else "raw_attention_mass_times_dispersion"
         ),
@@ -208,11 +325,21 @@ def _trigger_reason(
         )
         if high_risk:
             return RepairTriggerReason.HIGH_PROTOTYPE_RISK
+        # A prefix-safe FullKV draft is an independent counterfactual signal.
+        # Requiring the compressed-cache prototype-risk heuristic to cross its
+        # threshold first suppresses exactly the confident failures the draft
+        # is meant to catch (for example, an early EOS with low prototype
+        # attention mass).  Still require non-zero prototype attention so the
+        # repair has a cache-backed cluster that can affect the decision.
         draft_divergence = bool(
-            risk
+            signals.total_prototype_attention_mass > 0
             and config.draft_kl_threshold is not None
             and signals.draft_kl_divergence is not None
             and signals.draft_kl_divergence >= config.draft_kl_threshold
+            and (
+                not config.draft_require_token_mismatch
+                or signals.draft_top_token_agreement is False
+            )
         )
         if draft_divergence:
             return RepairTriggerReason.DRAFT_DIVERGENCE
@@ -437,6 +564,10 @@ def _promote(
         )
         for offset, prototype_id in enumerate(state.active_prototype_ids)
     }
+    rescue_by_node = {
+        payload.source_node_id: (payload.key_block, payload.value_block)
+        for payload in state.gpu_rescue_payloads
+    }
     transfer_items = sorted(
         (
             payload_by_node[node_id],
@@ -444,17 +575,21 @@ def _promote(
             parent_id,
         )
         for node_id, parent_id in plan.ranked_promotions
+        if node_id not in rescue_by_node
     )
-    payload_indices = tuple(payload_index for payload_index, _node_id, _parent in transfer_items)
+    transfer_payload_indices = tuple(
+        payload_index for payload_index, _node_id, _parent in transfer_items
+    )
     references = tuple(
         prototype_payloads[parent_id] for _payload_index, _node_id, parent_id in transfer_items
     )
     transfer = restore_residual_payloads_async(
         state.residual_storage,
-        payload_indices,
+        transfer_payload_indices,
         references,
     )
-    restored = {
+    restored = dict(rescue_by_node)
+    restored.update({
         state.residual_storage.payloads[payload_index].source_node_id: (key, value)
         for payload_index, key, value in zip(
             transfer.payload_indices,
@@ -462,6 +597,9 @@ def _promote(
             transfer.value_blocks,
             strict=True,
         )
+    })
+    restored = {
+        node_id: restored[node_id] for node_id, _parent_id in plan.ranked_promotions
     }
     exact_payloads = {
         node_id: (key, value)
@@ -507,6 +645,9 @@ def _promote(
         active_record_tuple,
         active_payloads,
     )
+    payload_indices = tuple(
+        sorted(payload_by_node[node_id] for node_id, _parent_id in plan.ranked_promotions)
+    )
     residual_storage = discard_residual_payloads(state.residual_storage, payload_indices)
     mosaic_state = MosaicKVState.create(
         state.full_state,
@@ -532,6 +673,11 @@ def _promote(
             sorted((*state.budget_evicted_prototype_ids, *plan.budget_evicted_prototype_ids))
         ),
         active_budget=state.active_budget,
+        gpu_rescue_payloads=tuple(
+            payload
+            for payload in state.gpu_rescue_payloads
+            if payload.source_node_id not in restored
+        ),
         events=state.events,
     )
     restored_bytes = sum(state.full_state.blocks[node_id].byte_size for node_id in restored_ids)

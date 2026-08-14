@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import math
 from collections import defaultdict
-from collections.abc import Mapping
-from typing import Any
+from collections.abc import Iterable, Mapping
+from typing import Any, cast
 
 import numpy as np
 
@@ -22,7 +22,7 @@ def _to_numpy(value: Any) -> np.ndarray[Any, Any]:
     result = np.asarray(value, dtype=np.float64)
     if not bool(np.all(np.isfinite(result))):
         raise ValueError("forecast attention must contain only finite values")
-    return result
+    return cast("np.ndarray[Any, Any]", result)
 
 
 def _head_groups(graph: SparseEvidenceGraph) -> dict[HeadId, list[int]]:
@@ -123,18 +123,34 @@ def _neighbor_sets(graph: SparseEvidenceGraph) -> tuple[frozenset[int], ...]:
 
 def _value_novelty_reference(
     graph: SparseEvidenceGraph,
+    *,
+    eligible_node_ids: Iterable[int] | None = None,
 ) -> tuple[tuple[float, ...], tuple[float, ...], tuple[float, ...]]:
     """Compute the reference novelty while caching each vector norm exactly once."""
 
-    values = [np.asarray(node.pooled_value, dtype=np.float64).reshape(-1) for node in graph.nodes]
-    norms = tuple(float(np.linalg.norm(vector)) for vector in values)
+    eligible = _validated_eligible_nodes(graph, eligible_node_ids)
+    values = {
+        node_id: np.asarray(graph.nodes[node_id].pooled_value, dtype=np.float64).reshape(-1)
+        for node_id in eligible
+    }
+    norms_list = [0.0] * len(graph.nodes)
+    for node_id, vector in values.items():
+        norms_list[node_id] = float(np.linalg.norm(vector))
+    norms = tuple(norms_list)
     neighbors = _neighbor_sets(graph)
     similarities: dict[tuple[int, int], float] = {}
     novelty: list[float] = []
     redundancy: list[float] = []
-    for node_id, vector in enumerate(values):
+    for node_id in range(len(graph.nodes)):
+        if node_id not in eligible:
+            novelty.append(0.0)
+            redundancy.append(1.0)
+            continue
+        vector = values[node_id]
         maximum_similarity = 0.0
         for neighbor_id in neighbors[node_id]:
+            if neighbor_id not in eligible:
+                continue
             neighbor = values[neighbor_id]
             if neighbor.size != vector.size:
                 continue
@@ -150,8 +166,16 @@ def _value_novelty_reference(
                 )
                 similarities[pair] = similarity
             maximum_similarity = max(maximum_similarity, min(1.0, similarity))
-        redundancy.append(maximum_similarity)
-        novelty.append(1.0 - maximum_similarity)
+        # Candidate-first graph construction represents non-candidate nodes
+        # with explicit zero descriptors. They remain eligible through prompt
+        # attention, but must not receive an artificial maximum novelty reward
+        # merely because their expensive K/V descriptor was not pooled.
+        if norms[node_id] == 0:
+            novelty.append(0.0)
+            redundancy.append(1.0)
+        else:
+            redundancy.append(maximum_similarity)
+            novelty.append(1.0 - maximum_similarity)
     return tuple(novelty), tuple(redundancy), norms
 
 
@@ -159,6 +183,7 @@ def _value_novelty_vectorized(
     graph: SparseEvidenceGraph,
     *,
     edge_chunk_size: int = 16_384,
+    eligible_node_ids: Iterable[int] | None = None,
 ) -> tuple[tuple[float, ...], tuple[float, ...], tuple[float, ...]]:
     """Compute the same neighbor novelty with bounded vectorized edge tiles.
 
@@ -171,19 +196,40 @@ def _value_novelty_vectorized(
 
     if edge_chunk_size < 1:
         raise ValueError("edge_chunk_size must be positive")
-    values = [np.asarray(node.pooled_value, dtype=np.float64).reshape(-1) for node in graph.nodes]
+    eligible = _validated_eligible_nodes(graph, eligible_node_ids)
+    if not eligible:
+        zeros = (0.0,) * len(graph.nodes)
+        return zeros, (1.0,) * len(graph.nodes), zeros
+    ordered_eligible = tuple(sorted(eligible))
+    values = [
+        np.asarray(graph.nodes[node_id].pooled_value, dtype=np.float64).reshape(-1)
+        for node_id in ordered_eligible
+    ]
     feature_sizes = {int(value.size) for value in values}
     if len(feature_sizes) != 1:
-        return _value_novelty_reference(graph)
+        return _value_novelty_reference(graph, eligible_node_ids=eligible)
     matrix = np.stack(values, axis=0)
-    norms_array = np.linalg.norm(matrix, axis=1)
-    maximum_similarity = np.zeros(len(values), dtype=np.float64)
+    eligible_norms = np.linalg.norm(matrix, axis=1)
+    maximum_similarity: np.ndarray[Any, Any] = np.zeros(
+        len(ordered_eligible), dtype=np.float64
+    )
     rows = np.asarray(graph.row_indices, dtype=np.int64)
     columns = np.asarray(graph.column_indices, dtype=np.int64)
+    local_by_global: np.ndarray[Any, Any] = np.full(
+        len(graph.nodes), -1, dtype=np.int64
+    )
+    local_by_global[np.asarray(ordered_eligible, dtype=np.int64)] = np.arange(
+        len(ordered_eligible), dtype=np.int64
+    )
+    local_rows = local_by_global[rows]
+    local_columns = local_by_global[columns]
+    admitted_edges = (local_rows >= 0) & (local_columns >= 0)
+    rows = local_rows[admitted_edges]
+    columns = local_columns[admitted_edges]
     for start in range(0, len(rows), edge_chunk_size):
         source = rows[start : start + edge_chunk_size]
         target = columns[start : start + edge_chunk_size]
-        denominator = norms_array[source] * norms_array[target]
+        denominator = eligible_norms[source] * eligible_norms[target]
         dot_products = np.einsum(
             "ij,ij->i",
             matrix[source],
@@ -199,12 +245,34 @@ def _value_novelty_vectorized(
         similarities = np.minimum(1.0, similarities)
         np.maximum.at(maximum_similarity, source, similarities)
         np.maximum.at(maximum_similarity, target, similarities)
-    novelty = 1.0 - maximum_similarity
+    zero_norm = eligible_norms == 0
+    eligible_novelty = np.where(zero_norm, 0.0, 1.0 - maximum_similarity)
+    maximum_similarity[zero_norm] = 1.0
+    novelty: np.ndarray[Any, Any] = np.zeros(len(graph.nodes), dtype=np.float64)
+    redundancy: np.ndarray[Any, Any] = np.ones(len(graph.nodes), dtype=np.float64)
+    norms_array: np.ndarray[Any, Any] = np.zeros(len(graph.nodes), dtype=np.float64)
+    eligible_array = np.asarray(ordered_eligible, dtype=np.int64)
+    novelty[eligible_array] = eligible_novelty
+    redundancy[eligible_array] = maximum_similarity
+    norms_array[eligible_array] = eligible_norms
     return (
         tuple(float(value) for value in novelty),
-        tuple(float(value) for value in maximum_similarity),
+        tuple(float(value) for value in redundancy),
         tuple(float(value) for value in norms_array),
     )
+
+
+def _validated_eligible_nodes(
+    graph: SparseEvidenceGraph,
+    eligible_node_ids: Iterable[int] | None,
+) -> frozenset[int]:
+    if eligible_node_ids is None:
+        return frozenset(range(len(graph.nodes)))
+    eligible = frozenset(int(node_id) for node_id in eligible_node_ids)
+    unknown = eligible - set(range(len(graph.nodes)))
+    if unknown:
+        raise ValueError(f"value-aware utility contains unknown node IDs: {sorted(unknown)}")
+    return eligible
 
 
 def _centrality_and_singleton_coverage(
@@ -214,7 +282,7 @@ def _centrality_and_singleton_coverage(
     rows = np.asarray(graph.row_indices, dtype=np.int64)
     columns = np.asarray(graph.column_indices, dtype=np.int64)
     weights = np.asarray(graph.weights, dtype=np.float64)
-    degree = np.zeros(node_count, dtype=np.float64)
+    degree: np.ndarray[Any, Any] = np.zeros(node_count, dtype=np.float64)
     np.add.at(degree, rows, weights)
     np.add.at(degree, columns, weights)
     maximum_degree = float(degree.max(initial=0.0))
@@ -224,12 +292,14 @@ def _centrality_and_singleton_coverage(
     # contributes, exactly matching the sparse dictionary reference path.
     encoded_pairs = rows * node_count + columns
     unique_pairs, inverse = np.unique(encoded_pairs, return_inverse=True)
-    pair_weights = np.zeros(len(unique_pairs), dtype=np.float64)
+    pair_weights: np.ndarray[Any, Any] = np.zeros(
+        len(unique_pairs), dtype=np.float64
+    )
     np.maximum.at(pair_weights, inverse, weights)
     pair_sources = unique_pairs // node_count
     pair_targets = unique_pairs % node_count
     nonself = pair_sources != pair_targets
-    facility_sums = np.zeros(node_count, dtype=np.float64)
+    facility_sums: np.ndarray[Any, Any] = np.zeros(node_count, dtype=np.float64)
     np.add.at(facility_sums, pair_sources[nonself], pair_weights[nonself])
     coverage = (1.0 + facility_sums) / node_count
     return tuple(float(value) for value in centrality), tuple(float(value) for value in coverage)
@@ -282,6 +352,7 @@ def compute_block_utilities(
     forecast_attention_by_head: Mapping[HeadId, Any] | None = None,
     attention_provenance: str,
     rope_aware: bool,
+    value_aware_node_ids: Iterable[int] | None = None,
 ) -> BlockUtilityTable:
     """Compute every requested block signal and the exact signed local utility.
 
@@ -301,9 +372,15 @@ def compute_block_utilities(
         forecast_attention_by_head=forecast_attention_by_head,
     )
     if weights.execution_mode == "reference_sparse":
-        raw_novelty, _raw_redundancy, value_norms = _value_novelty_reference(graph)
+        raw_novelty, _raw_redundancy, value_norms = _value_novelty_reference(
+            graph,
+            eligible_node_ids=value_aware_node_ids,
+        )
     elif weights.execution_mode == "vectorized_edges":
-        raw_novelty, _raw_redundancy, value_norms = _value_novelty_vectorized(graph)
+        raw_novelty, _raw_redundancy, value_norms = _value_novelty_vectorized(
+            graph,
+            eligible_node_ids=value_aware_node_ids,
+        )
     else:  # pragma: no cover - strict config validation guards this
         raise ValueError(f"unsupported utility execution mode: {weights.execution_mode}")
     centrality, coverage = _centrality_and_singleton_coverage(graph)
@@ -326,7 +403,7 @@ def compute_block_utilities(
             - weights.lambda_o * novelty[node_id]
         )
         utilities.append(
-            BlockUtility(
+            BlockUtility._from_validated(
                 node_id=node_id,
                 forecast_attention_probability=probabilities[node_id],
                 value_novelty=novelty[node_id],
@@ -339,7 +416,11 @@ def compute_block_utilities(
                 local_utility=local,
             )
         )
-    return BlockUtilityTable(tuple(utilities), weights, attention_provenance)
+    return BlockUtilityTable._from_validated(
+        blocks=tuple(utilities),
+        weights=weights,
+        attention_provenance=attention_provenance,
+    )
 
 
 __all__ = ["HeadId", "compute_block_utilities"]

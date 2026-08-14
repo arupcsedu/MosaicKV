@@ -11,9 +11,11 @@ from mosaickv.repair.core import (
     draft_kl_divergence,
     normalized_next_token_entropy,
     repair_decode_step,
+    stage_gpu_rescue_payloads,
 )
 from mosaickv.repair.oracle import evaluate_repair_decode_step
 from mosaickv.repair.types import (
+    GPURescuePayload,
     RepairCacheState,
     RepairEvent,
     RepairStepResult,
@@ -23,6 +25,7 @@ from mosaickv.repair.types import (
 
 __all__ = [
     "CalibratedRepairPolicy",
+    "GPURescuePayload",
     "ReDecodeCallback",
     "RepairCacheState",
     "RepairCalibrationObservation",
@@ -36,4 +39,5 @@ __all__ = [
     "evaluate_repair_decode_step",
     "normalized_next_token_entropy",
     "repair_decode_step",
+    "stage_gpu_rescue_payloads",
 ]

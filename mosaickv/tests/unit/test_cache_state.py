@@ -156,6 +156,34 @@ def test_selected_position_gather_preserves_values_and_logical_positions() -> No
         assert np.array_equal(value_block, expected_value)
 
 
+def test_tier_membership_index_is_lazy_and_exact_for_sparse_positions() -> None:
+    """Compact invariant checks must not turn sparse descriptors into spans."""
+
+    full = _simple_full()
+    exact = full.gather_selected_positions({(0, 0): (0, 2, 4, 6)})
+
+    assert exact._source_memberships is None
+    assert exact.source_membership_count == 4
+    assert exact.source_memberships == frozenset(
+        {(0, 0, 0), (0, 0, 2), (0, 0, 4), (0, 0, 6)}
+    )
+    assert exact._source_memberships is not None
+
+    overlapping = full.gather_selected_positions({(0, 0): (2,)})
+    overlapping_block = overlapping.blocks[0]
+    with pytest.raises(ValueError, match="memberships conflict"):
+        MosaicKVState.create(
+            full,
+            exact=exact,
+            prototypes=PrototypeTier(
+                source_blocks=(overlapping_block,),
+                prototype_keys=(overlapping.key_blocks[0],),
+                prototype_values=(overlapping.value_blocks[0],),
+                assignments=(0,),
+            ),
+        )
+
+
 def test_batched_torch_head_gather_matches_reference_with_variable_counts() -> None:
     torch = pytest.importorskip("torch")
     key = torch.arange(1 * 3 * 9 * 4, dtype=torch.float32).reshape(1, 3, 9, 4)

@@ -38,7 +38,8 @@ class Llava15Adapter(HuggingFaceMultimodalAdapter):
         supports_prototype_merge=True,
         supports_residual_repair=True,
         notes=(
-            "SDPA and FlashAttention-2 are FullKV-only until compressed parity passes",
+            "SDPA decode accepts MosaicKV's per-layer/head additive validity masks; "
+            "FlashAttention-2 remains FullKV-only",
             "prototype keys are de-rotated with exact prefill Llama RoPE phases and "
             "re-rotated at anchors",
             "prototype and repair decode require eager attention",

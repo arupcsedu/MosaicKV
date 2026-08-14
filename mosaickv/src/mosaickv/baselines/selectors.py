@@ -7,6 +7,7 @@ import random
 import time
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from fractions import Fraction
 
 import numpy as np
@@ -27,6 +28,42 @@ from mosaickv.types import BudgetUnit, MosaicKVMethod
 
 class InfeasibleBaselineBudgetError(ValueError):
     """Raised when mandatory exact blocks cannot fit the common budget."""
+
+
+@dataclass(frozen=True, slots=True)
+class HeadLocalCapacityRecord:
+    """Auditable physical-capacity use for one independently routed KV head."""
+
+    layer: int
+    kv_head: int
+    position_limit: int
+    selected_positions: int
+    shortfall_positions: int
+    selected_bytes: int
+
+    def __post_init__(self) -> None:
+        if self.layer < 0 or self.kv_head < 0:
+            raise ValueError("layer and KV head must be nonnegative")
+        if self.position_limit < 0 or self.selected_positions < 0:
+            raise ValueError("position capacities must be nonnegative")
+        if self.selected_positions > self.position_limit:
+            raise ValueError("selected positions exceed the route capacity")
+        if self.shortfall_positions != self.position_limit - self.selected_positions:
+            raise ValueError("route capacity shortfall is inconsistent")
+        if self.selected_bytes < 0:
+            raise ValueError("selected bytes must be nonnegative")
+
+
+@dataclass(frozen=True, slots=True)
+class HeadLocalPromptSelection:
+    """Selected source blocks plus exact per-route capacity accounting."""
+
+    selected_node_ids: tuple[int, ...]
+    capacity_records: tuple[HeadLocalCapacityRecord, ...]
+
+    @property
+    def total_shortfall_positions(self) -> int:
+        return sum(record.shortfall_positions for record in self.capacity_records)
 
 
 def _stratum(block: KVBlockDescriptor) -> BaselineStratum:
@@ -433,6 +470,209 @@ def select_exact_baseline(
     raise ValueError(f"method is not an exact compressed baseline: {method.value}")
 
 
+def select_prompt_attention_topk_ids(
+    full_state: FullKVState,
+    budget: SelectionBudget,
+    *,
+    prompt_attention_by_node: Mapping[int, float],
+    position_limits: Mapping[tuple[int, int], int] | None = None,
+) -> tuple[int, ...]:
+    """Return only Prompt Top-K selected IDs under the canonical policy.
+
+    Stable-head MosaicKV routing needs the baseline's selected set, not its
+    40,000-element audit table.  This narrow path deliberately mirrors
+    :func:`_finalize`: mandatory blocks are installed first, optional blocks
+    use descending prompt mass with node-ID tie-breaking, and both the common
+    hard budget and per-head dense capacities are enforced.  The ordinary
+    baseline path remains unchanged and continues to emit every decision.
+    """
+
+    node_count = len(full_state.blocks)
+    node_ids = tuple(range(node_count))
+    scores = {
+        int(node_id): float(value) for node_id, value in prompt_attention_by_node.items()
+    }
+    if set(scores) != set(node_ids):
+        raise ValueError(
+            "prompt_attention_topk scores must cover every source block exactly once"
+        )
+    if any(not math.isfinite(score) for score in scores.values()):
+        raise ValueError("prompt_attention_topk scores must be finite")
+    costs = tuple(budget.cost(block) for block in full_state.blocks)
+    mandatory = tuple(
+        node_id for node_id, block in enumerate(full_state.blocks) if block.mandatory
+    )
+    spent = sum(costs[node_id] for node_id in mandatory)
+    if spent > budget.value:
+        raise InfeasibleBaselineBudgetError("mandatory exact blocks exceed baseline budget")
+    selected = set(mandatory)
+    selected_positions: dict[tuple[int, int], int] = defaultdict(int)
+    for node_id in mandatory:
+        block = full_state.blocks[node_id]
+        identity = (block.layer, block.kv_head)
+        selected_positions[identity] += block.position_count
+    if position_limits is not None:
+        for identity, count in selected_positions.items():
+            if count > position_limits.get(identity, 0):
+                raise InfeasibleBaselineBudgetError(
+                    "mandatory exact blocks exceed the dense cache capacity: "
+                    f"layer={identity[0]}, kv_head={identity[1]}, "
+                    f"required={count}, limit={position_limits.get(identity, 0)}"
+                )
+    for node_id in sorted(node_ids, key=lambda candidate: (-scores[candidate], candidate)):
+        if node_id in selected:
+            continue
+        block = full_state.blocks[node_id]
+        identity = (block.layer, block.kv_head)
+        limit = None if position_limits is None else position_limits.get(identity)
+        if limit is not None and selected_positions[identity] + block.position_count > limit:
+            continue
+        cost = costs[node_id]
+        if cost <= budget.value - spent:
+            selected.add(node_id)
+            spent += cost
+            selected_positions[identity] += block.position_count
+    return tuple(sorted(selected))
+
+
+def select_prompt_attention_topk_ids_by_head(
+    full_state: FullKVState,
+    budget: SelectionBudget,
+    *,
+    prompt_attention_by_node: Mapping[int, float],
+    head_routes: Sequence[tuple[int, int]],
+    position_limits: Mapping[tuple[int, int], int],
+) -> HeadLocalPromptSelection:
+    """Select exact Prompt Top-K blocks independently for fixed head routes.
+
+    Dense Hugging Face caches impose a physical position capacity on every
+    layer/KV-head identity.  Once stable heads are routed independently, the
+    global greedy scan is unnecessary: each identity can consume only its own
+    capacity.  This implementation preserves the canonical score/node-ID
+    ordering and mandatory-first rule while avoiding a 40k-node global sort
+    and audit construction.
+    """
+
+    routes = frozenset((int(layer), int(head)) for layer, head in head_routes)
+    if not routes:
+        return HeadLocalPromptSelection((), ())
+    if len(routes) != len(head_routes):
+        raise ValueError("stable Prompt Top-K head routes must be unique")
+    missing_limits = routes - set(position_limits)
+    if missing_limits:
+        raise ValueError(
+            f"stable Prompt Top-K routes lack position limits: {sorted(missing_limits)}"
+        )
+    node_count = len(full_state.blocks)
+    if set(prompt_attention_by_node) != set(range(node_count)):
+        raise ValueError(
+            "prompt_attention_topk scores must cover every source block exactly once"
+        )
+    score_array = np.fromiter(
+        (float(prompt_attention_by_node[node_id]) for node_id in range(node_count)),
+        dtype=np.float64,
+        count=node_count,
+    )
+    if not bool(np.all(np.isfinite(score_array))):
+        raise ValueError("prompt_attention_topk scores must be finite")
+    node_ids_by_route: dict[tuple[int, int], list[int]] = defaultdict(list)
+    mandatory_by_route: dict[tuple[int, int], list[int]] = defaultdict(list)
+    for node_id, block in enumerate(full_state.blocks):
+        identity = (block.layer, block.kv_head)
+        if identity not in routes:
+            continue
+        node_ids_by_route[identity].append(node_id)
+        if block.mandatory:
+            mandatory_by_route[identity].append(node_id)
+
+    selected: list[int] = []
+    capacity_records: list[HeadLocalCapacityRecord] = []
+    total_cost = 0
+    for identity in sorted(routes):
+        mandatory = tuple(mandatory_by_route.get(identity, ()))
+        used_positions = sum(
+            full_state.blocks[node_id].position_count for node_id in mandatory
+        )
+        limit = int(position_limits[identity])
+        if used_positions > limit:
+            raise InfeasibleBaselineBudgetError(
+                "mandatory exact blocks exceed the dense cache capacity: "
+                f"layer={identity[0]}, kv_head={identity[1]}, "
+                f"required={used_positions}, limit={limit}"
+            )
+        selected.extend(mandatory)
+        total_cost += sum(budget.cost(full_state.blocks[node_id]) for node_id in mandatory)
+        mandatory_set = frozenset(mandatory)
+        remaining_capacity = limit - used_positions
+        candidates_by_size: dict[int, list[int]] = defaultdict(list)
+        for node_id in node_ids_by_route.get(identity, ()):
+            if node_id not in mandatory_set:
+                candidates_by_size[full_state.blocks[node_id].position_count].append(node_id)
+
+        # Equal-size blocks are interchangeable for capacity.  Keeping only
+        # each score-sorted prefix reduces the exact knapsack from one state
+        # transition per source block to one per distinct block size/count.
+        # The primary objective is total prompt-attention score; occupied
+        # positions and lexicographically smaller node IDs break exact ties.
+        states: dict[int, tuple[float, tuple[int, ...]]] = {0: (0.0, ())}
+        for size in sorted(candidates_by_size):
+            ranked = tuple(
+                sorted(
+                    candidates_by_size[size],
+                    key=lambda node_id: (-score_array[node_id], node_id),
+                )
+            )
+            maximum_count = min(len(ranked), remaining_capacity // size)
+            prefix_scores = np.concatenate(
+                (
+                    np.zeros(1, dtype=np.float64),
+                    np.cumsum(score_array[np.asarray(ranked[:maximum_count], dtype=np.intp)]),
+                )
+            )
+            previous = states
+            updated: dict[int, tuple[float, tuple[int, ...]]] = {}
+            for occupied, (prior_score, prior_nodes) in previous.items():
+                available_count = min(maximum_count, (remaining_capacity - occupied) // size)
+                for count in range(available_count + 1):
+                    next_occupied = occupied + count * size
+                    next_score = prior_score + float(prefix_scores[count])
+                    next_nodes = tuple(sorted((*prior_nodes, *ranked[:count])))
+                    incumbent = updated.get(next_occupied)
+                    if incumbent is None or next_score > incumbent[0] or (
+                        next_score == incumbent[0] and next_nodes < incumbent[1]
+                    ):
+                        updated[next_occupied] = (next_score, next_nodes)
+            states = updated
+        best_occupied, (_best_score, chosen) = max(
+            states.items(),
+            key=lambda item: (item[1][0], item[0], tuple(-node for node in item[1][1])),
+        )
+        selected.extend(chosen)
+        used_positions += best_occupied
+        selected_bytes = sum(
+            full_state.blocks[node_id].byte_size for node_id in (*mandatory, *chosen)
+        )
+        total_cost += sum(budget.cost(full_state.blocks[node_id]) for node_id in chosen)
+        capacity_records.append(
+            HeadLocalCapacityRecord(
+                layer=identity[0],
+                kv_head=identity[1],
+                position_limit=limit,
+                selected_positions=used_positions,
+                shortfall_positions=limit - used_positions,
+                selected_bytes=selected_bytes,
+            )
+        )
+    if total_cost > budget.value:
+        raise InfeasibleBaselineBudgetError(
+            "stable Prompt Top-K exact blocks exceed the shared active budget"
+        )
+    return HeadLocalPromptSelection(
+        selected_node_ids=tuple(sorted(selected)),
+        capacity_records=tuple(capacity_records),
+    )
+
+
 def build_exact_baseline_plan(
     full_state: FullKVState,
     method: MosaicKVMethod,
@@ -476,9 +716,13 @@ def build_exact_baseline_plan(
 
 
 __all__ = [
+    "HeadLocalCapacityRecord",
+    "HeadLocalPromptSelection",
     "InfeasibleBaselineBudgetError",
     "build_exact_baseline_plan",
     "resolve_baseline_budget",
     "select_exact_baseline",
+    "select_prompt_attention_topk_ids",
+    "select_prompt_attention_topk_ids_by_head",
     "value_novelty_scores",
 ]

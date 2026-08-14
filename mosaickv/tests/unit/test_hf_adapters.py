@@ -11,6 +11,7 @@ import pytest
 
 from mosaickv.adapters.huggingface import (
     AdapterCapabilities,
+    AttentionCapture,
     CachedKeyState,
     CacheSnapshot,
     DecodeState,
@@ -74,6 +75,27 @@ class _FakeCache:
     @classmethod
     def from_legacy_cache(cls, layers: Sequence[tuple[_FakeTensor, _FakeTensor]]) -> _FakeCache:
         return cls(layers)
+
+
+def test_attention_capture_reduces_query_groups_during_prefill() -> None:
+    torch = pytest.importorskip("torch")
+
+    class _Attention(torch.nn.Module):
+        def forward(self, value: Any) -> tuple[Any, Any]:
+            probabilities = torch.arange(1 * 4 * 3 * 5, dtype=torch.float32).reshape(
+                1, 4, 3, 5
+            )
+            return value, probabilities
+
+    attention = _Attention()
+    with AttentionCapture((attention,), query_window=1, kv_heads=(2,)) as capture:
+        attention(torch.zeros(1))
+    observed = capture.result()[0]
+    source = torch.arange(1 * 4 * 3 * 5, dtype=torch.float32).reshape(1, 4, 3, 5)
+    expected = source[..., -1:, :].reshape(1, 2, 2, 1, 5).mean(dim=2)
+
+    assert observed.shape == (1, 2, 1, 5)
+    assert torch.equal(observed, expected)
 
 
 class _FakeConfig:

@@ -99,6 +99,26 @@ def test_disabled_graph_preserves_nodes_and_has_no_edges() -> None:
     assert graph.diagnostics.connected_components == len(graph.nodes)
 
 
+def test_compact_graph_uses_dense_local_ids_and_preserves_source_ids() -> None:
+    full = _full_state((Modality.TEXT,) * 6)
+
+    graph = build_evidence_graph(
+        full,
+        _isolated_config(fallback_weight=0.5, max_neighbors=2),
+        source_node_ids=(1, 3, 5),
+        similarity_candidate_node_ids=(1, 5),
+    )
+
+    assert tuple(node.node_id for node in graph.nodes) == (0, 1, 2)
+    assert tuple(node.source_id for node in graph.nodes) == (1, 3, 5)
+    assert tuple(node.block for node in graph.nodes) == (
+        full.blocks[1],
+        full.blocks[3],
+        full.blocks[5],
+    )
+    assert all(0 <= node_id < 3 for node_id in (*graph.row_indices, *graph.column_indices))
+
+
 def test_pooling_supports_feature_before_sequence_cache_layout() -> None:
     key = np.arange(1 * 1 * 3 * 4, dtype=np.float32).reshape(1, 1, 3, 4)
     value = (key + 10).copy()
@@ -452,6 +472,35 @@ def test_candidate_descriptor_pooling_keeps_lightweight_structural_nodes() -> No
     )
     assert {source for source, _target in _edge_pairs(graph, EdgeType.FALLBACK_POSITIONAL)} == set(
         range(len(full.blocks))
+    )
+
+
+def test_candidate_graph_mode_materializes_only_shortlist_edges() -> None:
+    full = _full_state((Modality.TEXT,) * 8)
+    candidates = (2, 3, 5)
+    graph = build_evidence_graph(
+        full,
+        _isolated_config(
+            semantic_weight=1.0,
+            fallback_weight=0.25,
+            max_neighbors=2,
+            similarity_shortlist_multiplier=2.0,
+            candidate_descriptor_pooling=True,
+            candidate_graph_mode="shortlist_rerank",
+        ),
+        similarity_candidate_node_ids=candidates,
+    )
+
+    assert len(graph.nodes) == len(full.blocks)
+    assert graph.diagnostics.candidate_graph_mode == "shortlist_rerank"
+    assert graph.diagnostics.candidate_node_count == len(candidates)
+    assert graph.diagnostics.candidate_fraction == pytest.approx(len(candidates) / 8)
+    assert graph.diagnostics.fallback_used is False
+    assert not _edge_pairs(graph, EdgeType.FALLBACK_POSITIONAL)
+    assert graph.row_indices
+    assert all(
+        source in candidates and target in candidates
+        for source, target in zip(graph.row_indices, graph.column_indices, strict=True)
     )
 
 

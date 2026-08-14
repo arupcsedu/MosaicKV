@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
-from mosaickv.cache_state import FullKVState, MosaicKVState
+from mosaickv.cache_state import FullKVState, MosaicKVState, tensor_storage_bytes
 from mosaickv.prototypes.types import PrototypeRecord, ThreeTierCacheConstruction
 from mosaickv.residual.types import ResidualStorageReport
 from mosaickv.selection.types import SelectionBudget
@@ -43,6 +43,7 @@ class RepairStepSignals:
     prototype_risks: tuple[tuple[int, float], ...]
     maximum_prototype_risk: float
     draft_kl_divergence: float | None
+    draft_top_token_agreement: bool | None
     risk_normalization: str
 
     def __post_init__(self) -> None:
@@ -211,7 +212,27 @@ class RepairEvent:
             "maximum_prototype_risk": self.signals.maximum_prototype_risk,
             "risk_normalization": self.signals.risk_normalization,
             "draft_kl_divergence": self.signals.draft_kl_divergence,
+            "draft_top_token_agreement": self.signals.draft_top_token_agreement,
         }
+
+
+@dataclass(frozen=True, slots=True)
+class GPURescuePayload:
+    """One decoded residual block staged on the model GPU for fast repair."""
+
+    source_node_id: int
+    key_block: Any
+    value_block: Any
+    byte_size: int
+
+    def __post_init__(self) -> None:
+        if self.source_node_id < 0:
+            raise ValueError("GPU rescue source node ID must be nonnegative")
+        measured = tensor_storage_bytes(self.key_block) + tensor_storage_bytes(self.value_block)
+        if self.byte_size != measured:
+            raise ValueError("GPU rescue byte size does not match its tensor storage")
+        if self.byte_size <= 0:
+            raise ValueError("GPU rescue payload must contain non-empty tensor storage")
 
 
 @dataclass(frozen=True, slots=True)
@@ -230,6 +251,7 @@ class RepairCacheState:
     superseded_prototype_ids: tuple[int, ...]
     budget_evicted_prototype_ids: tuple[int, ...]
     active_budget: SelectionBudget
+    gpu_rescue_payloads: tuple[GPURescuePayload, ...] = ()
     events: tuple[RepairEvent, ...] = ()
 
     def __post_init__(self) -> None:
@@ -294,6 +316,14 @@ class RepairCacheState:
             payload.prototype_id not in catalog_ids for payload in self.residual_storage.payloads
         ):
             raise ValueError("residual storage references an unknown prototype")
+        rescue_ids = tuple(payload.source_node_id for payload in self.gpu_rescue_payloads)
+        if rescue_ids != tuple(sorted(set(rescue_ids))):
+            raise ValueError("GPU rescue source IDs must be sorted and unique")
+        residual_ids = {payload.source_node_id for payload in self.residual_storage.payloads}
+        if not set(rescue_ids) <= residual_ids:
+            raise ValueError("GPU rescue payload must have a matching CPU residual payload")
+        if set(rescue_ids) & set(self.exact_node_ids):
+            raise ValueError("GPU rescue payload cannot already be active in the exact tier")
         for node_id in self.promoted_node_ids:
             parent_ids = {
                 record.prototype_id
@@ -366,6 +396,12 @@ class RepairCacheState:
             return self.mosaic_state.statistics.active_kv_bytes
         raise ValueError(f"unsupported repair budget unit: {self.active_budget.unit}")
 
+    @property
+    def gpu_rescue_bytes(self) -> int:
+        """Return GPU storage reserved for repair but not active in attention."""
+
+        return sum(payload.byte_size for payload in self.gpu_rescue_payloads)
+
     def prototype_record(self, prototype_id: int) -> PrototypeRecord:
         for record in self.active_prototype_records:
             if record.prototype_id == prototype_id:
@@ -384,6 +420,7 @@ class RepairStepResult:
 
 
 __all__ = [
+    "GPURescuePayload",
     "RepairCacheState",
     "RepairEvent",
     "RepairStepResult",

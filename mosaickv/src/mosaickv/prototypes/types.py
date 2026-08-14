@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
+from typing import Self
 
 from mosaickv.adapters.huggingface.types import CachedKeyState
 from mosaickv.cache_state import Modality, MosaicKVState
@@ -21,6 +22,7 @@ class TierConstructionMode(StrEnum):
     EXACT_ONLY_DISABLED = "exact_only_prototypes_disabled"
     EXACT_ONLY_UNSAFE = "exact_only_prototype_merge_unsafe"
     EXACT_ONLY_INCOMPATIBLE = "exact_only_incompatible_assignments"
+    EXACT_ONLY_ROUTED = "exact_only_selection_routed_heads"
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,6 +73,11 @@ class PrototypeMember:
     reconstruction_error: float = 0.0
     value_output_norm: float = 0.0
     position_weights: tuple[float, ...] = ()
+    _within_block_attention_entropy: float = field(
+        init=False,
+        repr=False,
+        compare=False,
+    )
 
     def __post_init__(self) -> None:
         if self.node_id < 0:
@@ -94,12 +101,45 @@ class PrototypeMember:
             abs_tol=1e-7,
         ):
             raise ValueError("prototype source-position weights must sum to one")
+        object.__setattr__(
+            self,
+            "_within_block_attention_entropy",
+            -sum(weight * math.log(weight) for weight in self.position_weights),
+        )
+
+    @classmethod
+    def _from_validated(
+        cls,
+        *,
+        node_id: int,
+        raw_weight: float,
+        normalized_weight: float,
+        reconstruction_error: float,
+        value_output_norm: float,
+        position_weights: tuple[float, ...],
+        within_block_attention_entropy: float,
+    ) -> Self:
+        """Build a member from one batch-validated construction result."""
+
+        instance = object.__new__(cls)
+        object.__setattr__(instance, "node_id", node_id)
+        object.__setattr__(instance, "raw_weight", raw_weight)
+        object.__setattr__(instance, "normalized_weight", normalized_weight)
+        object.__setattr__(instance, "reconstruction_error", reconstruction_error)
+        object.__setattr__(instance, "value_output_norm", value_output_norm)
+        object.__setattr__(instance, "position_weights", position_weights)
+        object.__setattr__(
+            instance,
+            "_within_block_attention_entropy",
+            within_block_attention_entropy,
+        )
+        return instance
 
     @property
     def within_block_attention_entropy(self) -> float:
         """Entropy of the forecast distribution inside this source block."""
 
-        return -sum(weight * math.log(weight) for weight in self.position_weights)
+        return self._within_block_attention_entropy
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,6 +210,7 @@ class PrototypeRecord:
     anchor_position_strategy: str
     eviction_utility: float
     utility_provenance: str
+    _attention_log_bias: float = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if any(
@@ -220,6 +261,7 @@ class PrototypeRecord:
         if self.pooling_mode not in {
             "graph_weighted_block_mean",
             "forecast_attention_token",
+            "exact_medoid_key_forecast_value",
         }:
             raise ValueError("unsupported prototype pooling mode")
         if self.anchor_position_strategy not in {
@@ -231,6 +273,68 @@ class PrototypeRecord:
             raise ValueError("prototype eviction utility must be finite")
         if not self.utility_provenance.strip():
             raise ValueError("prototype utility provenance must be non-empty")
+        if self.attention_bias_basis == "source_position_multiplicity":
+            basis = math.log(self.represented_source_positions)
+        else:
+            basis = -sum(
+                member.normalized_weight * math.log(member.normalized_weight)
+                for member in self.members
+            ) + sum(
+                member.normalized_weight * member.within_block_attention_entropy
+                for member in self.members
+            )
+        object.__setattr__(self, "_attention_log_bias", self.attention_log_bias_scale * basis)
+
+    @classmethod
+    def _from_validated(
+        cls,
+        *,
+        prototype_id: int,
+        layer: int,
+        kv_head: int,
+        anchor_node_id: int,
+        anchor_logical_position: int,
+        members: tuple[PrototypeMember, ...],
+        assigned_node_ids: tuple[int, ...],
+        diagnostics: PrototypeDiagnostics,
+        represented_source_positions: int,
+        attention_log_bias_scale: float,
+        attention_bias_basis: str,
+        pooling_mode: str,
+        anchor_position_strategy: str,
+        eviction_utility: float,
+        utility_provenance: str,
+    ) -> Self:
+        """Build a record after the construction batch has validated its fields."""
+
+        instance = object.__new__(cls)
+        object.__setattr__(instance, "prototype_id", prototype_id)
+        object.__setattr__(instance, "layer", layer)
+        object.__setattr__(instance, "kv_head", kv_head)
+        object.__setattr__(instance, "anchor_node_id", anchor_node_id)
+        object.__setattr__(instance, "anchor_logical_position", anchor_logical_position)
+        object.__setattr__(instance, "members", members)
+        object.__setattr__(instance, "assigned_node_ids", assigned_node_ids)
+        object.__setattr__(instance, "diagnostics", diagnostics)
+        object.__setattr__(instance, "represented_source_positions", represented_source_positions)
+        object.__setattr__(instance, "attention_log_bias_scale", attention_log_bias_scale)
+        object.__setattr__(instance, "attention_bias_basis", attention_bias_basis)
+        object.__setattr__(instance, "pooling_mode", pooling_mode)
+        object.__setattr__(instance, "anchor_position_strategy", anchor_position_strategy)
+        object.__setattr__(instance, "eviction_utility", eviction_utility)
+        object.__setattr__(instance, "utility_provenance", utility_provenance)
+        if attention_bias_basis == "source_position_multiplicity":
+            basis = math.log(represented_source_positions)
+        else:
+            basis = -sum(
+                member.normalized_weight * math.log(member.normalized_weight)
+                for member in members
+            ) + sum(
+                member.normalized_weight * member.within_block_attention_entropy
+                for member in members
+            )
+        object.__setattr__(instance, "_attention_log_bias", attention_log_bias_scale * basis)
+        return instance
 
     @property
     def attention_log_bias(self) -> float:
@@ -245,17 +349,7 @@ class PrototypeRecord:
         linear-key limiting case.
         """
 
-        if self.attention_bias_basis == "source_position_multiplicity":
-            basis = math.log(self.represented_source_positions)
-        else:
-            basis = -sum(
-                member.normalized_weight * math.log(member.normalized_weight)
-                for member in self.members
-            ) + sum(
-                member.normalized_weight * member.within_block_attention_entropy
-                for member in self.members
-            )
-        return self.attention_log_bias_scale * basis
+        return self._attention_log_bias
 
 
 @dataclass(frozen=True, slots=True)
@@ -358,9 +452,7 @@ class ThreeTierCacheConstruction:
             raise ValueError("prototype records and active payload counts differ")
         if self.state.residuals is not self.residual_storage.tier:
             raise ValueError("state residual tier and residual storage report must be identical")
-        prototype_memberships = self.state.prototypes.source_memberships
-        residual_memberships = self.state.residuals.source_memberships
-        if not residual_memberships <= prototype_memberships:
+        if not self.state.residuals.source_is_subset_of(self.state.prototypes):
             raise ValueError(
                 "bounded residual storage may contain only prototyped source blocks"
             )

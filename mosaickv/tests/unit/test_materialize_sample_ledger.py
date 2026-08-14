@@ -83,3 +83,42 @@ def test_ledger_rejects_source_change_during_preparation(
         )
 
     assert not output.exists()
+
+
+def test_ledger_excludes_prior_samples_before_fixed_subset(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _stub_task(monkeypatch)
+    sha = "d" * 40
+    monkeypatch.setattr(MATERIALIZER, "_source_provenance", lambda: (sha, True))
+    exclusion_directory = tmp_path / "prior"
+    exclusion_directory.mkdir()
+    (exclusion_directory / "old.json").write_text(
+        json.dumps(
+            {
+                "task": "mmstar",
+                "dataset_id": "Lin-Chen/MMStar",
+                "dataset_revision": "e" * 40,
+                "split": "val",
+                "sample_ids": ["mmstar:1"],
+            }
+        )
+    )
+    output = tmp_path / "fresh.json"
+
+    MATERIALIZER.materialize(
+        task_name="mmstar",
+        dataset_revision="e" * 40,
+        model_name="Qwen/Qwen2.5-VL-3B-Instruct",
+        seed=17,
+        output=output,
+        resume=False,
+        subset_size=1,
+        exclude_ledger_directories=(exclusion_directory,),
+        allow_dirty_exploratory=True,
+    )
+
+    payload = json.loads(output.read_text())
+    assert payload["sample_ids"] == ["mmstar:2"]
+    assert payload["canonical_eligible"] is False
+    assert payload["excluded_unique_sample_count"] == 1

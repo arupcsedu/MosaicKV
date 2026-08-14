@@ -670,6 +670,21 @@ class GraphConfig:
     # This is an explicit approximation because excluded nodes no longer
     # contribute learned semantic/value descriptors.
     candidate_descriptor_pooling: bool = False
+    # ``shortlist_rerank`` keeps the complete source-block table for exact
+    # accounting and prompt-attention selection, but runs learned/structural
+    # graph sources only on the prompt-ranked candidate union.  Positional
+    # prototype compatibility remains analytic in the tier planner and is not
+    # materialized as O(source_nodes * degree) fallback edges.
+    candidate_graph_mode: str = "full"
+    candidate_neighbor_hops: int = 0
+    screening_group_blocks: int = 1
+    uncertain_head_only: bool = False
+    uncertain_head_fraction: float = 1.0
+    uncertain_head_threshold: float = 0.0
+    # Hard latency guard for candidate reranking. Mandatory blocks are always
+    # admitted separately and therefore do not consume this non-mandatory
+    # fraction. ``1.0`` preserves the prior behavior.
+    candidate_nonmandatory_fraction: float = 1.0
 
     def __post_init__(self) -> None:
         if self.max_neighbors < 1:
@@ -748,6 +763,33 @@ class GraphConfig:
                 "graph.candidate_descriptor_pooling requires a positive "
                 "similarity_shortlist_multiplier"
             )
+        if self.candidate_graph_mode not in {"full", "shortlist_rerank"}:
+            raise ConfigurationError(
+                "graph.candidate_graph_mode must be 'full' or 'shortlist_rerank'"
+            )
+        if self.candidate_graph_mode == "shortlist_rerank" and (
+            self.similarity_shortlist_multiplier <= 0 or not self.candidate_descriptor_pooling
+        ):
+            raise ConfigurationError(
+                "graph shortlist_rerank mode requires positive similarity_shortlist_multiplier "
+                "and candidate_descriptor_pooling=true"
+            )
+        if self.candidate_neighbor_hops < 0:
+            raise ConfigurationError("graph.candidate_neighbor_hops must be >= 0")
+        if self.screening_group_blocks < 1:
+            raise ConfigurationError("graph.screening_group_blocks must be >= 1")
+        if not 0 < self.uncertain_head_fraction <= 1:
+            raise ConfigurationError("graph.uncertain_head_fraction must be in (0, 1]")
+        if not 0 <= self.uncertain_head_threshold <= 1:
+            raise ConfigurationError("graph.uncertain_head_threshold must be in [0, 1]")
+        if not 0 < self.candidate_nonmandatory_fraction <= 1:
+            raise ConfigurationError(
+                "graph.candidate_nonmandatory_fraction must be in (0, 1]"
+            )
+        if self.uncertain_head_only and self.candidate_graph_mode != "shortlist_rerank":
+            raise ConfigurationError(
+                "graph.uncertain_head_only requires candidate_graph_mode='shortlist_rerank'"
+            )
 
     @classmethod
     def from_mapping(cls, value: object) -> GraphConfig:
@@ -778,6 +820,13 @@ class GraphConfig:
             "similarity_shortlist_multiplier",
             "similarity_shortlist_min_nodes",
             "candidate_descriptor_pooling",
+            "candidate_graph_mode",
+            "candidate_neighbor_hops",
+            "screening_group_blocks",
+            "uncertain_head_only",
+            "uncertain_head_fraction",
+            "uncertain_head_threshold",
+            "candidate_nonmandatory_fraction",
         }
         _reject_unknown(data, allowed, "graph")
         defaults = cls()
@@ -841,6 +890,48 @@ class GraphConfig:
                 data,
                 "candidate_descriptor_pooling",
                 False,
+                "graph",
+            ),
+            candidate_graph_mode=_optional_str(
+                data,
+                "candidate_graph_mode",
+                "full",
+                "graph",
+            ),
+            candidate_neighbor_hops=_int(
+                data,
+                "candidate_neighbor_hops",
+                0,
+                "graph",
+            ),
+            screening_group_blocks=_int(
+                data,
+                "screening_group_blocks",
+                1,
+                "graph",
+            ),
+            uncertain_head_only=_bool(
+                data,
+                "uncertain_head_only",
+                False,
+                "graph",
+            ),
+            uncertain_head_fraction=_float(
+                data,
+                "uncertain_head_fraction",
+                1.0,
+                "graph",
+            ),
+            uncertain_head_threshold=_float(
+                data,
+                "uncertain_head_threshold",
+                0.0,
+                "graph",
+            ),
+            candidate_nonmandatory_fraction=_float(
+                data,
+                "candidate_nonmandatory_fraction",
+                1.0,
                 "graph",
             ),
         )
@@ -911,10 +1002,25 @@ class SelectionConfig:
     exhaustive_max_nodes: int = 20
     prompt_anchor_fraction: float = 0.0
     evidence_preservation_fraction: float = 0.0
+    coverage_correction_rounds: int = 2
+    stable_head_prompt_routing: bool = False
+    stable_head_uniform_fill: bool = False
+    routed_head_only_planning: bool = False
+    # MosaicKV may deliberately materialize less than the shared comparison
+    # budget when evaluating a quality-matched memory point. The shared hard
+    # cap remains recorded separately; actual active bytes remain the primary
+    # comparison quantity. Baselines do not consume this MosaicKV planner knob.
+    physical_capacity_fraction: float = 1.0
 
     def __post_init__(self) -> None:
-        if self.algorithm != "lazy_greedy":
-            raise ConfigurationError("selection.algorithm must be 'lazy_greedy'")
+        if self.algorithm not in {"lazy_greedy", "vectorized_coverage"}:
+            raise ConfigurationError(
+                "selection.algorithm must be 'lazy_greedy' or 'vectorized_coverage'"
+            )
+        if self.coverage_correction_rounds < 0 or self.coverage_correction_rounds > 8:
+            raise ConfigurationError(
+                "selection.coverage_correction_rounds must be between 0 and 8"
+            )
         for name in ("lambda_g", "lambda_m"):
             value = getattr(self, name)
             if not math.isfinite(value):
@@ -930,6 +1036,21 @@ class SelectionConfig:
             raise ConfigurationError(
                 "selection prompt/evidence reservation fractions cannot sum above 1"
             )
+        if self.stable_head_uniform_fill and not self.stable_head_prompt_routing:
+            raise ConfigurationError(
+                "selection.stable_head_uniform_fill requires stable_head_prompt_routing"
+            )
+        if self.routed_head_only_planning and not self.stable_head_prompt_routing:
+            raise ConfigurationError(
+                "selection.routed_head_only_planning requires stable_head_prompt_routing"
+            )
+        if (
+            not math.isfinite(self.physical_capacity_fraction)
+            or not 0 < self.physical_capacity_fraction <= 1
+        ):
+            raise ConfigurationError(
+                "selection.physical_capacity_fraction must be finite and in (0, 1]"
+            )
 
     @classmethod
     def from_mapping(cls, value: object) -> SelectionConfig:
@@ -944,6 +1065,11 @@ class SelectionConfig:
             "exhaustive_max_nodes",
             "prompt_anchor_fraction",
             "evidence_preservation_fraction",
+            "coverage_correction_rounds",
+            "stable_head_prompt_routing",
+            "stable_head_uniform_fill",
+            "routed_head_only_planning",
+            "physical_capacity_fraction",
         }
         _reject_unknown(data, allowed, "selection")
         return cls(
@@ -957,6 +1083,27 @@ class SelectionConfig:
             prompt_anchor_fraction=_float(data, "prompt_anchor_fraction", 0.0, "selection"),
             evidence_preservation_fraction=_float(
                 data, "evidence_preservation_fraction", 0.0, "selection"
+            ),
+            coverage_correction_rounds=_int(
+                data,
+                "coverage_correction_rounds",
+                2,
+                "selection",
+            ),
+            stable_head_prompt_routing=_bool(
+                data, "stable_head_prompt_routing", False, "selection"
+            ),
+            stable_head_uniform_fill=_bool(
+                data, "stable_head_uniform_fill", False, "selection"
+            ),
+            routed_head_only_planning=_bool(
+                data, "routed_head_only_planning", False, "selection"
+            ),
+            physical_capacity_fraction=_float(
+                data,
+                "physical_capacity_fraction",
+                1.0,
+                "selection",
             ),
         )
 
@@ -980,6 +1127,15 @@ class PrototypeConfig:
     anchor_position_strategy: str = "selected_anchor_start"
     adaptive_grouping: bool = False
     exact_head_routes: tuple[str, ...] = ()
+    # Unselected blocks in these heads are dropped instead of prototyped. The
+    # already-selected exact subset remains active, unlike ``exact_head_routes``
+    # which requires every source block in the route to stay exact.
+    selection_only_head_routes: tuple[str, ...] = ()
+    maximum_prototypes_per_head: int | None = None
+    uncertain_head_only: bool = False
+    uncertain_head_fraction: float = 1.0
+    uncertain_head_threshold: float = 0.0
+    source_modalities: tuple[str, ...] = ("text", "image", "video")
     head_group_sizes: tuple[str, ...] = ()
     head_position_spans: tuple[str, ...] = ()
     source_gather_mode: str = "batched_layer"
@@ -1017,10 +1173,11 @@ class PrototypeConfig:
         if self.pooling_mode not in {
             "graph_weighted_block_mean",
             "forecast_attention_token",
+            "exact_medoid_key_forecast_value",
         }:
             raise ConfigurationError(
                 "prototypes.pooling_mode must be 'graph_weighted_block_mean' or "
-                "'forecast_attention_token'"
+                "'forecast_attention_token' or 'exact_medoid_key_forecast_value'"
             )
         if self.attention_bias_basis not in {
             "source_position_multiplicity",
@@ -1051,7 +1208,10 @@ class PrototypeConfig:
                 "'bounded_search_reference'"
             )
         if (
-            self.pooling_mode == "forecast_attention_token"
+            self.pooling_mode in {
+                "forecast_attention_token",
+                "exact_medoid_key_forecast_value",
+            }
             and self.attention_bias_basis != "forecast_attention_entropy"
         ):
             raise ConfigurationError(
@@ -1060,10 +1220,19 @@ class PrototypeConfig:
             )
         if (
             self.attention_bias_basis == "forecast_attention_entropy"
-            and self.pooling_mode != "forecast_attention_token"
+            and self.pooling_mode
+            not in {"forecast_attention_token", "exact_medoid_key_forecast_value"}
         ):
             raise ConfigurationError(
                 "forecast-attention entropy bias requires forecast-attention token pooling"
+            )
+        if (
+            self.pooling_mode == "exact_medoid_key_forecast_value"
+            and self.anchor_position_strategy != "forecast_weighted_member_medoid"
+        ):
+            raise ConfigurationError(
+                "exact-medoid key pooling requires "
+                "anchor_position_strategy='forecast_weighted_member_medoid'"
             )
         self._validate_head_routes(self.head_group_sizes, "head_group_sizes", minimum=1)
         self._validate_head_routes(self.head_position_spans, "head_position_spans", minimum=0)
@@ -1085,7 +1254,55 @@ class PrototypeConfig:
                     "prototypes.exact_head_routes require unique nonnegative identities"
                 )
             exact_identities.add(identity)
+        selection_only_identities: set[tuple[int, int]] = set()
+        for route in self.selection_only_head_routes:
+            parts = route.split(":")
+            if len(parts) != 2:
+                raise ConfigurationError(
+                    "prototypes.selection_only_head_routes entries must use "
+                    "'<layer>:<kv_head>'"
+                )
+            try:
+                identity = int(parts[0]), int(parts[1])
+            except ValueError as error:
+                raise ConfigurationError(
+                    "prototypes.selection_only_head_routes entries must contain integers"
+                ) from error
+            if min(identity) < 0 or identity in selection_only_identities:
+                raise ConfigurationError(
+                    "prototypes.selection_only_head_routes require unique nonnegative "
+                    "identities"
+                )
+            selection_only_identities.add(identity)
+        overlap = exact_identities & selection_only_identities
+        if overlap:
+            raise ConfigurationError(
+                "prototype exact and selection-only head routes must be disjoint: "
+                f"{sorted(overlap)}"
+            )
+        if self.maximum_prototypes_per_head is not None and (
+            self.maximum_prototypes_per_head < 1
+        ):
+            raise ConfigurationError(
+                "prototypes.maximum_prototypes_per_head must be >= 1 or null"
+            )
+        if not 0 < self.uncertain_head_fraction <= 1:
+            raise ConfigurationError(
+                "prototypes.uncertain_head_fraction must be in (0, 1]"
+            )
+        if not 0 <= self.uncertain_head_threshold <= 1:
+            raise ConfigurationError(
+                "prototypes.uncertain_head_threshold must be in [0, 1]"
+            )
         valid_modalities = {"text", "image", "video"}
+        if not self.source_modalities or any(
+            modality not in valid_modalities for modality in self.source_modalities
+        ):
+            raise ConfigurationError(
+                "prototypes.source_modalities must contain text, image, or video"
+            )
+        if len(set(self.source_modalities)) != len(self.source_modalities):
+            raise ConfigurationError("prototypes.source_modalities cannot contain duplicates")
         if not self.allowed_modality_pairs:
             raise ConfigurationError("prototypes.allowed_modality_pairs cannot be empty")
         for pair in self.allowed_modality_pairs:
@@ -1122,6 +1339,12 @@ class PrototypeConfig:
             "anchor_position_strategy",
             "adaptive_grouping",
             "exact_head_routes",
+            "selection_only_head_routes",
+            "maximum_prototypes_per_head",
+            "uncertain_head_only",
+            "uncertain_head_fraction",
+            "uncertain_head_threshold",
+            "source_modalities",
             "head_group_sizes",
             "head_position_spans",
             "source_gather_mode",
@@ -1181,6 +1404,42 @@ class PrototypeConfig:
             ),
             adaptive_grouping=_bool(data, "adaptive_grouping", False, "prototypes"),
             exact_head_routes=_string_tuple(data, "exact_head_routes", (), "prototypes"),
+            selection_only_head_routes=_string_tuple(
+                data,
+                "selection_only_head_routes",
+                (),
+                "prototypes",
+            ),
+            maximum_prototypes_per_head=_optional_int(
+                data,
+                "maximum_prototypes_per_head",
+                None,
+                "prototypes",
+            ),
+            uncertain_head_only=_bool(
+                data,
+                "uncertain_head_only",
+                False,
+                "prototypes",
+            ),
+            uncertain_head_fraction=_float(
+                data,
+                "uncertain_head_fraction",
+                1.0,
+                "prototypes",
+            ),
+            uncertain_head_threshold=_float(
+                data,
+                "uncertain_head_threshold",
+                0.0,
+                "prototypes",
+            ),
+            source_modalities=_string_tuple(
+                data,
+                "source_modalities",
+                defaults.source_modalities,
+                "prototypes",
+            ),
             head_group_sizes=_string_tuple(data, "head_group_sizes", (), "prototypes"),
             head_position_spans=_string_tuple(data, "head_position_spans", (), "prototypes"),
             source_gather_mode=_optional_str(
@@ -1247,6 +1506,16 @@ class PrototypeConfig:
     def requires_exact_head(self, layer: int, head: int) -> bool:
         return f"{layer}:{head}" in self.exact_head_routes
 
+    def uses_prototype_head(self, layer: int, head: int) -> bool:
+        identity = f"{layer}:{head}"
+        return identity not in self.exact_head_routes and identity not in (
+            self.selection_only_head_routes
+        )
+
+    def uses_prototype_block(self, layer: int, head: int, modality: object) -> bool:
+        value = getattr(modality, "value", modality)
+        return self.uses_prototype_head(layer, head) and str(value) in self.source_modalities
+
 
 @dataclass(frozen=True, slots=True)
 class ResidualConfig:
@@ -1264,6 +1533,12 @@ class ResidualConfig:
     max_bytes: int | None = None
     max_source_blocks: int | None = None
     selection_policy: str = "risk_weighted_reconstruction_error"
+    # Optional resident rescue payloads avoid a host transfer after a repair
+    # trigger. They are outside the attention-active cache and are reported as
+    # separate GPU-resident KV bytes; experiments must include them in total
+    # GPU-memory comparisons.
+    gpu_rescue_max_blocks: int = 0
+    gpu_rescue_max_bytes: int | None = None
 
     def __post_init__(self) -> None:
         if self.rank < 1:
@@ -1274,6 +1549,10 @@ class ResidualConfig:
             raise ConfigurationError("residual.max_bytes must be >= 0 or null")
         if self.max_source_blocks is not None and self.max_source_blocks < 0:
             raise ConfigurationError("residual.max_source_blocks must be >= 0 or null")
+        if self.gpu_rescue_max_blocks < 0:
+            raise ConfigurationError("residual.gpu_rescue_max_blocks must be >= 0")
+        if self.gpu_rescue_max_bytes is not None and self.gpu_rescue_max_bytes <= 0:
+            raise ConfigurationError("residual.gpu_rescue_max_bytes must be > 0 or null")
         if self.selection_policy not in {
             "source_order",
             "risk_weighted_reconstruction_error",
@@ -1299,6 +1578,8 @@ class ResidualConfig:
                 "max_bytes",
                 "max_source_blocks",
                 "selection_policy",
+                "gpu_rescue_max_blocks",
+                "gpu_rescue_max_bytes",
             },
             "residual",
         )
@@ -1323,6 +1604,18 @@ class ResidualConfig:
                 data,
                 "selection_policy",
                 "risk_weighted_reconstruction_error",
+                "residual",
+            ),
+            gpu_rescue_max_blocks=_int(
+                data,
+                "gpu_rescue_max_blocks",
+                0,
+                "residual",
+            ),
+            gpu_rescue_max_bytes=_optional_int(
+                data,
+                "gpu_rescue_max_bytes",
+                None,
                 "residual",
             ),
         )
@@ -1580,6 +1873,9 @@ class RepairConfig:
     prototype_risk_min_entropy: float = 0.0
     decision_margin_threshold: float = 0.15
     draft_kl_threshold: float | None = None
+    counterfactual_draft_steps: int = 0
+    draft_require_token_mismatch: bool = False
+    counterfactual_route_heads: bool = False
     normalize_prototype_risk: bool = False
     decision_high_risk_threshold: float | None = None
     max_blocks_per_step: int = 2
@@ -1606,6 +1902,16 @@ class RepairConfig:
             raise ConfigurationError("repair.draft_kl_threshold must be finite and >= 0 or null")
         if self.draft_kl_threshold is not None and self.policy is not RepairPolicy.DECISION_AWARE:
             raise ConfigurationError("repair.draft_kl_threshold requires policy='decision_aware'")
+        if self.counterfactual_draft_steps < 0:
+            raise ConfigurationError("repair.counterfactual_draft_steps must be >= 0")
+        if self.draft_require_token_mismatch and self.draft_kl_threshold is None:
+            raise ConfigurationError(
+                "repair.draft_require_token_mismatch requires draft_kl_threshold"
+            )
+        if self.counterfactual_route_heads and self.counterfactual_draft_steps < 1:
+            raise ConfigurationError(
+                "repair.counterfactual_route_heads requires counterfactual_draft_steps >= 1"
+            )
         if self.decision_high_risk_threshold is not None and (
             not math.isfinite(self.decision_high_risk_threshold)
             or self.decision_high_risk_threshold < 0
@@ -1633,6 +1939,9 @@ class RepairConfig:
             "prototype_risk_min_entropy",
             "decision_margin_threshold",
             "draft_kl_threshold",
+            "counterfactual_draft_steps",
+            "draft_require_token_mismatch",
+            "counterfactual_route_heads",
             "normalize_prototype_risk",
             "decision_high_risk_threshold",
             "max_blocks_per_step",
@@ -1656,6 +1965,15 @@ class RepairConfig:
                 None
                 if data.get("draft_kl_threshold") is None
                 else _float(data, "draft_kl_threshold", 0.0, "repair")
+            ),
+            counterfactual_draft_steps=_int(
+                data, "counterfactual_draft_steps", 0, "repair"
+            ),
+            draft_require_token_mismatch=_bool(
+                data, "draft_require_token_mismatch", False, "repair"
+            ),
+            counterfactual_route_heads=_bool(
+                data, "counterfactual_route_heads", False, "repair"
             ),
             normalize_prototype_risk=_bool(data, "normalize_prototype_risk", False, "repair"),
             decision_high_risk_threshold=(
@@ -1722,10 +2040,43 @@ class RunConfig:
         if self.repair.draft_kl_threshold is not None and (
             not self.method.is_mosaickv
             or not self.forecasting.enabled
-            or self.forecasting.draft_steps < 1
+            or (
+                self.forecasting.draft_steps < 1
+                and self.repair.counterfactual_draft_steps < 1
+            )
         ):
             raise ConfigurationError(
-                "repair.draft_kl_threshold requires a MosaicKV forecast with draft_steps >= 1"
+                "repair.draft_kl_threshold requires either forecasting.draft_steps >= 1 "
+                "or repair.counterfactual_draft_steps >= 1"
+            )
+        if (
+            self.method.is_mosaickv
+            and self.graph.similarity_shortlist_multiplier > 0
+            and self.forecasting.prompt_window < 1
+        ):
+            raise ConfigurationError(
+                "graph prompt shortlisting requires forecasting.prompt_window >= 1"
+            )
+        if self.selection.routed_head_only_planning and (
+            not self.method.is_mosaickv
+            or not self.graph.enabled
+            or self.graph.candidate_graph_mode != "shortlist_rerank"
+            or not self.graph.candidate_descriptor_pooling
+            or not self.prototypes.uncertain_head_only
+        ):
+            raise ConfigurationError(
+                "routed-head-only planning requires a MosaicKV method, enabled "
+                "shortlist_rerank graph with candidate descriptor pooling, and "
+                "prototypes.uncertain_head_only=true"
+            )
+        if (self.residual.gpu_rescue_max_blocks or self.residual.gpu_rescue_max_bytes) and (
+            self.method is not MosaicKVMethod.MOSAICKV_FULL
+            or not self.residual.enabled
+            or not self.repair.enabled
+            or self.repair.policy is RepairPolicy.NONE
+        ):
+            raise ConfigurationError(
+                "residual GPU rescue requires mosaickv_full with residual repair enabled"
             )
         variant = self.ablation.variant
         if variant is AblationVariant.NO_EVIDENCE_GRAPH and self.graph.enabled:
