@@ -70,7 +70,10 @@ def materialize(
     resume: bool,
     subset_size: int | None = None,
     exclude_ledger_directories: Sequence[Path] = (),
+    exclude_result_directories: Sequence[Path] = (),
     allow_dirty_exploratory: bool = False,
+    classification: str = "fresh_disjoint_heldout_quality_validation",
+    selection_freeze: Path | None = None,
 ) -> dict[str, Any]:
     spec = default_task_registry().resolve(task_name)
     if spec.development_lmms_task is None:
@@ -85,6 +88,24 @@ def materialize(
         raise RuntimeError("sample ledger materialization requires a clean source worktree")
     if subset_size is not None and subset_size < 1:
         raise ValueError("subset_size must be positive when provided")
+    allowed_classifications = {
+        "fresh_disjoint_heldout_quality_validation",
+        "fresh_disjoint_label_blind_calibration",
+    }
+    if classification not in allowed_classifications:
+        raise ValueError(
+            "classification must be fresh_disjoint_heldout_quality_validation or "
+            "fresh_disjoint_label_blind_calibration"
+        )
+    selection_freeze_record: dict[str, Any] | None = None
+    if selection_freeze is not None:
+        selection_freeze = selection_freeze.resolve()
+        if not selection_freeze.is_file():
+            raise ValueError(f"selection freeze does not exist: {selection_freeze}")
+        selection_freeze_record = {
+            "path": str(selection_freeze),
+            "sha256": hashlib.sha256(selection_freeze.read_bytes()).hexdigest(),
+        }
 
     exclusion_records: list[dict[str, Any]] = []
     excluded_sample_ids: set[str] = set()
@@ -104,9 +125,55 @@ def materialize(
             excluded_sample_ids.update(sample_ids)
             exclusion_records.append(
                 {
+                    "kind": "sample_ledger",
                     "name": ledger_path.name,
                     "sha256": hashlib.sha256(ledger_path.read_bytes()).hexdigest(),
                     "sample_count": len(sample_ids),
+                }
+            )
+    for directory in sorted(path.resolve() for path in exclude_result_directories):
+        if not directory.is_dir():
+            raise ValueError(f"exclusion result directory does not exist: {directory}")
+        for result_path in sorted(directory.rglob("results.jsonl")):
+            manifest_path = result_path.parent / "manifest.json"
+            matching_ids: set[str] = set()
+            for line_number, line in enumerate(
+                result_path.read_text(encoding="utf-8").splitlines(), start=1
+            ):
+                if not line.strip():
+                    continue
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError as error:
+                    raise ValueError(
+                        f"invalid JSON in {result_path}:{line_number}: {error}"
+                    ) from error
+                if row.get("task") == task_name and row.get("sample_id") is not None:
+                    matching_ids.add(str(row["sample_id"]))
+            if not matching_ids:
+                continue
+            if not manifest_path.is_file():
+                raise ValueError(
+                    f"matching observed results lack a manifest: {result_path}"
+                )
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            dataset = manifest.get("dataset", {})
+            if (
+                dataset.get("id") != spec.dataset_id
+                or dataset.get("revision") != dataset_revision
+                or dataset.get("split") != spec.split
+            ):
+                continue
+            excluded_sample_ids.update(matching_ids)
+            exclusion_records.append(
+                {
+                    "kind": "observed_results",
+                    "name": str(result_path.relative_to(directory)),
+                    "sha256": hashlib.sha256(result_path.read_bytes()).hexdigest(),
+                    "manifest_sha256": hashlib.sha256(
+                        manifest_path.read_bytes()
+                    ).hexdigest(),
+                    "sample_count": len(matching_ids),
                 }
             )
     exclusion_records.sort(key=lambda item: (str(item["name"]), str(item["sha256"])))
@@ -124,6 +191,16 @@ def materialize(
             "materialization_model_name": model_name,
             "subset_size": subset_size,
             "exclusion_manifest_sha": exclusion_manifest_sha,
+            "classification": (
+                f"exploratory_dirty_tree_{classification}"
+                if source_git_dirty
+                else classification
+            ),
+            "selection_freeze_sha256": (
+                None
+                if selection_freeze_record is None
+                else selection_freeze_record["sha256"]
+            ),
         }
         if any(recorded.get(key) != value for key, value in expected.items()):
             raise ValueError("existing sample ledger has different immutable provenance")
@@ -171,9 +248,9 @@ def materialize(
             "source_git_sha": source_git_sha,
             "source_git_dirty": source_git_dirty,
             "classification": (
-                "exploratory_dirty_tree_fresh_disjoint_heldout_quality_validation"
+                f"exploratory_dirty_tree_{classification}"
                 if source_git_dirty
-                else "fresh_disjoint_heldout_quality_validation"
+                else classification
             ),
             "canonical_eligible": not source_git_dirty,
             "selection_rule": (
@@ -183,6 +260,12 @@ def materialize(
             "excluded_unique_sample_count": len(excluded_sample_ids),
             "exclusion_manifest_sha": exclusion_manifest_sha,
             "exclusion_ledgers": exclusion_records,
+            "selection_freeze": selection_freeze_record,
+            "selection_freeze_sha256": (
+                None
+                if selection_freeze_record is None
+                else selection_freeze_record["sha256"]
+            ),
             "sample_count": len(selected_ids),
             "sample_ids": list(selected_ids),
         }
@@ -206,7 +289,17 @@ def main() -> int:
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--subset-size", type=int)
     parser.add_argument("--exclude-ledger-directory", action="append", default=[], type=Path)
+    parser.add_argument("--exclude-result-directory", action="append", default=[], type=Path)
     parser.add_argument("--allow-dirty-exploratory", action="store_true")
+    parser.add_argument(
+        "--classification",
+        choices=(
+            "fresh_disjoint_heldout_quality_validation",
+            "fresh_disjoint_label_blind_calibration",
+        ),
+        default="fresh_disjoint_heldout_quality_validation",
+    )
+    parser.add_argument("--selection-freeze", type=Path)
     args = parser.parse_args()
     result = materialize(
         task_name=args.task,
@@ -217,7 +310,12 @@ def main() -> int:
         resume=bool(args.resume),
         subset_size=args.subset_size,
         exclude_ledger_directories=tuple(args.exclude_ledger_directory),
+        exclude_result_directories=tuple(args.exclude_result_directory),
         allow_dirty_exploratory=bool(args.allow_dirty_exploratory),
+        classification=str(args.classification),
+        selection_freeze=(
+            None if args.selection_freeze is None else args.selection_freeze.resolve()
+        ),
     )
     print(json.dumps(result, sort_keys=True, separators=(",", ":")))
     return 0

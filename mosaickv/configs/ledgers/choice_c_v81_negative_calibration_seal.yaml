@@ -1,0 +1,95 @@
+schema_version: 1
+classification: sealed_negative_label_blind_calibration_result
+experiment_id: choice_c_v81_disjoint_exact_future_rerank_calibration
+immutable_result: true
+memory_gate_pass: true
+fidelity_gate_pass: false
+exact_dominant_gate_pass: true
+same_byte_decomposition_pass: true
+forecast_divergence_observed: false
+frozen_candidate_created: false
+freeze_exit_code: 2
+candidate_must_not_be_retuned_from_this_result: true
+benchmark_labels_accessed: false
+official_task_scores_accessed: false
+
+run_git_sha: db85f112e0baa9942da689cf8a7abad82ee2ee30
+source_snapshot_sha256: c6b26049dc2296ce7f09aa5fd3968474bafedbffeda8e915e9540f82eaba23ee
+run_root: /scratch/djy8hg/runs/mosaickv/choice-c-v81-disjoint-exact-future-rerank-calibration-v1
+slurm_jobs:
+  ledger: 18589918
+  calibration: 18589919
+  freeze: 18589925
+
+unchanged_gates:
+  minimum_active_reduction_fraction_vs_prompt_topk: 0.30
+  minimum_active_plus_residual_reduction_fraction_vs_prompt_topk: 0.30
+  fullkv_answer_noninferiority_margin_vs_prompt_topk: 0.05
+  maximum_prototype_logical_fraction: 0.05
+
+observed_gate_summary:
+  worst_active_plus_residual_reduction_fraction_vs_prompt_topk: 0.3455095862764884
+  best_worst_task_fullkv_answer_agreement_delta_vs_prompt_topk: -0.078125
+  selected_candidate: null
+  docvqa:
+    prompt_topk_fullkv_answer_agreement: 0.671875
+    best_candidate_fullkv_answer_agreement: 0.59375
+    delta: -0.078125
+    active_reduction_fraction_vs_prompt_topk: 0.3455095862764884
+  textvqa:
+    prompt_topk_fullkv_answer_agreement: 0.84375
+    best_candidate_fullkv_answer_agreement: 0.8125
+    delta: -0.03125
+    active_reduction_fraction_vs_prompt_topk: 0.3490203999192082
+
+same_byte_decomposition:
+  paired_packed_active_bytes_equal_on_every_sample: true
+  prototype_answer_agreement_advantage: 0.0
+  docvqa_prototype_token_agreement_advantage: 0.00927734375
+  textvqa_prototype_token_agreement_advantage: 0.0048828125
+  exact_only_removed_prototype_bytes_without_improving_answer_fidelity: true
+  prototypes_identified_as_primary_answer_gap_cause: false
+
+label_blind_design_finding:
+  stable_head_swaps_remain_retired: true
+  prompt_window_forecast_reused_prompt_side_evidence: true
+  future_rerank_candidates_per_sample: 11904
+  accepted_future_reranks_per_sample: 0
+  all_future_rerank_candidates_rejected: true
+  next_forecast_must_include_isolated_deterministic_draft_evidence: true
+  next_reranker_must_fail_closed_without_forecast_divergence: true
+
+protocol:
+  path: configs/experiments/choice_c_v81_disjoint_exact_future_rerank_calibration.yaml
+  sha256: 9d573a42005dec84120052cff85a7c275d557aab07b1572887737127cc348d9a
+
+artifacts:
+  calibration_json:
+    path: /scratch/djy8hg/runs/mosaickv/choice-c-v81-disjoint-exact-future-rerank-calibration-v1/analysis/label_blind_calibration.json
+    sha256: 2c7a7c044158840cc7f600417537f37b7dc770afd49be92c36f3d9be5e68b525
+  calibration_markdown:
+    path: /scratch/djy8hg/runs/mosaickv/choice-c-v81-disjoint-exact-future-rerank-calibration-v1/analysis/label_blind_calibration.md
+    sha256: 456f147c9cdf368a8d4a1ca722eadacd610b9f9f0afed2e76b74ec6fe1935651
+  calibration_trials:
+    path: /scratch/djy8hg/runs/mosaickv/choice-c-v81-disjoint-exact-future-rerank-calibration-v1/analysis/label_blind_calibration_trials.parquet
+    sha256: d259af0369ef1107461de5adcb9c29595b008f49b5abe813e0cd80dead48240e
+  candidate_ranking:
+    path: /scratch/djy8hg/runs/mosaickv/choice-c-v81-disjoint-exact-future-rerank-calibration-v1/analysis/label_blind_candidate_ranking.parquet
+    sha256: aeff5b4a6d341d1a4141cf4f42edf86a628eb45b97c063b883c409f88e9ce9c3
+
+calibration_ledgers:
+  docvqa:
+    path: /scratch/djy8hg/runs/mosaickv/choice-c-v81-disjoint-exact-future-rerank-calibration-v1/inputs/calibration_docvqa.json
+    sha256: bae653d01812156efca2bedd34e07b2983100d8c0c29ee2e76d74468694dad74
+    sample_count: 64
+  textvqa:
+    path: /scratch/djy8hg/runs/mosaickv/choice-c-v81-disjoint-exact-future-rerank-calibration-v1/inputs/calibration_textvqa.json
+    sha256: 3aafb1744157c8554976d129f1e365bf1ec5f659c8c02bdd86026da7653edf26
+    sample_count: 64
+
+future_protocol:
+  heldout_must_not_be_submitted: true
+  future_calibration_must_exclude_directory: /scratch/djy8hg/runs/mosaickv/choice-c-v81-disjoint-exact-future-rerank-calibration-v1/inputs
+  v81_candidate_must_not_be_revised_from_v81_outputs: true
+  gates_must_remain_unchanged: true
+  next_heldout_materialized_only_after_new_freeze: true

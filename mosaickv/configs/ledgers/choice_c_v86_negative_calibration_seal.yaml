@@ -1,0 +1,225 @@
+schema_version: 1
+classification: sealed_negative_label_blind_calibration_result
+experiment_id: choice_c_v86_disjoint_robust_fidelity_calibration
+immutable_result: true
+overall_freeze_gate_pass: false
+memory_gate_pass: true
+aggregate_fidelity_gate_pass: false
+robust_fold_fidelity_gate_pass: false
+frozen_candidate_created: false
+heldout_evaluation_authorized: false
+failure_scope:
+  - docvqa_aggregate_fullkv_answer_noninferiority_for_every_candidate
+  - every_candidate_has_at_least_one_failed_answer_fold
+  - every_candidate_has_at_least_one_failed_token_fold
+gate_thresholds_must_not_be_weakened_from_this_result: true
+v86_calibration_outputs_must_not_be_reclassified_as_heldout: true
+
+scientific_boundary:
+  benchmark_labels_accessed_for_selection: false
+  official_task_scores_accessed_for_selection: false
+  fullkv_generated_outputs_used_for_label_blind_fidelity: true
+  prompt_topk_generated_outputs_used_for_label_blind_comparison: true
+  v85_used_only_as_sample_exclusion_boundary: true
+  v85_sample_overlap: 0
+  future_heldout_materialized: false
+
+protocol_git_sha: 2004c1e71e7d8f0a4c5a7f123172f856bc2a4e0a
+source_snapshot_sha256: de58dfa94840a09f0779421dde193d22ebf659dfd1c296ee431006572b4d5098
+run_root: /scratch/djy8hg/runs/mosaickv/choice-c-v86-disjoint-robust-fidelity-calibration-v1
+slurm_jobs:
+  submitted_ledger_array: 18641057
+  submitted_calibration_array: 18641058
+  freeze_analysis: 18641059
+  allocated_ledger_tasks: [18641057, 18641060]
+  allocated_calibration_tasks: [18641058, 18641061]
+  ledger_state: completed
+  calibration_state: completed
+  freeze_state: failed_closed_no_eligible_candidate
+  freeze_exit_code: "2:0"
+  maximum_calibration_elapsed: "01:23:16"
+
+protocol:
+  path: configs/experiments/choice_c_v86_disjoint_robust_fidelity_calibration.yaml
+  sha256: 1121fc885063419ab07eb79072173b971fb46ca808bf41117ad6a8bd2471144f
+parent_negative_result_seal:
+  path: configs/ledgers/choice_c_v85_negative_heldout_seal.yaml
+  sha256: 0161ce937374033005dd8007b2b6a5e120f370386169f810b2e1d31ec54edd3d
+
+execution_provenance:
+  model_id: llava-hf/llava-1.5-7b-hf
+  model_revision: b234b804b114d9e37bb655e11cbbb5f5e971b7a9
+  model_precision: fp16
+  backend: huggingface
+  prefill_attention_implementation: eager
+  decode_attention_implementation: sdpa
+  gpu_type: NVIDIA A100-SXM4-80GB
+  gpu_count_per_worker: 1
+  seed: 17
+  deterministic_algorithms: true
+  output_length: 64
+  python: 3.11.15
+  cuda: "12.8"
+  driver: 595.71.05
+  pytorch: 2.8.0
+  transformers: 4.55.2
+  vllm: 0.10.2
+  sglang: 0.5.1.post3
+  environment_lock: mosaickv/env/common/requirements.lock
+  environment_lock_sha256: fdc56ad9edb03e8bad5cb2108322c7a12b0f33bdd5533ed596dc6b695a2db9c0
+  cache_root: /scratch/djy8hg/cache/mosaickv
+  source_git_dirty: false
+  measurement_type: method_measured
+
+execution_integrity:
+  tasks: [docvqa, textvqa]
+  samples_per_task: 128
+  arms_per_task: 5
+  measured_rows: 1280
+  completed_rows: 1280
+  failed_rows: 0
+  rows_with_errors: 0
+  rows_with_missing_required_values: 0
+  calibration_references_present: false
+  calibration_task_scores_present: false
+  v86_v85_docvqa_overlap: 0
+  v86_v85_textvqa_overlap: 0
+  docvqa_excluded_prior_unique_samples: 1140
+  textvqa_excluded_prior_unique_samples: 568
+
+common_candidate_properties:
+  effective_method: mosaickv_exact
+  tier_policy: exact_only_replacement
+  configured_active_byte_cap: 28500000
+  block_size: 4
+  prototype_fraction: 0.0
+  residual_bytes: 0
+  repair_enabled: false
+  supports_mosaickv_proto_claim: false
+  supports_mosaickv_full_claim: false
+
+observed_task_gates:
+  docvqa:
+    prompt_topk_active_kv_bytes: 40693760.0
+    candidate_active_kv_bytes: 27488256.0
+    candidate_residual_kv_bytes: 0.0
+    active_reduction_fraction_vs_prompt_topk: 0.3245093105183694
+    active_plus_residual_reduction_fraction_vs_prompt_topk: 0.3245093105183694
+    memory_gate_pass: true
+    prompt_topk_fullkv_exact_answer_agreement: 0.75
+    no_rerank_fullkv_exact_answer_agreement: 0.6640625
+    ultra_fullkv_exact_answer_agreement: 0.6875
+    conservative_fullkv_exact_answer_agreement: 0.6953125
+    no_rerank_delta_vs_prompt_topk: -0.0859375
+    ultra_delta_vs_prompt_topk: -0.0625
+    conservative_delta_vs_prompt_topk: -0.0546875
+    aggregate_fidelity_gate_pass: false
+  textvqa:
+    prompt_topk_active_kv_bytes: 40546304.0
+    candidate_active_kv_bytes: 27701248.0
+    candidate_residual_kv_bytes: 0.0
+    active_reduction_fraction_vs_prompt_topk: 0.31679967673502374
+    active_plus_residual_reduction_fraction_vs_prompt_topk: 0.31679967673502374
+    memory_gate_pass: true
+    prompt_topk_fullkv_exact_answer_agreement: 0.859375
+    no_rerank_fullkv_exact_answer_agreement: 0.8203125
+    ultra_fullkv_exact_answer_agreement: 0.8515625
+    conservative_fullkv_exact_answer_agreement: 0.8515625
+    no_rerank_delta_vs_prompt_topk: -0.0390625
+    ultra_delta_vs_prompt_topk: -0.0078125
+    conservative_delta_vs_prompt_topk: -0.0078125
+    aggregate_fidelity_gate_pass: true
+
+candidate_gate_summary:
+  hybrid4_exact_no_rerank_control_b4_28_5:
+    base_checks_passed: 15
+    base_checks_total: 16
+    answer_folds_passed: 1
+    answer_folds_total: 8
+    token_folds_passed: 5
+    token_folds_total: 8
+    all_performance_checks_passed: 21
+    all_performance_checks_total: 32
+    worst_fold_answer_delta_vs_prompt_topk: -0.125
+    worst_fold_token_delta_vs_prompt_topk: -0.19482421875
+    overall_gate_pass: false
+  hybrid4_exact_risk_ultra_b4_28_5:
+    base_checks_passed: 15
+    base_checks_total: 16
+    answer_folds_passed: 5
+    answer_folds_total: 8
+    token_folds_passed: 6
+    token_folds_total: 8
+    all_performance_checks_passed: 26
+    all_performance_checks_total: 32
+    worst_fold_answer_delta_vs_prompt_topk: -0.125
+    worst_fold_token_delta_vs_prompt_topk: -0.1875
+    overall_gate_pass: false
+  hybrid4_exact_risk_conservative_b4_28_5:
+    base_checks_passed: 15
+    base_checks_total: 16
+    answer_folds_passed: 4
+    answer_folds_total: 8
+    token_folds_passed: 7
+    token_folds_total: 8
+    all_performance_checks_passed: 26
+    all_performance_checks_total: 32
+    worst_fold_answer_delta_vs_prompt_topk: -0.125
+    worst_fold_token_delta_vs_prompt_topk: -0.2001953125
+    overall_gate_pass: false
+
+artifact_inventory:
+  algorithm: sha256_of_sorted_lines_each_formatted_as_file_sha256_two_spaces_relative_posix_path_newline
+  file_count: 1394
+  total_bytes: 627766894
+  inventory_sha256: 194331c8d650c61c29750d649933a22b7ad80b9822d02b657c11172ad0b8426c
+artifacts:
+  calibration_docvqa_ledger:
+    path: inputs/calibration_docvqa.json
+    sha256: 83d01c08520851cd060e21b97c0babc17a42e23f68c94ed3485482d303e5badd
+  calibration_textvqa_ledger:
+    path: inputs/calibration_textvqa.json
+    sha256: bb08303d4282ad9c0c392b7f5b7de02a0c73a8ceb2d7a74bcce91cd4171ca016
+  docvqa_telemetry:
+    path: telemetry/v86-docvqa-1121fc8850.json
+    sha256: 66678b66220e46252a0696ffe46f3f011ffea7ede516c0b14d9050a75f458dcd
+  textvqa_telemetry:
+    path: telemetry/v86-textvqa-1121fc8850.json
+    sha256: 7331729d1587ab6d49761a197d8141b0266fd7298480965e421a7fb19a8216a3
+  base_analysis:
+    path: analysis/label_blind_calibration.json
+    sha256: f4770e23cd6c040cf871d4d2ebf9fde15f59e22dd32ad41c7bdad79eb941e54e
+  base_report:
+    path: analysis/label_blind_calibration.md
+    sha256: 6f44e834469dde88eba4e564f69b34f101f0ad7a8f98032c50aea1cdd0e11ba5
+  trials:
+    path: analysis/label_blind_calibration_trials.parquet
+    sha256: f4446fb42f5549230276ad892bef8035004a2bafb4f604c758e7b6f442f6a0ce
+  base_ranking:
+    path: analysis/label_blind_candidate_ranking.parquet
+    sha256: 4c216841cb3f33082ba590a60b2ca8f352a2683bb4a0afc72f7878f3315664f0
+  robust_analysis:
+    path: analysis/robust_fidelity_calibration.json
+    sha256: e361369ff7b1312872c782bb8dcb41b87372a3778c9c63a737c6e61aa78943f8
+  robust_report:
+    path: analysis/robust_fidelity_calibration.md
+    sha256: a1cd11f6265998f01c16941f56a22454b6f43503c875362359b007a1724b4b3d
+  robust_ranking:
+    path: analysis/robust_fidelity_candidate_ranking.parquet
+    sha256: 5dfb28cb5808f321517197e0e23a56431170988d0ba450e63c6412ed0dfa0091
+  robust_folds:
+    path: analysis/robust_fidelity_folds.parquet
+    sha256: aa4ce578314179309b89efa027ed34b5e5e4098a32214487011e63538bea7154
+  docvqa_conservative_manifest:
+    path: v86-docvqa-trial-00-hybrid4_exact_risk_conservative_b4_28_5/manifest.json
+    sha256: 673b4adec034fb1edffda832a7e09d4f317daa40db97bf20020a0854ea382aff
+  textvqa_conservative_manifest:
+    path: v86-textvqa-trial-00-hybrid4_exact_risk_conservative_b4_28_5/manifest.json
+    sha256: 0d077174ced958a8c4278a1bfad1d031e63e1276e4d0e6310e1ca6cb119a2a99
+
+future_protocol:
+  v86_must_remain_negative: true
+  frozen_candidate_must_remain_absent: true
+  heldout_campaign_must_remain_blocked: true
+  no_v87_or_large_gpu_campaign_authorized: true
+  any_future_design_requires_new_version_and_explicit_authorization: true

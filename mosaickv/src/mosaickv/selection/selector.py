@@ -117,6 +117,15 @@ def lazy_greedy_select(
             raise ValueError("position_fill_quantum requires dense-cache position filling")
         if position_fill_quantum < 1:
             raise ValueError("position_fill_quantum must be positive")
+    # Dense position limits are hard upper bounds, but a fixed-block cache may
+    # not be able to represent every integer below that bound. Keep a private
+    # mutable copy so an impossible equality can be lowered deterministically
+    # without mutating the caller's preregistered physical caps.
+    position_limits = (
+        None
+        if position_limits is None
+        else {identity: int(limit) for identity, limit in position_limits.items()}
+    )
     graph = objective.graph
     optimization_nodes = (
         frozenset(range(len(graph.nodes)))
@@ -346,12 +355,43 @@ def lazy_greedy_select(
                 best = updates
             completion = best.get(residue)
             if completion is None or not completion[3]:
-                raise InfeasibleSelectionBudgetError(
-                    "required dense-cache fragments cannot be completed on the fixed-block "
-                    f"lattice: identity={identity}, selected_positions="
-                    f"{selected_positions[identity]}, limit={limit}, "
-                    f"quantum={position_fill_quantum}"
-                )
+                # No eligible boundary fragment can complete the advertised
+                # limit. Select the largest lower capacity reachable from the
+                # already required positions plus eligible aligned blocks.
+                # The dynamic program stores the minimum budget cost for each
+                # attainable additional position count; node IDs are included
+                # only to make equal-cost choices deterministic.
+                attainable: dict[int, tuple[int, tuple[int, ...]]] = {0: (0, ())}
+                for node_id in sorted(nodes_by_identity.get(identity, ())):
+                    if node_id in selected or node_id not in optimization_nodes:
+                        continue
+                    block = graph.nodes[node_id].block
+                    if block.position_count % position_fill_quantum != 0:
+                        continue
+                    cost = costs[node_id]
+                    aligned_updates = dict(attainable)
+                    for positions, (current_cost, identifiers) in attainable.items():
+                        candidate_positions = positions + block.position_count
+                        candidate_cost = current_cost + cost
+                        if (
+                            candidate_positions > remaining_positions
+                            or candidate_cost > remaining_budget
+                        ):
+                            continue
+                        aligned_candidate = (
+                            candidate_cost,
+                            (*identifiers, node_id),
+                        )
+                        aligned_previous = aligned_updates.get(candidate_positions)
+                        if aligned_previous is None or aligned_candidate < aligned_previous:
+                            aligned_updates[candidate_positions] = aligned_candidate
+                    attainable = aligned_updates
+                attainable_positions = max(attainable)
+                lowered_limit = selected_positions[identity] + attainable_positions
+                if lowered_limit > limit:  # pragma: no cover - DP bound invariant
+                    raise RuntimeError("dense-cache feasible capacity exceeds its hard limit")
+                position_limits[identity] = lowered_limit
+                continue
             for node_id in completion[3]:
                 block = graph.nodes[node_id].block
                 cost = costs[node_id]

@@ -1,0 +1,223 @@
+schema_version: 1
+revision: "81.1"
+experiment_id: choice_c_v81_disjoint_exact_future_rerank_calibration
+classification: preregistered_post_v80_negative_same_byte_exact_future_rerank_calibration
+report_title: V81 label-blind same-byte prototype decomposition and stable-head future reranking
+selection_rule_frozen_before_calibration: true
+execution_status: ready_after_clean_commit
+frozen_candidate_classification: frozen_v81_label_blind_exact_future_rerank_candidate
+parent_negative_result_seal: configs/ledgers/choice_c_v80_negative_calibration_seal.yaml
+
+protocol_amendment:
+  parent_result: /scratch/djy8hg/runs/mosaickv/choice-c-v80-disjoint-risk-gated-swap-calibration-v1/analysis/label_blind_calibration.json
+  parent_result_classification: sealed_negative_label_blind_calibration_result
+  parent_benchmark_labels_accessed: false
+  parent_official_task_scores_accessed: false
+  parent_fullkv_output_fidelity_used_for_design: true
+  parent_samples_forbidden_from_calibration: true
+  stable_head_swaps_retired: true
+  same_byte_decomposition_required: true
+  decomposition_control: current_minimal_prototypes_vs_exact_only_replacement
+  design_change: prompt_anchored_future_query_reranking_of_stable_exact_blocks
+  equal_size_replacements_only: true
+  mandatory_blocks_never_replaced: true
+  configured_active_byte_cap_frozen_bytes: 27500000
+  fidelity_gate_unchanged: true
+  memory_gate_unchanged: true
+  prototype_heavy_candidates_allowed: false
+
+common_cache_policy:
+  block_size: 4
+  physical_budget_block_size: 4
+  physical_budget_mandatory_policy: last_token
+
+candidate_config: configs/experiments/choice_c_v72_frozen_candidate.yaml
+model_id: llava-hf/llava-1.5-7b-hf
+model_revision: b234b804b114d9e37bb655e11cbbb5f5e971b7a9
+backend: hf_eager_prefill_sdpa_decode
+seed: 17
+output_length: 64
+warmups_per_arm: 1
+measured_repetitions_per_arm: 1
+
+tasks:
+  - task: docvqa
+    dataset_id: lmms-lab/DocVQA
+    dataset_revision: 539088ef8a8ada01ac8e2e6d4e372586748a265e
+    split: validation
+    ledger: /scratch/djy8hg/runs/mosaickv/choice-c-v81-disjoint-exact-future-rerank-calibration-v1/inputs/calibration_docvqa.json
+    selection_seed: 20271211
+    sample_count: 64
+  - task: textvqa
+    dataset_id: lmms-lab/textvqa
+    dataset_revision: 9c0699cd19768ac5ab97568f6b3cbac4c0062884
+    split: validation
+    ledger: /scratch/djy8hg/runs/mosaickv/choice-c-v81-disjoint-exact-future-rerank-calibration-v1/inputs/calibration_textvqa.json
+    selection_seed: 20271211
+    sample_count: 64
+
+candidates:
+  - id: v80_no_swap_prototype_control_b4_27_5
+    tier_policy: exact_dominant_minimal_prototype
+    target_active_reduction_fraction_vs_prompt_topk: 0.30
+    rationale: Preserve the v80 no-swap candidate as the prototype side of the same-byte decomposition.
+    overrides:
+      spatial_weight: 1.0
+      spatial_max_distance: 0.125
+      candidate_nonmandatory_fraction: 0.04
+      routed_head_fraction: 0.03125
+      prompt_anchor_fraction: 0.50
+      evidence_preservation_fraction: 0.35
+      minimum_stratum_fraction: 0.25
+      physical_capacity_fraction: 1.0
+      maximum_prototypes_per_head: 2
+      prototype_budget_planning_mode: one_pass_bounded_anchor_cover
+      active_budget_bytes: 27500000
+      evidence_reservation_mode: structural_round_robin
+      evidence_grid_rows: 4
+      evidence_grid_columns: 4
+      stable_head_visual_fraction: 0.0
+      stable_head_adaptive_visual_swaps: false
+      stable_head_minimum_text_mass_fraction: 1.0
+      stable_head_visual_gain_ratio: 1.0
+      stable_head_maximum_visual_swaps: 0
+      stable_head_swap_risk_gate: false
+      stable_head_maximum_normalized_text_loss: 1.0
+      stable_head_forecast_gain_ratio: 1.0
+      stable_head_future_query_reranking: false
+      stable_head_future_minimum_prompt_mass_fraction: 1.0
+      stable_head_future_gain_ratio: 1.0
+      stable_head_maximum_future_replacements: 0
+  - id: exact_only_prompt_control_b4_27_5
+    tier_policy: exact_only_replacement
+    target_active_reduction_fraction_vs_prompt_topk: 0.30
+    rationale: Replace prototype slots with exact blocks at the identical byte cap while preserving Prompt Top-K stable heads.
+    overrides:
+      spatial_weight: 1.0
+      spatial_max_distance: 0.125
+      candidate_nonmandatory_fraction: 0.04
+      routed_head_fraction: 0.03125
+      prompt_anchor_fraction: 0.50
+      evidence_preservation_fraction: 0.35
+      minimum_stratum_fraction: 0.25
+      physical_capacity_fraction: 1.0
+      maximum_prototypes_per_head: 0
+      prototype_budget_planning_mode: disabled_exact_only
+      active_budget_bytes: 27500000
+      evidence_reservation_mode: structural_round_robin
+      evidence_grid_rows: 4
+      evidence_grid_columns: 4
+      stable_head_visual_fraction: 0.0
+      stable_head_adaptive_visual_swaps: false
+      stable_head_minimum_text_mass_fraction: 1.0
+      stable_head_visual_gain_ratio: 1.0
+      stable_head_maximum_visual_swaps: 0
+      stable_head_swap_risk_gate: false
+      stable_head_maximum_normalized_text_loss: 1.0
+      stable_head_forecast_gain_ratio: 1.0
+      stable_head_future_query_reranking: false
+      stable_head_future_minimum_prompt_mass_fraction: 1.0
+      stable_head_future_gain_ratio: 1.0
+      stable_head_maximum_future_replacements: 0
+  - id: exact_future_prompt995_gain150_r2_b4_27_5
+    tier_policy: exact_only_replacement
+    target_active_reduction_fraction_vs_prompt_topk: 0.30
+    rationale: Permit at most two equal-size future-query replacements per stable head while preserving 99.5% of its Prompt Top-K selected prompt mass.
+    overrides:
+      spatial_weight: 1.0
+      spatial_max_distance: 0.125
+      candidate_nonmandatory_fraction: 0.04
+      routed_head_fraction: 0.03125
+      prompt_anchor_fraction: 0.50
+      evidence_preservation_fraction: 0.35
+      minimum_stratum_fraction: 0.25
+      physical_capacity_fraction: 1.0
+      maximum_prototypes_per_head: 0
+      prototype_budget_planning_mode: disabled_exact_only
+      active_budget_bytes: 27500000
+      evidence_reservation_mode: structural_round_robin
+      evidence_grid_rows: 4
+      evidence_grid_columns: 4
+      stable_head_visual_fraction: 0.0
+      stable_head_adaptive_visual_swaps: false
+      stable_head_minimum_text_mass_fraction: 1.0
+      stable_head_visual_gain_ratio: 1.0
+      stable_head_maximum_visual_swaps: 0
+      stable_head_swap_risk_gate: false
+      stable_head_maximum_normalized_text_loss: 1.0
+      stable_head_forecast_gain_ratio: 1.0
+      stable_head_future_query_reranking: true
+      stable_head_future_minimum_prompt_mass_fraction: 0.995
+      stable_head_future_gain_ratio: 1.50
+      stable_head_maximum_future_replacements: 2
+  - id: exact_future_prompt990_gain125_r4_b4_27_5
+    tier_policy: exact_only_replacement
+    target_active_reduction_fraction_vs_prompt_topk: 0.30
+    rationale: Test a preregistered wider rerank with four equal-size replacements, a 99.0% prompt anchor, and a 1.25 future-gain-to-prompt-loss threshold.
+    overrides:
+      spatial_weight: 1.0
+      spatial_max_distance: 0.125
+      candidate_nonmandatory_fraction: 0.04
+      routed_head_fraction: 0.03125
+      prompt_anchor_fraction: 0.50
+      evidence_preservation_fraction: 0.35
+      minimum_stratum_fraction: 0.25
+      physical_capacity_fraction: 1.0
+      maximum_prototypes_per_head: 0
+      prototype_budget_planning_mode: disabled_exact_only
+      active_budget_bytes: 27500000
+      evidence_reservation_mode: structural_round_robin
+      evidence_grid_rows: 4
+      evidence_grid_columns: 4
+      stable_head_visual_fraction: 0.0
+      stable_head_adaptive_visual_swaps: false
+      stable_head_minimum_text_mass_fraction: 1.0
+      stable_head_visual_gain_ratio: 1.0
+      stable_head_maximum_visual_swaps: 0
+      stable_head_swap_risk_gate: false
+      stable_head_maximum_normalized_text_loss: 1.0
+      stable_head_forecast_gain_ratio: 1.0
+      stable_head_future_query_reranking: true
+      stable_head_future_minimum_prompt_mass_fraction: 0.990
+      stable_head_future_gain_ratio: 1.25
+      stable_head_maximum_future_replacements: 4
+
+calibration_objective:
+  labels_accessed: false
+  official_task_scores_accessed: false
+  primary: maximize_worst_task_exact_answer_agreement_with_fullkv
+  secondary: maximize_macro_token_agreement_with_fullkv
+  tertiary: maximize_worst_task_active_plus_residual_reduction_vs_prompt_topk
+  deterministic_tie_break: lexicographically_smallest_candidate_id
+  minimum_active_reduction_fraction_vs_prompt_topk: 0.30
+  minimum_active_plus_residual_reduction_fraction_vs_prompt_topk: 0.30
+  fullkv_answer_noninferiority_margin_vs_prompt_topk: 0.05
+  maximum_prototype_logical_fraction: 0.05
+  require_all_rows_complete: true
+
+decomposition_analysis:
+  require_paired_samples: true
+  require_equal_configured_byte_cap: true
+  require_equal_packed_active_bytes_within_task: true
+  prototype_arm: v80_no_swap_prototype_control_b4_27_5
+  exact_only_arm: exact_only_prompt_control_b4_27_5
+  report_answer_and_token_fidelity_delta: true
+  report_prototype_and_residual_bytes: true
+  report_future_rerank_pairs: true
+
+sample_policy:
+  materialize_from_clean_commit: true
+  exclude_all_repository_ledgers: true
+  exclude_v73_heldout_ledgers: true
+  exclude_all_v74_calibration_ledgers: true
+  exclude_v75_heldout_ledgers: true
+  exclude_v76_calibration_ledgers: true
+  exclude_v78_calibration_ledgers: true
+  exclude_v79_calibration_ledgers: true
+  exclude_v80_calibration_ledgers: true
+  exclude_prior_observed_result_rows: true
+  benchmark_labels_used_for_candidate_selection: false
+  future_heldout_must_exclude_this_calibration_ledger: true
+
+output_root: /scratch/djy8hg/runs/mosaickv/choice-c-v81-disjoint-exact-future-rerank-calibration-v1
+frozen_candidate_output: /scratch/djy8hg/runs/mosaickv/choice-c-v81-disjoint-exact-future-rerank-calibration-v1/analysis/frozen_candidate.yaml

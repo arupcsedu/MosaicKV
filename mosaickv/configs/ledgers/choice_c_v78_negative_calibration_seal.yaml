@@ -1,0 +1,81 @@
+schema_version: 1
+classification: sealed_negative_label_blind_calibration_result
+experiment_id: choice_c_v78_disjoint_visual_balance_calibration
+immutable_result: true
+memory_gate_pass: true
+fidelity_gate_pass: false
+exact_dominant_gate_pass: true
+frozen_candidate_created: false
+freeze_exit_code: 2
+candidate_must_not_be_retuned_from_this_result: true
+benchmark_labels_accessed: false
+official_task_scores_accessed: false
+
+run_git_sha: 27d9caccfc07250ef9b5977e9d823f6243d7d173
+source_snapshot_sha256: e8851cc6484fa61bf620becc3aab4c0b5a7e9e622808b222e162d1adaeba3b42
+run_root: /scratch/djy8hg/runs/mosaickv/choice-c-v78-disjoint-visual-balance-calibration-v1
+slurm_jobs:
+  ledger: 18583437
+  calibration: 18583438
+  freeze: 18583439
+
+unchanged_gates:
+  minimum_active_reduction_fraction_vs_prompt_topk: 0.30
+  minimum_active_plus_residual_reduction_fraction_vs_prompt_topk: 0.30
+  fullkv_answer_noninferiority_margin_vs_prompt_topk: 0.05
+  maximum_prototype_logical_fraction: 0.05
+
+observed_gate_summary:
+  worst_active_plus_residual_reduction_fraction_vs_prompt_topk: 0.3420195439739414
+  best_worst_task_fullkv_answer_agreement_delta_vs_prompt_topk: -0.0625
+  selected_candidate: null
+  docvqa_gate_failure:
+    prompt_topk_fullkv_answer_agreement: 0.6875
+    best_candidate_fullkv_answer_agreement: 0.625
+  textvqa_gate_pass:
+    prompt_topk_fullkv_answer_agreement: 0.75
+    best_candidate_fullkv_answer_agreement: 0.8125
+
+label_blind_design_finding:
+  fixed_visual_targets_enforced: true
+  fixed_visual_targets_improved_docvqa_answer_agreement: false
+  fixed_visual_targets_reduced_token_agreement: true
+  stop_increasing_fixed_visual_quotas: true
+
+protocol:
+  path: configs/experiments/choice_c_v78_disjoint_visual_balance_calibration.yaml
+  sha256: fa851312e84b0817f19766a6a1208725b8fc16cbc85752ecbe813ad6a40f6898
+
+artifacts:
+  calibration_json:
+    path: /scratch/djy8hg/runs/mosaickv/choice-c-v78-disjoint-visual-balance-calibration-v1/analysis/label_blind_calibration.json
+    sha256: 8582866f4fef190183c3ab9853bf2084835948aef1491cac9d78a6d58ede4702
+  calibration_markdown:
+    path: /scratch/djy8hg/runs/mosaickv/choice-c-v78-disjoint-visual-balance-calibration-v1/analysis/label_blind_calibration.md
+    sha256: 089547c9cef7e766c6aa6a4ec0feab7c39ba3c23e4f2178f2147b1c142559d57
+  calibration_trials:
+    path: /scratch/djy8hg/runs/mosaickv/choice-c-v78-disjoint-visual-balance-calibration-v1/analysis/label_blind_calibration_trials.parquet
+    sha256: 4f214b157edb79f5e38e63aad81e7377e0ad88c8c30eaf94212cff46b8082f94
+  candidate_ranking:
+    path: /scratch/djy8hg/runs/mosaickv/choice-c-v78-disjoint-visual-balance-calibration-v1/analysis/label_blind_candidate_ranking.parquet
+    sha256: f2862754d9c79ea3231f04bab28f636a385bdd7d90f130ff8d960f24c2ac0ac1
+
+calibration_ledgers:
+  docvqa:
+    path: /scratch/djy8hg/runs/mosaickv/choice-c-v78-disjoint-visual-balance-calibration-v1/inputs/calibration_docvqa.json
+    sha256: 4d2d68122ebc6af84e68e479c04cf7983f3e90bc0800b6c31fe767bff61debec
+    sample_count: 16
+  textvqa:
+    path: /scratch/djy8hg/runs/mosaickv/choice-c-v78-disjoint-visual-balance-calibration-v1/inputs/calibration_textvqa.json
+    sha256: 7091a5db325bf42759c0d91df334399e88be7f91f28086dffe18094703a223db
+    sample_count: 16
+
+future_protocol:
+  v77_remains_blocked: true
+  heldout_must_not_be_submitted: true
+  future_calibration_must_exclude_directory: /scratch/djy8hg/runs/mosaickv/choice-c-v78-disjoint-visual-balance-calibration-v1/inputs
+  fixed_visual_quota_must_not_be_increased: true
+  candidate_version_must_change: true
+  gates_must_remain_unchanged: true
+  next_calibration_labels_accessed: false
+  next_heldout_materialized_only_after_new_freeze: true

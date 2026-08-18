@@ -185,7 +185,7 @@ class IncrementalObjectiveState:
         modality_delta = (
             0.0 if modality in self._selected_modalities else 1.0 / len(objective._modalities)
         )
-        return (
+        return float(
             objective.utilities.for_node(candidate).local_utility
             - objective.config.lambda_g * facility_delta
             - objective.config.lambda_m * modality_delta

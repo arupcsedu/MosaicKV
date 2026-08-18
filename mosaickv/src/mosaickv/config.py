@@ -783,9 +783,7 @@ class GraphConfig:
         if not 0 <= self.uncertain_head_threshold <= 1:
             raise ConfigurationError("graph.uncertain_head_threshold must be in [0, 1]")
         if not 0 < self.candidate_nonmandatory_fraction <= 1:
-            raise ConfigurationError(
-                "graph.candidate_nonmandatory_fraction must be in (0, 1]"
-            )
+            raise ConfigurationError("graph.candidate_nonmandatory_fraction must be in (0, 1]")
         if self.uncertain_head_only and self.candidate_graph_mode != "shortlist_rerank":
             raise ConfigurationError(
                 "graph.uncertain_head_only requires candidate_graph_mode='shortlist_rerank'"
@@ -1002,9 +1000,47 @@ class SelectionConfig:
     exhaustive_max_nodes: int = 20
     prompt_anchor_fraction: float = 0.0
     evidence_preservation_fraction: float = 0.0
+    evidence_reservation_mode: str = "structural_round_robin"
+    evidence_grid_rows: int = 4
+    evidence_grid_columns: int = 4
     coverage_correction_rounds: int = 2
     stable_head_prompt_routing: bool = False
     stable_head_uniform_fill: bool = False
+    stable_head_visual_fraction: float = 0.0
+    stable_head_adaptive_visual_swaps: bool = False
+    stable_head_minimum_text_mass_fraction: float = 1.0
+    stable_head_visual_gain_ratio: float = 1.0
+    stable_head_maximum_visual_swaps: int = 0
+    stable_head_swap_risk_gate: bool = False
+    stable_head_maximum_normalized_text_loss: float = 1.0
+    stable_head_forecast_gain_ratio: float = 1.0
+    stable_head_future_query_reranking: bool = False
+    stable_head_future_minimum_prompt_mass_fraction: float = 1.0
+    stable_head_future_gain_ratio: float = 1.0
+    stable_head_maximum_future_replacements: int = 0
+    stable_head_future_divergence_fail_closed: bool = False
+    stable_head_future_minimum_prompt_forecast_tv: float = 0.0
+    stable_head_future_risk_gate: bool = False
+    stable_head_future_maximum_normalized_prompt_loss: float = 1.0
+    stable_head_future_minimum_normalized_gain: float = 0.0
+    # Preserve evidence needed by individual prompt query positions.  The
+    # ordinary stable-head score averages the prompt window, which can hide a
+    # block that is decisive for only one OCR/question token.  This optional
+    # reranker exchanges equal-size, same-modality blocks while retaining the
+    # configured fraction of the original scalar Prompt Top-K mass.
+    stable_head_query_coverage_reranking: bool = False
+    stable_head_query_coverage_minimum_prompt_mass_fraction: float = 1.0
+    stable_head_query_coverage_maximum_replacements: int = 0
+    stable_head_query_coverage_minimum_normalized_gain: float = 0.0
+    # V88 integrates query diversity into the initial feasible-capacity
+    # selection.  A bounded fraction of each stable head's exact positions is
+    # reserved by facility-style prompt-query coverage before the remaining
+    # positions are filled by scalar Prompt Top-K mass.  This is deliberately
+    # separate from the post-selection V87 swap path.
+    stable_head_query_coverage_initial_selection: bool = False
+    stable_head_query_coverage_initial_fraction: float = 0.0
+    stable_head_query_coverage_initial_prompt_weight: float = 1.0
+    stable_head_query_coverage_initial_minimum_prompt_mass_fraction: float = 1.0
     routed_head_only_planning: bool = False
     # MosaicKV may deliberately materialize less than the shared comparison
     # budget when evaluating a quality-matched memory point. The shared hard
@@ -1018,9 +1054,7 @@ class SelectionConfig:
                 "selection.algorithm must be 'lazy_greedy' or 'vectorized_coverage'"
             )
         if self.coverage_correction_rounds < 0 or self.coverage_correction_rounds > 8:
-            raise ConfigurationError(
-                "selection.coverage_correction_rounds must be between 0 and 8"
-            )
+            raise ConfigurationError("selection.coverage_correction_rounds must be between 0 and 8")
         for name in ("lambda_g", "lambda_m"):
             value = getattr(self, name)
             if not math.isfinite(value):
@@ -1036,9 +1070,279 @@ class SelectionConfig:
             raise ConfigurationError(
                 "selection prompt/evidence reservation fractions cannot sum above 1"
             )
+        if self.evidence_reservation_mode not in {
+            "structural_round_robin",
+            "spatial_stratified_prompt",
+        }:
+            raise ConfigurationError(
+                "selection.evidence_reservation_mode must be "
+                "'structural_round_robin' or 'spatial_stratified_prompt'"
+            )
+        for name in ("evidence_grid_rows", "evidence_grid_columns"):
+            value = getattr(self, name)
+            if value < 1 or value > 32:
+                raise ConfigurationError(f"selection.{name} must be between 1 and 32")
         if self.stable_head_uniform_fill and not self.stable_head_prompt_routing:
             raise ConfigurationError(
                 "selection.stable_head_uniform_fill requires stable_head_prompt_routing"
+            )
+        if (
+            not math.isfinite(self.stable_head_visual_fraction)
+            or not 0 <= self.stable_head_visual_fraction <= 1
+        ):
+            raise ConfigurationError(
+                "selection.stable_head_visual_fraction must be finite and in [0, 1]"
+            )
+        if self.stable_head_visual_fraction and not self.stable_head_prompt_routing:
+            raise ConfigurationError(
+                "selection.stable_head_visual_fraction requires stable_head_prompt_routing"
+            )
+        if not 0 <= self.stable_head_minimum_text_mass_fraction <= 1:
+            raise ConfigurationError(
+                "selection.stable_head_minimum_text_mass_fraction must be in [0, 1]"
+            )
+        if (
+            not math.isfinite(self.stable_head_visual_gain_ratio)
+            or self.stable_head_visual_gain_ratio <= 0
+        ):
+            raise ConfigurationError(
+                "selection.stable_head_visual_gain_ratio must be finite and positive"
+            )
+        if self.stable_head_maximum_visual_swaps < 0:
+            raise ConfigurationError(
+                "selection.stable_head_maximum_visual_swaps must be nonnegative"
+            )
+        if (
+            not math.isfinite(self.stable_head_maximum_normalized_text_loss)
+            or not 0 < self.stable_head_maximum_normalized_text_loss <= 1
+        ):
+            raise ConfigurationError(
+                "selection.stable_head_maximum_normalized_text_loss must be finite and in (0, 1]"
+            )
+        if (
+            not math.isfinite(self.stable_head_forecast_gain_ratio)
+            or self.stable_head_forecast_gain_ratio <= 0
+        ):
+            raise ConfigurationError(
+                "selection.stable_head_forecast_gain_ratio must be finite and positive"
+            )
+        if self.stable_head_adaptive_visual_swaps:
+            if not self.stable_head_prompt_routing:
+                raise ConfigurationError(
+                    "selection.stable_head_adaptive_visual_swaps requires "
+                    "stable_head_prompt_routing"
+                )
+            if self.stable_head_visual_fraction:
+                raise ConfigurationError(
+                    "adaptive stable-head visual swaps cannot use a fixed visual fraction"
+                )
+            if self.stable_head_maximum_visual_swaps < 1:
+                raise ConfigurationError(
+                    "adaptive stable-head visual swaps require at least one permitted swap"
+                )
+            if self.stable_head_swap_risk_gate and (
+                self.stable_head_maximum_normalized_text_loss >= 1.0
+                and self.stable_head_forecast_gain_ratio <= 1.0
+            ):
+                raise ConfigurationError(
+                    "stable-head swap risk gating must tighten normalized text loss, "
+                    "forecast gain, or both"
+                )
+        elif (
+            self.stable_head_minimum_text_mass_fraction != 1.0
+            or self.stable_head_visual_gain_ratio != 1.0
+            or self.stable_head_maximum_visual_swaps != 0
+            or self.stable_head_swap_risk_gate
+            or self.stable_head_maximum_normalized_text_loss != 1.0
+            or self.stable_head_forecast_gain_ratio != 1.0
+        ):
+            raise ConfigurationError(
+                "stable-head adaptive swap controls require stable_head_adaptive_visual_swaps"
+            )
+        if not 0 <= self.stable_head_future_minimum_prompt_mass_fraction <= 1:
+            raise ConfigurationError(
+                "selection.stable_head_future_minimum_prompt_mass_fraction must be in [0, 1]"
+            )
+        if (
+            not math.isfinite(self.stable_head_future_gain_ratio)
+            or self.stable_head_future_gain_ratio <= 0
+        ):
+            raise ConfigurationError(
+                "selection.stable_head_future_gain_ratio must be finite and positive"
+            )
+        if self.stable_head_maximum_future_replacements < 0:
+            raise ConfigurationError(
+                "selection.stable_head_maximum_future_replacements must be nonnegative"
+            )
+        if (
+            not math.isfinite(self.stable_head_future_minimum_prompt_forecast_tv)
+            or not 0 <= self.stable_head_future_minimum_prompt_forecast_tv <= 1
+        ):
+            raise ConfigurationError(
+                "selection.stable_head_future_minimum_prompt_forecast_tv must be in [0, 1]"
+            )
+        if (
+            not math.isfinite(self.stable_head_future_maximum_normalized_prompt_loss)
+            or not 0 <= self.stable_head_future_maximum_normalized_prompt_loss <= 1
+        ):
+            raise ConfigurationError(
+                "selection.stable_head_future_maximum_normalized_prompt_loss must be in [0, 1]"
+            )
+        if (
+            not math.isfinite(self.stable_head_future_minimum_normalized_gain)
+            or not 0 <= self.stable_head_future_minimum_normalized_gain <= 1
+        ):
+            raise ConfigurationError(
+                "selection.stable_head_future_minimum_normalized_gain must be in [0, 1]"
+            )
+        if self.stable_head_future_query_reranking:
+            if not self.stable_head_prompt_routing:
+                raise ConfigurationError(
+                    "selection.stable_head_future_query_reranking requires "
+                    "stable_head_prompt_routing"
+                )
+            if self.stable_head_visual_fraction or self.stable_head_adaptive_visual_swaps:
+                raise ConfigurationError(
+                    "future-query reranking cannot be combined with stable-head visual routing"
+                )
+            if self.stable_head_maximum_future_replacements < 1:
+                raise ConfigurationError(
+                    "future-query reranking requires at least one permitted replacement"
+                )
+        elif (
+            self.stable_head_future_minimum_prompt_mass_fraction != 1.0
+            or self.stable_head_future_gain_ratio != 1.0
+            or self.stable_head_maximum_future_replacements != 0
+        ):
+            raise ConfigurationError(
+                "stable-head future-query controls require stable_head_future_query_reranking"
+            )
+        if self.stable_head_future_divergence_fail_closed:
+            if not self.stable_head_future_query_reranking:
+                raise ConfigurationError(
+                    "selection.stable_head_future_divergence_fail_closed requires "
+                    "stable_head_future_query_reranking"
+                )
+            if self.stable_head_future_minimum_prompt_forecast_tv <= 0:
+                raise ConfigurationError(
+                    "fail-closed future reranking requires a positive minimum prompt/forecast TV"
+                )
+        elif self.stable_head_future_minimum_prompt_forecast_tv != 0.0:
+            raise ConfigurationError(
+                "minimum prompt/forecast TV requires stable_head_future_divergence_fail_closed"
+            )
+        if self.stable_head_future_risk_gate:
+            if not self.stable_head_future_query_reranking:
+                raise ConfigurationError(
+                    "selection.stable_head_future_risk_gate requires "
+                    "stable_head_future_query_reranking"
+                )
+            if (
+                self.stable_head_future_maximum_normalized_prompt_loss >= 1.0
+                and self.stable_head_future_minimum_normalized_gain <= 0.0
+            ):
+                raise ConfigurationError(
+                    "future risk gating must tighten prompt loss, future gain, or both"
+                )
+        elif (
+            self.stable_head_future_maximum_normalized_prompt_loss != 1.0
+            or self.stable_head_future_minimum_normalized_gain != 0.0
+        ):
+            raise ConfigurationError(
+                "future per-swap risk controls require stable_head_future_risk_gate"
+            )
+        if not 0 <= self.stable_head_query_coverage_minimum_prompt_mass_fraction <= 1:
+            raise ConfigurationError(
+                "selection.stable_head_query_coverage_minimum_prompt_mass_fraction "
+                "must be in [0, 1]"
+            )
+        if self.stable_head_query_coverage_maximum_replacements < 0:
+            raise ConfigurationError(
+                "selection.stable_head_query_coverage_maximum_replacements must be nonnegative"
+            )
+        if (
+            not math.isfinite(self.stable_head_query_coverage_minimum_normalized_gain)
+            or not 0 <= self.stable_head_query_coverage_minimum_normalized_gain <= 1
+        ):
+            raise ConfigurationError(
+                "selection.stable_head_query_coverage_minimum_normalized_gain "
+                "must be finite and in [0, 1]"
+            )
+        if self.stable_head_query_coverage_reranking:
+            if not self.stable_head_prompt_routing:
+                raise ConfigurationError(
+                    "selection.stable_head_query_coverage_reranking requires "
+                    "stable_head_prompt_routing"
+                )
+            if self.stable_head_adaptive_visual_swaps or self.stable_head_future_query_reranking:
+                raise ConfigurationError(
+                    "prompt-query coverage reranking cannot be combined with stable-head "
+                    "adaptive visual swaps or future-query reranking"
+                )
+            if self.stable_head_query_coverage_maximum_replacements < 1:
+                raise ConfigurationError(
+                    "prompt-query coverage reranking requires at least one permitted replacement"
+                )
+            if self.stable_head_query_coverage_minimum_normalized_gain <= 0:
+                raise ConfigurationError(
+                    "prompt-query coverage reranking requires a positive minimum normalized gain"
+                )
+        elif (
+            self.stable_head_query_coverage_minimum_prompt_mass_fraction != 1.0
+            or self.stable_head_query_coverage_maximum_replacements != 0
+            or self.stable_head_query_coverage_minimum_normalized_gain != 0.0
+        ):
+            raise ConfigurationError(
+                "stable-head prompt-query coverage controls require "
+                "stable_head_query_coverage_reranking"
+            )
+        if (
+            not math.isfinite(self.stable_head_query_coverage_initial_fraction)
+            or not 0 <= self.stable_head_query_coverage_initial_fraction <= 1
+        ):
+            raise ConfigurationError(
+                "selection.stable_head_query_coverage_initial_fraction must be finite and in [0, 1]"
+            )
+        if (
+            not math.isfinite(self.stable_head_query_coverage_initial_prompt_weight)
+            or self.stable_head_query_coverage_initial_prompt_weight < 0
+        ):
+            raise ConfigurationError(
+                "selection.stable_head_query_coverage_initial_prompt_weight "
+                "must be finite and nonnegative"
+            )
+        if not 0 <= self.stable_head_query_coverage_initial_minimum_prompt_mass_fraction <= 1:
+            raise ConfigurationError(
+                "selection.stable_head_query_coverage_initial_minimum_prompt_mass_fraction "
+                "must be in [0, 1]"
+            )
+        if self.stable_head_query_coverage_initial_selection:
+            if not self.stable_head_prompt_routing:
+                raise ConfigurationError(
+                    "selection.stable_head_query_coverage_initial_selection requires "
+                    "stable_head_prompt_routing"
+                )
+            if (
+                self.stable_head_query_coverage_reranking
+                or self.stable_head_adaptive_visual_swaps
+                or self.stable_head_future_query_reranking
+            ):
+                raise ConfigurationError(
+                    "initial prompt-query coverage selection cannot be combined with "
+                    "post-selection reranking or stable-head visual/future swaps"
+                )
+            if self.stable_head_query_coverage_initial_fraction <= 0:
+                raise ConfigurationError(
+                    "initial prompt-query coverage selection requires a positive fraction"
+                )
+        elif (
+            self.stable_head_query_coverage_initial_fraction != 0.0
+            or self.stable_head_query_coverage_initial_prompt_weight != 1.0
+            or self.stable_head_query_coverage_initial_minimum_prompt_mass_fraction != 1.0
+        ):
+            raise ConfigurationError(
+                "initial prompt-query coverage controls require "
+                "stable_head_query_coverage_initial_selection"
             )
         if self.routed_head_only_planning and not self.stable_head_prompt_routing:
             raise ConfigurationError(
@@ -1065,9 +1369,37 @@ class SelectionConfig:
             "exhaustive_max_nodes",
             "prompt_anchor_fraction",
             "evidence_preservation_fraction",
+            "evidence_reservation_mode",
+            "evidence_grid_rows",
+            "evidence_grid_columns",
             "coverage_correction_rounds",
             "stable_head_prompt_routing",
             "stable_head_uniform_fill",
+            "stable_head_visual_fraction",
+            "stable_head_adaptive_visual_swaps",
+            "stable_head_minimum_text_mass_fraction",
+            "stable_head_visual_gain_ratio",
+            "stable_head_maximum_visual_swaps",
+            "stable_head_swap_risk_gate",
+            "stable_head_maximum_normalized_text_loss",
+            "stable_head_forecast_gain_ratio",
+            "stable_head_future_query_reranking",
+            "stable_head_future_minimum_prompt_mass_fraction",
+            "stable_head_future_gain_ratio",
+            "stable_head_maximum_future_replacements",
+            "stable_head_future_divergence_fail_closed",
+            "stable_head_future_minimum_prompt_forecast_tv",
+            "stable_head_future_risk_gate",
+            "stable_head_future_maximum_normalized_prompt_loss",
+            "stable_head_future_minimum_normalized_gain",
+            "stable_head_query_coverage_reranking",
+            "stable_head_query_coverage_minimum_prompt_mass_fraction",
+            "stable_head_query_coverage_maximum_replacements",
+            "stable_head_query_coverage_minimum_normalized_gain",
+            "stable_head_query_coverage_initial_selection",
+            "stable_head_query_coverage_initial_fraction",
+            "stable_head_query_coverage_initial_prompt_weight",
+            "stable_head_query_coverage_initial_minimum_prompt_mass_fraction",
             "routed_head_only_planning",
             "physical_capacity_fraction",
         }
@@ -1084,6 +1416,14 @@ class SelectionConfig:
             evidence_preservation_fraction=_float(
                 data, "evidence_preservation_fraction", 0.0, "selection"
             ),
+            evidence_reservation_mode=_optional_str(
+                data,
+                "evidence_reservation_mode",
+                "structural_round_robin",
+                "selection",
+            ),
+            evidence_grid_rows=_int(data, "evidence_grid_rows", 4, "selection"),
+            evidence_grid_columns=_int(data, "evidence_grid_columns", 4, "selection"),
             coverage_correction_rounds=_int(
                 data,
                 "coverage_correction_rounds",
@@ -1093,12 +1433,158 @@ class SelectionConfig:
             stable_head_prompt_routing=_bool(
                 data, "stable_head_prompt_routing", False, "selection"
             ),
-            stable_head_uniform_fill=_bool(
-                data, "stable_head_uniform_fill", False, "selection"
+            stable_head_uniform_fill=_bool(data, "stable_head_uniform_fill", False, "selection"),
+            stable_head_visual_fraction=_float(
+                data,
+                "stable_head_visual_fraction",
+                0.0,
+                "selection",
             ),
-            routed_head_only_planning=_bool(
-                data, "routed_head_only_planning", False, "selection"
+            stable_head_adaptive_visual_swaps=_bool(
+                data,
+                "stable_head_adaptive_visual_swaps",
+                False,
+                "selection",
             ),
+            stable_head_minimum_text_mass_fraction=_float(
+                data,
+                "stable_head_minimum_text_mass_fraction",
+                1.0,
+                "selection",
+            ),
+            stable_head_visual_gain_ratio=_float(
+                data,
+                "stable_head_visual_gain_ratio",
+                1.0,
+                "selection",
+            ),
+            stable_head_maximum_visual_swaps=_int(
+                data,
+                "stable_head_maximum_visual_swaps",
+                0,
+                "selection",
+            ),
+            stable_head_swap_risk_gate=_bool(
+                data,
+                "stable_head_swap_risk_gate",
+                False,
+                "selection",
+            ),
+            stable_head_maximum_normalized_text_loss=_float(
+                data,
+                "stable_head_maximum_normalized_text_loss",
+                1.0,
+                "selection",
+            ),
+            stable_head_forecast_gain_ratio=_float(
+                data,
+                "stable_head_forecast_gain_ratio",
+                1.0,
+                "selection",
+            ),
+            stable_head_future_query_reranking=_bool(
+                data,
+                "stable_head_future_query_reranking",
+                False,
+                "selection",
+            ),
+            stable_head_future_minimum_prompt_mass_fraction=_float(
+                data,
+                "stable_head_future_minimum_prompt_mass_fraction",
+                1.0,
+                "selection",
+            ),
+            stable_head_future_gain_ratio=_float(
+                data,
+                "stable_head_future_gain_ratio",
+                1.0,
+                "selection",
+            ),
+            stable_head_maximum_future_replacements=_int(
+                data,
+                "stable_head_maximum_future_replacements",
+                0,
+                "selection",
+            ),
+            stable_head_future_divergence_fail_closed=_bool(
+                data,
+                "stable_head_future_divergence_fail_closed",
+                False,
+                "selection",
+            ),
+            stable_head_future_minimum_prompt_forecast_tv=_float(
+                data,
+                "stable_head_future_minimum_prompt_forecast_tv",
+                0.0,
+                "selection",
+            ),
+            stable_head_future_risk_gate=_bool(
+                data,
+                "stable_head_future_risk_gate",
+                False,
+                "selection",
+            ),
+            stable_head_future_maximum_normalized_prompt_loss=_float(
+                data,
+                "stable_head_future_maximum_normalized_prompt_loss",
+                1.0,
+                "selection",
+            ),
+            stable_head_future_minimum_normalized_gain=_float(
+                data,
+                "stable_head_future_minimum_normalized_gain",
+                0.0,
+                "selection",
+            ),
+            stable_head_query_coverage_reranking=_bool(
+                data,
+                "stable_head_query_coverage_reranking",
+                False,
+                "selection",
+            ),
+            stable_head_query_coverage_minimum_prompt_mass_fraction=_float(
+                data,
+                "stable_head_query_coverage_minimum_prompt_mass_fraction",
+                1.0,
+                "selection",
+            ),
+            stable_head_query_coverage_maximum_replacements=_int(
+                data,
+                "stable_head_query_coverage_maximum_replacements",
+                0,
+                "selection",
+            ),
+            stable_head_query_coverage_minimum_normalized_gain=_float(
+                data,
+                "stable_head_query_coverage_minimum_normalized_gain",
+                0.0,
+                "selection",
+            ),
+            stable_head_query_coverage_initial_selection=_bool(
+                data,
+                "stable_head_query_coverage_initial_selection",
+                False,
+                "selection",
+            ),
+            stable_head_query_coverage_initial_fraction=_float(
+                data,
+                "stable_head_query_coverage_initial_fraction",
+                0.0,
+                "selection",
+            ),
+            stable_head_query_coverage_initial_prompt_weight=_float(
+                data,
+                "stable_head_query_coverage_initial_prompt_weight",
+                1.0,
+                "selection",
+            ),
+            stable_head_query_coverage_initial_minimum_prompt_mass_fraction=_float(
+                data,
+                "stable_head_query_coverage_initial_minimum_prompt_mass_fraction",
+                1.0,
+                "selection",
+            ),
+            routed_head_only_planning=_bool(data, "routed_head_only_planning", False, "selection"),
             physical_capacity_fraction=_float(
                 data,
                 "physical_capacity_fraction",
@@ -1201,14 +1687,16 @@ class PrototypeConfig:
             )
         if self.budget_planning_mode not in {
             "one_pass_anchor_cover",
+            "one_pass_bounded_anchor_cover",
             "bounded_search_reference",
         }:
             raise ConfigurationError(
-                "prototypes.budget_planning_mode must be 'one_pass_anchor_cover' or "
-                "'bounded_search_reference'"
+                "prototypes.budget_planning_mode must be 'one_pass_anchor_cover', "
+                "'one_pass_bounded_anchor_cover', or 'bounded_search_reference'"
             )
         if (
-            self.pooling_mode in {
+            self.pooling_mode
+            in {
                 "forecast_attention_token",
                 "exact_medoid_key_forecast_value",
             }
@@ -1218,11 +1706,10 @@ class PrototypeConfig:
                 "forecast-attention token pooling requires the forecast-attention "
                 "entropy bias basis"
             )
-        if (
-            self.attention_bias_basis == "forecast_attention_entropy"
-            and self.pooling_mode
-            not in {"forecast_attention_token", "exact_medoid_key_forecast_value"}
-        ):
+        if self.attention_bias_basis == "forecast_attention_entropy" and self.pooling_mode not in {
+            "forecast_attention_token",
+            "exact_medoid_key_forecast_value",
+        }:
             raise ConfigurationError(
                 "forecast-attention entropy bias requires forecast-attention token pooling"
             )
@@ -1259,8 +1746,7 @@ class PrototypeConfig:
             parts = route.split(":")
             if len(parts) != 2:
                 raise ConfigurationError(
-                    "prototypes.selection_only_head_routes entries must use "
-                    "'<layer>:<kv_head>'"
+                    "prototypes.selection_only_head_routes entries must use '<layer>:<kv_head>'"
                 )
             try:
                 identity = int(parts[0]), int(parts[1])
@@ -1270,8 +1756,7 @@ class PrototypeConfig:
                 ) from error
             if min(identity) < 0 or identity in selection_only_identities:
                 raise ConfigurationError(
-                    "prototypes.selection_only_head_routes require unique nonnegative "
-                    "identities"
+                    "prototypes.selection_only_head_routes require unique nonnegative identities"
                 )
             selection_only_identities.add(identity)
         overlap = exact_identities & selection_only_identities
@@ -1280,20 +1765,12 @@ class PrototypeConfig:
                 "prototype exact and selection-only head routes must be disjoint: "
                 f"{sorted(overlap)}"
             )
-        if self.maximum_prototypes_per_head is not None and (
-            self.maximum_prototypes_per_head < 1
-        ):
-            raise ConfigurationError(
-                "prototypes.maximum_prototypes_per_head must be >= 1 or null"
-            )
+        if self.maximum_prototypes_per_head is not None and (self.maximum_prototypes_per_head < 1):
+            raise ConfigurationError("prototypes.maximum_prototypes_per_head must be >= 1 or null")
         if not 0 < self.uncertain_head_fraction <= 1:
-            raise ConfigurationError(
-                "prototypes.uncertain_head_fraction must be in (0, 1]"
-            )
+            raise ConfigurationError("prototypes.uncertain_head_fraction must be in (0, 1]")
         if not 0 <= self.uncertain_head_threshold <= 1:
-            raise ConfigurationError(
-                "prototypes.uncertain_head_threshold must be in [0, 1]"
-            )
+            raise ConfigurationError("prototypes.uncertain_head_threshold must be in [0, 1]")
         valid_modalities = {"text", "image", "video"}
         if not self.source_modalities or any(
             modality not in valid_modalities for modality in self.source_modalities
@@ -1966,15 +2443,11 @@ class RepairConfig:
                 if data.get("draft_kl_threshold") is None
                 else _float(data, "draft_kl_threshold", 0.0, "repair")
             ),
-            counterfactual_draft_steps=_int(
-                data, "counterfactual_draft_steps", 0, "repair"
-            ),
+            counterfactual_draft_steps=_int(data, "counterfactual_draft_steps", 0, "repair"),
             draft_require_token_mismatch=_bool(
                 data, "draft_require_token_mismatch", False, "repair"
             ),
-            counterfactual_route_heads=_bool(
-                data, "counterfactual_route_heads", False, "repair"
-            ),
+            counterfactual_route_heads=_bool(data, "counterfactual_route_heads", False, "repair"),
             normalize_prototype_risk=_bool(data, "normalize_prototype_risk", False, "repair"),
             decision_high_risk_threshold=(
                 None
@@ -2040,10 +2513,7 @@ class RunConfig:
         if self.repair.draft_kl_threshold is not None and (
             not self.method.is_mosaickv
             or not self.forecasting.enabled
-            or (
-                self.forecasting.draft_steps < 1
-                and self.repair.counterfactual_draft_steps < 1
-            )
+            or (self.forecasting.draft_steps < 1 and self.repair.counterfactual_draft_steps < 1)
         ):
             raise ConfigurationError(
                 "repair.draft_kl_threshold requires either forecasting.draft_steps >= 1 "
@@ -2056,6 +2526,14 @@ class RunConfig:
         ):
             raise ConfigurationError(
                 "graph prompt shortlisting requires forecasting.prompt_window >= 1"
+            )
+        if (
+            self.selection.stable_head_query_coverage_reranking
+            or self.selection.stable_head_query_coverage_initial_selection
+        ) and (not self.method.is_mosaickv or self.forecasting.prompt_window < 1):
+            raise ConfigurationError(
+                "stable-head prompt-query coverage selection requires a MosaicKV method "
+                "and forecasting.prompt_window >= 1"
             )
         if self.selection.routed_head_only_planning and (
             not self.method.is_mosaickv

@@ -1,0 +1,204 @@
+schema_version: 1
+revision: "86.1"
+experiment_id: choice_c_v86_disjoint_robust_fidelity_calibration
+classification: preregistered_post_v85_seal_fresh_disjoint_label_blind_calibration
+report_title: V86 disjoint robust-fidelity calibration
+selection_rule_frozen_before_calibration: true
+execution_status: designed_unsubmitted_requires_clean_commit
+frozen_candidate_classification: frozen_v86_label_blind_robust_fidelity_candidate
+parent_negative_result_seal: configs/ledgers/choice_c_v85_negative_heldout_seal.yaml
+
+scientific_boundary:
+  v85_used_only_as_exclusion_boundary: true
+  v85_answers_used_for_design: false
+  v85_references_used_for_design: false
+  v85_task_scores_used_for_design: false
+  v85_failure_identities_used_for_design: false
+  v85_generated_token_ids_used_for_design: false
+  v85_per_sample_telemetry_used_for_design: false
+  v85_aggregate_outcomes_used_for_candidate_tuning: false
+  design_evidence_source: pre_v85_v84_label_blind_aggregate_calibration_telemetry_only
+  calibration_labels_accessed: false
+  official_task_scores_accessed: false
+  future_heldout_materialized_before_freeze: false
+
+protocol_amendment:
+  prior_candidate_retuned_from_v85: false
+  configured_active_byte_cap_frozen_bytes: 28500000
+  cap_reason_frozen_before_calibration: allocate_pre_v85_observed_memory_headroom_while_preserving_30_percent_gate
+  block_size_frozen_tokens: 4
+  exact_only_candidate_family: true
+  prototype_heavy_candidates_allowed: false
+  residual_storage_allowed: false
+  repair_allowed: false
+  original_prefill_reused: true
+  draft_cache_must_be_isolated: true
+  deterministic_greedy_draft: true
+  equal_size_replacements_only: true
+  mandatory_blocks_never_replaced: true
+  forecast_divergence_fail_closed: true
+  per_swap_risk_gate_fail_closed: true
+  fidelity_gate_unchanged: true
+  memory_gate_unchanged: true
+  robust_fold_gate_added_without_weakening_existing_gates: true
+
+common_cache_policy:
+  block_size: 4
+  physical_budget_block_size: 4
+  physical_budget_mandatory_policy: last_token
+
+candidate_config: configs/experiments/choice_c_v72_frozen_candidate.yaml
+model_id: llava-hf/llava-1.5-7b-hf
+model_revision: b234b804b114d9e37bb655e11cbbb5f5e971b7a9
+backend: hf_eager_prefill_sdpa_decode
+seed: 17
+output_length: 64
+warmups_per_arm: 1
+measured_repetitions_per_arm: 1
+
+tasks:
+  - task: docvqa
+    dataset_id: lmms-lab/DocVQA
+    dataset_revision: 539088ef8a8ada01ac8e2e6d4e372586748a265e
+    split: validation
+    ledger: /scratch/djy8hg/runs/mosaickv/choice-c-v86-disjoint-robust-fidelity-calibration-v1/inputs/calibration_docvqa.json
+    selection_seed: 20280203
+    sample_count: 128
+  - task: textvqa
+    dataset_id: lmms-lab/textvqa
+    dataset_revision: 9c0699cd19768ac5ab97568f6b3cbac4c0062884
+    split: validation
+    ledger: /scratch/djy8hg/runs/mosaickv/choice-c-v86-disjoint-robust-fidelity-calibration-v1/inputs/calibration_textvqa.json
+    selection_seed: 20280203
+    sample_count: 128
+
+candidates:
+  - id: hybrid4_exact_no_rerank_control_b4_28_5
+    tier_policy: exact_only_replacement
+    target_active_reduction_fraction_vs_prompt_topk: 0.30
+    rationale: Same forecast and byte cap as the risk arms, without stable-head replacement.
+    overrides: &common_exact_overrides
+      spatial_weight: 1.0
+      spatial_max_distance: 0.125
+      candidate_nonmandatory_fraction: 0.04
+      routed_head_fraction: 0.03125
+      prompt_anchor_fraction: 0.50
+      evidence_preservation_fraction: 0.35
+      minimum_stratum_fraction: 0.25
+      physical_capacity_fraction: 1.0
+      maximum_prototypes_per_head: 0
+      prototype_budget_planning_mode: disabled_exact_only
+      active_budget_bytes: 28500000
+      evidence_reservation_mode: structural_round_robin
+      evidence_grid_rows: 4
+      evidence_grid_columns: 4
+      stable_head_visual_fraction: 0.0
+      stable_head_adaptive_visual_swaps: false
+      stable_head_minimum_text_mass_fraction: 1.0
+      stable_head_visual_gain_ratio: 1.0
+      stable_head_maximum_visual_swaps: 0
+      stable_head_swap_risk_gate: false
+      stable_head_maximum_normalized_text_loss: 1.0
+      stable_head_forecast_gain_ratio: 1.0
+      stable_head_future_query_reranking: false
+      stable_head_future_minimum_prompt_mass_fraction: 1.0
+      stable_head_future_gain_ratio: 1.0
+      stable_head_maximum_future_replacements: 0
+      stable_head_future_divergence_fail_closed: false
+      stable_head_future_minimum_prompt_forecast_tv: 0.0
+      stable_head_future_risk_gate: false
+      stable_head_future_maximum_normalized_prompt_loss: 1.0
+      stable_head_future_minimum_normalized_gain: 0.0
+      forecast_mode: hybrid
+      forecast_prompt_window: 16
+      forecast_draft_steps: 4
+  - id: hybrid4_exact_risk_ultra_b4_28_5
+    tier_policy: exact_only_replacement
+    target_active_reduction_fraction_vs_prompt_topk: 0.30
+    rationale: Permit at most one replacement with a strict prompt-loss and future-gain test.
+    overrides:
+      <<: *common_exact_overrides
+      stable_head_future_query_reranking: true
+      stable_head_future_minimum_prompt_mass_fraction: 0.9975
+      stable_head_future_gain_ratio: 2.0
+      stable_head_maximum_future_replacements: 1
+      stable_head_future_divergence_fail_closed: true
+      stable_head_future_minimum_prompt_forecast_tv: 0.01
+      stable_head_future_risk_gate: true
+      stable_head_future_maximum_normalized_prompt_loss: 0.00075
+      stable_head_future_minimum_normalized_gain: 0.0035
+  - id: hybrid4_exact_risk_conservative_b4_28_5
+    tier_policy: exact_only_replacement
+    target_active_reduction_fraction_vs_prompt_topk: 0.30
+    rationale: Retain the preregistered pre-v85 conservative risk envelope at the common cap.
+    overrides:
+      <<: *common_exact_overrides
+      stable_head_future_query_reranking: true
+      stable_head_future_minimum_prompt_mass_fraction: 0.995
+      stable_head_future_gain_ratio: 1.50
+      stable_head_maximum_future_replacements: 2
+      stable_head_future_divergence_fail_closed: true
+      stable_head_future_minimum_prompt_forecast_tv: 0.01
+      stable_head_future_risk_gate: true
+      stable_head_future_maximum_normalized_prompt_loss: 0.0015
+      stable_head_future_minimum_normalized_gain: 0.0025
+
+calibration_objective:
+  labels_accessed: false
+  official_task_scores_accessed: false
+  primary: maximize_worst_fold_exact_answer_agreement_with_fullkv
+  secondary: maximize_worst_fold_token_agreement_with_fullkv
+  tertiary: maximize_worst_task_active_plus_residual_reduction_vs_prompt_topk
+  deterministic_tie_break: lexicographically_smallest_candidate_id
+  minimum_active_reduction_fraction_vs_prompt_topk: 0.30
+  minimum_active_plus_residual_reduction_fraction_vs_prompt_topk: 0.30
+  fullkv_answer_noninferiority_margin_vs_prompt_topk: 0.05
+  maximum_prototype_logical_fraction: 0.0
+  require_zero_residual_bytes: true
+  require_all_rows_complete: true
+
+robust_fidelity_analysis:
+  labels_accessed: false
+  official_task_scores_accessed: false
+  fold_count: 4
+  fold_assignment: sha256_sorted_round_robin
+  fold_assignment_salt: choice-c-v86-robust-fidelity-v1
+  expected_samples_per_fold: 32
+  require_every_task_and_fold: true
+  require_base_memory_and_fidelity_gates: true
+  fullkv_answer_noninferiority_margin_vs_prompt_topk: 0.05
+  fullkv_token_noninferiority_margin_vs_prompt_topk: 0.05
+  selection_primary: maximize_worst_fold_exact_answer_agreement_with_fullkv
+  selection_secondary: maximize_worst_fold_token_agreement_with_fullkv
+  selection_tertiary: maximize_macro_token_agreement_with_fullkv
+
+forecast_divergence_analysis:
+  metric: prompt_forecast_total_variation
+  minimum_eligible_route_value: 0.01
+  require_at_least_one_eligible_stable_route_per_sample: true
+  require_isolated_draft_cache: true
+  require_original_prefill_reuse: true
+  require_deterministic_draft: true
+
+future_rerank_risk_analysis:
+  control_arm: hybrid4_exact_no_rerank_control_b4_28_5
+  candidate_arms:
+    - hybrid4_exact_risk_ultra_b4_28_5
+    - hybrid4_exact_risk_conservative_b4_28_5
+  require_positive_accepted_reranks_each_task: true
+  require_positive_risk_rejections_each_task: true
+  require_not_below_control_each_task: true
+  fullkv_answer_noninferiority_margin_vs_control: 0.0
+
+sample_policy:
+  materialize_from_clean_commit: true
+  exclude_all_repository_ledgers: true
+  exclude_every_prior_choice_c_input_ledger: true
+  exclude_v85_heldout_inputs_explicitly: true
+  require_v85_exclusion_directory: true
+  exclude_prior_observed_result_rows: true
+  benchmark_labels_used_for_candidate_selection: false
+  future_heldout_must_exclude_this_calibration_ledger: true
+
+output_root: /scratch/djy8hg/runs/mosaickv/choice-c-v86-disjoint-robust-fidelity-calibration-v1
+frozen_candidate_output: /scratch/djy8hg/runs/mosaickv/choice-c-v86-disjoint-robust-fidelity-calibration-v1/analysis/frozen_candidate.yaml

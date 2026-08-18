@@ -1,0 +1,81 @@
+schema_version: 1
+classification: sealed_negative_label_blind_calibration_result
+experiment_id: choice_c_v80_disjoint_risk_gated_swap_calibration
+immutable_result: true
+memory_gate_pass: true
+fidelity_gate_pass: false
+exact_dominant_gate_pass: true
+frozen_candidate_created: false
+freeze_exit_code: 2
+candidate_must_not_be_retuned_from_this_result: true
+benchmark_labels_accessed: false
+official_task_scores_accessed: false
+
+run_git_sha: 2c49897bb9468ea8faf6d7a47e14f6da22b9415e
+source_snapshot_sha256: 6bfffe5e5f5da8e822a0e4dbb8f485885010e51821c9e49d90b3bbbb93744622
+run_root: /scratch/djy8hg/runs/mosaickv/choice-c-v80-disjoint-risk-gated-swap-calibration-v1
+slurm_jobs:
+  ledger: 18587316
+  calibration: 18587317
+  freeze: 18587318
+
+unchanged_gates:
+  minimum_active_reduction_fraction_vs_prompt_topk: 0.30
+  minimum_active_plus_residual_reduction_fraction_vs_prompt_topk: 0.30
+  fullkv_answer_noninferiority_margin_vs_prompt_topk: 0.05
+  maximum_prototype_logical_fraction: 0.05
+
+observed_gate_summary:
+  worst_active_plus_residual_reduction_fraction_vs_prompt_topk: 0.34408602150537626
+  best_worst_task_fullkv_answer_agreement_delta_vs_prompt_topk: -0.125
+  selected_candidate: null
+  docvqa:
+    prompt_topk_fullkv_answer_agreement: 0.75
+    best_candidate_fullkv_answer_agreement: 0.625
+    delta: -0.125
+  textvqa:
+    prompt_topk_fullkv_answer_agreement: 0.9166666666666666
+    best_candidate_fullkv_answer_agreement: 0.8541666666666666
+    delta: -0.0625
+
+label_blind_design_finding:
+  stable_head_swaps_retired: true
+  risk_gating_changed_few_selected_blocks: true
+  no_swap_cache_already_contains_fidelity_gap: true
+  next_decomposition: same_byte_prototype_vs_exact_only
+  next_candidate_change: prompt_anchored_future_query_reranking_of_stable_exact_blocks
+
+protocol:
+  path: configs/experiments/choice_c_v80_disjoint_risk_gated_swap_calibration.yaml
+  sha256: 811fb9ae12de334cd8359fa391459169423394113fba5a2ecad4decd9df9844b
+
+artifacts:
+  calibration_json:
+    path: /scratch/djy8hg/runs/mosaickv/choice-c-v80-disjoint-risk-gated-swap-calibration-v1/analysis/label_blind_calibration.json
+    sha256: 6a8a693641dd46e91c79bc78a4444177a16b6fd592590c47d9851afeba94fc70
+  calibration_markdown:
+    path: /scratch/djy8hg/runs/mosaickv/choice-c-v80-disjoint-risk-gated-swap-calibration-v1/analysis/label_blind_calibration.md
+    sha256: 87604dd66971a52b11956602cd46f818e06a41e76b8552023f67ca808a727cee
+  calibration_trials:
+    path: /scratch/djy8hg/runs/mosaickv/choice-c-v80-disjoint-risk-gated-swap-calibration-v1/analysis/label_blind_calibration_trials.parquet
+    sha256: 9f083741e9e119e137e9d786d8ae50a620e0f7e206264096212431d8224458ff
+  candidate_ranking:
+    path: /scratch/djy8hg/runs/mosaickv/choice-c-v80-disjoint-risk-gated-swap-calibration-v1/analysis/label_blind_candidate_ranking.parquet
+    sha256: edde8026ba61f9a717214eafd45caba073450aecaa6b35e5d341e86723df490c
+
+calibration_ledgers:
+  docvqa:
+    path: /scratch/djy8hg/runs/mosaickv/choice-c-v80-disjoint-risk-gated-swap-calibration-v1/inputs/calibration_docvqa.json
+    sha256: afdb2b38f4a4442ef8a57f97aadf30f40b9e545e57e2d88d2ef3e1add3ecdfe7
+    sample_count: 48
+  textvqa:
+    path: /scratch/djy8hg/runs/mosaickv/choice-c-v80-disjoint-risk-gated-swap-calibration-v1/inputs/calibration_textvqa.json
+    sha256: e62c5e77e6ece4c9f043e045ea2e50f9fc8b14919cf2318f21aa937169f0e7d3
+    sample_count: 48
+
+future_protocol:
+  heldout_must_not_be_submitted: true
+  future_calibration_must_exclude_directory: /scratch/djy8hg/runs/mosaickv/choice-c-v80-disjoint-risk-gated-swap-calibration-v1/inputs
+  stable_head_swapping_must_not_be_retuned: true
+  gates_must_remain_unchanged: true
+  next_heldout_materialized_only_after_new_freeze: true

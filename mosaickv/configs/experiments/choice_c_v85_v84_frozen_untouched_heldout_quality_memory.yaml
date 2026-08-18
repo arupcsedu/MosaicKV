@@ -1,0 +1,100 @@
+schema_version: 1
+revision: "85.1"
+experiment_id: choice_c_v85_v84_frozen_untouched_heldout_quality_memory
+classification: preregistered_v84_frozen_untouched_heldout_quality_memory_validation
+frozen_before_sample_materialization: true
+selection_rule_frozen_before_heldout: true
+execution_status: preregistered_unsubmitted_requires_authorized_commit
+
+scientific_boundary:
+  v84_candidate_retuning_allowed: false
+  v84_candidate_overrides_immutable: true
+  v84_calibration_samples_forbidden_from_heldout: true
+  v83_heldout_samples_forbidden_from_heldout: true
+  heldout_answers_used_before_execution: false
+  heldout_references_used_before_execution: false
+  heldout_task_scores_used_before_execution: false
+  heldout_failure_identities_used_before_execution: false
+  official_task_scores_accessed_only_during_final_analysis: true
+
+runtime_source_commit: 9e300dda54fb5377aefae06d1f28614e426d42fd
+runtime_source_snapshot_sha256: adb6806e609e004387f094270f32a1f995640dcbc887414ef4eee4256a359909
+candidate_config: configs/experiments/choice_c_v72_frozen_candidate.yaml
+calibration_spec: configs/experiments/choice_c_v84_disjoint_risk_gated_hybrid_calibration.yaml
+frozen_candidate: /scratch/djy8hg/runs/mosaickv/choice-c-v84-disjoint-risk-gated-hybrid-calibration-v1/analysis/frozen_candidate.yaml
+frozen_candidate_sha256: 940b124a2c2ab09d8192ab03d6cb2efda85339523e613980d567495a7280cf64
+v84_calibration_result_sha256: 655753a1d985d1d90c7d29352a5e72c3cc3821c55403801bdd3270428d7e6552
+parent_negative_result_seal: /sfs/weka/scratch/djy8hg/workdir/MosaicKV/mosaickv/configs/ledgers/choice_c_v83_negative_heldout_seal.yaml
+selected_candidate: hybrid4_exact_risk_moderate_b4_27_5
+candidate_protocol_method: mosaickv_full
+candidate_effective_method: mosaickv_exact
+candidate_tier_policy: exact_only_replacement
+supports_prototype_or_repair_claim: false
+
+model_id: llava-hf/llava-1.5-7b-hf
+model_revision: b234b804b114d9e37bb655e11cbbb5f5e971b7a9
+backend: hf_eager_prefill_sdpa_decode
+methods: [full_kv, prompt_attention_topk, mosaickv_full]
+seed: 17
+output_length: 64
+warmups_per_method: 1
+measured_repetitions_per_method: 2
+
+tasks:
+  - task: docvqa
+    dataset_id: lmms-lab/DocVQA
+    dataset_revision: 539088ef8a8ada01ac8e2e6d4e372586748a265e
+    split: validation
+    ledger: /scratch/djy8hg/runs/mosaickv/choice-c-v85-v84-frozen-untouched-heldout-quality-memory-v1/inputs/heldout_docvqa.json
+    selection_seed: 20280113
+    sample_count: 128
+  - task: textvqa
+    dataset_id: lmms-lab/textvqa
+    dataset_revision: 9c0699cd19768ac5ab97568f6b3cbac4c0062884
+    split: validation
+    ledger: /scratch/djy8hg/runs/mosaickv/choice-c-v85-v84-frozen-untouched-heldout-quality-memory-v1/inputs/heldout_textvqa.json
+    selection_seed: 20280113
+    sample_count: 128
+
+primary_gate:
+  memory_comparator: prompt_attention_topk
+  quality_comparators: [full_kv, prompt_attention_topk]
+  accounting_boundary: measured_active_kv_bytes
+  minimum_active_memory_reduction_fraction: 0.30
+  minimum_active_plus_residual_memory_reduction_fraction: 0.30
+  require_nonnegative_mean_score_difference: true
+  task_score_noninferiority_margin: 0.05
+  require_bootstrap_lower_bound_above_negative_margin: true
+  require_each_task_to_pass: true
+  require_all_rows_complete: true
+  require_deterministic_answers_across_repetitions: true
+  require_fullkv_transformation_free: true
+
+latency_report:
+  policy: informational_not_a_rejection_criterion
+  metrics: [compression_time, decode_time, end_to_end_time]
+  statistics: [mean, p50, p95, paired_ratio]
+
+statistics:
+  paired_bootstrap_resamples: 10000
+  paired_bootstrap_seed: 20280113
+
+sample_policy:
+  materialize_only_after_v84_candidate_freeze: true
+  bind_frozen_candidate_sha_in_every_ledger: true
+  require_zero_overlap_with_v84_calibration: true
+  require_zero_overlap_with_v83_heldout: true
+  exclude_repository_ledgers: true
+  exclude_every_prior_choice_c_input_ledger: true
+  exclude_prior_observed_result_rows: true
+  labels_used_for_selection: false
+  require_clean_runtime_worktree_at_materialization_and_execution: true
+
+reporting_policy:
+  report_each_task_separately: true
+  do_not_average_incompatible_task_metrics: true
+  report_candidate_as_exact_only: true
+  latency_is_secondary: true
+  calibration_result_is_not_a_heldout_claim: true
+
+output_root: /scratch/djy8hg/runs/mosaickv/choice-c-v85-v84-frozen-untouched-heldout-quality-memory-v1

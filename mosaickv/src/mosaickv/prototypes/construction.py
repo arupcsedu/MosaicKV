@@ -475,10 +475,10 @@ def _assign_to_anchors_unchecked(
         )
     neighbors = _selected_anchor_neighbors(graph, anchors, selected)
 
-    if (
-        config.budget_planning_mode == "one_pass_anchor_cover"
-        and prototype_anchor_node_ids is not None
-    ):
+    if config.budget_planning_mode in {
+        "one_pass_anchor_cover",
+        "one_pass_bounded_anchor_cover",
+    } and prototype_anchor_node_ids is not None:
         # The runtime planner reserves an anchor cover over these exact same
         # segments. Resolve assignments locally instead of building a global
         # preference table and then discarding every out-of-segment entry.
@@ -492,10 +492,17 @@ def _assign_to_anchors_unchecked(
                 continue
             strata[(block.layer, block.kv_head, block.modality)].append(node.node_id)
         result: dict[int, tuple[int, float]] = {}
+        bounded_cover = config.budget_planning_mode == "one_pass_bounded_anchor_cover"
 
         def assign_segment(member_ids: Sequence[int]) -> str | None:
             segment_anchors = tuple(node_id for node_id in member_ids if node_id in anchors)
             if not segment_anchors:
+                if bounded_cover:
+                    # A bounded cover intentionally represents only the most
+                    # prompt-relevant compatible segments. Uncovered source
+                    # blocks remain pruned; they are not silently assigned
+                    # across group-size or position-span boundaries.
+                    return None
                 return f"prototype anchor-cover segment {tuple(member_ids)} has no selected anchor"
             segment_anchor_set = frozenset(segment_anchors)
             for node_id in member_ids:
@@ -2621,6 +2628,20 @@ def construct_three_tier_cache(
         prototypes=prototype_tier,
         residuals=residual_report.tier,
     )
+    eligible_unselected = tuple(
+        node.node_id
+        for node in graph.nodes
+        if node.node_id not in selected
+        and prototypes.uses_prototype_block(
+            node.block.layer,
+            node.block.kv_head,
+            node.block.modality,
+        )
+    )
+    represented_unselected = len(assignments)
+    bounded_partial_cover = (
+        prototypes.budget_planning_mode == "one_pass_bounded_anchor_cover"
+    )
     return ThreeTierCacheConstruction(
         state=state,
         mode=(
@@ -2630,8 +2651,18 @@ def construct_three_tier_cache(
         ),
         reason=(
             (
-                "all unselected prototype-routed blocks were assigned to compatible "
-                "selected anchors; "
+                (
+                    "bounded prototype anchor cover assigned "
+                    f"{represented_unselected}/{len(eligible_unselected)} eligible "
+                    "unselected source blocks to compatible selected anchors; "
+                )
+                if bounded_partial_cover
+                else (
+                    "all unselected prototype-routed blocks were assigned to compatible "
+                    "selected anchors; "
+                )
+            )
+            + (
                 f"residuals stored for {len(residual_report.payloads)}/"
                 f"{len(residual_node_order)} prototyped source blocks"
             )

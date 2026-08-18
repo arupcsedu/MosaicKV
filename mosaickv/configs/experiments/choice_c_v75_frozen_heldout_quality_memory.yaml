@@ -1,0 +1,76 @@
+schema_version: 1
+revision: "75.6"
+experiment_id: choice_c_v75_frozen_heldout_quality_memory
+classification: preregistered_post_calibration_heldout_quality_memory_validation
+frozen_before_sample_materialization: true
+execution_status: blocked_until_v74_freeze_and_clean_commit
+
+candidate_config: configs/experiments/choice_c_v72_frozen_candidate.yaml
+calibration_spec: configs/experiments/choice_c_v74_label_blind_calibration.yaml
+frozen_candidate: /scratch/djy8hg/runs/mosaickv/choice-c-v74-label-blind-calibration-v6/analysis/frozen_candidate.yaml
+model_id: llava-hf/llava-1.5-7b-hf
+model_revision: b234b804b114d9e37bb655e11cbbb5f5e971b7a9
+backend: hf_eager_prefill_sdpa_decode
+methods: [full_kv, prompt_attention_topk, mosaickv_full]
+seed: 17
+output_length: 64
+warmups_per_method: 1
+measured_repetitions_per_method: 2
+
+tasks:
+  - task: docvqa
+    dataset_id: lmms-lab/DocVQA
+    dataset_revision: 539088ef8a8ada01ac8e2e6d4e372586748a265e
+    split: validation
+    ledger: /scratch/djy8hg/runs/mosaickv/choice-c-v75-frozen-heldout-quality-memory-v6/inputs/heldout_docvqa.json
+    selection_seed: 20270817
+    sample_count: 48
+  - task: mmstar
+    dataset_id: Lin-Chen/MMStar
+    dataset_revision: bc98d668301da7b14f648724866e57302778ab27
+    split: test
+    ledger: /scratch/djy8hg/runs/mosaickv/choice-c-v75-frozen-heldout-quality-memory-v6/inputs/heldout_mmstar.json
+    selection_seed: 20270817
+    sample_count: 48
+  - task: chartqa
+    dataset_id: lmms-lab/ChartQA
+    dataset_revision: 9e63b7df1592a1c2158e735cc1725454aef0d6d9
+    split: test
+    ledger: /scratch/djy8hg/runs/mosaickv/choice-c-v75-frozen-heldout-quality-memory-v6/inputs/heldout_chartqa.json
+    selection_seed: 20270817
+    sample_count: 48
+
+primary_gate:
+  memory_comparator: prompt_attention_topk
+  quality_comparators: [full_kv, prompt_attention_topk]
+  accounting_boundary: measured_active_kv_bytes
+  minimum_active_memory_reduction_fraction: 0.30
+  require_nonnegative_mean_score_difference: true
+  task_score_noninferiority_margin: 0.05
+  require_bootstrap_lower_bound_above_negative_margin: true
+  require_each_task_to_pass: true
+  require_all_rows_complete: true
+  require_deterministic_answers_across_repetitions: true
+  require_fullkv_transformation_free: true
+
+latency_report:
+  policy: informational_not_a_rejection_criterion
+  metrics: [compression_time, decode_time, end_to_end_time]
+  statistics: [mean, p50, p95, paired_ratio]
+
+statistics:
+  paired_bootstrap_resamples: 10000
+  paired_bootstrap_seed: 20270817
+
+sample_policy:
+  materialize_only_after_v74_candidate_freeze: true
+  bind_frozen_candidate_sha_in_every_ledger: true
+  exclude_repository_ledgers: true
+  exclude_v73_heldout_ledgers: true
+  exclude_v74_calibration_ledgers: true
+  exclude_prior_observed_result_rows: true
+  do_not_treat_candidate_sampling_frames_as_observed: true
+  labels_used_for_selection: false
+  require_clean_worktree_at_materialization_and_execution: true
+
+output_root: /scratch/djy8hg/runs/mosaickv/choice-c-v75-frozen-heldout-quality-memory-v6

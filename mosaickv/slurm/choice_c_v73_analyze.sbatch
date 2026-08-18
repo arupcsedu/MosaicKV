@@ -1,11 +1,11 @@
 #!/bin/bash
 #SBATCH --job-name=mosaickv-v73-analyze
-#SBATCH --nodes=1
-#SBATCH --ntasks-per-node=1
+#SBATCH --nodes=2
+#SBATCH --ntasks=2
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=16G
 #SBATCH --time=00:20:00
-#SBATCH --partition=bii
+#SBATCH --partition=parallel
 #SBATCH --output=/scratch/djy8hg/runs/mosaickv/slurm/v73-analyze-%j.log
 #SBATCH --export=ALL
 

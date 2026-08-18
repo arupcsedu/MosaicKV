@@ -1,0 +1,180 @@
+schema_version: 1
+revision: "87.1"
+experiment_id: choice_c_v87_prompt_query_coverage_calibration
+classification: preregistered_fresh_disjoint_label_blind_query_coverage_calibration
+analysis_label: V87
+prior_result_exclusion_boundary: v86_and_all_prior_choice_c_runs
+selection_rule_frozen_before_calibration: true
+execution_status: preregistered_ready_for_clean_submission
+frozen_candidate_classification: frozen_v87_label_blind_query_coverage_candidate
+parent_negative_result_seal: configs/ledgers/choice_c_v86_negative_calibration_seal.yaml
+
+scientific_boundary:
+  prior_choice_c_runs_used_only_as_sample_exclusion_boundaries: true
+  v86_answers_used_for_design: false
+  v86_references_used_for_design: false
+  v86_task_scores_used_for_design: false
+  v86_failure_identities_used_for_design: false
+  v86_generated_token_ids_used_for_design: false
+  v86_per_sample_telemetry_used_for_design: false
+  v86_candidate_revised: false
+  calibration_labels_accessed: false
+  official_task_scores_accessed: false
+  benchmark_labels_required_online: false
+  method_is_training_free: true
+  future_heldout_materialization_before_freeze_forbidden: true
+
+protocol_amendment:
+  configured_active_byte_cap_frozen_bytes: 28500000
+  block_size_frozen_tokens: 4
+  exact_only_candidate_family: true
+  prototype_heavy_candidates_allowed: false
+  residual_storage_allowed: false
+  repair_allowed: false
+  prompt_query_axis_preserved: true
+  equal_size_replacements_only: true
+  same_modality_replacements_only: true
+  mandatory_blocks_never_replaced: true
+  scalar_prompt_topk_anchor_unchanged: true
+  query_coverage_reranking_disabled_by_default: true
+  memory_gate_unchanged: true
+  fidelity_gate_unchanged: true
+
+design:
+  name: prompt_query_coverage_stable_head_reranking
+  coverage_objective: sum_over_prompt_queries_of_max_selected_block_attention_mass
+  donor_policy: optional_exact_blocks_only
+  replacement_policy: equal_position_count_and_same_modality_only
+  active_byte_change_per_replacement: 0
+  prompt_mass_floor_scope: selected_optional_blocks
+  ocr_metadata_claimed: false
+  note: >-
+    LLaVA exposes image-grid regions but not OCR boxes. This method preserves
+    label-blind query-conditioned visual and text evidence and must not be
+    described as using an OCR detector, OCR labels, or benchmark answers.
+
+common_cache_policy:
+  block_size: 4
+  physical_budget_block_size: 4
+  physical_budget_mandatory_policy: last_token
+
+candidate_config: configs/experiments/choice_c_v72_frozen_candidate.yaml
+model_id: llava-hf/llava-1.5-7b-hf
+model_revision: b234b804b114d9e37bb655e11cbbb5f5e971b7a9
+backend: hf_eager_prefill_sdpa_decode
+seed: 17
+output_length: 64
+warmups_per_arm: 1
+measured_repetitions_per_arm: 1
+
+tasks:
+  - task: docvqa
+    dataset_id: lmms-lab/DocVQA
+    dataset_revision: 539088ef8a8ada01ac8e2e6d4e372586748a265e
+    split: validation
+    ledger: /scratch/djy8hg/runs/mosaickv/choice-c-v87-prompt-query-coverage-calibration-v1/inputs/calibration_docvqa.json
+    selection_seed: 20280817
+    sample_count: 32
+  - task: textvqa
+    dataset_id: lmms-lab/textvqa
+    dataset_revision: 9c0699cd19768ac5ab97568f6b3cbac4c0062884
+    split: validation
+    ledger: /scratch/djy8hg/runs/mosaickv/choice-c-v87-prompt-query-coverage-calibration-v1/inputs/calibration_textvqa.json
+    selection_seed: 20280817
+    sample_count: 32
+
+candidates:
+  - id: prompt_query_coverage_exact_b4_28_5
+    tier_policy: exact_only_replacement
+    target_active_reduction_fraction_vs_prompt_topk: 0.30
+    rationale: >-
+      Preserve evidence serving distinct recent prompt queries while keeping
+      the Prompt Top-K scalar anchor, modality allocation, and active bytes fixed.
+    overrides:
+      spatial_weight: 1.0
+      spatial_max_distance: 0.125
+      candidate_nonmandatory_fraction: 0.04
+      routed_head_fraction: 0.03125
+      prompt_anchor_fraction: 0.50
+      evidence_preservation_fraction: 0.35
+      minimum_stratum_fraction: 0.25
+      physical_capacity_fraction: 1.0
+      maximum_prototypes_per_head: 0
+      prototype_budget_planning_mode: disabled_exact_only
+      active_budget_bytes: 28500000
+      evidence_reservation_mode: structural_round_robin
+      evidence_grid_rows: 4
+      evidence_grid_columns: 4
+      stable_head_visual_fraction: 0.0
+      stable_head_adaptive_visual_swaps: false
+      stable_head_minimum_text_mass_fraction: 1.0
+      stable_head_visual_gain_ratio: 1.0
+      stable_head_maximum_visual_swaps: 0
+      stable_head_swap_risk_gate: false
+      stable_head_maximum_normalized_text_loss: 1.0
+      stable_head_forecast_gain_ratio: 1.0
+      stable_head_future_query_reranking: false
+      stable_head_future_minimum_prompt_mass_fraction: 1.0
+      stable_head_future_gain_ratio: 1.0
+      stable_head_maximum_future_replacements: 0
+      stable_head_future_divergence_fail_closed: false
+      stable_head_future_minimum_prompt_forecast_tv: 0.0
+      stable_head_future_risk_gate: false
+      stable_head_future_maximum_normalized_prompt_loss: 1.0
+      stable_head_future_minimum_normalized_gain: 0.0
+      stable_head_query_coverage_reranking: true
+      stable_head_query_coverage_minimum_prompt_mass_fraction: 0.9975
+      stable_head_query_coverage_maximum_replacements: 1
+      stable_head_query_coverage_minimum_normalized_gain: 0.001
+      forecast_mode: prompt_window
+      forecast_prompt_window: 16
+      forecast_draft_steps: 0
+
+calibration_objective:
+  labels_accessed: false
+  official_task_scores_accessed: false
+  primary: maximize_worst_fold_exact_answer_agreement_with_fullkv
+  secondary: maximize_worst_fold_token_agreement_with_fullkv
+  tertiary: maximize_worst_task_active_plus_residual_reduction_vs_prompt_topk
+  deterministic_tie_break: lexicographically_smallest_candidate_id
+  minimum_active_reduction_fraction_vs_prompt_topk: 0.30
+  minimum_active_plus_residual_reduction_fraction_vs_prompt_topk: 0.30
+  fullkv_answer_noninferiority_margin_vs_prompt_topk: 0.05
+  maximum_prototype_logical_fraction: 0.0
+  require_zero_residual_bytes: true
+  require_all_rows_complete: true
+
+robust_fidelity_analysis:
+  labels_accessed: false
+  official_task_scores_accessed: false
+  fold_count: 4
+  fold_assignment: sha256_sorted_round_robin
+  fold_assignment_salt: choice-c-v87-prompt-query-coverage-v1
+  expected_samples_per_fold: 8
+  require_every_task_and_fold: true
+  require_base_memory_and_fidelity_gates: true
+  fullkv_answer_noninferiority_margin_vs_prompt_topk: 0.05
+  fullkv_token_noninferiority_margin_vs_prompt_topk: 0.05
+  selection_primary: maximize_worst_fold_exact_answer_agreement_with_fullkv
+  selection_secondary: maximize_worst_fold_token_agreement_with_fullkv
+  selection_tertiary: maximize_macro_token_agreement_with_fullkv
+
+query_coverage_audit:
+  labels_accessed: false
+  official_task_scores_accessed: false
+  require_complete_route_telemetry: true
+  report_accepted_and_rejected_replacements: true
+  report_query_coverage_gain: true
+  report_prompt_mass_preservation: true
+  query_coverage_activity_is_not_an_extra_freeze_gate: true
+
+sample_policy:
+  materialize_from_clean_commit: true
+  exclude_all_repository_ledgers: true
+  exclude_every_prior_choice_c_input_ledger: true
+  exclude_prior_observed_result_rows: true
+  benchmark_labels_used_for_candidate_selection: false
+  future_heldout_must_exclude_this_calibration_ledger: true
+
+output_root: /scratch/djy8hg/runs/mosaickv/choice-c-v87-prompt-query-coverage-calibration-v1
+frozen_candidate_output: /scratch/djy8hg/runs/mosaickv/choice-c-v87-prompt-query-coverage-calibration-v1/analysis/frozen_candidate.yaml

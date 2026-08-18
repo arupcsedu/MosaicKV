@@ -1,0 +1,125 @@
+schema_version: 1
+revision: "74.6"
+experiment_id: choice_c_v74f_bounded_prototype_prompt_core_calibration
+classification: frozen_post_failure_bounded_prototype_prompt_core_calibration
+selection_rule_frozen_before_calibration: true
+execution_status: ready_after_clean_commit
+
+protocol_amendment:
+  prior_calibration: /scratch/djy8hg/runs/mosaickv/choice-c-v74-label-blind-calibration-v5/analysis/label_blind_calibration.json
+  prior_labels_accessed: false
+  reason: v74.5 eliminated padding and passed memory but every candidate fell back to exact-only because five planned prototype anchors exceeded the configured one-or-two-prototype limit
+  new_calibration_samples_disjoint_from_prior_calibration: true
+  fidelity_gate_unchanged: true
+  configured_active_byte_cap_frozen_bytes: 27500000
+  prototype_heavy_candidates_allowed: false
+  prior_result_used_only_for_label_blind_fullkv_agreement_and_byte_accounting: true
+
+common_cache_policy:
+  block_size: 4
+  physical_budget_block_size: 4
+  physical_budget_mandatory_policy: last_token
+
+candidate_config: configs/experiments/choice_c_v72_frozen_candidate.yaml
+model_id: llava-hf/llava-1.5-7b-hf
+model_revision: b234b804b114d9e37bb655e11cbbb5f5e971b7a9
+backend: hf_eager_prefill_sdpa_decode
+seed: 17
+output_length: 64
+warmups_per_arm: 1
+measured_repetitions_per_arm: 1
+
+tasks:
+  - task: docvqa
+    dataset_id: lmms-lab/DocVQA
+    dataset_revision: 539088ef8a8ada01ac8e2e6d4e372586748a265e
+    split: validation
+    ledger: /scratch/djy8hg/runs/mosaickv/choice-c-v74-label-blind-calibration-v6/inputs/calibration_docvqa.json
+    selection_seed: 20270821
+    sample_count: 16
+  - task: chartqa
+    dataset_id: lmms-lab/ChartQA
+    dataset_revision: 9e63b7df1592a1c2158e735cc1725454aef0d6d9
+    split: test
+    ledger: /scratch/djy8hg/runs/mosaickv/choice-c-v74-label-blind-calibration-v6/inputs/calibration_chartqa.json
+    selection_seed: 20270821
+    sample_count: 16
+
+candidates:
+  - id: prompt_core_proto1_b4_27_5
+    tier_policy: exact_dominant_minimal_prototype
+    target_active_reduction_fraction_vs_prompt_topk: 0.30
+    rationale: Preserve a large Prompt Top-K exact core and use at most one prompt-mass-ranked, RoPE-safe prototype segment per routed head at the frozen byte cap.
+    overrides:
+      spatial_weight: 0.0
+      spatial_max_distance: 0.125
+      candidate_nonmandatory_fraction: 0.02
+      routed_head_fraction: 0.015625
+      prompt_anchor_fraction: 0.70
+      evidence_preservation_fraction: 0.15
+      minimum_stratum_fraction: 0.20
+      physical_capacity_fraction: 1.0
+      maximum_prototypes_per_head: 1
+      prototype_budget_planning_mode: one_pass_bounded_anchor_cover
+      active_budget_bytes: 27500000
+  - id: prompt_ocr_proto2_b4_27_5
+    tier_policy: exact_dominant_minimal_prototype
+    target_active_reduction_fraction_vs_prompt_topk: 0.30
+    rationale: Preserve a Prompt Top-K exact core, reserve spatial OCR evidence, and use at most two prompt-mass-ranked, RoPE-safe prototype segments per routed head at the same cap.
+    overrides:
+      spatial_weight: 1.0
+      spatial_max_distance: 0.125
+      candidate_nonmandatory_fraction: 0.04
+      routed_head_fraction: 0.015625
+      prompt_anchor_fraction: 0.60
+      evidence_preservation_fraction: 0.25
+      minimum_stratum_fraction: 0.25
+      physical_capacity_fraction: 1.0
+      maximum_prototypes_per_head: 2
+      prototype_budget_planning_mode: one_pass_bounded_anchor_cover
+      active_budget_bytes: 27500000
+  - id: prompt_chart_proto2_b4_27_5
+    tier_policy: exact_dominant_minimal_prototype
+    target_active_reduction_fraction_vs_prompt_topk: 0.30
+    rationale: Balance the Prompt Top-K exact core with chart-region coverage and at most two bounded RoPE-safe prototype segments while holding the cap fixed.
+    overrides:
+      spatial_weight: 1.0
+      spatial_max_distance: 0.125
+      candidate_nonmandatory_fraction: 0.04
+      routed_head_fraction: 0.03125
+      prompt_anchor_fraction: 0.50
+      evidence_preservation_fraction: 0.35
+      minimum_stratum_fraction: 0.25
+      physical_capacity_fraction: 1.0
+      maximum_prototypes_per_head: 2
+      prototype_budget_planning_mode: one_pass_bounded_anchor_cover
+      active_budget_bytes: 27500000
+
+calibration_objective:
+  labels_accessed: false
+  official_task_scores_accessed: false
+  primary: maximize_worst_task_exact_answer_agreement_with_fullkv
+  secondary: maximize_macro_token_agreement_with_fullkv
+  tertiary: maximize_worst_task_active_plus_residual_reduction_vs_prompt_topk
+  deterministic_tie_break: lexicographically_smallest_candidate_id
+  minimum_active_reduction_fraction_vs_prompt_topk: 0.30
+  minimum_active_plus_residual_reduction_fraction_vs_prompt_topk: 0.30
+  fullkv_answer_noninferiority_margin_vs_prompt_topk: 0.05
+  maximum_prototype_logical_fraction: 0.05
+  require_all_rows_complete: true
+
+sample_policy:
+  materialize_from_clean_commit: true
+  calibration_is_disjoint_from_all_declared_v72_v73_ledgers: true
+  calibration_is_disjoint_from_v74_v1_calibration: true
+  calibration_is_disjoint_from_v74_v2_calibration: true
+  calibration_is_disjoint_from_v74_v3_calibration: true
+  calibration_is_disjoint_from_v74_v4_calibration: true
+  calibration_is_disjoint_from_v74_v5_calibration: true
+  exclude_prior_observed_result_rows: true
+  do_not_treat_candidate_sampling_frames_as_observed: true
+  heldout_must_exclude_this_calibration_ledger: true
+  benchmark_labels_used_for_candidate_selection: false
+
+output_root: /scratch/djy8hg/runs/mosaickv/choice-c-v74-label-blind-calibration-v6
+frozen_candidate_output: /scratch/djy8hg/runs/mosaickv/choice-c-v74-label-blind-calibration-v6/analysis/frozen_candidate.yaml

@@ -122,3 +122,110 @@ def test_ledger_excludes_prior_samples_before_fixed_subset(
     assert payload["sample_ids"] == ["mmstar:2"]
     assert payload["canonical_eligible"] is False
     assert payload["excluded_unique_sample_count"] == 1
+
+
+def test_ledger_excludes_only_samples_present_in_observed_results(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _stub_task(monkeypatch)
+    sha = "d" * 40
+    revision = "e" * 40
+    monkeypatch.setattr(MATERIALIZER, "_source_provenance", lambda: (sha, True))
+    result_directory = tmp_path / "prior_results"
+    run_directory = result_directory / "run-1"
+    run_directory.mkdir(parents=True)
+    (run_directory / "manifest.json").write_text(
+        json.dumps(
+            {
+                "dataset": {
+                    "id": "Lin-Chen/MMStar",
+                    "revision": revision,
+                    "split": "val",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    (run_directory / "results.jsonl").write_text(
+        json.dumps(
+            {
+                "task": "mmstar",
+                "sample_id": "mmstar:1",
+                "status": "completed",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "fresh.json"
+
+    MATERIALIZER.materialize(
+        task_name="mmstar",
+        dataset_revision=revision,
+        model_name="Qwen/Qwen2.5-VL-3B-Instruct",
+        seed=17,
+        output=output,
+        resume=False,
+        subset_size=1,
+        exclude_result_directories=(result_directory,),
+        allow_dirty_exploratory=True,
+    )
+
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    assert payload["sample_ids"] == ["mmstar:2"]
+    assert payload["excluded_unique_sample_count"] == 1
+    assert payload["exclusion_ledgers"][0]["kind"] == "observed_results"
+
+
+def test_heldout_ledger_binds_preexisting_selection_freeze(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _stub_task(monkeypatch)
+    sha = "f" * 40
+    monkeypatch.setattr(MATERIALIZER, "_source_provenance", lambda: (sha, False))
+    freeze = tmp_path / "frozen.yaml"
+    freeze.write_text("selected_candidate: spatial_evidence\n", encoding="utf-8")
+    output = tmp_path / "fresh.json"
+
+    MATERIALIZER.materialize(
+        task_name="mmstar",
+        dataset_revision="e" * 40,
+        model_name="Qwen/Qwen2.5-VL-3B-Instruct",
+        seed=19,
+        output=output,
+        resume=False,
+        subset_size=1,
+        selection_freeze=freeze,
+    )
+
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    assert payload["classification"] == "fresh_disjoint_heldout_quality_validation"
+    assert payload["selection_freeze"]["path"] == str(freeze.resolve())
+    assert payload["selection_freeze_sha256"] == MATERIALIZER.hashlib.sha256(
+        freeze.read_bytes()
+    ).hexdigest()
+
+
+def test_calibration_ledger_has_explicit_label_blind_classification(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _stub_task(monkeypatch)
+    monkeypatch.setattr(
+        MATERIALIZER, "_source_provenance", lambda: ("1" * 40, False)
+    )
+    output = tmp_path / "calibration.json"
+
+    MATERIALIZER.materialize(
+        task_name="mmstar",
+        dataset_revision="2" * 40,
+        model_name="Qwen/Qwen2.5-VL-3B-Instruct",
+        seed=23,
+        output=output,
+        resume=False,
+        subset_size=1,
+        classification="fresh_disjoint_label_blind_calibration",
+    )
+
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    assert payload["classification"] == "fresh_disjoint_label_blind_calibration"
+    assert payload["selection_freeze"] is None

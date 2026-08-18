@@ -194,9 +194,7 @@ def test_value_aware_utility_only_materializes_routed_nodes() -> None:
         assert block.value_novelty == 0.0
         assert block.expected_attention_output_contribution == 0.0
         assert block.redundancy_penalty == 1.0
-        assert block.local_utility == pytest.approx(
-            block.forecast_attention_probability
-        )
+        assert block.local_utility == pytest.approx(block.forecast_attention_probability)
     assert table.for_node(2).expected_attention_output_contribution > 0
     assert table.for_node(3).expected_attention_output_contribution > 0
 
@@ -360,12 +358,15 @@ def test_prompt_topk_id_only_path_matches_full_baseline(
         position_limits=limits,
     )
 
-    assert select_prompt_attention_topk_ids(
-        full,
-        budget,
-        prompt_attention_by_node=scores,
-        position_limits=limits,
-    ) == reference.selected_node_ids
+    assert (
+        select_prompt_attention_topk_ids(
+            full,
+            budget,
+            prompt_attention_by_node=scores,
+            position_limits=limits,
+        )
+        == reference.selected_node_ids
+    )
 
 
 def test_vectorized_head_local_prompt_topk_matches_canonical_dense_selection() -> None:
@@ -442,6 +443,48 @@ def test_head_local_prompt_topk_solves_the_previous_64_of_75_stranding_case() ->
     assert result.capacity_records[0].shortfall_positions == 0
 
 
+def test_head_local_prompt_topk_fills_capacity_before_breaking_ties_by_score() -> None:
+    sizes = (6, 6, 8, 5)
+    sequence = sum(sizes)
+    key = np.arange(sequence * 2, dtype=np.float32).reshape(1, 1, sequence, 2)
+    spans: list[ModalitySpan] = []
+    offset = 0
+    for image_index, size in enumerate(sizes):
+        spans.append(
+            ModalitySpan(
+                offset,
+                offset + size,
+                Modality.IMAGE,
+                image_index=image_index,
+            )
+        )
+        offset += size
+    full = FullKVState.from_tensors(
+        ((key, key.copy()),),
+        modality_spans=tuple(spans),
+        block_size=8,
+    )
+    scores = {
+        node_id: (100.0 - node_id if block.position_count == 6 else 1.0)
+        for node_id, block in enumerate(full.blocks)
+    }
+
+    result = select_prompt_attention_topk_ids_by_head(
+        full,
+        SelectionBudget(full.active_bytes, BudgetUnit.BYTES),
+        prompt_attention_by_node=scores,
+        head_routes=((0, 0),),
+        position_limits={(0, 0): 13},
+    )
+
+    selected_sizes = tuple(
+        sorted(full.blocks[node_id].position_count for node_id in result.selected_node_ids)
+    )
+    assert selected_sizes == (5, 8)
+    assert result.capacity_records[0].selected_positions == 13
+    assert result.capacity_records[0].shortfall_positions == 0
+
+
 def test_head_local_prompt_topk_records_unavoidable_capacity_shortfall() -> None:
     sequence = 80
     key = np.arange(sequence * 2, dtype=np.float32).reshape(1, 1, sequence, 2)
@@ -462,6 +505,501 @@ def test_head_local_prompt_topk_records_unavoidable_capacity_shortfall() -> None
     assert result.capacity_records[0].selected_positions == 64
     assert result.capacity_records[0].shortfall_positions == 11
     assert result.total_shortfall_positions == 11
+
+
+def test_head_local_prompt_topk_reserves_visual_capacity_without_underfill() -> None:
+    full = _full(
+        (
+            Modality.IMAGE,
+            Modality.IMAGE,
+            Modality.IMAGE,
+            Modality.IMAGE,
+            Modality.TEXT,
+            Modality.TEXT,
+            Modality.TEXT,
+            Modality.TEXT,
+        ),
+        mandatory=(7,),
+    )
+    scores = {
+        node_id: (100.0 - node_id if block.modality is Modality.TEXT else 1.0)
+        for node_id, block in enumerate(full.blocks)
+    }
+
+    result = select_prompt_attention_topk_ids_by_head(
+        full,
+        SelectionBudget(4, BudgetUnit.BLOCKS),
+        prompt_attention_by_node=scores,
+        head_routes=((0, 0),),
+        position_limits={(0, 0): 4},
+        minimum_visual_fraction=0.5,
+    )
+
+    selected = [full.blocks[node_id] for node_id in result.selected_node_ids]
+    assert sum(block.position_count for block in selected) == 4
+    assert sum(block.modality is Modality.IMAGE for block in selected) == 2
+    assert result.capacity_records[0].selected_visual_positions == 2
+    assert result.capacity_records[0].target_visual_positions == 2
+    assert result.capacity_records[0].shortfall_positions == 0
+
+
+def test_head_local_prompt_topk_adaptive_swap_preserves_capacity_and_text_floor() -> None:
+    full = _full(
+        (
+            Modality.IMAGE,
+            Modality.IMAGE,
+            Modality.IMAGE,
+            Modality.TEXT,
+            Modality.TEXT,
+            Modality.TEXT,
+            Modality.TEXT,
+        ),
+        mandatory=(6,),
+    )
+    scores = {
+        0: 0.10,
+        1: 0.09,
+        2: 0.00,
+        3: 0.20,
+        4: 0.19,
+        5: 0.18,
+        6: 100.0,
+    }
+
+    result = select_prompt_attention_topk_ids_by_head(
+        full,
+        SelectionBudget(4, BudgetUnit.BLOCKS),
+        prompt_attention_by_node=scores,
+        head_routes=((0, 0),),
+        position_limits={(0, 0): 4},
+        adaptive_visual_swaps=True,
+        minimum_text_mass_fraction=0.995,
+        visual_gain_ratio=1.0,
+        maximum_visual_swaps=2,
+    )
+
+    record = result.capacity_records[0]
+    assert record.selected_positions == 4
+    assert record.shortfall_positions == 0
+    assert record.adaptive_swap_count == 2
+    assert record.selected_visual_positions == 2
+    assert record.selected_text_prompt_mass >= record.baseline_text_prompt_mass * 0.995
+    assert record.normalized_visual_evidence_gain > record.normalized_text_prompt_mass_loss
+    assert 6 in result.selected_node_ids
+
+    with_unused_forecast = select_prompt_attention_topk_ids_by_head(
+        full,
+        SelectionBudget(4, BudgetUnit.BLOCKS),
+        prompt_attention_by_node=scores,
+        forecast_attention_by_node={node_id: float(node_id + 1) for node_id in scores},
+        head_routes=((0, 0),),
+        position_limits={(0, 0): 4},
+        adaptive_visual_swaps=True,
+        minimum_text_mass_fraction=0.995,
+        visual_gain_ratio=1.0,
+        maximum_visual_swaps=2,
+    )
+    assert with_unused_forecast.selected_node_ids == result.selected_node_ids
+    assert with_unused_forecast.capacity_records[0].adaptive_swap_pairs == (
+        result.capacity_records[0].adaptive_swap_pairs
+    )
+
+
+def test_head_local_prompt_topk_adaptive_swap_rejects_text_floor_violation() -> None:
+    full = _full(
+        (Modality.IMAGE, Modality.IMAGE, Modality.TEXT, Modality.TEXT),
+        mandatory=(3,),
+    )
+    scores = {0: 0.10, 1: 0.09, 2: 0.20, 3: 1.0}
+
+    result = select_prompt_attention_topk_ids_by_head(
+        full,
+        SelectionBudget(2, BudgetUnit.BLOCKS),
+        prompt_attention_by_node=scores,
+        head_routes=((0, 0),),
+        position_limits={(0, 0): 2},
+        adaptive_visual_swaps=True,
+        minimum_text_mass_fraction=0.99,
+        visual_gain_ratio=1.0,
+        maximum_visual_swaps=1,
+    )
+
+    record = result.capacity_records[0]
+    assert record.adaptive_swap_count == 0
+    assert record.selected_visual_positions == 0
+    assert result.selected_node_ids == (2, 3)
+
+
+def test_head_local_prompt_topk_forecast_risk_gate_rejects_future_text_loss() -> None:
+    full = _full(
+        (Modality.IMAGE, Modality.IMAGE, Modality.TEXT, Modality.TEXT),
+        mandatory=(3,),
+    )
+    prompt_scores = {0: 0.10, 1: 0.09, 2: 0.20, 3: 100.0}
+    forecast_scores = {0: 0.01, 1: 0.01, 2: 1.0, 3: 1.0}
+
+    result = select_prompt_attention_topk_ids_by_head(
+        full,
+        SelectionBudget(2, BudgetUnit.BLOCKS),
+        prompt_attention_by_node=prompt_scores,
+        forecast_attention_by_node=forecast_scores,
+        head_routes=((0, 0),),
+        position_limits={(0, 0): 2},
+        adaptive_visual_swaps=True,
+        minimum_text_mass_fraction=0.997,
+        visual_gain_ratio=1.0,
+        maximum_visual_swaps=1,
+        swap_risk_gate=True,
+        maximum_normalized_text_loss=0.002,
+        forecast_gain_ratio=1.5,
+    )
+
+    record = result.capacity_records[0]
+    assert record.adaptive_swap_count == 0
+    assert record.adaptive_swap_candidate_count >= 1
+    assert record.adaptive_swap_risk_rejected_count >= 1
+    assert record.adaptive_swap_pairs == ()
+    assert result.selected_node_ids == (2, 3)
+
+
+def test_head_local_prompt_topk_forecast_risk_gate_records_safe_per_head_pair() -> None:
+    full = _full(
+        (Modality.IMAGE, Modality.IMAGE, Modality.TEXT, Modality.TEXT),
+        mandatory=(3,),
+    )
+    prompt_scores = {0: 0.10, 1: 0.09, 2: 0.20, 3: 100.0}
+    forecast_scores = {0: 1.0, 1: 0.01, 2: 0.001, 3: 1.0}
+
+    result = select_prompt_attention_topk_ids_by_head(
+        full,
+        SelectionBudget(2, BudgetUnit.BLOCKS),
+        prompt_attention_by_node=prompt_scores,
+        forecast_attention_by_node=forecast_scores,
+        head_routes=((0, 0),),
+        position_limits={(0, 0): 2},
+        adaptive_visual_swaps=True,
+        minimum_text_mass_fraction=0.997,
+        visual_gain_ratio=1.0,
+        maximum_visual_swaps=1,
+        swap_risk_gate=True,
+        maximum_normalized_text_loss=0.002,
+        forecast_gain_ratio=1.5,
+    )
+
+    record = result.capacity_records[0]
+    assert record.adaptive_swap_count == 1
+    assert record.adaptive_swap_pairs == ((2, 0),)
+    assert record.normalized_forecast_visual_gain > record.normalized_forecast_text_loss
+    assert record.selected_positions == 2
+    assert result.selected_node_ids == (0, 3)
+
+
+def test_head_local_future_query_reranking_is_same_byte_prompt_anchored_and_deterministic() -> None:
+    full = _full(
+        (
+            Modality.TEXT,
+            Modality.TEXT,
+            Modality.IMAGE,
+            Modality.IMAGE,
+            Modality.IMAGE,
+            Modality.TEXT,
+        ),
+        mandatory=(5,),
+    )
+    prompt_scores = {0: 10.0, 1: 9.0, 2: 1.0, 3: 8.0, 4: 7.0, 5: 100.0}
+    forecast_scores = {0: 0.2, 1: 0.1, 2: 0.0, 3: 10.0, 4: 9.0, 5: 1.0}
+    kwargs = {
+        "prompt_attention_by_node": prompt_scores,
+        "forecast_attention_by_node": forecast_scores,
+        "head_routes": ((0, 0),),
+        "position_limits": {(0, 0): 3},
+        "future_query_reranking": True,
+        "future_minimum_prompt_mass_fraction": 0.99,
+        "future_gain_ratio": 1.0,
+        "maximum_future_replacements": 2,
+        "future_divergence_fail_closed": True,
+        "future_minimum_prompt_forecast_tv": 0.01,
+    }
+
+    first = select_prompt_attention_topk_ids_by_head(
+        full,
+        SelectionBudget(3, BudgetUnit.BLOCKS),
+        **kwargs,
+    )
+    second = select_prompt_attention_topk_ids_by_head(
+        full,
+        SelectionBudget(3, BudgetUnit.BLOCKS),
+        **kwargs,
+    )
+
+    assert first == second
+    assert first.selected_node_ids == (0, 3, 5)
+    record = first.capacity_records[0]
+    assert record.selected_positions == 3
+    assert record.selected_bytes == sum(full.blocks[node_id].byte_size for node_id in (0, 3, 5))
+    assert record.future_rerank_count == 1
+    assert record.future_rerank_pairs == ((1, 3),)
+    assert record.selected_prompt_mass_after_future_rerank >= (
+        record.baseline_selected_prompt_mass * 0.99
+    )
+    assert record.normalized_future_query_gain > record.normalized_future_prompt_mass_loss
+    assert record.prompt_forecast_total_variation >= 0.01
+    assert record.forecast_divergence_eligible
+    assert 5 in first.selected_node_ids
+
+
+def test_future_query_reranking_rejects_visual_swap_combination() -> None:
+    full = _full((Modality.TEXT, Modality.IMAGE), mandatory=(1,))
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        select_prompt_attention_topk_ids_by_head(
+            full,
+            SelectionBudget(1, BudgetUnit.BLOCKS),
+            prompt_attention_by_node={0: 1.0, 1: 2.0},
+            forecast_attention_by_node={0: 2.0, 1: 1.0},
+            head_routes=((0, 0),),
+            position_limits={(0, 0): 1},
+            adaptive_visual_swaps=True,
+            maximum_visual_swaps=1,
+            future_query_reranking=True,
+            maximum_future_replacements=1,
+        )
+
+
+def test_future_query_reranking_risk_gate_rejects_large_prompt_loss() -> None:
+    full = _full(
+        (
+            Modality.TEXT,
+            Modality.TEXT,
+            Modality.IMAGE,
+            Modality.IMAGE,
+            Modality.IMAGE,
+            Modality.TEXT,
+        ),
+        mandatory=(5,),
+    )
+    result = select_prompt_attention_topk_ids_by_head(
+        full,
+        SelectionBudget(3, BudgetUnit.BLOCKS),
+        prompt_attention_by_node={0: 10.0, 1: 9.0, 2: 1.0, 3: 8.0, 4: 7.0, 5: 100.0},
+        forecast_attention_by_node={0: 0.2, 1: 0.1, 2: 0.0, 3: 10.0, 4: 9.0, 5: 1.0},
+        head_routes=((0, 0),),
+        position_limits={(0, 0): 3},
+        future_query_reranking=True,
+        future_minimum_prompt_mass_fraction=0.99,
+        future_gain_ratio=1.0,
+        maximum_future_replacements=2,
+        future_divergence_fail_closed=True,
+        future_minimum_prompt_forecast_tv=0.01,
+        future_risk_gate=True,
+        future_maximum_normalized_prompt_loss=0.005,
+    )
+
+    assert result.selected_node_ids == (0, 1, 5)
+    record = result.capacity_records[0]
+    assert record.future_rerank_count == 0
+    assert record.future_rerank_risk_rejected_count == 2
+    assert record.future_rerank_rejected_count == 2
+
+
+def test_future_query_reranking_fails_closed_when_forecast_matches_prompt() -> None:
+    full = _full((Modality.TEXT,) * 4, mandatory=(3,))
+    scores = {0: 0.4, 1: 0.3, 2: 0.2, 3: 0.1}
+
+    with pytest.raises(ValueError, match="did not diverge"):
+        select_prompt_attention_topk_ids_by_head(
+            full,
+            SelectionBudget(2, BudgetUnit.BLOCKS),
+            prompt_attention_by_node=scores,
+            forecast_attention_by_node=scores,
+            head_routes=((0, 0),),
+            position_limits={(0, 0): 2},
+            future_query_reranking=True,
+            future_minimum_prompt_mass_fraction=0.99,
+            future_gain_ratio=1.0,
+            maximum_future_replacements=1,
+            future_divergence_fail_closed=True,
+            future_minimum_prompt_forecast_tv=0.01,
+        )
+
+
+def test_prompt_query_coverage_reranking_preserves_same_bytes_and_distinct_evidence() -> None:
+    full = _full(
+        (Modality.IMAGE, Modality.IMAGE, Modality.IMAGE, Modality.TEXT),
+        mandatory=(3,),
+    )
+    prompt_scores = {0: 0.5, 1: 0.5, 2: 0.5, 3: 0.0}
+    query_attention = {
+        0: (0.9, 0.1),
+        1: (0.8, 0.2),
+        2: (0.1, 0.9),
+        3: (0.0, 0.0),
+    }
+    kwargs = {
+        "prompt_attention_by_node": prompt_scores,
+        "prompt_query_attention_by_node": query_attention,
+        "head_routes": ((0, 0),),
+        "position_limits": {(0, 0): 3},
+        "query_coverage_reranking": True,
+        "query_coverage_minimum_prompt_mass_fraction": 1.0,
+        "query_coverage_maximum_replacements": 1,
+        "query_coverage_minimum_normalized_gain": 0.1,
+    }
+
+    first = select_prompt_attention_topk_ids_by_head(
+        full,
+        SelectionBudget(3, BudgetUnit.BLOCKS),
+        **kwargs,
+    )
+    second = select_prompt_attention_topk_ids_by_head(
+        full,
+        SelectionBudget(3, BudgetUnit.BLOCKS),
+        **kwargs,
+    )
+
+    assert first == second
+    assert first.selected_node_ids == (0, 2, 3)
+    record = first.capacity_records[0]
+    assert record.selected_positions == 3
+    assert record.shortfall_positions == 0
+    assert record.query_coverage_rerank_count == 1
+    assert record.query_coverage_pairs == ((1, 2),)
+    assert record.selected_query_coverage > record.baseline_query_coverage
+    assert record.normalized_query_coverage_gain > 0.1
+    assert record.query_coverage_selected_prompt_mass == (
+        record.query_coverage_baseline_prompt_mass
+    )
+    assert record.query_coverage_normalized_prompt_loss == 0.0
+    assert record.selected_bytes == sum(
+        full.blocks[node_id].byte_size for node_id in first.selected_node_ids
+    )
+
+
+def test_prompt_query_coverage_reranking_never_crosses_modalities() -> None:
+    full = _full(
+        (Modality.IMAGE, Modality.IMAGE, Modality.TEXT, Modality.TEXT),
+        mandatory=(3,),
+    )
+    result = select_prompt_attention_topk_ids_by_head(
+        full,
+        SelectionBudget(2, BudgetUnit.BLOCKS),
+        prompt_attention_by_node={0: 0.5, 1: 0.4, 2: 0.1, 3: 0.0},
+        prompt_query_attention_by_node={
+            0: (0.9, 0.0),
+            1: (0.8, 0.0),
+            2: (0.0, 1.0),
+            3: (0.0, 0.0),
+        },
+        head_routes=((0, 0),),
+        position_limits={(0, 0): 2},
+        query_coverage_reranking=True,
+        query_coverage_minimum_prompt_mass_fraction=0.5,
+        query_coverage_maximum_replacements=1,
+        query_coverage_minimum_normalized_gain=0.01,
+    )
+
+    assert result.selected_node_ids == (0, 3)
+    record = result.capacity_records[0]
+    assert record.query_coverage_rerank_count == 0
+    assert record.query_coverage_pairs == ()
+    assert record.query_coverage_candidate_count == 1
+
+
+def test_prompt_query_coverage_reranking_fails_closed_on_invalid_evidence() -> None:
+    full = _full((Modality.IMAGE, Modality.IMAGE, Modality.TEXT), mandatory=(2,))
+    with pytest.raises(ValueError, match="must cover every source block"):
+        select_prompt_attention_topk_ids_by_head(
+            full,
+            SelectionBudget(2, BudgetUnit.BLOCKS),
+            prompt_attention_by_node={0: 0.5, 1: 0.4, 2: 0.0},
+            prompt_query_attention_by_node={0: (0.9, 0.1), 2: (0.0, 0.0)},
+            head_routes=((0, 0),),
+            position_limits={(0, 0): 2},
+            query_coverage_reranking=True,
+            query_coverage_maximum_replacements=1,
+            query_coverage_minimum_normalized_gain=0.01,
+        )
+
+
+def test_prompt_query_coverage_initial_selection_reserves_diverse_evidence() -> None:
+    full = _full(
+        (Modality.IMAGE, Modality.IMAGE, Modality.IMAGE, Modality.IMAGE, Modality.TEXT),
+        mandatory=(4,),
+    )
+    prompt_scores = {0: 0.6, 1: 0.5, 2: 0.4, 3: 0.3, 4: 0.0}
+    query_attention = {
+        0: (1.0, 0.0),
+        1: (0.9, 0.0),
+        2: (0.0, 1.0),
+        3: (0.0, 0.8),
+        4: (0.0, 0.0),
+    }
+    kwargs = {
+        "prompt_attention_by_node": prompt_scores,
+        "prompt_query_attention_by_node": query_attention,
+        "head_routes": ((0, 0),),
+        "position_limits": {(0, 0): 3},
+        "query_coverage_initial_selection": True,
+        "query_coverage_initial_fraction": 1.0,
+        "query_coverage_initial_prompt_weight": 0.1,
+        "query_coverage_initial_minimum_prompt_mass_fraction": 0.8,
+    }
+
+    first = select_prompt_attention_topk_ids_by_head(
+        full,
+        SelectionBudget(3, BudgetUnit.BLOCKS),
+        **kwargs,
+    )
+    second = select_prompt_attention_topk_ids_by_head(
+        full,
+        SelectionBudget(3, BudgetUnit.BLOCKS),
+        **kwargs,
+    )
+
+    assert first == second
+    assert first.selected_node_ids == (0, 2, 4)
+    record = first.capacity_records[0]
+    assert record.selected_positions == 3
+    assert record.shortfall_positions == 0
+    assert record.query_coverage_initial_reserved_count == 2
+    assert record.query_coverage_initial_changed_count == 1
+    assert record.query_coverage_initial_added_node_ids == (2,)
+    assert record.query_coverage_initial_selected > record.query_coverage_initial_baseline
+    assert record.query_coverage_initial_normalized_gain > 0
+    assert record.query_coverage_initial_selected_prompt_mass >= (
+        0.8 * record.query_coverage_initial_baseline_prompt_mass
+    )
+    assert record.selected_bytes == sum(
+        full.blocks[node_id].byte_size for node_id in first.selected_node_ids
+    )
+
+
+def test_prompt_query_coverage_initial_selection_falls_back_at_prompt_mass_floor() -> None:
+    full = _full(
+        (Modality.IMAGE, Modality.IMAGE, Modality.IMAGE, Modality.TEXT),
+        mandatory=(3,),
+    )
+    result = select_prompt_attention_topk_ids_by_head(
+        full,
+        SelectionBudget(3, BudgetUnit.BLOCKS),
+        prompt_attention_by_node={0: 0.6, 1: 0.5, 2: 0.1, 3: 0.0},
+        prompt_query_attention_by_node={
+            0: (1.0, 0.0),
+            1: (0.9, 0.0),
+            2: (0.0, 1.0),
+            3: (0.0, 0.0),
+        },
+        head_routes=((0, 0),),
+        position_limits={(0, 0): 3},
+        query_coverage_initial_selection=True,
+        query_coverage_initial_fraction=1.0,
+        query_coverage_initial_prompt_weight=0.0,
+        query_coverage_initial_minimum_prompt_mass_fraction=1.0,
+    )
+
+    assert result.selected_node_ids == (0, 1, 3)
+    record = result.capacity_records[0]
+    assert record.query_coverage_initial_reserved_count == 0
+    assert record.query_coverage_initial_changed_count == 0
 
 
 def test_required_prototype_anchor_budget_fails_closed() -> None:
@@ -822,6 +1360,28 @@ def test_dense_fill_completes_partial_prompt_anchor_on_block_lattice() -> None:
     assert result.decisions[0].reason is SelectionReason.PROMPT_ANCHOR
     assert result.decisions[1].reason is SelectionReason.DENSE_CACHE_FILL
     assert sum(block.position_count for block in result.selected_blocks) == 10
+
+
+def test_dense_fill_lowers_unattainable_44_position_limit_to_32() -> None:
+    key = np.arange(48 * 2, dtype=np.float32).reshape(1, 1, 48, 2)
+    full = FullKVState.from_tensors(
+        ((key, key.copy()),),
+        block_size=16,
+    )
+    _graph, _utilities, objective = _utilities_and_objective(full)
+
+    result = lazy_greedy_select(
+        objective,
+        SelectionBudget(44, BudgetUnit.RETAINED_SLOTS),
+        position_limits={(0, 0): 44},
+        fill_position_limits=True,
+        position_fill_quantum=16,
+        prompt_anchor_node_ids=(0,),
+    )
+
+    assert sum(block.position_count for block in result.selected_blocks) == 32
+    assert result.budget_spent == 32
+    assert result.remaining_budget == 12
 
 
 def test_mandatory_blocks_that_exceed_budget_fail_closed() -> None:

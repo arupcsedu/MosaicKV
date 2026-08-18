@@ -1,0 +1,158 @@
+schema_version: 1
+revision: "79.1"
+experiment_id: choice_c_v79_disjoint_adaptive_swap_calibration
+classification: preregistered_post_v78_negative_disjoint_adaptive_swap_calibration
+report_title: V79 label-blind adaptive stable-head swap calibration
+selection_rule_frozen_before_calibration: true
+execution_status: ready_after_clean_commit
+frozen_candidate_classification: frozen_v79_label_blind_adaptive_swap_candidate
+parent_negative_result_seal: configs/ledgers/choice_c_v78_negative_calibration_seal.yaml
+
+protocol_amendment:
+  parent_result: /scratch/djy8hg/runs/mosaickv/choice-c-v78-disjoint-visual-balance-calibration-v1/analysis/label_blind_calibration.json
+  parent_result_classification: sealed_negative_label_blind_calibration_result
+  parent_benchmark_labels_accessed: false
+  parent_official_task_scores_accessed: false
+  parent_fullkv_output_fidelity_used_for_design: true
+  parent_samples_forbidden_from_calibration: true
+  fixed_visual_quotas_retired: true
+  design_change: adaptive_equal_size_visual_for_text_swaps
+  visual_gain_definition: visual_prompt_mass_fraction_within_layer_head
+  text_loss_definition: text_prompt_mass_fraction_within_layer_head
+  text_preservation_reference: prompt_topk_selected_text_mass_before_swaps
+  configured_active_byte_cap_frozen_bytes: 27500000
+  fidelity_gate_unchanged: true
+  memory_gate_unchanged: true
+  prototype_heavy_candidates_allowed: false
+
+common_cache_policy:
+  block_size: 4
+  physical_budget_block_size: 4
+  physical_budget_mandatory_policy: last_token
+
+candidate_config: configs/experiments/choice_c_v72_frozen_candidate.yaml
+model_id: llava-hf/llava-1.5-7b-hf
+model_revision: b234b804b114d9e37bb655e11cbbb5f5e971b7a9
+backend: hf_eager_prefill_sdpa_decode
+seed: 17
+output_length: 64
+warmups_per_arm: 1
+measured_repetitions_per_arm: 1
+
+tasks:
+  - task: docvqa
+    dataset_id: lmms-lab/DocVQA
+    dataset_revision: 539088ef8a8ada01ac8e2e6d4e372586748a265e
+    split: validation
+    ledger: /scratch/djy8hg/runs/mosaickv/choice-c-v79-disjoint-adaptive-swap-calibration-v1/inputs/calibration_docvqa.json
+    selection_seed: 20270907
+    sample_count: 32
+  - task: textvqa
+    dataset_id: lmms-lab/textvqa
+    dataset_revision: 9c0699cd19768ac5ab97568f6b3cbac4c0062884
+    split: validation
+    ledger: /scratch/djy8hg/runs/mosaickv/choice-c-v79-disjoint-adaptive-swap-calibration-v1/inputs/calibration_textvqa.json
+    selection_seed: 20270907
+    sample_count: 32
+
+candidates:
+  - id: v78_negative_control_b4_27_5
+    tier_policy: exact_dominant_minimal_prototype
+    target_active_reduction_fraction_vs_prompt_topk: 0.30
+    rationale: Preserve the v78 no-rebalancing control to isolate adaptive swaps.
+    overrides:
+      spatial_weight: 1.0
+      spatial_max_distance: 0.125
+      candidate_nonmandatory_fraction: 0.04
+      routed_head_fraction: 0.03125
+      prompt_anchor_fraction: 0.50
+      evidence_preservation_fraction: 0.35
+      minimum_stratum_fraction: 0.25
+      physical_capacity_fraction: 1.0
+      maximum_prototypes_per_head: 2
+      prototype_budget_planning_mode: one_pass_bounded_anchor_cover
+      active_budget_bytes: 27500000
+      evidence_reservation_mode: structural_round_robin
+      evidence_grid_rows: 4
+      evidence_grid_columns: 4
+      stable_head_visual_fraction: 0.0
+      stable_head_adaptive_visual_swaps: false
+      stable_head_minimum_text_mass_fraction: 1.0
+      stable_head_visual_gain_ratio: 1.0
+      stable_head_maximum_visual_swaps: 0
+  - id: adaptive_swap2_text9975_gain150_b4_27_5
+    tier_policy: exact_dominant_minimal_prototype
+    target_active_reduction_fraction_vs_prompt_topk: 0.30
+    rationale: Permit at most two equal-size swaps per stable head only when normalized visual evidence gain is at least 1.5 times normalized text loss and at least 99.75% of baseline selected text mass remains.
+    overrides:
+      spatial_weight: 1.0
+      spatial_max_distance: 0.125
+      candidate_nonmandatory_fraction: 0.04
+      routed_head_fraction: 0.03125
+      prompt_anchor_fraction: 0.50
+      evidence_preservation_fraction: 0.35
+      minimum_stratum_fraction: 0.25
+      physical_capacity_fraction: 1.0
+      maximum_prototypes_per_head: 2
+      prototype_budget_planning_mode: one_pass_bounded_anchor_cover
+      active_budget_bytes: 27500000
+      evidence_reservation_mode: structural_round_robin
+      evidence_grid_rows: 4
+      evidence_grid_columns: 4
+      stable_head_visual_fraction: 0.0
+      stable_head_adaptive_visual_swaps: true
+      stable_head_minimum_text_mass_fraction: 0.9975
+      stable_head_visual_gain_ratio: 1.5
+      stable_head_maximum_visual_swaps: 2
+  - id: adaptive_swap2_text995_gain125_b4_27_5
+    tier_policy: exact_dominant_minimal_prototype
+    target_active_reduction_fraction_vs_prompt_topk: 0.30
+    rationale: Permit at most two equal-size swaps per stable head with a 99.5% selected-text-mass floor and a 1.25 normalized visual-gain-to-text-loss threshold.
+    overrides:
+      spatial_weight: 1.0
+      spatial_max_distance: 0.125
+      candidate_nonmandatory_fraction: 0.04
+      routed_head_fraction: 0.03125
+      prompt_anchor_fraction: 0.50
+      evidence_preservation_fraction: 0.35
+      minimum_stratum_fraction: 0.25
+      physical_capacity_fraction: 1.0
+      maximum_prototypes_per_head: 2
+      prototype_budget_planning_mode: one_pass_bounded_anchor_cover
+      active_budget_bytes: 27500000
+      evidence_reservation_mode: structural_round_robin
+      evidence_grid_rows: 4
+      evidence_grid_columns: 4
+      stable_head_visual_fraction: 0.0
+      stable_head_adaptive_visual_swaps: true
+      stable_head_minimum_text_mass_fraction: 0.995
+      stable_head_visual_gain_ratio: 1.25
+      stable_head_maximum_visual_swaps: 2
+
+calibration_objective:
+  labels_accessed: false
+  official_task_scores_accessed: false
+  primary: maximize_worst_task_exact_answer_agreement_with_fullkv
+  secondary: maximize_macro_token_agreement_with_fullkv
+  tertiary: maximize_worst_task_active_plus_residual_reduction_vs_prompt_topk
+  deterministic_tie_break: lexicographically_smallest_candidate_id
+  minimum_active_reduction_fraction_vs_prompt_topk: 0.30
+  minimum_active_plus_residual_reduction_fraction_vs_prompt_topk: 0.30
+  fullkv_answer_noninferiority_margin_vs_prompt_topk: 0.05
+  maximum_prototype_logical_fraction: 0.05
+  require_all_rows_complete: true
+
+sample_policy:
+  materialize_from_clean_commit: true
+  exclude_all_repository_ledgers: true
+  exclude_v73_heldout_ledgers: true
+  exclude_all_v74_calibration_ledgers: true
+  exclude_v75_heldout_ledgers: true
+  exclude_v76_calibration_ledgers: true
+  exclude_v78_calibration_ledgers: true
+  exclude_prior_observed_result_rows: true
+  benchmark_labels_used_for_candidate_selection: false
+  future_heldout_must_exclude_this_calibration_ledger: true
+
+output_root: /scratch/djy8hg/runs/mosaickv/choice-c-v79-disjoint-adaptive-swap-calibration-v1
+frozen_candidate_output: /scratch/djy8hg/runs/mosaickv/choice-c-v79-disjoint-adaptive-swap-calibration-v1/analysis/frozen_candidate.yaml

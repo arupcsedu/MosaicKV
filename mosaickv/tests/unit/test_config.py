@@ -150,6 +150,11 @@ def test_forecast_attention_prototype_controls_are_strictly_coupled() -> None:
     gather_config = PrototypeConfig.from_mapping({"source_gather_mode": "per_head_reference"})
     assert gather_config.source_gather_mode == "per_head_reference"
     assert PrototypeConfig().budget_planning_mode == "one_pass_anchor_cover"
+    bounded = PrototypeConfig(
+        budget_planning_mode="one_pass_bounded_anchor_cover",
+        maximum_prototypes_per_head=2,
+    )
+    assert bounded.budget_planning_mode == "one_pass_bounded_anchor_cover"
     with pytest.raises(ConfigurationError, match="budget_planning_mode"):
         PrototypeConfig(budget_planning_mode="unbounded_retry")
 
@@ -631,6 +636,257 @@ def test_forecasting_configuration_parses_conditional_draft_gate_strictly() -> N
     assert config.conditional_draft_uncertainty_threshold == 0.2
     with pytest.raises(ConfigurationError, match="must be in \\[0, 1\\]"):
         ForecastingConfig(conditional_draft_uncertainty_threshold=1.01)
+
+
+def test_spatial_evidence_reservation_configuration_is_strict() -> None:
+    config = SelectionConfig.from_mapping(
+        {
+            "evidence_reservation_mode": "spatial_stratified_prompt",
+            "evidence_grid_rows": 6,
+            "evidence_grid_columns": 6,
+        }
+    )
+    assert config.evidence_reservation_mode == "spatial_stratified_prompt"
+    assert config.evidence_grid_rows == 6
+    assert config.evidence_grid_columns == 6
+    with pytest.raises(ConfigurationError, match="evidence_reservation_mode"):
+        SelectionConfig(evidence_reservation_mode="ocr_from_labels")
+    with pytest.raises(ConfigurationError, match="evidence_grid_rows"):
+        SelectionConfig(evidence_grid_rows=0)
+
+
+def test_stable_head_visual_fraction_requires_prompt_routing() -> None:
+    config = SelectionConfig.from_mapping(
+        {
+            "stable_head_prompt_routing": True,
+            "stable_head_visual_fraction": 0.5,
+        }
+    )
+    assert config.stable_head_visual_fraction == 0.5
+    with pytest.raises(ConfigurationError, match="stable_head_visual_fraction"):
+        SelectionConfig(stable_head_visual_fraction=0.5)
+    with pytest.raises(ConfigurationError, match="stable_head_visual_fraction"):
+        SelectionConfig(
+            stable_head_prompt_routing=True,
+            stable_head_visual_fraction=1.01,
+        )
+
+
+def test_adaptive_stable_head_visual_swaps_are_strict_and_exclude_fixed_quota() -> None:
+    config = SelectionConfig.from_mapping(
+        {
+            "stable_head_prompt_routing": True,
+            "stable_head_adaptive_visual_swaps": True,
+            "stable_head_minimum_text_mass_fraction": 0.995,
+            "stable_head_visual_gain_ratio": 1.5,
+            "stable_head_maximum_visual_swaps": 2,
+            "stable_head_swap_risk_gate": True,
+            "stable_head_maximum_normalized_text_loss": 0.001,
+            "stable_head_forecast_gain_ratio": 1.5,
+        }
+    )
+    assert config.stable_head_adaptive_visual_swaps
+    assert config.stable_head_minimum_text_mass_fraction == 0.995
+    assert config.stable_head_visual_gain_ratio == 1.5
+    assert config.stable_head_maximum_visual_swaps == 2
+    assert config.stable_head_swap_risk_gate
+    assert config.stable_head_maximum_normalized_text_loss == 0.001
+    assert config.stable_head_forecast_gain_ratio == 1.5
+    with pytest.raises(ConfigurationError, match="requires stable_head_prompt_routing"):
+        SelectionConfig(
+            stable_head_adaptive_visual_swaps=True,
+            stable_head_maximum_visual_swaps=1,
+        )
+    with pytest.raises(ConfigurationError, match="cannot use a fixed visual fraction"):
+        SelectionConfig(
+            stable_head_prompt_routing=True,
+            stable_head_visual_fraction=0.5,
+            stable_head_adaptive_visual_swaps=True,
+            stable_head_maximum_visual_swaps=1,
+        )
+    with pytest.raises(ConfigurationError, match="require at least one permitted swap"):
+        SelectionConfig(
+            stable_head_prompt_routing=True,
+            stable_head_adaptive_visual_swaps=True,
+        )
+    with pytest.raises(ConfigurationError, match="must tighten"):
+        SelectionConfig(
+            stable_head_prompt_routing=True,
+            stable_head_adaptive_visual_swaps=True,
+            stable_head_maximum_visual_swaps=1,
+            stable_head_swap_risk_gate=True,
+        )
+    with pytest.raises(ConfigurationError, match="require stable_head_adaptive_visual_swaps"):
+        SelectionConfig(stable_head_swap_risk_gate=True)
+
+
+def test_stable_head_future_query_reranking_is_strict_and_excludes_visual_routing() -> None:
+    config = SelectionConfig.from_mapping(
+        {
+            "stable_head_prompt_routing": True,
+            "stable_head_future_query_reranking": True,
+            "stable_head_future_minimum_prompt_mass_fraction": 0.995,
+            "stable_head_future_gain_ratio": 1.5,
+            "stable_head_maximum_future_replacements": 2,
+            "stable_head_future_divergence_fail_closed": True,
+            "stable_head_future_minimum_prompt_forecast_tv": 0.01,
+            "stable_head_future_risk_gate": True,
+            "stable_head_future_maximum_normalized_prompt_loss": 0.005,
+            "stable_head_future_minimum_normalized_gain": 0.0005,
+        }
+    )
+    assert config.stable_head_future_query_reranking
+    assert config.stable_head_future_minimum_prompt_mass_fraction == 0.995
+    assert config.stable_head_future_gain_ratio == 1.5
+    assert config.stable_head_maximum_future_replacements == 2
+    assert config.stable_head_future_divergence_fail_closed
+    assert config.stable_head_future_minimum_prompt_forecast_tv == 0.01
+    assert config.stable_head_future_risk_gate
+    assert config.stable_head_future_maximum_normalized_prompt_loss == 0.005
+    assert config.stable_head_future_minimum_normalized_gain == 0.0005
+    with pytest.raises(ConfigurationError, match="requires stable_head_prompt_routing"):
+        SelectionConfig(
+            stable_head_future_query_reranking=True,
+            stable_head_maximum_future_replacements=1,
+        )
+    with pytest.raises(ConfigurationError, match="cannot be combined"):
+        SelectionConfig(
+            stable_head_prompt_routing=True,
+            stable_head_visual_fraction=0.5,
+            stable_head_future_query_reranking=True,
+            stable_head_maximum_future_replacements=1,
+        )
+    with pytest.raises(ConfigurationError, match="at least one permitted replacement"):
+        SelectionConfig(
+            stable_head_prompt_routing=True,
+            stable_head_future_query_reranking=True,
+        )
+    with pytest.raises(ConfigurationError, match="require stable_head_future_query_reranking"):
+        SelectionConfig(stable_head_maximum_future_replacements=1)
+    with pytest.raises(ConfigurationError, match="positive minimum prompt/forecast TV"):
+        SelectionConfig(
+            stable_head_prompt_routing=True,
+            stable_head_future_query_reranking=True,
+            stable_head_maximum_future_replacements=1,
+            stable_head_future_divergence_fail_closed=True,
+        )
+    with pytest.raises(ConfigurationError, match="requires stable_head_future_divergence"):
+        SelectionConfig(stable_head_future_minimum_prompt_forecast_tv=0.01)
+    with pytest.raises(ConfigurationError, match="requires stable_head_future_query_reranking"):
+        SelectionConfig(stable_head_future_risk_gate=True)
+    with pytest.raises(ConfigurationError, match="must tighten"):
+        SelectionConfig(
+            stable_head_prompt_routing=True,
+            stable_head_future_query_reranking=True,
+            stable_head_maximum_future_replacements=1,
+            stable_head_future_risk_gate=True,
+        )
+    with pytest.raises(ConfigurationError, match="require stable_head_future_risk_gate"):
+        SelectionConfig(stable_head_future_maximum_normalized_prompt_loss=0.01)
+
+
+def test_stable_head_prompt_query_coverage_reranking_is_strict_and_exclusive() -> None:
+    config = SelectionConfig.from_mapping(
+        {
+            "stable_head_prompt_routing": True,
+            "stable_head_query_coverage_reranking": True,
+            "stable_head_query_coverage_minimum_prompt_mass_fraction": 0.995,
+            "stable_head_query_coverage_maximum_replacements": 2,
+            "stable_head_query_coverage_minimum_normalized_gain": 0.001,
+        }
+    )
+    assert config.stable_head_query_coverage_reranking
+    assert config.stable_head_query_coverage_minimum_prompt_mass_fraction == 0.995
+    assert config.stable_head_query_coverage_maximum_replacements == 2
+    assert config.stable_head_query_coverage_minimum_normalized_gain == 0.001
+    with pytest.raises(ConfigurationError, match="requires stable_head_prompt_routing"):
+        SelectionConfig(
+            stable_head_query_coverage_reranking=True,
+            stable_head_query_coverage_maximum_replacements=1,
+            stable_head_query_coverage_minimum_normalized_gain=0.001,
+        )
+    with pytest.raises(ConfigurationError, match="cannot be combined"):
+        SelectionConfig(
+            stable_head_prompt_routing=True,
+            stable_head_future_query_reranking=True,
+            stable_head_maximum_future_replacements=1,
+            stable_head_query_coverage_reranking=True,
+            stable_head_query_coverage_maximum_replacements=1,
+            stable_head_query_coverage_minimum_normalized_gain=0.001,
+        )
+    with pytest.raises(ConfigurationError, match="at least one permitted replacement"):
+        SelectionConfig(
+            stable_head_prompt_routing=True,
+            stable_head_query_coverage_reranking=True,
+            stable_head_query_coverage_minimum_normalized_gain=0.001,
+        )
+    with pytest.raises(ConfigurationError, match="positive minimum normalized gain"):
+        SelectionConfig(
+            stable_head_prompt_routing=True,
+            stable_head_query_coverage_reranking=True,
+            stable_head_query_coverage_maximum_replacements=1,
+        )
+    with pytest.raises(ConfigurationError, match="require stable_head_query_coverage"):
+        SelectionConfig(stable_head_query_coverage_maximum_replacements=1)
+
+    selection = SelectionConfig(
+        stable_head_prompt_routing=True,
+        stable_head_query_coverage_reranking=True,
+        stable_head_query_coverage_maximum_replacements=1,
+        stable_head_query_coverage_minimum_normalized_gain=0.001,
+    )
+    base = synthetic_smoke_config()
+    with pytest.raises(ConfigurationError, match="requires a MosaicKV method"):
+        replace(base, selection=selection)
+    with pytest.raises(ConfigurationError, match="prompt_window >= 1"):
+        replace(
+            base,
+            method=MosaicKVMethod.MOSAICKV_EXACT,
+            forecasting=ForecastingConfig(
+                mode=ForecastMode.DRAFT_ROLLOUT,
+                prompt_window=0,
+                draft_steps=1,
+            ),
+            selection=selection,
+        )
+
+
+def test_stable_head_initial_query_coverage_selection_is_strict_and_exclusive() -> None:
+    config = SelectionConfig.from_mapping(
+        {
+            "stable_head_prompt_routing": True,
+            "stable_head_query_coverage_initial_selection": True,
+            "stable_head_query_coverage_initial_fraction": 0.25,
+            "stable_head_query_coverage_initial_prompt_weight": 0.5,
+            "stable_head_query_coverage_initial_minimum_prompt_mass_fraction": 0.9,
+        }
+    )
+    assert config.stable_head_query_coverage_initial_selection
+    assert config.stable_head_query_coverage_initial_fraction == 0.25
+    assert config.stable_head_query_coverage_initial_prompt_weight == 0.5
+    assert config.stable_head_query_coverage_initial_minimum_prompt_mass_fraction == 0.9
+
+    with pytest.raises(ConfigurationError, match="requires stable_head_prompt_routing"):
+        SelectionConfig(
+            stable_head_query_coverage_initial_selection=True,
+            stable_head_query_coverage_initial_fraction=0.25,
+        )
+    with pytest.raises(ConfigurationError, match="positive fraction"):
+        SelectionConfig(
+            stable_head_prompt_routing=True,
+            stable_head_query_coverage_initial_selection=True,
+        )
+    with pytest.raises(ConfigurationError, match="cannot be combined"):
+        SelectionConfig(
+            stable_head_prompt_routing=True,
+            stable_head_query_coverage_initial_selection=True,
+            stable_head_query_coverage_initial_fraction=0.25,
+            stable_head_query_coverage_reranking=True,
+            stable_head_query_coverage_maximum_replacements=1,
+            stable_head_query_coverage_minimum_normalized_gain=0.001,
+        )
+    with pytest.raises(ConfigurationError, match="controls require"):
+        SelectionConfig(stable_head_query_coverage_initial_fraction=0.25)
 
 
 def test_prototype_configuration_rejects_invalid_modality_pairs() -> None:

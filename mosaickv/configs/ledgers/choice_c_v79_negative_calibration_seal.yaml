@@ -1,0 +1,91 @@
+schema_version: 1
+classification: sealed_negative_label_blind_calibration_result
+experiment_id: choice_c_v79_disjoint_adaptive_swap_calibration
+immutable_result: true
+memory_gate_pass: true
+fidelity_gate_pass: false
+exact_dominant_gate_pass: true
+frozen_candidate_created: false
+freeze_exit_code: 2
+candidate_must_not_be_retuned_from_this_result: true
+benchmark_labels_accessed: false
+official_task_scores_accessed: false
+
+run_git_sha: d68a4da4098c8b868b4cc153356408351ff3a515
+source_snapshot_sha256: 11c46d7bb02eb8c37ee8e8316d03b1d03fd58a6e0abb6e034d9c2afe457d8d20
+run_root: /scratch/djy8hg/runs/mosaickv/choice-c-v79-disjoint-adaptive-swap-calibration-v1
+slurm_jobs:
+  ledger: 18584130
+  calibration: 18584131
+  freeze: 18584132
+
+unchanged_gates:
+  minimum_active_reduction_fraction_vs_prompt_topk: 0.30
+  minimum_active_plus_residual_reduction_fraction_vs_prompt_topk: 0.30
+  fullkv_answer_noninferiority_margin_vs_prompt_topk: 0.05
+  maximum_prototype_logical_fraction: 0.05
+
+observed_gate_summary:
+  worst_active_plus_residual_reduction_fraction_vs_prompt_topk: 0.34796616995569873
+  best_worst_task_fullkv_answer_agreement_delta_vs_prompt_topk: -0.09375
+  selected_candidate: null
+  best_docvqa_candidate:
+    candidate_id: adaptive_swap2_text995_gain125_b4_27_5
+    prompt_topk_fullkv_answer_agreement: 0.6875
+    candidate_fullkv_answer_agreement: 0.65625
+    delta: -0.03125
+  textvqa_gate_failure:
+    prompt_topk_fullkv_answer_agreement: 0.90625
+    best_candidate_fullkv_answer_agreement: 0.8125
+    delta: -0.09375
+
+label_blind_design_finding:
+  broad_adaptive_swaps_retired: true
+  conservative_mean_swaps_per_sample_range: [319.4375, 365.5]
+  balanced_mean_swaps_per_sample_range: [689.4375, 754.375]
+  aggregate_swap_count_predicted_sequence_change: false
+  exact_per_head_swap_records_available: false
+  causal_per_head_claim_permitted: false
+  next_policy_must_fail_closed: true
+
+protocol:
+  path: configs/experiments/choice_c_v79_disjoint_adaptive_swap_calibration.yaml
+  sha256: e2acc2abd821fac6f8d31f53b751cd9f9130d6882165cfcf59785ba616bd67fe
+
+artifacts:
+  calibration_json:
+    path: /scratch/djy8hg/runs/mosaickv/choice-c-v79-disjoint-adaptive-swap-calibration-v1/analysis/label_blind_calibration.json
+    sha256: c8c858fd62b415d2012342a45341e8e084043139a1bd5adc2c63a6f6a59b0765
+  calibration_markdown:
+    path: /scratch/djy8hg/runs/mosaickv/choice-c-v79-disjoint-adaptive-swap-calibration-v1/analysis/label_blind_calibration.md
+    sha256: 393fca4b15b75776ae8c3d69dcb0132e8c3e7c58c3dd8c793a006cc9e13b8983
+  calibration_trials:
+    path: /scratch/djy8hg/runs/mosaickv/choice-c-v79-disjoint-adaptive-swap-calibration-v1/analysis/label_blind_calibration_trials.parquet
+    sha256: 2dd5fb3b26a3d0cd940771d0922035ac7763539f3af1852ef11caaaee3eaada4
+  candidate_ranking:
+    path: /scratch/djy8hg/runs/mosaickv/choice-c-v79-disjoint-adaptive-swap-calibration-v1/analysis/label_blind_candidate_ranking.parquet
+    sha256: 4e213bab365da9259dd886459e4eb21a5ec35bc66a4959e5d6b75af7bcb0255c
+  swap_audit_json:
+    path: /scratch/djy8hg/runs/mosaickv/choice-c-v79-disjoint-adaptive-swap-calibration-v1/analysis/adaptive_swap_audit.json
+    sha256: 9583087e3f50d50d1d78d842813c9e586369a0cce83be724d8bf3da476418d5e
+  swap_audit_markdown:
+    path: /scratch/djy8hg/runs/mosaickv/choice-c-v79-disjoint-adaptive-swap-calibration-v1/analysis/adaptive_swap_audit.md
+    sha256: 2933882862ba1dc17799a8fa5dc9bf7a9c70ca612ed2b19cbbd915d7c2e908e2
+
+calibration_ledgers:
+  docvqa:
+    path: /scratch/djy8hg/runs/mosaickv/choice-c-v79-disjoint-adaptive-swap-calibration-v1/inputs/calibration_docvqa.json
+    sha256: 6f6e1868f2c3111488a69344afe97b7d9ef442398a49b3582daed505d724dada
+    sample_count: 32
+  textvqa:
+    path: /scratch/djy8hg/runs/mosaickv/choice-c-v79-disjoint-adaptive-swap-calibration-v1/inputs/calibration_textvqa.json
+    sha256: 6142200ed7177d835b77733a23d3b6b145c0659062285a545f76ebe9fd255174
+    sample_count: 32
+
+future_protocol:
+  heldout_must_not_be_submitted: true
+  future_calibration_must_exclude_directory: /scratch/djy8hg/runs/mosaickv/choice-c-v79-disjoint-adaptive-swap-calibration-v1/inputs
+  broad_ungated_swapping_must_not_be_reused: true
+  next_trace_must_record_exact_per_head_swap_pairs: true
+  gates_must_remain_unchanged: true
+  next_heldout_materialized_only_after_new_freeze: true

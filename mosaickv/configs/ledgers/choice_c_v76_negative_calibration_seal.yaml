@@ -1,0 +1,80 @@
+schema_version: 1
+classification: sealed_negative_label_blind_calibration_result
+experiment_id: choice_c_v76_disjoint_ocr_grid_calibration
+immutable_result: true
+memory_gate_pass: true
+fidelity_gate_pass: false
+exact_dominant_gate_pass: true
+frozen_candidate_created: false
+freeze_exit_code: 2
+candidate_must_not_be_retuned_from_this_result: true
+benchmark_labels_accessed: false
+official_task_scores_accessed: false
+
+run_git_sha: e8d8b542a594c96b3fb819956a85e692f8a54f2f
+source_snapshot_sha256: c9448e9b10e35d0b1779d933e6dec031fc1cc1eb68d38c175dd699561c177100
+run_root: /scratch/djy8hg/runs/mosaickv/choice-c-v76-disjoint-ocr-calibration-v1
+slurm_jobs:
+  ledger: 18572258
+  calibration: 18572259
+  freeze: 18572260
+
+unchanged_gates:
+  minimum_active_reduction_fraction_vs_prompt_topk: 0.30
+  minimum_active_plus_residual_reduction_fraction_vs_prompt_topk: 0.30
+  fullkv_answer_noninferiority_margin_vs_prompt_topk: 0.05
+  maximum_prototype_logical_fraction: 0.05
+
+observed_gate_summary:
+  worst_active_plus_residual_reduction_fraction_vs_prompt_topk: 0.3474025974025974
+  best_worst_task_fullkv_answer_agreement_delta_vs_prompt_topk: -0.1875
+  selected_candidate: null
+
+protocol:
+  path: configs/experiments/choice_c_v76_disjoint_ocr_calibration.yaml
+  sha256: b8b7a09783fb39ed58ed45c5207f2ecf4661c73dc59b8aa86969d6f8fe72b983
+
+artifacts:
+  calibration_json:
+    path: /scratch/djy8hg/runs/mosaickv/choice-c-v76-disjoint-ocr-calibration-v1/analysis/label_blind_calibration.json
+    sha256: 2b2adff2decc4545456156933f9da324f21482e1c0f0d66071a98511ffa636ff
+  calibration_markdown:
+    path: /scratch/djy8hg/runs/mosaickv/choice-c-v76-disjoint-ocr-calibration-v1/analysis/label_blind_calibration.md
+    sha256: 28f16daa075f9dd0ec70752aaaa27b9c71ccdf231f633f88ef32082b7e518918
+  calibration_trials:
+    path: /scratch/djy8hg/runs/mosaickv/choice-c-v76-disjoint-ocr-calibration-v1/analysis/label_blind_calibration_trials.parquet
+    sha256: f659c36b02052b0f163a4deb1c7b06e46fbe21a27ad577efed3c9a8bb7feb267
+  candidate_ranking:
+    path: /scratch/djy8hg/runs/mosaickv/choice-c-v76-disjoint-ocr-calibration-v1/analysis/label_blind_candidate_ranking.parquet
+    sha256: 199ec3b66f69cfa037b8bba3361b392fb9b225cb072b4beb8989db48bfa42a83
+  selection_audit_json:
+    path: /scratch/djy8hg/runs/mosaickv/choice-c-v76-disjoint-ocr-calibration-v1/analysis/label_blind_selection_audit.json
+    sha256: e248687812d9e94883c4f9ccebb0c71ee7b173587e9fd36236c0fe02af4a2070
+  selection_audit_markdown:
+    path: /scratch/djy8hg/runs/mosaickv/choice-c-v76-disjoint-ocr-calibration-v1/analysis/label_blind_selection_audit.md
+    sha256: 21c583767fc19e98c1454678e2d509994b982af84eeb05fb77d92af7bc19b4c9
+  selection_audit_rows:
+    path: /scratch/djy8hg/runs/mosaickv/choice-c-v76-disjoint-ocr-calibration-v1/analysis/label_blind_selection_audit.parquet
+    sha256: 565f850014fc8fda9dee62595823008422451a4a91ec73a4b430fce4447aa499
+  selection_audit_script:
+    path: scripts/analyze_choice_c_v76_label_blind_selection.py
+    sha256: 5710431ebbbb3fc85db0369d16dd81b7d9ef5372c1f6bd9d065a008b8b059617
+
+calibration_ledgers:
+  docvqa:
+    path: /scratch/djy8hg/runs/mosaickv/choice-c-v76-disjoint-ocr-calibration-v1/inputs/calibration_docvqa.json
+    sha256: b92b75ae62423edaff7e0ca235139f20b925a6b1f9bf7f22060dc69aad4ebb3f
+    sample_count: 16
+  textvqa:
+    path: /scratch/djy8hg/runs/mosaickv/choice-c-v76-disjoint-ocr-calibration-v1/inputs/calibration_textvqa.json
+    sha256: bbaa1b4bcf9beb8de60821641757dffd957ceaa0cb357b93efdbc5b8923a39d0
+    sample_count: 16
+
+future_protocol:
+  v77_remains_blocked: true
+  v77_must_not_be_submitted: true
+  future_calibration_must_exclude_directory: /scratch/djy8hg/runs/mosaickv/choice-c-v76-disjoint-ocr-calibration-v1/inputs
+  candidate_version_must_change: true
+  gates_must_remain_unchanged: true
+  next_calibration_labels_accessed: false
+  next_heldout_materialized_only_after_new_freeze: true

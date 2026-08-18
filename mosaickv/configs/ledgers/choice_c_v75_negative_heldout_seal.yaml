@@ -1,0 +1,50 @@
+schema_version: 1
+classification: sealed_negative_heldout_quality_memory_result
+experiment_id: choice_c_v75_frozen_heldout_quality_memory
+immutable_result: true
+overall_quality_memory_gate_pass: false
+failure_scope: docvqa_quality
+candidate_must_not_be_retuned_from_this_result: true
+labels_must_not_enter_future_calibration: true
+
+run_git_sha: 28f0e2b56a73272a65e4d905c18921d2386e84a3
+source_snapshot_sha256: 6f12ddb962b0797d178ec46f15675800568e802ffaa5058c0abf099c76894b61
+run_root: /scratch/djy8hg/runs/mosaickv/choice-c-v75-frozen-heldout-quality-memory-v6
+protocol:
+  path: configs/experiments/choice_c_v75_frozen_heldout_quality_memory.yaml
+  sha256: 82037ad751f93bd664fdd7f33fe115cb1b9f34a4fe3c91df9cc575ac2926994b
+frozen_candidate:
+  path: /scratch/djy8hg/runs/mosaickv/choice-c-v74-label-blind-calibration-v6/analysis/frozen_candidate.yaml
+  sha256: 200ab662c1bd99f865e36035860b4c677360a90ab2d82fb27644ea845533a537
+artifacts:
+  gate:
+    path: /scratch/djy8hg/runs/mosaickv/choice-c-v75-frozen-heldout-quality-memory-v6/analysis/heldout_quality_memory_gate.json
+    sha256: ee9d82860e0860605b965c27d333f4f7851682e23c3dc23c4d91f460821268e7
+  trials:
+    path: /scratch/djy8hg/runs/mosaickv/choice-c-v75-frozen-heldout-quality-memory-v6/analysis/heldout_trials.parquet
+    sha256: bec0ed53ce64972e3a3dd0d92d0aa51e875f4070c0675a0901622c8fca666b8b
+  summary:
+    path: /scratch/djy8hg/runs/mosaickv/choice-c-v75-frozen-heldout-quality-memory-v6/analysis/heldout_summary.parquet
+    sha256: 32d628b6d8715b865ca898ad2c78221aa5a8ca77ae01188dc19d210df316b57f
+heldout_ledgers:
+  docvqa:
+    path: /scratch/djy8hg/runs/mosaickv/choice-c-v75-frozen-heldout-quality-memory-v6/inputs/heldout_docvqa.json
+    sha256: e69eb5e561bc45d3dde7395e325817b71ecf9219cd30cd240dcd51d1911fe147
+    sample_count: 48
+    gate_pass: false
+  mmstar:
+    path: /scratch/djy8hg/runs/mosaickv/choice-c-v75-frozen-heldout-quality-memory-v6/inputs/heldout_mmstar.json
+    sha256: 814c43c0b4025edbde76296f5706d77023f75dc3344ee1d970c8730f795e7ff6
+    sample_count: 48
+    gate_pass: true
+  chartqa:
+    path: /scratch/djy8hg/runs/mosaickv/choice-c-v75-frozen-heldout-quality-memory-v6/inputs/heldout_chartqa.json
+    sha256: 610f4fdef79846d34c35c40d82943da83be48f39fa45427f4674e75aa0c476ab
+    sample_count: 48
+    gate_pass: true
+
+future_protocol:
+  calibration_must_exclude_directory: /scratch/djy8hg/runs/mosaickv/choice-c-v75-frozen-heldout-quality-memory-v6/inputs
+  candidate_version_must_change: true
+  next_calibration_labels_accessed: false
+  next_heldout_materialized_only_after_new_freeze: true

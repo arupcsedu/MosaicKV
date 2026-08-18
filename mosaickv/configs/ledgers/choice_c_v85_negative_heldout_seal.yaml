@@ -1,0 +1,200 @@
+schema_version: 1
+classification: sealed_negative_heldout_quality_memory_result
+experiment_id: choice_c_v85_v84_frozen_untouched_heldout_quality_memory
+immutable_result: true
+overall_quality_memory_gate_pass: false
+memory_gate_pass: true
+quality_gate_pass: false
+failure_scope:
+  - docvqa_fullkv_nonnegative_mean
+  - textvqa_fullkv_nonnegative_mean
+  - textvqa_fullkv_noninferiority_ci
+candidate_must_not_be_retuned_from_this_result: true
+heldout_labels_accessed_for_analysis: true
+heldout_labels_accessed_for_candidate_selection: false
+labels_must_not_enter_future_calibration: true
+
+protocol_git_sha: 2553f02c6b05b7220ea1a5a691e5f3c15f268c6f
+runtime_git_sha: 9e300dda54fb5377aefae06d1f28614e426d42fd
+source_snapshot_sha256: adb6806e609e004387f094270f32a1f995640dcbc887414ef4eee4256a359909
+run_root: /scratch/djy8hg/runs/mosaickv/choice-c-v85-v84-frozen-untouched-heldout-quality-memory-v1
+slurm_jobs:
+  ledger_array: 18634896
+  evaluation_array: 18634897
+  analysis: 18634898
+  allocated_docvqa_task: 18634903
+  allocated_textvqa_task: 18634897
+
+protocol:
+  executed_path: /scratch/djy8hg/runs/mosaickv/choice-c-v85-v84-frozen-untouched-heldout-quality-memory-v1/preregistration.yaml
+  archived_path: configs/experiments/choice_c_v85_v84_frozen_untouched_heldout_quality_memory.yaml
+  sha256: 9132e7e7ac5d7738d83c5e097933fcc7e97c9b3829667274d6678cfe77b60c41
+frozen_candidate:
+  path: /scratch/djy8hg/runs/mosaickv/choice-c-v84-disjoint-risk-gated-hybrid-calibration-v1/analysis/frozen_candidate.yaml
+  sha256: 940b124a2c2ab09d8192ab03d6cb2efda85339523e613980d567495a7280cf64
+  selected_candidate: hybrid4_exact_risk_moderate_b4_27_5
+  protocol_method: mosaickv_full
+  effective_method: mosaickv_exact
+  tier_policy: exact_only_replacement
+  maximum_prototypes_per_head: 0
+  residual_bytes: 0
+  repair_count: 0
+  supports_full_mosaickv_claim: false
+  supports_prototype_or_repair_claim: false
+
+preregistered_gates:
+  memory_comparator: prompt_attention_topk
+  quality_comparators: [full_kv, prompt_attention_topk]
+  minimum_active_memory_reduction_fraction: 0.30
+  minimum_active_plus_residual_memory_reduction_fraction: 0.30
+  require_nonnegative_mean_score_difference: true
+  task_score_noninferiority_margin: 0.05
+  require_bootstrap_lower_bound_above_negative_margin: true
+  require_each_task_to_pass: true
+  require_all_rows_complete: true
+  require_deterministic_answers_across_repetitions: true
+  require_fullkv_transformation_free: true
+  paired_bootstrap_resamples: 10000
+  paired_bootstrap_seed: 20280113
+
+execution_integrity:
+  measured_rows: 1536
+  completed_rows: 1536
+  failed_rows: 0
+  rows_with_errors: 0
+  rows_with_missing_required_values: 0
+  rows_with_nonfinite_timing: 0
+  generated_tokens_per_row: 64
+  deterministic_samples: 768
+  nondeterministic_samples: 0
+  background_gpu_processes_observed: 0
+  fullkv_transformation_free: true
+  raw_telemetry_modified: false
+
+observed_gate_summary:
+  docvqa:
+    sample_count: 128
+    full_kv_score: 0.250537948083262
+    prompt_attention_topk_score: 0.22418644383258354
+    candidate_score: 0.24541155841707313
+    candidate_minus_full_kv: -0.005126389666188908
+    candidate_minus_full_kv_95_ci: [-0.03495407301869588, 0.025994688212310334]
+    candidate_minus_full_kv_nonnegative_mean_pass: false
+    candidate_minus_full_kv_noninferiority_ci_pass: true
+    candidate_minus_prompt_attention_topk: 0.021225114584489585
+    candidate_minus_prompt_attention_topk_95_ci: [-0.004440291334822584, 0.051127787866069085]
+    candidate_minus_prompt_attention_topk_quality_pass: true
+    candidate_full_kv_answer_agreement: 0.6875
+    candidate_prompt_attention_topk_answer_agreement: 0.6875
+    candidate_vs_fullkv_sample_scores: {wins: 5, ties: 113, losses: 10}
+    candidate_vs_prompt_topk_sample_scores: {wins: 7, ties: 117, losses: 4}
+    candidate_active_kv_bytes: 26529792.0
+    candidate_active_kv_mib: 25.30078125
+    candidate_residual_kv_bytes: 0.0
+    candidate_active_plus_residual_bytes: 26529792.0
+    prompt_attention_topk_active_kv_bytes: 40718336.0
+    full_kv_active_kv_bytes: 320589824.0
+    active_memory_reduction_fraction_vs_prompt_topk: 0.34845588974952213
+    active_plus_residual_reduction_fraction_vs_prompt_topk: 0.34845588974952213
+    active_memory_reduction_fraction_vs_fullkv: 0.9172469304577802
+    memory_gate_pass: true
+    quality_memory_gate_pass: false
+  textvqa:
+    sample_count: 128
+    full_kv_score: 0.5171875
+    prompt_attention_topk_score: 0.45078125
+    candidate_score: 0.47109375
+    candidate_minus_full_kv: -0.04609375
+    candidate_minus_full_kv_95_ci: [-0.0921875, -0.00703125]
+    candidate_minus_full_kv_nonnegative_mean_pass: false
+    candidate_minus_full_kv_noninferiority_ci_pass: false
+    candidate_minus_prompt_attention_topk: 0.0203125
+    candidate_minus_prompt_attention_topk_95_ci: [-0.0078125, 0.0546875]
+    candidate_minus_prompt_attention_topk_quality_pass: true
+    candidate_full_kv_answer_agreement: 0.8671875
+    candidate_prompt_attention_topk_answer_agreement: 0.8828125
+    candidate_vs_fullkv_sample_scores: {wins: 1, ties: 120, losses: 7}
+    candidate_vs_prompt_topk_sample_scores: {wins: 4, ties: 123, losses: 1}
+    candidate_active_kv_bytes: 26411008.0
+    candidate_active_kv_mib: 25.1875
+    candidate_residual_kv_bytes: 0.0
+    candidate_active_plus_residual_bytes: 26411008.0
+    prompt_attention_topk_active_kv_bytes: 40566784.0
+    full_kv_active_kv_bytes: 318652416.0
+    active_memory_reduction_fraction_vs_prompt_topk: 0.34894991922455576
+    active_plus_residual_reduction_fraction_vs_prompt_topk: 0.34894991922455576
+    active_memory_reduction_fraction_vs_fullkv: 0.9171165612627898
+    memory_gate_pass: true
+    quality_memory_gate_pass: false
+
+latency_observation:
+  rejection_criterion: false
+  docvqa:
+    candidate_compression_p50_seconds: 4.207896955620497
+    prompt_attention_topk_compression_p50_seconds: 3.0505294053703547
+    candidate_decode_p50_seconds: 2.500849611282349
+    prompt_attention_topk_decode_p50_seconds: 2.50855262184143
+    candidate_end_to_end_p50_seconds: 7.665121600411832
+    prompt_attention_topk_end_to_end_p50_seconds: 6.581029241438955
+    candidate_prompt_paired_median_end_to_end_ratio: 1.1746752441590866
+  textvqa:
+    candidate_compression_p50_seconds: 4.127913705382497
+    prompt_attention_topk_compression_p50_seconds: 3.023215604387224
+    candidate_decode_p50_seconds: 2.5199594497680664
+    prompt_attention_topk_decode_p50_seconds: 2.5248423500061037
+    candidate_end_to_end_p50_seconds: 7.5898191012665635
+    prompt_attention_topk_end_to_end_p50_seconds: 6.55832516682893
+    candidate_prompt_paired_median_end_to_end_ratio: 1.1789214889941564
+
+artifacts:
+  gate:
+    path: /scratch/djy8hg/runs/mosaickv/choice-c-v85-v84-frozen-untouched-heldout-quality-memory-v1/analysis/heldout_quality_memory_gate.json
+    sha256: a4f820789dc045292eacc7471778418b351e6a72bd1d728c87f2860fed785a84
+  report:
+    path: /scratch/djy8hg/runs/mosaickv/choice-c-v85-v84-frozen-untouched-heldout-quality-memory-v1/analysis/heldout_quality_memory_report.md
+    sha256: 3f2b36998f20cd877347953c1494053b7554efb51f4d0d0c224374f764febfa7
+  trials:
+    path: /scratch/djy8hg/runs/mosaickv/choice-c-v85-v84-frozen-untouched-heldout-quality-memory-v1/analysis/heldout_trials.parquet
+    sha256: e8e6d52822e7240c8e4058cc252319f119d084d21e646e747f9aac3d6d40475d
+  summary:
+    path: /scratch/djy8hg/runs/mosaickv/choice-c-v85-v84-frozen-untouched-heldout-quality-memory-v1/analysis/heldout_summary.parquet
+    sha256: bd4d1adfe97df1ca1e23c670010e4422e4ab7b9197e70d22be20d38039d36a2a
+  analyzer_wrapper:
+    path: scripts/analyze_choice_c_v85_heldout_quality_memory.py
+    sha256: 6feaef401d9d16b2ac518c01dafeb6bec9db17c2d9ce6eb934c0e9a143c78add
+  sealed_analyzer:
+    path: scripts/analyze_choice_c_v73_clean_quality_memory.py
+    sha256: b56f4c13758964f79bb4f558a2eb38a8cd8045a6b2a62b3d72191d1d3962a9e9
+
+heldout_ledgers:
+  docvqa:
+    path: /scratch/djy8hg/runs/mosaickv/choice-c-v85-v84-frozen-untouched-heldout-quality-memory-v1/inputs/heldout_docvqa.json
+    sha256: 51bb5d9e6da7f94ae5e79c595a26f424cd4d5cb2782a8f613418800670deb352
+    sample_count: 128
+    excluded_prior_unique_samples: 1012
+    overlap_with_prior_ledgers: 0
+  textvqa:
+    path: /scratch/djy8hg/runs/mosaickv/choice-c-v85-v84-frozen-untouched-heldout-quality-memory-v1/inputs/heldout_textvqa.json
+    sha256: 623b9b6554feabae6376b8f2907b152a3d4cf0d1ee3f666a90d15dc8f83bc83b
+    sample_count: 128
+    excluded_prior_unique_samples: 440
+    overlap_with_prior_ledgers: 0
+
+telemetry:
+  docvqa:
+    path: /scratch/djy8hg/runs/mosaickv/choice-c-v85-v84-frozen-untouched-heldout-quality-memory-v1/telemetry/v85-docvqa-9132e7e7ac.json
+    sha256: 5218839678df12d8dadb4e8dfbd2a8d6b180c710df9ff3ac8918a54643d6ba35
+    status: completed
+  textvqa:
+    path: /scratch/djy8hg/runs/mosaickv/choice-c-v85-v84-frozen-untouched-heldout-quality-memory-v1/telemetry/v85-textvqa-9132e7e7ac.json
+    sha256: b42a0460e00dda84b0c80b36c1f675694eb8d71ddc7499bfc20c5120304a2175
+    status: completed
+
+future_protocol:
+  v85_must_remain_a_negative_heldout_result: true
+  v84_candidate_must_not_be_revised_from_v85_outputs: true
+  future_calibration_must_exclude_directory: /scratch/djy8hg/runs/mosaickv/choice-c-v85-v84-frozen-untouched-heldout-quality-memory-v1/inputs
+  future_candidate_version: v86_or_later
+  future_calibration_split_must_be_fresh_and_disjoint: true
+  future_calibration_labels_accessed: false
+  future_heldout_materialized_only_after_new_candidate_freeze: true
