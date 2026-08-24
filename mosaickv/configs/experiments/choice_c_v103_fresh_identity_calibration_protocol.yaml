@@ -1,13 +1,13 @@
 schema_version: 1
-revision: "103.0-draft-review-required"
+revision: "103.1-protocol-commit-reviewed-scan-scope-seal-authored"
 experiment_id: choice_c_v103_fresh_identity_calibration
-classification: preregistered_draft_unscanned_unmaterialized_unsubmitted
-protocol_status: draft_review_required_all_actions_disabled
+classification: preregistered_protocol_commit_reviewed_scan_scope_defined_unexecuted
+protocol_status: scan_scope_seal_authored_pending_commit_all_execution_disabled
 draft_date: "2026-08-23"
 
 authorization:
-  protocol_commit_created: false
-  protocol_reviewed_after_commit: false
+  protocol_commit_created: true
+  protocol_reviewed_after_commit: true
   exclusion_scan_authorized: false
   id_catalog_reuse_review_authorized: false
   preflight_ledger_materialization_authorized: false
@@ -22,7 +22,9 @@ authorization:
 
 version_boundary:
   protocol_draft_parent_git_sha: 3563c669b70cc923eec1d76a4cb0f53bc1144a6a
-  protocol_commit_git_sha: null
+  protocol_commit_git_sha: 75736bbc115d2ad5d82ae7c7a3a26df41c89d8fe
+  protocol_file_sha256_at_protocol_commit: c87e76a7555aeea7c7722e5b0cd8604134f5da94fad5fa0f156cea0e4ce26e9f
+  protocol_commit_reviewed_by_user: true
   protocol_commit_policy: commit_containing_this_protocol_becomes_the_v103_preregistration_boundary
   v102_negative_seal_git_sha: 3563c669b70cc923eec1d76a4cb0f53bc1144a6a
   v102_negative_seal_path: configs/ledgers/choice_c_v102_negative_debug_gate_seal.yaml
@@ -108,6 +110,17 @@ fresh_exclusion_scan:
   scan_performed: false
   manifest_reviewed: false
   manifest_sealed: false
+
+scan_scope_seal:
+  path: configs/ledgers/choice_c_v103_protocol_scan_scope_seal.yaml
+  status: authored_uncommitted_unreviewed_after_commit
+  protocol_commit_git_sha: 75736bbc115d2ad5d82ae7c7a3a26df41c89d8fe
+  protocol_file_sha256_at_protocol_commit: c87e76a7555aeea7c7722e5b0cd8604134f5da94fad5fa0f156cea0e4ce26e9f
+  scope_is_identity_and_provenance_only: true
+  exclusion_scan_execution_authorized: false
+  seal_commit_git_sha: null
+  seal_reviewed_after_commit: false
+  next_action_requires_separate_explicit_authorization: true
 
 reviewed_id_catalogs:
   status: planned_reuse_review_not_authorized

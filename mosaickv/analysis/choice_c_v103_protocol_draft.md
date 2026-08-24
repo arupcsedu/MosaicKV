@@ -70,10 +70,22 @@ memory than Prompt Top-K, no more than five percentage points of paired answer
 or token fidelity loss, every task and every robust fold passing, zero residual
 storage, and complete provenance. Latency remains informational.
 
+## Protocol-commit and scan-scope seal update
+
+The protocol was committed and reviewed at
+`75736bbc115d2ad5d82ae7c7a3a26df41c89d8fe`; its committed file hash is
+`c87e76a7555aeea7c7722e5b0cd8604134f5da94fad5fa0f156cea0e4ce26e9f`.
+The subsequent scan-scope seal permits no execution. It defines only the fields,
+roots, mandatory V102 inputs, fail-closed behavior, and sole future output that
+could be authorized by a later scan-only update. In particular, it forbids
+catalog access, sample selection, dataset-row loading, materialization,
+disjointness checking, model loading, and CPU, GPU, or Slurm experiments.
+
 ## Current state
 
-Every action flag is false. The selection seed is derived from the V103
-experiment identifier rather than any observed outcome. No IDs have been
-selected, no data have been loaded, and no job has been submitted. The next
-permitted action after review is one local protocol commit; exclusion scanning
-still requires a later, narrowly scoped authorization.
+The protocol commit has been reviewed, but every operational action flag remains
+false. The scan-scope seal is authored but is not yet committed or reviewed after
+commit. No IDs have been selected, no data have been loaded, and no job has been
+submitted. The next permitted action is one local seal commit. Exclusion scanning
+still requires a later, narrowly scoped authorization after that commit is
+reviewed.

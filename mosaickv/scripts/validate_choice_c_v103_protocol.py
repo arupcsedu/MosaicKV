@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import subprocess
 from pathlib import Path
 from typing import Any, cast
 
@@ -15,10 +16,67 @@ V102_SEAL_SHA = "1f100eee354f553d16e8a41921b7bc0edec559a62a9090bbceb650496c394ab
 V102_PROTOCOL_SHA = "d68bc737aecdc9383dbb47ee2eea830a1d9aeaf24c22b9973be59cc299e337c3"
 V100_PROTOCOL_SHA = "69aed21ee82c5cf338eeb4ecff2a8dd0481d4d04fb378831339da0cfa9effac4"
 V72_CONFIG_SHA = "8bb0add49a858df8bfa936bc932e919ce847511cdccd5e3ce5407b91cd1996b9"
+V103_PROTOCOL_COMMIT = "75736bbc115d2ad5d82ae7c7a3a26df41c89d8fe"
+V103_PROTOCOL_COMMIT_FILE_SHA = "c87e76a7555aeea7c7722e5b0cd8604134f5da94fad5fa0f156cea0e4ce26e9f"
+V103_EXCLUSION_OUTPUT = (
+    "/scratch/djy8hg/runs/mosaickv/choice-c-v103-fresh-identity-calibration-v1/"
+    "inputs/exclusion_manifest.json"
+)
+EXPECTED_BOUND_SOURCES = {
+    "v102_textvqa_complete_selected_ledger": (
+        "a0667e45729639b1830a308d97d46662f3e6c6c76ddda97749d0663fc329b242",
+        32,
+    ),
+    "v102_infovqa_complete_selected_ledger": (
+        "3308465e540f98dac1003e85a78403968a90ed19bd7d23fe5b2ec6ad8da258c5",
+        32,
+    ),
+    "v102_negative_seal": (
+        "1f100eee354f553d16e8a41921b7bc0edec559a62a9090bbceb650496c394ab8",
+        None,
+    ),
+}
+SCAN_ALLOWED_FIELDS = {
+    "canonical_sample_identity",
+    "dataset_id",
+    "dataset_config",
+    "dataset_revision",
+    "split",
+    "sample_id",
+    "task_name",
+    "source_path",
+    "source_sha256",
+    "source_record_count",
+    "identity_count",
+    "schema_version",
+}
+SCAN_FORBIDDEN_FIELDS = {
+    "answer",
+    "answers",
+    "reference",
+    "references",
+    "task_score",
+    "generated_tokens",
+    "logits",
+    "media",
+    "prompt",
+    "error",
+    "failure_identity",
+}
 
 
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _sha256_at_commit(repository: Path, commit: str, path: Path) -> str:
+    relative = path.resolve().relative_to(repository.resolve())
+    content = subprocess.run(
+        ["git", "-C", str(repository), "show", f"{commit}:{relative.as_posix()}"],
+        check=True,
+        capture_output=True,
+    ).stdout
+    return hashlib.sha256(content).hexdigest()
 
 
 def validate(path: Path) -> dict[str, Any]:
@@ -26,20 +84,38 @@ def validate(path: Path) -> dict[str, Any]:
     package = Path(__file__).resolve().parents[1]
     expected = {
         "experiment_id": "choice_c_v103_fresh_identity_calibration",
-        "classification": "preregistered_draft_unscanned_unmaterialized_unsubmitted",
-        "protocol_status": "draft_review_required_all_actions_disabled",
+        "classification": "preregistered_protocol_commit_reviewed_scan_scope_defined_unexecuted",
+        "protocol_status": "scan_scope_seal_authored_pending_commit_all_execution_disabled",
     }
     if any(spec.get(key) != value for key, value in expected.items()):
         raise RuntimeError("V103 is not an authorization-disabled protocol draft")
 
     authorization = cast("dict[str, Any]", spec["authorization"])
-    if any(value is not False for value in authorization.values()):
-        raise RuntimeError("V103 draft authorizes an action")
+    expected_authorization = {
+        "protocol_commit_created": True,
+        "protocol_reviewed_after_commit": True,
+        "exclusion_scan_authorized": False,
+        "id_catalog_reuse_review_authorized": False,
+        "preflight_ledger_materialization_authorized": False,
+        "calibration_ledger_materialization_authorized": False,
+        "disjointness_check_authorized": False,
+        "gpu_preflight_authorized": False,
+        "calibration_execution_authorized": False,
+        "candidate_freeze_authorized": False,
+        "heldout_materialization_authorized": False,
+        "heldout_evaluation_authorized": False,
+        "slurm_or_other_job_submission_authorized": False,
+    }
+    if authorization != expected_authorization:
+        raise RuntimeError("V103 seal update changes an operational authorization")
     submission = cast("dict[str, Any]", spec["submission_policy"])
     if any(value is not False for key, value in submission.items() if key != "reason"):
         raise RuntimeError("V103 draft permits submission or materialization")
 
     boundary = cast("dict[str, Any]", spec["version_boundary"])
+    canonical_protocol = (
+        package / "configs/experiments/choice_c_v103_fresh_identity_calibration_protocol.yaml"
+    )
     pinned_files = {
         package / str(boundary["v102_negative_seal_path"]): V102_SEAL_SHA,
         package / str(boundary["v102_protocol_path"]): V102_PROTOCOL_SHA,
@@ -53,12 +129,61 @@ def validate(path: Path) -> dict[str, Any]:
         raise RuntimeError("V103 predecessor or candidate pin differs")
     if (
         boundary.get("protocol_draft_parent_git_sha") != "3563c669b70cc923eec1d76a4cb0f53bc1144a6a"
-        or boundary.get("protocol_commit_git_sha") is not None
+        or boundary.get("protocol_commit_git_sha") != V103_PROTOCOL_COMMIT
+        or boundary.get("protocol_file_sha256_at_protocol_commit") != V103_PROTOCOL_COMMIT_FILE_SHA
+        or boundary.get("protocol_commit_reviewed_by_user") is not True
+        or _sha256_at_commit(package.parent, V103_PROTOCOL_COMMIT, canonical_protocol)
+        != V103_PROTOCOL_COMMIT_FILE_SHA
         or boundary.get("v102_is_sealed_negative") is not True
         or boundary.get("v102_frozen_candidate_exists") is not False
         or boundary.get("v102_execution_must_remain_disabled") is not True
     ):
         raise RuntimeError("V103 does not preserve the V102 negative boundary")
+
+    scan_scope = cast("dict[str, Any]", spec["scan_scope_seal"])
+    scan_scope_path = package / str(scan_scope["path"])
+    seal = cast("dict[str, Any]", yaml.safe_load(scan_scope_path.read_text(encoding="utf-8")))
+    seal_authorization = cast("dict[str, Any]", seal["authorization"])
+    permitted = cast("dict[str, Any]", seal["permitted_future_scan_scope"])
+    forbidden = cast("dict[str, Any]", seal["explicitly_forbidden_actions"])
+    seal_sources = cast("list[dict[str, Any]]", permitted["mandatory_bound_sources"])
+    observed_seal_sources = {
+        str(source["role"]): (source.get("sha256"), source.get("expected_unique_identities"))
+        for source in seal_sources
+    }
+    if (
+        scan_scope.get("status") != "authored_uncommitted_unreviewed_after_commit"
+        or scan_scope.get("protocol_commit_git_sha") != V103_PROTOCOL_COMMIT
+        or scan_scope.get("protocol_file_sha256_at_protocol_commit")
+        != V103_PROTOCOL_COMMIT_FILE_SHA
+        or scan_scope.get("exclusion_scan_execution_authorized") is not False
+        or scan_scope.get("seal_commit_git_sha") is not None
+        or scan_scope.get("seal_reviewed_after_commit") is not False
+        or seal.get("status") != "authored_uncommitted_unreviewed_after_commit"
+        or seal.get("immutable") is not False
+        or permitted.get("execution_mode") != "local_cpu_process_only"
+        or permitted.get("allowed_read_roots")
+        != ["configs/ledgers", "/scratch/djy8hg/runs/mosaickv"]
+        or observed_seal_sources != EXPECTED_BOUND_SOURCES
+        or set(cast("list[str]", permitted["allowed_fields"])) != SCAN_ALLOWED_FIELDS
+        or set(cast("list[str]", permitted["forbidden_fields"])) != SCAN_FORBIDDEN_FIELDS
+        or permitted.get("only_permitted_output") != V103_EXCLUSION_OUTPUT
+        or any(value is not True for value in forbidden.values())
+        or seal_authorization.get("scan_scope_definition_reviewed") is not True
+        or any(
+            seal_authorization.get(key) is not False
+            for key in (
+                "seal_commit_created",
+                "seal_reviewed_after_commit",
+                "exclusion_scan_authorized",
+                "catalog_access_authorized",
+                "materialization_authorized",
+                "disjointness_check_authorized",
+                "experiment_authorized",
+            )
+        )
+    ):
+        raise RuntimeError("V103 scan-scope seal is not fail-closed")
 
     candidate_boundary = cast("dict[str, Any]", spec["candidate_boundary"])
     if (
@@ -87,23 +212,12 @@ def validate(path: Path) -> dict[str, Any]:
 
     scan = cast("dict[str, Any]", spec["fresh_exclusion_scan"])
     sources = cast("list[dict[str, Any]]", scan["mandatory_bound_sources"])
-    expected_sources = {
-        "v102_textvqa_complete_selected_ledger": (
-            "a0667e45729639b1830a308d97d46662f3e6c6c76ddda97749d0663fc329b242",
-            32,
-        ),
-        "v102_infovqa_complete_selected_ledger": (
-            "3308465e540f98dac1003e85a78403968a90ed19bd7d23fe5b2ec6ad8da258c5",
-            32,
-        ),
-        "v102_negative_seal": (V102_SEAL_SHA, None),
-    }
     observed_sources = {
         str(source["role"]): (source.get("sha256"), source.get("expected_unique_identities"))
         for source in sources
     }
     if (
-        observed_sources != expected_sources
+        observed_sources != EXPECTED_BOUND_SOURCES
         or scan.get("required_v102_unique_identity_count") != 64
         or scan.get("inspect_answers_references_scores_media_prompts_or_failure_outcomes")
         is not False
@@ -232,7 +346,11 @@ def validate(path: Path) -> dict[str, Any]:
     outputs = cast("dict[str, Any]", spec["outputs"])
     return {
         "experiment_id": spec["experiment_id"],
-        "status": "valid_authorization_disabled_v103_draft",
+        "status": "valid_uncommitted_v103_scan_scope_seal_all_execution_disabled",
+        "protocol_commit_git_sha": V103_PROTOCOL_COMMIT,
+        "protocol_commit_reviewed": True,
+        "scan_scope_seal_commit_created": False,
+        "exclusion_scan_authorized": False,
         "selection_seed": selection["selection_seed"],
         "tasks": {name: 32 for name in sorted(by_task)},
         "preflight_samples": 4,

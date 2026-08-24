@@ -1,0 +1,121 @@
+schema_version: 1
+experiment_id: choice_c_v103_fresh_identity_calibration
+classification: protocol_preregistration_and_unexecuted_scan_scope_seal
+status: authored_uncommitted_unreviewed_after_commit
+immutable: false
+
+protocol_boundary:
+  protocol_commit_git_sha: 75736bbc115d2ad5d82ae7c7a3a26df41c89d8fe
+  protocol_commit_subject: Implement MosaicKV compression and experiment protocols
+  protocol_file: configs/experiments/choice_c_v103_fresh_identity_calibration_protocol.yaml
+  protocol_file_sha256_at_commit: c87e76a7555aeea7c7722e5b0cd8604134f5da94fad5fa0f156cea0e4ce26e9f
+  protocol_commit_reviewed_by_user: true
+  protocol_selection_rule_is_preregistered: true
+  protocol_candidate_and_gates_are_frozen: true
+
+seal_boundary:
+  seal_commit_git_sha: null
+  seal_commit_policy: commit_containing_this_file_is_the_v103_scan_scope_seal_boundary
+  seal_reviewed_after_commit: false
+  scan_must_remain_disabled_until_seal_commit_is_reviewed: true
+
+permitted_future_scan_scope:
+  execution_mode: local_cpu_process_only
+  source_snapshot_must_be_clean_and_committed: true
+  source_snapshot_must_include_this_seal_after_review: true
+  allowed_read_roots:
+    - configs/ledgers
+    - /scratch/djy8hg/runs/mosaickv
+  mandatory_bound_sources:
+    - role: v102_textvqa_complete_selected_ledger
+      path: /scratch/djy8hg/runs/mosaickv/choice-c-v102-v100-fresh-cross-dataset-calibration-v1/inputs/calibration_textvqa_train.json
+      sha256: a0667e45729639b1830a308d97d46662f3e6c6c76ddda97749d0663fc329b242
+      expected_unique_identities: 32
+    - role: v102_infovqa_complete_selected_ledger
+      path: /scratch/djy8hg/runs/mosaickv/choice-c-v102-v100-fresh-cross-dataset-calibration-v1/inputs/calibration_infovqa.json
+      sha256: 3308465e540f98dac1003e85a78403968a90ed19bd7d23fe5b2ec6ad8da258c5
+      expected_unique_identities: 32
+    - role: v102_negative_seal
+      path: configs/ledgers/choice_c_v102_negative_debug_gate_seal.yaml
+      sha256: 1f100eee354f553d16e8a41921b7bc0edec559a62a9090bbceb650496c394ab8
+  canonical_identity_fields:
+    - dataset_id
+    - dataset_config
+    - dataset_revision
+    - split
+    - sample_id
+  allowed_fields:
+    - canonical_sample_identity
+    - dataset_id
+    - dataset_config
+    - dataset_revision
+    - split
+    - sample_id
+    - task_name
+    - source_path
+    - source_sha256
+    - source_record_count
+    - identity_count
+    - schema_version
+  forbidden_fields:
+    - answer
+    - answers
+    - reference
+    - references
+    - task_score
+    - generated_tokens
+    - logits
+    - media
+    - prompt
+    - error
+    - failure_identity
+  required_behavior:
+    recursively_scan_both_allowed_roots: true
+    bind_source_path_hash_and_identity_count: true
+    include_all_64_v102_selected_identities: true
+    deduplicate_by_canonical_identity: true
+    fail_on_ambiguous_relevant_artifact: true
+    fail_on_missing_or_hash_mismatched_mandatory_source: true
+    never_load_dataset_rows_or_media: true
+    never_rank_or_select_candidate_samples: true
+    never_inspect_answers_references_scores_prompts_media_or_failures: true
+  only_permitted_output: /scratch/djy8hg/runs/mosaickv/choice-c-v103-fresh-identity-calibration-v1/inputs/exclusion_manifest.json
+  output_must_be_new: true
+  output_must_be_write_once_and_read_only: true
+  output_schema: configuration_aware_identity_manifest_v2_or_newer
+  output_hash_and_content_review_required: true
+
+explicitly_forbidden_actions:
+  dataset_download_or_row_loading: true
+  id_catalog_read_or_reuse: true
+  sample_ranking_or_selection: true
+  preflight_ledger_materialization: true
+  calibration_ledger_materialization: true
+  disjointness_check: true
+  gpu_or_slurm_job_submission: true
+  model_loading_or_inference: true
+  candidate_freeze: true
+  heldout_materialization_or_evaluation: true
+
+authorization:
+  scan_scope_definition_reviewed: true
+  seal_commit_created: false
+  seal_reviewed_after_commit: false
+  exclusion_scan_authorized: false
+  catalog_access_authorized: false
+  materialization_authorized: false
+  disjointness_check_authorized: false
+  experiment_authorized: false
+
+current_evidence:
+  v103_output_root_exists: false
+  exclusion_manifest_exists: false
+  scan_performed: false
+  catalog_access_performed: false
+  materialization_performed: false
+  job_submitted: false
+
+next_step:
+  action: commit_and_review_this_seal_only
+  exclusion_scan_must_remain_disabled: true
+  scan_only_authorization_requires_later_separate_update: true

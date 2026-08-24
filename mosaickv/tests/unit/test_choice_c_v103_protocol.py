@@ -28,12 +28,21 @@ def _validator(package: Path) -> ModuleType:
     return module
 
 
-def test_v103_draft_disables_every_action_and_requires_fresh_identities() -> None:
+def test_v103_scan_scope_seal_disables_every_operational_action() -> None:
     package = Path(__file__).parents[2]
     protocol = _protocol(package)
 
-    assert protocol["protocol_status"] == "draft_review_required_all_actions_disabled"
-    assert all(value is False for value in protocol["authorization"].values())
+    assert protocol["protocol_status"] == (
+        "scan_scope_seal_authored_pending_commit_all_execution_disabled"
+    )
+    authorization = protocol["authorization"]
+    assert authorization["protocol_commit_created"] is True
+    assert authorization["protocol_reviewed_after_commit"] is True
+    assert all(
+        value is False
+        for key, value in authorization.items()
+        if key not in {"protocol_commit_created", "protocol_reviewed_after_commit"}
+    )
     assert all(
         value is False for key, value in protocol["submission_policy"].items() if key != "reason"
     )
@@ -42,6 +51,11 @@ def test_v103_draft_disables_every_action_and_requires_fresh_identities() -> Non
     assert freshness["sample_level_freshness_claimed_before_scan_review"] is False
     assert freshness["any_ambiguous_relevant_artifact_blocks_materialization"] is True
     assert protocol["outputs"]["no_output_created_by_this_draft"] is True
+    scan_scope = protocol["scan_scope_seal"]
+    assert scan_scope["protocol_commit_git_sha"] == ("75736bbc115d2ad5d82ae7c7a3a26df41c89d8fe")
+    assert scan_scope["exclusion_scan_execution_authorized"] is False
+    assert scan_scope["seal_commit_git_sha"] is None
+    assert scan_scope["seal_reviewed_after_commit"] is False
 
 
 def test_v103_uses_separate_preflight_and_calibration_identity_sets() -> None:
@@ -107,8 +121,11 @@ def test_v103_validator_accepts_draft_and_rejects_weakened_copies(tmp_path: Path
     )
     result = validator.validate(canonical)
 
-    assert result["status"] == "valid_authorization_disabled_v103_draft"
+    assert result["status"] == ("valid_uncommitted_v103_scan_scope_seal_all_execution_disabled")
     assert result["all_actions_authorized"] is False
+    assert result["protocol_commit_reviewed"] is True
+    assert result["scan_scope_seal_commit_created"] is False
+    assert result["exclusion_scan_authorized"] is False
     assert result["preflight_samples"] == 4
     assert result["calibration_samples"] == 64
     assert result["planned_unique_identities"] == 68
@@ -118,8 +135,20 @@ def test_v103_validator_accepts_draft_and_rejects_weakened_copies(tmp_path: Path
     authorized["authorization"]["exclusion_scan_authorized"] = True
     authorized_path = tmp_path / "authorized.yaml"
     authorized_path.write_text(yaml.safe_dump(authorized), encoding="utf-8")
-    with pytest.raises(RuntimeError, match="authorizes an action"):
+    with pytest.raises(RuntimeError, match="operational authorization"):
         validator.validate(authorized_path)
+
+    widened = copy.deepcopy(_protocol(package))
+    seal_path = package / widened["scan_scope_seal"]["path"]
+    seal = yaml.safe_load(seal_path.read_text(encoding="utf-8"))
+    seal["permitted_future_scan_scope"]["allowed_fields"].append("answer")
+    widened_seal = tmp_path / "widened_seal.yaml"
+    widened_seal.write_text(yaml.safe_dump(seal), encoding="utf-8")
+    widened["scan_scope_seal"]["path"] = str(widened_seal)
+    widened_path = tmp_path / "widened.yaml"
+    widened_path.write_text(yaml.safe_dump(widened), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="scan-scope seal"):
+        validator.validate(widened_path)
 
     weakened = copy.deepcopy(_protocol(package))
     weakened["unchanged_memory_and_fidelity_gates"][
