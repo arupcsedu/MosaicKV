@@ -1,0 +1,208 @@
+schema_version: 1
+classification: sealed_negative_label_blind_calibration_result
+experiment_id: choice_c_v92_output_impact_stability_calibration
+immutable_result: true
+overall_freeze_gate_pass: false
+memory_gate_pass: true
+aggregate_fidelity_gate_pass: false
+robust_fold_fidelity_gate_pass: false
+frozen_candidate_created: false
+heldout_evaluation_authorized: false
+failure_scope:
+  - neither_task_passed_answer_noninferiority
+  - not_every_fold_passed_answer_noninferiority
+  - not_every_fold_passed_token_noninferiority
+  - post_selection_output_impact_gate_accepted_no_query_coverage_changes
+gate_thresholds_must_not_be_weakened_from_this_result: true
+v92_calibration_outputs_must_not_be_reclassified_as_heldout: true
+
+scientific_boundary:
+  benchmark_labels_accessed_for_selection: false
+  official_task_scores_accessed_for_selection: false
+  fullkv_generated_outputs_used_for_label_blind_fidelity: true
+  prompt_topk_generated_outputs_used_for_label_blind_comparison: true
+  v91_and_prior_used_only_as_sample_exclusion_boundaries: true
+  future_design_may_use_aggregate_label_blind_mechanism_telemetry: true
+  future_design_must_not_use_v92_answers: true
+  future_design_must_not_use_v92_references: true
+  future_design_must_not_use_v92_task_scores: true
+  future_design_must_not_use_v92_failure_identities: true
+  future_design_must_not_use_v92_generated_token_ids: true
+  future_heldout_materialized: false
+
+protocol_git_sha: 02a6ea1b2d2237f8cb04dfbbbaf400ab2c734e74
+source_snapshot_sha256: c333ff5e81735ea7e329aa1d53a292e9f3a5c2a485530b743bfc6a6c228ee756
+run_root: /scratch/djy8hg/runs/mosaickv/choice-c-v92-output-impact-stability-calibration-v1
+execution_jobs:
+  submitted_ledger_array: 18681878
+  ledger_array_state: completed
+  ledger_exit_codes: ["0:0", "0:0"]
+  submitted_calibration_array: 18681879
+  calibration_state: completed
+  calibration_exit_codes: ["0:0", "0:0"]
+  maximum_calibration_elapsed: "00:15:34"
+  freeze_analysis: 18681880
+  freeze_state: completed_failed_closed_no_eligible_candidate
+  freeze_exit_code: "0:0"
+
+protocol:
+  path: configs/experiments/choice_c_v92_output_impact_stability_calibration.yaml
+  sha256: db9b682e196d6d36185e6016c88a41bffba8c6889a19596c71a693ba9042bd92
+parent_negative_result_seal:
+  path: configs/ledgers/choice_c_v91_negative_calibration_seal.yaml
+  sha256: 77246dbaf4f4f78512e8ee3adaa392e45277d8fbbedd5602214ab1d97675ae9b
+
+execution_provenance:
+  model_id: llava-hf/llava-1.5-7b-hf
+  model_revision: b234b804b114d9e37bb655e11cbbb5f5e971b7a9
+  model_precision: fp16
+  backend: huggingface
+  prefill_attention_implementation: eager
+  decode_attention_implementation: sdpa
+  gpu_type: NVIDIA A100-SXM4-80GB
+  gpu_count_per_worker: 1
+  seed: 17
+  deterministic_algorithms: true
+  output_length: 64
+  python: 3.11.15
+  cuda: "12.8"
+  driver: 595.71.05
+  pytorch: 2.8.0
+  transformers: 4.55.2
+  vllm: 0.10.2
+  sglang: 0.5.1.post3
+  environment_lock: env/common/requirements.lock
+  environment_lock_sha256: fdc56ad9edb03e8bad5cb2108322c7a12b0f33bdd5533ed596dc6b695a2db9c0
+  cache_root: /scratch/djy8hg/cache/mosaickv
+  source_git_dirty: false
+  measurement_type: method_measured
+
+execution_integrity:
+  tasks: [docvqa, textvqa]
+  samples_per_task: 32
+  arms_per_task: 3
+  measured_rows: 192
+  completed_rows: 192
+  failed_rows: 0
+  rows_with_errors: 0
+  rows_with_missing_required_values: 0
+  calibration_references_present: false
+  calibration_task_scores_present: false
+
+common_candidate_properties:
+  effective_method: mosaickv_exact
+  tier_policy: exact_only_replacement
+  configured_active_byte_cap: 28500000
+  block_size: 4
+  prototype_fraction: 0.0
+  residual_bytes: 0
+  repair_enabled: false
+  stability_gate: normalized_query_gain_vs_attention_weighted_value_deviation
+  minimum_normalized_gain: 0.005
+  minimum_gain_to_output_impact_ratio: 4.0
+  supports_mosaickv_proto_claim: false
+  supports_mosaickv_full_claim: false
+
+observed_task_gates:
+  docvqa:
+    prompt_topk_fullkv_exact_answer_agreement: 0.8125
+    candidate_fullkv_exact_answer_agreement: 0.6875
+    candidate_delta_vs_prompt_topk: -0.125
+    candidate_fullkv_token_agreement: 0.265625
+    prompt_topk_fullkv_token_agreement: 0.3310546875
+    candidate_active_kv_bytes: 27541504.0
+    prompt_topk_active_kv_bytes: 40714240.0
+    candidate_residual_kv_bytes: 0.0
+    active_reduction_fraction_vs_prompt_topk: 0.3235412474849094
+    active_plus_residual_reduction_fraction_vs_prompt_topk: 0.3235412474849094
+    memory_gate_pass: true
+    aggregate_fidelity_gate_pass: false
+  textvqa:
+    prompt_topk_fullkv_exact_answer_agreement: 0.71875
+    candidate_fullkv_exact_answer_agreement: 0.65625
+    candidate_delta_vs_prompt_topk: -0.0625
+    candidate_fullkv_token_agreement: 0.212890625
+    prompt_topk_fullkv_token_agreement: 0.27783203125
+    candidate_active_kv_bytes: 27574272.0
+    prompt_topk_active_kv_bytes: 40484864.0
+    candidate_residual_kv_bytes: 0.0
+    active_reduction_fraction_vs_prompt_topk: 0.3188992310805342
+    active_plus_residual_reduction_fraction_vs_prompt_topk: 0.3188992310805342
+    memory_gate_pass: true
+    aggregate_fidelity_gate_pass: false
+
+robust_gate_summary:
+  answer_folds_passed: 3
+  answer_folds_total: 8
+  token_folds_passed: 4
+  token_folds_total: 8
+  worst_fold_answer_delta_vs_prompt_topk: -0.25
+  worst_fold_token_delta_vs_prompt_topk: -0.208984375
+  overall_gate_pass: false
+
+aggregate_label_blind_mechanism_telemetry:
+  docvqa:
+    mean_allocated_routes_per_sample: 63.25
+    mean_stability_rejected_routes_per_sample: 49.3125
+    mean_accepted_changed_blocks_per_sample: 0.0
+    mean_proposed_output_impact_donor_count: 103.4375
+    mean_proposed_normalized_query_gain: 0.40112653629769746
+    mean_proposed_normalized_prompt_loss: 0.2457298597164945
+    mean_proposed_output_impact_risk: 0.4044281889214706
+    prompt_mass_preservation_fraction: 1.0
+  textvqa:
+    mean_allocated_routes_per_sample: 48.46875
+    mean_stability_rejected_routes_per_sample: 36.21875
+    mean_accepted_changed_blocks_per_sample: 0.0
+    mean_proposed_output_impact_donor_count: 70.3125
+    mean_proposed_normalized_query_gain: 0.26169854950825
+    mean_proposed_normalized_prompt_loss: 0.16392185136064297
+    mean_proposed_output_impact_risk: 0.2811175853142188
+    prompt_mass_preservation_fraction: 1.0
+
+artifact_inventory:
+  algorithm: sha256_of_sorted_lines_each_formatted_as_file_sha256_two_spaces_relative_posix_path_newline
+  file_count: 266
+  total_bytes: 25249458
+  inventory_sha256: e6264e2d18b33d20692d5ec98ac975f122c10d93e50df2eb3bc14e698b257045
+artifacts:
+  calibration_docvqa_ledger:
+    path: inputs/calibration_docvqa.json
+    sha256: 2132d178dab40de6698c6bdd8d6573fd46323f87aee2c45d16f247100660109d
+  calibration_textvqa_ledger:
+    path: inputs/calibration_textvqa.json
+    sha256: 004612c3ca985d222bfc555e70bac81514060c921ae7fcf8c3b39a8ef7980128
+  base_analysis:
+    path: analysis/label_blind_calibration.json
+    sha256: fce49b2e29b2d0c90372f9c7ffb39c4715ddb2014a148e4f9adae2dcbd789be4
+  base_report:
+    path: analysis/label_blind_calibration.md
+    sha256: 4bac0ee6e52117c7634c95497a0ed0b150c9f9f73fd9748472c14a952540d380
+  trials:
+    path: analysis/label_blind_calibration_trials.parquet
+    sha256: b1f92cb0dc6a332fc8b180d8b73ad48c1a532875a5e9558a15faaceca902957e
+  base_ranking:
+    path: analysis/label_blind_candidate_ranking.parquet
+    sha256: b4c0385e552f6e25e01af641c0e5fd33c9cd6f1b85f5eb74158e39b6819c748a
+  robust_analysis:
+    path: analysis/robust_fidelity_calibration.json
+    sha256: e7117b9ac41bb2d1712cccdb211c720327d6edac2bd9e00a80591806da2c3d9e
+  robust_report:
+    path: analysis/robust_fidelity_calibration.md
+    sha256: 65b6f60da9c4986e6a5fa9934eb39048fd460c5551d043558fd5dd30324b164f
+  robust_ranking:
+    path: analysis/robust_fidelity_candidate_ranking.parquet
+    sha256: 014798a3742ff0b167a2c4c310b19fd195dd80d56a02651d54782aab37cde450
+  robust_folds:
+    path: analysis/robust_fidelity_folds.parquet
+    sha256: 0ff4f62a3be179bda3829e0a5a0d6b38ab432d1f6bb14a303e7725a26aa3fc13
+
+future_protocol:
+  v92_must_remain_negative: true
+  frozen_candidate_must_remain_absent: true
+  heldout_campaign_must_remain_blocked: true
+  v93_requires_label_blind_output_impact_initial_reservation: true
+  v93_requires_fresh_disjoint_calibration_samples: true
+  v93_must_keep_memory_and_fidelity_gates_unchanged: true
+  v93_design_must_not_use_v92_answers_or_failure_identities: true
+  v93_must_protect_output_impact_blocks_before_query_coverage_allocation: true

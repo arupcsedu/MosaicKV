@@ -28,9 +28,14 @@ from mosaickv.adapters.huggingface import (
     PrefillOutput,
     PreparedInputs,
 )
+from mosaickv.backends.cache_isolation import (
+    IsolatedDecodeStateHandle,
+    construct_isolated_decode_state,
+)
 from mosaickv.baselines import (
     BaselineCompressionPlan,
     HeadLocalCapacityRecord,
+    HeadLocalPromptSelectionAlternative,
     LookMCompressionPlan,
     PrefixKVCompressionPlan,
     PrefixKVOfflineProfile,
@@ -40,6 +45,7 @@ from mosaickv.baselines import (
     build_lookm_reimpl_plan,
     build_prefixkv_reimpl_plan,
     build_vl_cache_reimpl_plan,
+    coherent_layout_groups,
     load_prefixkv_profile,
     lookm_runtime_payloads,
     prefixkv_runtime_payloads,
@@ -94,13 +100,22 @@ from mosaickv.repair import (
 )
 from mosaickv.selection import (
     BlockUtilityTable,
+    BoundedHierarchicalProbeDecision,
     BudgetedObjective,
+    HierarchicalCapacityProposal,
     InfeasibleSelectionBudgetError,
+    LogitProbeResult,
+    ProbeBudgetTracker,
+    RouteBlockCandidate,
+    RouteCapacityLadder,
     SelectionBudget,
     SelectionResult,
+    build_route_capacity_ladders,
     compute_block_utilities,
     lazy_greedy_select,
+    run_bounded_hierarchical_probe_loop,
     select_all_exact,
+    select_exact_subset,
 )
 from mosaickv.types import (
     AblationVariant,
@@ -115,6 +130,64 @@ from mosaickv.types import (
 
 class HuggingFaceRuntimeError(RuntimeError):
     """Raised when a requested HF runtime state cannot be represented safely."""
+
+    mosaickv_failure_trace_payload: JsonObject | None = None
+
+
+def _hard_budget_fallback_trace_payload(
+    decision_record: JsonObject,
+    *,
+    attempted_active_kv_bytes: int,
+    hard_active_kv_budget_bytes: int,
+    attempted_prompt_capacity: int,
+    hard_prompt_capacity: int,
+    timing_breakdown: JsonObject,
+) -> JsonObject:
+    """Build the complete trace emitted when a safe search returns FullKV."""
+
+    if decision_record.get("used_fullkv_fallback") is not True:
+        raise ValueError("hard-budget fallback trace requires a FullKV fallback decision")
+    if attempted_active_kv_bytes <= hard_active_kv_budget_bytes:
+        raise ValueError("fallback attempt must exceed the hard active-byte budget")
+    if attempted_prompt_capacity <= hard_prompt_capacity:
+        raise ValueError("fallback attempt must exceed the hard prompt capacity")
+    return {
+        "failure_classification": "hard_budget_fullkv_fallback",
+        "effective_method": "full_kv_fallback_rejected_before_packing",
+        "used_fullkv_fallback": True,
+        "hard_budget_enforced": True,
+        "over_budget_cache_packed": False,
+        "over_budget_cache_decoded": False,
+        "over_budget_cache_scope": "final_selected_fullkv_fallback",
+        "isolated_probe_candidates_materialized": True,
+        "isolated_probe_states_discarded": True,
+        "attempted_active_kv_bytes": attempted_active_kv_bytes,
+        "attempted_total_kv_bytes": attempted_active_kv_bytes,
+        "attempted_residual_kv_bytes": 0,
+        "hard_active_kv_budget_bytes": hard_active_kv_budget_bytes,
+        "attempted_prompt_capacity": attempted_prompt_capacity,
+        "hard_prompt_capacity": hard_prompt_capacity,
+        "target_reached": False,
+        "probe_decisions": decision_record.get("evaluations", []),
+        "probe_evaluations_used": decision_record.get("evaluations_used"),
+        "probe_rounds_used": decision_record.get("rounds_used"),
+        "hierarchical_logit_safe_eviction": {
+            "status": "failed_closed_fullkv_fallback",
+            **decision_record,
+        },
+        "timing_breakdown": timing_breakdown,
+        "byte_budget_materialization": {
+            "status": "rejected_before_materialization",
+            "attempted_active_kv_bytes": attempted_active_kv_bytes,
+            "hard_active_kv_budget_bytes": hard_active_kv_budget_bytes,
+            "attempted_over_budget_bytes": (
+                attempted_active_kv_bytes - hard_active_kv_budget_bytes
+            ),
+            "attempted_prompt_capacity": attempted_prompt_capacity,
+            "hard_prompt_capacity": hard_prompt_capacity,
+            "packed_active_kv_bytes": None,
+        },
+    }
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,6 +204,9 @@ class RuntimePhaseTimings:
     graph: float
     utility_and_selection: float
     tier_construction: float
+    logit_stability: float
+    progressive_eviction: float
+    hierarchical_eviction: float
     cache_packing: float
     decode: float
     per_token_decode: tuple[float, ...]
@@ -150,6 +226,8 @@ class RuntimePhaseTimings:
             self.graph,
             self.utility_and_selection,
             self.tier_construction,
+            self.logit_stability,
+            self.progressive_eviction,
             self.cache_packing,
             self.decode,
             self.repair_transfer,
@@ -187,6 +265,83 @@ class FidelityDiagnostic:
 
 
 @dataclass(frozen=True, slots=True)
+class ShortHorizonLogitCandidateEvaluation:
+    """Label-blind FullKV-logit evidence for one same-byte cache candidate."""
+
+    candidate_id: str
+    passed: bool
+    greedy_token_match: bool
+    maximum_kl: float
+    maximum_logit_difference: float
+    evaluated_steps: int
+
+
+@dataclass(frozen=True, slots=True)
+class ShortHorizonLogitStabilityDecision:
+    """Fail-closed V98 choice over a bounded deterministic Pareto shortlist."""
+
+    enabled: bool
+    shortlist_size: int
+    evaluated_candidates: tuple[ShortHorizonLogitCandidateEvaluation, ...]
+    selected_candidate_id: str
+    selected_candidate_passed: bool
+    used_fail_closed_scalar_anchor: bool
+    horizon: int
+    maximum_kl_threshold: float
+    maximum_logit_difference_threshold: float
+    fullkv_prefill_reused: bool = True
+    second_prefill_performed: bool = False
+    probe_states_discarded_before_measured_decode: bool = True
+    benchmark_labels_accessed: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class ProgressiveEvictionCheckpoint:
+    """One cumulative FullKV-to-target eviction probe."""
+
+    probe_index: int
+    proposed_removed_blocks: int
+    accepted: bool
+    greedy_token_match: bool
+    maximum_kl: float
+    maximum_logit_difference: float
+    maximum_active_positions: int
+    logical_active_bytes: int
+
+
+@dataclass(frozen=True, slots=True)
+class ProgressiveLogitSafeEvictionDecision:
+    """Fail-closed V99 progressive eviction result and audit evidence."""
+
+    enabled: bool
+    started_from_fullkv: bool
+    target_reached: bool
+    selected_candidate_passed: bool
+    used_target_fallback: bool
+    horizon: int
+    maximum_kl_threshold: float
+    maximum_logit_difference_threshold: float
+    maximum_probes: int
+    probes_used: int
+    accepted_checkpoints: int
+    rejected_checkpoints: int
+    initial_fullkv_logical_bytes: int
+    target_active_bytes: int
+    final_logical_active_bytes: int
+    protected_group_candidate_count: int
+    protected_group_count: int
+    protected_group_block_count: int
+    protected_group_bytes: int
+    protected_group_target_bytes: int
+    protected_group_score: float
+    checkpoints: tuple[ProgressiveEvictionCheckpoint, ...]
+    fullkv_prefill_reused: bool = True
+    second_prefill_performed: bool = False
+    probe_states_discarded_before_measured_decode: bool = True
+    benchmark_labels_accessed: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class MosaicKVCompressionPlan:
     """All inspectable algorithm outputs produced from one full prefill."""
 
@@ -214,6 +369,8 @@ class MosaicKVCompressionPlan:
     planner_source_node_ids: tuple[int, ...] | None
     external_exact_node_ids: tuple[int, ...]
     external_exact_capacity_records: tuple[HeadLocalCapacityRecord, ...]
+    external_exact_logit_shortlist: tuple[HeadLocalPromptSelectionAlternative, ...]
+    prompt_attention_by_node: tuple[float, ...] | None
     stable_routing_seconds: float
     similarity_shortlist_seconds: float
     planner_mapping_seconds: float
@@ -2652,6 +2809,14 @@ def build_compression_plan(
     planner_source_node_ids: tuple[int, ...] | None = None
     external_exact_node_ids: tuple[int, ...] = ()
     external_exact_capacity_records: tuple[HeadLocalCapacityRecord, ...] = ()
+    external_exact_logit_shortlist: tuple[HeadLocalPromptSelectionAlternative, ...] = ()
+    prompt_attention_values = (
+        None
+        if prompt_attention_by_node is None
+        else tuple(
+            float(prompt_attention_by_node[node_id]) for node_id in range(len(full_state.blocks))
+        )
+    )
     stable_routing_seconds = 0.0
     similarity_shortlist_seconds = 0.0
     planner_mapping_seconds = 0.0
@@ -2759,9 +2924,73 @@ def build_compression_plan(
                     query_coverage_initial_minimum_prompt_mass_fraction=(
                         config.selection.stable_head_query_coverage_initial_minimum_prompt_mass_fraction
                     ),
+                    query_coverage_initial_objective=(
+                        config.selection.stable_head_query_coverage_initial_objective
+                    ),
+                    query_coverage_initial_cap_fraction=(
+                        config.selection.stable_head_query_coverage_initial_cap_fraction
+                    ),
+                    query_coverage_cross_head_allocation=(
+                        config.selection.stable_head_query_coverage_cross_head_allocation
+                    ),
+                    query_coverage_cross_head_stability_gate=(
+                        config.selection.stable_head_query_coverage_cross_head_stability_gate
+                    ),
+                    query_coverage_cross_head_stability_risk_mode=(
+                        config.selection.stable_head_query_coverage_cross_head_stability_risk_mode
+                    ),
+                    query_coverage_cross_head_minimum_normalized_gain=(
+                        config.selection.stable_head_query_coverage_cross_head_minimum_normalized_gain
+                    ),
+                    query_coverage_cross_head_gain_to_prompt_loss_ratio=(
+                        config.selection.stable_head_query_coverage_cross_head_gain_to_prompt_loss_ratio
+                    ),
+                    query_coverage_output_impact_reservation=(
+                        config.selection.stable_head_query_coverage_output_impact_reservation
+                    ),
+                    query_coverage_output_impact_fraction=(
+                        config.selection.stable_head_query_coverage_output_impact_fraction
+                    ),
+                    query_coverage_layout_group_reservation=(
+                        config.selection.stable_head_query_coverage_layout_group_reservation
+                    ),
+                    query_coverage_layout_group_fraction=(
+                        config.selection.stable_head_query_coverage_layout_group_fraction
+                    ),
+                    query_coverage_layout_group_maximum_blocks=(
+                        config.selection.stable_head_query_coverage_layout_group_maximum_blocks
+                    ),
+                    query_coverage_layout_group_row_bins=(
+                        config.selection.stable_head_query_coverage_layout_group_row_bins
+                    ),
+                    query_coverage_layout_group_atomic_selection=(
+                        config.selection.stable_head_query_coverage_layout_group_atomic_selection
+                    ),
+                    query_coverage_layout_group_atomic_selection_mode=(
+                        config.selection.stable_head_query_coverage_layout_group_atomic_selection_mode
+                    ),
+                    query_coverage_layout_group_minimum_utilization_fraction=(
+                        config.selection.stable_head_query_coverage_layout_group_minimum_utilization_fraction
+                    ),
+                    query_coverage_layout_group_minimum_normalized_gain=(
+                        config.selection.stable_head_query_coverage_layout_group_minimum_normalized_gain
+                    ),
+                    query_coverage_layout_group_gain_to_risk_ratio=(
+                        config.selection.stable_head_query_coverage_layout_group_gain_to_risk_ratio
+                    ),
+                    short_horizon_logit_stability=(
+                        config.selection.stable_head_short_horizon_logit_stability
+                    ),
+                    progressive_logit_safe_eviction=(
+                        config.selection.stable_head_progressive_logit_safe_eviction
+                    ),
+                    hierarchical_logit_safe_eviction=(
+                        config.selection.stable_head_hierarchical_logit_safe_eviction
+                    ),
                 )
                 external_exact_node_ids = external_selection.selected_node_ids
                 external_exact_capacity_records = external_selection.capacity_records
+                external_exact_logit_shortlist = external_selection.logit_stability_shortlist
                 external_cost = sum(
                     total_active_budget.cost(full_state.blocks[node_id])
                     for node_id in external_exact_node_ids
@@ -3169,6 +3398,8 @@ def build_compression_plan(
         planner_source_node_ids=planner_source_node_ids,
         external_exact_node_ids=external_exact_node_ids,
         external_exact_capacity_records=external_exact_capacity_records,
+        external_exact_logit_shortlist=external_exact_logit_shortlist,
+        prompt_attention_by_node=prompt_attention_values,
         stable_routing_seconds=stable_routing_seconds,
         similarity_shortlist_seconds=similarity_shortlist_seconds,
         planner_mapping_seconds=planner_mapping_seconds,
@@ -4398,6 +4629,23 @@ def _state_from_packed(
 ) -> DecodeState:
     torch = _torch()
     device = packed.snapshot.layers[0].key.device
+    model_state = _packed_model_state(original, packed)
+    return DecodeState(
+        past_key_values=adapter.inject_past_key_values(packed.snapshot),
+        attention_mask=torch.ones(
+            (1, packed.snapshot.active_sequence_length),
+            dtype=original.attention_mask.dtype,
+            device=device,
+        ),
+        active_cache_length=packed.snapshot.active_sequence_length,
+        logical_sequence_length=original.logical_sequence_length,
+        next_decode_position=original.next_decode_position,
+        modality_map=original.modality_map,
+        model_state=model_state,
+    )
+
+
+def _packed_model_state(original: DecodeState, packed: PackedRuntimeCache) -> dict[str, Any]:
     model_state = dict(original.model_state)
     for stale_key in (
         "mosaickv_validity_buffers",
@@ -4418,18 +4666,32 @@ def _state_from_packed(
         model_state["mosaickv_validity_masks"] = packed.validity_masks
     else:
         model_state.pop("mosaickv_validity_masks", None)
-    return DecodeState(
-        past_key_values=adapter.inject_past_key_values(packed.snapshot),
+    return model_state
+
+
+def construct_isolated_packed_decode_state(
+    adapter: HuggingFaceMultimodalAdapter,
+    reference: DecodeState,
+    packed: PackedRuntimeCache,
+    *,
+    candidate_id: str,
+) -> IsolatedDecodeStateHandle:
+    """Own one disposable packed HF candidate and guard its FullKV reference."""
+
+    torch = _torch()
+    device = packed.snapshot.layers[0].key.device
+    return construct_isolated_decode_state(
+        adapter,
+        reference,
+        candidate_id=candidate_id,
+        cache_snapshot=packed.snapshot,
         attention_mask=torch.ones(
             (1, packed.snapshot.active_sequence_length),
-            dtype=original.attention_mask.dtype,
+            dtype=reference.attention_mask.dtype,
             device=device,
         ),
         active_cache_length=packed.snapshot.active_sequence_length,
-        logical_sequence_length=original.logical_sequence_length,
-        next_decode_position=original.next_decode_position,
-        modality_map=original.modality_map,
-        model_state=model_state,
+        model_state=_packed_model_state(reference, packed),
     )
 
 
@@ -4721,6 +4983,1020 @@ def _logit_kl(reference_logits: Any, candidate_logits: Any) -> float:
         dim=-1,
     ).mean()
     return max(0.0, float(divergence.item()))
+
+
+def _short_horizon_candidate_evaluation(
+    candidate_id: str,
+    *,
+    kl_values: Sequence[float],
+    maximum_logit_differences: Sequence[float],
+    greedy_token_matches: Sequence[bool],
+    maximum_kl_threshold: float,
+    maximum_logit_difference_threshold: float,
+) -> ShortHorizonLogitCandidateEvaluation:
+    """Apply the preregistered V98 gate without benchmark labels."""
+
+    if not kl_values or len(kl_values) != len(maximum_logit_differences):
+        raise ValueError("short-horizon logit metrics must be nonempty and aligned")
+    if len(kl_values) != len(greedy_token_matches):
+        raise ValueError("short-horizon greedy-token evidence must align with logits")
+    values = (*kl_values, *maximum_logit_differences)
+    if any(not math.isfinite(value) or value < 0 for value in values):
+        raise ValueError("short-horizon logit metrics must be finite and nonnegative")
+    maximum_kl = max(float(value) for value in kl_values)
+    maximum_difference = max(float(value) for value in maximum_logit_differences)
+    token_match = all(bool(value) for value in greedy_token_matches)
+    return ShortHorizonLogitCandidateEvaluation(
+        candidate_id=candidate_id,
+        passed=bool(
+            token_match
+            and maximum_kl <= maximum_kl_threshold + 1e-12
+            and maximum_difference <= maximum_logit_difference_threshold + 1e-12
+        ),
+        greedy_token_match=token_match,
+        maximum_kl=maximum_kl,
+        maximum_logit_difference=maximum_difference,
+        evaluated_steps=len(kl_values),
+    )
+
+
+def probe_isolated_packed_candidate(
+    adapter: HuggingFaceMultimodalAdapter,
+    reference_state: DecodeState,
+    packed: PackedRuntimeCache,
+    *,
+    candidate_id: str,
+    teacher_forced_inputs: Sequence[Any],
+    reference_logits: Sequence[Any],
+) -> LogitProbeResult:
+    """Evaluate one packed candidate without retaining a live cache reference."""
+
+    if not teacher_forced_inputs or len(teacher_forced_inputs) != len(reference_logits):
+        raise HuggingFaceRuntimeError(
+            "isolated candidate probe inputs and reference logits must be nonempty and aligned"
+        )
+    divergences: list[float] = []
+    differences: list[float] = []
+    matches: list[bool] = []
+    with construct_isolated_packed_decode_state(
+        adapter,
+        reference_state,
+        packed,
+        candidate_id=candidate_id,
+    ) as handle:
+        for teacher_input, full_logits in zip(
+            teacher_forced_inputs,
+            reference_logits,
+            strict=True,
+        ):
+            output = adapter.decode_one_token(
+                teacher_input,
+                handle.state,
+                capture_queries=False,
+                capture_attentions=False,
+            )
+            handle.adopt(output.state)
+            divergences.append(_logit_kl(full_logits, output.logits))
+            differences.append(
+                float(
+                    _torch()
+                    .max(
+                        _torch().abs(full_logits.detach().float() - output.logits.detach().float())
+                    )
+                    .item()
+                )
+            )
+            matches.append(
+                int(full_logits.detach().argmax(dim=-1).reshape(-1)[0].item())
+                == int(output.logits.detach().argmax(dim=-1).reshape(-1)[0].item())
+            )
+    return LogitProbeResult(
+        greedy_token_match=all(matches),
+        maximum_forward_kl=max(divergences),
+        maximum_absolute_logit_difference=max(differences),
+        evaluated_steps=len(divergences),
+    )
+
+
+def _run_short_horizon_logit_stability(
+    adapter: HuggingFaceMultimodalAdapter,
+    prefill: PrefillOutput,
+    plan: MosaicKVCompressionPlan,
+    config: RunConfig,
+    *,
+    key_transform: RotaryPrototypeKeyTransform | None,
+    physical_prompt_capacity: int,
+) -> tuple[MosaicKVCompressionPlan, ShortHorizonLogitStabilityDecision]:
+    """Choose one same-byte exact cache using isolated FullKV logit probes.
+
+    The probe teacher-forces the deterministic FullKV greedy prefix into each
+    candidate so a cache perturbation is measured before trajectory drift. All
+    probe states are disposable clones; the measured decode starts from a fresh
+    packing of the selected construction.
+    """
+
+    if plan.method is not MosaicKVMethod.MOSAICKV_EXACT:
+        raise HuggingFaceRuntimeError("short-horizon logit stability supports mosaickv_exact")
+    requested = config.selection.stable_head_logit_stability_shortlist_size
+    shortlist = plan.external_exact_logit_shortlist[:requested]
+    if len(shortlist) != requested:
+        raise HuggingFaceRuntimeError(
+            "short-horizon logit stability did not produce the preregistered shortlist"
+        )
+    if shortlist[0].selected_node_ids != plan.external_exact_node_ids:
+        raise HuggingFaceRuntimeError("primary logit-stability candidate differs from the plan")
+    shortlist_costs = tuple(
+        sum(plan.full_state.blocks[node_id].byte_size for node_id in item.selected_node_ids)
+        for item in shortlist
+    )
+    if len(set(shortlist_costs)) != 1:
+        raise HuggingFaceRuntimeError(
+            "short-horizon logit-stability candidates must use identical exact KV bytes"
+        )
+    if len({item.candidate_id for item in shortlist}) != len(shortlist):
+        raise HuggingFaceRuntimeError("short-horizon logit-stability candidate IDs must be unique")
+    scalar = next(
+        (item for item in shortlist if item.candidate_id == "scalar_prompt_topk_anchor"),
+        None,
+    )
+    if scalar is None:
+        raise HuggingFaceRuntimeError("logit-stability shortlist lacks its scalar anchor")
+
+    horizon = config.selection.stable_head_logit_stability_horizon
+    reference_state = _clone_decode_state(adapter, prefill.state)
+    reference_input = prefill.next_token_id.detach().clone()
+    teacher_forced_inputs: list[Any] = []
+    reference_logits: list[Any] = []
+    for _step in range(horizon):
+        teacher_forced_inputs.append(reference_input.detach().clone())
+        output = adapter.decode_one_token(
+            reference_input,
+            reference_state,
+            capture_queries=False,
+            capture_attentions=False,
+        )
+        reference_state = output.state
+        reference_logits.append(output.logits.detach().clone())
+        reference_input = output.next_token_id.detach().clone()
+
+    active_budget = SelectionBudget(plan.active_budget_value, config.cache.budget_unit)
+    constructions: dict[str, ThreeTierCacheConstruction] = {}
+    evaluations: list[ShortHorizonLogitCandidateEvaluation] = []
+    for alternative in shortlist:
+        construction = (
+            plan.construction
+            if alternative.selected_node_ids == plan.external_exact_node_ids
+            else _exact_construction(
+                plan.full_state,
+                plan.graph,
+                plan.selection,
+                adapter.capabilities,
+                config,
+                key_transform,
+                additional_exact_source_node_ids=alternative.selected_node_ids,
+                active_budget=active_budget,
+            )
+        )
+        constructions[alternative.candidate_id] = construction
+        packed = pack_runtime_cache(
+            adapter,
+            plan.full_state,
+            construction.state,
+            construction.prototypes,
+            (),
+            physical_prompt_capacity=physical_prompt_capacity,
+            packing_mode=config.cache.packing_mode,
+        )
+        candidate_state = _state_from_packed(adapter, prefill.state, packed)
+        divergences: list[float] = []
+        differences: list[float] = []
+        matches: list[bool] = []
+        for teacher_input, full_logits in zip(
+            teacher_forced_inputs,
+            reference_logits,
+            strict=True,
+        ):
+            output = adapter.decode_one_token(
+                teacher_input,
+                candidate_state,
+                capture_queries=False,
+                capture_attentions=False,
+            )
+            candidate_state = output.state
+            divergences.append(_logit_kl(full_logits, output.logits))
+            difference = float(
+                _torch()
+                .max(_torch().abs(full_logits.detach().float() - output.logits.detach().float()))
+                .item()
+            )
+            differences.append(difference)
+            matches.append(
+                int(full_logits.detach().argmax(dim=-1).reshape(-1)[0].item())
+                == int(output.logits.detach().argmax(dim=-1).reshape(-1)[0].item())
+            )
+        evaluations.append(
+            _short_horizon_candidate_evaluation(
+                alternative.candidate_id,
+                kl_values=divergences,
+                maximum_logit_differences=differences,
+                greedy_token_matches=matches,
+                maximum_kl_threshold=(config.selection.stable_head_logit_stability_maximum_kl),
+                maximum_logit_difference_threshold=(
+                    config.selection.stable_head_logit_stability_maximum_logit_difference
+                ),
+            )
+        )
+
+    first_passing = next((item for item in evaluations if item.passed), None)
+    selected_id = scalar.candidate_id if first_passing is None else first_passing.candidate_id
+    selected_alternative = next(item for item in shortlist if item.candidate_id == selected_id)
+    selected_evaluation = next(item for item in evaluations if item.candidate_id == selected_id)
+    selected_plan = replace(
+        plan,
+        effective_method=f"{plan.effective_method}__short_logit_{selected_id}",
+        construction=constructions[selected_id],
+        external_exact_node_ids=selected_alternative.selected_node_ids,
+        external_exact_capacity_records=selected_alternative.capacity_records,
+    )
+    return selected_plan, ShortHorizonLogitStabilityDecision(
+        enabled=True,
+        shortlist_size=len(shortlist),
+        evaluated_candidates=tuple(evaluations),
+        selected_candidate_id=selected_id,
+        selected_candidate_passed=selected_evaluation.passed,
+        used_fail_closed_scalar_anchor=(selected_id == scalar.candidate_id),
+        horizon=horizon,
+        maximum_kl_threshold=config.selection.stable_head_logit_stability_maximum_kl,
+        maximum_logit_difference_threshold=(
+            config.selection.stable_head_logit_stability_maximum_logit_difference
+        ),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _ProgressiveGroupReservation:
+    protected_node_ids: frozenset[int]
+    groups_by_route: Mapping[tuple[int, int], tuple[tuple[int, ...], ...]]
+    candidate_count_by_route: Mapping[tuple[int, int], int]
+    target_bytes_by_route: Mapping[tuple[int, int], int]
+    protected_bytes_by_route: Mapping[tuple[int, int], int]
+    protected_score_by_route: Mapping[tuple[int, int], float]
+
+
+def _progressive_fixed_source_ids(plan: MosaicKVCompressionPlan) -> frozenset[int]:
+    """Translate the compact planner selection into immutable source-block IDs."""
+
+    return frozenset(
+        plan.source_node_id(planner_node_id) for planner_node_id in plan.selection.selected_node_ids
+    )
+
+
+def _progressive_exact_construction(
+    plan: MosaicKVCompressionPlan,
+    capabilities: AdapterCapabilities,
+    config: RunConfig,
+    retained_source_node_ids: Iterable[int],
+    *,
+    key_transform: RotaryPrototypeKeyTransform | None,
+    active_budget: SelectionBudget,
+) -> tuple[ThreeTierCacheConstruction, SelectionResult, tuple[int, ...]]:
+    """Construct an exact cache after partitioning planner and external IDs.
+
+    Progressive eviction starts from FullKV, so its retained set can include
+    routed graph nodes that were absent from the original compressed plan.
+    Those nodes must be represented by graph-local selection IDs; only blocks
+    outside the compact planner graph may use the external-exact path.
+    """
+
+    retained = frozenset(int(node_id) for node_id in retained_source_node_ids)
+    if any(node_id < 0 or node_id >= len(plan.full_state.blocks) for node_id in retained):
+        raise HuggingFaceRuntimeError(
+            "progressive retained set contains a source block outside FullKV"
+        )
+    source_to_planner = {node.source_id: node.node_id for node in plan.graph.nodes}
+    selected_planner_ids = tuple(
+        sorted(source_to_planner[node_id] for node_id in retained if node_id in source_to_planner)
+    )
+    external_ids = tuple(sorted(retained - set(source_to_planner)))
+    objective = BudgetedObjective(plan.graph, plan.utilities, config.selection)
+    selection = select_exact_subset(objective, active_budget, selected_planner_ids)
+    construction = _exact_construction(
+        plan.full_state,
+        plan.graph,
+        selection,
+        capabilities,
+        config,
+        key_transform,
+        additional_exact_source_node_ids=external_ids,
+        active_budget=active_budget,
+    )
+    return construction, selection, external_ids
+
+
+def _progressive_eviction_risks(plan: MosaicKVCompressionPlan) -> tuple[float, ...]:
+    """Map compact planner utilities back to immutable FullKV source IDs once."""
+
+    utility_by_source = {
+        node.source_id: plan.utilities.for_node(node.node_id) for node in plan.graph.nodes
+    }
+    risks: list[float] = []
+    for source_id in range(len(plan.full_state.blocks)):
+        prompt = (
+            0.0
+            if plan.prompt_attention_by_node is None
+            else float(plan.prompt_attention_by_node[source_id])
+        )
+        utility = utility_by_source.get(source_id)
+        risks.append(
+            prompt
+            if utility is None
+            else float(
+                prompt
+                + utility.forecast_attention_probability
+                + utility.expected_attention_output_contribution
+                + utility.value_novelty
+                + utility.singleton_coverage_gain
+                + utility.modality_rarity
+            )
+        )
+    return tuple(risks)
+
+
+def _progressive_group_reservation(
+    plan: MosaicKVCompressionPlan,
+    config: RunConfig,
+    position_limits: Mapping[tuple[int, int], int],
+    eviction_risks: Sequence[float],
+) -> _ProgressiveGroupReservation:
+    """Reserve coherent evidence groups before any V99 eviction proposal."""
+
+    full_state = plan.full_state
+    stable_routes = {
+        (record.layer, record.kv_head) for record in plan.external_exact_capacity_records
+    }
+    fixed_ids = set(_progressive_fixed_source_ids(plan))
+    groups = coherent_layout_groups(
+        full_state,
+        tuple(
+            node_id
+            for node_id, block in enumerate(full_state.blocks)
+            if (block.layer, block.kv_head) in stable_routes
+        ),
+        maximum_blocks=(config.selection.stable_head_query_coverage_layout_group_maximum_blocks),
+        row_bins=config.selection.stable_head_query_coverage_layout_group_row_bins,
+    )
+    candidates_by_route: dict[tuple[int, int], list[tuple[int, ...]]] = defaultdict(list)
+    for group in groups:
+        first = full_state.blocks[group[0]]
+        candidates_by_route[(first.layer, first.kv_head)].append(group)
+
+    selected_by_route: dict[tuple[int, int], list[tuple[int, ...]]] = defaultdict(list)
+    target_bytes_by_route: dict[tuple[int, int], int] = {}
+    protected_bytes_by_route: dict[tuple[int, int], int] = defaultdict(int)
+    protected_score_by_route: dict[tuple[int, int], float] = defaultdict(float)
+    protected_ids: set[int] = set()
+    for route in sorted(stable_routes):
+        route_groups = candidates_by_route.get(route, [])
+        if not route_groups:
+            target_bytes_by_route[route] = 0
+            continue
+        route_nodes = [
+            node_id
+            for node_id, block in enumerate(full_state.blocks)
+            if (block.layer, block.kv_head) == route
+        ]
+        bytes_per_position = min(
+            full_state.blocks[node_id].byte_size / full_state.blocks[node_id].position_count
+            for node_id in route_nodes
+        )
+        target_positions = math.floor(
+            position_limits[route]
+            * config.selection.stable_head_query_coverage_initial_fraction
+            * config.selection.stable_head_query_coverage_layout_group_fraction
+        )
+        target_bytes = int(target_positions * bytes_per_position)
+        target_bytes_by_route[route] = target_bytes
+        fixed_positions = sum(
+            full_state.blocks[node_id].position_count
+            for node_id in route_nodes
+            if node_id in fixed_ids
+        )
+        protected_positions = 0
+        ordered = sorted(
+            route_groups,
+            key=lambda group: (
+                -sum(eviction_risks[node_id] for node_id in group),
+                group,
+            ),
+        )
+        for group in ordered:
+            if protected_bytes_by_route[route] >= target_bytes:
+                break
+            new_nodes = tuple(
+                node_id
+                for node_id in group
+                if node_id not in protected_ids and node_id not in fixed_ids
+            )
+            if not new_nodes:
+                continue
+            group_positions = sum(
+                full_state.blocks[node_id].position_count for node_id in new_nodes
+            )
+            if fixed_positions + protected_positions + group_positions > position_limits[route]:
+                continue
+            selected_by_route[route].append(group)
+            protected_ids.update(group)
+            protected_positions += group_positions
+            protected_bytes_by_route[route] += sum(
+                full_state.blocks[node_id].byte_size for node_id in new_nodes
+            )
+            protected_score_by_route[route] += sum(eviction_risks[node_id] for node_id in new_nodes)
+    return _ProgressiveGroupReservation(
+        protected_node_ids=frozenset(protected_ids),
+        groups_by_route={route: tuple(values) for route, values in selected_by_route.items()},
+        candidate_count_by_route={
+            route: len(candidates_by_route.get(route, ())) for route in stable_routes
+        },
+        target_bytes_by_route=target_bytes_by_route,
+        protected_bytes_by_route=dict(protected_bytes_by_route),
+        protected_score_by_route=dict(protected_score_by_route),
+    )
+
+
+def _progressive_capacity_records(
+    plan: MosaicKVCompressionPlan,
+    external_node_ids: frozenset[int],
+    reservation: _ProgressiveGroupReservation,
+    *,
+    allow_fullkv_capacity_expansion: bool = False,
+) -> tuple[HeadLocalCapacityRecord, ...]:
+    full_state = plan.full_state
+    by_route: dict[tuple[int, int], list[int]] = defaultdict(list)
+    for node_id in sorted(external_node_ids):
+        block = full_state.blocks[node_id]
+        by_route[(block.layer, block.kv_head)].append(node_id)
+    result: list[HeadLocalCapacityRecord] = []
+    for record in plan.external_exact_capacity_records:
+        route = (record.layer, record.kv_head)
+        node_ids = by_route.get(route, [])
+        selected_positions = sum(full_state.blocks[node_id].position_count for node_id in node_ids)
+        selected_bytes = sum(full_state.blocks[node_id].byte_size for node_id in node_ids)
+        selected_visual = sum(
+            full_state.blocks[node_id].position_count
+            for node_id in node_ids
+            if full_state.blocks[node_id].modality in {Modality.IMAGE, Modality.VIDEO}
+        )
+        groups = reservation.groups_by_route.get(route, ())
+        protected_bytes = reservation.protected_bytes_by_route.get(route, 0)
+        target_bytes = reservation.target_bytes_by_route.get(route, 0)
+        position_limit = record.position_limit
+        if selected_positions > position_limit:
+            if not allow_fullkv_capacity_expansion:
+                raise HuggingFaceRuntimeError("non-fallback selection exceeds its route capacity")
+            # A fail-closed hierarchical decision may deliberately return
+            # FullKV. Preserve that actual physical capacity in the audit
+            # record; active-byte gates will reject it rather than disguising
+            # it as a compressed candidate or crashing before measurement.
+            position_limit = selected_positions
+        result.append(
+            replace(
+                record,
+                position_limit=position_limit,
+                selected_positions=selected_positions,
+                shortfall_positions=position_limit - selected_positions,
+                selected_bytes=selected_bytes,
+                selected_visual_positions=selected_visual,
+                query_coverage_initial_layout_group_candidate_count=(
+                    reservation.candidate_count_by_route.get(route, 0)
+                ),
+                query_coverage_initial_layout_group_protected_group_count=len(groups),
+                query_coverage_initial_layout_group_protected_block_count=sum(
+                    len(group) for group in groups
+                ),
+                query_coverage_initial_layout_group_protected_bytes=protected_bytes,
+                query_coverage_initial_layout_group_protected_score=(
+                    reservation.protected_score_by_route.get(route, 0.0)
+                ),
+                query_coverage_initial_layout_group_target_bytes=target_bytes,
+                query_coverage_initial_layout_group_accepted_candidate_count=len(groups),
+                query_coverage_initial_layout_group_knapsack_selected_count=len(groups),
+                query_coverage_initial_layout_group_node_ids=groups,
+            )
+        )
+    return tuple(result)
+
+
+def _hierarchical_route_ladders(
+    plan: MosaicKVCompressionPlan,
+    config: RunConfig,
+    position_limits: Mapping[tuple[int, int], int],
+) -> tuple[RouteCapacityLadder, ...]:
+    """Build V100 route ladders from FullKV and label-blind online signals."""
+
+    full_state = plan.full_state
+    risks = _progressive_eviction_risks(plan)
+    reservation = _progressive_group_reservation(plan, config, position_limits, risks)
+    group_by_node: dict[int, str] = {}
+    for route, groups in sorted(reservation.groups_by_route.items()):
+        for group_index, group in enumerate(groups):
+            group_id = f"{route[0]}:{route[1]}:{group_index}"
+            for node_id in group:
+                if node_id in group_by_node:
+                    raise HuggingFaceRuntimeError("hierarchical protected layout groups overlap")
+                group_by_node[node_id] = group_id
+    fixed_ids = _progressive_fixed_source_ids(plan)
+    route_blocks: dict[tuple[int, int], list[int]] = defaultdict(list)
+    candidates: list[RouteBlockCandidate] = []
+    for node_id, block in enumerate(full_state.blocks):
+        route = (block.layer, block.kv_head)
+        route_blocks[route].append(node_id)
+        risk = max(0.0, float(risks[node_id]))
+        candidates.append(
+            RouteBlockCandidate(
+                node_id=node_id,
+                layer=block.layer,
+                kv_head=block.kv_head,
+                byte_size=block.byte_size,
+                evidence_utility=risk,
+                eviction_risk=risk,
+                mandatory=block.mandatory or node_id in fixed_ids,
+                atomic_group_id=group_by_node.get(node_id),
+            )
+        )
+    if set(route_blocks) != set(position_limits):
+        raise HuggingFaceRuntimeError(
+            "hierarchical position limits must cover every FullKV layer/head route"
+        )
+    target_bytes_by_route: dict[tuple[int, int], int] = {}
+    for route, node_ids in sorted(route_blocks.items()):
+        bytes_per_position = {
+            full_state.blocks[node_id].byte_size // full_state.blocks[node_id].position_count
+            for node_id in node_ids
+        }
+        if len(bytes_per_position) != 1 or any(
+            full_state.blocks[node_id].byte_size % full_state.blocks[node_id].position_count
+            for node_id in node_ids
+        ):
+            raise HuggingFaceRuntimeError(
+                "hierarchical route blocks do not have a uniform integral byte cost"
+            )
+        unit = next(iter(bytes_per_position))
+        full_bytes = sum(full_state.blocks[node_id].byte_size for node_id in node_ids)
+        target_bytes_by_route[route] = min(
+            full_bytes,
+            max(1, int(position_limits[route]) * unit),
+        )
+    return build_route_capacity_ladders(candidates, target_bytes_by_route)
+
+
+def _hierarchical_reference_rollout(
+    adapter: HuggingFaceMultimodalAdapter,
+    prefill: PrefillOutput,
+    horizon: int,
+) -> tuple[tuple[Any, ...], tuple[Any, ...]]:
+    """Capture one teacher-forced FullKV prefix from an isolated state."""
+
+    teacher_inputs: list[Any] = []
+    reference_logits: list[Any] = []
+    reference_input = prefill.next_token_id.detach().clone()
+    with construct_isolated_decode_state(
+        adapter,
+        prefill.state,
+        candidate_id="v100-fullkv-teacher",
+    ) as handle:
+        for _step in range(horizon):
+            teacher_inputs.append(reference_input.detach().clone())
+            output = adapter.decode_one_token(
+                reference_input,
+                handle.state,
+                capture_queries=False,
+                capture_attentions=False,
+            )
+            handle.adopt(output.state)
+            reference_logits.append(output.logits.detach().clone())
+            reference_input = output.next_token_id.detach().clone()
+    return tuple(teacher_inputs), tuple(reference_logits)
+
+
+def _run_hierarchical_logit_safe_eviction(
+    adapter: HuggingFaceMultimodalAdapter,
+    prefill: PrefillOutput,
+    plan: MosaicKVCompressionPlan,
+    config: RunConfig,
+    *,
+    key_transform: RotaryPrototypeKeyTransform | None,
+    position_limits: Mapping[tuple[int, int], int],
+) -> tuple[MosaicKVCompressionPlan, BoundedHierarchicalProbeDecision]:
+    """Run V100's bounded hierarchy using only disposable isolated states."""
+
+    if plan.method is not MosaicKVMethod.MOSAICKV_EXACT:
+        raise HuggingFaceRuntimeError("hierarchical logit-safe eviction supports mosaickv_exact")
+    selection_config = config.selection
+    ladders = _hierarchical_route_ladders(plan, config, position_limits)
+    teacher_inputs, reference_logits = _hierarchical_reference_rollout(
+        adapter,
+        prefill,
+        selection_config.stable_head_hierarchical_horizon,
+    )
+    full_logical_bytes = sum(block.byte_size for block in plan.full_state.blocks)
+    probe_budget = SelectionBudget(full_logical_bytes, BudgetUnit.BYTES)
+    probe_config = replace(
+        config,
+        cache=replace(
+            config.cache,
+            budget_value=full_logical_bytes,
+            total_storage_budget_bytes=full_logical_bytes,
+        ),
+    )
+    artifacts: dict[
+        tuple[tuple[tuple[int, int], int], ...],
+        tuple[ThreeTierCacheConstruction, SelectionResult, tuple[int, ...]],
+    ] = {}
+
+    def probe(proposal: HierarchicalCapacityProposal) -> LogitProbeResult:
+        level_indices = proposal.level_index_by_route()
+        retained_ids = frozenset(
+            node_id
+            for ladder in ladders
+            for node_id in ladder.level(level_indices[ladder.route]).selected_node_ids
+        )
+        construction, selection, external = _progressive_exact_construction(
+            plan,
+            adapter.capabilities,
+            probe_config,
+            retained_ids,
+            key_transform=key_transform,
+            active_budget=probe_budget,
+        )
+        maximum_positions = max(
+            layout.active_cache_length for layout in construction.active_layouts
+        )
+        packed = pack_runtime_cache(
+            adapter,
+            plan.full_state,
+            construction.state,
+            (),
+            (),
+            physical_prompt_capacity=maximum_positions,
+            packing_mode=config.cache.packing_mode,
+        )
+        artifacts[proposal.level_indices] = (construction, selection, external)
+        return probe_isolated_packed_candidate(
+            adapter,
+            prefill.state,
+            packed,
+            candidate_id=proposal.proposal_id,
+            teacher_forced_inputs=teacher_inputs,
+            reference_logits=reference_logits,
+        )
+
+    tracker = ProbeBudgetTracker(
+        selection_config.stable_head_hierarchical_maximum_candidate_evaluations,
+        selection_config.stable_head_hierarchical_maximum_sequential_rounds,
+    )
+    decision = run_bounded_hierarchical_probe_loop(
+        ladders,
+        target_active_bytes=plan.active_budget_value,
+        initial_partition_count=selection_config.stable_head_hierarchical_partition_count,
+        maximum_refinement_depth=(
+            selection_config.stable_head_hierarchical_maximum_refinement_depth
+        ),
+        maximum_rollback_rounds=(selection_config.stable_head_hierarchical_maximum_rollback_rounds),
+        maximum_forward_kl=selection_config.stable_head_hierarchical_maximum_kl,
+        maximum_absolute_logit_difference=(
+            selection_config.stable_head_hierarchical_maximum_logit_difference
+        ),
+        required_steps=selection_config.stable_head_hierarchical_horizon,
+        probe_budget=tracker,
+        probe=probe,
+    )
+    selected_levels = tuple(
+        (choice.route, choice.level_index) for choice in decision.selection.choices
+    )
+    selected_artifact = artifacts.get(selected_levels)
+    if selected_artifact is None:
+        retained_ids = frozenset(
+            node_id
+            for ladder in ladders
+            for node_id in ladder.level(
+                decision.selection.level_index_by_route()[ladder.route]
+            ).selected_node_ids
+        )
+        selected_artifact = _progressive_exact_construction(
+            plan,
+            adapter.capabilities,
+            probe_config,
+            retained_ids,
+            key_transform=key_transform,
+            active_budget=probe_budget,
+        )
+    construction, selection, external = selected_artifact
+    if construction.state.statistics.active_kv_bytes != decision.selection.active_bytes:
+        raise HuggingFaceRuntimeError(
+            "hierarchical knapsack and exact construction byte counts differ"
+        )
+    reservation = _progressive_group_reservation(
+        plan,
+        config,
+        position_limits,
+        _progressive_eviction_risks(plan),
+    )
+    selected_plan = replace(
+        plan,
+        effective_method=(
+            f"{plan.effective_method}__hierarchical_fullkv_fallback"
+            if decision.used_fullkv_fallback
+            else f"{plan.effective_method}__hierarchical_logit_safe_eviction"
+        ),
+        selection=selection,
+        construction=construction,
+        external_exact_node_ids=external,
+        external_exact_capacity_records=_progressive_capacity_records(
+            plan,
+            frozenset(external),
+            reservation,
+            allow_fullkv_capacity_expansion=decision.used_fullkv_fallback,
+        ),
+    )
+    return selected_plan, decision
+
+
+def _run_progressive_logit_safe_eviction(
+    adapter: HuggingFaceMultimodalAdapter,
+    prefill: PrefillOutput,
+    plan: MosaicKVCompressionPlan,
+    config: RunConfig,
+    *,
+    key_transform: RotaryPrototypeKeyTransform | None,
+    position_limits: Mapping[tuple[int, int], int],
+) -> tuple[MosaicKVCompressionPlan, ProgressiveLogitSafeEvictionDecision]:
+    """Evict cumulatively from FullKV, accepting only FullKV-stable checkpoints."""
+
+    if plan.method is not MosaicKVMethod.MOSAICKV_EXACT:
+        raise HuggingFaceRuntimeError("progressive logit-safe eviction supports mosaickv_exact")
+    full_state = plan.full_state
+    fixed_ids = _progressive_fixed_source_ids(plan)
+    eviction_risks = _progressive_eviction_risks(plan)
+    reservation = _progressive_group_reservation(
+        plan,
+        config,
+        position_limits,
+        eviction_risks,
+    )
+    protected_ids = (
+        {node_id for node_id, block in enumerate(full_state.blocks) if block.mandatory}
+        | set(reservation.protected_node_ids)
+        | set(fixed_ids)
+    )
+    current_external = set(range(len(full_state.blocks))) - set(fixed_ids)
+    blocked_ids: set[int] = set()
+    nodes_by_route: dict[tuple[int, int], list[int]] = defaultdict(list)
+    for node_id, block in enumerate(full_state.blocks):
+        nodes_by_route[(block.layer, block.kv_head)].append(node_id)
+    eviction_order = {
+        route: tuple(
+            sorted(
+                (node_id for node_id in node_ids if node_id not in protected_ids),
+                key=lambda node_id: (eviction_risks[node_id], node_id),
+            )
+        )
+        for route, node_ids in nodes_by_route.items()
+    }
+
+    horizon = config.selection.stable_head_progressive_eviction_horizon
+    reference_state = _clone_decode_state(adapter, prefill.state)
+    reference_input = prefill.next_token_id.detach().clone()
+    teacher_inputs: list[Any] = []
+    reference_logits: list[Any] = []
+    for _step in range(horizon):
+        teacher_inputs.append(reference_input.detach().clone())
+        output = adapter.decode_one_token(
+            reference_input,
+            reference_state,
+            capture_queries=False,
+            capture_attentions=False,
+        )
+        reference_state = output.state
+        reference_logits.append(output.logits.detach().clone())
+        reference_input = output.next_token_id.detach().clone()
+
+    full_logical_bytes = sum(block.byte_size for block in full_state.blocks)
+    probe_budget = SelectionBudget(full_logical_bytes, BudgetUnit.BYTES)
+    probe_config = replace(
+        config,
+        cache=replace(
+            config.cache,
+            budget_value=full_logical_bytes,
+            total_storage_budget_bytes=full_logical_bytes,
+        ),
+    )
+    checkpoints: list[ProgressiveEvictionCheckpoint] = []
+    pending: deque[tuple[int, ...]] = deque()
+    batch_blocks = config.selection.stable_head_progressive_eviction_initial_batch_blocks
+    maximum_probes = config.selection.stable_head_progressive_eviction_maximum_probes
+    last_accepted_evaluation: ShortHorizonLogitCandidateEvaluation | None = None
+
+    def route_positions(external_ids: set[int], route: tuple[int, int]) -> int:
+        return sum(
+            full_state.blocks[node_id].position_count
+            for node_id in nodes_by_route[route]
+            if node_id in external_ids or node_id in fixed_ids
+        )
+
+    def target_reached(external_ids: set[int]) -> bool:
+        return all(
+            route_positions(external_ids, route) <= limit
+            for route, limit in position_limits.items()
+        )
+
+    def next_proposal() -> tuple[int, ...]:
+        while pending:
+            proposal = tuple(
+                node_id
+                for node_id in pending.popleft()
+                if node_id in current_external
+                and route_positions(
+                    current_external,
+                    (
+                        full_state.blocks[node_id].layer,
+                        full_state.blocks[node_id].kv_head,
+                    ),
+                )
+                > position_limits[
+                    (
+                        full_state.blocks[node_id].layer,
+                        full_state.blocks[node_id].kv_head,
+                    )
+                ]
+            )
+            if proposal:
+                return proposal
+        proposal_ids: list[int] = []
+        for route, limit in sorted(position_limits.items()):
+            excess = route_positions(current_external, route) - limit
+            if excess <= 0:
+                continue
+            removed_positions = 0
+            for node_id in eviction_order.get(route, ()):
+                if node_id not in current_external or node_id in blocked_ids:
+                    continue
+                proposal_ids.append(node_id)
+                removed_positions += full_state.blocks[node_id].position_count
+                if removed_positions >= min(
+                    excess,
+                    batch_blocks * full_state.block_size,
+                ):
+                    break
+        return tuple(sorted(set(proposal_ids)))
+
+    while len(checkpoints) < maximum_probes and not target_reached(current_external):
+        proposal = next_proposal()
+        if not proposal:
+            break
+        candidate_external = current_external - set(proposal)
+        construction, _probe_selection, _probe_external = _progressive_exact_construction(
+            plan,
+            adapter.capabilities,
+            probe_config,
+            fixed_ids | candidate_external,
+            key_transform=key_transform,
+            active_budget=probe_budget,
+        )
+        maximum_positions = max(
+            layout.active_cache_length for layout in construction.active_layouts
+        )
+        packed = pack_runtime_cache(
+            adapter,
+            full_state,
+            construction.state,
+            (),
+            (),
+            physical_prompt_capacity=maximum_positions,
+            packing_mode=config.cache.packing_mode,
+        )
+        candidate_state = _state_from_packed(adapter, prefill.state, packed)
+        divergences: list[float] = []
+        differences: list[float] = []
+        matches: list[bool] = []
+        for teacher_input, full_logits in zip(teacher_inputs, reference_logits, strict=True):
+            output = adapter.decode_one_token(
+                teacher_input,
+                candidate_state,
+                capture_queries=False,
+                capture_attentions=False,
+            )
+            candidate_state = output.state
+            divergences.append(_logit_kl(full_logits, output.logits))
+            differences.append(
+                float(
+                    _torch()
+                    .max(
+                        _torch().abs(full_logits.detach().float() - output.logits.detach().float())
+                    )
+                    .item()
+                )
+            )
+            matches.append(
+                int(full_logits.detach().argmax(dim=-1).reshape(-1)[0].item())
+                == int(output.logits.detach().argmax(dim=-1).reshape(-1)[0].item())
+            )
+        evaluation = _short_horizon_candidate_evaluation(
+            f"progressive_probe_{len(checkpoints)}",
+            kl_values=divergences,
+            maximum_logit_differences=differences,
+            greedy_token_matches=matches,
+            maximum_kl_threshold=config.selection.stable_head_progressive_eviction_maximum_kl,
+            maximum_logit_difference_threshold=(
+                config.selection.stable_head_progressive_eviction_maximum_logit_difference
+            ),
+        )
+        logical_bytes = sum(
+            full_state.blocks[node_id].byte_size
+            for node_id in fixed_ids | frozenset(candidate_external)
+        )
+        checkpoints.append(
+            ProgressiveEvictionCheckpoint(
+                probe_index=len(checkpoints),
+                proposed_removed_blocks=len(proposal),
+                accepted=evaluation.passed,
+                greedy_token_match=evaluation.greedy_token_match,
+                maximum_kl=evaluation.maximum_kl,
+                maximum_logit_difference=evaluation.maximum_logit_difference,
+                maximum_active_positions=maximum_positions,
+                logical_active_bytes=logical_bytes,
+            )
+        )
+        if evaluation.passed:
+            current_external = candidate_external
+            last_accepted_evaluation = evaluation
+            pending.clear()
+        elif len(proposal) > 1:
+            midpoint = len(proposal) // 2
+            pending.appendleft(proposal[midpoint:])
+            pending.appendleft(proposal[:midpoint])
+        else:
+            blocked_ids.add(proposal[0])
+
+    reached = target_reached(current_external)
+    selected_plan = plan
+    final_logical_bytes = plan.construction.state.statistics.active_kv_bytes
+    if reached:
+        final_construction, final_selection, final_external = _progressive_exact_construction(
+            plan,
+            adapter.capabilities,
+            config,
+            fixed_ids | current_external,
+            key_transform=key_transform,
+            active_budget=SelectionBudget(
+                plan.active_budget_value,
+                config.cache.budget_unit,
+            ),
+        )
+        final_logical_bytes = final_construction.state.statistics.active_kv_bytes
+        selected_plan = replace(
+            plan,
+            effective_method=f"{plan.effective_method}__progressive_logit_safe_eviction",
+            selection=final_selection,
+            construction=final_construction,
+            external_exact_node_ids=final_external,
+            external_exact_capacity_records=_progressive_capacity_records(
+                plan,
+                frozenset(current_external),
+                reservation,
+            ),
+        )
+    protected_groups = tuple(
+        group for groups in reservation.groups_by_route.values() for group in groups
+    )
+    protected_bytes = sum(reservation.protected_bytes_by_route.values())
+    protected_target = sum(reservation.target_bytes_by_route.values())
+    selected_passed = bool(reached and last_accepted_evaluation is not None)
+    return selected_plan, ProgressiveLogitSafeEvictionDecision(
+        enabled=True,
+        started_from_fullkv=True,
+        target_reached=reached,
+        selected_candidate_passed=selected_passed,
+        used_target_fallback=not reached,
+        horizon=horizon,
+        maximum_kl_threshold=config.selection.stable_head_progressive_eviction_maximum_kl,
+        maximum_logit_difference_threshold=(
+            config.selection.stable_head_progressive_eviction_maximum_logit_difference
+        ),
+        maximum_probes=maximum_probes,
+        probes_used=len(checkpoints),
+        accepted_checkpoints=sum(item.accepted for item in checkpoints),
+        rejected_checkpoints=sum(not item.accepted for item in checkpoints),
+        initial_fullkv_logical_bytes=full_logical_bytes,
+        target_active_bytes=plan.active_budget_value,
+        final_logical_active_bytes=final_logical_bytes,
+        protected_group_candidate_count=sum(reservation.candidate_count_by_route.values()),
+        protected_group_count=len(protected_groups),
+        protected_group_block_count=sum(len(group) for group in protected_groups),
+        protected_group_bytes=protected_bytes,
+        protected_group_target_bytes=protected_target,
+        protected_group_score=sum(reservation.protected_score_by_route.values()),
+        checkpoints=tuple(checkpoints),
+    )
 
 
 def _run_fidelity_diagnostic(
@@ -5244,6 +6520,90 @@ def _external_stable_capacity_trace(
         "query_coverage_initial_candidate_count": sum(
             record.query_coverage_initial_candidate_count for record in records
         ),
+        "query_coverage_initial_reserved_bytes": sum(
+            record.query_coverage_initial_reserved_bytes for record in records
+        ),
+        "query_coverage_initial_allocated_bytes": sum(
+            record.query_coverage_initial_allocated_bytes for record in records
+        ),
+        "query_coverage_initial_cross_head_risk": math.fsum(
+            record.query_coverage_initial_cross_head_risk for record in records
+        ),
+        "query_coverage_initial_proposed_normalized_gain": math.fsum(
+            record.query_coverage_initial_proposed_normalized_gain for record in records
+        ),
+        "query_coverage_initial_proposed_normalized_prompt_loss": math.fsum(
+            record.query_coverage_initial_proposed_normalized_prompt_loss for record in records
+        ),
+        "query_coverage_initial_proposed_output_impact_risk": math.fsum(
+            record.query_coverage_initial_proposed_output_impact_risk for record in records
+        ),
+        "query_coverage_initial_output_impact_donor_count": sum(
+            record.query_coverage_initial_output_impact_donor_count for record in records
+        ),
+        "query_coverage_initial_output_impact_protected_count": sum(
+            record.query_coverage_initial_output_impact_protected_count for record in records
+        ),
+        "query_coverage_initial_output_impact_protected_bytes": sum(
+            record.query_coverage_initial_output_impact_protected_bytes for record in records
+        ),
+        "query_coverage_initial_output_impact_protected_score": math.fsum(
+            record.query_coverage_initial_output_impact_protected_score for record in records
+        ),
+        "query_coverage_initial_layout_group_candidate_count": sum(
+            record.query_coverage_initial_layout_group_candidate_count for record in records
+        ),
+        "query_coverage_initial_layout_group_protected_group_count": sum(
+            record.query_coverage_initial_layout_group_protected_group_count for record in records
+        ),
+        "query_coverage_initial_layout_group_protected_block_count": sum(
+            record.query_coverage_initial_layout_group_protected_block_count for record in records
+        ),
+        "query_coverage_initial_layout_group_protected_bytes": sum(
+            record.query_coverage_initial_layout_group_protected_bytes for record in records
+        ),
+        "query_coverage_initial_layout_group_protected_score": math.fsum(
+            record.query_coverage_initial_layout_group_protected_score for record in records
+        ),
+        "query_coverage_initial_layout_group_target_bytes": max(
+            (record.query_coverage_initial_layout_group_target_bytes for record in records),
+            default=0,
+        ),
+        "query_coverage_initial_layout_group_accepted_candidate_count": sum(
+            record.query_coverage_initial_layout_group_accepted_candidate_count
+            for record in records
+        ),
+        "query_coverage_initial_layout_group_risk_rejected_count": sum(
+            record.query_coverage_initial_layout_group_risk_rejected_count for record in records
+        ),
+        "query_coverage_initial_layout_group_pareto_candidate_count": sum(
+            record.query_coverage_initial_layout_group_pareto_candidate_count for record in records
+        ),
+        "query_coverage_initial_layout_group_knapsack_selected_count": sum(
+            record.query_coverage_initial_layout_group_knapsack_selected_count for record in records
+        ),
+        "query_coverage_initial_layout_group_joint_donor_candidate_count": sum(
+            record.query_coverage_initial_layout_group_joint_donor_candidate_count
+            for record in records
+        ),
+        "query_coverage_initial_layout_group_normalized_query_gain": math.fsum(
+            record.query_coverage_initial_layout_group_normalized_query_gain for record in records
+        ),
+        "query_coverage_initial_layout_group_normalized_prompt_risk": math.fsum(
+            record.query_coverage_initial_layout_group_normalized_prompt_risk for record in records
+        ),
+        "query_coverage_initial_layout_group_output_impact_risk": math.fsum(
+            record.query_coverage_initial_layout_group_output_impact_risk for record in records
+        ),
+        "query_coverage_initial_stability_rejected_route_count": sum(
+            record.query_coverage_initial_stability_rejected for record in records
+        ),
+        "query_coverage_initial_global_allocation_route_count": sum(
+            record.query_coverage_initial_global_allocation for record in records
+        ),
+        "query_coverage_initial_allocated_route_count": sum(
+            record.query_coverage_initial_allocated_bytes > 0 for record in records
+        ),
         "forecast_divergence_eligible_route_count": sum(
             record.forecast_divergence_eligible for record in records
         ),
@@ -5299,6 +6659,27 @@ def _external_stable_capacity_trace(
             for record in records
             if record.query_coverage_initial_added_node_ids
         },
+        "query_coverage_initial_layout_group_node_ids": {
+            f"{record.layer}:{record.kv_head}": [
+                list(group) for group in record.query_coverage_initial_layout_group_node_ids
+            ]
+            for record in records
+            if record.query_coverage_initial_layout_group_node_ids
+        },
+        "routes_with_query_coverage_cross_head_allocation": [
+            cast("JsonObject", asdict(record))
+            for record in records
+            if record.query_coverage_initial_global_allocation
+            and (
+                record.query_coverage_initial_allocated_bytes > 0
+                or record.query_coverage_initial_cross_head_risk > 0
+            )
+        ],
+        "routes_rejected_by_query_coverage_stability": [
+            cast("JsonObject", asdict(record))
+            for record in records
+            if record.query_coverage_initial_stability_rejected
+        ],
         "routes_with_shortfall": [
             cast("JsonObject", asdict(record)) for record in records if record.shortfall_positions
         ],
@@ -5986,6 +7367,14 @@ class HuggingFaceMosaicKVModel:
     ) -> None:
         if config.execution.backend.value != "huggingface":
             raise ValueError("HuggingFaceMosaicKVModel requires execution.backend='huggingface'")
+        self._hierarchical_gpu_debug_authorized = False
+        if config.selection.stable_head_hierarchical_logit_safe_eviction:
+            if os.environ.get("MOSAICKV_ENABLE_V100_GPU_DEBUG") != "1":
+                raise HuggingFaceRuntimeError(
+                    "hierarchical logit-safe eviction is GPU-unverified and requires the "
+                    "explicit debug-only MOSAICKV_ENABLE_V100_GPU_DEBUG=1 authorization"
+                )
+            self._hierarchical_gpu_debug_authorized = True
         if config.execution.attention_implementation != "eager" and not config.method.is_full_cache:
             raise ValueError(
                 "compressed HF methods currently require eager attention; "
@@ -6208,6 +7597,12 @@ class HuggingFaceMosaicKVModel:
             graph_seconds = 0.0
             selection_seconds = 0.0
             tier_seconds = 0.0
+            logit_stability_seconds = 0.0
+            logit_stability_decision: ShortHorizonLogitStabilityDecision | None = None
+            progressive_eviction_seconds = 0.0
+            progressive_eviction_decision: ProgressiveLogitSafeEvictionDecision | None = None
+            hierarchical_eviction_seconds = 0.0
+            hierarchical_eviction_decision: BoundedHierarchicalProbeDecision | None = None
             packing_seconds = 0.0
             repair_state: RepairCacheState | None = None
             gpu_rescue_staging_seconds = 0.0
@@ -6594,6 +7989,57 @@ class HuggingFaceMosaicKVModel:
                         prototype_token_weight_by_head=predicted_token_attention,
                         graph_head_uncertainty=graph_head_uncertainty,
                     )
+                    if self.config.selection.stable_head_short_horizon_logit_stability:
+                        if dense_budget is None:
+                            raise HuggingFaceRuntimeError(
+                                "short-horizon logit stability requires a dense byte budget"
+                            )
+                        stability_result, logit_stability_seconds = _timed(
+                            prefill.logits,
+                            lambda: _run_short_horizon_logit_stability(
+                                self.adapter,
+                                prefill,
+                                plan,
+                                self.config,
+                                key_transform=key_transform,
+                                physical_prompt_capacity=dense_budget.prompt_capacity,
+                            ),
+                        )
+                        plan, logit_stability_decision = stability_result
+                    if self.config.selection.stable_head_progressive_logit_safe_eviction:
+                        if dense_budget is None:
+                            raise HuggingFaceRuntimeError(
+                                "progressive logit-safe eviction requires a dense byte budget"
+                            )
+                        progressive_result, progressive_eviction_seconds = _timed(
+                            prefill.logits,
+                            lambda: _run_progressive_logit_safe_eviction(
+                                self.adapter,
+                                prefill,
+                                plan,
+                                self.config,
+                                key_transform=key_transform,
+                                position_limits=dense_budget.position_limits,
+                            ),
+                        )
+                        plan, progressive_eviction_decision = progressive_result
+                    if self.config.selection.stable_head_hierarchical_logit_safe_eviction:
+                        if dense_budget is None:
+                            raise HuggingFaceRuntimeError(
+                                "hierarchical logit-safe eviction requires a dense byte budget"
+                            )
+                        hierarchical_result, hierarchical_eviction_seconds = _timed(
+                            prefill.logits,
+                            lambda: _run_hierarchical_logit_safe_eviction(
+                                self.adapter,
+                                prefill,
+                                plan,
+                                self.config,
+                                key_transform=key_transform,
+                                position_limits=dense_budget.position_limits,
+                            ),
+                        )
+                        plan, hierarchical_eviction_decision = hierarchical_result
                     planner_wall_seconds = time.perf_counter() - planner_wall_started
                     planner_preparation_seconds = max(
                         0.0,
@@ -6602,8 +8048,91 @@ class HuggingFaceMosaicKVModel:
                         - key_transform_seconds
                         - plan.graph_seconds
                         - plan.selection_seconds
-                        - plan.tier_seconds,
+                        - plan.tier_seconds
+                        - logit_stability_seconds
+                        - progressive_eviction_seconds
+                        - hierarchical_eviction_seconds,
                     )
+                    if (
+                        dense_budget is not None
+                        and hierarchical_eviction_decision is not None
+                        and hierarchical_eviction_decision.used_fullkv_fallback
+                    ):
+                        attempted_lengths = {
+                            layout.active_cache_length
+                            for layout in plan.construction.active_layouts
+                        }
+                        if not attempted_lengths:
+                            raise HuggingFaceRuntimeError(
+                                "hierarchical FullKV fallback has no active cache layouts"
+                            )
+                        attempted_capacity = max(attempted_lengths)
+                        attempted_active_bytes = plan.construction.state.statistics.active_kv_bytes
+                        failure_total_seconds = time.perf_counter() - started
+                        accounted_failure_seconds = (
+                            prefill_seconds
+                            + cache_state_construction_seconds
+                            + forecast_seconds
+                            + planner_preparation_seconds
+                            + plan.graph_seconds
+                            + plan.selection_seconds
+                            + plan.tier_seconds
+                            + key_transform_seconds
+                            + logit_stability_seconds
+                            + progressive_eviction_seconds
+                            + hierarchical_eviction_seconds
+                        )
+                        failure_timings = cast(
+                            "JsonObject",
+                            {
+                                "prefill": prefill_seconds,
+                                "image_video_encoder": image_video_encoder_seconds,
+                                "projector": projector_seconds,
+                                "language_model_prefill": language_model_prefill_seconds,
+                                "cache_state_construction": (cache_state_construction_seconds),
+                                "forecast": forecast_seconds,
+                                "planner_preparation": planner_preparation_seconds,
+                                "graph": plan.graph_seconds,
+                                "utility_and_selection": plan.selection_seconds,
+                                "tier_construction": (plan.tier_seconds + key_transform_seconds),
+                                "logit_stability": logit_stability_seconds,
+                                "progressive_eviction": progressive_eviction_seconds,
+                                "hierarchical_eviction": hierarchical_eviction_seconds,
+                                "cache_packing": 0.0,
+                                "decode": 0.0,
+                                "repair_transfer": 0.0,
+                                "repair_redecode": 0.0,
+                                "host_orchestration": max(
+                                    0.0,
+                                    failure_total_seconds - accounted_failure_seconds,
+                                ),
+                                "total_before_failure": failure_total_seconds,
+                            },
+                        )
+                        decision_record = cast(
+                            "JsonObject",
+                            {
+                                **asdict(hierarchical_eviction_decision),
+                                "overhead_seconds": hierarchical_eviction_seconds,
+                                "probe_state_isolation": (
+                                    "clone_per_probe_discarded_after_evaluation"
+                                ),
+                            },
+                        )
+                        failure_payload = _hard_budget_fallback_trace_payload(
+                            decision_record,
+                            attempted_active_kv_bytes=attempted_active_bytes,
+                            hard_active_kv_budget_bytes=dense_budget.target_bytes,
+                            attempted_prompt_capacity=attempted_capacity,
+                            hard_prompt_capacity=dense_budget.prompt_capacity,
+                            timing_breakdown=failure_timings,
+                        )
+                        error = HuggingFaceRuntimeError(
+                            "hierarchical logit-safe eviction returned an over-budget "
+                            "FullKV fallback; rejected before final cache packing"
+                        )
+                        error.mosaickv_failure_trace_payload = failure_payload
+                        raise error
                     if (
                         dense_budget is not None
                         and plan.construction.mode is TierConstructionMode.THREE_TIER
@@ -6617,7 +8146,14 @@ class HuggingFaceMosaicKVModel:
                                 "three-tier construction has no active layer/head layouts"
                             )
                         measured_capacity = max(active_lengths)
-                        if measured_capacity > dense_budget.prompt_capacity:
+                        hierarchical_fullkv_fallback = bool(
+                            hierarchical_eviction_decision is not None
+                            and hierarchical_eviction_decision.used_fullkv_fallback
+                        )
+                        if (
+                            measured_capacity > dense_budget.prompt_capacity
+                            and not hierarchical_fullkv_fallback
+                        ):
                             raise HuggingFaceRuntimeError(
                                 "three-tier measured physical capacity exceeds its hard cap: "
                                 f"active={measured_capacity}, "
@@ -7368,6 +8904,9 @@ class HuggingFaceMosaicKVModel:
                 + graph_seconds
                 + selection_seconds
                 + tier_seconds
+                + logit_stability_seconds
+                + progressive_eviction_seconds
+                + hierarchical_eviction_seconds
                 + packing_seconds
                 + decode_seconds
                 + repair_transfer
@@ -7385,6 +8924,9 @@ class HuggingFaceMosaicKVModel:
                 graph=graph_seconds,
                 utility_and_selection=selection_seconds,
                 tier_construction=tier_seconds,
+                logit_stability=logit_stability_seconds,
+                progressive_eviction=progressive_eviction_seconds,
+                hierarchical_eviction=hierarchical_eviction_seconds,
                 cache_packing=packing_seconds,
                 decode=decode_seconds,
                 per_token_decode=tuple(per_token_decode_seconds),
@@ -7494,6 +9036,45 @@ class HuggingFaceMosaicKVModel:
                         "final_prefix_match_state": draft_repair_prefix_matches,
                     },
                     "prefixkv_decode_events": cast("list[JsonValue]", prefixkv_decode_events),
+                    "short_horizon_logit_stability": (
+                        {"status": "disabled"}
+                        if logit_stability_decision is None
+                        else {
+                            "status": "completed_label_blind",
+                            **cast("JsonObject", asdict(logit_stability_decision)),
+                            "overhead_seconds": logit_stability_seconds,
+                            "trajectory": "fullkv_teacher_forced_short_horizon",
+                            "probe_state_discarded_before_measured_decode": True,
+                        }
+                    ),
+                    "progressive_logit_safe_eviction": (
+                        {"status": "disabled"}
+                        if progressive_eviction_decision is None
+                        else {
+                            "status": "completed_label_blind",
+                            **cast(
+                                "JsonObject",
+                                asdict(progressive_eviction_decision),
+                            ),
+                            "overhead_seconds": progressive_eviction_seconds,
+                            "trajectory": "progressive_fullkv_to_target_teacher_forced",
+                            "probe_state_discarded_before_measured_decode": True,
+                        }
+                    ),
+                    "hierarchical_logit_safe_eviction": (
+                        {"status": "disabled"}
+                        if hierarchical_eviction_decision is None
+                        else {
+                            "status": "completed_label_blind",
+                            **cast(
+                                "JsonObject",
+                                asdict(hierarchical_eviction_decision),
+                            ),
+                            "overhead_seconds": hierarchical_eviction_seconds,
+                            "trajectory": "bounded_hierarchical_fullkv_teacher_forced",
+                            "probe_state_discarded_before_measured_decode": True,
+                        }
+                    ),
                     "timing_breakdown": timing_payload,
                     "planner_subphases": cast(
                         "JsonObject",
@@ -7503,6 +9084,9 @@ class HuggingFaceMosaicKVModel:
                                 0.0 if plan is None else plan.reservation_seconds
                             ),
                             "budgeted_selector": (0.0 if plan is None else plan.selector_seconds),
+                            "short_horizon_logit_stability": logit_stability_seconds,
+                            "progressive_logit_safe_eviction": (progressive_eviction_seconds),
+                            "hierarchical_logit_safe_eviction": (hierarchical_eviction_seconds),
                             "stable_head_routing": (
                                 0.0 if plan is None else plan.stable_routing_seconds
                             ),
@@ -7665,6 +9249,126 @@ class HuggingFaceMosaicKVModel:
                             "stable_head_query_coverage_initial_minimum_prompt_mass_fraction": (
                                 self.config.selection.stable_head_query_coverage_initial_minimum_prompt_mass_fraction
                             ),
+                            "stable_head_query_coverage_initial_objective": (
+                                self.config.selection.stable_head_query_coverage_initial_objective
+                            ),
+                            "stable_head_query_coverage_initial_cap_fraction": (
+                                self.config.selection.stable_head_query_coverage_initial_cap_fraction
+                            ),
+                            "stable_head_query_coverage_cross_head_allocation": (
+                                self.config.selection.stable_head_query_coverage_cross_head_allocation
+                            ),
+                            "stable_head_query_coverage_cross_head_stability_gate": (
+                                self.config.selection.stable_head_query_coverage_cross_head_stability_gate
+                            ),
+                            "stable_head_query_coverage_cross_head_stability_risk_mode": (
+                                self.config.selection.stable_head_query_coverage_cross_head_stability_risk_mode
+                            ),
+                            "stable_head_query_coverage_cross_head_minimum_normalized_gain": (
+                                self.config.selection.stable_head_query_coverage_cross_head_minimum_normalized_gain
+                            ),
+                            "stable_head_query_coverage_cross_head_gain_to_prompt_loss_ratio": (
+                                self.config.selection.stable_head_query_coverage_cross_head_gain_to_prompt_loss_ratio
+                            ),
+                            "stable_head_query_coverage_output_impact_reservation": (
+                                self.config.selection.stable_head_query_coverage_output_impact_reservation
+                            ),
+                            "stable_head_query_coverage_output_impact_fraction": (
+                                self.config.selection.stable_head_query_coverage_output_impact_fraction
+                            ),
+                            "stable_head_query_coverage_layout_group_reservation": (
+                                self.config.selection.stable_head_query_coverage_layout_group_reservation
+                            ),
+                            "stable_head_query_coverage_layout_group_fraction": (
+                                self.config.selection.stable_head_query_coverage_layout_group_fraction
+                            ),
+                            "stable_head_query_coverage_layout_group_maximum_blocks": (
+                                self.config.selection.stable_head_query_coverage_layout_group_maximum_blocks
+                            ),
+                            "stable_head_query_coverage_layout_group_row_bins": (
+                                self.config.selection.stable_head_query_coverage_layout_group_row_bins
+                            ),
+                            "stable_head_query_coverage_layout_group_atomic_selection": (
+                                self.config.selection.stable_head_query_coverage_layout_group_atomic_selection
+                            ),
+                            "stable_head_query_coverage_layout_group_atomic_selection_mode": (
+                                self.config.selection.stable_head_query_coverage_layout_group_atomic_selection_mode
+                            ),
+                            (
+                                "stable_head_query_coverage_layout_group_"
+                                "minimum_utilization_fraction"
+                            ): (
+                                self.config.selection.stable_head_query_coverage_layout_group_minimum_utilization_fraction
+                            ),
+                            "stable_head_query_coverage_layout_group_minimum_normalized_gain": (
+                                self.config.selection.stable_head_query_coverage_layout_group_minimum_normalized_gain
+                            ),
+                            "stable_head_query_coverage_layout_group_gain_to_risk_ratio": (
+                                self.config.selection.stable_head_query_coverage_layout_group_gain_to_risk_ratio
+                            ),
+                            "stable_head_short_horizon_logit_stability": (
+                                self.config.selection.stable_head_short_horizon_logit_stability
+                            ),
+                            "stable_head_logit_stability_shortlist_size": (
+                                self.config.selection.stable_head_logit_stability_shortlist_size
+                            ),
+                            "stable_head_logit_stability_horizon": (
+                                self.config.selection.stable_head_logit_stability_horizon
+                            ),
+                            "stable_head_logit_stability_maximum_kl": (
+                                self.config.selection.stable_head_logit_stability_maximum_kl
+                            ),
+                            "stable_head_logit_stability_maximum_logit_difference": (
+                                self.config.selection.stable_head_logit_stability_maximum_logit_difference
+                            ),
+                            "stable_head_progressive_logit_safe_eviction": (
+                                self.config.selection.stable_head_progressive_logit_safe_eviction
+                            ),
+                            "stable_head_progressive_eviction_initial_batch_blocks": (
+                                self.config.selection.stable_head_progressive_eviction_initial_batch_blocks
+                            ),
+                            "stable_head_progressive_eviction_maximum_probes": (
+                                self.config.selection.stable_head_progressive_eviction_maximum_probes
+                            ),
+                            "stable_head_progressive_eviction_horizon": (
+                                self.config.selection.stable_head_progressive_eviction_horizon
+                            ),
+                            "stable_head_progressive_eviction_maximum_kl": (
+                                self.config.selection.stable_head_progressive_eviction_maximum_kl
+                            ),
+                            "stable_head_progressive_eviction_maximum_logit_difference": (
+                                self.config.selection.stable_head_progressive_eviction_maximum_logit_difference
+                            ),
+                            "stable_head_hierarchical_logit_safe_eviction": (
+                                self.config.selection.stable_head_hierarchical_logit_safe_eviction
+                            ),
+                            "stable_head_hierarchical_partition_count": (
+                                self.config.selection.stable_head_hierarchical_partition_count
+                            ),
+                            "stable_head_hierarchical_maximum_refinement_depth": (
+                                self.config.selection.stable_head_hierarchical_maximum_refinement_depth
+                            ),
+                            "stable_head_hierarchical_maximum_candidate_evaluations": (
+                                self.config.selection.stable_head_hierarchical_maximum_candidate_evaluations
+                            ),
+                            "stable_head_hierarchical_maximum_sequential_rounds": (
+                                self.config.selection.stable_head_hierarchical_maximum_sequential_rounds
+                            ),
+                            "stable_head_hierarchical_maximum_rollback_rounds": (
+                                self.config.selection.stable_head_hierarchical_maximum_rollback_rounds
+                            ),
+                            "stable_head_hierarchical_horizon": (
+                                self.config.selection.stable_head_hierarchical_horizon
+                            ),
+                            "stable_head_hierarchical_maximum_kl": (
+                                self.config.selection.stable_head_hierarchical_maximum_kl
+                            ),
+                            "stable_head_hierarchical_maximum_logit_difference": (
+                                self.config.selection.stable_head_hierarchical_maximum_logit_difference
+                            ),
+                            "hierarchical_gpu_debug_authorized": (
+                                self._hierarchical_gpu_debug_authorized
+                            ),
                             "routed_head_only_planning": (
                                 self.config.selection.routed_head_only_planning
                             ),
@@ -7709,6 +9413,9 @@ class HuggingFaceMosaicKVModel:
                 + graph_seconds
                 + selection_seconds
                 + tier_seconds
+                + logit_stability_seconds
+                + progressive_eviction_seconds
+                + hierarchical_eviction_seconds
                 + packing_seconds
             )
             peak_memory = (
@@ -7741,6 +9448,9 @@ class HuggingFaceMosaicKVModel:
                 effective_method=effective_method,
             )
         except Exception as error:
+            structured_failure = getattr(error, "mosaickv_failure_trace_payload", None)
+            if isinstance(structured_failure, dict):
+                trace.update(cast("JsonObject", structured_failure))
             failure_capacity_records = cast(
                 "tuple[HeadLocalCapacityRecord, ...]",
                 getattr(error, "mosaickv_external_exact_capacity_records", ()),
@@ -7773,7 +9483,9 @@ __all__ = [
     "RuntimePhaseTimings",
     "build_compression_plan",
     "compare_runtime_retention_one",
+    "construct_isolated_packed_decode_state",
     "maintain_prefixkv_decode_cache",
     "pack_runtime_cache",
     "pack_runtime_payloads",
+    "probe_isolated_packed_candidate",
 ]

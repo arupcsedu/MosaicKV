@@ -1,0 +1,245 @@
+schema_version: 1
+classification: sealed_negative_label_blind_calibration_result
+experiment_id: choice_c_v99_progressive_logit_safe_eviction_calibration
+immutable_result: true
+overall_freeze_gate_pass: false
+memory_gate_pass: true
+aggregate_fidelity_gate_pass: true
+robust_fold_fidelity_gate_pass: false
+layout_group_activity_gate_pass: true
+atomic_group_utilization_gate_pass: false
+pareto_knapsack_activity_gate_pass: true
+joint_group_donor_activity_gate_pass: true
+progressive_logit_safe_eviction_gate_pass: false
+frozen_candidate_created: false
+heldout_evaluation_authorized: false
+failure_scope:
+  - not_every_fold_passed_answer_noninferiority
+  - not_every_fold_passed_token_noninferiority
+  - atomic_group_reservation_utilization_failed
+  - progressive_logit_safe_eviction_did_not_reach_target_on_every_sample
+gate_thresholds_must_not_be_weakened_from_this_result: true
+v99_calibration_outputs_must_not_be_reclassified_as_heldout: true
+
+scientific_boundary:
+  benchmark_labels_accessed_for_selection: false
+  official_task_scores_accessed_for_selection: false
+  fullkv_generated_outputs_used_for_label_blind_fidelity: true
+  prompt_topk_generated_outputs_used_for_label_blind_comparison: true
+  v98_and_prior_used_only_as_sample_exclusion_boundaries: true
+  future_design_may_use_aggregate_label_blind_mechanism_telemetry: true
+  future_design_must_not_use_v99_answers: true
+  future_design_must_not_use_v99_references: true
+  future_design_must_not_use_v99_task_scores: true
+  future_design_must_not_use_v99_failure_identities: true
+  future_design_must_not_use_v99_generated_token_ids: true
+  future_design_must_not_use_v99_per_sample_telemetry: true
+  future_heldout_materialized: false
+
+protocol_git_sha: 4620243556e89538e7e82cacb89b306d8164279f
+source_snapshot_sha256: ca6242780843f1be4961a9bfd4b688e7e02e75ebcc7d7ae492fc2a7da03e2fbd
+run_root: /scratch/djy8hg/runs/mosaickv/choice-c-v99-progressive-logit-safe-eviction-calibration-v1-retry2
+immutable_ledger_root: /scratch/djy8hg/runs/mosaickv/choice-c-v99-progressive-logit-safe-eviction-calibration-v1
+execution_jobs:
+  original_ledger_array: 18728935
+  ledger_array_states: [completed, completed]
+  ledger_exit_codes: ["0:0", "0:0"]
+  original_failed_calibration_array: 18728936
+  original_failure_classification: progressive_selector_flag_not_propagated
+  first_replacement_calibration_array: 18730744
+  first_replacement_failure_classification: compact_graph_source_ids_sent_as_external_exact_blocks
+  first_replacement_freeze: 18730745
+  first_replacement_freeze_state: cancelled_dependency_never_satisfied
+  successful_replacement_calibration_array: 18731439
+  calibration_array_states: [completed, completed]
+  calibration_exit_codes: ["0:0", "0:0"]
+  maximum_calibration_elapsed: "03:37:45"
+  freeze_analysis: 18731440
+  freeze_state: completed_failed_closed_no_eligible_candidate
+  freeze_exit_code: "0:0"
+
+protocol:
+  path: configs/experiments/choice_c_v99_progressive_logit_safe_eviction_calibration.yaml
+  sha256: d0f45da3f9c47abfd56c73efb85eb78cfce7857157497cacb62b3e9395aa7156
+parent_negative_result_seal:
+  path: configs/ledgers/choice_c_v98_negative_calibration_seal.yaml
+  sha256: fa7d10faf6c4ecdcc734c64a888f909ce4261a1af87170697c003a3bf90ca20f
+
+execution_integrity:
+  tasks: [docvqa, textvqa]
+  samples_per_task: 32
+  arms_per_task: 3
+  measured_rows: 192
+  completed_rows: 192
+  failed_rows: 0
+  rows_with_errors: 0
+  calibration_references_present: false
+  calibration_task_scores_present: false
+
+common_candidate_properties:
+  candidate_id: progressive_fullkv_logit_safe_exact_b4_28_5
+  effective_method: mosaickv_exact
+  tier_policy: exact_only_progressive_fullkv_eviction
+  configured_active_byte_cap: 28500000
+  block_size: 4
+  prototype_fraction: 0.0
+  residual_bytes: 0
+  repair_enabled: false
+  starts_from_fullkv: true
+  initial_eviction_batch_blocks: 16
+  maximum_probes: 128
+  logit_horizon_steps: 2
+  maximum_forward_kl: 0.02
+  maximum_absolute_logit_difference: 1.0
+  greedy_token_match_required: true
+  every_sample_must_reach_target: true
+  minimum_group_reservation_utilization: 0.75
+
+observed_task_gates:
+  docvqa:
+    prompt_topk_fullkv_exact_answer_agreement: 0.75
+    candidate_fullkv_exact_answer_agreement: 0.75
+    candidate_delta_vs_prompt_topk: 0.0
+    candidate_fullkv_token_agreement: 0.28369140625
+    candidate_active_kv_bytes: 27639808.0
+    prompt_topk_active_kv_bytes: 40419328.0
+    candidate_residual_kv_bytes: 0.0
+    active_reduction_fraction_vs_prompt_topk: 0.3161734900689096
+    active_plus_residual_reduction_fraction_vs_prompt_topk: 0.3161734900689096
+    memory_gate_pass: true
+    aggregate_fidelity_gate_pass: true
+    group_utilization_gate_pass: false
+    progressive_logit_safe_eviction_gate_pass: false
+    progressive_target_reached_samples: 0
+    progressive_target_required_samples: 32
+    mean_progressive_eviction_overhead_seconds: 339.28168701171876
+  textvqa:
+    prompt_topk_fullkv_exact_answer_agreement: 0.78125
+    candidate_fullkv_exact_answer_agreement: 0.78125
+    candidate_delta_vs_prompt_topk: 0.0
+    candidate_fullkv_token_agreement: 0.251953125
+    candidate_active_kv_bytes: 27688960.0
+    prompt_topk_active_kv_bytes: 40599552.0
+    candidate_residual_kv_bytes: 0.0
+    active_reduction_fraction_vs_prompt_topk: 0.31799838579499595
+    active_plus_residual_reduction_fraction_vs_prompt_topk: 0.31799838579499595
+    memory_gate_pass: true
+    aggregate_fidelity_gate_pass: true
+    group_utilization_gate_pass: false
+    progressive_logit_safe_eviction_gate_pass: false
+    progressive_target_reached_samples: 1
+    progressive_target_required_samples: 32
+    mean_progressive_eviction_overhead_seconds: 347.0087005615235
+
+robust_gate_summary:
+  answer_folds_passed: 6
+  answer_folds_total: 8
+  token_folds_passed: 3
+  token_folds_total: 8
+  worst_fold_answer_delta_vs_prompt_topk: -0.125
+  worst_fold_token_delta_vs_prompt_topk: -0.2421875
+  worst_fold_fullkv_exact_answer_agreement: 0.625
+  worst_fold_fullkv_token_agreement: 0.16796875
+  overall_gate_pass: false
+
+aggregate_label_blind_mechanism_telemetry:
+  candidate_samples: 64
+  progressive_target_reached_samples: 1
+  progressive_selected_candidate_passed_samples: 1
+  target_fallback_samples: 63
+  total_probes: 8073
+  accepted_checkpoints: 1146
+  rejected_checkpoints: 6927
+  samples_started_from_fullkv: 64
+  samples_reusing_fullkv_prefill: 64
+  samples_performing_second_prefill: 0
+  samples_discarding_probe_state_before_measured_decode: 64
+  samples_with_greedy_safe_accepted_checkpoints: 64
+  samples_with_strictly_decreasing_accepted_bytes: 64
+  group_utilization_passed_samples: 1
+  group_utilization_required_samples: 64
+  mean_progressive_eviction_overhead_seconds: 343.1451937866211
+  p95_progressive_eviction_overhead_seconds: 559.811575
+
+strategy_outcomes:
+  progressive_fullkv_to_target_eviction:
+    purpose: begin_from_the_known_correct_cache_and_remove_only_logit_safe_blocks
+    activity: 8073_short_horizon_probes_across_64_samples
+    failure: only_1_of_64_samples_reached_the_fixed_memory_target
+  strict_checkpoint_admission:
+    purpose: require_greedy_token_KL_and_absolute_logit_safety_before_each_eviction
+    activity: 1146_checkpoints_accepted_and_6927_rejected
+    failure: safe_local_steps_did_not_form_a_path_to_the_global_byte_target
+  fail_closed_target_fallback:
+    purpose: preserve_complete_measurement_rows_when_progressive_search_stalls
+    activity: fallback_used_on_63_of_64_samples_and_explicitly_marked_ineligible
+    failure: fallback_memory_and_quality_measurements_are_not_verified_logit_safe_selections
+  atomic_layout_group_reservation:
+    purpose: protect_coherent_OCR_and_document_evidence_during_eviction
+    activity: layout_groups_were_generated_and_selected_on_both_tasks
+    failure: only_1_of_64_samples_met_the_unchanged_75_percent_utilization_gate
+  aggregate_fidelity:
+    purpose: ensure_task_level_answer_agreement_is_not_inferior_to_prompt_topk
+    activity: aggregate_answer_agreement_tied_prompt_topk_on_both_tasks
+    failure: fold_level_answer_and_token_stability_failed
+
+artifact_inventory:
+  algorithm: sha256_of_sorted_lines_each_formatted_as_file_sha256_two_spaces_relative_posix_path_newline
+  file_count: 264
+  total_bytes: 27253277
+  inventory_sha256: 8f92f99e0e0c1da8e56fde5c90f4f830f0ed7ec58e65a55cf70b26d8c48b3c9d
+artifacts:
+  calibration_docvqa_ledger:
+    root: immutable_ledger_root
+    path: inputs/calibration_docvqa.json
+    sha256: c871e44a176fd62988b1bf8a51c93414200832fe424531b39dcf636e33663a73
+  calibration_textvqa_ledger:
+    root: immutable_ledger_root
+    path: inputs/calibration_textvqa.json
+    sha256: 73cb0b3be2cee3ba69174a5403d48a1549dddfec2cdc436ba6544a5f7b9da59a
+  base_analysis:
+    root: run_root
+    path: analysis/label_blind_calibration.json
+    sha256: 11d2a2afffee25e0471e5daaf985265b15496c5d0eb5124813375cd16b26a2f3
+  base_report:
+    root: run_root
+    path: analysis/label_blind_calibration.md
+    sha256: e7aacfd915c1b4104a4a2f2b8e863768b11c3b4d94e804f72ea272618b6f5443
+  trials:
+    root: run_root
+    path: analysis/label_blind_calibration_trials.parquet
+    sha256: 1c76b7b6314b6921d071c7351fb32af0c89f60cad3ee03247d73ffcb017d1314
+  base_ranking:
+    root: run_root
+    path: analysis/label_blind_candidate_ranking.parquet
+    sha256: 193a3f4e44106c489318edb04077fd7c9b1e6a6793aff3a26a7e57eb5a4321f1
+  robust_analysis:
+    root: run_root
+    path: analysis/robust_fidelity_calibration.json
+    sha256: 1390f400a29bb667626f1b2ef531e48c73fe6c403e888e51fb479ae4dd5c3644
+  robust_report:
+    root: run_root
+    path: analysis/robust_fidelity_calibration.md
+    sha256: d1e690b15bd6053bdf82d46431e1c04d67e3cbea6aaadd571577e344e07d7e1d
+  robust_ranking:
+    root: run_root
+    path: analysis/robust_fidelity_candidate_ranking.parquet
+    sha256: 24841048bc300e88bada4bcb7b588dd20a783005b43142a2b904629c977be8ba
+  robust_folds:
+    root: run_root
+    path: analysis/robust_fidelity_folds.parquet
+    sha256: 758d3d419a1a215495ae3a0f47cd9511a22fe44f214692a4283a0a30bc255b81
+
+future_protocol:
+  next_version: v100
+  fresh_disjoint_calibration_required: true
+  v99_samples_must_be_excluded: true
+  v99_labels_and_failure_identities_forbidden: true
+  design_change: hierarchical_or_head_local_logit_safe_eviction
+  sequential_full_decode_probe_per_eviction_must_be_replaced: true
+  search_must_have_a_preregistered_sublinear_or_small_bounded_probe_budget: true
+  memory_gate_unchanged: true
+  task_and_fold_fidelity_gates_unchanged: true
+  group_utilization_gate_unchanged: true
+  logit_thresholds_unchanged: true
+  heldout_remains_blocked: true

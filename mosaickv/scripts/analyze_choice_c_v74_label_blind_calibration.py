@@ -48,6 +48,26 @@ def _format_fraction(value: object) -> str:
     return f"{float(cast('Any', value)):.2%}"
 
 
+def _boolean_metric(
+    frame: pd.DataFrame,
+    column: str,
+    *,
+    missing_default: bool,
+) -> tuple[pd.Series, pd.Series]:
+    """Normalize booleans without allowing pandas missing values to become true."""
+
+    raw = (
+        frame[column]
+        if column in frame
+        else pd.Series(pd.NA, index=frame.index, dtype="object")
+    )
+    missing = raw.map(pd.isna).astype(bool)
+    normalized = raw.map(
+        lambda value: missing_default if pd.isna(value) else bool(value)
+    ).astype(bool)
+    return normalized, missing
+
+
 def _write_frozen(path: Path, payload: dict[str, Any]) -> None:
     encoded = yaml.safe_dump(payload, sort_keys=True)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -212,6 +232,39 @@ def analyze(
         )
         if not 0 <= risk_control_margin <= 1:
             raise ValueError("future-rerank control noninferiority margin must be in [0, 1]")
+    logit_protocol = cast("dict[str, Any]", spec.get("short_horizon_logit_stability_analysis", {}))
+    if logit_protocol:
+        if logit_protocol.get("labels_accessed") is not False:
+            raise ValueError("short-horizon logit stability must be label blind")
+        if logit_protocol.get("require_every_sample_to_pass") is not True:
+            raise ValueError("short-horizon logit stability must fail closed per sample")
+        if logit_protocol.get("require_fullkv_prefill_reuse") is not True:
+            raise ValueError("short-horizon logit stability must reuse the FullKV prefill")
+        if logit_protocol.get("forbid_second_prefill") is not True:
+            raise ValueError("short-horizon logit stability must forbid a second prefill")
+        if logit_protocol.get("require_probe_state_discard_before_measured_decode") is not True:
+            raise ValueError("short-horizon logit stability must discard probe states")
+        if logit_protocol.get("require_greedy_token_match") is not True:
+            raise ValueError("short-horizon logit stability must require greedy-token parity")
+    progressive_protocol = cast(
+        "dict[str, Any]",
+        spec.get("progressive_logit_safe_eviction_analysis", {}),
+    )
+    if progressive_protocol:
+        required_true = {
+            "require_start_from_fullkv": "start from FullKV",
+            "require_every_sample_to_reach_target": "reach the target for every sample",
+            "require_every_accepted_checkpoint_to_pass": "pass every accepted checkpoint",
+            "require_fullkv_prefill_reuse": "reuse the FullKV prefill",
+            "forbid_second_prefill": "forbid a second prefill",
+            "require_probe_state_discard_before_measured_decode": "discard probe states",
+            "require_greedy_token_match": "require greedy-token parity",
+        }
+        if progressive_protocol.get("labels_accessed") is not False:
+            raise ValueError("progressive logit-safe eviction must be label blind")
+        for field, description in required_true.items():
+            if progressive_protocol.get(field) is not True:
+                raise ValueError(f"progressive logit-safe eviction must {description}")
     task_results: dict[str, dict[str, Any]] = {}
     decomposition = cast("dict[str, Any]", spec.get("decomposition_analysis", {}))
     prototype_decomposition_arm = decomposition.get("prototype_arm")
@@ -492,6 +545,114 @@ def analyze(
                 candidate,
                 "external_stable_query_coverage_initial_candidate_count",
             )
+            initial_query_coverage_reserved_bytes = _mean_metric(
+                candidate,
+                "external_stable_query_coverage_initial_reserved_bytes",
+            )
+            initial_query_coverage_allocated_bytes = _mean_metric(
+                candidate,
+                "external_stable_query_coverage_initial_allocated_bytes",
+            )
+            initial_query_coverage_cross_head_risk = _mean_metric(
+                candidate,
+                "external_stable_query_coverage_initial_cross_head_risk",
+            )
+            initial_query_coverage_proposed_gain = _mean_metric(
+                candidate,
+                "external_stable_query_coverage_initial_proposed_normalized_gain",
+            )
+            initial_query_coverage_proposed_prompt_loss = _mean_metric(
+                candidate,
+                "external_stable_query_coverage_initial_proposed_normalized_prompt_loss",
+            )
+            initial_query_coverage_proposed_output_impact_risk = _mean_metric(
+                candidate,
+                "external_stable_query_coverage_initial_proposed_output_impact_risk",
+            )
+            initial_query_coverage_output_impact_donor_count = _mean_metric(
+                candidate,
+                "external_stable_query_coverage_initial_output_impact_donor_count",
+            )
+            initial_query_coverage_output_impact_protected_count = _mean_metric(
+                candidate,
+                "external_stable_query_coverage_initial_output_impact_protected_count",
+            )
+            initial_query_coverage_output_impact_protected_bytes = _mean_metric(
+                candidate,
+                "external_stable_query_coverage_initial_output_impact_protected_bytes",
+            )
+            initial_query_coverage_output_impact_protected_score = _mean_metric(
+                candidate,
+                "external_stable_query_coverage_initial_output_impact_protected_score",
+            )
+            initial_layout_group_candidates = _mean_metric(
+                candidate,
+                "external_stable_query_coverage_initial_layout_group_candidate_count",
+            )
+            initial_layout_group_count = _mean_metric(
+                candidate,
+                "external_stable_query_coverage_initial_layout_group_protected_group_count",
+            )
+            initial_layout_group_blocks = _mean_metric(
+                candidate,
+                "external_stable_query_coverage_initial_layout_group_protected_block_count",
+            )
+            initial_layout_group_bytes = _mean_metric(
+                candidate,
+                "external_stable_query_coverage_initial_layout_group_protected_bytes",
+            )
+            initial_layout_group_score = _mean_metric(
+                candidate,
+                "external_stable_query_coverage_initial_layout_group_protected_score",
+            )
+            initial_layout_group_target_bytes = _mean_metric(
+                candidate,
+                "external_stable_query_coverage_initial_layout_group_target_bytes",
+            )
+            initial_layout_group_accepted_candidates = _mean_metric(
+                candidate,
+                "external_stable_query_coverage_initial_layout_group_accepted_candidate_count",
+            )
+            initial_layout_group_risk_rejections = _mean_metric(
+                candidate,
+                "external_stable_query_coverage_initial_layout_group_risk_rejected_count",
+            )
+            initial_layout_group_pareto_candidates = _mean_metric(
+                candidate,
+                "external_stable_query_coverage_initial_layout_group_pareto_candidate_count",
+            )
+            initial_layout_group_knapsack_selected = _mean_metric(
+                candidate,
+                "external_stable_query_coverage_initial_layout_group_knapsack_selected_count",
+            )
+            initial_layout_group_joint_donor_candidates = _mean_metric(
+                candidate,
+                "external_stable_query_coverage_initial_layout_group_joint_donor_candidate_count",
+            )
+            initial_layout_group_query_gain = _mean_metric(
+                candidate,
+                "external_stable_query_coverage_initial_layout_group_normalized_query_gain",
+            )
+            initial_layout_group_prompt_risk = _mean_metric(
+                candidate,
+                "external_stable_query_coverage_initial_layout_group_normalized_prompt_risk",
+            )
+            initial_layout_group_output_risk = _mean_metric(
+                candidate,
+                "external_stable_query_coverage_initial_layout_group_output_impact_risk",
+            )
+            initial_query_coverage_stability_rejections = _mean_metric(
+                candidate,
+                "external_stable_query_coverage_initial_stability_rejected_route_count",
+            )
+            initial_query_coverage_global_routes = _mean_metric(
+                candidate,
+                "external_stable_query_coverage_initial_global_allocation_route_count",
+            )
+            initial_query_coverage_allocated_routes = _mean_metric(
+                candidate,
+                "external_stable_query_coverage_initial_allocated_route_count",
+            )
             initial_query_coverage_routes = _mean_metric(
                 candidate,
                 "external_stable_routes_with_query_coverage_initial_selection_count",
@@ -549,6 +710,460 @@ def analyze(
                     and bool((divergence_route_series > 0).all())
                     and not divergence_max_series.isna().any()
                     and bool((divergence_max_series + 1e-12 >= minimum_forecast_tv).all())
+                )
+            )
+            requires_layout_groups = bool(
+                candidate_overrides.get(
+                    "stable_head_query_coverage_layout_group_reservation",
+                    False,
+                )
+            )
+            requires_atomic_layout_groups = bool(
+                candidate_overrides.get(
+                    "stable_head_query_coverage_layout_group_atomic_selection",
+                    False,
+                )
+            )
+            minimum_layout_utilization = float(
+                candidate_overrides.get(
+                    "stable_head_query_coverage_layout_group_minimum_utilization_fraction",
+                    0.0,
+                )
+            )
+            layout_target_series = pd.to_numeric(
+                candidate.get(
+                    "external_stable_query_coverage_initial_layout_group_target_bytes",
+                    pd.Series(index=candidate.index, dtype=float),
+                ),
+                errors="coerce",
+            )
+            layout_protected_series = pd.to_numeric(
+                candidate.get(
+                    "external_stable_query_coverage_initial_layout_group_protected_bytes",
+                    pd.Series(index=candidate.index, dtype=float),
+                ),
+                errors="coerce",
+            )
+            layout_utilization_series = layout_protected_series / layout_target_series
+            layout_group_utilization_eligible = bool(
+                not requires_atomic_layout_groups
+                or (
+                    not layout_target_series.isna().any()
+                    and bool((layout_target_series > 0).all())
+                    and not layout_protected_series.isna().any()
+                    and bool(
+                        (layout_utilization_series + 1e-12 >= minimum_layout_utilization).all()
+                    )
+                )
+            )
+            atomic_selection_mode = candidate_overrides.get(
+                "stable_head_query_coverage_layout_group_atomic_selection_mode",
+                "topk_greedy",
+            )
+            requires_pareto_knapsack = atomic_selection_mode in {
+                "pareto_knapsack",
+                "pareto_joint_donor_knapsack",
+            }
+            requires_joint_group_donors = atomic_selection_mode == "pareto_joint_donor_knapsack"
+            defers_surrogate_stability_to_logits = bool(
+                candidate_overrides.get("stable_head_short_horizon_logit_stability", False)
+                or candidate_overrides.get(
+                    "stable_head_progressive_logit_safe_eviction",
+                    False,
+                )
+            )
+            pareto_knapsack_activity_eligible = bool(
+                not requires_pareto_knapsack
+                or (
+                    initial_layout_group_pareto_candidates is not None
+                    and initial_layout_group_pareto_candidates > 0
+                    and initial_layout_group_knapsack_selected is not None
+                    and initial_layout_group_knapsack_selected > 0
+                    and (
+                        defers_surrogate_stability_to_logits
+                        or (
+                            initial_query_coverage_output_impact_donor_count is not None
+                            and initial_query_coverage_output_impact_donor_count > 0
+                        )
+                    )
+                )
+            )
+            joint_group_donor_activity_eligible = bool(
+                not requires_joint_group_donors
+                or (
+                    initial_layout_group_joint_donor_candidates is not None
+                    and initial_layout_group_joint_donor_candidates > 0
+                )
+            )
+            layout_group_activity_eligible = bool(
+                not requires_layout_groups
+                or (
+                    initial_layout_group_candidates is not None
+                    and initial_layout_group_candidates > 0
+                    and initial_layout_group_count is not None
+                    and initial_layout_group_count > 0
+                    and initial_layout_group_blocks is not None
+                    and initial_layout_group_blocks > initial_layout_group_count
+                    and initial_layout_group_bytes is not None
+                    and initial_layout_group_bytes > 0
+                    and initial_layout_group_score is not None
+                    and initial_layout_group_score > 0
+                )
+            )
+            requires_logit_stability = bool(
+                candidate_overrides.get("stable_head_short_horizon_logit_stability", False)
+            )
+            configured_logit_shortlist = int(
+                candidate_overrides.get("stable_head_logit_stability_shortlist_size", 0)
+            )
+            configured_logit_horizon = int(
+                candidate_overrides.get("stable_head_logit_stability_horizon", 0)
+            )
+            configured_maximum_kl = float(
+                candidate_overrides.get("stable_head_logit_stability_maximum_kl", 0.0)
+            )
+            configured_maximum_logit_difference = float(
+                candidate_overrides.get(
+                    "stable_head_logit_stability_maximum_logit_difference",
+                    0.0,
+                )
+            )
+            logit_enabled, logit_enabled_missing = _boolean_metric(
+                candidate,
+                "logit_stability_enabled",
+                missing_default=False,
+            )
+            logit_selected_passed, logit_selected_passed_missing = _boolean_metric(
+                candidate,
+                "logit_stability_selected_candidate_passed",
+                missing_default=False,
+            )
+            logit_greedy_match, logit_greedy_match_missing = _boolean_metric(
+                candidate,
+                "logit_stability_selected_greedy_token_match",
+                missing_default=False,
+            )
+            logit_prefill_reused, logit_prefill_reused_missing = _boolean_metric(
+                candidate,
+                "logit_stability_fullkv_prefill_reused",
+                missing_default=False,
+            )
+            logit_second_prefill, logit_second_prefill_missing = _boolean_metric(
+                candidate,
+                "logit_stability_second_prefill_performed",
+                missing_default=True,
+            )
+            logit_probe_states_discarded, logit_probe_states_discarded_missing = (
+                _boolean_metric(
+                    candidate,
+                    "logit_stability_probe_states_discarded_before_measured_decode",
+                    missing_default=False,
+                )
+            )
+            logit_labels_accessed, logit_labels_accessed_missing = _boolean_metric(
+                candidate,
+                "logit_stability_benchmark_labels_accessed",
+                missing_default=True,
+            )
+            logit_shortlist_count = pd.to_numeric(
+                candidate.get(
+                    "logit_stability_evaluated_candidate_count",
+                    pd.Series(index=candidate.index, dtype=float),
+                ),
+                errors="coerce",
+            )
+            logit_horizon = pd.to_numeric(
+                candidate.get(
+                    "logit_stability_horizon",
+                    pd.Series(index=candidate.index, dtype=float),
+                ),
+                errors="coerce",
+            )
+            logit_maximum_kl = pd.to_numeric(
+                candidate.get(
+                    "logit_stability_selected_maximum_kl",
+                    pd.Series(index=candidate.index, dtype=float),
+                ),
+                errors="coerce",
+            )
+            logit_maximum_difference = pd.to_numeric(
+                candidate.get(
+                    "logit_stability_selected_maximum_logit_difference",
+                    pd.Series(index=candidate.index, dtype=float),
+                ),
+                errors="coerce",
+            )
+            logit_reported_kl_threshold = pd.to_numeric(
+                candidate.get(
+                    "logit_stability_maximum_kl_threshold",
+                    pd.Series(index=candidate.index, dtype=float),
+                ),
+                errors="coerce",
+            )
+            logit_reported_difference_threshold = pd.to_numeric(
+                candidate.get(
+                    "logit_stability_maximum_logit_difference_threshold",
+                    pd.Series(index=candidate.index, dtype=float),
+                ),
+                errors="coerce",
+            )
+            logit_fallback, _logit_fallback_missing = _boolean_metric(
+                candidate,
+                "logit_stability_used_fail_closed_scalar_anchor",
+                missing_default=False,
+            )
+            logit_stability_eligible = bool(
+                not requires_logit_stability
+                or (
+                    not bool(logit_enabled_missing.any())
+                    and not bool(logit_selected_passed_missing.any())
+                    and not bool(logit_greedy_match_missing.any())
+                    and not bool(logit_prefill_reused_missing.any())
+                    and not bool(logit_second_prefill_missing.any())
+                    and not bool(logit_probe_states_discarded_missing.any())
+                    and not bool(logit_labels_accessed_missing.any())
+                    and bool(logit_enabled.all())
+                    and not logit_shortlist_count.isna().any()
+                    and bool((logit_shortlist_count == configured_logit_shortlist).all())
+                    and not logit_horizon.isna().any()
+                    and bool((logit_horizon == configured_logit_horizon).all())
+                    and bool(logit_selected_passed.all())
+                    and bool(logit_greedy_match.all())
+                    and bool(logit_prefill_reused.all())
+                    and not bool(logit_second_prefill.any())
+                    and bool(logit_probe_states_discarded.all())
+                    and not bool(logit_labels_accessed.any())
+                    and not logit_reported_kl_threshold.isna().any()
+                    and bool(
+                        (
+                            (logit_reported_kl_threshold - configured_maximum_kl).abs()
+                            <= 1e-12
+                        ).all()
+                    )
+                    and not logit_reported_difference_threshold.isna().any()
+                    and bool(
+                        (
+                            (
+                                logit_reported_difference_threshold
+                                - configured_maximum_logit_difference
+                            ).abs()
+                            <= 1e-12
+                        ).all()
+                    )
+                    and not logit_maximum_kl.isna().any()
+                    and bool((logit_maximum_kl <= configured_maximum_kl + 1e-12).all())
+                    and not logit_maximum_difference.isna().any()
+                    and bool(
+                        (
+                            logit_maximum_difference
+                            <= configured_maximum_logit_difference + 1e-12
+                        ).all()
+                    )
+                )
+            )
+            requires_progressive_eviction = bool(
+                candidate_overrides.get(
+                    "stable_head_progressive_logit_safe_eviction",
+                    False,
+                )
+            )
+            configured_progressive_horizon = int(
+                candidate_overrides.get("stable_head_progressive_eviction_horizon", 0)
+            )
+            configured_progressive_maximum_probes = int(
+                candidate_overrides.get("stable_head_progressive_eviction_maximum_probes", 0)
+            )
+            configured_progressive_maximum_kl = float(
+                candidate_overrides.get("stable_head_progressive_eviction_maximum_kl", 0.0)
+            )
+            configured_progressive_maximum_difference = float(
+                candidate_overrides.get(
+                    "stable_head_progressive_eviction_maximum_logit_difference",
+                    0.0,
+                )
+            )
+            configured_progressive_target_raw = candidate_overrides.get("active_budget_bytes")
+            configured_progressive_target_bytes = (
+                None
+                if configured_progressive_target_raw is None
+                else int(configured_progressive_target_raw)
+            )
+            progressive_boolean_fields = {
+                "enabled": ("progressive_eviction_enabled", False),
+                "started_from_fullkv": (
+                    "progressive_eviction_started_from_fullkv",
+                    False,
+                ),
+                "target_reached": ("progressive_eviction_target_reached", False),
+                "selected_passed": (
+                    "progressive_eviction_selected_candidate_passed",
+                    False,
+                ),
+                "used_fallback": ("progressive_eviction_used_target_fallback", True),
+                "accepted_greedy": (
+                    "progressive_eviction_accepted_greedy_token_match",
+                    False,
+                ),
+                "accepted_decreasing": (
+                    "progressive_eviction_accepted_bytes_strictly_decrease",
+                    False,
+                ),
+                "prefill_reused": (
+                    "progressive_eviction_fullkv_prefill_reused",
+                    False,
+                ),
+                "second_prefill": (
+                    "progressive_eviction_second_prefill_performed",
+                    True,
+                ),
+                "states_discarded": (
+                    "progressive_eviction_probe_states_discarded_before_measured_decode",
+                    False,
+                ),
+                "labels_accessed": (
+                    "progressive_eviction_benchmark_labels_accessed",
+                    True,
+                ),
+            }
+            progressive_booleans: dict[str, pd.Series] = {}
+            progressive_missing: dict[str, pd.Series] = {}
+            for name, (column, default) in progressive_boolean_fields.items():
+                values, missing = _boolean_metric(
+                    candidate,
+                    column,
+                    missing_default=default,
+                )
+                progressive_booleans[name] = values
+                progressive_missing[name] = missing
+
+            def progressive_numeric(
+                field: str,
+                candidate_frame: pd.DataFrame = candidate,
+            ) -> pd.Series:
+                return pd.to_numeric(
+                    candidate_frame.get(
+                        f"progressive_eviction_{field}",
+                        pd.Series(index=candidate_frame.index, dtype=float),
+                    ),
+                    errors="coerce",
+                )
+
+            progressive_horizon = progressive_numeric("horizon")
+            progressive_reported_kl = progressive_numeric("maximum_kl_threshold")
+            progressive_reported_difference = progressive_numeric(
+                "maximum_logit_difference_threshold"
+            )
+            progressive_maximum_probes = progressive_numeric("maximum_probes")
+            progressive_probes_used = progressive_numeric("probes_used")
+            progressive_checkpoints = progressive_numeric("checkpoint_count")
+            progressive_accepted = progressive_numeric("accepted_checkpoints")
+            progressive_rejected = progressive_numeric("rejected_checkpoints")
+            progressive_initial_bytes = progressive_numeric("initial_fullkv_logical_bytes")
+            progressive_target_bytes = progressive_numeric("target_active_bytes")
+            progressive_final_bytes = progressive_numeric("final_logical_active_bytes")
+            progressive_accepted_kl = progressive_numeric("accepted_maximum_kl")
+            progressive_accepted_difference = progressive_numeric(
+                "accepted_maximum_logit_difference"
+            )
+            progressive_group_bytes = progressive_numeric("protected_group_bytes")
+            progressive_group_target = progressive_numeric("protected_group_target_bytes")
+            progressive_group_count = progressive_numeric("protected_group_count")
+            progressive_group_utilization = progressive_group_bytes / progressive_group_target
+            progressive_eviction_eligible = bool(
+                not requires_progressive_eviction
+                or (
+                    progressive_protocol
+                    and all(not bool(series.any()) for series in progressive_missing.values())
+                    and bool(progressive_booleans["enabled"].all())
+                    and bool(progressive_booleans["started_from_fullkv"].all())
+                    and bool(progressive_booleans["target_reached"].all())
+                    and bool(progressive_booleans["selected_passed"].all())
+                    and not bool(progressive_booleans["used_fallback"].any())
+                    and bool(progressive_booleans["accepted_greedy"].all())
+                    and bool(progressive_booleans["accepted_decreasing"].all())
+                    and bool(progressive_booleans["prefill_reused"].all())
+                    and not bool(progressive_booleans["second_prefill"].any())
+                    and bool(progressive_booleans["states_discarded"].all())
+                    and not bool(progressive_booleans["labels_accessed"].any())
+                    and not progressive_horizon.isna().any()
+                    and bool((progressive_horizon == configured_progressive_horizon).all())
+                    and not progressive_reported_kl.isna().any()
+                    and bool(
+                        (
+                            (progressive_reported_kl - configured_progressive_maximum_kl).abs()
+                            <= 1e-12
+                        ).all()
+                    )
+                    and not progressive_reported_difference.isna().any()
+                    and bool(
+                        (
+                            (
+                                progressive_reported_difference
+                                - configured_progressive_maximum_difference
+                            ).abs()
+                            <= 1e-12
+                        ).all()
+                    )
+                    and not progressive_maximum_probes.isna().any()
+                    and bool(
+                        (progressive_maximum_probes == configured_progressive_maximum_probes).all()
+                    )
+                    and not progressive_probes_used.isna().any()
+                    and bool((progressive_probes_used > 0).all())
+                    and bool(
+                        (progressive_probes_used <= configured_progressive_maximum_probes).all()
+                    )
+                    and not progressive_checkpoints.isna().any()
+                    and bool((progressive_checkpoints == progressive_probes_used).all())
+                    and not progressive_accepted.isna().any()
+                    and bool((progressive_accepted > 0).all())
+                    and not progressive_rejected.isna().any()
+                    and bool(
+                        (
+                            progressive_accepted + progressive_rejected
+                            == progressive_probes_used
+                        ).all()
+                    )
+                    and not progressive_initial_bytes.isna().any()
+                    and not progressive_target_bytes.isna().any()
+                    and (
+                        configured_progressive_target_bytes is None
+                        or bool(
+                            (
+                                progressive_target_bytes
+                                == configured_progressive_target_bytes
+                            ).all()
+                        )
+                    )
+                    and not progressive_final_bytes.isna().any()
+                    and bool((progressive_initial_bytes > progressive_target_bytes).all())
+                    and bool((progressive_final_bytes <= progressive_target_bytes).all())
+                    and bool((progressive_final_bytes > 0).all())
+                    and not progressive_accepted_kl.isna().any()
+                    and bool(
+                        (
+                            progressive_accepted_kl
+                            <= configured_progressive_maximum_kl + 1e-12
+                        ).all()
+                    )
+                    and not progressive_accepted_difference.isna().any()
+                    and bool(
+                        (
+                            progressive_accepted_difference
+                            <= configured_progressive_maximum_difference + 1e-12
+                        ).all()
+                    )
+                    and not progressive_group_target.isna().any()
+                    and bool((progressive_group_target > 0).all())
+                    and not progressive_group_bytes.isna().any()
+                    and not progressive_group_count.isna().any()
+                    and bool((progressive_group_count > 0).all())
+                    and bool(
+                        (
+                            progressive_group_utilization + 1e-12
+                            >= minimum_layout_utilization
+                        ).all()
+                    )
                 )
             )
             candidate_results[candidate_id] = {
@@ -667,6 +1282,95 @@ def analyze(
                 "mean_external_stable_query_coverage_initial_candidate_count": (
                     initial_query_coverage_candidates
                 ),
+                "mean_external_stable_query_coverage_initial_reserved_bytes": (
+                    initial_query_coverage_reserved_bytes
+                ),
+                "mean_external_stable_query_coverage_initial_allocated_bytes": (
+                    initial_query_coverage_allocated_bytes
+                ),
+                "mean_external_stable_query_coverage_initial_cross_head_risk": (
+                    initial_query_coverage_cross_head_risk
+                ),
+                "mean_external_stable_query_coverage_initial_proposed_normalized_gain": (
+                    initial_query_coverage_proposed_gain
+                ),
+                "mean_external_stable_query_coverage_initial_proposed_normalized_prompt_loss": (
+                    initial_query_coverage_proposed_prompt_loss
+                ),
+                "mean_external_stable_query_coverage_initial_proposed_output_impact_risk": (
+                    initial_query_coverage_proposed_output_impact_risk
+                ),
+                "mean_external_stable_query_coverage_initial_output_impact_donor_count": (
+                    initial_query_coverage_output_impact_donor_count
+                ),
+                "mean_external_stable_query_coverage_initial_output_impact_protected_count": (
+                    initial_query_coverage_output_impact_protected_count
+                ),
+                "mean_external_stable_query_coverage_initial_output_impact_protected_bytes": (
+                    initial_query_coverage_output_impact_protected_bytes
+                ),
+                "mean_external_stable_query_coverage_initial_output_impact_protected_score": (
+                    initial_query_coverage_output_impact_protected_score
+                ),
+                "mean_external_stable_query_coverage_initial_layout_group_candidate_count": (
+                    initial_layout_group_candidates
+                ),
+                "mean_external_stable_query_coverage_initial_layout_group_protected_group_count": (
+                    initial_layout_group_count
+                ),
+                "mean_external_stable_query_coverage_initial_layout_group_protected_block_count": (
+                    initial_layout_group_blocks
+                ),
+                "mean_external_stable_query_coverage_initial_layout_group_protected_bytes": (
+                    initial_layout_group_bytes
+                ),
+                "mean_external_stable_query_coverage_initial_layout_group_protected_score": (
+                    initial_layout_group_score
+                ),
+                "mean_external_stable_query_coverage_initial_layout_group_target_bytes": (
+                    initial_layout_group_target_bytes
+                ),
+                (
+                    "mean_external_stable_query_coverage_initial_layout_group_"
+                    "accepted_candidate_count"
+                ): (initial_layout_group_accepted_candidates),
+                "mean_external_stable_query_coverage_initial_layout_group_risk_rejected_count": (
+                    initial_layout_group_risk_rejections
+                ),
+                "mean_external_stable_query_coverage_initial_layout_group_pareto_candidate_count": (
+                    initial_layout_group_pareto_candidates
+                ),
+                (
+                    "mean_external_stable_query_coverage_initial_layout_group_"
+                    "knapsack_selected_count"
+                ): initial_layout_group_knapsack_selected,
+                (
+                    "mean_external_stable_query_coverage_initial_layout_group_"
+                    "joint_donor_candidate_count"
+                ): initial_layout_group_joint_donor_candidates,
+                "mean_external_stable_query_coverage_initial_layout_group_normalized_query_gain": (
+                    initial_layout_group_query_gain
+                ),
+                "mean_external_stable_query_coverage_initial_layout_group_normalized_prompt_risk": (
+                    initial_layout_group_prompt_risk
+                ),
+                "mean_external_stable_query_coverage_initial_layout_group_output_impact_risk": (
+                    initial_layout_group_output_risk
+                ),
+                "minimum_external_stable_query_coverage_initial_layout_group_utilization": (
+                    None
+                    if layout_utilization_series.isna().any()
+                    else float(layout_utilization_series.min())
+                ),
+                "mean_external_stable_query_coverage_initial_stability_rejected_route_count": (
+                    initial_query_coverage_stability_rejections
+                ),
+                "mean_external_stable_query_coverage_initial_global_allocation_route_count": (
+                    initial_query_coverage_global_routes
+                ),
+                "mean_external_stable_query_coverage_initial_allocated_route_count": (
+                    initial_query_coverage_allocated_routes
+                ),
                 "mean_external_stable_routes_with_query_coverage_initial_selection_count": (
                     initial_query_coverage_routes
                 ),
@@ -686,6 +1390,59 @@ def analyze(
                 "future_rerank_risk_activity_required": candidate_id in risk_candidate_ids,
                 "future_rerank_risk_activity_eligible": True,
                 "future_rerank_control_fidelity_eligible": True,
+                "layout_group_activity_required": requires_layout_groups,
+                "layout_group_activity_eligible": layout_group_activity_eligible,
+                "layout_group_utilization_required": requires_atomic_layout_groups,
+                "layout_group_utilization_eligible": layout_group_utilization_eligible,
+                "pareto_knapsack_activity_required": requires_pareto_knapsack,
+                "pareto_knapsack_activity_eligible": pareto_knapsack_activity_eligible,
+                "joint_group_donor_activity_required": requires_joint_group_donors,
+                "joint_group_donor_activity_eligible": joint_group_donor_activity_eligible,
+                "short_horizon_logit_stability_required": requires_logit_stability,
+                "short_horizon_logit_stability_eligible": logit_stability_eligible,
+                "mean_short_horizon_logit_stability_maximum_kl": (
+                    None if logit_maximum_kl.isna().all() else float(logit_maximum_kl.mean())
+                ),
+                "mean_short_horizon_logit_stability_maximum_logit_difference": (
+                    None
+                    if logit_maximum_difference.isna().all()
+                    else float(logit_maximum_difference.mean())
+                ),
+                "short_horizon_logit_scalar_fallback_fraction": (
+                    None if not requires_logit_stability else float(logit_fallback.mean())
+                ),
+                "progressive_logit_safe_eviction_required": requires_progressive_eviction,
+                "progressive_logit_safe_eviction_eligible": progressive_eviction_eligible,
+                "mean_progressive_eviction_probes_used": (
+                    None
+                    if progressive_probes_used.isna().all()
+                    else float(progressive_probes_used.mean())
+                ),
+                "mean_progressive_eviction_accepted_checkpoints": (
+                    None
+                    if progressive_accepted.isna().all()
+                    else float(progressive_accepted.mean())
+                ),
+                "mean_progressive_eviction_rejected_checkpoints": (
+                    None
+                    if progressive_rejected.isna().all()
+                    else float(progressive_rejected.mean())
+                ),
+                "mean_progressive_eviction_accepted_maximum_kl": (
+                    None
+                    if progressive_accepted_kl.isna().all()
+                    else float(progressive_accepted_kl.mean())
+                ),
+                "mean_progressive_eviction_accepted_maximum_logit_difference": (
+                    None
+                    if progressive_accepted_difference.isna().all()
+                    else float(progressive_accepted_difference.mean())
+                ),
+                "minimum_progressive_eviction_group_utilization": (
+                    None
+                    if progressive_group_utilization.isna().all()
+                    else float(progressive_group_utilization.min())
+                ),
                 "gate_eligible": False,
             }
         if risk_gate_protocol:
@@ -718,6 +1475,12 @@ def analyze(
                 and result["forecast_divergence_eligible"]
                 and result["future_rerank_risk_activity_eligible"]
                 and result["future_rerank_control_fidelity_eligible"]
+                and result["layout_group_activity_eligible"]
+                and result["layout_group_utilization_eligible"]
+                and result["pareto_knapsack_activity_eligible"]
+                and result["joint_group_donor_activity_eligible"]
+                and result["short_horizon_logit_stability_eligible"]
+                and result["progressive_logit_safe_eviction_eligible"]
             )
         decomposition_result: dict[str, Any] | None = None
         if decomposition:
@@ -791,6 +1554,42 @@ def analyze(
         future_rerank_control_fidelity_eligible = all(
             bool(record["future_rerank_control_fidelity_eligible"]) for record in records
         )
+        layout_group_activity_eligible = all(
+            bool(record["layout_group_activity_eligible"]) for record in records
+        )
+        layout_group_activity_required = any(
+            bool(record["layout_group_activity_required"]) for record in records
+        )
+        layout_group_utilization_eligible = all(
+            bool(record["layout_group_utilization_eligible"]) for record in records
+        )
+        layout_group_utilization_required = any(
+            bool(record["layout_group_utilization_required"]) for record in records
+        )
+        pareto_knapsack_activity_eligible = all(
+            bool(record["pareto_knapsack_activity_eligible"]) for record in records
+        )
+        pareto_knapsack_activity_required = any(
+            bool(record["pareto_knapsack_activity_required"]) for record in records
+        )
+        joint_group_donor_activity_eligible = all(
+            bool(record["joint_group_donor_activity_eligible"]) for record in records
+        )
+        joint_group_donor_activity_required = any(
+            bool(record["joint_group_donor_activity_required"]) for record in records
+        )
+        short_horizon_logit_stability_eligible = all(
+            bool(record["short_horizon_logit_stability_eligible"]) for record in records
+        )
+        short_horizon_logit_stability_required = any(
+            bool(record["short_horizon_logit_stability_required"]) for record in records
+        )
+        progressive_logit_safe_eviction_eligible = all(
+            bool(record["progressive_logit_safe_eviction_eligible"]) for record in records
+        )
+        progressive_logit_safe_eviction_required = any(
+            bool(record["progressive_logit_safe_eviction_required"]) for record in records
+        )
         candidate_ranking.append(
             {
                 "candidate_id": candidate_id,
@@ -804,6 +1603,26 @@ def analyze(
                 "future_rerank_control_fidelity_eligible": (
                     future_rerank_control_fidelity_eligible
                 ),
+                "layout_group_activity_required": layout_group_activity_required,
+                "layout_group_activity_eligible": layout_group_activity_eligible,
+                "layout_group_utilization_required": layout_group_utilization_required,
+                "layout_group_utilization_eligible": layout_group_utilization_eligible,
+                "pareto_knapsack_activity_required": pareto_knapsack_activity_required,
+                "pareto_knapsack_activity_eligible": pareto_knapsack_activity_eligible,
+                "joint_group_donor_activity_required": joint_group_donor_activity_required,
+                "joint_group_donor_activity_eligible": joint_group_donor_activity_eligible,
+                "short_horizon_logit_stability_required": (
+                    short_horizon_logit_stability_required
+                ),
+                "short_horizon_logit_stability_eligible": (
+                    short_horizon_logit_stability_eligible
+                ),
+                "progressive_logit_safe_eviction_required": (
+                    progressive_logit_safe_eviction_required
+                ),
+                "progressive_logit_safe_eviction_eligible": (
+                    progressive_logit_safe_eviction_eligible
+                ),
                 "gate_eligible": (
                     memory_eligible
                     and fidelity_eligible
@@ -812,6 +1631,12 @@ def analyze(
                     and forecast_divergence_eligible
                     and future_rerank_risk_activity_eligible
                     and future_rerank_control_fidelity_eligible
+                    and layout_group_activity_eligible
+                    and layout_group_utilization_eligible
+                    and pareto_knapsack_activity_eligible
+                    and joint_group_donor_activity_eligible
+                    and short_horizon_logit_stability_eligible
+                    and progressive_logit_safe_eviction_eligible
                 ),
                 "worst_task_fullkv_exact_answer_agreement": min(
                     float(record["fullkv_exact_answer_agreement"]) for record in records
@@ -880,6 +1705,66 @@ def analyze(
                     for record in records
                 )
                 else None,
+                "minimum_layout_group_reservation_utilization": min(
+                    float(
+                        record[
+                            "minimum_external_stable_query_coverage_initial_layout_group_utilization"
+                        ]
+                    )
+                    for record in records
+                    if record[
+                        "minimum_external_stable_query_coverage_initial_layout_group_utilization"
+                    ]
+                    is not None
+                )
+                if any(
+                    record[
+                        "minimum_external_stable_query_coverage_initial_layout_group_utilization"
+                    ]
+                    is not None
+                    for record in records
+                )
+                else None,
+                "mean_layout_group_accepted_candidate_count": statistics.fmean(
+                    float(
+                        record[
+                            "mean_external_stable_query_coverage_initial_layout_group_accepted_candidate_count"
+                        ]
+                    )
+                    for record in records
+                    if record[
+                        "mean_external_stable_query_coverage_initial_layout_group_accepted_candidate_count"
+                    ]
+                    is not None
+                )
+                if any(
+                    record[
+                        "mean_external_stable_query_coverage_initial_layout_group_accepted_candidate_count"
+                    ]
+                    is not None
+                    for record in records
+                )
+                else None,
+                "mean_layout_group_risk_rejected_count": statistics.fmean(
+                    float(
+                        record[
+                            "mean_external_stable_query_coverage_initial_layout_group_risk_rejected_count"
+                        ]
+                    )
+                    for record in records
+                    if record[
+                        "mean_external_stable_query_coverage_initial_layout_group_risk_rejected_count"
+                    ]
+                    is not None
+                )
+                if any(
+                    record[
+                        "mean_external_stable_query_coverage_initial_layout_group_risk_rejected_count"
+                    ]
+                    is not None
+                    for record in records
+                )
+                else None,
                 "mean_exact_prompt_mass_fraction": statistics.fmean(
                     float(record["mean_exact_prompt_mass_fraction"])
                     for record in records
@@ -910,6 +1795,106 @@ def analyze(
                     if record["mean_prototype_logical_fraction"] is not None
                 )
                 if any(record["mean_prototype_logical_fraction"] is not None for record in records)
+                else None,
+                "mean_layout_group_candidate_count": statistics.fmean(
+                    float(
+                        record[
+                            "mean_external_stable_query_coverage_initial_layout_group_candidate_count"
+                        ]
+                    )
+                    for record in records
+                    if record[
+                        "mean_external_stable_query_coverage_initial_layout_group_candidate_count"
+                    ]
+                    is not None
+                )
+                if any(
+                    record[
+                        "mean_external_stable_query_coverage_initial_layout_group_candidate_count"
+                    ]
+                    is not None
+                    for record in records
+                )
+                else None,
+                "mean_layout_group_protected_group_count": statistics.fmean(
+                    float(
+                        record[
+                            "mean_external_stable_query_coverage_initial_layout_group_protected_group_count"
+                        ]
+                    )
+                    for record in records
+                    if record[
+                        "mean_external_stable_query_coverage_initial_layout_group_protected_group_count"
+                    ]
+                    is not None
+                )
+                if any(
+                    record[
+                        "mean_external_stable_query_coverage_initial_layout_group_protected_group_count"
+                    ]
+                    is not None
+                    for record in records
+                )
+                else None,
+                "mean_layout_group_protected_block_count": statistics.fmean(
+                    float(
+                        record[
+                            "mean_external_stable_query_coverage_initial_layout_group_protected_block_count"
+                        ]
+                    )
+                    for record in records
+                    if record[
+                        "mean_external_stable_query_coverage_initial_layout_group_protected_block_count"
+                    ]
+                    is not None
+                )
+                if any(
+                    record[
+                        "mean_external_stable_query_coverage_initial_layout_group_protected_block_count"
+                    ]
+                    is not None
+                    for record in records
+                )
+                else None,
+                "mean_progressive_eviction_probes_used": statistics.fmean(
+                    float(record["mean_progressive_eviction_probes_used"])
+                    for record in records
+                    if record["mean_progressive_eviction_probes_used"] is not None
+                )
+                if any(
+                    record["mean_progressive_eviction_probes_used"] is not None
+                    for record in records
+                )
+                else None,
+                "mean_progressive_eviction_accepted_checkpoints": statistics.fmean(
+                    float(record["mean_progressive_eviction_accepted_checkpoints"])
+                    for record in records
+                    if record["mean_progressive_eviction_accepted_checkpoints"] is not None
+                )
+                if any(
+                    record["mean_progressive_eviction_accepted_checkpoints"] is not None
+                    for record in records
+                )
+                else None,
+                "mean_progressive_eviction_rejected_checkpoints": statistics.fmean(
+                    float(record["mean_progressive_eviction_rejected_checkpoints"])
+                    for record in records
+                    if record["mean_progressive_eviction_rejected_checkpoints"] is not None
+                )
+                if any(
+                    record["mean_progressive_eviction_rejected_checkpoints"] is not None
+                    for record in records
+                )
+                else None,
+                "minimum_progressive_eviction_group_utilization": min(
+                    float(record["minimum_progressive_eviction_group_utilization"])
+                    for record in records
+                    if record["minimum_progressive_eviction_group_utilization"] is not None
+                )
+                if any(
+                    record["minimum_progressive_eviction_group_utilization"] is not None
+                    for record in records
+                )
                 else None,
             }
         )
@@ -943,6 +1928,8 @@ def analyze(
         "all_configured_gates_eligible_candidate_found": selected is not None,
         "forecast_divergence_analysis": divergence_protocol or None,
         "future_rerank_risk_analysis": risk_gate_protocol or None,
+        "short_horizon_logit_stability_analysis": logit_protocol or None,
+        "progressive_logit_safe_eviction_analysis": progressive_protocol or None,
     }
     (analysis_root / "label_blind_calibration.json").write_text(
         json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8"
@@ -1030,16 +2017,60 @@ def analyze(
             if risk_gate_protocol
             else "- No separate future-rerank risk/activity gate was configured."
         ),
+        (
+            "- Coherent layout-group candidates must protect at least one multi-block "
+            "group with positive bytes and score on every task when enabled."
+            if any(record["layout_group_activity_required"] for record in candidate_ranking)
+            else "- No coherent layout-group activity gate was configured."
+        ),
+        (
+            "- Atomic layout-group reservation must meet its preregistered minimum "
+            "utilization on every sample."
+            if any(record["layout_group_utilization_required"] for record in candidate_ranking)
+            else "- No atomic layout-group utilization gate was configured."
+        ),
+        (
+            "- Pareto-knapsack candidates require positive Pareto items, selected "
+            "knapsack groups, and audited non-group output-impact donors on every task."
+            if any(record["pareto_knapsack_activity_required"] for record in candidate_ranking)
+            else "- No Pareto-knapsack mechanism-activity gate was configured."
+        ),
+        (
+            "- Joint group-and-donor candidates must be constructed on every task before "
+            "Pareto filtering and atomic allocation."
+            if any(record["joint_group_donor_activity_required"] for record in candidate_ranking)
+            else "- No joint group-and-donor mechanism-activity gate was configured."
+        ),
+        (
+            "- Short-horizon logit stability requires every selected cache to preserve "
+            "the FullKV greedy token and remain below both preregistered logit thresholds."
+            if any(
+                record["short_horizon_logit_stability_required"]
+                for record in candidate_ranking
+            )
+            else "- No short-horizon FullKV-logit gate was configured."
+        ),
+        (
+            "- Progressive logit-safe eviction must start from FullKV, reach the fixed "
+            "memory target, and pass the greedy-token, KL, and absolute-logit gates at "
+            "every accepted checkpoint."
+            if any(
+                record["progressive_logit_safe_eviction_required"]
+                for record in candidate_ranking
+            )
+            else "- No progressive FullKV-to-target eviction gate was configured."
+        ),
         "",
         "| Candidate | Memory | Fidelity | Exact-dominant | Zero residual | "
         "Forecast divergence | "
-        "Risk activity | Control safety | "
+        "Risk activity | Control safety | Layout groups | Group utilization | Pareto knapsack | "
+        "Joint donors | Logit stability | Progressive eviction | "
         "Worst answer agreement | "
         "Macro token agreement | Worst total reduction | Mean configured cap | "
         "Mean attainable cap | Mean final underfill | Mean packed padding | "
         "Mean stable-head shortfall | Exact prompt mass | Represented prompt mass | "
         "Mean prototypes |",
-        "|---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "|---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for record in candidate_ranking:
         stable_shortfall = record["mean_external_stable_shortfall_positions"]
@@ -1056,6 +2087,12 @@ def analyze(
             f"{'yes' if record['forecast_divergence_eligible'] else 'no'} | "
             f"{'yes' if record['future_rerank_risk_activity_eligible'] else 'no'} | "
             f"{'yes' if record['future_rerank_control_fidelity_eligible'] else 'no'} | "
+            f"{'yes' if record['layout_group_activity_eligible'] else 'no'} | "
+            f"{'yes' if record['layout_group_utilization_eligible'] else 'no'} | "
+            f"{'yes' if record['pareto_knapsack_activity_eligible'] else 'no'} | "
+            f"{'yes' if record['joint_group_donor_activity_eligible'] else 'no'} | "
+            f"{'yes' if record['short_horizon_logit_stability_eligible'] else 'no'} | "
+            f"{'yes' if record['progressive_logit_safe_eviction_eligible'] else 'no'} | "
             f"{float(record['worst_task_fullkv_exact_answer_agreement']):.2%} | "
             f"{float(record['macro_fullkv_token_agreement']):.2%} | "
             f"{float(record['worst_task_active_plus_residual_reduction']):.2%} | "

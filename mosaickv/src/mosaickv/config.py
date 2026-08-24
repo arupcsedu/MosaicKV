@@ -1041,6 +1041,72 @@ class SelectionConfig:
     stable_head_query_coverage_initial_fraction: float = 0.0
     stable_head_query_coverage_initial_prompt_weight: float = 1.0
     stable_head_query_coverage_initial_minimum_prompt_mass_fraction: float = 1.0
+    stable_head_query_coverage_initial_objective: str = "max"
+    stable_head_query_coverage_initial_cap_fraction: float = 1.0
+    # V90 allocates the initial query-conditioned exact-byte reservation
+    # globally across stable KV-head routes. Dense HF storage remains uniform;
+    # this flag does not claim unsupported ragged physical head tensors.
+    stable_head_query_coverage_cross_head_allocation: bool = False
+    # V91 accepts a cross-head query-coverage replacement only when its
+    # normalized capped-mass gain clears both an absolute floor and a fixed
+    # multiple of a label-blind donor-risk signal. ``prompt_mass`` preserves
+    # the V91 rule; V92 uses prompt attention times pooled-value deviation as
+    # a closer proxy for output impact. Rejected routes fail closed to their
+    # scalar exact selection.
+    stable_head_query_coverage_cross_head_stability_gate: bool = False
+    stable_head_query_coverage_cross_head_stability_risk_mode: str = "prompt_mass"
+    stable_head_query_coverage_cross_head_minimum_normalized_gain: float = 0.0
+    stable_head_query_coverage_cross_head_gain_to_prompt_loss_ratio: float = 1.0
+    # V93 protects a bounded subset of the scalar Prompt Top-K exact core
+    # before capped-query allocation. The fraction is measured against the
+    # existing cross-head reservation, not the complete cache capacity.
+    stable_head_query_coverage_output_impact_reservation: bool = False
+    stable_head_query_coverage_output_impact_fraction: float = 0.0
+    # V94 protects complete, spatially coherent reading-order groups before
+    # query-coverage allocation. Only normalized source regions are eligible;
+    # absent layout metadata fails closed rather than being called OCR.
+    stable_head_query_coverage_layout_group_reservation: bool = False
+    stable_head_query_coverage_layout_group_fraction: float = 0.0
+    stable_head_query_coverage_layout_group_maximum_blocks: int = 0
+    stable_head_query_coverage_layout_group_row_bins: int = 4
+    # V95 makes an admitted coherent group indivisible through the final
+    # exact-capacity fill. Admission is label blind: capped-query gain must
+    # clear both displaced prompt mass and attention-weighted value risk.
+    stable_head_query_coverage_layout_group_atomic_selection: bool = False
+    stable_head_query_coverage_layout_group_atomic_selection_mode: str = "topk_greedy"
+    stable_head_query_coverage_layout_group_minimum_utilization_fraction: float = 0.0
+    stable_head_query_coverage_layout_group_minimum_normalized_gain: float = 0.0
+    stable_head_query_coverage_layout_group_gain_to_risk_ratio: float = 1.0
+    # V98 replaces the V97 scalar output-impact admission proxy with an
+    # isolated, label-blind decode probe over a bounded same-byte shortlist.
+    # The probe reuses the original FullKV prefill, teacher-forces the FullKV
+    # greedy prefix, and never mutates the state used by the measured decode.
+    stable_head_short_horizon_logit_stability: bool = False
+    stable_head_logit_stability_shortlist_size: int = 0
+    stable_head_logit_stability_horizon: int = 0
+    stable_head_logit_stability_maximum_kl: float = 0.0
+    stable_head_logit_stability_maximum_logit_difference: float = 0.0
+    # V99 begins with the exact FullKV state and accepts cumulative eviction
+    # checkpoints only when their teacher-forced short-horizon logits remain
+    # within the preregistered token/KL/absolute-difference gate.
+    stable_head_progressive_logit_safe_eviction: bool = False
+    stable_head_progressive_eviction_initial_batch_blocks: int = 0
+    stable_head_progressive_eviction_maximum_probes: int = 0
+    stable_head_progressive_eviction_horizon: int = 0
+    stable_head_progressive_eviction_maximum_kl: float = 0.0
+    stable_head_progressive_eviction_maximum_logit_difference: float = 0.0
+    # V100 replaces V99's long sequential eviction path with a bounded,
+    # deterministic CPU proposal hierarchy. A backend must still evaluate the
+    # proposed caches in isolated state before this mode may execute online.
+    stable_head_hierarchical_logit_safe_eviction: bool = False
+    stable_head_hierarchical_partition_count: int = 0
+    stable_head_hierarchical_maximum_refinement_depth: int = 0
+    stable_head_hierarchical_maximum_candidate_evaluations: int = 0
+    stable_head_hierarchical_maximum_sequential_rounds: int = 0
+    stable_head_hierarchical_maximum_rollback_rounds: int = 0
+    stable_head_hierarchical_horizon: int = 0
+    stable_head_hierarchical_maximum_kl: float = 0.0
+    stable_head_hierarchical_maximum_logit_difference: float = 0.0
     routed_head_only_planning: bool = False
     # MosaicKV may deliberately materialize less than the shared comparison
     # budget when evaluating a quality-matched memory point. The shared hard
@@ -1316,6 +1382,307 @@ class SelectionConfig:
                 "selection.stable_head_query_coverage_initial_minimum_prompt_mass_fraction "
                 "must be in [0, 1]"
             )
+        if self.stable_head_query_coverage_initial_objective not in {
+            "max",
+            "capped_cumulative",
+        }:
+            raise ConfigurationError(
+                "selection.stable_head_query_coverage_initial_objective must be "
+                "'max' or 'capped_cumulative'"
+            )
+        if (
+            not math.isfinite(self.stable_head_query_coverage_initial_cap_fraction)
+            or not 0 < self.stable_head_query_coverage_initial_cap_fraction <= 1
+        ):
+            raise ConfigurationError(
+                "selection.stable_head_query_coverage_initial_cap_fraction "
+                "must be finite and in (0, 1]"
+            )
+        if (
+            not math.isfinite(self.stable_head_query_coverage_cross_head_minimum_normalized_gain)
+            or not 0 <= self.stable_head_query_coverage_cross_head_minimum_normalized_gain <= 1
+        ):
+            raise ConfigurationError(
+                "selection.stable_head_query_coverage_cross_head_minimum_normalized_gain "
+                "must be finite and in [0, 1]"
+            )
+        if self.stable_head_query_coverage_cross_head_stability_risk_mode not in {
+            "prompt_mass",
+            "output_impact",
+        }:
+            raise ConfigurationError(
+                "selection.stable_head_query_coverage_cross_head_stability_risk_mode "
+                "must be 'prompt_mass' or 'output_impact'"
+            )
+        if (
+            not math.isfinite(self.stable_head_query_coverage_cross_head_gain_to_prompt_loss_ratio)
+            or self.stable_head_query_coverage_cross_head_gain_to_prompt_loss_ratio <= 0
+        ):
+            raise ConfigurationError(
+                "selection.stable_head_query_coverage_cross_head_gain_to_prompt_loss_ratio "
+                "must be finite and positive"
+            )
+        if (
+            not math.isfinite(self.stable_head_query_coverage_output_impact_fraction)
+            or not 0 <= self.stable_head_query_coverage_output_impact_fraction <= 1
+        ):
+            raise ConfigurationError(
+                "selection.stable_head_query_coverage_output_impact_fraction "
+                "must be finite and in [0, 1]"
+            )
+        if (
+            not math.isfinite(self.stable_head_query_coverage_layout_group_fraction)
+            or not 0 <= self.stable_head_query_coverage_layout_group_fraction <= 1
+        ):
+            raise ConfigurationError(
+                "selection.stable_head_query_coverage_layout_group_fraction "
+                "must be finite and in [0, 1]"
+            )
+        if self.stable_head_query_coverage_layout_group_maximum_blocks < 0:
+            raise ConfigurationError(
+                "selection.stable_head_query_coverage_layout_group_maximum_blocks "
+                "must be nonnegative"
+            )
+        if not 1 <= self.stable_head_query_coverage_layout_group_row_bins <= 32:
+            raise ConfigurationError(
+                "selection.stable_head_query_coverage_layout_group_row_bins "
+                "must be between 1 and 32"
+            )
+        if (
+            not math.isfinite(
+                self.stable_head_query_coverage_layout_group_minimum_utilization_fraction
+            )
+            or not 0
+            <= self.stable_head_query_coverage_layout_group_minimum_utilization_fraction
+            <= 1
+        ):
+            raise ConfigurationError(
+                "selection.stable_head_query_coverage_layout_group_minimum_utilization_fraction "
+                "must be finite and in [0, 1]"
+            )
+        if (
+            not math.isfinite(self.stable_head_query_coverage_layout_group_minimum_normalized_gain)
+            or not 0 <= self.stable_head_query_coverage_layout_group_minimum_normalized_gain <= 1
+        ):
+            raise ConfigurationError(
+                "selection.stable_head_query_coverage_layout_group_minimum_normalized_gain "
+                "must be finite and in [0, 1]"
+            )
+        if (
+            not math.isfinite(self.stable_head_query_coverage_layout_group_gain_to_risk_ratio)
+            or self.stable_head_query_coverage_layout_group_gain_to_risk_ratio <= 0
+        ):
+            raise ConfigurationError(
+                "selection.stable_head_query_coverage_layout_group_gain_to_risk_ratio "
+                "must be finite and positive"
+            )
+        if not 0 <= self.stable_head_logit_stability_shortlist_size <= 2:
+            raise ConfigurationError(
+                "selection.stable_head_logit_stability_shortlist_size must be between 0 and 2"
+            )
+        if not 0 <= self.stable_head_logit_stability_horizon <= 4:
+            raise ConfigurationError(
+                "selection.stable_head_logit_stability_horizon must be between 0 and 4"
+            )
+        for name in (
+            "stable_head_logit_stability_maximum_kl",
+            "stable_head_logit_stability_maximum_logit_difference",
+        ):
+            value = getattr(self, name)
+            if not math.isfinite(value) or value < 0:
+                raise ConfigurationError(f"selection.{name} must be finite and nonnegative")
+        if self.stable_head_short_horizon_logit_stability:
+            if not self.stable_head_prompt_routing:
+                raise ConfigurationError(
+                    "short-horizon logit stability requires stable-head prompt routing"
+                )
+            if not self.stable_head_query_coverage_cross_head_allocation:
+                raise ConfigurationError(
+                    "short-horizon logit stability requires cross-head query allocation"
+                )
+            if not self.stable_head_query_coverage_layout_group_atomic_selection:
+                raise ConfigurationError(
+                    "short-horizon logit stability requires atomic layout-group selection"
+                )
+            if (
+                self.stable_head_query_coverage_layout_group_atomic_selection_mode
+                != "pareto_joint_donor_knapsack"
+            ):
+                raise ConfigurationError(
+                    "short-horizon logit stability requires pareto_joint_donor_knapsack"
+                )
+            if self.stable_head_logit_stability_shortlist_size != 2:
+                raise ConfigurationError(
+                    "short-horizon logit stability requires a two-point Pareto shortlist"
+                )
+            if self.stable_head_logit_stability_horizon < 1:
+                raise ConfigurationError(
+                    "short-horizon logit stability requires a positive decode horizon"
+                )
+            if self.stable_head_logit_stability_maximum_kl <= 0:
+                raise ConfigurationError(
+                    "short-horizon logit stability requires a positive KL threshold"
+                )
+            if self.stable_head_logit_stability_maximum_logit_difference <= 0:
+                raise ConfigurationError(
+                    "short-horizon logit stability requires a positive logit threshold"
+                )
+        elif (
+            self.stable_head_logit_stability_shortlist_size != 0
+            or self.stable_head_logit_stability_horizon != 0
+            or self.stable_head_logit_stability_maximum_kl != 0.0
+            or self.stable_head_logit_stability_maximum_logit_difference != 0.0
+        ):
+            raise ConfigurationError(
+                "short-horizon logit stability controls require the stability gate"
+            )
+        for name in (
+            "stable_head_progressive_eviction_maximum_kl",
+            "stable_head_progressive_eviction_maximum_logit_difference",
+        ):
+            value = getattr(self, name)
+            if not math.isfinite(value) or value < 0:
+                raise ConfigurationError(f"selection.{name} must be finite and nonnegative")
+        if self.stable_head_progressive_logit_safe_eviction:
+            if self.stable_head_short_horizon_logit_stability:
+                raise ConfigurationError(
+                    "progressive logit-safe eviction cannot use the bounded shortlist gate"
+                )
+            if not self.stable_head_prompt_routing:
+                raise ConfigurationError(
+                    "progressive logit-safe eviction requires stable-head prompt routing"
+                )
+            if not self.stable_head_query_coverage_cross_head_allocation:
+                raise ConfigurationError(
+                    "progressive logit-safe eviction requires cross-head query allocation"
+                )
+            if not self.stable_head_query_coverage_layout_group_atomic_selection:
+                raise ConfigurationError(
+                    "progressive logit-safe eviction requires atomic layout-group selection"
+                )
+            if not 1 <= self.stable_head_progressive_eviction_initial_batch_blocks <= 64:
+                raise ConfigurationError(
+                    "progressive logit-safe eviction batch size must be between 1 and 64"
+                )
+            if not 1 <= self.stable_head_progressive_eviction_maximum_probes <= 128:
+                raise ConfigurationError(
+                    "progressive logit-safe eviction probe count must be between 1 and 128"
+                )
+            if not 1 <= self.stable_head_progressive_eviction_horizon <= 4:
+                raise ConfigurationError(
+                    "progressive logit-safe eviction horizon must be between 1 and 4"
+                )
+            if self.stable_head_progressive_eviction_maximum_kl <= 0:
+                raise ConfigurationError(
+                    "progressive logit-safe eviction requires a positive KL threshold"
+                )
+            if self.stable_head_progressive_eviction_maximum_logit_difference <= 0:
+                raise ConfigurationError(
+                    "progressive logit-safe eviction requires a positive logit threshold"
+                )
+        elif (
+            self.stable_head_progressive_eviction_initial_batch_blocks != 0
+            or self.stable_head_progressive_eviction_maximum_probes != 0
+            or self.stable_head_progressive_eviction_horizon != 0
+            or self.stable_head_progressive_eviction_maximum_kl != 0.0
+            or self.stable_head_progressive_eviction_maximum_logit_difference != 0.0
+        ):
+            raise ConfigurationError(
+                "progressive logit-safe eviction controls require the progressive gate"
+            )
+        for name in (
+            "stable_head_hierarchical_maximum_kl",
+            "stable_head_hierarchical_maximum_logit_difference",
+        ):
+            value = getattr(self, name)
+            if not math.isfinite(value) or value < 0:
+                raise ConfigurationError(f"selection.{name} must be finite and nonnegative")
+        if self.stable_head_hierarchical_logit_safe_eviction:
+            if (
+                self.stable_head_short_horizon_logit_stability
+                or self.stable_head_progressive_logit_safe_eviction
+            ):
+                raise ConfigurationError(
+                    "hierarchical logit-safe eviction is mutually exclusive with V98/V99 gates"
+                )
+            if not self.stable_head_prompt_routing:
+                raise ConfigurationError(
+                    "hierarchical logit-safe eviction requires stable-head prompt routing"
+                )
+            if not self.stable_head_query_coverage_cross_head_allocation:
+                raise ConfigurationError(
+                    "hierarchical logit-safe eviction requires cross-head query allocation"
+                )
+            if not self.stable_head_query_coverage_layout_group_atomic_selection:
+                raise ConfigurationError(
+                    "hierarchical logit-safe eviction requires atomic layout-group selection"
+                )
+            if (
+                self.stable_head_query_coverage_layout_group_atomic_selection_mode
+                != "pareto_joint_donor_knapsack"
+            ):
+                raise ConfigurationError(
+                    "hierarchical logit-safe eviction requires pareto_joint_donor_knapsack"
+                )
+            if not 2 <= self.stable_head_hierarchical_partition_count <= 64:
+                raise ConfigurationError("hierarchical partition count must be between 2 and 64")
+            if not 0 <= self.stable_head_hierarchical_maximum_refinement_depth <= 6:
+                raise ConfigurationError("hierarchical refinement depth must be between 0 and 6")
+            if not (
+                self.stable_head_hierarchical_partition_count + 1
+                <= self.stable_head_hierarchical_maximum_candidate_evaluations
+                <= 64
+            ):
+                raise ConfigurationError(
+                    "hierarchical candidate evaluations must include every initial partition "
+                    "plus joint verification and cannot exceed 64"
+                )
+            if not 2 <= self.stable_head_hierarchical_maximum_sequential_rounds <= 16:
+                raise ConfigurationError("hierarchical sequential rounds must be between 2 and 16")
+            if not 0 <= self.stable_head_hierarchical_maximum_rollback_rounds <= 2:
+                raise ConfigurationError("hierarchical rollback rounds must be between 0 and 2")
+            if (
+                self.stable_head_hierarchical_maximum_rollback_rounds
+                > self.stable_head_hierarchical_maximum_sequential_rounds - 2
+            ):
+                raise ConfigurationError(
+                    "hierarchical rollback rounds must leave screening and joint-check rounds"
+                )
+            if not 1 <= self.stable_head_hierarchical_horizon <= 4:
+                raise ConfigurationError(
+                    "hierarchical logit-safe eviction horizon must be between 1 and 4"
+                )
+            if self.stable_head_hierarchical_maximum_kl <= 0:
+                raise ConfigurationError(
+                    "hierarchical logit-safe eviction requires a positive KL threshold"
+                )
+            if self.stable_head_hierarchical_maximum_logit_difference <= 0:
+                raise ConfigurationError(
+                    "hierarchical logit-safe eviction requires a positive logit threshold"
+                )
+        elif (
+            self.stable_head_hierarchical_partition_count != 0
+            or self.stable_head_hierarchical_maximum_refinement_depth != 0
+            or self.stable_head_hierarchical_maximum_candidate_evaluations != 0
+            or self.stable_head_hierarchical_maximum_sequential_rounds != 0
+            or self.stable_head_hierarchical_maximum_rollback_rounds != 0
+            or self.stable_head_hierarchical_horizon != 0
+            or self.stable_head_hierarchical_maximum_kl != 0.0
+            or self.stable_head_hierarchical_maximum_logit_difference != 0.0
+        ):
+            raise ConfigurationError(
+                "hierarchical logit-safe eviction controls require the hierarchical gate"
+            )
+        if self.stable_head_query_coverage_layout_group_atomic_selection_mode not in {
+            "topk_greedy",
+            "pareto_knapsack",
+            "pareto_joint_donor_knapsack",
+        }:
+            raise ConfigurationError(
+                "selection.stable_head_query_coverage_layout_group_atomic_selection_mode "
+                "must be 'topk_greedy', 'pareto_knapsack', or "
+                "'pareto_joint_donor_knapsack'"
+            )
         if self.stable_head_query_coverage_initial_selection:
             if not self.stable_head_prompt_routing:
                 raise ConfigurationError(
@@ -1335,10 +1702,184 @@ class SelectionConfig:
                 raise ConfigurationError(
                     "initial prompt-query coverage selection requires a positive fraction"
                 )
+            if (
+                self.stable_head_query_coverage_initial_objective == "max"
+                and self.stable_head_query_coverage_initial_cap_fraction != 1.0
+            ):
+                raise ConfigurationError("max initial query coverage requires cap_fraction=1.0")
+            if (
+                self.stable_head_query_coverage_cross_head_allocation
+                and self.stable_head_query_coverage_initial_objective != "capped_cumulative"
+            ):
+                raise ConfigurationError(
+                    "cross-head query allocation requires capped_cumulative initial coverage"
+                )
+            if self.stable_head_query_coverage_cross_head_stability_gate:
+                if not self.stable_head_query_coverage_cross_head_allocation:
+                    raise ConfigurationError(
+                        "cross-head query stability gating requires cross-head allocation"
+                    )
+                if self.stable_head_query_coverage_cross_head_minimum_normalized_gain <= 0:
+                    raise ConfigurationError(
+                        "cross-head query stability gating requires a positive minimum gain"
+                    )
+                if self.stable_head_query_coverage_cross_head_gain_to_prompt_loss_ratio <= 1:
+                    raise ConfigurationError(
+                        "cross-head query stability gating requires a gain/loss ratio above 1"
+                    )
+            elif (
+                self.stable_head_query_coverage_cross_head_stability_risk_mode != "prompt_mass"
+                or self.stable_head_query_coverage_cross_head_minimum_normalized_gain != 0.0
+                or self.stable_head_query_coverage_cross_head_gain_to_prompt_loss_ratio != 1.0
+            ):
+                raise ConfigurationError(
+                    "cross-head stability controls require the cross-head stability gate"
+                )
+            if self.stable_head_query_coverage_output_impact_reservation:
+                if not self.stable_head_query_coverage_cross_head_allocation:
+                    raise ConfigurationError(
+                        "output-impact reservation requires cross-head query allocation"
+                    )
+                if self.stable_head_query_coverage_initial_objective != "capped_cumulative":
+                    raise ConfigurationError(
+                        "output-impact reservation requires capped_cumulative coverage"
+                    )
+                if self.stable_head_query_coverage_output_impact_fraction <= 0:
+                    raise ConfigurationError(
+                        "output-impact reservation requires a positive fraction"
+                    )
+                if self.stable_head_query_coverage_cross_head_stability_gate:
+                    raise ConfigurationError(
+                        "output-impact initial reservation cannot use post-selection "
+                        "cross-head stability gating"
+                    )
+            elif self.stable_head_query_coverage_output_impact_fraction != 0.0:
+                raise ConfigurationError(
+                    "output-impact reservation fraction requires output-impact reservation"
+                )
+            if self.stable_head_query_coverage_layout_group_reservation:
+                if not self.stable_head_query_coverage_cross_head_allocation:
+                    raise ConfigurationError(
+                        "layout-group reservation requires cross-head query allocation"
+                    )
+                if self.stable_head_query_coverage_initial_objective != "capped_cumulative":
+                    raise ConfigurationError(
+                        "layout-group reservation requires capped_cumulative coverage"
+                    )
+                if self.stable_head_query_coverage_layout_group_fraction <= 0:
+                    raise ConfigurationError(
+                        "layout-group reservation requires a positive fraction"
+                    )
+                if self.stable_head_query_coverage_layout_group_maximum_blocks < 2:
+                    raise ConfigurationError(
+                        "layout-group reservation requires at least two blocks per group"
+                    )
+                if self.stable_head_query_coverage_output_impact_reservation:
+                    raise ConfigurationError(
+                        "layout-group and output-impact reservations are mutually exclusive"
+                    )
+                if self.stable_head_query_coverage_cross_head_stability_gate and not (
+                    self.stable_head_query_coverage_layout_group_atomic_selection
+                    and self.stable_head_query_coverage_layout_group_atomic_selection_mode
+                    in {"pareto_knapsack", "pareto_joint_donor_knapsack"}
+                    and self.stable_head_query_coverage_cross_head_stability_risk_mode
+                    == "output_impact"
+                ):
+                    raise ConfigurationError(
+                        "layout-group reservation permits post-selection stability gating only "
+                        "for Pareto-knapsack atomic groups with output-impact risk"
+                    )
+                if self.stable_head_query_coverage_layout_group_atomic_selection:
+                    if (
+                        self.stable_head_query_coverage_layout_group_minimum_utilization_fraction
+                        <= 0
+                    ):
+                        raise ConfigurationError(
+                            "atomic layout-group selection requires a positive minimum "
+                            "reservation utilization"
+                        )
+                    if self.stable_head_query_coverage_layout_group_minimum_normalized_gain <= 0:
+                        raise ConfigurationError(
+                            "atomic layout-group selection requires a positive minimum gain"
+                        )
+                    if self.stable_head_query_coverage_layout_group_gain_to_risk_ratio <= 1:
+                        raise ConfigurationError(
+                            "atomic layout-group selection requires a gain/risk ratio above 1"
+                        )
+                    if (
+                        self.stable_head_query_coverage_layout_group_atomic_selection_mode
+                        in {"pareto_knapsack", "pareto_joint_donor_knapsack"}
+                        and not self.stable_head_query_coverage_cross_head_stability_gate
+                        and not self.stable_head_short_horizon_logit_stability
+                        and not self.stable_head_progressive_logit_safe_eviction
+                        and not self.stable_head_hierarchical_logit_safe_eviction
+                    ):
+                        raise ConfigurationError(
+                            "Pareto-knapsack atomic groups require non-group stability gating"
+                        )
+                elif (
+                    self.stable_head_query_coverage_layout_group_atomic_selection_mode
+                    != "topk_greedy"
+                    or self.stable_head_query_coverage_layout_group_minimum_utilization_fraction
+                    != 0.0
+                    or self.stable_head_query_coverage_layout_group_minimum_normalized_gain != 0.0
+                    or self.stable_head_query_coverage_layout_group_gain_to_risk_ratio != 1.0
+                ):
+                    raise ConfigurationError(
+                        "atomic layout-group controls require atomic layout-group selection"
+                    )
+            elif (
+                self.stable_head_query_coverage_layout_group_fraction != 0.0
+                or self.stable_head_query_coverage_layout_group_maximum_blocks != 0
+                or self.stable_head_query_coverage_layout_group_atomic_selection
+                or self.stable_head_query_coverage_layout_group_atomic_selection_mode
+                != "topk_greedy"
+                or self.stable_head_query_coverage_layout_group_minimum_utilization_fraction != 0.0
+                or self.stable_head_query_coverage_layout_group_minimum_normalized_gain != 0.0
+                or self.stable_head_query_coverage_layout_group_gain_to_risk_ratio != 1.0
+            ):
+                raise ConfigurationError("layout-group controls require layout-group reservation")
         elif (
             self.stable_head_query_coverage_initial_fraction != 0.0
             or self.stable_head_query_coverage_initial_prompt_weight != 1.0
             or self.stable_head_query_coverage_initial_minimum_prompt_mass_fraction != 1.0
+            or self.stable_head_query_coverage_initial_objective != "max"
+            or self.stable_head_query_coverage_initial_cap_fraction != 1.0
+            or self.stable_head_query_coverage_cross_head_allocation
+            or self.stable_head_query_coverage_cross_head_stability_gate
+            or self.stable_head_query_coverage_cross_head_stability_risk_mode != "prompt_mass"
+            or self.stable_head_query_coverage_cross_head_minimum_normalized_gain != 0.0
+            or self.stable_head_query_coverage_cross_head_gain_to_prompt_loss_ratio != 1.0
+            or self.stable_head_query_coverage_output_impact_reservation
+            or self.stable_head_query_coverage_output_impact_fraction != 0.0
+            or self.stable_head_query_coverage_layout_group_reservation
+            or self.stable_head_query_coverage_layout_group_fraction != 0.0
+            or self.stable_head_query_coverage_layout_group_maximum_blocks != 0
+            or self.stable_head_query_coverage_layout_group_atomic_selection
+            or self.stable_head_query_coverage_layout_group_atomic_selection_mode != "topk_greedy"
+            or self.stable_head_query_coverage_layout_group_minimum_utilization_fraction != 0.0
+            or self.stable_head_query_coverage_layout_group_minimum_normalized_gain != 0.0
+            or self.stable_head_query_coverage_layout_group_gain_to_risk_ratio != 1.0
+            or self.stable_head_short_horizon_logit_stability
+            or self.stable_head_logit_stability_shortlist_size != 0
+            or self.stable_head_logit_stability_horizon != 0
+            or self.stable_head_logit_stability_maximum_kl != 0.0
+            or self.stable_head_logit_stability_maximum_logit_difference != 0.0
+            or self.stable_head_progressive_logit_safe_eviction
+            or self.stable_head_progressive_eviction_initial_batch_blocks != 0
+            or self.stable_head_progressive_eviction_maximum_probes != 0
+            or self.stable_head_progressive_eviction_horizon != 0
+            or self.stable_head_progressive_eviction_maximum_kl != 0.0
+            or self.stable_head_progressive_eviction_maximum_logit_difference != 0.0
+            or self.stable_head_hierarchical_logit_safe_eviction
+            or self.stable_head_hierarchical_partition_count != 0
+            or self.stable_head_hierarchical_maximum_refinement_depth != 0
+            or self.stable_head_hierarchical_maximum_candidate_evaluations != 0
+            or self.stable_head_hierarchical_maximum_sequential_rounds != 0
+            or self.stable_head_hierarchical_maximum_rollback_rounds != 0
+            or self.stable_head_hierarchical_horizon != 0
+            or self.stable_head_hierarchical_maximum_kl != 0.0
+            or self.stable_head_hierarchical_maximum_logit_difference != 0.0
         ):
             raise ConfigurationError(
                 "initial prompt-query coverage controls require "
@@ -1400,6 +1941,44 @@ class SelectionConfig:
             "stable_head_query_coverage_initial_fraction",
             "stable_head_query_coverage_initial_prompt_weight",
             "stable_head_query_coverage_initial_minimum_prompt_mass_fraction",
+            "stable_head_query_coverage_initial_objective",
+            "stable_head_query_coverage_initial_cap_fraction",
+            "stable_head_query_coverage_cross_head_allocation",
+            "stable_head_query_coverage_cross_head_stability_gate",
+            "stable_head_query_coverage_cross_head_stability_risk_mode",
+            "stable_head_query_coverage_cross_head_minimum_normalized_gain",
+            "stable_head_query_coverage_cross_head_gain_to_prompt_loss_ratio",
+            "stable_head_query_coverage_output_impact_reservation",
+            "stable_head_query_coverage_output_impact_fraction",
+            "stable_head_query_coverage_layout_group_reservation",
+            "stable_head_query_coverage_layout_group_fraction",
+            "stable_head_query_coverage_layout_group_maximum_blocks",
+            "stable_head_query_coverage_layout_group_row_bins",
+            "stable_head_query_coverage_layout_group_atomic_selection",
+            "stable_head_query_coverage_layout_group_atomic_selection_mode",
+            "stable_head_query_coverage_layout_group_minimum_utilization_fraction",
+            "stable_head_query_coverage_layout_group_minimum_normalized_gain",
+            "stable_head_query_coverage_layout_group_gain_to_risk_ratio",
+            "stable_head_short_horizon_logit_stability",
+            "stable_head_logit_stability_shortlist_size",
+            "stable_head_logit_stability_horizon",
+            "stable_head_logit_stability_maximum_kl",
+            "stable_head_logit_stability_maximum_logit_difference",
+            "stable_head_progressive_logit_safe_eviction",
+            "stable_head_progressive_eviction_initial_batch_blocks",
+            "stable_head_progressive_eviction_maximum_probes",
+            "stable_head_progressive_eviction_horizon",
+            "stable_head_progressive_eviction_maximum_kl",
+            "stable_head_progressive_eviction_maximum_logit_difference",
+            "stable_head_hierarchical_logit_safe_eviction",
+            "stable_head_hierarchical_partition_count",
+            "stable_head_hierarchical_maximum_refinement_depth",
+            "stable_head_hierarchical_maximum_candidate_evaluations",
+            "stable_head_hierarchical_maximum_sequential_rounds",
+            "stable_head_hierarchical_maximum_rollback_rounds",
+            "stable_head_hierarchical_horizon",
+            "stable_head_hierarchical_maximum_kl",
+            "stable_head_hierarchical_maximum_logit_difference",
             "routed_head_only_planning",
             "physical_capacity_fraction",
         }
@@ -1582,6 +2161,234 @@ class SelectionConfig:
                 data,
                 "stable_head_query_coverage_initial_minimum_prompt_mass_fraction",
                 1.0,
+                "selection",
+            ),
+            stable_head_query_coverage_initial_objective=_optional_str(
+                data,
+                "stable_head_query_coverage_initial_objective",
+                "max",
+                "selection",
+            ),
+            stable_head_query_coverage_initial_cap_fraction=_float(
+                data,
+                "stable_head_query_coverage_initial_cap_fraction",
+                1.0,
+                "selection",
+            ),
+            stable_head_query_coverage_cross_head_allocation=_bool(
+                data,
+                "stable_head_query_coverage_cross_head_allocation",
+                False,
+                "selection",
+            ),
+            stable_head_query_coverage_cross_head_stability_gate=_bool(
+                data,
+                "stable_head_query_coverage_cross_head_stability_gate",
+                False,
+                "selection",
+            ),
+            stable_head_query_coverage_cross_head_stability_risk_mode=_optional_str(
+                data,
+                "stable_head_query_coverage_cross_head_stability_risk_mode",
+                "prompt_mass",
+                "selection",
+            ),
+            stable_head_query_coverage_cross_head_minimum_normalized_gain=_float(
+                data,
+                "stable_head_query_coverage_cross_head_minimum_normalized_gain",
+                0.0,
+                "selection",
+            ),
+            stable_head_query_coverage_cross_head_gain_to_prompt_loss_ratio=_float(
+                data,
+                "stable_head_query_coverage_cross_head_gain_to_prompt_loss_ratio",
+                1.0,
+                "selection",
+            ),
+            stable_head_query_coverage_output_impact_reservation=_bool(
+                data,
+                "stable_head_query_coverage_output_impact_reservation",
+                False,
+                "selection",
+            ),
+            stable_head_query_coverage_output_impact_fraction=_float(
+                data,
+                "stable_head_query_coverage_output_impact_fraction",
+                0.0,
+                "selection",
+            ),
+            stable_head_query_coverage_layout_group_reservation=_bool(
+                data,
+                "stable_head_query_coverage_layout_group_reservation",
+                False,
+                "selection",
+            ),
+            stable_head_query_coverage_layout_group_fraction=_float(
+                data,
+                "stable_head_query_coverage_layout_group_fraction",
+                0.0,
+                "selection",
+            ),
+            stable_head_query_coverage_layout_group_maximum_blocks=_int(
+                data,
+                "stable_head_query_coverage_layout_group_maximum_blocks",
+                0,
+                "selection",
+            ),
+            stable_head_query_coverage_layout_group_row_bins=_int(
+                data,
+                "stable_head_query_coverage_layout_group_row_bins",
+                4,
+                "selection",
+            ),
+            stable_head_query_coverage_layout_group_atomic_selection=_bool(
+                data,
+                "stable_head_query_coverage_layout_group_atomic_selection",
+                False,
+                "selection",
+            ),
+            stable_head_query_coverage_layout_group_atomic_selection_mode=_optional_str(
+                data,
+                "stable_head_query_coverage_layout_group_atomic_selection_mode",
+                "topk_greedy",
+                "selection",
+            ),
+            stable_head_query_coverage_layout_group_minimum_utilization_fraction=_float(
+                data,
+                "stable_head_query_coverage_layout_group_minimum_utilization_fraction",
+                0.0,
+                "selection",
+            ),
+            stable_head_query_coverage_layout_group_minimum_normalized_gain=_float(
+                data,
+                "stable_head_query_coverage_layout_group_minimum_normalized_gain",
+                0.0,
+                "selection",
+            ),
+            stable_head_query_coverage_layout_group_gain_to_risk_ratio=_float(
+                data,
+                "stable_head_query_coverage_layout_group_gain_to_risk_ratio",
+                1.0,
+                "selection",
+            ),
+            stable_head_short_horizon_logit_stability=_bool(
+                data,
+                "stable_head_short_horizon_logit_stability",
+                False,
+                "selection",
+            ),
+            stable_head_logit_stability_shortlist_size=_int(
+                data,
+                "stable_head_logit_stability_shortlist_size",
+                0,
+                "selection",
+            ),
+            stable_head_logit_stability_horizon=_int(
+                data,
+                "stable_head_logit_stability_horizon",
+                0,
+                "selection",
+            ),
+            stable_head_logit_stability_maximum_kl=_float(
+                data,
+                "stable_head_logit_stability_maximum_kl",
+                0.0,
+                "selection",
+            ),
+            stable_head_logit_stability_maximum_logit_difference=_float(
+                data,
+                "stable_head_logit_stability_maximum_logit_difference",
+                0.0,
+                "selection",
+            ),
+            stable_head_progressive_logit_safe_eviction=_bool(
+                data,
+                "stable_head_progressive_logit_safe_eviction",
+                False,
+                "selection",
+            ),
+            stable_head_progressive_eviction_initial_batch_blocks=_int(
+                data,
+                "stable_head_progressive_eviction_initial_batch_blocks",
+                0,
+                "selection",
+            ),
+            stable_head_progressive_eviction_maximum_probes=_int(
+                data,
+                "stable_head_progressive_eviction_maximum_probes",
+                0,
+                "selection",
+            ),
+            stable_head_progressive_eviction_horizon=_int(
+                data,
+                "stable_head_progressive_eviction_horizon",
+                0,
+                "selection",
+            ),
+            stable_head_progressive_eviction_maximum_kl=_float(
+                data,
+                "stable_head_progressive_eviction_maximum_kl",
+                0.0,
+                "selection",
+            ),
+            stable_head_progressive_eviction_maximum_logit_difference=_float(
+                data,
+                "stable_head_progressive_eviction_maximum_logit_difference",
+                0.0,
+                "selection",
+            ),
+            stable_head_hierarchical_logit_safe_eviction=_bool(
+                data,
+                "stable_head_hierarchical_logit_safe_eviction",
+                False,
+                "selection",
+            ),
+            stable_head_hierarchical_partition_count=_int(
+                data,
+                "stable_head_hierarchical_partition_count",
+                0,
+                "selection",
+            ),
+            stable_head_hierarchical_maximum_refinement_depth=_int(
+                data,
+                "stable_head_hierarchical_maximum_refinement_depth",
+                0,
+                "selection",
+            ),
+            stable_head_hierarchical_maximum_candidate_evaluations=_int(
+                data,
+                "stable_head_hierarchical_maximum_candidate_evaluations",
+                0,
+                "selection",
+            ),
+            stable_head_hierarchical_maximum_sequential_rounds=_int(
+                data,
+                "stable_head_hierarchical_maximum_sequential_rounds",
+                0,
+                "selection",
+            ),
+            stable_head_hierarchical_maximum_rollback_rounds=_int(
+                data,
+                "stable_head_hierarchical_maximum_rollback_rounds",
+                0,
+                "selection",
+            ),
+            stable_head_hierarchical_horizon=_int(
+                data,
+                "stable_head_hierarchical_horizon",
+                0,
+                "selection",
+            ),
+            stable_head_hierarchical_maximum_kl=_float(
+                data,
+                "stable_head_hierarchical_maximum_kl",
+                0.0,
+                "selection",
+            ),
+            stable_head_hierarchical_maximum_logit_difference=_float(
+                data,
+                "stable_head_hierarchical_maximum_logit_difference",
+                0.0,
                 "selection",
             ),
             routed_head_only_planning=_bool(data, "routed_head_only_planning", False, "selection"),
@@ -2546,6 +3353,35 @@ class RunConfig:
                 "routed-head-only planning requires a MosaicKV method, enabled "
                 "shortlist_rerank graph with candidate descriptor pooling, and "
                 "prototypes.uncertain_head_only=true"
+            )
+        if self.selection.stable_head_short_horizon_logit_stability and (
+            self.method is not MosaicKVMethod.MOSAICKV_EXACT
+            or self.generation.max_new_tokens <= self.selection.stable_head_logit_stability_horizon
+        ):
+            raise ConfigurationError(
+                "short-horizon logit stability requires mosaickv_exact and generation length "
+                "greater than the probe horizon"
+            )
+        if self.selection.stable_head_progressive_logit_safe_eviction and (
+            self.method is not MosaicKVMethod.MOSAICKV_EXACT
+            or self.cache.budget_unit is not BudgetUnit.BYTES
+            or self.cache.retention_ratio >= 1.0
+            or self.generation.max_new_tokens
+            <= self.selection.stable_head_progressive_eviction_horizon
+        ):
+            raise ConfigurationError(
+                "progressive logit-safe eviction requires mosaickv_exact, a compressed byte "
+                "budget, and generation length greater than the probe horizon"
+            )
+        if self.selection.stable_head_hierarchical_logit_safe_eviction and (
+            self.method is not MosaicKVMethod.MOSAICKV_EXACT
+            or self.cache.budget_unit is not BudgetUnit.BYTES
+            or self.cache.retention_ratio >= 1.0
+            or self.generation.max_new_tokens <= self.selection.stable_head_hierarchical_horizon
+        ):
+            raise ConfigurationError(
+                "hierarchical logit-safe eviction requires mosaickv_exact, a compressed byte "
+                "budget, and generation length greater than the probe horizon"
             )
         if (self.residual.gpu_rescue_max_blocks or self.residual.gpu_rescue_max_bytes) and (
             self.method is not MosaicKVMethod.MOSAICKV_FULL

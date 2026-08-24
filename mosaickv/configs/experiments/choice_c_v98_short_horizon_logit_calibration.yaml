@@ -1,0 +1,280 @@
+schema_version: 1
+revision: "98.1"
+experiment_id: choice_c_v98_short_horizon_logit_calibration
+classification: preregistered_fresh_disjoint_label_blind_short_horizon_logit_calibration
+analysis_label: V98
+report_title: V98 label-blind short-horizon logit-stability calibration
+prior_result_exclusion_boundary: v97_and_all_prior_choice_c_runs
+selection_rule_frozen_before_calibration: true
+execution_status: prepared_waiting_for_clean_commit
+frozen_candidate_classification: frozen_v98_short_horizon_logit_candidate
+parent_negative_result_seal: configs/ledgers/choice_c_v97_negative_calibration_seal.yaml
+
+scientific_boundary:
+  prior_choice_c_runs_used_only_as_sample_exclusion_boundaries: true
+  aggregate_v97_mechanism_activity_used_for_design: true
+  v97_answers_used_for_design: false
+  v97_references_used_for_design: false
+  v97_task_scores_used_for_design: false
+  v97_failure_identities_used_for_design: false
+  v97_generated_token_ids_used_for_design: false
+  v97_per_sample_telemetry_used_for_design: false
+  v97_candidate_revised: false
+  calibration_labels_accessed: false
+  official_task_scores_accessed: false
+  benchmark_labels_required_online: false
+  method_is_training_free: true
+  fullkv_prefill_reused_for_probe: true
+  second_prefill_for_probe_forbidden: true
+  probe_states_discarded_before_measured_decode: true
+  future_heldout_materialization_before_freeze_forbidden: true
+
+protocol_amendment:
+  configured_active_byte_cap_frozen_bytes: 28500000
+  block_size_frozen_tokens: 4
+  exact_only_candidate_family: true
+  prototype_heavy_candidates_allowed: false
+  residual_storage_allowed: false
+  repair_allowed: false
+  bounded_pareto_shortlist_enabled: true
+  shortlist_size_frozen: 2
+  shortlist_points: [pareto_joint_group_donor, scalar_prompt_topk_anchor]
+  surrogate_output_impact_hard_admission_enabled: false
+  short_horizon_fullkv_logit_admission_enabled: true
+  fullkv_greedy_teacher_forcing_enabled: true
+  greedy_token_match_required: true
+  maximum_kl_frozen: 0.02
+  maximum_logit_difference_frozen: 1.0
+  probe_horizon_frozen_steps: 2
+  group_reservation_utilization_audited_per_sample: true
+  mandatory_blocks_never_replaced: true
+  dense_hf_physical_position_limit_unchanged: true
+  ragged_physical_head_storage_claimed: false
+  memory_gate_unchanged: true
+  fidelity_gate_unchanged: true
+  utilization_gate_unchanged: true
+  robust_fold_gates_unchanged: true
+
+design:
+  name: short_horizon_fullkv_logit_stable_joint_group_selection
+  candidate_scope: optional_visual_blocks_with_authoritative_normalized_regions
+  group_stage: complete_route_local_exact_capacity_counterfactual
+  group_identity: layer_head_modality_image_page_frame_and_coarse_row
+  maximum_blocks_per_group: 4
+  minimum_blocks_per_group: 2
+  group_and_donor_selection: joint_exact_position_dynamic_program
+  pareto_coordinates: normalized_query_gain_combined_surrogate_risk_and_group_bytes
+  shortlist_rule: >-
+    retain_the_complete_joint_group_allocation_and_its_same_byte_scalar_prompt_topk
+    anchor_as_two_nondominated_points_in_query_gain_and_perturbation_risk
+  surrogate_role: shortlist_generation_and_deterministic_tie_break_only
+  surrogate_hard_rejection: disabled
+  group_knapsack_utility_during_shortlist_construction: normalized_query_gain
+  probe_reference: original_fullkv_prefill_plus_teacher_forced_fullkv_greedy_prefix
+  probe_candidate_state: isolated_same_byte_exact_cache_clone
+  probe_steps: 2
+  probe_metrics: [maximum_forward_kl, maximum_absolute_logit_difference, greedy_token_match]
+  admission_rule: >-
+    accept_only_if_every_step_matches_the_fullkv_greedy_token_and_maximum_forward_kl
+    is_at_most_0.02_and_maximum_absolute_logit_difference_is_at_most_1.0
+  no_admissible_candidate_behavior: execute_scalar_anchor_but_mark_the_logit_gate_failed
+  candidate_order: pareto_joint_group_donor_then_scalar_prompt_topk_anchor
+  probe_overhead_accounting: separate_compression_phase
+  complete_query_reservation_fraction: 0.25
+  atomic_group_share_of_reservation: 0.5
+  minimum_per_sample_group_reservation_utilization: 0.75
+  active_byte_change_between_shortlist_points: 0
+  benchmark_labels_used: false
+  reason: >-
+    V97 produced_about_35705_joint_counterfactuals_and_about_1029_pareto_points
+    per_sample_but_its_attention_times_value_deviation_proxy_neither_filled_the
+    atomic_reservation_nor_preserved_greedy_outputs. V98 measures the model's
+    short_horizon_logit_response_directly_without_training_or_task_labels.
+
+common_cache_policy:
+  block_size: 4
+  physical_budget_block_size: 4
+  physical_budget_mandatory_policy: last_token
+
+candidate_config: configs/experiments/choice_c_v72_frozen_candidate.yaml
+model_id: llava-hf/llava-1.5-7b-hf
+model_revision: b234b804b114d9e37bb655e11cbbb5f5e971b7a9
+backend: hf_eager_prefill_sdpa_decode
+seed: 17
+output_length: 64
+warmups_per_arm: 1
+measured_repetitions_per_arm: 1
+
+tasks:
+  - task: docvqa
+    dataset_id: lmms-lab/DocVQA
+    dataset_revision: 539088ef8a8ada01ac8e2e6d4e372586748a265e
+    split: validation
+    ledger: /scratch/djy8hg/runs/mosaickv/choice-c-v98-short-horizon-logit-calibration-v1/inputs/calibration_docvqa.json
+    selection_seed: 20290228
+    sample_count: 32
+  - task: textvqa
+    dataset_id: lmms-lab/textvqa
+    dataset_revision: 9c0699cd19768ac5ab97568f6b3cbac4c0062884
+    split: validation
+    ledger: /scratch/djy8hg/runs/mosaickv/choice-c-v98-short-horizon-logit-calibration-v1/inputs/calibration_textvqa.json
+    selection_seed: 20290228
+    sample_count: 32
+
+candidates:
+  - id: short_logit_stable_joint_group_exact_b4_28_5
+    tier_policy: exact_only_replacement
+    target_active_reduction_fraction_vs_prompt_topk: 0.30
+    rationale: >-
+      Replace the V97 hard surrogate admission rule with a two-step label-blind
+      FullKV-logit gate over a bounded same-byte Pareto shortlist.
+    overrides:
+      spatial_weight: 1.0
+      spatial_max_distance: 0.125
+      candidate_nonmandatory_fraction: 0.04
+      routed_head_fraction: 0.03125
+      prompt_anchor_fraction: 0.50
+      evidence_preservation_fraction: 0.35
+      minimum_stratum_fraction: 0.25
+      physical_capacity_fraction: 1.0
+      maximum_prototypes_per_head: 0
+      prototype_budget_planning_mode: disabled_exact_only
+      active_budget_bytes: 28500000
+      evidence_reservation_mode: structural_round_robin
+      evidence_grid_rows: 4
+      evidence_grid_columns: 4
+      stable_head_visual_fraction: 0.0
+      stable_head_adaptive_visual_swaps: false
+      stable_head_minimum_text_mass_fraction: 1.0
+      stable_head_visual_gain_ratio: 1.0
+      stable_head_maximum_visual_swaps: 0
+      stable_head_swap_risk_gate: false
+      stable_head_maximum_normalized_text_loss: 1.0
+      stable_head_forecast_gain_ratio: 1.0
+      stable_head_future_query_reranking: false
+      stable_head_future_minimum_prompt_mass_fraction: 1.0
+      stable_head_future_gain_ratio: 1.0
+      stable_head_maximum_future_replacements: 0
+      stable_head_future_divergence_fail_closed: false
+      stable_head_future_minimum_prompt_forecast_tv: 0.0
+      stable_head_future_risk_gate: false
+      stable_head_future_maximum_normalized_prompt_loss: 1.0
+      stable_head_future_minimum_normalized_gain: 0.0
+      stable_head_query_coverage_reranking: false
+      stable_head_query_coverage_minimum_prompt_mass_fraction: 1.0
+      stable_head_query_coverage_maximum_replacements: 0
+      stable_head_query_coverage_minimum_normalized_gain: 0.0
+      stable_head_query_coverage_initial_selection: true
+      stable_head_query_coverage_initial_fraction: 0.25
+      stable_head_query_coverage_initial_prompt_weight: 0.5
+      stable_head_query_coverage_initial_minimum_prompt_mass_fraction: 0.95
+      stable_head_query_coverage_initial_objective: capped_cumulative
+      stable_head_query_coverage_initial_cap_fraction: 0.5
+      stable_head_query_coverage_cross_head_allocation: true
+      stable_head_query_coverage_cross_head_stability_gate: false
+      stable_head_query_coverage_cross_head_stability_risk_mode: prompt_mass
+      stable_head_query_coverage_cross_head_minimum_normalized_gain: 0.0
+      stable_head_query_coverage_cross_head_gain_to_prompt_loss_ratio: 1.0
+      stable_head_query_coverage_output_impact_reservation: false
+      stable_head_query_coverage_output_impact_fraction: 0.0
+      stable_head_query_coverage_layout_group_reservation: true
+      stable_head_query_coverage_layout_group_fraction: 0.5
+      stable_head_query_coverage_layout_group_maximum_blocks: 4
+      stable_head_query_coverage_layout_group_row_bins: 4
+      stable_head_query_coverage_layout_group_atomic_selection: true
+      stable_head_query_coverage_layout_group_atomic_selection_mode: pareto_joint_donor_knapsack
+      stable_head_query_coverage_layout_group_minimum_utilization_fraction: 0.75
+      stable_head_query_coverage_layout_group_minimum_normalized_gain: 0.000001
+      stable_head_query_coverage_layout_group_gain_to_risk_ratio: 1.01
+      stable_head_short_horizon_logit_stability: true
+      stable_head_logit_stability_shortlist_size: 2
+      stable_head_logit_stability_horizon: 2
+      stable_head_logit_stability_maximum_kl: 0.02
+      stable_head_logit_stability_maximum_logit_difference: 1.0
+      forecast_mode: prompt_window
+      forecast_prompt_window: 16
+      forecast_draft_steps: 0
+
+calibration_objective:
+  labels_accessed: false
+  official_task_scores_accessed: false
+  primary: maximize_worst_fold_exact_answer_agreement_with_fullkv
+  secondary: maximize_worst_fold_token_agreement_with_fullkv
+  tertiary: maximize_worst_task_active_plus_residual_reduction_vs_prompt_topk
+  deterministic_tie_break: lexicographically_smallest_candidate_id
+  minimum_active_reduction_fraction_vs_prompt_topk: 0.30
+  minimum_active_plus_residual_reduction_fraction_vs_prompt_topk: 0.30
+  fullkv_answer_noninferiority_margin_vs_prompt_topk: 0.05
+  maximum_prototype_logical_fraction: 0.0
+  require_zero_residual_bytes: true
+  require_all_rows_complete: true
+
+robust_fidelity_analysis:
+  labels_accessed: false
+  official_task_scores_accessed: false
+  fold_count: 4
+  fold_assignment: sha256_sorted_round_robin
+  fold_assignment_salt: choice-c-v98-short-horizon-logit-v1
+  expected_samples_per_fold: 8
+  require_every_task_and_fold: true
+  require_base_memory_and_fidelity_gates: true
+  fullkv_answer_noninferiority_margin_vs_prompt_topk: 0.05
+  fullkv_token_noninferiority_margin_vs_prompt_topk: 0.05
+
+short_horizon_logit_stability_analysis:
+  labels_accessed: false
+  official_task_scores_accessed: false
+  shortlist_size: 2
+  horizon_steps: 2
+  maximum_forward_kl: 0.02
+  maximum_absolute_logit_difference: 1.0
+  require_greedy_token_match: true
+  require_every_sample_to_pass: true
+  require_fullkv_prefill_reuse: true
+  forbid_second_prefill: true
+  require_probe_state_discard_before_measured_decode: true
+  overhead_reported_separately: true
+  activity_is_additional_freeze_gate: true
+
+layout_group_audit:
+  labels_accessed: false
+  official_task_scores_accessed: false
+  require_positive_candidates_each_task: true
+  require_positive_protected_groups_each_task: true
+  require_every_protected_group_to_contain_multiple_blocks: true
+  require_positive_protected_bytes_and_score_each_task: true
+  require_atomic_membership_through_final_selection: true
+  require_positive_accepted_candidates_each_task: true
+  minimum_per_sample_reservation_utilization: 0.75
+  require_query_gain_to_exceed_prompt_and_output_impact_risk: false
+  risk_admission_replaced_by_short_horizon_logit_gate: true
+  activity_and_utilization_are_additional_freeze_gates: true
+
+pareto_knapsack_audit:
+  labels_accessed: false
+  official_task_scores_accessed: false
+  require_positive_pareto_candidates_each_task: true
+  require_positive_knapsack_selected_groups_each_task: true
+  require_non_group_output_impact_donors_each_task: false
+  non_group_stability_replaced_by_short_horizon_logit_gate: true
+  activity_is_additional_freeze_gate: true
+
+joint_group_donor_audit:
+  labels_accessed: false
+  official_task_scores_accessed: false
+  require_positive_joint_counterfactuals_each_task: true
+  require_exact_route_capacity_after_joint_donor_removal: true
+  require_atomic_group_membership_after_joint_donor_removal: true
+  require_deterministic_joint_donor_selection: true
+  activity_is_additional_freeze_gate: true
+
+sample_policy:
+  materialize_from_clean_commit: true
+  exclude_all_repository_ledgers: true
+  exclude_every_prior_choice_c_input_ledger: true
+  exclude_prior_observed_result_rows: true
+  benchmark_labels_used_for_candidate_selection: false
+  future_heldout_must_exclude_this_calibration_ledger: true
+
+output_root: /scratch/djy8hg/runs/mosaickv/choice-c-v98-short-horizon-logit-calibration-v1
+frozen_candidate_output: /scratch/djy8hg/runs/mosaickv/choice-c-v98-short-horizon-logit-calibration-v1/analysis/frozen_candidate.yaml

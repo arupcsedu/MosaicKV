@@ -10,6 +10,14 @@ from mosaickv.baselines import (
     select_prompt_attention_topk_ids,
     select_prompt_attention_topk_ids_by_head,
 )
+from mosaickv.baselines.selectors import (
+    _atomic_group_multiple_choice_knapsack,
+    _AtomicLayoutGroupCandidate,
+    _best_prompt_subset_excluding_group,
+    _best_prompt_subset_for_exact_positions,
+    _build_prompt_subset_interval_exclusion_index,
+    _gain_risk_pareto_frontier,
+)
 from mosaickv.cache_state import FullKVState, Modality, ModalitySpan
 from mosaickv.config import ConfigurationError, GraphConfig, SelectionConfig, UtilityConfig
 from mosaickv.graph import SparseEvidenceGraph, build_evidence_graph
@@ -50,6 +58,8 @@ def _full(
     mandatory: tuple[int, ...] = (),
     block_size: int = 1,
     values: np.ndarray | None = None,
+    kv_heads: int = 1,
+    image_grid_shape: tuple[int, int] | None = None,
 ) -> FullKVState:
     sequence_length = len(modalities)
     key = np.asarray(
@@ -63,7 +73,17 @@ def _full(
         ],
         dtype=np.float32,
     ).reshape(1, 1, sequence_length, 2)
-    value = key.copy() if values is None else values.reshape(1, 1, sequence_length, -1)
+    key = np.repeat(key, kv_heads, axis=1)
+    if values is None:
+        value = key.copy()
+    elif values.ndim == 2:
+        value = np.repeat(values.reshape(1, 1, sequence_length, -1), kv_heads, axis=1)
+    elif values.ndim == 3 and values.shape[:2] == (kv_heads, sequence_length):
+        value = values.reshape(1, kv_heads, sequence_length, -1)
+    else:
+        raise ValueError(
+            "test values must have shape [sequence, feature] or [head, sequence, feature]"
+        )
     spans: list[ModalitySpan] = []
     start = 0
     for index in range(1, sequence_length + 1):
@@ -77,6 +97,7 @@ def _full(
                     image_index=0 if modality is Modality.IMAGE else None,
                     frame_index=start if modality is Modality.VIDEO else None,
                     page_index=0 if modality is Modality.IMAGE else None,
+                    grid_shape=image_grid_shape if modality is Modality.IMAGE else None,
                 )
             )
             start = index
@@ -111,6 +132,100 @@ def _utilities_and_objective(
         selection_config or SelectionConfig(lambda_g=-0.5, lambda_m=-0.25),
     )
     return graph, utilities, objective
+
+
+def _atomic_candidate(
+    identity: tuple[int, int],
+    group: tuple[int, ...],
+    *,
+    gain: float,
+    risk: float,
+    byte_size: int,
+) -> _AtomicLayoutGroupCandidate:
+    return _AtomicLayoutGroupCandidate(
+        identity=identity,
+        group=group,
+        selected_optional_node_ids=group,
+        normalized_query_gain=gain,
+        normalized_prompt_risk=risk,
+        output_impact_risk=risk,
+        group_score=gain,
+        group_bytes=byte_size,
+        baseline_coverage=0.5,
+        selected_coverage=0.5 + gain,
+        baseline_prompt_mass=1.0,
+        selected_prompt_mass=1.0 - risk,
+        donor_node_ids=(),
+        recipient_node_ids=group,
+    )
+
+
+def test_atomic_gain_risk_frontier_and_multiple_choice_knapsack_are_deterministic() -> None:
+    route_zero = (
+        _atomic_candidate((0, 0), (0, 1), gain=0.30, risk=0.05, byte_size=32),
+        _atomic_candidate((0, 0), (2, 3), gain=0.20, risk=0.10, byte_size=32),
+        _atomic_candidate((0, 0), (4, 5), gain=0.35, risk=0.20, byte_size=16),
+    )
+    route_one = (
+        _atomic_candidate((0, 1), (6, 7), gain=0.25, risk=0.02, byte_size=32),
+        _atomic_candidate((0, 1), (8, 9), gain=0.20, risk=0.03, byte_size=16),
+    )
+
+    frontier_zero = _gain_risk_pareto_frontier(route_zero)
+    frontier_one = _gain_risk_pareto_frontier(route_one)
+    assert tuple(candidate.group for candidate in frontier_zero) == ((0, 1), (4, 5))
+    assert tuple(candidate.group for candidate in frontier_one) == ((6, 7), (8, 9))
+
+    first = _atomic_group_multiple_choice_knapsack(
+        {(0, 0): frontier_zero, (0, 1): frontier_one},
+        byte_budget=48,
+        gain_to_risk_ratio=1.01,
+    )
+    second = _atomic_group_multiple_choice_knapsack(
+        {(0, 0): frontier_zero, (0, 1): frontier_one},
+        byte_budget=48,
+        gain_to_risk_ratio=1.01,
+    )
+
+    assert first == second
+    assert tuple(candidate.group for candidate in first) == ((0, 1), (8, 9))
+    assert sum(candidate.group_bytes for candidate in first) == 48
+    assert len({candidate.identity for candidate in first}) == len(first)
+
+
+def test_prompt_subset_interval_index_matches_exact_fill_with_partial_block() -> None:
+    full = _full((Modality.IMAGE,) * 10, block_size=4)
+    prompt_scores = np.asarray((0.2, 0.9, 0.8), dtype=np.float64)
+    index = _build_prompt_subset_interval_exclusion_index(
+        full,
+        (0, 1, 2),
+        maximum_positions=10,
+        prompt_score_array=prompt_scores,
+    )
+
+    indexed = _best_prompt_subset_excluding_group(
+        full,
+        index,
+        (1,),
+        target_positions=6,
+        prompt_score_array=prompt_scores,
+    )
+    reference = _best_prompt_subset_for_exact_positions(
+        full,
+        (0, 2),
+        target_positions=6,
+        prompt_score_array=prompt_scores,
+    )
+    fallback = _best_prompt_subset_excluding_group(
+        full,
+        index,
+        (0, 2),
+        target_positions=4,
+        prompt_score_array=prompt_scores,
+    )
+
+    assert indexed == reference == (0, 2)
+    assert fallback == (1,)
 
 
 def test_block_utility_records_every_requested_signal_and_exact_formula() -> None:
@@ -1000,6 +1115,854 @@ def test_prompt_query_coverage_initial_selection_falls_back_at_prompt_mass_floor
     record = result.capacity_records[0]
     assert record.query_coverage_initial_reserved_count == 0
     assert record.query_coverage_initial_changed_count == 0
+
+
+def test_capped_cumulative_query_coverage_preserves_additional_query_mass() -> None:
+    full = _full(
+        (Modality.IMAGE, Modality.IMAGE, Modality.IMAGE, Modality.IMAGE, Modality.TEXT),
+        mandatory=(4,),
+    )
+    result = select_prompt_attention_topk_ids_by_head(
+        full,
+        SelectionBudget(3, BudgetUnit.BLOCKS),
+        prompt_attention_by_node={0: 0.6, 1: 0.5, 2: 0.4, 3: 0.3, 4: 0.0},
+        prompt_query_attention_by_node={
+            0: (0.6, 0.0),
+            1: (0.4, 0.0),
+            2: (0.0, 0.6),
+            3: (0.0, 0.4),
+            4: (0.0, 0.0),
+        },
+        head_routes=((0, 0),),
+        position_limits={(0, 0): 3},
+        query_coverage_initial_selection=True,
+        query_coverage_initial_fraction=1.0,
+        query_coverage_initial_prompt_weight=0.1,
+        query_coverage_initial_minimum_prompt_mass_fraction=0.9,
+        query_coverage_initial_objective="capped_cumulative",
+        query_coverage_initial_cap_fraction=0.5,
+    )
+
+    assert result.selected_node_ids == (0, 2, 4)
+    record = result.capacity_records[0]
+    assert record.query_coverage_initial_changed_count == 1
+    assert record.query_coverage_initial_added_node_ids == (2,)
+    assert record.query_coverage_initial_selected == pytest.approx(1.0)
+    assert record.query_coverage_initial_baseline == pytest.approx(0.5)
+
+
+def test_cross_head_query_byte_allocation_prioritizes_high_risk_head() -> None:
+    full = _full(
+        (Modality.IMAGE, Modality.IMAGE, Modality.IMAGE, Modality.IMAGE, Modality.TEXT),
+        mandatory=(4,),
+        kv_heads=2,
+    )
+    prompt_scores = {
+        0: 0.6,
+        1: 0.5,
+        2: 0.4,
+        3: 0.3,
+        4: 0.0,
+        5: 0.6,
+        6: 0.5,
+        7: 0.4,
+        8: 0.3,
+        9: 0.0,
+    }
+    query_attention = {
+        0: (0.5, 0.5),
+        1: (0.5, 0.5),
+        2: (0.0, 0.0),
+        3: (0.0, 0.0),
+        4: (0.0, 0.0),
+        5: (0.6, 0.0),
+        6: (0.4, 0.0),
+        7: (0.0, 0.6),
+        8: (0.0, 0.4),
+        9: (0.0, 0.0),
+    }
+    kwargs = {
+        "prompt_attention_by_node": prompt_scores,
+        "prompt_query_attention_by_node": query_attention,
+        "head_routes": ((0, 0), (0, 1)),
+        "position_limits": {(0, 0): 3, (0, 1): 3},
+        "query_coverage_initial_selection": True,
+        "query_coverage_initial_fraction": 0.5,
+        "query_coverage_initial_prompt_weight": 0.1,
+        "query_coverage_initial_minimum_prompt_mass_fraction": 0.8,
+        "query_coverage_initial_objective": "capped_cumulative",
+        "query_coverage_initial_cap_fraction": 0.5,
+        "query_coverage_cross_head_allocation": True,
+    }
+
+    first = select_prompt_attention_topk_ids_by_head(
+        full,
+        SelectionBudget(6, BudgetUnit.BLOCKS),
+        **kwargs,
+    )
+    second = select_prompt_attention_topk_ids_by_head(
+        full,
+        SelectionBudget(6, BudgetUnit.BLOCKS),
+        **kwargs,
+    )
+
+    assert first == second
+    assert first.selected_node_ids == (0, 1, 4, 5, 7, 9)
+    by_head = {record.kv_head: record for record in first.capacity_records}
+    assert by_head[0].query_coverage_initial_global_allocation
+    assert by_head[1].query_coverage_initial_global_allocation
+    assert by_head[0].query_coverage_initial_reserved_bytes == 0
+    assert by_head[1].query_coverage_initial_reserved_bytes == 2 * full.blocks[5].byte_size
+    assert by_head[0].query_coverage_initial_allocated_bytes == 0
+    assert by_head[1].query_coverage_initial_allocated_bytes == 2 * full.blocks[5].byte_size
+    assert by_head[1].query_coverage_initial_cross_head_risk > (
+        by_head[0].query_coverage_initial_cross_head_risk
+    )
+    assert by_head[1].query_coverage_initial_selected > (by_head[1].query_coverage_initial_baseline)
+    assert sum(record.selected_bytes for record in first.capacity_records) == (
+        full.active_bytes * 3 // 5
+    )
+
+
+def test_cross_head_layout_group_reservation_protects_complete_spatial_group() -> None:
+    full = _full(
+        (
+            Modality.IMAGE,
+            Modality.IMAGE,
+            Modality.IMAGE,
+            Modality.IMAGE,
+            Modality.IMAGE,
+            Modality.IMAGE,
+            Modality.TEXT,
+        ),
+        mandatory=(6,),
+        image_grid_shape=(1, 6),
+    )
+    kwargs = {
+        "prompt_attention_by_node": {
+            0: 0.9,
+            1: 0.8,
+            2: 0.7,
+            3: 0.6,
+            4: 0.5,
+            5: 0.4,
+            6: 0.0,
+        },
+        "prompt_query_attention_by_node": {
+            0: (0.1, 0.0),
+            1: (0.1, 0.0),
+            2: (0.1, 0.0),
+            3: (0.1, 0.0),
+            4: (0.0, 1.0),
+            5: (0.0, 1.0),
+            6: (0.0, 0.0),
+        },
+        "head_routes": ((0, 0),),
+        "position_limits": {(0, 0): 5},
+        "query_coverage_initial_selection": True,
+        "query_coverage_initial_fraction": 0.5,
+        "query_coverage_initial_prompt_weight": 0.5,
+        "query_coverage_initial_minimum_prompt_mass_fraction": 0.8,
+        "query_coverage_initial_objective": "capped_cumulative",
+        "query_coverage_initial_cap_fraction": 0.5,
+        "query_coverage_cross_head_allocation": True,
+        "query_coverage_layout_group_reservation": True,
+        "query_coverage_layout_group_fraction": 1.0,
+        "query_coverage_layout_group_maximum_blocks": 2,
+        "query_coverage_layout_group_row_bins": 1,
+    }
+
+    first = select_prompt_attention_topk_ids_by_head(
+        full,
+        SelectionBudget(5, BudgetUnit.BLOCKS),
+        **kwargs,
+    )
+    second = select_prompt_attention_topk_ids_by_head(
+        full,
+        SelectionBudget(5, BudgetUnit.BLOCKS),
+        **kwargs,
+    )
+
+    assert first == second
+    assert first.selected_node_ids == (0, 1, 4, 5, 6)
+    record = first.capacity_records[0]
+    assert record.query_coverage_initial_layout_group_candidate_count == 3
+    assert record.query_coverage_initial_layout_group_protected_group_count == 1
+    assert record.query_coverage_initial_layout_group_protected_block_count == 2
+    assert record.query_coverage_initial_layout_group_node_ids == ((4, 5),)
+    assert record.query_coverage_initial_layout_group_protected_bytes == (
+        full.blocks[4].byte_size + full.blocks[5].byte_size
+    )
+    assert record.query_coverage_initial_layout_group_protected_score > 0
+    assert record.query_coverage_initial_output_impact_protected_count == 0
+    assert record.selected_positions == 5
+    assert record.shortfall_positions == 0
+
+
+def test_cross_head_layout_group_reservation_fails_closed_without_regions() -> None:
+    full = _full(
+        (Modality.IMAGE, Modality.IMAGE, Modality.IMAGE, Modality.TEXT),
+        mandatory=(3,),
+    )
+    result = select_prompt_attention_topk_ids_by_head(
+        full,
+        SelectionBudget(3, BudgetUnit.BLOCKS),
+        prompt_attention_by_node={0: 0.9, 1: 0.8, 2: 0.1, 3: 0.0},
+        prompt_query_attention_by_node={
+            0: (1.0, 0.0),
+            1: (0.8, 0.0),
+            2: (0.0, 1.0),
+            3: (0.0, 0.0),
+        },
+        head_routes=((0, 0),),
+        position_limits={(0, 0): 3},
+        query_coverage_initial_selection=True,
+        query_coverage_initial_fraction=0.5,
+        query_coverage_initial_prompt_weight=0.5,
+        query_coverage_initial_minimum_prompt_mass_fraction=0.95,
+        query_coverage_initial_objective="capped_cumulative",
+        query_coverage_initial_cap_fraction=0.5,
+        query_coverage_cross_head_allocation=True,
+        query_coverage_layout_group_reservation=True,
+        query_coverage_layout_group_fraction=1.0,
+        query_coverage_layout_group_maximum_blocks=2,
+        query_coverage_layout_group_row_bins=1,
+    )
+
+    assert result.selected_node_ids == (0, 1, 3)
+    record = result.capacity_records[0]
+    assert record.query_coverage_initial_layout_group_candidate_count == 0
+    assert record.query_coverage_initial_layout_group_protected_group_count == 0
+    assert record.query_coverage_initial_layout_group_node_ids == ()
+
+
+def test_atomic_layout_group_survives_final_capacity_selection() -> None:
+    full = _full(
+        (
+            Modality.IMAGE,
+            Modality.IMAGE,
+            Modality.IMAGE,
+            Modality.IMAGE,
+            Modality.IMAGE,
+            Modality.IMAGE,
+            Modality.TEXT,
+        ),
+        mandatory=(6,),
+        image_grid_shape=(1, 6),
+    )
+    result = select_prompt_attention_topk_ids_by_head(
+        full,
+        SelectionBudget(5, BudgetUnit.BLOCKS),
+        prompt_attention_by_node={
+            0: 0.9,
+            1: 0.8,
+            2: 0.7,
+            3: 0.6,
+            4: 0.5,
+            5: 0.4,
+            6: 0.0,
+        },
+        prompt_query_attention_by_node={
+            0: (0.1, 0.0),
+            1: (0.1, 0.0),
+            2: (0.1, 0.0),
+            3: (0.1, 0.0),
+            4: (0.0, 1.0),
+            5: (0.0, 1.0),
+            6: (0.0, 0.0),
+        },
+        head_routes=((0, 0),),
+        position_limits={(0, 0): 5},
+        query_coverage_initial_selection=True,
+        query_coverage_initial_fraction=0.5,
+        query_coverage_initial_prompt_weight=0.5,
+        query_coverage_initial_minimum_prompt_mass_fraction=0.8,
+        query_coverage_initial_objective="capped_cumulative",
+        query_coverage_initial_cap_fraction=0.5,
+        query_coverage_cross_head_allocation=True,
+        query_coverage_cross_head_stability_gate=True,
+        query_coverage_cross_head_stability_risk_mode="output_impact",
+        query_coverage_cross_head_minimum_normalized_gain=0.01,
+        query_coverage_cross_head_gain_to_prompt_loss_ratio=1.01,
+        query_coverage_layout_group_reservation=True,
+        query_coverage_layout_group_fraction=1.0,
+        query_coverage_layout_group_maximum_blocks=2,
+        query_coverage_layout_group_row_bins=1,
+        query_coverage_layout_group_atomic_selection=True,
+        query_coverage_layout_group_atomic_selection_mode="pareto_knapsack",
+        query_coverage_layout_group_minimum_utilization_fraction=1.0,
+        query_coverage_layout_group_minimum_normalized_gain=0.01,
+        query_coverage_layout_group_gain_to_risk_ratio=1.01,
+    )
+
+    assert result.selected_node_ids == (0, 1, 4, 5, 6)
+    record = result.capacity_records[0]
+    assert record.query_coverage_initial_layout_group_node_ids == ((4, 5),)
+    assert set(record.query_coverage_initial_layout_group_node_ids[0]) <= set(
+        result.selected_node_ids
+    )
+    assert record.query_coverage_initial_layout_group_accepted_candidate_count == 1
+    assert record.query_coverage_initial_layout_group_pareto_candidate_count > 0
+    assert record.query_coverage_initial_layout_group_knapsack_selected_count == 1
+    assert record.query_coverage_initial_layout_group_target_bytes == (
+        full.blocks[4].byte_size + full.blocks[5].byte_size
+    )
+    assert record.query_coverage_initial_layout_group_protected_bytes == (
+        record.query_coverage_initial_layout_group_target_bytes
+    )
+    assert record.query_coverage_initial_layout_group_normalized_query_gain > 0
+    assert record.selected_positions == 5
+    assert record.shortfall_positions == 0
+
+
+def test_joint_group_donor_selection_avoids_high_output_impact_donors() -> None:
+    values = np.asarray(
+        (
+            (1.0, 0.0),
+            (1.0, 0.0),
+            (-1.0, 0.0),
+            (-1.0, 0.0),
+            (1.0, 0.0),
+            (1.0, 0.0),
+            (0.0, 1.0),
+        ),
+        dtype=np.float32,
+    )
+    full = _full(
+        (Modality.IMAGE,) * 6 + (Modality.TEXT,),
+        mandatory=(6,),
+        image_grid_shape=(1, 6),
+        values=values,
+    )
+    result = select_prompt_attention_topk_ids_by_head(
+        full,
+        SelectionBudget(5, BudgetUnit.BLOCKS),
+        prompt_attention_by_node={
+            0: 0.90,
+            1: 0.89,
+            2: 0.88,
+            3: 0.87,
+            4: 0.86,
+            5: 0.85,
+            6: 0.0,
+        },
+        prompt_query_attention_by_node={
+            0: (0.25, 0.0),
+            1: (0.25, 0.0),
+            2: (0.25, 0.0),
+            3: (0.25, 0.0),
+            4: (0.0, 1.0),
+            5: (0.0, 1.0),
+            6: (0.0, 0.0),
+        },
+        head_routes=((0, 0),),
+        position_limits={(0, 0): 5},
+        query_coverage_initial_selection=True,
+        query_coverage_initial_fraction=0.5,
+        query_coverage_initial_prompt_weight=0.5,
+        query_coverage_initial_minimum_prompt_mass_fraction=0.95,
+        query_coverage_initial_objective="capped_cumulative",
+        query_coverage_initial_cap_fraction=0.5,
+        query_coverage_cross_head_allocation=True,
+        query_coverage_cross_head_stability_gate=True,
+        query_coverage_cross_head_stability_risk_mode="output_impact",
+        query_coverage_cross_head_minimum_normalized_gain=0.01,
+        query_coverage_cross_head_gain_to_prompt_loss_ratio=1.01,
+        query_coverage_layout_group_reservation=True,
+        query_coverage_layout_group_fraction=1.0,
+        query_coverage_layout_group_maximum_blocks=2,
+        query_coverage_layout_group_row_bins=1,
+        query_coverage_layout_group_atomic_selection=True,
+        query_coverage_layout_group_atomic_selection_mode="pareto_joint_donor_knapsack",
+        query_coverage_layout_group_minimum_utilization_fraction=1.0,
+        query_coverage_layout_group_minimum_normalized_gain=0.01,
+        query_coverage_layout_group_gain_to_risk_ratio=1.01,
+    )
+
+    assert result.selected_node_ids == (2, 3, 4, 5, 6)
+    record = result.capacity_records[0]
+    assert record.query_coverage_initial_layout_group_node_ids == ((4, 5),)
+    assert record.query_coverage_initial_layout_group_joint_donor_candidate_count == 1
+    assert record.query_coverage_initial_layout_group_pareto_candidate_count == 1
+    assert record.query_coverage_initial_layout_group_knapsack_selected_count == 1
+    assert record.query_coverage_initial_layout_group_output_impact_risk == pytest.approx(0.0)
+    assert record.query_coverage_initial_layout_group_normalized_query_gain > 0
+    assert record.selected_positions == record.position_limit == 5
+
+
+def test_short_horizon_logit_selection_emits_two_same_byte_candidates() -> None:
+    full = _full(
+        (
+            Modality.IMAGE,
+            Modality.IMAGE,
+            Modality.IMAGE,
+            Modality.IMAGE,
+            Modality.IMAGE,
+            Modality.IMAGE,
+            Modality.TEXT,
+        ),
+        mandatory=(6,),
+        image_grid_shape=(1, 6),
+    )
+    result = select_prompt_attention_topk_ids_by_head(
+        full,
+        SelectionBudget(5, BudgetUnit.BLOCKS),
+        prompt_attention_by_node={index: float(6 - index) for index in range(7)},
+        prompt_query_attention_by_node={
+            0: (0.25, 0.0),
+            1: (0.25, 0.0),
+            2: (0.25, 0.0),
+            3: (0.25, 0.0),
+            4: (0.0, 1.0),
+            5: (0.0, 1.0),
+            6: (0.0, 0.0),
+        },
+        head_routes=((0, 0),),
+        position_limits={(0, 0): 5},
+        query_coverage_initial_selection=True,
+        query_coverage_initial_fraction=0.5,
+        query_coverage_initial_prompt_weight=0.5,
+        query_coverage_initial_minimum_prompt_mass_fraction=0.8,
+        query_coverage_initial_objective="capped_cumulative",
+        query_coverage_initial_cap_fraction=0.5,
+        query_coverage_cross_head_allocation=True,
+        query_coverage_layout_group_reservation=True,
+        query_coverage_layout_group_fraction=1.0,
+        query_coverage_layout_group_maximum_blocks=2,
+        query_coverage_layout_group_row_bins=1,
+        query_coverage_layout_group_atomic_selection=True,
+        query_coverage_layout_group_atomic_selection_mode="pareto_joint_donor_knapsack",
+        query_coverage_layout_group_minimum_utilization_fraction=1.0,
+        query_coverage_layout_group_minimum_normalized_gain=0.01,
+        query_coverage_layout_group_gain_to_risk_ratio=1.01,
+        short_horizon_logit_stability=True,
+    )
+
+    assert tuple(item.candidate_id for item in result.logit_stability_shortlist) == (
+        "pareto_joint_group_donor",
+        "scalar_prompt_topk_anchor",
+    )
+    costs = [
+        sum(full.blocks[node_id].byte_size for node_id in item.selected_node_ids)
+        for item in result.logit_stability_shortlist
+    ]
+    assert costs[0] == costs[1]
+    assert result.logit_stability_shortlist[0].selected_node_ids == result.selected_node_ids
+
+
+def test_progressive_logit_safe_eviction_defers_pareto_surrogate_gate() -> None:
+    """V99 reaches runtime probing without requiring the retired surrogate gate."""
+
+    full = _full(
+        (
+            Modality.IMAGE,
+            Modality.IMAGE,
+            Modality.IMAGE,
+            Modality.IMAGE,
+            Modality.IMAGE,
+            Modality.IMAGE,
+            Modality.TEXT,
+        ),
+        mandatory=(6,),
+        image_grid_shape=(1, 6),
+    )
+    common = {
+        "prompt_attention_by_node": {index: float(6 - index) for index in range(7)},
+        "prompt_query_attention_by_node": {
+            0: (0.25, 0.0),
+            1: (0.25, 0.0),
+            2: (0.25, 0.0),
+            3: (0.25, 0.0),
+            4: (0.0, 1.0),
+            5: (0.0, 1.0),
+            6: (0.0, 0.0),
+        },
+        "head_routes": ((0, 0),),
+        "position_limits": {(0, 0): 5},
+        "query_coverage_initial_selection": True,
+        "query_coverage_initial_fraction": 0.25,
+        "query_coverage_initial_prompt_weight": 0.5,
+        "query_coverage_initial_minimum_prompt_mass_fraction": 0.95,
+        "query_coverage_initial_objective": "capped_cumulative",
+        "query_coverage_initial_cap_fraction": 0.5,
+        "query_coverage_cross_head_allocation": True,
+        "query_coverage_cross_head_stability_gate": False,
+        "query_coverage_layout_group_reservation": True,
+        "query_coverage_layout_group_fraction": 0.5,
+        "query_coverage_layout_group_maximum_blocks": 4,
+        "query_coverage_layout_group_row_bins": 4,
+        "query_coverage_layout_group_atomic_selection": True,
+        "query_coverage_layout_group_atomic_selection_mode": (
+            "pareto_joint_donor_knapsack"
+        ),
+        "query_coverage_layout_group_minimum_utilization_fraction": 0.75,
+        "query_coverage_layout_group_minimum_normalized_gain": 0.000001,
+        "query_coverage_layout_group_gain_to_risk_ratio": 1.01,
+    }
+    with pytest.raises(
+        ValueError,
+        match="Pareto-knapsack atomic groups require non-group stability gating",
+    ):
+        select_prompt_attention_topk_ids_by_head(
+            full,
+            SelectionBudget(5, BudgetUnit.BLOCKS),
+            **common,
+        )
+
+    result = select_prompt_attention_topk_ids_by_head(
+        full,
+        SelectionBudget(5, BudgetUnit.BLOCKS),
+        progressive_logit_safe_eviction=True,
+        **common,
+    )
+
+    assert result.selected_node_ids
+    assert result.logit_stability_shortlist == ()
+    assert result.capacity_records[0].position_limit == 5
+
+
+def test_hierarchical_logit_safe_eviction_defers_pareto_surrogate_gate() -> None:
+    """V100 reaches bounded runtime probes without requiring the retired surrogate gate."""
+
+    full = _full(
+        (
+            Modality.IMAGE,
+            Modality.IMAGE,
+            Modality.IMAGE,
+            Modality.IMAGE,
+            Modality.IMAGE,
+            Modality.IMAGE,
+            Modality.TEXT,
+        ),
+        mandatory=(6,),
+        image_grid_shape=(1, 6),
+    )
+    result = select_prompt_attention_topk_ids_by_head(
+        full,
+        SelectionBudget(5, BudgetUnit.BLOCKS),
+        prompt_attention_by_node={index: float(6 - index) for index in range(7)},
+        prompt_query_attention_by_node={
+            0: (0.25, 0.0),
+            1: (0.25, 0.0),
+            2: (0.25, 0.0),
+            3: (0.25, 0.0),
+            4: (0.0, 1.0),
+            5: (0.0, 1.0),
+            6: (0.0, 0.0),
+        },
+        head_routes=((0, 0),),
+        position_limits={(0, 0): 5},
+        query_coverage_initial_selection=True,
+        query_coverage_initial_fraction=0.25,
+        query_coverage_initial_prompt_weight=0.5,
+        query_coverage_initial_minimum_prompt_mass_fraction=0.95,
+        query_coverage_initial_objective="capped_cumulative",
+        query_coverage_initial_cap_fraction=0.5,
+        query_coverage_cross_head_allocation=True,
+        query_coverage_layout_group_reservation=True,
+        query_coverage_layout_group_fraction=0.5,
+        query_coverage_layout_group_maximum_blocks=4,
+        query_coverage_layout_group_row_bins=4,
+        query_coverage_layout_group_atomic_selection=True,
+        query_coverage_layout_group_atomic_selection_mode="pareto_joint_donor_knapsack",
+        query_coverage_layout_group_minimum_utilization_fraction=0.75,
+        query_coverage_layout_group_minimum_normalized_gain=0.000001,
+        query_coverage_layout_group_gain_to_risk_ratio=1.01,
+        hierarchical_logit_safe_eviction=True,
+    )
+
+    assert result.selected_node_ids
+    assert result.logit_stability_shortlist == ()
+    assert result.capacity_records[0].position_limit == 5
+
+
+def test_atomic_layout_group_rejects_insufficient_query_gain() -> None:
+    full = _full(
+        (
+            Modality.IMAGE,
+            Modality.IMAGE,
+            Modality.IMAGE,
+            Modality.IMAGE,
+            Modality.IMAGE,
+            Modality.IMAGE,
+            Modality.TEXT,
+        ),
+        mandatory=(6,),
+        image_grid_shape=(1, 6),
+    )
+    result = select_prompt_attention_topk_ids_by_head(
+        full,
+        SelectionBudget(5, BudgetUnit.BLOCKS),
+        prompt_attention_by_node={index: float(6 - index) for index in range(7)},
+        prompt_query_attention_by_node={
+            0: (0.1, 0.0),
+            1: (0.1, 0.0),
+            2: (0.1, 0.0),
+            3: (0.1, 0.0),
+            4: (0.0, 1.0),
+            5: (0.0, 1.0),
+            6: (0.0, 0.0),
+        },
+        head_routes=((0, 0),),
+        position_limits={(0, 0): 5},
+        query_coverage_initial_selection=True,
+        query_coverage_initial_fraction=0.5,
+        query_coverage_initial_prompt_weight=0.5,
+        query_coverage_initial_minimum_prompt_mass_fraction=0.8,
+        query_coverage_initial_objective="capped_cumulative",
+        query_coverage_initial_cap_fraction=0.5,
+        query_coverage_cross_head_allocation=True,
+        query_coverage_layout_group_reservation=True,
+        query_coverage_layout_group_fraction=1.0,
+        query_coverage_layout_group_maximum_blocks=2,
+        query_coverage_layout_group_row_bins=1,
+        query_coverage_layout_group_atomic_selection=True,
+        query_coverage_layout_group_minimum_utilization_fraction=1.0,
+        query_coverage_layout_group_minimum_normalized_gain=0.9,
+        query_coverage_layout_group_gain_to_risk_ratio=1.01,
+    )
+
+    assert not {4, 5} <= set(result.selected_node_ids)
+    record = result.capacity_records[0]
+    assert record.query_coverage_initial_layout_group_protected_group_count == 0
+    assert record.query_coverage_initial_layout_group_accepted_candidate_count == 0
+    assert record.query_coverage_initial_layout_group_risk_rejected_count > 0
+    assert record.query_coverage_initial_layout_group_target_bytes > 0
+
+
+def test_cross_head_stability_gate_falls_back_to_scalar_selection() -> None:
+    full = _full(
+        (Modality.IMAGE, Modality.IMAGE, Modality.IMAGE, Modality.IMAGE, Modality.TEXT),
+        mandatory=(4,),
+        kv_heads=2,
+    )
+    result = select_prompt_attention_topk_ids_by_head(
+        full,
+        SelectionBudget(6, BudgetUnit.BLOCKS),
+        prompt_attention_by_node={
+            0: 0.6,
+            1: 0.5,
+            2: 0.4,
+            3: 0.3,
+            4: 0.0,
+            5: 0.6,
+            6: 0.5,
+            7: 0.4,
+            8: 0.3,
+            9: 0.0,
+        },
+        prompt_query_attention_by_node={
+            0: (0.5, 0.5),
+            1: (0.5, 0.5),
+            2: (0.0, 0.0),
+            3: (0.0, 0.0),
+            4: (0.0, 0.0),
+            5: (0.6, 0.0),
+            6: (0.4, 0.0),
+            7: (0.0, 0.6),
+            8: (0.0, 0.4),
+            9: (0.0, 0.0),
+        },
+        head_routes=((0, 0), (0, 1)),
+        position_limits={(0, 0): 3, (0, 1): 3},
+        query_coverage_initial_selection=True,
+        query_coverage_initial_fraction=0.5,
+        query_coverage_initial_prompt_weight=0.1,
+        query_coverage_initial_minimum_prompt_mass_fraction=0.8,
+        query_coverage_initial_objective="capped_cumulative",
+        query_coverage_initial_cap_fraction=0.5,
+        query_coverage_cross_head_allocation=True,
+        query_coverage_cross_head_stability_gate=True,
+        query_coverage_cross_head_minimum_normalized_gain=0.1,
+        query_coverage_cross_head_gain_to_prompt_loss_ratio=10.0,
+    )
+
+    assert result.selected_node_ids == (0, 1, 4, 5, 6, 9)
+    by_head = {record.kv_head: record for record in result.capacity_records}
+    assert not by_head[0].query_coverage_initial_stability_rejected
+    assert by_head[1].query_coverage_initial_stability_rejected
+    assert by_head[1].query_coverage_initial_proposed_normalized_gain > 0
+    assert by_head[1].query_coverage_initial_proposed_normalized_prompt_loss > 0
+    assert by_head[1].query_coverage_initial_changed_count == 0
+    assert by_head[1].query_coverage_initial_reserved_bytes == 0
+    assert by_head[1].query_coverage_initial_allocated_bytes == 2 * full.blocks[5].byte_size
+
+
+def test_cross_head_output_impact_risk_rejects_value_deviating_donor() -> None:
+    values = np.ones((2, 5, 2), dtype=np.float32)
+    values[1, 1] = np.asarray([1.0, 0.0], dtype=np.float32)
+    values[1, 2] = np.asarray([-1.0, 0.0], dtype=np.float32)
+    full = _full(
+        (Modality.IMAGE, Modality.IMAGE, Modality.IMAGE, Modality.IMAGE, Modality.TEXT),
+        mandatory=(4,),
+        kv_heads=2,
+        values=values,
+    )
+    common = {
+        "prompt_attention_by_node": {
+            0: 0.6,
+            1: 0.5,
+            2: 0.4,
+            3: 0.3,
+            4: 0.0,
+            5: 0.6,
+            6: 0.5,
+            7: 0.4,
+            8: 0.3,
+            9: 0.0,
+        },
+        "prompt_query_attention_by_node": {
+            0: (0.5, 0.5),
+            1: (0.5, 0.5),
+            2: (0.0, 0.0),
+            3: (0.0, 0.0),
+            4: (0.0, 0.0),
+            5: (0.6, 0.0),
+            6: (0.4, 0.0),
+            7: (0.0, 0.6),
+            8: (0.0, 0.4),
+            9: (0.0, 0.0),
+        },
+        "head_routes": ((0, 0), (0, 1)),
+        "position_limits": {(0, 0): 3, (0, 1): 3},
+        "query_coverage_initial_selection": True,
+        "query_coverage_initial_fraction": 0.5,
+        "query_coverage_initial_prompt_weight": 0.1,
+        "query_coverage_initial_minimum_prompt_mass_fraction": 0.8,
+        "query_coverage_initial_objective": "capped_cumulative",
+        "query_coverage_initial_cap_fraction": 0.5,
+        "query_coverage_cross_head_allocation": True,
+        "query_coverage_cross_head_stability_gate": True,
+        "query_coverage_cross_head_minimum_normalized_gain": 0.01,
+        "query_coverage_cross_head_gain_to_prompt_loss_ratio": 2.0,
+    }
+
+    prompt_mass = select_prompt_attention_topk_ids_by_head(
+        full,
+        SelectionBudget(6, BudgetUnit.BLOCKS),
+        query_coverage_cross_head_stability_risk_mode="prompt_mass",
+        **common,  # type: ignore[arg-type]
+    )
+    output_impact = select_prompt_attention_topk_ids_by_head(
+        full,
+        SelectionBudget(6, BudgetUnit.BLOCKS),
+        query_coverage_cross_head_stability_risk_mode="output_impact",
+        **common,  # type: ignore[arg-type]
+    )
+
+    assert prompt_mass.selected_node_ids == (0, 1, 4, 5, 7, 9)
+    assert output_impact.selected_node_ids == (0, 1, 4, 5, 6, 9)
+    record = {item.kv_head: item for item in output_impact.capacity_records}[1]
+    assert record.query_coverage_initial_stability_rejected
+    assert record.query_coverage_initial_proposed_output_impact_risk == pytest.approx(5 / 18)
+    assert record.query_coverage_initial_output_impact_donor_count == 1
+    assert record.query_coverage_initial_proposed_normalized_gain == pytest.approx(0.5)
+
+
+def test_cross_head_output_impact_reservation_protects_before_query_coverage() -> None:
+    values = np.ones((2, 5, 2), dtype=np.float32)
+    values[1, 0] = np.asarray([1.0, 1.0], dtype=np.float32)
+    values[1, 1] = np.asarray([-1.0, 0.0], dtype=np.float32)
+    full = _full(
+        (Modality.IMAGE, Modality.IMAGE, Modality.IMAGE, Modality.IMAGE, Modality.TEXT),
+        mandatory=(4,),
+        kv_heads=2,
+        values=values,
+    )
+    common = {
+        "prompt_attention_by_node": {
+            0: 0.6,
+            1: 0.5,
+            2: 0.4,
+            3: 0.3,
+            4: 0.0,
+            5: 0.5,
+            6: 0.6,
+            7: 0.4,
+            8: 0.3,
+            9: 0.0,
+        },
+        "prompt_query_attention_by_node": {
+            0: (0.5, 0.5),
+            1: (0.5, 0.5),
+            2: (0.0, 0.0),
+            3: (0.0, 0.0),
+            4: (0.0, 0.0),
+            5: (0.6, 0.0),
+            6: (0.4, 0.0),
+            7: (0.0, 0.6),
+            8: (0.0, 0.4),
+            9: (0.0, 0.0),
+        },
+        "head_routes": ((0, 0), (0, 1)),
+        "position_limits": {(0, 0): 3, (0, 1): 3},
+        "query_coverage_initial_selection": True,
+        "query_coverage_initial_fraction": 0.5,
+        "query_coverage_initial_prompt_weight": 0.1,
+        "query_coverage_initial_minimum_prompt_mass_fraction": 0.8,
+        "query_coverage_initial_objective": "capped_cumulative",
+        "query_coverage_initial_cap_fraction": 0.5,
+        "query_coverage_cross_head_allocation": True,
+    }
+
+    unprotected = select_prompt_attention_topk_ids_by_head(
+        full,
+        SelectionBudget(6, BudgetUnit.BLOCKS),
+        **common,  # type: ignore[arg-type]
+    )
+    protected = select_prompt_attention_topk_ids_by_head(
+        full,
+        SelectionBudget(6, BudgetUnit.BLOCKS),
+        query_coverage_output_impact_reservation=True,
+        query_coverage_output_impact_fraction=0.5,
+        **common,  # type: ignore[arg-type]
+    )
+
+    assert unprotected.selected_node_ids == (0, 1, 4, 5, 7, 9)
+    assert protected.selected_node_ids == (0, 1, 4, 6, 7, 9)
+    record = {item.kv_head: item for item in protected.capacity_records}[1]
+    assert record.query_coverage_initial_output_impact_protected_count == 1
+    assert record.query_coverage_initial_output_impact_protected_bytes == full.blocks[6].byte_size
+    assert record.query_coverage_initial_output_impact_protected_score > 0
+    assert record.query_coverage_initial_added_node_ids == (7,)
+    assert record.selected_positions == record.position_limit
+
+
+def test_cross_head_query_allocation_requires_capped_cumulative_objective() -> None:
+    full = _full((Modality.IMAGE, Modality.IMAGE, Modality.TEXT), mandatory=(2,))
+    with pytest.raises(ValueError, match="requires capped cumulative"):
+        select_prompt_attention_topk_ids_by_head(
+            full,
+            SelectionBudget(2, BudgetUnit.BLOCKS),
+            prompt_attention_by_node={0: 0.6, 1: 0.4, 2: 0.0},
+            prompt_query_attention_by_node={0: (0.6,), 1: (0.4,), 2: (0.0,)},
+            head_routes=((0, 0),),
+            position_limits={(0, 0): 2},
+            query_coverage_initial_selection=True,
+            query_coverage_initial_fraction=0.5,
+            query_coverage_cross_head_allocation=True,
+        )
+
+
+def test_max_query_coverage_rejects_nonidentity_cap() -> None:
+    full = _full((Modality.IMAGE, Modality.IMAGE, Modality.TEXT), mandatory=(2,))
+    with pytest.raises(ValueError, match=r"cap fraction 1\.0"):
+        select_prompt_attention_topk_ids_by_head(
+            full,
+            SelectionBudget(2, BudgetUnit.BLOCKS),
+            prompt_attention_by_node={0: 0.6, 1: 0.4, 2: 0.0},
+            prompt_query_attention_by_node={
+                0: (0.6,),
+                1: (0.4,),
+                2: (0.0,),
+            },
+            head_routes=((0, 0),),
+            position_limits={(0, 0): 2},
+            query_coverage_initial_selection=True,
+            query_coverage_initial_fraction=1.0,
+            query_coverage_initial_objective="max",
+            query_coverage_initial_cap_fraction=0.5,
+        )
 
 
 def test_required_prototype_anchor_budget_fails_closed() -> None:

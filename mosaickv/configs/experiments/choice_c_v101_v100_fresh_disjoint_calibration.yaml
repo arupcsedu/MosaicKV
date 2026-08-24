@@ -1,0 +1,267 @@
+schema_version: 1
+revision: "101.4-feasibility-negative-sealed"
+experiment_id: choice_c_v101_v100_fresh_disjoint_calibration
+classification: sealed_feasibility_negative_unmaterialized_unsubmitted_label_blind_calibration
+protocol_status: sealed_feasibility_negative_full_validation_splits_exhausted
+selection_rule_frozen_before_materialization: true
+exclusion_scan_authorized: false
+materialization_authorized: false
+disjointness_check_authorized: false
+calibration_execution_authorized: false
+candidate_freeze_authorized: false
+heldout_evaluation_authorized: false
+
+candidate_source:
+  candidate_name: v100_hierarchical_head_local_logit_safe_exact
+  candidate_effective_method: mosaickv_exact
+  candidate_implementation_git_sha: 820037afb3cc74a9f949df1555a2441680f9660e
+  protocol_base_git_sha: 820037afb3cc74a9f949df1555a2441680f9660e
+  preregistration_git_sha: c110d1ddbe141f78d18412d2e230502f788c2fff
+  v100_protocol_path: configs/experiments/choice_c_v100_hierarchical_head_local_logit_safe_design.yaml
+  v100_protocol_sha256: 69aed21ee82c5cf338eeb4ecff2a8dd0481d4d04fb378831339da0cfa9effac4
+  tooling_implementation_git_sha: 25e173af78fb2e748794755575a8c34f98d1dde8
+  execution_git_sha_policy: clean_descendant_of_tooling_commit_with_allowlisted_diff_from_candidate
+  execution_diff_allowlist:
+    - mosaickv/configs/experiments/choice_c_v101_v100_fresh_disjoint_calibration.yaml
+    - mosaickv/scripts/choice_c_v101_sample_tooling.py
+    - mosaickv/scripts/validate_choice_c_v101_preregistration.py
+    - mosaickv/src/mosaickv/evaluation/disjoint_samples.py
+    - mosaickv/tests/unit/test_choice_c_v101_protocol.py
+    - mosaickv/tests/unit/test_disjoint_samples.py
+  runtime_behavior_changes_after_candidate_commit_allowed: false
+  protocol_document_may_be_added_by_review_commit: true
+  execution_manifest_must_record_candidate_tooling_and_execution_git_shas: true
+
+sample_tooling_implementation:
+  implementation_status: committed_sealed_synthetic_tested_exclusion_scan_completed
+  tooling_commit_created: true
+  tooling_commit_sha: 25e173af78fb2e748794755575a8c34f98d1dde8
+  core_module: src/mosaickv/evaluation/disjoint_samples.py
+  core_module_sha256: a16507c2cc1e199cd2fb5d6b4d4a9a9389d43f7ffcb78d5a840aa0d788127a8e
+  command_wrapper: scripts/choice_c_v101_sample_tooling.py
+  command_wrapper_sha256: 371212d43c09c0065937a5ea5c4c91f6927e0ddc5906cda3bfaa06decd2753d9
+  synthetic_regression: tests/unit/test_disjoint_samples.py
+  synthetic_regression_sha256: f4f850bf74f5fa0f988a94597a4180adaaaaf97fb81821870af86757878d55c5
+  exclusion_scanner_implemented: true
+  deterministic_materializer_implemented: true
+  disjointness_checker_implemented: true
+  candidate_catalog_restricted_to_ids_only: true
+  overlap_failures_recorded: true
+  immutable_write_once_artifacts: true
+  source_hashes_and_clean_git_provenance_required: true
+  synthetic_cpu_tests_passed: true
+  real_dataset_access_performed: false
+  real_dataset_samples_or_labels_accessed: false
+  dataset_metadata_only_review_performed: true
+  real_exclusion_scan_performed: true
+  real_ledger_materialized: false
+  real_output_directory_created: true
+  slurm_job_submitted: false
+  real_cli_actions_fail_closed_while_unauthorized: true
+
+scientific_boundary:
+  all_prior_choice_c_runs_used_only_as_sample_exclusion_boundaries: true
+  prior_answers_used_for_candidate_or_sample_selection: false
+  prior_references_used_for_candidate_or_sample_selection: false
+  prior_task_scores_used_for_candidate_or_sample_selection: false
+  prior_failure_identities_used_for_candidate_or_sample_selection: false
+  prior_generated_tokens_used_for_candidate_or_sample_selection: false
+  v100_synthetic_debug_used_only_for_implementation_validation: true
+  calibration_answers_accessed_before_execution: false
+  calibration_references_accessed: false
+  calibration_official_task_scores_accessed: false
+  benchmark_labels_required_online: false
+  method_is_training_free: true
+  future_heldout_materialization_before_candidate_freeze_forbidden: true
+
+fixed_runtime:
+  model_id: llava-hf/llava-1.5-7b-hf
+  model_revision: b234b804b114d9e37bb655e11cbbb5f5e971b7a9
+  precision: fp16
+  backend: huggingface
+  prefill_attention_implementation: eager
+  decode_attention_implementation: sdpa
+  processor_and_chat_template_identical_across_arms: true
+  media_preprocessing_identical_across_arms: true
+  prompt_text_and_tokenization_identical_across_arms: true
+  generation_seed: 17
+  deterministic_generation: true
+  do_sample: false
+  temperature: 0.0
+  top_p: 1.0
+  output_length: 64
+  warmups_per_arm: 1
+  measured_repetitions_per_arm: 1
+
+cache_contract:
+  common_block_size_tokens: 4
+  physical_budget_block_size_tokens: 4
+  mandatory_policy: last_token
+  candidate_active_byte_cap: 28500000
+  candidate_tier_policy: exact_only
+  prototype_merging_enabled: false
+  residual_storage_enabled: false
+  repair_enabled: false
+  primary_memory_axis: measured_active_kv_bytes
+  secondary_memory_axis: measured_active_plus_residual_kv_bytes
+  nominal_retention_comparisons_forbidden: true
+  exact_byte_accounting_required_per_sample: true
+  fullkv_transformation_free: true
+  retention_one_parity_precondition_passed: true
+
+arms:
+  - full_kv
+  - prompt_attention_topk
+  - v100_hierarchical_head_local_logit_safe_exact
+
+tasks:
+  - task: docvqa
+    dataset_id: lmms-lab/DocVQA
+    dataset_revision: 539088ef8a8ada01ac8e2e6d4e372586748a265e
+    split: validation
+    selection_seed: 20310821
+    sample_count: 32
+    ledger_path: /scratch/djy8hg/runs/mosaickv/choice-c-v101-v100-fresh-disjoint-calibration-v1/inputs/calibration_docvqa.json
+    ledger_status: blocked_zero_eligible_validation_ids
+  - task: textvqa
+    dataset_id: lmms-lab/textvqa
+    dataset_revision: 9c0699cd19768ac5ab97568f6b3cbac4c0062884
+    split: validation
+    selection_seed: 20310821
+    sample_count: 32
+    ledger_path: /scratch/djy8hg/runs/mosaickv/choice-c-v101-v100-fresh-disjoint-calibration-v1/inputs/calibration_textvqa.json
+    ledger_status: blocked_zero_eligible_validation_ids
+
+future_materialization_rule:
+  authorized: false
+  blocked_reason: exclusion_manifest_covers_every_pinned_validation_example
+  canonical_identity: dataset_id_dataset_revision_split_sample_id
+  ordering: sha256_digest_ascending_then_canonical_sample_id
+  hash_preimage: choice-c-v101-v100-fresh-disjoint-calibration-v1_null_dataset_id_null_dataset_revision_null_split_null_selection_seed_null_canonical_sample_id
+  inspect_media_or_prompt_content_for_selection: false
+  inspect_answers_references_scores_or_failure_identity_for_selection: false
+  choose_first_n_eligible_after_exclusion: true
+  fail_if_fewer_than_requested_eligible_samples: true
+  materialize_from_clean_committed_worktree_only: true
+  immutable_ledger_required: true
+  ledger_sha256_required_before_gpu_execution: true
+
+required_exclusion_snapshot:
+  status: materialized_reviewed_read_only_feasibility_negative
+  exclude_all_repository_ledgers: true
+  exclude_every_prior_choice_c_input_ledger: true
+  exclude_every_prior_choice_c_observed_result_row: true
+  exclude_prior_calibration_development_debug_and_heldout_samples: true
+  recursively_scan_roots:
+    - configs/ledgers
+    - /scratch/djy8hg/runs/mosaickv
+  require_source_path_sha256_and_sample_count_per_exclusion_source: true
+  require_canonical_identity_deduplication: true
+  require_zero_overlap_for_each_task: true
+  exclusion_manifest_path: /scratch/djy8hg/runs/mosaickv/choice-c-v101-v100-fresh-disjoint-calibration-v1/inputs/exclusion_manifest.json
+  disjointness_report_path: /scratch/djy8hg/runs/mosaickv/choice-c-v101-v100-fresh-disjoint-calibration-v1/inputs/disjointness_report.json
+  exclusion_manifest_status: reviewed_sealed_read_only
+  exclusion_manifest_file_sha256: 39a068c8863ea4afd936ce698d933fff5abed31e6f43d1874f778039ef139ca2
+  exclusion_manifest_content_sha256: ea217365356ea199de1080245618c12502857be4071f001e0fbbd3ce0a06a91b
+  exclusion_manifest_source_git_sha: 36659a51354e48c3ad8bdaa983ef530ba15fe842
+  exclusion_manifest_source_git_dirty: false
+  exclusion_manifest_mode: "0444"
+  exclusion_manifest_bytes: 3082881
+  exclusion_source_count: 2410
+  excluded_unique_sample_count: 10349
+  all_bound_source_hashes_verified: true
+  disjointness_report_status: not_materialized_not_applicable_zero_eligible_ids
+
+feasibility_negative_seal:
+  review_date: "2026-08-21"
+  outcome: infeasible_no_untouched_ids_in_either_pinned_validation_split
+  materialization_must_remain_disabled: true
+  calibration_or_submission_performed: false
+  labels_references_scores_media_or_failure_identities_accessed_for_review: false
+  review_used_only_ids_provenance_hashes_and_cached_dataset_cardinalities: true
+  split_coverage:
+    - task: docvqa
+      dataset_id: lmms-lab/DocVQA
+      dataset_revision: 539088ef8a8ada01ac8e2e6d4e372586748a265e
+      split: validation
+      pinned_split_cardinality: 5349
+      excluded_unique_ids: 5349
+      eligible_unique_ids: 0
+      coverage_fraction: 1.0
+      cardinality_evidence_path: /scratch/djy8hg/cache/mosaickv/datasets/lmms-lab___doc_vqa/DocVQA/0.0.0/539088ef8a8ada01ac8e2e6d4e372586748a265e/dataset_info.json
+      cardinality_evidence_sha256: 05fe715511d02decdb9fc6a90ecb135e3ec057914b8124c785c4d92891f0a282
+    - task: textvqa
+      dataset_id: lmms-lab/textvqa
+      dataset_revision: 9c0699cd19768ac5ab97568f6b3cbac4c0062884
+      split: validation
+      pinned_split_cardinality: 5000
+      excluded_unique_ids: 5000
+      eligible_unique_ids: 0
+      coverage_fraction: 1.0
+      cardinality_evidence_path: /scratch/djy8hg/cache/mosaickv/datasets/lmms-lab___textvqa/default/0.0.0/9c0699cd19768ac5ab97568f6b3cbac4c0062884/dataset_info.json
+      cardinality_evidence_sha256: e74048a03f463d5626a46d3a434c47e383d440c6f803c2c94b6e805d03ba5e44
+  conclusion: terminate_v101_and_preregister_new_untouched_dataset_split_contracts
+
+unchanged_memory_and_fidelity_gates:
+  memory_comparator: prompt_attention_topk
+  minimum_active_reduction_fraction_vs_prompt_topk: 0.30
+  minimum_active_plus_residual_reduction_fraction_vs_prompt_topk: 0.30
+  fullkv_answer_noninferiority_margin_vs_prompt_topk: 0.05
+  fullkv_token_noninferiority_margin_vs_prompt_topk: 0.05
+  require_every_task: true
+  robust_fold_count: 4
+  expected_samples_per_fold: 8
+  fold_assignment: sha256_sorted_round_robin
+  fold_assignment_salt: choice-c-v101-v100-fresh-disjoint-calibration-v1
+  require_every_fold: true
+  maximum_prototype_logical_fraction: 0.0
+  require_zero_residual_bytes: true
+  minimum_per_sample_group_reservation_utilization: 0.75
+  require_every_sample_to_reach_target: true
+  require_every_final_joint_logit_gate: true
+  maximum_forward_kl: 0.02
+  maximum_absolute_logit_difference: 1.0
+  require_greedy_token_match: true
+  require_all_rows_complete: true
+  forbid_nan_or_missing_measurements: true
+
+analysis_policy:
+  calibration_labels_accessed: false
+  official_task_scores_accessed: false
+  primary: maximize_worst_fold_exact_answer_agreement_with_fullkv
+  secondary: maximize_worst_fold_token_agreement_with_fullkv
+  tertiary: maximize_worst_task_active_plus_residual_reduction_vs_prompt_topk
+  single_fixed_candidate_no_hyperparameter_search: true
+  paired_examples_required: true
+  task_results_reported_separately: true
+  incompatible_task_metrics_must_not_be_averaged: true
+  latency_is_informational_not_a_rejection_gate: true
+  calibration_result_is_not_a_paper_level_or_heldout_claim: true
+
+review_gate_before_materialization:
+  protocol_reviewed: true
+  protocol_commit_created: true
+  candidate_source_commit_verified: true
+  v100_gpu_debug_gates_verified: true
+  materializer_implemented_and_tested: true
+  exclusion_scanner_implemented_and_tested: true
+  disjointness_checker_implemented_and_tested: true
+  tooling_commit_sealed: true
+  exclusion_scan_scope_reviewed: true
+  exclusion_manifest_reviewed: true
+  exclusion_manifest_hashes_verified: true
+  split_cardinalities_verified: true
+  materialization_feasible: false
+  protocol_terminated_as_feasibility_negative: true
+  clean_worktree_required: true
+  all_conditions_required: true
+
+output_root: /scratch/djy8hg/runs/mosaickv/choice-c-v101-v100-fresh-disjoint-calibration-v1
+frozen_candidate_output: /scratch/djy8hg/runs/mosaickv/choice-c-v101-v100-fresh-disjoint-calibration-v1/analysis/frozen_candidate.yaml
+
+submission_policy:
+  materialization_job_allowed: false
+  calibration_job_allowed: false
+  freeze_job_allowed: false
+  heldout_job_allowed: false
+  reason: v101_terminated_all_pinned_validation_ids_were_previously_observed

@@ -7,7 +7,7 @@ import random
 import time
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from fractions import Fraction
 from typing import Any, cast
 
@@ -83,6 +83,33 @@ class HeadLocalCapacityRecord:
     query_coverage_initial_selected_prompt_mass: float = 0.0
     query_coverage_initial_normalized_prompt_loss: float = 0.0
     query_coverage_initial_candidate_count: int = 0
+    query_coverage_initial_reserved_bytes: int = 0
+    query_coverage_initial_allocated_bytes: int = 0
+    query_coverage_initial_cross_head_risk: float = 0.0
+    query_coverage_initial_proposed_normalized_gain: float = 0.0
+    query_coverage_initial_proposed_normalized_prompt_loss: float = 0.0
+    query_coverage_initial_proposed_output_impact_risk: float = 0.0
+    query_coverage_initial_output_impact_donor_count: int = 0
+    query_coverage_initial_output_impact_protected_count: int = 0
+    query_coverage_initial_output_impact_protected_bytes: int = 0
+    query_coverage_initial_output_impact_protected_score: float = 0.0
+    query_coverage_initial_layout_group_candidate_count: int = 0
+    query_coverage_initial_layout_group_protected_group_count: int = 0
+    query_coverage_initial_layout_group_protected_block_count: int = 0
+    query_coverage_initial_layout_group_protected_bytes: int = 0
+    query_coverage_initial_layout_group_protected_score: float = 0.0
+    query_coverage_initial_layout_group_target_bytes: int = 0
+    query_coverage_initial_layout_group_accepted_candidate_count: int = 0
+    query_coverage_initial_layout_group_risk_rejected_count: int = 0
+    query_coverage_initial_layout_group_pareto_candidate_count: int = 0
+    query_coverage_initial_layout_group_knapsack_selected_count: int = 0
+    query_coverage_initial_layout_group_joint_donor_candidate_count: int = 0
+    query_coverage_initial_layout_group_normalized_query_gain: float = 0.0
+    query_coverage_initial_layout_group_normalized_prompt_risk: float = 0.0
+    query_coverage_initial_layout_group_output_impact_risk: float = 0.0
+    query_coverage_initial_layout_group_node_ids: tuple[tuple[int, ...], ...] = ()
+    query_coverage_initial_stability_rejected: bool = False
+    query_coverage_initial_global_allocation: bool = False
     query_coverage_initial_added_node_ids: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
@@ -138,6 +165,49 @@ class HeadLocalCapacityRecord:
             raise ValueError("initial query coverage changed count must be nonnegative")
         if self.query_coverage_initial_candidate_count < 0:
             raise ValueError("initial query coverage candidate count must be nonnegative")
+        if self.query_coverage_initial_reserved_bytes < 0:
+            raise ValueError("initial query coverage reserved bytes must be nonnegative")
+        if self.query_coverage_initial_allocated_bytes < 0:
+            raise ValueError("initial query coverage allocated bytes must be nonnegative")
+        if self.query_coverage_initial_output_impact_donor_count < 0:
+            raise ValueError("initial query coverage output-impact donors must be nonnegative")
+        if self.query_coverage_initial_output_impact_protected_count < 0:
+            raise ValueError("initial query coverage protected count must be nonnegative")
+        if self.query_coverage_initial_output_impact_protected_bytes < 0:
+            raise ValueError("initial query coverage protected bytes must be nonnegative")
+        for name in (
+            "query_coverage_initial_layout_group_candidate_count",
+            "query_coverage_initial_layout_group_protected_group_count",
+            "query_coverage_initial_layout_group_protected_block_count",
+            "query_coverage_initial_layout_group_protected_bytes",
+            "query_coverage_initial_layout_group_target_bytes",
+            "query_coverage_initial_layout_group_accepted_candidate_count",
+            "query_coverage_initial_layout_group_risk_rejected_count",
+            "query_coverage_initial_layout_group_pareto_candidate_count",
+            "query_coverage_initial_layout_group_knapsack_selected_count",
+            "query_coverage_initial_layout_group_joint_donor_candidate_count",
+        ):
+            if getattr(self, name) < 0:
+                raise ValueError(f"{name} must be nonnegative")
+        if (
+            len(self.query_coverage_initial_layout_group_node_ids)
+            != self.query_coverage_initial_layout_group_protected_group_count
+        ):
+            raise ValueError("layout-group memberships must align with protected group count")
+        flattened_layout_nodes = tuple(
+            node_id
+            for group in self.query_coverage_initial_layout_group_node_ids
+            for node_id in group
+        )
+        if (
+            len(flattened_layout_nodes)
+            != self.query_coverage_initial_layout_group_protected_block_count
+        ):
+            raise ValueError("layout-group memberships must align with protected block count")
+        if len(flattened_layout_nodes) != len(set(flattened_layout_nodes)):
+            raise ValueError("protected layout groups cannot overlap")
+        if any(node_id < 0 for node_id in flattened_layout_nodes):
+            raise ValueError("protected layout-group node IDs must be nonnegative")
         if (
             len(self.query_coverage_initial_added_node_ids)
             != self.query_coverage_initial_changed_count
@@ -169,6 +239,15 @@ class HeadLocalCapacityRecord:
             "query_coverage_initial_baseline_prompt_mass",
             "query_coverage_initial_selected_prompt_mass",
             "query_coverage_initial_normalized_prompt_loss",
+            "query_coverage_initial_cross_head_risk",
+            "query_coverage_initial_proposed_normalized_gain",
+            "query_coverage_initial_proposed_normalized_prompt_loss",
+            "query_coverage_initial_proposed_output_impact_risk",
+            "query_coverage_initial_output_impact_protected_score",
+            "query_coverage_initial_layout_group_protected_score",
+            "query_coverage_initial_layout_group_normalized_query_gain",
+            "query_coverage_initial_layout_group_normalized_prompt_risk",
+            "query_coverage_initial_layout_group_output_impact_risk",
         ):
             value = getattr(self, name)
             if not math.isfinite(value) or value < 0:
@@ -178,11 +257,21 @@ class HeadLocalCapacityRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class HeadLocalPromptSelectionAlternative:
+    """One same-byte external exact-cache point in a bounded Pareto shortlist."""
+
+    candidate_id: str
+    selected_node_ids: tuple[int, ...]
+    capacity_records: tuple[HeadLocalCapacityRecord, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class HeadLocalPromptSelection:
     """Selected source blocks plus exact per-route capacity accounting."""
 
     selected_node_ids: tuple[int, ...]
     capacity_records: tuple[HeadLocalCapacityRecord, ...]
+    logit_stability_shortlist: tuple[HeadLocalPromptSelectionAlternative, ...] = ()
 
     @property
     def total_shortfall_positions(self) -> int:
@@ -251,7 +340,51 @@ class _QueryCoverageInitialSelectionResult:
     selected_prompt_mass: float
     normalized_prompt_mass_loss: float
     candidate_count: int
+    reserved_node_ids: tuple[int, ...]
     added_node_ids: tuple[int, ...]
+    cross_head_risk: float = 0.0
+    allocated_bytes: int = 0
+    proposed_normalized_gain: float = 0.0
+    proposed_normalized_prompt_loss: float = 0.0
+    proposed_output_impact_risk: float = 0.0
+    output_impact_donor_count: int = 0
+    output_impact_protected_count: int = 0
+    output_impact_protected_bytes: int = 0
+    output_impact_protected_score: float = 0.0
+    layout_group_candidate_count: int = 0
+    layout_group_protected_groups: tuple[tuple[int, ...], ...] = ()
+    layout_group_protected_bytes: int = 0
+    layout_group_protected_score: float = 0.0
+    layout_group_target_bytes: int = 0
+    layout_group_accepted_candidate_count: int = 0
+    layout_group_risk_rejected_count: int = 0
+    layout_group_pareto_candidate_count: int = 0
+    layout_group_knapsack_selected_count: int = 0
+    layout_group_joint_donor_candidate_count: int = 0
+    layout_group_normalized_query_gain: float = 0.0
+    layout_group_normalized_prompt_risk: float = 0.0
+    layout_group_output_impact_risk: float = 0.0
+    stability_rejected: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class _AtomicLayoutGroupCandidate:
+    """One route-local atomic group and its exact-capacity counterfactual."""
+
+    identity: tuple[int, int]
+    group: tuple[int, ...]
+    selected_optional_node_ids: tuple[int, ...]
+    normalized_query_gain: float
+    normalized_prompt_risk: float
+    output_impact_risk: float
+    group_score: float
+    group_bytes: int
+    baseline_coverage: float
+    selected_coverage: float
+    baseline_prompt_mass: float
+    selected_prompt_mass: float
+    donor_node_ids: tuple[int, ...]
+    recipient_node_ids: tuple[int, ...]
 
 
 def _stratum(block: KVBlockDescriptor) -> BaselineStratum:
@@ -1297,6 +1430,239 @@ def _best_prompt_subset_for_exact_positions(
     return states[target_positions][1]
 
 
+@dataclass(frozen=True, slots=True)
+class _PromptSubsetIntervalExclusionIndex:
+    """Exact prompt-mass fill tables for excluding one contiguous node interval."""
+
+    ordered_node_ids: tuple[int, ...]
+    node_index: Mapping[int, int]
+    prefix: tuple[Mapping[int, tuple[float, tuple[int, ...]]], ...]
+    suffix: tuple[Mapping[int, tuple[float, tuple[int, ...]]], ...]
+    maximum_positions: int
+
+
+def _extend_prompt_subset_states(
+    states: Mapping[int, tuple[float, tuple[int, ...]]],
+    *,
+    node_id: int,
+    node_size: int,
+    node_score: float,
+    maximum_positions: int,
+    prepend: bool,
+) -> dict[int, tuple[float, tuple[int, ...]]]:
+    updated = dict(states)
+    for occupied, (prior_score, prior_nodes) in states.items():
+        next_occupied = occupied + node_size
+        if next_occupied > maximum_positions:
+            continue
+        next_score = prior_score + node_score
+        next_nodes = (node_id, *prior_nodes) if prepend else (*prior_nodes, node_id)
+        incumbent = updated.get(next_occupied)
+        if (
+            incumbent is None
+            or next_score > incumbent[0]
+            or (next_score == incumbent[0] and next_nodes < incumbent[1])
+        ):
+            updated[next_occupied] = (next_score, next_nodes)
+    return updated
+
+
+def _build_prompt_subset_interval_exclusion_index(
+    full_state: FullKVState,
+    node_ids: Sequence[int],
+    *,
+    maximum_positions: int,
+    prompt_score_array: np.ndarray[Any, np.dtype[np.float64]],
+) -> _PromptSubsetIntervalExclusionIndex:
+    ordered = tuple(sorted(int(node_id) for node_id in node_ids))
+    prefix: list[Mapping[int, tuple[float, tuple[int, ...]]]] = [{0: (0.0, ())}]
+    for node_id in ordered:
+        prefix.append(
+            _extend_prompt_subset_states(
+                prefix[-1],
+                node_id=node_id,
+                node_size=full_state.blocks[node_id].position_count,
+                node_score=float(prompt_score_array[node_id]),
+                maximum_positions=maximum_positions,
+                prepend=False,
+            )
+        )
+    suffix: list[Mapping[int, tuple[float, tuple[int, ...]]]] = [
+        {0: (0.0, ())} for _ in range(len(ordered) + 1)
+    ]
+    for index in range(len(ordered) - 1, -1, -1):
+        node_id = ordered[index]
+        suffix[index] = _extend_prompt_subset_states(
+            suffix[index + 1],
+            node_id=node_id,
+            node_size=full_state.blocks[node_id].position_count,
+            node_score=float(prompt_score_array[node_id]),
+            maximum_positions=maximum_positions,
+            prepend=True,
+        )
+    return _PromptSubsetIntervalExclusionIndex(
+        ordered,
+        {node_id: index for index, node_id in enumerate(ordered)},
+        tuple(prefix),
+        tuple(suffix),
+        maximum_positions,
+    )
+
+
+def _best_prompt_subset_excluding_group(
+    full_state: FullKVState,
+    index: _PromptSubsetIntervalExclusionIndex,
+    group: Sequence[int],
+    *,
+    target_positions: int,
+    prompt_score_array: np.ndarray[Any, np.dtype[np.float64]],
+) -> tuple[int, ...] | None:
+    """Return the exact best fill outside one group, reusing route-local tables."""
+
+    if not 0 <= target_positions <= index.maximum_positions:
+        return None
+    group_indices = tuple(sorted(index.node_index[int(node_id)] for node_id in group))
+    if not group_indices:
+        return None
+    if group_indices != tuple(range(group_indices[0], group_indices[-1] + 1)):
+        remaining = tuple(node_id for node_id in index.ordered_node_ids if node_id not in group)
+        if not _can_attain_exact_positions(full_state, remaining, target_positions):
+            return None
+        return _best_prompt_subset_for_exact_positions(
+            full_state,
+            remaining,
+            target_positions=target_positions,
+            prompt_score_array=prompt_score_array,
+        )
+    left = index.prefix[group_indices[0]]
+    right = index.suffix[group_indices[-1] + 1]
+    best: tuple[float, tuple[int, ...]] | None = None
+    for left_positions, (left_score, left_nodes) in left.items():
+        right_state = right.get(target_positions - left_positions)
+        if right_state is None:
+            continue
+        right_score, right_nodes = right_state
+        candidate = (left_score + right_score, (*left_nodes, *right_nodes))
+        if (
+            best is None
+            or candidate[0] > best[0]
+            or (candidate[0] == best[0] and candidate[1] < best[1])
+        ):
+            best = candidate
+    return None if best is None else best[1]
+
+
+@dataclass(frozen=True, slots=True)
+class _JointGroupDonorSelection:
+    """One exact-capacity group insertion with jointly optimized donors."""
+
+    selected_optional_node_ids: tuple[int, ...]
+    donor_node_ids: tuple[int, ...]
+    recipient_node_ids: tuple[int, ...]
+    output_impact_risk: float
+
+
+def _joint_group_donor_selection(
+    full_state: FullKVState,
+    *,
+    mandatory_node_ids: frozenset[int],
+    scalar_node_ids: frozenset[int],
+    group: tuple[int, ...],
+    prompt_score_array: np.ndarray[Any, np.dtype[np.float64]],
+    query_attention_by_node: Mapping[int, np.ndarray[Any, np.dtype[np.float64]]],
+    caps: np.ndarray[Any, np.dtype[np.float64]],
+    attainable_coverage: float,
+    optional_prompt_mass: float,
+    value_by_node: Mapping[int, np.ndarray[Any, np.dtype[np.float64]]],
+    prompt_weight: float,
+    output_impact_weight: float,
+) -> _JointGroupDonorSelection | None:
+    """Insert a complete group while selecting donors by query, prompt, and output risk."""
+
+    recipients = tuple(sorted(set(group) - scalar_node_ids))
+    if not recipients:
+        return None
+    target_removed_positions = sum(
+        full_state.blocks[node_id].position_count for node_id in recipients
+    )
+    donor_pool = tuple(sorted(scalar_node_ids - set(group)))
+    if not _can_attain_exact_positions(full_state, donor_pool, target_removed_positions):
+        return None
+
+    epsilon = float(np.finfo(np.float64).tiny)
+    base_with_group = mandatory_node_ids | scalar_node_ids | frozenset(group)
+    total_attention = np.stack(
+        [query_attention_by_node[node_id] for node_id in sorted(base_with_group)],
+        axis=0,
+    ).sum(axis=0)
+    covered_with_group = np.minimum(caps, total_attention)
+    covered_sum = float(covered_with_group.sum())
+    donor_metrics: dict[int, tuple[float, float, float, float]] = {}
+    for donor in donor_pool:
+        query_loss = max(
+            0.0,
+            covered_sum
+            - float(
+                np.minimum(
+                    caps,
+                    total_attention - query_attention_by_node[donor],
+                ).sum()
+            ),
+        ) / max(attainable_coverage, epsilon)
+        prompt_loss = max(0.0, float(prompt_score_array[donor])) / max(
+            optional_prompt_mass,
+            epsilon,
+        )
+        donor_value = value_by_node[donor]
+        donor_norm = float(np.linalg.norm(donor_value))
+        value_deviation = min(
+            float(np.linalg.norm(donor_value - value_by_node[recipient]))
+            / max(
+                donor_norm + float(np.linalg.norm(value_by_node[recipient])),
+                epsilon,
+            )
+            for recipient in recipients
+        )
+        output_risk = prompt_loss * value_deviation
+        cost = query_loss + prompt_weight * prompt_loss + output_impact_weight * output_risk
+        donor_metrics[donor] = (cost, query_loss, prompt_loss, output_risk)
+
+    states: dict[
+        int,
+        tuple[float, float, float, float, tuple[int, ...]],
+    ] = {0: (0.0, 0.0, 0.0, 0.0, ())}
+    for donor in donor_pool:
+        size = full_state.blocks[donor].position_count
+        cost, query_loss, prompt_loss, output_risk = donor_metrics[donor]
+        updated = dict(states)
+        for occupied, prior in states.items():
+            next_occupied = occupied + size
+            if next_occupied > target_removed_positions:
+                continue
+            candidate = (
+                prior[0] + cost,
+                prior[1] + output_risk,
+                prior[2] + prompt_loss,
+                prior[3] + query_loss,
+                (*prior[4], donor),
+            )
+            incumbent = updated.get(next_occupied)
+            if incumbent is None or candidate < incumbent:
+                updated[next_occupied] = candidate
+        states = updated
+    best = states.get(target_removed_positions)
+    if best is None:  # pragma: no cover - guarded by exact feasibility
+        return None
+    donors = best[4]
+    selected = tuple(sorted((scalar_node_ids | set(group)) - set(donors)))
+    return _JointGroupDonorSelection(
+        selected,
+        donors,
+        recipients,
+        best[1],
+    )
+
+
 def _prompt_query_coverage_initial_selection(
     full_state: FullKVState,
     *,
@@ -1309,14 +1675,21 @@ def _prompt_query_coverage_initial_selection(
     reservation_fraction: float,
     prompt_weight: float,
     minimum_prompt_mass_fraction: float,
+    coverage_objective: str,
+    cumulative_cap_fraction: float,
+    reservation_target_positions: int | None = None,
+    pre_reserved_optional_node_ids: Sequence[int] = (),
 ) -> _QueryCoverageInitialSelectionResult:
     """Build a feasible selection with query diversity reserved from the start.
 
     The scalar Prompt Top-K solution defines only the capacity target and an
     auditable comparison point.  Query-diverse blocks are chosen before the
-    remaining capacity is filled by prompt mass.  Each greedy reservation is
-    accepted only when the unselected block sizes can still attain the exact
-    target, so the coverage objective cannot create padding or alter bytes.
+    remaining capacity is filled by prompt mass. ``max`` preserves the V88
+    facility objective. ``capped_cumulative`` uses
+    ``sum_q min(tau_q, sum_i attention[q, i])`` with each ``tau_q`` fixed from
+    the complete route before selection. Each greedy reservation is accepted
+    only when the unselected block sizes can still attain the exact target, so
+    the coverage objective cannot create padding or alter bytes.
     """
 
     route_nodes = tuple(sorted(int(node_id) for node_id in route_node_ids))
@@ -1325,7 +1698,27 @@ def _prompt_query_coverage_initial_selection(
     scalar_selected = tuple(
         sorted(int(node_id) for node_id in scalar_prompt_selected_optional_node_ids)
     )
+    pre_reserved = tuple(sorted(int(node_id) for node_id in pre_reserved_optional_node_ids))
+    if len(pre_reserved) != len(set(pre_reserved)):
+        raise ValueError("pre-reserved node IDs must be unique")
+    if not set(pre_reserved) <= set(optional_nodes):
+        raise ValueError("pre-reserved nodes must be optional route nodes")
     epsilon = float(np.finfo(np.float64).tiny)
+    if coverage_objective not in {"max", "capped_cumulative"}:
+        raise ValueError("coverage_objective must be 'max' or 'capped_cumulative'")
+    if not math.isfinite(cumulative_cap_fraction) or not 0 < cumulative_cap_fraction <= 1:
+        raise ValueError("cumulative_cap_fraction must be finite and in (0, 1]")
+    if coverage_objective == "max" and cumulative_cap_fraction != 1.0:
+        raise ValueError("max query coverage requires cumulative_cap_fraction=1.0")
+    route_attention = np.stack(
+        [query_attention_by_node[node_id] for node_id in route_nodes],
+        axis=0,
+    )
+    cumulative_caps = (
+        cumulative_cap_fraction * route_attention.sum(axis=0)
+        if coverage_objective == "capped_cumulative"
+        else None
+    )
 
     def coverage_vector(
         node_ids: Sequence[int] | set[int] | frozenset[int],
@@ -1333,12 +1726,33 @@ def _prompt_query_coverage_initial_selection(
         ordered = tuple(sorted(node_ids))
         if not ordered:
             return np.zeros_like(query_attention_by_node[route_nodes[0]], dtype=np.float64)
+        values = np.stack([query_attention_by_node[node_id] for node_id in ordered], axis=0)
+        if coverage_objective == "capped_cumulative":
+            if cumulative_caps is None:  # pragma: no cover - guarded by objective
+                raise RuntimeError("cumulative query coverage caps are unexpectedly absent")
+            return cast(
+                "np.ndarray[Any, np.dtype[np.float64]]",
+                np.minimum(cumulative_caps, values.sum(axis=0)),
+            )
         return cast(
             "np.ndarray[Any, np.dtype[np.float64]]",
-            np.max(
-                np.stack([query_attention_by_node[node_id] for node_id in ordered], axis=0),
-                axis=0,
-            ),
+            np.max(values, axis=0),
+        )
+
+    def add_node_coverage(
+        current: np.ndarray[Any, np.dtype[np.float64]],
+        node_id: int,
+    ) -> np.ndarray[Any, np.dtype[np.float64]]:
+        if coverage_objective == "capped_cumulative":
+            if cumulative_caps is None:  # pragma: no cover - guarded by objective
+                raise RuntimeError("cumulative query coverage caps are unexpectedly absent")
+            return cast(
+                "np.ndarray[Any, np.dtype[np.float64]]",
+                np.minimum(cumulative_caps, current + query_attention_by_node[node_id]),
+            )
+        return cast(
+            "np.ndarray[Any, np.dtype[np.float64]]",
+            np.maximum(current, query_attention_by_node[node_id]),
         )
 
     baseline_selected = mandatory | frozenset(scalar_selected)
@@ -1361,16 +1775,43 @@ def _prompt_query_coverage_initial_selection(
             0.0,
             0,
             (),
+            (),
         )
 
-    reservation_target = min(
-        optional_target_positions,
-        max(1, math.ceil(optional_target_positions * reservation_fraction)),
+    reservation_target = (
+        min(
+            optional_target_positions,
+            max(1, math.ceil(optional_target_positions * reservation_fraction)),
+        )
+        if reservation_target_positions is None
+        else int(reservation_target_positions)
     )
-    reserved: list[int] = []
-    remaining = set(optional_nodes)
-    reserved_positions = 0
-    current_coverage_vector = coverage_vector(mandatory)
+    if not 0 <= reservation_target <= optional_target_positions:
+        raise ValueError("query coverage reservation target must fit the optional capacity")
+    pre_reserved_positions = sum(
+        full_state.blocks[node_id].position_count for node_id in pre_reserved
+    )
+    if pre_reserved_positions > reservation_target:
+        raise ValueError("pre-reserved positions exceed the reservation target")
+    if reservation_target == 0:
+        return _QueryCoverageInitialSelectionResult(
+            scalar_selected,
+            0,
+            0,
+            baseline_coverage,
+            baseline_coverage,
+            0.0,
+            baseline_prompt_mass,
+            baseline_prompt_mass,
+            0.0,
+            0,
+            (),
+            (),
+        )
+    reserved = list(pre_reserved)
+    remaining = set(optional_nodes) - set(pre_reserved)
+    reserved_positions = pre_reserved_positions
+    current_coverage_vector = coverage_vector(mandatory | frozenset(pre_reserved))
     candidate_count = 0
     while reserved_positions < reservation_target:
         best: tuple[float, float, float, int] | None = None
@@ -1387,10 +1828,7 @@ def _prompt_query_coverage_initial_selection(
             ):
                 continue
             candidate_count += 1
-            next_coverage = np.maximum(
-                current_coverage_vector,
-                query_attention_by_node[node_id],
-            )
+            next_coverage = add_node_coverage(current_coverage_vector, node_id)
             marginal = float(next_coverage.sum() - current_coverage_vector.sum()) / max(
                 attainable_coverage,
                 epsilon,
@@ -1406,10 +1844,7 @@ def _prompt_query_coverage_initial_selection(
         reserved.append(node_id)
         remaining.remove(node_id)
         reserved_positions += full_state.blocks[node_id].position_count
-        current_coverage_vector = np.maximum(
-            current_coverage_vector,
-            query_attention_by_node[node_id],
-        )
+        current_coverage_vector = add_node_coverage(current_coverage_vector, node_id)
 
     fill = _best_prompt_subset_for_exact_positions(
         full_state,
@@ -1437,6 +1872,7 @@ def _prompt_query_coverage_initial_selection(
             0.0,
             candidate_count,
             (),
+            (),
         )
     added = tuple(sorted(set(selected) - set(scalar_selected)))
     return _QueryCoverageInitialSelectionResult(
@@ -1450,8 +1886,1088 @@ def _prompt_query_coverage_initial_selection(
         selected_prompt_mass,
         max(0.0, baseline_prompt_mass - selected_prompt_mass) / max(total_prompt_mass, epsilon),
         candidate_count,
+        tuple(sorted(reserved)),
         added,
     )
+
+
+def _coherent_layout_groups(
+    full_state: FullKVState,
+    node_ids: Sequence[int],
+    *,
+    maximum_blocks: int,
+    row_bins: int,
+) -> tuple[tuple[int, ...], ...]:
+    """Return deterministic, nonoverlapping spatial reading-order groups.
+
+    Only authoritative normalized block regions are used. Blocks are grouped
+    within one layer, KV head, modality, media/page/frame source, and coarse
+    row band, then split into contiguous reading-order chunks. Missing spatial
+    metadata fails closed: such blocks are not described as OCR/layout
+    evidence. The grouping therefore preserves coherent raster evidence
+    without inventing OCR boxes or using benchmark labels.
+    """
+
+    if maximum_blocks < 2:
+        raise ValueError("coherent layout groups require maximum_blocks >= 2")
+    if row_bins < 1:
+        raise ValueError("coherent layout groups require at least one row bin")
+    buckets: dict[
+        tuple[int, int, str, int | None, int | None, int | None, int],
+        list[int],
+    ] = defaultdict(list)
+    for node_id in sorted(int(value) for value in node_ids):
+        block = full_state.blocks[node_id]
+        region = block.region
+        if block.modality not in {Modality.IMAGE, Modality.VIDEO} or region is None:
+            continue
+        if not all(0.0 <= coordinate <= 1.0 for coordinate in region):
+            continue
+        center_y = (region[1] + region[3]) / 2.0
+        row_band = min(row_bins - 1, math.floor(center_y * row_bins))
+        buckets[
+            (
+                block.layer,
+                block.kv_head,
+                block.modality.value,
+                block.image_index,
+                block.page_index,
+                block.frame_index,
+                row_band,
+            )
+        ].append(node_id)
+
+    groups: list[tuple[int, ...]] = []
+    for identity in sorted(buckets, key=repr):
+        ordered = sorted(
+            buckets[identity],
+            key=lambda node_id: (
+                full_state.blocks[node_id].original_logical_positions[0],
+                node_id,
+            ),
+        )
+        run: list[int] = []
+
+        def flush(current_run: Sequence[int]) -> None:
+            for start in range(0, len(current_run), maximum_blocks):
+                group = tuple(current_run[start : start + maximum_blocks])
+                if len(group) >= 2:
+                    groups.append(group)
+
+        for node_id in ordered:
+            block = full_state.blocks[node_id]
+            if run:
+                prior = full_state.blocks[run[-1]]
+                if block.original_logical_positions[0] != prior.original_logical_positions[-1] + 1:
+                    flush(run)
+                    run = []
+            run.append(node_id)
+        flush(run)
+    return tuple(sorted(groups))
+
+
+def coherent_layout_groups(
+    full_state: FullKVState,
+    node_ids: Sequence[int],
+    *,
+    maximum_blocks: int,
+    row_bins: int,
+) -> tuple[tuple[int, ...], ...]:
+    """Public, label-blind coherent-group constructor for runtime policies."""
+
+    return _coherent_layout_groups(
+        full_state,
+        node_ids,
+        maximum_blocks=maximum_blocks,
+        row_bins=row_bins,
+    )
+
+
+def _capped_attention_coverage(
+    node_ids: Sequence[int] | set[int] | frozenset[int],
+    *,
+    query_attention_by_node: Mapping[int, np.ndarray[Any, np.dtype[np.float64]]],
+    caps: np.ndarray[Any, np.dtype[np.float64]],
+) -> float:
+    ordered = tuple(sorted(node_ids))
+    if not ordered:
+        return 0.0
+    mass = np.stack(
+        [query_attention_by_node[node_id] for node_id in ordered],
+        axis=0,
+    ).sum(axis=0)
+    return float(np.minimum(caps, mass).sum())
+
+
+def _atomic_layout_group_candidates(
+    full_state: FullKVState,
+    *,
+    routes: Sequence[tuple[int, int]],
+    node_ids_by_route: Mapping[tuple[int, int], Sequence[int]],
+    mandatory_by_route: Mapping[tuple[int, int], set[int]],
+    scalar_by_route: Mapping[tuple[int, int], set[int]],
+    optional_target_by_route: Mapping[tuple[int, int], int],
+    prompt_score_array: np.ndarray[Any, np.dtype[np.float64]],
+    query_attention_by_node: Mapping[int, np.ndarray[Any, np.dtype[np.float64]]],
+    cumulative_cap_fraction: float,
+    prompt_weight: float,
+    maximum_blocks: int,
+    row_bins: int,
+    selection_mode: str,
+) -> tuple[
+    dict[tuple[int, int], tuple[_AtomicLayoutGroupCandidate, ...]],
+    dict[tuple[int, int], int],
+    dict[tuple[int, int], int],
+    dict[tuple[int, int], int],
+]:
+    """Build route-local atomic counterfactuals without labels.
+
+    V95 audits the four highest standalone query/prompt-density groups per
+    route. V96 evaluates every feasible group and retains only the label-blind
+    frontier that is not dominated in query gain, combined donor risk, and
+    byte cost.
+    """
+
+    if selection_mode not in {
+        "topk_greedy",
+        "pareto_knapsack",
+        "pareto_joint_donor_knapsack",
+    }:
+        raise ValueError("atomic layout-group selection mode is unsupported")
+    epsilon = float(np.finfo(np.float64).tiny)
+    candidates: dict[tuple[int, int], tuple[_AtomicLayoutGroupCandidate, ...]] = {}
+    candidate_counts: dict[tuple[int, int], int] = {}
+    joint_candidate_counts: dict[tuple[int, int], int] = {identity: 0 for identity in routes}
+    joint_value_by_node: dict[int, np.ndarray[Any, np.dtype[np.float64]]] = {}
+    if selection_mode == "pareto_joint_donor_knapsack":
+        all_route_nodes = tuple(
+            sorted({node_id for identity in routes for node_id in node_ids_by_route[identity]})
+        )
+        descriptors = pool_block_descriptors(
+            full_state,
+            host_transfer_mode="deferred_layer_vectorized",
+            eligible_node_ids=all_route_nodes,
+            node_table_ids=all_route_nodes,
+        )
+        joint_value_by_node = {
+            descriptor.source_id: np.asarray(descriptor.pooled_value, dtype=np.float64)
+            for descriptor in descriptors
+        }
+    provisional: list[_AtomicLayoutGroupCandidate] = []
+    for identity in routes:
+        route_nodes = tuple(sorted(int(node_id) for node_id in node_ids_by_route[identity]))
+        mandatory = frozenset(mandatory_by_route[identity])
+        scalar = frozenset(scalar_by_route[identity])
+        optional_nodes = tuple(node_id for node_id in route_nodes if node_id not in mandatory)
+        groups = _coherent_layout_groups(
+            full_state,
+            optional_nodes,
+            maximum_blocks=maximum_blocks,
+            row_bins=row_bins,
+        )
+        candidate_counts[identity] = len(groups)
+        if not groups:
+            candidates[identity] = ()
+            continue
+        route_attention = np.stack(
+            [query_attention_by_node[node_id] for node_id in route_nodes],
+            axis=0,
+        )
+        caps = cumulative_cap_fraction * route_attention.sum(axis=0)
+
+        attainable = float(caps.sum())
+        baseline_coverage = _capped_attention_coverage(
+            mandatory | scalar,
+            query_attention_by_node=query_attention_by_node,
+            caps=caps,
+        )
+        baseline_prompt_mass = math.fsum(
+            max(0.0, float(prompt_score_array[node_id])) for node_id in scalar
+        )
+        optional_prompt_mass = math.fsum(
+            max(0.0, float(prompt_score_array[node_id])) for node_id in optional_nodes
+        )
+        fill_index = _build_prompt_subset_interval_exclusion_index(
+            full_state,
+            optional_nodes,
+            maximum_positions=optional_target_by_route[identity],
+            prompt_score_array=prompt_score_array,
+        )
+        scored_groups: list[tuple[float, float, float, tuple[int, ...]]] = []
+        for group in groups:
+            if set(group) <= scalar:
+                continue
+            group_attention = np.stack(
+                [query_attention_by_node[node_id] for node_id in group],
+                axis=0,
+            ).sum(axis=0)
+            query_share = float(np.minimum(caps, group_attention).sum()) / max(
+                attainable,
+                epsilon,
+            )
+            prompt_share = math.fsum(
+                max(0.0, float(prompt_score_array[node_id])) for node_id in group
+            ) / max(optional_prompt_mass, epsilon)
+            group_score = query_share + prompt_weight * prompt_share
+            positions = sum(full_state.blocks[node_id].position_count for node_id in group)
+            scored_groups.append(
+                (group_score / max(positions, 1), group_score, prompt_share, group)
+            )
+        route_candidates: list[_AtomicLayoutGroupCandidate] = []
+        ranked_groups = sorted(
+            scored_groups,
+            key=lambda item: (-item[0], -item[1], -item[2], item[3]),
+        )
+        if selection_mode == "topk_greedy":
+            ranked_groups = ranked_groups[:4]
+        for _density, group_score, _prompt_share, group in ranked_groups:
+            group_positions = sum(full_state.blocks[node_id].position_count for node_id in group)
+            remaining_target = optional_target_by_route[identity] - group_positions
+            if remaining_target < 0:
+                continue
+            joint: _JointGroupDonorSelection | None = None
+            if selection_mode == "pareto_joint_donor_knapsack":
+                joint = _joint_group_donor_selection(
+                    full_state,
+                    mandatory_node_ids=mandatory,
+                    scalar_node_ids=scalar,
+                    group=group,
+                    prompt_score_array=prompt_score_array,
+                    query_attention_by_node=query_attention_by_node,
+                    caps=caps,
+                    attainable_coverage=attainable,
+                    optional_prompt_mass=optional_prompt_mass,
+                    value_by_node=joint_value_by_node,
+                    prompt_weight=prompt_weight,
+                    output_impact_weight=1.0,
+                )
+                if joint is None:
+                    continue
+                selected = joint.selected_optional_node_ids
+                joint_candidate_counts[identity] += 1
+            else:
+                fill = _best_prompt_subset_excluding_group(
+                    full_state,
+                    fill_index,
+                    group,
+                    target_positions=remaining_target,
+                    prompt_score_array=prompt_score_array,
+                )
+                if fill is None:
+                    continue
+                selected = tuple(sorted((*group, *fill)))
+            selected_coverage = _capped_attention_coverage(
+                mandatory | frozenset(selected),
+                query_attention_by_node=query_attention_by_node,
+                caps=caps,
+            )
+            selected_prompt_mass = math.fsum(
+                max(0.0, float(prompt_score_array[node_id])) for node_id in selected
+            )
+            route_candidates.append(
+                _AtomicLayoutGroupCandidate(
+                    identity=identity,
+                    group=group,
+                    selected_optional_node_ids=selected,
+                    normalized_query_gain=max(0.0, selected_coverage - baseline_coverage)
+                    / max(attainable, epsilon),
+                    normalized_prompt_risk=max(0.0, baseline_prompt_mass - selected_prompt_mass)
+                    / max(optional_prompt_mass, epsilon),
+                    output_impact_risk=(0.0 if joint is None else joint.output_impact_risk),
+                    group_score=group_score,
+                    group_bytes=sum(full_state.blocks[node_id].byte_size for node_id in group),
+                    baseline_coverage=baseline_coverage,
+                    selected_coverage=selected_coverage,
+                    baseline_prompt_mass=baseline_prompt_mass,
+                    selected_prompt_mass=selected_prompt_mass,
+                    donor_node_ids=(
+                        tuple(sorted(scalar - set(selected)))
+                        if joint is None
+                        else joint.donor_node_ids
+                    ),
+                    recipient_node_ids=(
+                        tuple(sorted(set(selected) - scalar))
+                        if joint is None
+                        else joint.recipient_node_ids
+                    ),
+                )
+            )
+        candidates[identity] = tuple(route_candidates)
+        provisional.extend(route_candidates)
+
+    changed = tuple(
+        sorted(
+            {
+                node_id
+                for candidate in provisional
+                for node_id in (*candidate.donor_node_ids, *candidate.recipient_node_ids)
+            }
+        )
+    )
+    if not changed:
+        return (
+            candidates,
+            candidate_counts,
+            {identity: 0 for identity in routes},
+            joint_candidate_counts,
+        )
+    if joint_value_by_node:
+        value_by_node = joint_value_by_node
+    else:
+        descriptors = pool_block_descriptors(
+            full_state,
+            host_transfer_mode="deferred_layer_vectorized",
+            eligible_node_ids=changed,
+            node_table_ids=changed,
+        )
+        value_by_node = {
+            descriptor.source_id: np.asarray(descriptor.pooled_value, dtype=np.float64)
+            for descriptor in descriptors
+        }
+    audited: dict[tuple[int, int], tuple[_AtomicLayoutGroupCandidate, ...]] = {}
+    for identity in routes:
+        optional_prompt_mass = math.fsum(
+            max(0.0, float(prompt_score_array[node_id]))
+            for node_id in node_ids_by_route[identity]
+            if node_id not in mandatory_by_route[identity]
+        )
+        route_audited: list[_AtomicLayoutGroupCandidate] = []
+        for candidate in candidates[identity]:
+            if candidate.donor_node_ids and not candidate.recipient_node_ids:
+                output_risk = 1.0
+            else:
+                output_risk = 0.0
+                for donor in candidate.donor_node_ids:
+                    donor_value = value_by_node[donor]
+                    donor_norm = float(np.linalg.norm(donor_value))
+                    closest_deviation = min(
+                        float(np.linalg.norm(donor_value - value_by_node[recipient]))
+                        / max(
+                            donor_norm + float(np.linalg.norm(value_by_node[recipient])),
+                            epsilon,
+                        )
+                        for recipient in candidate.recipient_node_ids
+                    )
+                    prompt_share = max(0.0, float(prompt_score_array[donor])) / max(
+                        optional_prompt_mass,
+                        epsilon,
+                    )
+                    output_risk += prompt_share * closest_deviation
+            route_audited.append(replace(candidate, output_impact_risk=output_risk))
+        audited[identity] = (
+            _gain_risk_pareto_frontier(route_audited)
+            if selection_mode in {"pareto_knapsack", "pareto_joint_donor_knapsack"}
+            else tuple(route_audited)
+        )
+    pareto_counts = {
+        identity: (
+            len(audited[identity])
+            if selection_mode in {"pareto_knapsack", "pareto_joint_donor_knapsack"}
+            else 0
+        )
+        for identity in routes
+    }
+    return audited, candidate_counts, pareto_counts, joint_candidate_counts
+
+
+def _gain_risk_pareto_frontier(
+    candidates: Sequence[_AtomicLayoutGroupCandidate],
+) -> tuple[_AtomicLayoutGroupCandidate, ...]:
+    """Return candidates not dominated in gain, combined risk, and bytes."""
+
+    ordered = tuple(sorted(candidates, key=lambda candidate: candidate.group))
+    frontier: list[_AtomicLayoutGroupCandidate] = []
+    for candidate in ordered:
+        risk = max(candidate.normalized_prompt_risk, candidate.output_impact_risk)
+        dominated = False
+        for other in ordered:
+            if other is candidate:
+                continue
+            other_risk = max(other.normalized_prompt_risk, other.output_impact_risk)
+            weakly_better = bool(
+                other.normalized_query_gain + 1e-12 >= candidate.normalized_query_gain
+                and other_risk <= risk + 1e-12
+                and other.group_bytes <= candidate.group_bytes
+            )
+            strictly_better = bool(
+                other.normalized_query_gain > candidate.normalized_query_gain + 1e-12
+                or other_risk + 1e-12 < risk
+                or other.group_bytes < candidate.group_bytes
+            )
+            if weakly_better and strictly_better:
+                dominated = True
+                break
+        if not dominated:
+            frontier.append(candidate)
+    return tuple(frontier)
+
+
+def _atomic_group_multiple_choice_knapsack(
+    accepted_by_route: Mapping[tuple[int, int], Sequence[_AtomicLayoutGroupCandidate]],
+    *,
+    byte_budget: int,
+    gain_to_risk_ratio: float,
+    defer_surrogate_risk_to_logit: bool = False,
+) -> tuple[_AtomicLayoutGroupCandidate, ...]:
+    """Choose at most one complete group per route under one byte budget."""
+
+    if byte_budget < 0:
+        raise ValueError("atomic group knapsack byte budget must be nonnegative")
+    states: dict[
+        int,
+        tuple[float, tuple[_AtomicLayoutGroupCandidate, ...]],
+    ] = {0: (0.0, ())}
+
+    def signature(
+        choices: Sequence[_AtomicLayoutGroupCandidate],
+    ) -> tuple[tuple[tuple[int, int], tuple[int, ...]], ...]:
+        return tuple((choice.identity, choice.group) for choice in choices)
+
+    for identity in sorted(accepted_by_route):
+        options = tuple(sorted(accepted_by_route[identity], key=lambda item: item.group))
+        updated = dict(states)
+        for occupied, (utility, choices) in states.items():
+            for candidate in options:
+                next_occupied = occupied + candidate.group_bytes
+                if next_occupied > byte_budget:
+                    continue
+                risk = max(
+                    candidate.normalized_prompt_risk,
+                    candidate.output_impact_risk,
+                )
+                next_utility = utility + (
+                    candidate.normalized_query_gain
+                    if defer_surrogate_risk_to_logit
+                    else candidate.normalized_query_gain - gain_to_risk_ratio * risk
+                )
+                next_choices = (*choices, candidate)
+                incumbent = updated.get(next_occupied)
+                if (
+                    incumbent is None
+                    or next_utility > incumbent[0] + 1e-12
+                    or (
+                        abs(next_utility - incumbent[0]) <= 1e-12
+                        and signature(next_choices) < signature(incumbent[1])
+                    )
+                ):
+                    updated[next_occupied] = (next_utility, next_choices)
+        states = updated
+    _occupied, (_utility, selected) = min(
+        states.items(),
+        key=lambda item: (-item[1][0], -item[0], signature(item[1][1])),
+    )
+    return selected
+
+
+def _cross_head_capped_query_initial_selection(
+    full_state: FullKVState,
+    *,
+    head_routes: Sequence[tuple[int, int]],
+    scalar_selection: HeadLocalPromptSelection,
+    prompt_score_array: np.ndarray[Any, np.dtype[np.float64]],
+    query_attention_by_node: Mapping[int, np.ndarray[Any, np.dtype[np.float64]]],
+    reservation_fraction: float,
+    prompt_weight: float,
+    minimum_prompt_mass_fraction: float,
+    cumulative_cap_fraction: float,
+    stability_gate: bool,
+    stability_risk_mode: str,
+    minimum_normalized_gain: float,
+    gain_to_prompt_loss_ratio: float,
+    output_impact_reservation: bool,
+    output_impact_reservation_fraction: float,
+    layout_group_reservation: bool,
+    layout_group_reservation_fraction: float,
+    layout_group_maximum_blocks: int,
+    layout_group_row_bins: int,
+    layout_group_atomic_selection: bool,
+    layout_group_atomic_selection_mode: str,
+    layout_group_minimum_normalized_gain: float,
+    layout_group_gain_to_risk_ratio: float,
+    defer_surrogate_stability_to_logit: bool,
+) -> dict[tuple[int, int], _QueryCoverageInitialSelectionResult]:
+    """Allocate one query-conditioned exact-byte reservation across KV heads.
+
+    Dense Hugging Face tensors retain their shared physical sequence extent.
+    This allocator therefore redistributes the byte budget *inside* that
+    extent: capped query mass globally decides which exact blocks are reserved
+    before each route's remaining exact slots are filled by scalar Prompt
+    Top-K.  A high-risk route may consume more of the global query-conditioned
+    byte reservation than a low-risk route, but no route can exceed its
+    backend-safe physical position limit.
+    """
+
+    routes = tuple(sorted((int(layer), int(head)) for layer, head in head_routes))
+    route_set = frozenset(routes)
+    record_by_route = {
+        (record.layer, record.kv_head): record for record in scalar_selection.capacity_records
+    }
+    if set(record_by_route) != set(routes):
+        raise ValueError("scalar cross-head reference does not cover every requested route")
+    node_ids_by_route: dict[tuple[int, int], list[int]] = defaultdict(list)
+    mandatory_by_route: dict[tuple[int, int], set[int]] = defaultdict(set)
+    scalar_by_route: dict[tuple[int, int], set[int]] = defaultdict(set)
+    scalar_ids = frozenset(int(node_id) for node_id in scalar_selection.selected_node_ids)
+    for node_id, block in enumerate(full_state.blocks):
+        identity = (block.layer, block.kv_head)
+        if identity not in route_set:
+            continue
+        node_ids_by_route[identity].append(node_id)
+        if block.mandatory:
+            mandatory_by_route[identity].add(node_id)
+        elif node_id in scalar_ids:
+            scalar_by_route[identity].add(node_id)
+
+    epsilon = float(np.finfo(np.float64).tiny)
+    optional_target_by_route: dict[tuple[int, int], int] = {}
+    risk_by_route: dict[tuple[int, int], float] = {}
+    bytes_per_position_by_route: dict[tuple[int, int], int] = {}
+    allocated_positions_by_route = {identity: 0 for identity in routes}
+    baseline_optional_bytes = 0
+    for identity in routes:
+        nodes = tuple(sorted(node_ids_by_route[identity]))
+        mandatory = mandatory_by_route[identity]
+        scalar = scalar_by_route[identity]
+        if not nodes:
+            raise ValueError(f"cross-head query allocation route {identity} contains no blocks")
+        route_attention = np.stack([query_attention_by_node[node_id] for node_id in nodes], axis=0)
+        caps = cumulative_cap_fraction * route_attention.sum(axis=0)
+        optional = set(nodes) - mandatory
+        optional_target = sum(full_state.blocks[node_id].position_count for node_id in scalar)
+        expected = record_by_route[identity].selected_positions - sum(
+            full_state.blocks[node_id].position_count for node_id in mandatory
+        )
+        if optional_target != expected:
+            raise ValueError("scalar cross-head reference has inconsistent optional capacity")
+        optional_target_by_route[identity] = optional_target
+        selected_optional_bytes = sum(full_state.blocks[node_id].byte_size for node_id in scalar)
+        baseline_optional_bytes += selected_optional_bytes
+        ratios = {
+            full_state.blocks[node_id].byte_size // full_state.blocks[node_id].position_count
+            for node_id in optional
+        }
+        if optional and any(
+            full_state.blocks[node_id].byte_size % full_state.blocks[node_id].position_count
+            for node_id in optional
+        ):
+            raise ValueError("cross-head allocation requires integral bytes per position")
+        if optional and len(ratios) != 1:
+            raise ValueError("cross-head allocation requires one byte cost per position per route")
+        bytes_per_position_by_route[identity] = next(iter(ratios)) if ratios else 0
+        scalar_with_mandatory = mandatory | scalar
+        scalar_attention = (
+            np.stack(
+                [query_attention_by_node[node_id] for node_id in sorted(scalar_with_mandatory)],
+                axis=0,
+            ).sum(axis=0)
+            if scalar_with_mandatory
+            else np.zeros_like(caps)
+        )
+        attainable = float(caps.sum())
+        baseline_coverage = float(np.minimum(caps, scalar_attention).sum())
+        risk_by_route[identity] = max(0.0, attainable - baseline_coverage) / max(
+            attainable,
+            epsilon,
+        )
+
+    # Allocate only block-aligned query-conditioned reservation quanta.  The
+    # score is the route's remaining capped-mass deficit divided by one plus
+    # its reserved fraction, which gives high-risk routes more capacity while
+    # preventing one route from monopolizing the complete reservation.
+    target_reserved_bytes = math.floor(baseline_optional_bytes * reservation_fraction)
+    protected_by_route: dict[tuple[int, int], set[int]] = {identity: set() for identity in routes}
+    protected_score_by_route = {identity: 0.0 for identity in routes}
+    layout_group_score_by_route = {identity: 0.0 for identity in routes}
+    layout_group_candidates_by_route = {identity: 0 for identity in routes}
+    layout_group_pareto_candidates_by_route = {identity: 0 for identity in routes}
+    layout_group_joint_donor_candidates_by_route = {identity: 0 for identity in routes}
+    protected_layout_groups_by_route: dict[tuple[int, int], list[tuple[int, ...]]] = {
+        identity: [] for identity in routes
+    }
+    atomic_layout_selection_by_route: dict[tuple[int, int], _AtomicLayoutGroupCandidate] = {}
+    layout_group_risk_rejections_by_route = {identity: 0 for identity in routes}
+    layout_group_target_bytes = 0
+    allocated_bytes = 0
+    if output_impact_reservation:
+        scalar_optional_ids = tuple(
+            sorted(node_id for identity in routes for node_id in scalar_by_route[identity])
+        )
+        if scalar_optional_ids:
+            descriptors = pool_block_descriptors(
+                full_state,
+                host_transfer_mode="deferred_layer_vectorized",
+                eligible_node_ids=scalar_optional_ids,
+                node_table_ids=scalar_optional_ids,
+            )
+            value_by_node = {
+                descriptor.source_id: np.asarray(descriptor.pooled_value, dtype=np.float64)
+                for descriptor in descriptors
+            }
+            scored_candidates: list[tuple[float, float, int, tuple[int, int]]] = []
+            for identity in routes:
+                scalar_nodes = tuple(sorted(scalar_by_route[identity]))
+                optional_prompt_mass = math.fsum(
+                    max(0.0, float(prompt_score_array[node_id]))
+                    for node_id in node_ids_by_route[identity]
+                    if node_id not in mandatory_by_route[identity]
+                )
+                for node_id in scalar_nodes:
+                    prompt_share = max(0.0, float(prompt_score_array[node_id])) / max(
+                        optional_prompt_mass,
+                        epsilon,
+                    )
+                    node_value = value_by_node[node_id]
+                    node_norm = float(np.linalg.norm(node_value))
+                    alternatives = tuple(other for other in scalar_nodes if other != node_id)
+                    value_deviation = (
+                        min(
+                            float(np.linalg.norm(node_value - value_by_node[other]))
+                            / max(
+                                node_norm + float(np.linalg.norm(value_by_node[other])),
+                                epsilon,
+                            )
+                            for other in alternatives
+                        )
+                        if alternatives
+                        else 1.0
+                    )
+                    output_impact = prompt_share * value_deviation
+                    if output_impact > 1e-12:
+                        scored_candidates.append((output_impact, prompt_share, node_id, identity))
+            protected_target_bytes = math.floor(
+                target_reserved_bytes * output_impact_reservation_fraction
+            )
+            for output_impact, _prompt_share, node_id, identity in sorted(
+                scored_candidates,
+                key=lambda item: (-item[0], -item[1], item[2]),
+            ):
+                block = full_state.blocks[node_id]
+                if allocated_bytes + block.byte_size > protected_target_bytes:
+                    continue
+                protected_by_route[identity].add(node_id)
+                protected_score_by_route[identity] += output_impact
+                allocated_positions_by_route[identity] += block.position_count
+                allocated_bytes += block.byte_size
+    elif layout_group_reservation and layout_group_atomic_selection:
+        protected_target_bytes = math.floor(
+            target_reserved_bytes * layout_group_reservation_fraction
+        )
+        layout_group_target_bytes = protected_target_bytes
+        (
+            atomic_candidates,
+            layout_group_candidates_by_route,
+            layout_group_pareto_candidates_by_route,
+            layout_group_joint_donor_candidates_by_route,
+        ) = _atomic_layout_group_candidates(
+            full_state,
+            routes=routes,
+            node_ids_by_route=node_ids_by_route,
+            mandatory_by_route=mandatory_by_route,
+            scalar_by_route=scalar_by_route,
+            optional_target_by_route=optional_target_by_route,
+            prompt_score_array=prompt_score_array,
+            query_attention_by_node=query_attention_by_node,
+            cumulative_cap_fraction=cumulative_cap_fraction,
+            prompt_weight=prompt_weight,
+            maximum_blocks=layout_group_maximum_blocks,
+            row_bins=layout_group_row_bins,
+            selection_mode=layout_group_atomic_selection_mode,
+        )
+        accepted_by_route: dict[tuple[int, int], tuple[_AtomicLayoutGroupCandidate, ...]] = {}
+        for identity in routes:
+            route_accepted: list[_AtomicLayoutGroupCandidate] = []
+            for candidate in atomic_candidates[identity]:
+                combined_risk = max(
+                    candidate.normalized_prompt_risk,
+                    candidate.output_impact_risk,
+                )
+                prompt_floor = candidate.baseline_prompt_mass * minimum_prompt_mass_fraction
+                accepted = bool(
+                    candidate.normalized_query_gain + 1e-12 >= layout_group_minimum_normalized_gain
+                    and candidate.selected_prompt_mass + 1e-12 >= prompt_floor
+                    and (
+                        defer_surrogate_stability_to_logit
+                        or candidate.normalized_query_gain + 1e-12
+                        >= layout_group_gain_to_risk_ratio * combined_risk
+                    )
+                )
+                if accepted:
+                    route_accepted.append(candidate)
+                else:
+                    layout_group_risk_rejections_by_route[identity] += 1
+            accepted_by_route[identity] = tuple(route_accepted)
+        if layout_group_atomic_selection_mode in {
+            "pareto_knapsack",
+            "pareto_joint_donor_knapsack",
+        }:
+            selected_atomic_candidates = _atomic_group_multiple_choice_knapsack(
+                accepted_by_route,
+                byte_budget=protected_target_bytes,
+                gain_to_risk_ratio=layout_group_gain_to_risk_ratio,
+                defer_surrogate_risk_to_logit=defer_surrogate_stability_to_logit,
+            )
+        else:
+            best_by_route = [
+                max(
+                    route_accepted,
+                    key=lambda candidate: (
+                        candidate.normalized_query_gain
+                        / max(
+                            max(
+                                candidate.normalized_prompt_risk,
+                                candidate.output_impact_risk,
+                            ),
+                            epsilon,
+                        ),
+                        candidate.normalized_query_gain,
+                        candidate.group_score,
+                        tuple(-node_id for node_id in candidate.group),
+                    ),
+                )
+                for route_accepted in accepted_by_route.values()
+                if route_accepted
+            ]
+            selected_atomic_candidates = tuple(
+                sorted(
+                    best_by_route,
+                    key=lambda item: (
+                        -item.normalized_query_gain
+                        / max(
+                            max(item.normalized_prompt_risk, item.output_impact_risk),
+                            epsilon,
+                        ),
+                        -item.normalized_query_gain,
+                        -item.group_score,
+                        item.identity,
+                        item.group,
+                    ),
+                )
+            )
+        for candidate in selected_atomic_candidates:
+            if allocated_bytes + candidate.group_bytes > protected_target_bytes:
+                continue
+            identity = candidate.identity
+            protected_by_route[identity].update(candidate.group)
+            protected_layout_groups_by_route[identity].append(candidate.group)
+            layout_group_score_by_route[identity] += candidate.group_score
+            allocated_positions_by_route[identity] = sum(
+                full_state.blocks[node_id].position_count for node_id in candidate.group
+            )
+            allocated_bytes += candidate.group_bytes
+            atomic_layout_selection_by_route[identity] = candidate
+    elif layout_group_reservation:
+        protected_target_bytes = math.floor(
+            target_reserved_bytes * layout_group_reservation_fraction
+        )
+        layout_group_target_bytes = protected_target_bytes
+        scored_groups: list[tuple[float, float, float, tuple[int, int], tuple[int, ...]]] = []
+        for identity in routes:
+            optional_nodes = tuple(
+                node_id
+                for node_id in node_ids_by_route[identity]
+                if node_id not in mandatory_by_route[identity]
+            )
+            groups = _coherent_layout_groups(
+                full_state,
+                optional_nodes,
+                maximum_blocks=layout_group_maximum_blocks,
+                row_bins=layout_group_row_bins,
+            )
+            layout_group_candidates_by_route[identity] = len(groups)
+            if not groups:
+                continue
+            route_attention = np.stack(
+                [query_attention_by_node[node_id] for node_id in node_ids_by_route[identity]],
+                axis=0,
+            )
+            caps = cumulative_cap_fraction * route_attention.sum(axis=0)
+            attainable = float(caps.sum())
+            optional_prompt_mass = math.fsum(
+                max(0.0, float(prompt_score_array[node_id])) for node_id in optional_nodes
+            )
+            for group in groups:
+                group_attention = np.stack(
+                    [query_attention_by_node[node_id] for node_id in group],
+                    axis=0,
+                ).sum(axis=0)
+                query_share = float(np.minimum(caps, group_attention).sum()) / max(
+                    attainable,
+                    epsilon,
+                )
+                prompt_share = math.fsum(
+                    max(0.0, float(prompt_score_array[node_id])) for node_id in group
+                ) / max(optional_prompt_mass, epsilon)
+                group_score = query_share + prompt_weight * prompt_share
+                group_positions = sum(
+                    full_state.blocks[node_id].position_count for node_id in group
+                )
+                score_density = group_score / max(group_positions, 1)
+                scored_groups.append((score_density, group_score, prompt_share, identity, group))
+        for _density, group_score, _prompt_share, identity, group in sorted(
+            scored_groups,
+            key=lambda item: (-item[0], -item[1], -item[2], item[3], item[4]),
+        ):
+            if any(node_id in protected_by_route[identity] for node_id in group):
+                continue
+            group_bytes = sum(full_state.blocks[node_id].byte_size for node_id in group)
+            group_positions = sum(full_state.blocks[node_id].position_count for node_id in group)
+            next_positions = allocated_positions_by_route[identity] + group_positions
+            if allocated_bytes + group_bytes > protected_target_bytes:
+                continue
+            if next_positions > optional_target_by_route[identity]:
+                continue
+            remaining = tuple(
+                node_id
+                for node_id in node_ids_by_route[identity]
+                if node_id not in mandatory_by_route[identity]
+                and node_id not in protected_by_route[identity]
+                and node_id not in group
+            )
+            if not _can_attain_exact_positions(
+                full_state,
+                remaining,
+                optional_target_by_route[identity] - next_positions,
+            ):
+                continue
+            protected_by_route[identity].update(group)
+            protected_layout_groups_by_route[identity].append(group)
+            layout_group_score_by_route[identity] += group_score
+            allocated_positions_by_route[identity] = next_positions
+            allocated_bytes += group_bytes
+    while True:
+        best: tuple[float, float, int, int] | None = None
+        best_cost = 0
+        for identity in routes:
+            if identity in atomic_layout_selection_by_route:
+                continue
+            optional_target = optional_target_by_route[identity]
+            allocated_positions = allocated_positions_by_route[identity]
+            remaining_positions = optional_target - allocated_positions
+            quantum_positions = min(full_state.block_size, remaining_positions)
+            if quantum_positions <= 0 or risk_by_route[identity] <= 1e-12:
+                continue
+            quantum_bytes = bytes_per_position_by_route[identity] * quantum_positions
+            if allocated_bytes + quantum_bytes > target_reserved_bytes:
+                continue
+            allocated_fraction = allocated_positions / max(optional_target, 1)
+            priority = risk_by_route[identity] / (1.0 + allocated_fraction)
+            proposal = (priority, risk_by_route[identity], -identity[0], -identity[1])
+            if best is None or proposal > best:
+                best = proposal
+                best_cost = quantum_bytes
+        if best is None:
+            break
+        identity = (-best[2], -best[3])
+        remaining_positions = (
+            optional_target_by_route[identity] - allocated_positions_by_route[identity]
+        )
+        allocated_positions_by_route[identity] += min(full_state.block_size, remaining_positions)
+        allocated_bytes += best_cost
+
+    proposals: dict[tuple[int, int], _QueryCoverageInitialSelectionResult] = {}
+    for identity in routes:
+        atomic = atomic_layout_selection_by_route.get(identity)
+        if atomic is not None:
+            scalar = scalar_by_route[identity]
+            added = tuple(sorted(set(atomic.selected_optional_node_ids) - scalar))
+            proposals[identity] = _QueryCoverageInitialSelectionResult(
+                selected_optional_node_ids=atomic.selected_optional_node_ids,
+                reserved_count=len(atomic.group),
+                changed_count=len(added),
+                baseline_query_coverage=atomic.baseline_coverage,
+                selected_query_coverage=atomic.selected_coverage,
+                normalized_query_coverage_gain=atomic.normalized_query_gain,
+                baseline_selected_prompt_mass=atomic.baseline_prompt_mass,
+                selected_prompt_mass=atomic.selected_prompt_mass,
+                normalized_prompt_mass_loss=atomic.normalized_prompt_risk,
+                candidate_count=layout_group_candidates_by_route[identity],
+                reserved_node_ids=atomic.group,
+                added_node_ids=added,
+            )
+        else:
+            proposals[identity] = _prompt_query_coverage_initial_selection(
+                full_state,
+                route_node_ids=node_ids_by_route[identity],
+                mandatory_node_ids=tuple(sorted(mandatory_by_route[identity])),
+                scalar_prompt_selected_optional_node_ids=tuple(sorted(scalar_by_route[identity])),
+                optional_target_positions=optional_target_by_route[identity],
+                prompt_score_array=prompt_score_array,
+                query_attention_by_node=query_attention_by_node,
+                reservation_fraction=reservation_fraction,
+                prompt_weight=prompt_weight,
+                minimum_prompt_mass_fraction=minimum_prompt_mass_fraction,
+                coverage_objective="capped_cumulative",
+                cumulative_cap_fraction=cumulative_cap_fraction,
+                reservation_target_positions=allocated_positions_by_route[identity],
+                pre_reserved_optional_node_ids=tuple(sorted(protected_by_route[identity])),
+            )
+
+    output_impact_by_route: dict[tuple[int, int], tuple[float, int]] = {
+        identity: (0.0, 0) for identity in routes
+    }
+    if stability_gate and stability_risk_mode == "output_impact":
+        changed_node_ids: set[int] = set()
+        for identity, local in proposals.items():
+            if identity in atomic_layout_selection_by_route:
+                continue
+            scalar = scalar_by_route[identity]
+            proposed = set(local.selected_optional_node_ids)
+            changed_node_ids.update(scalar - proposed)
+            changed_node_ids.update(proposed - scalar)
+        if changed_node_ids:
+            ordered_changed = tuple(sorted(changed_node_ids))
+            descriptors = pool_block_descriptors(
+                full_state,
+                host_transfer_mode="deferred_layer_vectorized",
+                eligible_node_ids=ordered_changed,
+                node_table_ids=ordered_changed,
+            )
+            value_by_node = {
+                descriptor.source_id: np.asarray(descriptor.pooled_value, dtype=np.float64)
+                for descriptor in descriptors
+            }
+            for identity, local in proposals.items():
+                if identity in atomic_layout_selection_by_route:
+                    continue
+                scalar = scalar_by_route[identity]
+                proposed = set(local.selected_optional_node_ids)
+                donors = tuple(sorted(scalar - proposed))
+                recipients = tuple(sorted(proposed - scalar))
+                if not donors:
+                    continue
+                optional_prompt_mass = math.fsum(
+                    max(0.0, float(prompt_score_array[node_id]))
+                    for node_id in node_ids_by_route[identity]
+                    if node_id not in mandatory_by_route[identity]
+                )
+                if not recipients:
+                    output_impact_by_route[identity] = (1.0, len(donors))
+                    continue
+                if optional_prompt_mass <= epsilon:
+                    output_impact_by_route[identity] = (0.0, len(donors))
+                    continue
+                output_impact = 0.0
+                for donor in donors:
+                    donor_value = value_by_node[donor]
+                    donor_norm = float(np.linalg.norm(donor_value))
+                    closest_deviation = min(
+                        float(np.linalg.norm(donor_value - value_by_node[recipient]))
+                        / max(
+                            donor_norm + float(np.linalg.norm(value_by_node[recipient])),
+                            epsilon,
+                        )
+                        for recipient in recipients
+                    )
+                    donor_attention_share = max(
+                        0.0,
+                        float(prompt_score_array[donor]),
+                    ) / max(optional_prompt_mass, epsilon)
+                    output_impact += donor_attention_share * closest_deviation
+                output_impact_by_route[identity] = (output_impact, len(donors))
+
+    results: dict[tuple[int, int], _QueryCoverageInitialSelectionResult] = {}
+    for identity in routes:
+        local = proposals[identity]
+        proposed_gain = local.normalized_query_coverage_gain
+        proposed_prompt_loss = local.normalized_prompt_mass_loss
+        proposed_output_impact, output_impact_donor_count = output_impact_by_route[identity]
+        donor_risk = (
+            proposed_output_impact
+            if stability_risk_mode == "output_impact"
+            else proposed_prompt_loss
+        )
+        stability_rejected = bool(
+            stability_gate
+            and identity not in atomic_layout_selection_by_route
+            and local.changed_count
+            and (
+                proposed_gain + 1e-12 < minimum_normalized_gain
+                or proposed_gain + 1e-12 < gain_to_prompt_loss_ratio * donor_risk
+            )
+        )
+        if stability_rejected:
+            local = _QueryCoverageInitialSelectionResult(
+                tuple(sorted(scalar_by_route[identity])),
+                0,
+                0,
+                local.baseline_query_coverage,
+                local.baseline_query_coverage,
+                0.0,
+                local.baseline_selected_prompt_mass,
+                local.baseline_selected_prompt_mass,
+                0.0,
+                local.candidate_count,
+                (),
+                (),
+                proposed_normalized_gain=proposed_gain,
+                proposed_normalized_prompt_loss=proposed_prompt_loss,
+                proposed_output_impact_risk=proposed_output_impact,
+                output_impact_donor_count=output_impact_donor_count,
+                stability_rejected=True,
+            )
+        active_layout_groups = tuple(
+            group
+            for group in sorted(protected_layout_groups_by_route[identity])
+            if set(group) <= set(local.selected_optional_node_ids)
+        )
+        atomic_layout = atomic_layout_selection_by_route.get(identity)
+        results[identity] = replace(
+            local,
+            cross_head_risk=risk_by_route[identity],
+            allocated_bytes=(
+                allocated_positions_by_route[identity] * bytes_per_position_by_route[identity]
+            ),
+            proposed_normalized_gain=proposed_gain,
+            proposed_normalized_prompt_loss=proposed_prompt_loss,
+            proposed_output_impact_risk=proposed_output_impact,
+            output_impact_donor_count=output_impact_donor_count,
+            output_impact_protected_count=(
+                len(protected_by_route[identity]) if output_impact_reservation else 0
+            ),
+            output_impact_protected_bytes=(
+                sum(
+                    full_state.blocks[node_id].byte_size for node_id in protected_by_route[identity]
+                )
+                if output_impact_reservation
+                else 0
+            ),
+            output_impact_protected_score=(
+                protected_score_by_route[identity] if output_impact_reservation else 0.0
+            ),
+            layout_group_candidate_count=layout_group_candidates_by_route[identity],
+            layout_group_protected_groups=active_layout_groups,
+            layout_group_protected_bytes=sum(
+                full_state.blocks[node_id].byte_size
+                for group in active_layout_groups
+                for node_id in group
+            ),
+            layout_group_protected_score=(
+                layout_group_score_by_route[identity] if active_layout_groups else 0.0
+            ),
+            layout_group_target_bytes=layout_group_target_bytes,
+            layout_group_accepted_candidate_count=int(atomic_layout is not None),
+            layout_group_risk_rejected_count=(layout_group_risk_rejections_by_route[identity]),
+            layout_group_pareto_candidate_count=(layout_group_pareto_candidates_by_route[identity]),
+            layout_group_knapsack_selected_count=int(
+                layout_group_atomic_selection_mode
+                in {"pareto_knapsack", "pareto_joint_donor_knapsack"}
+                and atomic_layout is not None
+            ),
+            layout_group_joint_donor_candidate_count=(
+                layout_group_joint_donor_candidates_by_route[identity]
+            ),
+            layout_group_normalized_query_gain=(
+                atomic_layout.normalized_query_gain if atomic_layout is not None else 0.0
+            ),
+            layout_group_normalized_prompt_risk=(
+                atomic_layout.normalized_prompt_risk if atomic_layout is not None else 0.0
+            ),
+            layout_group_output_impact_risk=(
+                atomic_layout.output_impact_risk if atomic_layout is not None else 0.0
+            ),
+            stability_rejected=stability_rejected,
+        )
+    return results
 
 
 def select_prompt_attention_topk_ids_by_head(
@@ -1488,6 +3004,27 @@ def select_prompt_attention_topk_ids_by_head(
     query_coverage_initial_fraction: float = 0.0,
     query_coverage_initial_prompt_weight: float = 1.0,
     query_coverage_initial_minimum_prompt_mass_fraction: float = 1.0,
+    query_coverage_initial_objective: str = "max",
+    query_coverage_initial_cap_fraction: float = 1.0,
+    query_coverage_cross_head_allocation: bool = False,
+    query_coverage_cross_head_stability_gate: bool = False,
+    query_coverage_cross_head_stability_risk_mode: str = "prompt_mass",
+    query_coverage_cross_head_minimum_normalized_gain: float = 0.0,
+    query_coverage_cross_head_gain_to_prompt_loss_ratio: float = 1.0,
+    query_coverage_output_impact_reservation: bool = False,
+    query_coverage_output_impact_fraction: float = 0.0,
+    query_coverage_layout_group_reservation: bool = False,
+    query_coverage_layout_group_fraction: float = 0.0,
+    query_coverage_layout_group_maximum_blocks: int = 0,
+    query_coverage_layout_group_row_bins: int = 4,
+    query_coverage_layout_group_atomic_selection: bool = False,
+    query_coverage_layout_group_atomic_selection_mode: str = "topk_greedy",
+    query_coverage_layout_group_minimum_utilization_fraction: float = 0.0,
+    query_coverage_layout_group_minimum_normalized_gain: float = 0.0,
+    query_coverage_layout_group_gain_to_risk_ratio: float = 1.0,
+    short_horizon_logit_stability: bool = False,
+    progressive_logit_safe_eviction: bool = False,
+    hierarchical_logit_safe_eviction: bool = False,
 ) -> HeadLocalPromptSelection:
     """Select exact Prompt Top-K blocks independently for fixed head routes.
 
@@ -1557,6 +3094,74 @@ def select_prompt_attention_topk_ids_by_head(
         raise ValueError("query_coverage_initial_prompt_weight must be finite and nonnegative")
     if not 0 <= query_coverage_initial_minimum_prompt_mass_fraction <= 1:
         raise ValueError("query_coverage_initial_minimum_prompt_mass_fraction must be in [0, 1]")
+    if query_coverage_initial_objective not in {"max", "capped_cumulative"}:
+        raise ValueError("query_coverage_initial_objective must be 'max' or 'capped_cumulative'")
+    if (
+        not math.isfinite(query_coverage_initial_cap_fraction)
+        or not 0 < query_coverage_initial_cap_fraction <= 1
+    ):
+        raise ValueError("query_coverage_initial_cap_fraction must be finite and in (0, 1]")
+    if (
+        not math.isfinite(query_coverage_cross_head_minimum_normalized_gain)
+        or not 0 <= query_coverage_cross_head_minimum_normalized_gain <= 1
+    ):
+        raise ValueError(
+            "query_coverage_cross_head_minimum_normalized_gain must be finite and in [0, 1]"
+        )
+    if query_coverage_cross_head_stability_risk_mode not in {
+        "prompt_mass",
+        "output_impact",
+    }:
+        raise ValueError(
+            "query_coverage_cross_head_stability_risk_mode must be 'prompt_mass' or 'output_impact'"
+        )
+    if (
+        not math.isfinite(query_coverage_cross_head_gain_to_prompt_loss_ratio)
+        or query_coverage_cross_head_gain_to_prompt_loss_ratio <= 0
+    ):
+        raise ValueError(
+            "query_coverage_cross_head_gain_to_prompt_loss_ratio must be finite and positive"
+        )
+    if (
+        not math.isfinite(query_coverage_output_impact_fraction)
+        or not 0 <= query_coverage_output_impact_fraction <= 1
+    ):
+        raise ValueError("query_coverage_output_impact_fraction must be finite and in [0, 1]")
+    if (
+        not math.isfinite(query_coverage_layout_group_fraction)
+        or not 0 <= query_coverage_layout_group_fraction <= 1
+    ):
+        raise ValueError("query_coverage_layout_group_fraction must be finite and in [0, 1]")
+    if query_coverage_layout_group_maximum_blocks < 0:
+        raise ValueError("query_coverage_layout_group_maximum_blocks must be nonnegative")
+    if not 1 <= query_coverage_layout_group_row_bins <= 32:
+        raise ValueError("query_coverage_layout_group_row_bins must be between 1 and 32")
+    if (
+        not math.isfinite(query_coverage_layout_group_minimum_utilization_fraction)
+        or not 0 <= query_coverage_layout_group_minimum_utilization_fraction <= 1
+    ):
+        raise ValueError(
+            "query_coverage_layout_group_minimum_utilization_fraction must be in [0, 1]"
+        )
+    if (
+        not math.isfinite(query_coverage_layout_group_minimum_normalized_gain)
+        or not 0 <= query_coverage_layout_group_minimum_normalized_gain <= 1
+    ):
+        raise ValueError("query_coverage_layout_group_minimum_normalized_gain must be in [0, 1]")
+    if (
+        not math.isfinite(query_coverage_layout_group_gain_to_risk_ratio)
+        or query_coverage_layout_group_gain_to_risk_ratio <= 0
+    ):
+        raise ValueError("query_coverage_layout_group_gain_to_risk_ratio must be positive")
+    if query_coverage_layout_group_atomic_selection_mode not in {
+        "topk_greedy",
+        "pareto_knapsack",
+        "pareto_joint_donor_knapsack",
+    }:
+        raise ValueError(
+            "query_coverage_layout_group_atomic_selection_mode must be "
+            "'topk_greedy', 'pareto_knapsack', or 'pareto_joint_donor_knapsack'"
+        )
     if (
         sum(
             (
@@ -1633,10 +3238,126 @@ def select_prompt_attention_topk_ids_by_head(
             raise ValueError("initial prompt-query coverage requires per-query prompt attention")
         if query_coverage_initial_fraction <= 0:
             raise ValueError("initial prompt-query coverage requires a positive fraction")
+        if query_coverage_initial_objective == "max" and query_coverage_initial_cap_fraction != 1.0:
+            raise ValueError("max initial query coverage requires cap fraction 1.0")
+        if query_coverage_cross_head_allocation:
+            if query_coverage_initial_objective != "capped_cumulative":
+                raise ValueError("cross-head query allocation requires capped cumulative coverage")
+            if minimum_visual_fraction != 0.0:
+                raise ValueError("cross-head query allocation cannot use a fixed visual quota")
+        if query_coverage_cross_head_stability_gate:
+            if not query_coverage_cross_head_allocation:
+                raise ValueError("cross-head stability gating requires cross-head allocation")
+            if query_coverage_cross_head_minimum_normalized_gain <= 0:
+                raise ValueError("cross-head stability gating requires a positive minimum gain")
+            if query_coverage_cross_head_gain_to_prompt_loss_ratio <= 1:
+                raise ValueError("cross-head stability gating requires a gain/loss ratio above 1")
+        elif (
+            query_coverage_cross_head_stability_risk_mode != "prompt_mass"
+            or query_coverage_cross_head_minimum_normalized_gain != 0.0
+            or query_coverage_cross_head_gain_to_prompt_loss_ratio != 1.0
+        ):
+            raise ValueError("cross-head stability controls require stability gating")
+        if query_coverage_output_impact_reservation:
+            if not query_coverage_cross_head_allocation:
+                raise ValueError("output-impact reservation requires cross-head allocation")
+            if query_coverage_initial_objective != "capped_cumulative":
+                raise ValueError("output-impact reservation requires capped cumulative coverage")
+            if query_coverage_output_impact_fraction <= 0:
+                raise ValueError("output-impact reservation requires a positive fraction")
+            if query_coverage_cross_head_stability_gate:
+                raise ValueError(
+                    "output-impact reservation cannot use post-selection stability gating"
+                )
+        elif query_coverage_output_impact_fraction != 0.0:
+            raise ValueError(
+                "output-impact reservation fraction requires output-impact reservation"
+            )
+        if query_coverage_layout_group_reservation:
+            if not query_coverage_cross_head_allocation:
+                raise ValueError("layout-group reservation requires cross-head allocation")
+            if query_coverage_initial_objective != "capped_cumulative":
+                raise ValueError("layout-group reservation requires capped cumulative coverage")
+            if query_coverage_layout_group_fraction <= 0:
+                raise ValueError("layout-group reservation requires a positive fraction")
+            if query_coverage_layout_group_maximum_blocks < 2:
+                raise ValueError("layout-group reservation requires at least two blocks per group")
+            if query_coverage_output_impact_reservation:
+                raise ValueError(
+                    "layout-group and output-impact initial reservations are mutually exclusive"
+                )
+            if query_coverage_cross_head_stability_gate and not (
+                query_coverage_layout_group_atomic_selection
+                and query_coverage_layout_group_atomic_selection_mode
+                in {"pareto_knapsack", "pareto_joint_donor_knapsack"}
+                and query_coverage_cross_head_stability_risk_mode == "output_impact"
+            ):
+                raise ValueError(
+                    "layout-group reservation permits stability gating only for "
+                    "Pareto-knapsack atomic groups with output-impact risk"
+                )
+            if query_coverage_layout_group_atomic_selection:
+                if query_coverage_layout_group_minimum_utilization_fraction <= 0:
+                    raise ValueError(
+                        "atomic layout-group selection requires positive minimum utilization"
+                    )
+                if query_coverage_layout_group_minimum_normalized_gain <= 0:
+                    raise ValueError("atomic layout-group selection requires positive gain")
+                if query_coverage_layout_group_gain_to_risk_ratio <= 1:
+                    raise ValueError(
+                        "atomic layout-group selection requires a gain/risk ratio above 1"
+                    )
+                if (
+                    query_coverage_layout_group_atomic_selection_mode
+                    in {"pareto_knapsack", "pareto_joint_donor_knapsack"}
+                    and not query_coverage_cross_head_stability_gate
+                    and not short_horizon_logit_stability
+                    and not progressive_logit_safe_eviction
+                    and not hierarchical_logit_safe_eviction
+                ):
+                    raise ValueError(
+                        "Pareto-knapsack atomic groups require non-group stability gating"
+                    )
+            elif (
+                query_coverage_layout_group_atomic_selection_mode != "topk_greedy"
+                or query_coverage_layout_group_minimum_utilization_fraction != 0.0
+                or query_coverage_layout_group_minimum_normalized_gain != 0.0
+                or query_coverage_layout_group_gain_to_risk_ratio != 1.0
+            ):
+                raise ValueError(
+                    "atomic layout-group controls require atomic layout-group selection"
+                )
+        elif (
+            query_coverage_layout_group_fraction != 0.0
+            or query_coverage_layout_group_maximum_blocks != 0
+            or query_coverage_layout_group_atomic_selection
+            or query_coverage_layout_group_atomic_selection_mode != "topk_greedy"
+            or query_coverage_layout_group_minimum_utilization_fraction != 0.0
+            or query_coverage_layout_group_minimum_normalized_gain != 0.0
+            or query_coverage_layout_group_gain_to_risk_ratio != 1.0
+        ):
+            raise ValueError("layout-group controls require layout-group reservation")
     elif (
         query_coverage_initial_fraction != 0.0
         or query_coverage_initial_prompt_weight != 1.0
         or query_coverage_initial_minimum_prompt_mass_fraction != 1.0
+        or query_coverage_initial_objective != "max"
+        or query_coverage_initial_cap_fraction != 1.0
+        or query_coverage_cross_head_allocation
+        or query_coverage_cross_head_stability_gate
+        or query_coverage_cross_head_stability_risk_mode != "prompt_mass"
+        or query_coverage_cross_head_minimum_normalized_gain != 0.0
+        or query_coverage_cross_head_gain_to_prompt_loss_ratio != 1.0
+        or query_coverage_output_impact_reservation
+        or query_coverage_output_impact_fraction != 0.0
+        or query_coverage_layout_group_reservation
+        or query_coverage_layout_group_fraction != 0.0
+        or query_coverage_layout_group_maximum_blocks != 0
+        or query_coverage_layout_group_atomic_selection
+        or query_coverage_layout_group_atomic_selection_mode != "topk_greedy"
+        or query_coverage_layout_group_minimum_utilization_fraction != 0.0
+        or query_coverage_layout_group_minimum_normalized_gain != 0.0
+        or query_coverage_layout_group_gain_to_risk_ratio != 1.0
     ):
         raise ValueError(
             "initial prompt-query coverage controls require query_coverage_initial_selection"
@@ -1705,6 +3426,49 @@ def select_prompt_attention_topk_ids_by_head(
         node_ids_by_route[identity].append(node_id)
         if block.mandatory:
             mandatory_by_route[identity].append(node_id)
+
+    cross_head_initial_by_route: dict[tuple[int, int], _QueryCoverageInitialSelectionResult] = {}
+    scalar_reference: HeadLocalPromptSelection | None = None
+    if query_coverage_cross_head_allocation:
+        scalar_reference = select_prompt_attention_topk_ids_by_head(
+            full_state,
+            budget,
+            prompt_attention_by_node=prompt_attention_by_node,
+            head_routes=tuple(sorted(routes)),
+            position_limits=position_limits,
+        )
+        cross_head_initial_by_route = _cross_head_capped_query_initial_selection(
+            full_state,
+            head_routes=tuple(sorted(routes)),
+            scalar_selection=scalar_reference,
+            prompt_score_array=score_array,
+            query_attention_by_node=query_attention_arrays,
+            reservation_fraction=query_coverage_initial_fraction,
+            prompt_weight=query_coverage_initial_prompt_weight,
+            minimum_prompt_mass_fraction=(query_coverage_initial_minimum_prompt_mass_fraction),
+            cumulative_cap_fraction=query_coverage_initial_cap_fraction,
+            stability_gate=query_coverage_cross_head_stability_gate,
+            stability_risk_mode=query_coverage_cross_head_stability_risk_mode,
+            minimum_normalized_gain=(query_coverage_cross_head_minimum_normalized_gain),
+            gain_to_prompt_loss_ratio=(query_coverage_cross_head_gain_to_prompt_loss_ratio),
+            output_impact_reservation=query_coverage_output_impact_reservation,
+            output_impact_reservation_fraction=query_coverage_output_impact_fraction,
+            layout_group_reservation=query_coverage_layout_group_reservation,
+            layout_group_reservation_fraction=query_coverage_layout_group_fraction,
+            layout_group_maximum_blocks=query_coverage_layout_group_maximum_blocks,
+            layout_group_row_bins=query_coverage_layout_group_row_bins,
+            layout_group_atomic_selection=query_coverage_layout_group_atomic_selection,
+            layout_group_atomic_selection_mode=(query_coverage_layout_group_atomic_selection_mode),
+            layout_group_minimum_normalized_gain=(
+                query_coverage_layout_group_minimum_normalized_gain
+            ),
+            layout_group_gain_to_risk_ratio=(query_coverage_layout_group_gain_to_risk_ratio),
+            defer_surrogate_stability_to_logit=(
+                short_horizon_logit_stability
+                or progressive_logit_safe_eviction
+                or hierarchical_logit_safe_eviction
+            ),
+        )
 
     selected: list[int] = []
     capacity_records: list[HeadLocalCapacityRecord] = []
@@ -1801,8 +3565,10 @@ def select_prompt_attention_topk_ids_by_head(
                 tuple(-node for node in item[2]),
             ),
         )
-        initial_query_coverage = (
-            _prompt_query_coverage_initial_selection(
+        if query_coverage_cross_head_allocation:
+            initial_query_coverage = cross_head_initial_by_route[identity]
+        elif query_coverage_initial_selection:
+            initial_query_coverage = _prompt_query_coverage_initial_selection(
                 full_state,
                 route_node_ids=node_ids_by_route.get(identity, ()),
                 mandatory_node_ids=mandatory,
@@ -1813,9 +3579,11 @@ def select_prompt_attention_topk_ids_by_head(
                 reservation_fraction=query_coverage_initial_fraction,
                 prompt_weight=query_coverage_initial_prompt_weight,
                 minimum_prompt_mass_fraction=(query_coverage_initial_minimum_prompt_mass_fraction),
+                coverage_objective=query_coverage_initial_objective,
+                cumulative_cap_fraction=query_coverage_initial_cap_fraction,
             )
-            if query_coverage_initial_selection
-            else _QueryCoverageInitialSelectionResult(
+        else:
+            initial_query_coverage = _QueryCoverageInitialSelectionResult(
                 tuple(chosen),
                 0,
                 0,
@@ -1827,8 +3595,8 @@ def select_prompt_attention_topk_ids_by_head(
                 0.0,
                 0,
                 (),
+                (),
             )
-        )
         chosen = initial_query_coverage.selected_optional_node_ids
         query_coverage = (
             _prompt_query_coverage_rerank_selection(
@@ -1991,6 +3759,82 @@ def select_prompt_attention_topk_ids_by_head(
                     initial_query_coverage.normalized_prompt_mass_loss
                 ),
                 query_coverage_initial_candidate_count=(initial_query_coverage.candidate_count),
+                query_coverage_initial_reserved_bytes=sum(
+                    full_state.blocks[node_id].byte_size
+                    for node_id in initial_query_coverage.reserved_node_ids
+                ),
+                query_coverage_initial_allocated_bytes=(initial_query_coverage.allocated_bytes),
+                query_coverage_initial_cross_head_risk=(initial_query_coverage.cross_head_risk),
+                query_coverage_initial_proposed_normalized_gain=(
+                    initial_query_coverage.proposed_normalized_gain
+                ),
+                query_coverage_initial_proposed_normalized_prompt_loss=(
+                    initial_query_coverage.proposed_normalized_prompt_loss
+                ),
+                query_coverage_initial_proposed_output_impact_risk=(
+                    initial_query_coverage.proposed_output_impact_risk
+                ),
+                query_coverage_initial_output_impact_donor_count=(
+                    initial_query_coverage.output_impact_donor_count
+                ),
+                query_coverage_initial_output_impact_protected_count=(
+                    initial_query_coverage.output_impact_protected_count
+                ),
+                query_coverage_initial_output_impact_protected_bytes=(
+                    initial_query_coverage.output_impact_protected_bytes
+                ),
+                query_coverage_initial_output_impact_protected_score=(
+                    initial_query_coverage.output_impact_protected_score
+                ),
+                query_coverage_initial_layout_group_candidate_count=(
+                    initial_query_coverage.layout_group_candidate_count
+                ),
+                query_coverage_initial_layout_group_protected_group_count=len(
+                    initial_query_coverage.layout_group_protected_groups
+                ),
+                query_coverage_initial_layout_group_protected_block_count=sum(
+                    len(group) for group in initial_query_coverage.layout_group_protected_groups
+                ),
+                query_coverage_initial_layout_group_protected_bytes=(
+                    initial_query_coverage.layout_group_protected_bytes
+                ),
+                query_coverage_initial_layout_group_protected_score=(
+                    initial_query_coverage.layout_group_protected_score
+                ),
+                query_coverage_initial_layout_group_target_bytes=(
+                    initial_query_coverage.layout_group_target_bytes
+                ),
+                query_coverage_initial_layout_group_accepted_candidate_count=(
+                    initial_query_coverage.layout_group_accepted_candidate_count
+                ),
+                query_coverage_initial_layout_group_risk_rejected_count=(
+                    initial_query_coverage.layout_group_risk_rejected_count
+                ),
+                query_coverage_initial_layout_group_pareto_candidate_count=(
+                    initial_query_coverage.layout_group_pareto_candidate_count
+                ),
+                query_coverage_initial_layout_group_knapsack_selected_count=(
+                    initial_query_coverage.layout_group_knapsack_selected_count
+                ),
+                query_coverage_initial_layout_group_joint_donor_candidate_count=(
+                    initial_query_coverage.layout_group_joint_donor_candidate_count
+                ),
+                query_coverage_initial_layout_group_normalized_query_gain=(
+                    initial_query_coverage.layout_group_normalized_query_gain
+                ),
+                query_coverage_initial_layout_group_normalized_prompt_risk=(
+                    initial_query_coverage.layout_group_normalized_prompt_risk
+                ),
+                query_coverage_initial_layout_group_output_impact_risk=(
+                    initial_query_coverage.layout_group_output_impact_risk
+                ),
+                query_coverage_initial_layout_group_node_ids=(
+                    initial_query_coverage.layout_group_protected_groups
+                ),
+                query_coverage_initial_stability_rejected=(
+                    initial_query_coverage.stability_rejected
+                ),
+                query_coverage_initial_global_allocation=(query_coverage_cross_head_allocation),
                 query_coverage_initial_added_node_ids=(initial_query_coverage.added_node_ids),
             )
         )
@@ -2004,9 +3848,32 @@ def select_prompt_attention_topk_ids_by_head(
         raise InfeasibleBaselineBudgetError(
             "stable Prompt Top-K exact blocks exceed the shared active budget"
         )
-    return HeadLocalPromptSelection(
+    primary = HeadLocalPromptSelection(
         selected_node_ids=tuple(sorted(selected)),
         capacity_records=tuple(capacity_records),
+    )
+    if not short_horizon_logit_stability:
+        return primary
+    if scalar_reference is None:
+        raise ValueError("short-horizon logit stability requires a scalar cross-head anchor")
+    alternatives = [
+        HeadLocalPromptSelectionAlternative(
+            "pareto_joint_group_donor",
+            primary.selected_node_ids,
+            primary.capacity_records,
+        )
+    ]
+    alternatives.append(
+        HeadLocalPromptSelectionAlternative(
+            "scalar_prompt_topk_anchor",
+            scalar_reference.selected_node_ids,
+            scalar_reference.capacity_records,
+        )
+    )
+    return HeadLocalPromptSelection(
+        selected_node_ids=primary.selected_node_ids,
+        capacity_records=primary.capacity_records,
+        logit_stability_shortlist=tuple(alternatives),
     )
 
 

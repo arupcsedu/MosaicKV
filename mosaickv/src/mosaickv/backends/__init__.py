@@ -1,5 +1,16 @@
 """Hugging Face runtime plus future vLLM and SGLang integrations."""
 
+from mosaickv.backends.cache_isolation import (
+    CacheIsolationAudit,
+    CacheIsolationError,
+    CacheStateAdapter,
+    DecodeStateCheckpoint,
+    IsolatedDecodeStateHandle,
+    assert_decode_state_unchanged,
+    capture_decode_state,
+    clone_cache_snapshot,
+    construct_isolated_decode_state,
+)
 from mosaickv.backends.hf_runtime import (
     HuggingFaceMosaicKVModel,
     HuggingFaceRuntimeError,
@@ -8,8 +19,10 @@ from mosaickv.backends.hf_runtime import (
     RuntimePhaseTimings,
     build_compression_plan,
     compare_runtime_retention_one,
+    construct_isolated_packed_decode_state,
     pack_runtime_cache,
     pack_runtime_payloads,
+    probe_isolated_packed_candidate,
 )
 from mosaickv.backends.vllm_runtime import (
     AsyncVLLMTrialRunner,
@@ -27,8 +40,13 @@ from mosaickv.backends.vllm_runtime import (
 
 __all__ = [
     "AsyncVLLMTrialRunner",
+    "CacheIsolationAudit",
+    "CacheIsolationError",
+    "CacheStateAdapter",
+    "DecodeStateCheckpoint",
     "HuggingFaceMosaicKVModel",
     "HuggingFaceRuntimeError",
+    "IsolatedDecodeStateHandle",
     "MosaicKVCompressionPlan",
     "NativeIntegrationCapability",
     "NativeMosaicKVUnsupported",
@@ -39,11 +57,17 @@ __all__ = [
     "VLLMRuntimeError",
     "VLLMRuntimeOptions",
     "VLLMTrialMeasurement",
+    "assert_decode_state_unchanged",
     "build_compression_plan",
+    "capture_decode_state",
+    "clone_cache_snapshot",
     "compare_runtime_retention_one",
+    "construct_isolated_decode_state",
+    "construct_isolated_packed_decode_state",
     "native_integration_capability",
     "pack_runtime_cache",
     "pack_runtime_payloads",
     "prepare_vllm_prompt",
+    "probe_isolated_packed_candidate",
     "require_native_mosaickv_support",
 ]

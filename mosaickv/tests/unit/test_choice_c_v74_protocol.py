@@ -272,6 +272,38 @@ def test_versioned_candidate_can_build_prompt_query_coverage_reranker() -> None:
     assert revised.forecasting.draft_steps == 0
 
 
+def test_v102_candidate_builds_bounded_hierarchical_logit_safe_eviction() -> None:
+    root = Path(__file__).parents[2]
+    base = load_config(root / "configs/experiments/choice_c_v72_frozen_candidate.yaml")
+    spec = yaml.safe_load(
+        (
+            root / "configs/experiments/choice_c_v102_v100_fresh_cross_dataset_calibration.yaml"
+        ).read_text(encoding="utf-8")
+    )
+
+    revised = PROTOCOL.apply_candidate(base, spec["candidates"][0])
+
+    assert revised.method is MosaicKVMethod.MOSAICKV_EXACT
+    assert revised.cache.budget_value == 28_500_000
+    assert revised.selection.stable_head_hierarchical_logit_safe_eviction
+    assert revised.selection.stable_head_hierarchical_partition_count == 8
+    assert revised.selection.stable_head_hierarchical_maximum_refinement_depth == 2
+    assert revised.selection.stable_head_hierarchical_maximum_candidate_evaluations == 24
+    assert revised.selection.stable_head_hierarchical_maximum_sequential_rounds == 6
+    assert revised.selection.stable_head_hierarchical_maximum_rollback_rounds == 2
+    assert revised.selection.stable_head_hierarchical_horizon == 2
+    assert revised.selection.stable_head_hierarchical_maximum_kl == 0.02
+    assert revised.selection.stable_head_hierarchical_maximum_logit_difference == 1.0
+    assert revised.selection.stable_head_query_coverage_cross_head_allocation
+    assert revised.selection.stable_head_query_coverage_layout_group_atomic_selection
+    assert (
+        revised.selection.stable_head_query_coverage_layout_group_atomic_selection_mode
+        == "pareto_joint_donor_knapsack"
+    )
+    assert not revised.selection.stable_head_progressive_logit_safe_eviction
+    assert not revised.selection.stable_head_short_horizon_logit_stability
+
+
 def test_versioned_candidate_rejects_string_adaptive_swap_flag() -> None:
     root = Path(__file__).parents[2]
     base = load_config(root / "configs/experiments/choice_c_v72_frozen_candidate.yaml")

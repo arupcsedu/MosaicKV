@@ -1,0 +1,151 @@
+schema_version: 1
+experiment_id: choice_c_v102_v100_fresh_cross_dataset_calibration
+classification: sealed_negative_fail_fast_debug_gate_result
+sealed_at_utc: "2026-08-24T00:43:47Z"
+immutable_result: true
+measurement_type: one_sample_per_task_gpu_debug_gate
+overall_pass: false
+debug_gate_pass: false
+candidate_target_reached_both_tasks: false
+full_calibration_submitted: false
+frozen_candidate_created: false
+heldout_evaluation_submitted: false
+future_protocol_requires_fresh_samples: true
+
+protocol:
+  path: configs/experiments/choice_c_v102_v100_fresh_cross_dataset_calibration.yaml
+  unchanged_minimum_active_memory_reduction_fraction: 0.30
+  unchanged_minimum_active_plus_residual_reduction_fraction: 0.30
+  unchanged_fidelity_noninferiority_margin: 0.05
+  execution_disabled_after_negative_debug_gate: true
+
+execution:
+  source_git_sha: 4449e6d673dba5b0f65235f9967f7b6da0b00444
+  source_git_dirty: false
+  spec_sha256: 0be49b702d5ff8bc1af80f0da0ff56bdd7e0cff91f45bd8cf2fec1a13f31e81b
+  output_root: /scratch/djy8hg/runs/mosaickv/choice-c-v102-v100-fresh-cross-dataset-calibration-v1-debug1
+  slurm_array_id: "18816597"
+  array_tasks:
+    - task: textvqa_train_calibration
+      slurm_job_id: "18816598"
+      slurm_array_label: "18816597_0"
+      state: FAILED
+      exit_code: "1:0"
+      elapsed: "00:05:28"
+      gpu: NVIDIA A100-SXM4-80GB
+    - task: infovqa
+      slurm_job_id: "18816597"
+      slurm_array_label: "18816597_1"
+      state: FAILED
+      exit_code: "1:0"
+      elapsed: "00:05:00"
+      gpu: NVIDIA A100-SXM4-80GB
+  telemetry:
+    - task: textvqa_train_calibration
+      path: /scratch/djy8hg/runs/mosaickv/choice-c-v102-v100-fresh-cross-dataset-calibration-v1-debug1/telemetry/v102-debug1-textvqa_train_calibration-0be49b702d.json
+      sha256: 410e612845cd87efb6b8b32c31a2ff5f649b2dd282a0f95865cb98fa9470771d
+    - task: infovqa
+      path: /scratch/djy8hg/runs/mosaickv/choice-c-v102-v100-fresh-cross-dataset-calibration-v1-debug1/telemetry/v102-debug1-infovqa-0be49b702d.json
+      sha256: cc3601797669c29f6577f1137e12f2f6b94e7844d719f729c2ac143ef716c827
+  candidate_artifacts:
+    - task: textvqa_train_calibration
+      trace_path: /scratch/djy8hg/runs/mosaickv/choice-c-v102-v100-fresh-cross-dataset-calibration-v1-debug1/traces/v102-debug1-textvqa_train_calibration-warmup-v100_hierarchical_head_local_logit_safe_exact/871a41c86af7add1.json
+      trace_sha256: bcddf2f9f054de0e3a4aebd66ebbda4e9d01751188ad6cc938ffc78829c923fb
+      raw_result_path: /scratch/djy8hg/runs/mosaickv/choice-c-v102-v100-fresh-cross-dataset-calibration-v1-debug1/v102-debug1-textvqa_train_calibration-warmup-v100_hierarchical_head_local_logit_safe_exact/results.jsonl
+      raw_result_sha256: fb2588d4bf91a19a6d135cf55b6fbc4c54fe6e15f59a2a7a9aee58a349b86167
+    - task: infovqa
+      trace_path: /scratch/djy8hg/runs/mosaickv/choice-c-v102-v100-fresh-cross-dataset-calibration-v1-debug1/traces/v102-debug1-infovqa-warmup-v100_hierarchical_head_local_logit_safe_exact/76220da6f74e9772.json
+      trace_sha256: 5cc358f3b864e391baf0649b78f11c5882832f554a45a4bba345afb9b5c0cd94
+      raw_result_path: /scratch/djy8hg/runs/mosaickv/choice-c-v102-v100-fresh-cross-dataset-calibration-v1-debug1/v102-debug1-infovqa-warmup-v100_hierarchical_head_local_logit_safe_exact/results.jsonl
+      raw_result_sha256: b224e50f99baeeb43384dfd5e0e46a20b9fdb71274f595c6657336efd96c846d
+
+debug_results:
+  - task: textvqa_train_calibration
+    sample_id: textvqa_train_calibration:8226
+    fullkv:
+      status: completed
+      active_kv_bytes: 318242816
+      residual_kv_bytes: 0
+      generated_tokens: 64
+      end_to_end_seconds: 3.18138156594336
+    prompt_attention_topk:
+      status: completed
+      active_kv_bytes: 40894464
+      residual_kv_bytes: 0
+      generated_tokens: 64
+      end_to_end_seconds: 6.568117608137428
+    candidate:
+      status: failed
+      failure: selected_cache_exceeds_dense_physical_prompt_capacity
+      trace_end_to_end_seconds: 284.59141562040895
+      target_reached: false
+      complete_measurement_row: false
+  - task: infovqa
+    sample_id: infovqa:98235
+    fullkv:
+      status: completed
+      active_kv_bytes: 322961408
+      residual_kv_bytes: 0
+      generated_tokens: 64
+      end_to_end_seconds: 3.2561035839021204
+    prompt_attention_topk:
+      status: completed
+      active_kv_bytes: 41418752
+      residual_kv_bytes: 0
+      generated_tokens: 64
+      end_to_end_seconds: 6.497535918898881
+    candidate:
+      status: failed
+      failure: selected_cache_exceeds_dense_physical_prompt_capacity
+      trace_end_to_end_seconds: 258.66779936198145
+      target_reached: false
+      complete_measurement_row: false
+
+failure_diagnosis:
+  both_candidates_used_fullkv_safety_fallback: true
+  diagnosis_basis: source_control_flow_and_capacity_invariant_not_historical_trace_field
+  hard_budget_candidate_bytes: 28500000
+  final_over_budget_cache_pack_was_attempted_by_historical_runtime: true
+  historical_failure_trace_complete: false
+  historical_missing_fields:
+    - used_fullkv_fallback
+    - attempted_active_kv_bytes
+    - probe_decisions
+    - phase_timing_breakdown
+  corrective_runtime_policy: reject_fullkv_fallback_before_final_over_budget_pack
+  bounded_isolated_probe_materialization_remains_required: true
+  final_selected_fallback_pack_forbidden: true
+  corrective_trace_fields_required:
+    - used_fullkv_fallback
+    - attempted_active_kv_bytes
+    - hard_active_kv_budget_bytes
+    - hierarchical_logit_safe_eviction
+    - timing_breakdown
+    - byte_budget_materialization
+  corrective_changes_are_not_retroactive_measurements: true
+
+reference_provenance_defect:
+  affected_task: textvqa_train_calibration
+  historical_stored_reference: answer
+  cause: lmms_doc_to_target_template_field_name_was_serialized
+  correct_source_field: answers
+  correct_semantics: full_annotation_list
+  historical_textvqa_scores_not_eligible_for_claims: true
+  correction_is_not_retroactive: true
+
+scientific_boundary:
+  debug_outputs_inspected: true
+  answers_inspected: true
+  references_inspected: true
+  scores_inspected: true
+  failure_identities_inspected: true
+  all_samples_in_both_v102_ledgers_ineligible_for_future_calibration: true
+  no_v102_sample_outcome_may_influence_future_candidate_design: true
+  future_protocol_requires_new_version: true
+  future_protocol_requires_fresh_samples: true
+  future_calibration_must_repeat_exclusion_and_disjointness_review: true
+
+paper_eligibility:
+  v102_debug_rows_eligible_for_paper_result_tables: false
+  v102_candidate_performance_claim_allowed: false
+  negative_engineering_result_only: true

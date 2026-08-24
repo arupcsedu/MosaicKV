@@ -307,8 +307,8 @@ def _load_sample_id_file(
             f"sample ID file SHA mismatch: expected {expected_sha}, observed {actual_sha}"
         )
     value = json.loads(payload)
-    if not isinstance(value, dict) or value.get("schema_version") != 1:
-        raise ValueError("sample ID file must be a schema-version-1 JSON object")
+    if not isinstance(value, dict) or value.get("schema_version") not in {1, 2}:
+        raise ValueError("sample ID file must be a schema-version-1-or-2 JSON object")
     expected = {
         "task": task_name,
         "dataset_id": config.dataset.id,
@@ -328,6 +328,8 @@ def _load_sample_id_file(
     sample_ids = tuple(cast("list[str]", raw_ids))
     if len(sample_ids) != len(set(sample_ids)):
         raise ValueError("sample ID file contains duplicate sample IDs")
+    if value.get("schema_version") == 2 and value.get("sample_count") != len(sample_ids):
+        raise ValueError("schema-version-2 sample ID file has inconsistent sample_count")
     return sample_ids
 
 

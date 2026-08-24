@@ -53,10 +53,33 @@ class TaskSpec:
     scoring_owner: str
     scoring_deterministic: bool
     local_scorer: LocalScorer | None = None
+    dataset_config: str | None = None
+    lmms_split_override: str | None = None
+    reference_field: str | None = None
+
+    def __post_init__(self) -> None:
+        for field_name in ("name", "dataset_id", "split", "sample_metric", "scoring_owner"):
+            if not str(getattr(self, field_name)).strip():
+                raise ValueError(f"{field_name} must be non-empty")
+        if self.dataset_config is not None and not self.dataset_config.strip():
+            raise ValueError("dataset_config must be non-empty when specified")
+        if self.reference_field is not None and not self.reference_field.strip():
+            raise ValueError("reference_field must be non-empty when specified")
+        if self.lmms_split_override is not None:
+            if not self.lmms_split_override.strip():
+                raise ValueError("lmms_split_override must be non-empty when specified")
+            if self.lmms_split_override != self.split:
+                raise ValueError("lmms_split_override must equal the canonical task split")
 
     @property
     def requires_video(self) -> bool:
         return MediaKind.VIDEO in self.media_kinds
+
+    @property
+    def route_key(self) -> tuple[str, str | None, str, str | None]:
+        """Return the configuration-aware dataset and lmms task route."""
+
+        return self.dataset_id, self.dataset_config, self.split, self.development_lmms_task
 
     def score_local(self, answer: str, references: tuple[str, ...]) -> float:
         """Score only tasks explicitly owned by the local CI harness."""
@@ -142,6 +165,21 @@ def default_task_registry() -> TaskRegistry:
                 image,
                 "lmms_eval",
                 True,
+                reference_field="answers",
+            ),
+            TaskSpec(
+                "textvqa_train_calibration",
+                "lmms-lab/textvqa",
+                "train",
+                "textvqa_val",
+                "textvqa_val",
+                "exact_match",
+                image,
+                "lmms_eval",
+                True,
+                dataset_config="default",
+                lmms_split_override="train",
+                reference_field="answers",
             ),
             TaskSpec(
                 "docvqa",
@@ -153,6 +191,18 @@ def default_task_registry() -> TaskRegistry:
                 image,
                 "lmms_eval",
                 True,
+            ),
+            TaskSpec(
+                "infovqa",
+                "lmms-lab-encoder/DocVQA",
+                "validation",
+                "infovqa_val",
+                "infovqa_val",
+                "anls",
+                image,
+                "lmms_eval",
+                True,
+                dataset_config="InfographicVQA",
             ),
             TaskSpec(
                 "chartqa",

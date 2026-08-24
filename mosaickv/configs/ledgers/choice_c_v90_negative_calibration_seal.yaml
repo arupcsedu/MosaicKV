@@ -1,0 +1,201 @@
+schema_version: 1
+classification: sealed_negative_label_blind_calibration_result
+experiment_id: choice_c_v90_cross_head_query_byte_allocation_calibration
+immutable_result: true
+overall_freeze_gate_pass: false
+memory_gate_pass: true
+aggregate_fidelity_gate_pass: true
+robust_fold_fidelity_gate_pass: false
+frozen_candidate_created: false
+heldout_evaluation_authorized: false
+failure_scope:
+  - not_every_docvqa_fold_passed_answer_and_token_noninferiority
+  - not_every_textvqa_fold_passed_answer_and_token_noninferiority
+  - cross_head_reallocation_was_not_robust_across_every_preregistered_fold
+gate_thresholds_must_not_be_weakened_from_this_result: true
+v90_calibration_outputs_must_not_be_reclassified_as_heldout: true
+
+scientific_boundary:
+  benchmark_labels_accessed_for_selection: false
+  official_task_scores_accessed_for_selection: false
+  fullkv_generated_outputs_used_for_label_blind_fidelity: true
+  prompt_topk_generated_outputs_used_for_label_blind_comparison: true
+  v89_and_prior_used_only_as_sample_exclusion_boundaries: true
+  future_design_may_use_aggregate_label_blind_mechanism_telemetry: true
+  future_design_must_not_use_v90_answers: true
+  future_design_must_not_use_v90_references: true
+  future_design_must_not_use_v90_task_scores: true
+  future_design_must_not_use_v90_failure_identities: true
+  future_design_must_not_use_v90_generated_token_ids: true
+  future_heldout_materialized: false
+
+protocol_git_sha: 28fa497ca658a8dbbb2e1b8f821e65a95a3fbc69
+source_snapshot_sha256: 91844a51e34fc66ef12124639e03a2d4cd59bd33003111034411e5b79ed3165d
+run_root: /scratch/djy8hg/runs/mosaickv/choice-c-v90-cross-head-query-byte-allocation-calibration-v1
+execution_jobs:
+  submitted_ledger_array: 18664681
+  ledger_array_state: completed
+  ledger_exit_codes: ["0:0", "0:0"]
+  submitted_calibration_array: 18664682
+  calibration_state: completed
+  calibration_exit_codes: ["0:0", "0:0"]
+  maximum_calibration_elapsed: "00:15:58"
+  freeze_analysis: 18664683
+  freeze_state: completed_failed_closed_no_eligible_candidate
+  freeze_exit_code: "0:0"
+
+protocol:
+  path: configs/experiments/choice_c_v90_cross_head_query_byte_allocation_calibration.yaml
+  sha256: 4bc79dd4624c9956646f5abbaba8ad157c5d7842ba0ae5cdd8a67b21bbae2bbd
+parent_negative_result_seal:
+  path: configs/ledgers/choice_c_v89_negative_calibration_seal.yaml
+  sha256: dcbcdbb45b320696dee91de66bbf4aede175fda521d0782abc58ed52ae4befff
+
+execution_provenance:
+  model_id: llava-hf/llava-1.5-7b-hf
+  model_revision: b234b804b114d9e37bb655e11cbbb5f5e971b7a9
+  model_precision: fp16
+  backend: huggingface
+  prefill_attention_implementation: eager
+  decode_attention_implementation: sdpa
+  gpu_type: NVIDIA A100-SXM4-80GB
+  gpu_count_per_worker: 1
+  seed: 17
+  deterministic_algorithms: true
+  output_length: 64
+  python: 3.11.15
+  cuda: "12.8"
+  driver: 595.71.05
+  pytorch: 2.8.0
+  transformers: 4.55.2
+  vllm: 0.10.2
+  sglang: 0.5.1.post3
+  environment_lock: env/common/requirements.lock
+  environment_lock_sha256: fdc56ad9edb03e8bad5cb2108322c7a12b0f33bdd5533ed596dc6b695a2db9c0
+  cache_root: /scratch/djy8hg/cache/mosaickv
+  source_git_dirty: false
+  measurement_type: method_measured
+
+execution_integrity:
+  tasks: [docvqa, textvqa]
+  samples_per_task: 32
+  arms_per_task: 3
+  measured_rows: 192
+  completed_rows: 192
+  failed_rows: 0
+  rows_with_errors: 0
+  rows_with_missing_required_values: 0
+  calibration_references_present: false
+  calibration_task_scores_present: false
+
+common_candidate_properties:
+  effective_method: mosaickv_exact
+  tier_policy: exact_only_replacement
+  configured_active_byte_cap: 28500000
+  block_size: 4
+  prototype_fraction: 0.0
+  residual_bytes: 0
+  repair_enabled: false
+  query_coverage_objective: sum_q_min_tau_q_sum_selected_i_attention_q_i
+  cumulative_cap_fraction: 0.5
+  cross_head_query_conditioned_byte_reservation: true
+  supports_mosaickv_proto_claim: false
+  supports_mosaickv_full_claim: false
+
+observed_task_gates:
+  docvqa:
+    prompt_topk_fullkv_exact_answer_agreement: 0.5625
+    candidate_fullkv_exact_answer_agreement: 0.53125
+    candidate_delta_vs_prompt_topk: -0.03125
+    candidate_fullkv_token_agreement: 0.2119140625
+    prompt_topk_fullkv_token_agreement: 0.2841796875
+    candidate_active_kv_bytes: 27295744.0
+    prompt_topk_active_kv_bytes: 40730624.0
+    candidate_residual_kv_bytes: 0.0
+    active_reduction_fraction_vs_prompt_topk: 0.329847144006436
+    active_plus_residual_reduction_fraction_vs_prompt_topk: 0.329847144006436
+    memory_gate_pass: true
+    aggregate_fidelity_gate_pass: true
+  textvqa:
+    prompt_topk_fullkv_exact_answer_agreement: 0.9375
+    candidate_fullkv_exact_answer_agreement: 0.96875
+    candidate_delta_vs_prompt_topk: 0.03125
+    candidate_fullkv_token_agreement: 0.27783203125
+    prompt_topk_fullkv_token_agreement: 0.322265625
+    candidate_active_kv_bytes: 27623424.0
+    prompt_topk_active_kv_bytes: 40599552.0
+    candidate_residual_kv_bytes: 0.0
+    active_reduction_fraction_vs_prompt_topk: 0.3196125907990315
+    active_plus_residual_reduction_fraction_vs_prompt_topk: 0.3196125907990315
+    memory_gate_pass: true
+    aggregate_fidelity_gate_pass: true
+
+robust_gate_summary:
+  answer_folds_passed: 6
+  answer_folds_total: 8
+  token_folds_passed: 4
+  token_folds_total: 8
+  worst_fold_answer_delta_vs_prompt_topk: -0.125
+  worst_fold_token_delta_vs_prompt_topk: -0.1953125
+  overall_gate_pass: false
+
+aggregate_label_blind_mechanism_telemetry:
+  docvqa:
+    mean_allocated_bytes_per_sample: 1744768.0
+    mean_allocated_routes_per_sample: 68.8125
+    mean_changed_blocks_per_sample: 115.5
+    mean_normalized_query_coverage_gain: 0.463036117229379
+    prompt_mass_preservation_fraction: 0.9996902905824805
+  textvqa:
+    mean_allocated_bytes_per_sample: 1209984.0
+    mean_allocated_routes_per_sample: 47.03125
+    mean_changed_blocks_per_sample: 67.625
+    mean_normalized_query_coverage_gain: 0.24633876978063377
+    prompt_mass_preservation_fraction: 0.9998349563512461
+
+artifact_inventory:
+  algorithm: sha256_of_sorted_lines_each_formatted_as_file_sha256_two_spaces_relative_posix_path_newline
+  file_count: 266
+  total_bytes: 18048041
+  inventory_sha256: 72b1222e51298a86a3fe7a348ed50ad1f3aaaa33a1e272b6fb4d68a470d4162b
+artifacts:
+  calibration_docvqa_ledger:
+    path: inputs/calibration_docvqa.json
+    sha256: 13e97c2f1db675a791cd1a4c30b4f604b102492ce2afe7ed1aef88d6510e72e3
+  calibration_textvqa_ledger:
+    path: inputs/calibration_textvqa.json
+    sha256: 17829b7e9f8f012e9821f1b9b1a8e2387c10f003d5620800e763dab76e0aabab
+  base_analysis:
+    path: analysis/label_blind_calibration.json
+    sha256: e872afc92a78a47de5db722303cb9992eb5cdca592bab5041ad547849ed08feb
+  base_report:
+    path: analysis/label_blind_calibration.md
+    sha256: 53ae50518bbd368987f7d816c544d13a50c165a0eefb4be8323a35a380ca7535
+  trials:
+    path: analysis/label_blind_calibration_trials.parquet
+    sha256: e71a13a49c02660914721e0fe66747bd726502f35a602ea9c366ab8a9195e526
+  base_ranking:
+    path: analysis/label_blind_candidate_ranking.parquet
+    sha256: 10904fb26859048f78d8b701001e36e59714dbdbf0dfc409aa4c55134ddc8c54
+  robust_analysis:
+    path: analysis/robust_fidelity_calibration.json
+    sha256: b03589a44f610b906937f4f7141300811ff17ffdc1b3083f7c736066d6aae35c
+  robust_report:
+    path: analysis/robust_fidelity_calibration.md
+    sha256: 6b7029d4115de3c5f53180ab4ee15394deef067e047a859d44abc2efc572b5ec
+  robust_ranking:
+    path: analysis/robust_fidelity_candidate_ranking.parquet
+    sha256: 0bee639ea47d5984b419577497d3d111cef607d1a2c62a10b17f94322a6184f5
+  robust_folds:
+    path: analysis/robust_fidelity_folds.parquet
+    sha256: 49be6ae9c29af895821774172741c7c8b6aba17ea280359b2a8d6936e7e0e1a3
+
+future_protocol:
+  v90_must_remain_negative: true
+  frozen_candidate_must_remain_absent: true
+  heldout_campaign_must_remain_blocked: true
+  v91_requires_a_new_versioned_conservative_cross_head_stability_gate: true
+  v91_requires_fresh_disjoint_calibration_samples: true
+  v91_must_keep_memory_and_fidelity_gates_unchanged: true
+  v91_design_must_not_use_v90_answers_or_failure_identities: true
+  v91_must_fail_closed_to_scalar_prompt_topk_when_stability_gates_fail: true

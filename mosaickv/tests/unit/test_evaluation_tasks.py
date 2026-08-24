@@ -17,15 +17,33 @@ def test_registry_routes_public_scoring_to_lmms_eval() -> None:
     assert set(registry.names()) == {
         "chartqa",
         "docvqa",
+        "infovqa",
         "mmstar",
         "mmvet",
         "synthetic_ci",
         "textvqa",
+        "textvqa_train_calibration",
         "video_mme",
     }
     assert registry.resolve("textvqa").development_lmms_task == "textvqa_val"
     assert registry.resolve("docvqa").development_lmms_task == "docvqa_val"
     assert registry.resolve("chartqa").development_lmms_task == "chartqa"
+    text_train = registry.resolve("textvqa_train_calibration")
+    assert text_train.route_key == (
+        "lmms-lab/textvqa",
+        "default",
+        "train",
+        "textvqa_val",
+    )
+    assert text_train.lmms_split_override == "train"
+    assert text_train.reference_field == "answers"
+    assert registry.resolve("textvqa").reference_field == "answers"
+    assert registry.resolve("infovqa").route_key == (
+        "lmms-lab-encoder/DocVQA",
+        "InfographicVQA",
+        "validation",
+        "infovqa_val",
+    )
     assert registry.resolve("video_mme").requires_video is True
     with pytest.raises(RuntimeError, match="lmms_eval"):
         registry.resolve("chartqa").score_local("1", ("1",))

@@ -859,12 +859,26 @@ def test_stable_head_initial_query_coverage_selection_is_strict_and_exclusive() 
             "stable_head_query_coverage_initial_fraction": 0.25,
             "stable_head_query_coverage_initial_prompt_weight": 0.5,
             "stable_head_query_coverage_initial_minimum_prompt_mass_fraction": 0.9,
+            "stable_head_query_coverage_initial_objective": "capped_cumulative",
+            "stable_head_query_coverage_initial_cap_fraction": 0.5,
+            "stable_head_query_coverage_cross_head_allocation": True,
+            "stable_head_query_coverage_cross_head_stability_gate": True,
+            "stable_head_query_coverage_cross_head_stability_risk_mode": "output_impact",
+            "stable_head_query_coverage_cross_head_minimum_normalized_gain": 0.005,
+            "stable_head_query_coverage_cross_head_gain_to_prompt_loss_ratio": 4.0,
         }
     )
     assert config.stable_head_query_coverage_initial_selection
     assert config.stable_head_query_coverage_initial_fraction == 0.25
     assert config.stable_head_query_coverage_initial_prompt_weight == 0.5
     assert config.stable_head_query_coverage_initial_minimum_prompt_mass_fraction == 0.9
+    assert config.stable_head_query_coverage_initial_objective == "capped_cumulative"
+    assert config.stable_head_query_coverage_initial_cap_fraction == 0.5
+    assert config.stable_head_query_coverage_cross_head_allocation
+    assert config.stable_head_query_coverage_cross_head_stability_gate
+    assert config.stable_head_query_coverage_cross_head_stability_risk_mode == "output_impact"
+    assert config.stable_head_query_coverage_cross_head_minimum_normalized_gain == 0.005
+    assert config.stable_head_query_coverage_cross_head_gain_to_prompt_loss_ratio == 4.0
 
     with pytest.raises(ConfigurationError, match="requires stable_head_prompt_routing"):
         SelectionConfig(
@@ -887,6 +901,146 @@ def test_stable_head_initial_query_coverage_selection_is_strict_and_exclusive() 
         )
     with pytest.raises(ConfigurationError, match="controls require"):
         SelectionConfig(stable_head_query_coverage_initial_fraction=0.25)
+    with pytest.raises(ConfigurationError, match="must be 'max' or 'capped_cumulative'"):
+        SelectionConfig(stable_head_query_coverage_initial_objective="sum")
+    with pytest.raises(ConfigurationError, match=r"requires cap_fraction=1\.0"):
+        SelectionConfig(
+            stable_head_prompt_routing=True,
+            stable_head_query_coverage_initial_selection=True,
+            stable_head_query_coverage_initial_fraction=0.25,
+            stable_head_query_coverage_initial_cap_fraction=0.5,
+        )
+    with pytest.raises(ConfigurationError, match="requires capped_cumulative"):
+        SelectionConfig(
+            stable_head_prompt_routing=True,
+            stable_head_query_coverage_initial_selection=True,
+            stable_head_query_coverage_initial_fraction=0.25,
+            stable_head_query_coverage_cross_head_allocation=True,
+        )
+    with pytest.raises(ConfigurationError, match="controls require"):
+        SelectionConfig(stable_head_query_coverage_cross_head_allocation=True)
+    with pytest.raises(ConfigurationError, match="requires cross-head allocation"):
+        SelectionConfig(
+            stable_head_prompt_routing=True,
+            stable_head_query_coverage_initial_selection=True,
+            stable_head_query_coverage_initial_fraction=0.25,
+            stable_head_query_coverage_initial_objective="capped_cumulative",
+            stable_head_query_coverage_initial_cap_fraction=0.5,
+            stable_head_query_coverage_cross_head_stability_gate=True,
+            stable_head_query_coverage_cross_head_minimum_normalized_gain=0.005,
+            stable_head_query_coverage_cross_head_gain_to_prompt_loss_ratio=4.0,
+        )
+    with pytest.raises(ConfigurationError, match="positive minimum gain"):
+        SelectionConfig(
+            stable_head_prompt_routing=True,
+            stable_head_query_coverage_initial_selection=True,
+            stable_head_query_coverage_initial_fraction=0.25,
+            stable_head_query_coverage_initial_objective="capped_cumulative",
+            stable_head_query_coverage_initial_cap_fraction=0.5,
+            stable_head_query_coverage_cross_head_allocation=True,
+            stable_head_query_coverage_cross_head_stability_gate=True,
+            stable_head_query_coverage_cross_head_gain_to_prompt_loss_ratio=4.0,
+        )
+    with pytest.raises(ConfigurationError, match="must be 'prompt_mass' or 'output_impact'"):
+        SelectionConfig(stable_head_query_coverage_cross_head_stability_risk_mode="labels")
+    with pytest.raises(ConfigurationError, match="controls require"):
+        SelectionConfig(stable_head_query_coverage_cross_head_stability_risk_mode="output_impact")
+    output_impact = SelectionConfig(
+        stable_head_prompt_routing=True,
+        stable_head_query_coverage_initial_selection=True,
+        stable_head_query_coverage_initial_fraction=0.25,
+        stable_head_query_coverage_initial_objective="capped_cumulative",
+        stable_head_query_coverage_initial_cap_fraction=0.5,
+        stable_head_query_coverage_cross_head_allocation=True,
+        stable_head_query_coverage_output_impact_reservation=True,
+        stable_head_query_coverage_output_impact_fraction=0.5,
+    )
+    assert output_impact.stable_head_query_coverage_output_impact_reservation
+    assert output_impact.stable_head_query_coverage_output_impact_fraction == 0.5
+    with pytest.raises(ConfigurationError, match="requires a positive fraction"):
+        replace(output_impact, stable_head_query_coverage_output_impact_fraction=0.0)
+    with pytest.raises(ConfigurationError, match="cannot use post-selection"):
+        replace(
+            output_impact,
+            stable_head_query_coverage_cross_head_stability_gate=True,
+            stable_head_query_coverage_cross_head_minimum_normalized_gain=0.005,
+            stable_head_query_coverage_cross_head_gain_to_prompt_loss_ratio=4.0,
+        )
+    layout_group = SelectionConfig(
+        stable_head_prompt_routing=True,
+        stable_head_query_coverage_initial_selection=True,
+        stable_head_query_coverage_initial_fraction=0.25,
+        stable_head_query_coverage_initial_objective="capped_cumulative",
+        stable_head_query_coverage_initial_cap_fraction=0.5,
+        stable_head_query_coverage_cross_head_allocation=True,
+        stable_head_query_coverage_layout_group_reservation=True,
+        stable_head_query_coverage_layout_group_fraction=0.5,
+        stable_head_query_coverage_layout_group_maximum_blocks=4,
+        stable_head_query_coverage_layout_group_row_bins=4,
+    )
+    assert layout_group.stable_head_query_coverage_layout_group_reservation
+    assert layout_group.stable_head_query_coverage_layout_group_fraction == 0.5
+    assert layout_group.stable_head_query_coverage_layout_group_maximum_blocks == 4
+    with pytest.raises(ConfigurationError, match="at least two blocks"):
+        replace(layout_group, stable_head_query_coverage_layout_group_maximum_blocks=1)
+    with pytest.raises(ConfigurationError, match="mutually exclusive"):
+        replace(
+            layout_group,
+            stable_head_query_coverage_output_impact_reservation=True,
+            stable_head_query_coverage_output_impact_fraction=0.5,
+        )
+    with pytest.raises(ConfigurationError, match="controls require"):
+        SelectionConfig(stable_head_query_coverage_layout_group_maximum_blocks=4)
+    atomic_layout_group = replace(
+        layout_group,
+        stable_head_query_coverage_layout_group_atomic_selection=True,
+        stable_head_query_coverage_layout_group_minimum_utilization_fraction=0.75,
+        stable_head_query_coverage_layout_group_minimum_normalized_gain=0.000001,
+        stable_head_query_coverage_layout_group_gain_to_risk_ratio=1.01,
+    )
+    assert atomic_layout_group.stable_head_query_coverage_layout_group_atomic_selection
+    with pytest.raises(ConfigurationError, match="positive minimum gain"):
+        replace(
+            atomic_layout_group,
+            stable_head_query_coverage_layout_group_minimum_normalized_gain=0.0,
+        )
+    with pytest.raises(ConfigurationError, match="gain/risk ratio above 1"):
+        replace(
+            atomic_layout_group,
+            stable_head_query_coverage_layout_group_gain_to_risk_ratio=1.0,
+        )
+    with pytest.raises(ConfigurationError, match="require non-group stability gating"):
+        replace(
+            atomic_layout_group,
+            stable_head_query_coverage_layout_group_atomic_selection_mode="pareto_knapsack",
+        )
+    pareto_atomic_layout_group = replace(
+        atomic_layout_group,
+        stable_head_query_coverage_layout_group_atomic_selection_mode="pareto_knapsack",
+        stable_head_query_coverage_cross_head_stability_gate=True,
+        stable_head_query_coverage_cross_head_stability_risk_mode="output_impact",
+        stable_head_query_coverage_cross_head_minimum_normalized_gain=0.000001,
+        stable_head_query_coverage_cross_head_gain_to_prompt_loss_ratio=1.01,
+    )
+    assert (
+        pareto_atomic_layout_group.stable_head_query_coverage_layout_group_atomic_selection_mode
+        == "pareto_knapsack"
+    )
+    with pytest.raises(ConfigurationError, match="output-impact risk"):
+        replace(
+            pareto_atomic_layout_group,
+            stable_head_query_coverage_cross_head_stability_risk_mode="prompt_mass",
+        )
+    joint_donor_atomic_layout_group = replace(
+        pareto_atomic_layout_group,
+        stable_head_query_coverage_layout_group_atomic_selection_mode=(
+            "pareto_joint_donor_knapsack"
+        ),
+    )
+    assert (
+        joint_donor_atomic_layout_group.stable_head_query_coverage_layout_group_atomic_selection_mode
+        == "pareto_joint_donor_knapsack"
+    )
 
 
 def test_prototype_configuration_rejects_invalid_modality_pairs() -> None:

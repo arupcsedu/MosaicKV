@@ -91,6 +91,19 @@ def _trace(root: Path, run_id: str) -> dict[str, Any]:
     return result
 
 
+def _checkpoint_model_kwargs(hub_cache: Path, *, allow_download: bool) -> dict[str, Any]:
+    """Return loader kwargs compatible with the pinned Transformers 4.55.2 lock."""
+
+    return {
+        "attn_implementation": "eager",
+        "cache_dir": str(hub_cache),
+        "device_map": "auto",
+        "torch_dtype": "auto",
+        "local_files_only": not allow_download,
+        "low_cpu_mem_usage": True,
+    }
+
+
 def validate(max_new_tokens: int) -> dict[str, Any]:
     """Run every method on three real randomly initialized HF architectures."""
 
@@ -233,14 +246,10 @@ def validate_checkpoint(args: argparse.Namespace) -> dict[str, Any]:
     adapter = load_hf_adapter(
         model_id,
         revision=revision,
-        model_kwargs={
-            "attn_implementation": "eager",
-            "cache_dir": str(hub_cache),
-            "device_map": "auto",
-            "dtype": "auto",
-            "local_files_only": not args.allow_download,
-            "low_cpu_mem_usage": True,
-        },
+        model_kwargs=_checkpoint_model_kwargs(
+            hub_cache,
+            allow_download=bool(args.allow_download),
+        ),
         processor_kwargs={
             "cache_dir": str(hub_cache),
             "local_files_only": not args.allow_download,

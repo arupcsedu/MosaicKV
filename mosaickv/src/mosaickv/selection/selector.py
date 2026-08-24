@@ -78,6 +78,103 @@ def select_all_exact(
     )
 
 
+def select_exact_subset(
+    objective: BudgetedObjective,
+    budget: SelectionBudget,
+    selected_node_ids: Iterable[int],
+) -> SelectionResult:
+    """Record one explicit exact subset without rerunning the optimizer.
+
+    This path is used after a separate, auditable controller has already made
+    its eviction decisions. It preserves the graph-local node namespace and
+    reconstructs complete selection telemetry for cache construction.
+    """
+
+    graph = objective.graph
+    selected_ids = tuple(sorted(set(int(node_id) for node_id in selected_node_ids)))
+    if any(node_id < 0 or node_id >= len(graph.nodes) for node_id in selected_ids):
+        raise ValueError("explicit exact subset contains a node outside the graph")
+    selected_set = frozenset(selected_ids)
+    missing_mandatory = tuple(
+        node.node_id
+        for node in graph.nodes
+        if node.block.mandatory and node.node_id not in selected_set
+    )
+    if missing_mandatory:
+        raise InfeasibleSelectionBudgetError(
+            "explicit exact subset omits mandatory nodes: "
+            f"{missing_mandatory}"
+        )
+    costs = tuple(budget.cost(node.block) for node in graph.nodes)
+    spent = sum(costs[node_id] for node_id in selected_ids)
+    if spent > budget.value:
+        raise InfeasibleSelectionBudgetError(
+            "explicit exact subset exceeds the configured selection budget: "
+            f"required={spent}, budget={budget.value}, unit={budget.unit.value}"
+        )
+
+    mandatory = tuple(
+        node_id for node_id in selected_ids if graph.nodes[node_id].block.mandatory
+    )
+    optional = tuple(
+        node_id for node_id in selected_ids if not graph.nodes[node_id].block.mandatory
+    )
+    order = mandatory + optional
+    incremental = objective.incremental_state()
+    decisions: dict[int, SelectionDecision] = {}
+    for rank, node_id in enumerate(order):
+        gain = incremental.select(node_id)
+        cost = costs[node_id]
+        decisions[node_id] = SelectionDecision._from_validated(
+            node_id=node_id,
+            selected=True,
+            selection_rank=rank,
+            marginal_gain=gain,
+            marginal_gain_per_cost=gain / cost,
+            cost=cost,
+            reason=(
+                SelectionReason.MANDATORY_EXACT
+                if graph.nodes[node_id].block.mandatory
+                else SelectionReason.DENSE_CACHE_FILL
+            ),
+        )
+    unselected_ids = tuple(
+        node.node_id for node in graph.nodes if node.node_id not in selected_set
+    )
+    final_gains = dict(
+        zip(
+            unselected_ids,
+            incremental.marginal_gains(unselected_ids),
+            strict=True,
+        )
+    )
+    for node_id in unselected_ids:
+        cost = costs[node_id]
+        gain = final_gains[node_id]
+        decisions[node_id] = SelectionDecision._from_validated(
+            node_id=node_id,
+            selected=False,
+            selection_rank=None,
+            marginal_gain=gain,
+            marginal_gain_per_cost=gain / cost,
+            cost=cost,
+            reason=SelectionReason.NOT_SELECTED_LOWER_GAIN,
+        )
+
+    selected_blocks = tuple(graph.nodes[node_id].block for node_id in selected_ids)
+    return SelectionResult(
+        selected_blocks=selected_blocks,
+        selection_order=order,
+        decisions=tuple(decisions[node_id] for node_id in range(len(graph.nodes))),
+        budget=budget,
+        budget_spent=spent,
+        active_bytes=sum(block.byte_size for block in selected_blocks),
+        objective=objective.evaluate(selected_ids),
+        heap_pops=0,
+        marginal_recomputations=0,
+    )
+
+
 def _entry(
     node_id: int,
     marginal_gain: float,
@@ -722,4 +819,9 @@ def lazy_greedy_select(
     )
 
 
-__all__ = ["InfeasibleSelectionBudgetError", "lazy_greedy_select", "select_all_exact"]
+__all__ = [
+    "InfeasibleSelectionBudgetError",
+    "lazy_greedy_select",
+    "select_all_exact",
+    "select_exact_subset",
+]

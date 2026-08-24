@@ -1,0 +1,475 @@
+schema_version: 1
+revision: "103.0-draft-review-required"
+experiment_id: choice_c_v103_fresh_identity_calibration
+classification: preregistered_draft_unscanned_unmaterialized_unsubmitted
+protocol_status: draft_review_required_all_actions_disabled
+draft_date: "2026-08-23"
+
+authorization:
+  protocol_commit_created: false
+  protocol_reviewed_after_commit: false
+  exclusion_scan_authorized: false
+  id_catalog_reuse_review_authorized: false
+  preflight_ledger_materialization_authorized: false
+  calibration_ledger_materialization_authorized: false
+  disjointness_check_authorized: false
+  gpu_preflight_authorized: false
+  calibration_execution_authorized: false
+  candidate_freeze_authorized: false
+  heldout_materialization_authorized: false
+  heldout_evaluation_authorized: false
+  slurm_or_other_job_submission_authorized: false
+
+version_boundary:
+  protocol_draft_parent_git_sha: 3563c669b70cc923eec1d76a4cb0f53bc1144a6a
+  protocol_commit_git_sha: null
+  protocol_commit_policy: commit_containing_this_protocol_becomes_the_v103_preregistration_boundary
+  v102_negative_seal_git_sha: 3563c669b70cc923eec1d76a4cb0f53bc1144a6a
+  v102_negative_seal_path: configs/ledgers/choice_c_v102_negative_debug_gate_seal.yaml
+  v102_negative_seal_sha256: 1f100eee354f553d16e8a41921b7bc0edec559a62a9090bbceb650496c394ab8
+  v102_protocol_path: configs/experiments/choice_c_v102_v100_fresh_cross_dataset_calibration.yaml
+  v102_protocol_sha256: d68bc737aecdc9383dbb47ee2eea830a1d9aeaf24c22b9973be59cc299e337c3
+  v102_is_sealed_negative: true
+  v102_frozen_candidate_exists: false
+  v102_execution_must_remain_disabled: true
+
+candidate_boundary:
+  candidate_name: v100_hierarchical_head_local_logit_safe_exact
+  effective_method: mosaickv_exact
+  algorithm_implementation_git_sha: 820037afb3cc74a9f949df1555a2441680f9660e
+  algorithm_protocol_path: configs/experiments/choice_c_v100_hierarchical_head_local_logit_safe_design.yaml
+  algorithm_protocol_sha256: 69aed21ee82c5cf338eeb4ecff2a8dd0481d4d04fb378831339da0cfa9effac4
+  base_config_path: configs/experiments/choice_c_v72_frozen_candidate.yaml
+  base_config_sha256: 8bb0add49a858df8bfa936bc932e919ce847511cdccd5e3ce5407b91cd1996b9
+  minimum_runtime_correction_git_sha: 3563c669b70cc923eec1d76a4cb0f53bc1144a6a
+  allowed_post_algorithm_changes:
+    - structured_hard_budget_fallback_trace_before_final_cache_packing
+    - textvqa_reference_annotation_list_provenance
+    - protocol_submission_guards
+  algorithm_or_hyperparameter_change_allowed: false
+  v102_answers_references_scores_or_failure_identities_used_for_algorithm_or_hyperparameters: false
+  v102_engineering_defects_used_to_define_fail_closed_trace_requirements: true
+  single_fixed_candidate_no_search: true
+
+freshness_definition:
+  freshness_unit: canonical_sample_identity
+  canonical_identity_fields:
+    - dataset_id
+    - dataset_config
+    - dataset_revision
+    - split
+    - sample_id
+  fresh_means_absent_from_every_prior_input_debug_calibration_evaluation_and_heldout_artifact: true
+  same_dataset_split_may_be_reused_only_for_unseen_canonical_identities: true
+  pool_level_novelty_claimed: false
+  sample_level_freshness_claimed_before_scan_review: false
+  labels_answers_references_scores_media_prompts_and_failure_outcomes_forbidden_during_selection: true
+  all_v102_ledger_identities_mandatorily_excluded: true
+  all_v102_debug_identities_mandatorily_excluded: true
+  any_ambiguous_relevant_artifact_blocks_materialization: true
+
+fresh_exclusion_scan:
+  status: planned_not_authorized
+  execution_mode: local_cpu_only
+  clean_committed_source_required: true
+  scanner_implementation_source: scripts/choice_c_v102_sample_tooling.py
+  scanner_output_schema: configuration_aware_identity_manifest_v2_or_newer
+  v103_tooling_compatibility_status: not_reviewed_not_authorized
+  v102_specific_authorization_guards_must_not_be_bypassed: true
+  v103_compatibility_requires_synthetic_cpu_tests_and_separate_review: true
+  recursively_scan_roots:
+    - configs/ledgers
+    - /scratch/djy8hg/runs/mosaickv
+  mandatory_bound_sources:
+    - role: v102_textvqa_complete_selected_ledger
+      path: /scratch/djy8hg/runs/mosaickv/choice-c-v102-v100-fresh-cross-dataset-calibration-v1/inputs/calibration_textvqa_train.json
+      sha256: a0667e45729639b1830a308d97d46662f3e6c6c76ddda97749d0663fc329b242
+      expected_unique_identities: 32
+    - role: v102_infovqa_complete_selected_ledger
+      path: /scratch/djy8hg/runs/mosaickv/choice-c-v102-v100-fresh-cross-dataset-calibration-v1/inputs/calibration_infovqa.json
+      sha256: 3308465e540f98dac1003e85a78403968a90ed19bd7d23fe5b2ec6ad8da258c5
+      expected_unique_identities: 32
+    - role: v102_negative_seal
+      path: configs/ledgers/choice_c_v102_negative_debug_gate_seal.yaml
+      sha256: 1f100eee354f553d16e8a41921b7bc0edec559a62a9090bbceb650496c394ab8
+  required_v102_unique_identity_count: 64
+  required_v102_textvqa_train_identity_count: 32
+  required_v102_infovqa_validation_identity_count: 32
+  require_every_prior_repository_ledger: true
+  require_every_prior_scratch_result_row: true
+  require_source_path_sha256_and_identity_count: true
+  inspect_only_identity_and_provenance_fields: true
+  inspect_answers_references_scores_media_prompts_or_failure_outcomes: false
+  planned_output: /scratch/djy8hg/runs/mosaickv/choice-c-v103-fresh-identity-calibration-v1/inputs/exclusion_manifest.json
+  immutable_write_once_output_required: true
+  output_must_not_exist_before_authorized_scan: true
+  manifest_hash_and_content_review_required_before_next_action: true
+  scan_authorized: false
+  scan_performed: false
+  manifest_reviewed: false
+  manifest_sealed: false
+
+reviewed_id_catalogs:
+  status: planned_reuse_review_not_authorized
+  rationale: reuse_only_complete_id_only_catalogs_then_apply_the_new_v103_exclusion_manifest
+  catalog_rows_contain_labels_answers_references_scores_or_media: false
+  catalogs:
+    - task: textvqa_train_calibration
+      path: /scratch/djy8hg/runs/mosaickv/choice-c-v102-v100-fresh-cross-dataset-calibration-v1/inputs/catalog_textvqa_train_id_projected_v2.json
+      sha256: 5a6f700a623da65ae62bf4abc7317dcea48f0a9388f4047d3de8cfd643aece8d
+      expected_id_count: 34602
+    - task: infovqa
+      path: /scratch/djy8hg/runs/mosaickv/choice-c-v102-v100-fresh-cross-dataset-calibration-v1/inputs/catalog_infovqa_validation_id_projected_v2.json
+      sha256: 38907d03d42a6c52d898b3a543ad2cd737b85569c465ad301ca148aa72e4308c
+      expected_id_count: 2801
+  rehash_and_schema_review_required_after_exclusion_manifest_review: true
+  reuse_authorized: false
+  reuse_reviewed: false
+
+deterministic_selection:
+  status: planned_not_authorized
+  selection_seed: 496373287
+  selection_seed_derivation: first_32_bits_of_sha256_choice-c-v103-fresh-identity-calibration-v1
+  ordering: sha256_digest_ascending_then_canonical_identity
+  hash_preimage_fields:
+    - experiment_id
+    - task
+    - dataset_id
+    - dataset_config
+    - dataset_revision
+    - split
+    - selection_seed
+    - canonical_sample_identity
+  exclude_before_ranking: true
+  choose_first_n_remaining: true
+  task_local_ordering: true
+  selection_must_be_reproducible_byte_for_byte: true
+  insufficient_eligible_pool_fails_closed: true
+  no_replacement_after_outcome_inspection: true
+
+tasks:
+  - task: textvqa_train_calibration
+    task_family: textvqa
+    dataset_id: lmms-lab/textvqa
+    dataset_config: default
+    dataset_revision: 9c0699cd19768ac5ab97568f6b3cbac4c0062884
+    split: train
+    expected_split_cardinality: 34602
+    runtime_task_template: textvqa_val
+    runtime_split_override: train
+    reference_provenance_field: answers
+    reference_provenance_type: annotation_list
+    forbidden_literal_reference: answer
+    preflight_sample_count: 2
+    calibration_sample_count: 32
+    preflight_ledger: /scratch/djy8hg/runs/mosaickv/choice-c-v103-fresh-identity-calibration-v1/inputs/preflight_textvqa_train.json
+    calibration_ledger: /scratch/djy8hg/runs/mosaickv/choice-c-v103-fresh-identity-calibration-v1/inputs/calibration_textvqa_train.json
+  - task: infovqa
+    task_family: ocr_document
+    dataset_id: lmms-lab-encoder/DocVQA
+    dataset_config: InfographicVQA
+    dataset_revision: 539088ef8a8ada01ac8e2e6d4e372586748a265e
+    split: validation
+    expected_split_cardinality: 2801
+    runtime_task_template: infovqa_val
+    reference_provenance_field: answers
+    reference_provenance_type: annotation_list
+    preflight_sample_count: 2
+    calibration_sample_count: 32
+    preflight_ledger: /scratch/djy8hg/runs/mosaickv/choice-c-v103-fresh-identity-calibration-v1/inputs/preflight_infovqa.json
+    calibration_ledger: /scratch/djy8hg/runs/mosaickv/choice-c-v103-fresh-identity-calibration-v1/inputs/calibration_infovqa.json
+
+ledger_materialization:
+  status: planned_not_authorized
+  preflight_and_calibration_ledgers_are_separate: true
+  preflight_ids_assigned_before_calibration_ids: true
+  preflight_ids_count_per_task: 2
+  calibration_ids_count_per_task: 32
+  total_planned_unique_identities: 68
+  write_once_mode: "0444"
+  include_only_identity_and_dataset_provenance: true
+  include_answers_references_scores_media_prompts_or_failure_outcomes: false
+  record_exclusion_manifest_sha256: true
+  record_catalog_sha256: true
+  record_protocol_git_sha: true
+  record_protocol_sha256: true
+  preflight_ledgers_materialized_before_gpu_preflight: true
+  calibration_ledgers_materialized_before_gpu_preflight: false
+  calibration_materialization_requires_sealed_positive_preflight: true
+  failed_preflight_must_leave_calibration_ledgers_absent: true
+  preflight_materialization_authorized: false
+  calibration_materialization_authorized: false
+  materialization_performed: false
+
+new_disjointness_review:
+  status: planned_not_authorized
+  checker_execution_mode: local_cpu_only
+  require_zero_overlap_with_new_exclusion_manifest: true
+  require_zero_overlap_between_preflight_and_calibration: true
+  require_zero_cross_task_canonical_identity_duplicates: true
+  require_exact_dataset_config_revision_and_split: true
+  require_exact_preflight_count_per_task: 2
+  require_exact_calibration_count_per_task: 32
+  require_all_68_selected_identities_unique: true
+  require_v102_64_identity_exclusion_coverage: true
+  preflight_report:
+    planned_output: /scratch/djy8hg/runs/mosaickv/choice-c-v103-fresh-identity-calibration-v1/inputs/preflight_disjointness_report.json
+    selected_identity_count: 4
+    required_before_gpu_preflight: true
+    checker_performed: false
+    report_reviewed: false
+    report_sealed: false
+  calibration_report:
+    planned_output: /scratch/djy8hg/runs/mosaickv/choice-c-v103-fresh-identity-calibration-v1/inputs/calibration_disjointness_report.json
+    selected_identity_count_including_preflight: 68
+    require_zero_overlap_with_preflight_ledgers: true
+    required_before_full_calibration: true
+    checker_performed: false
+    report_reviewed: false
+    report_sealed: false
+  each_report_hash_and_content_review_required: true
+  checker_authorized: false
+
+fixed_runtime:
+  model_id: llava-hf/llava-1.5-7b-hf
+  model_revision: b234b804b114d9e37bb655e11cbbb5f5e971b7a9
+  precision: fp16
+  backend: huggingface
+  prefill_attention_implementation: eager
+  decode_attention_implementation: sdpa
+  processor_and_chat_template_identical_across_arms: true
+  media_preprocessing_identical_across_arms: true
+  prompt_text_and_tokenization_identical_across_arms: true
+  generation_seed: 17
+  deterministic_generation: true
+  do_sample: false
+  temperature: 0.0
+  top_p: 1.0
+  output_length: 64
+  warmups_per_arm: 1
+  measured_repetitions_per_arm: 1
+
+controlled_comparison_contract:
+  identical_across_arms:
+    - model_weights_and_precision
+    - processor_and_chat_template
+    - media_and_media_preprocessing
+    - prompt_text
+    - tokenization
+    - generation_parameters
+    - output_length
+    - active_kv_byte_budget
+    - mandatory_token_policy
+    - block_granularity
+    - prefill_attention_backend
+    - decode_attention_backend
+    - warmup_count
+    - measurement_protocol
+  pair_every_arm_on_the_same_canonical_sample_identity: true
+  active_kv_bytes_are_the_primary_budget: true
+  nominal_retention_ratio_comparisons_forbidden: true
+  failed_samples_must_be_preserved_as_error_rows: true
+  no_sample_may_silently_disappear: true
+
+required_run_provenance:
+  every_row_or_immutable_manifest_must_record:
+    - git_sha
+    - config_sha
+    - model_id
+    - model_revision
+    - dataset_id
+    - dataset_config
+    - dataset_revision
+    - dataset_split
+    - cuda_runtime_version
+    - nvidia_driver_version
+    - pytorch_version
+    - transformers_version
+    - vllm_version_or_not_used
+    - sglang_version_or_not_used
+    - gpu_type
+    - gpu_count
+    - backend
+    - prefill_attention_implementation
+    - decode_attention_implementation
+    - seed
+    - measurement_type
+    - worktree_dirty
+  clean_worktree_required: true
+  dirty_patch_not_accepted_for_canonical_rows: true
+  missing_provenance_fails_the_row: true
+
+cache_contract:
+  common_block_size_tokens: 4
+  physical_budget_block_size_tokens: 4
+  mandatory_policy: last_token
+  candidate_active_byte_cap: 28500000
+  candidate_tier_policy: exact_only
+  prototype_merging_enabled: false
+  residual_storage_enabled: false
+  repair_enabled: false
+  primary_memory_axis: measured_active_kv_bytes
+  secondary_memory_axis: measured_active_plus_residual_kv_bytes
+  nominal_retention_comparisons_forbidden: true
+  exact_byte_accounting_required_per_sample: true
+  hard_budget_fallback_is_a_failed_candidate_row: true
+  hard_budget_fallback_must_not_pack_final_over_budget_cache: true
+
+arms:
+  - full_kv
+  - prompt_attention_topk
+  - v100_hierarchical_head_local_logit_safe_exact
+
+candidate:
+  id: v100_hierarchical_head_local_logit_safe_exact
+  effective_method: mosaickv_exact
+  tier_policy: exact_only_replacement
+  active_budget_bytes: 28500000
+  block_size_tokens: 4
+  forecast_mode: prompt_window
+  forecast_prompt_window: 16
+  forecast_draft_steps: 0
+  physical_capacity_fraction: 1.0
+  maximum_prototypes_per_head: 0
+  residual_storage_enabled: false
+  repair_enabled: false
+  hierarchical_logit_safe_eviction: true
+  hierarchical_partition_count: 8
+  hierarchical_maximum_refinement_depth: 2
+  hierarchical_maximum_candidate_evaluations: 24
+  hierarchical_maximum_sequential_rounds: 6
+  hierarchical_maximum_rollback_rounds: 2
+  hierarchical_horizon: 2
+  hierarchical_maximum_kl: 0.02
+  hierarchical_maximum_logit_difference: 1.0
+  hierarchical_greedy_token_match_required: true
+  every_sample_must_reach_target: true
+  every_final_joint_gate_must_pass: true
+  configuration_source_is_v100_protocol_plus_v72_base_config: true
+  no_v103_parameter_search: true
+
+gpu_preflight_gate:
+  status: planned_not_authorized
+  run_only_preflight_ledgers: true
+  arms_required_on_identical_samples:
+    - full_kv
+    - prompt_attention_topk
+    - v100_hierarchical_head_local_logit_safe_exact
+  every_candidate_sample_must_reach_compressed_target: true
+  every_candidate_sample_must_complete: true
+  every_trace_must_record:
+    - status
+    - effective_method
+    - used_fullkv_fallback
+    - attempted_active_kv_bytes
+    - hard_active_kv_budget_bytes
+    - probe_decisions
+    - timing_breakdown
+    - byte_budget_materialization
+  fullkv_fallback_permitted_as_safe_runtime_behavior: true
+  fullkv_fallback_passes_preflight: false
+  missing_or_literal_textvqa_reference_fails_preflight: true
+  over_budget_final_cache_pack_fails_preflight: true
+  failed_or_incomplete_sample_fails_preflight: true
+  calibration_may_be_authorized_only_after_separate_positive_preflight_review: true
+  gpu_preflight_authorized: false
+
+unchanged_memory_and_fidelity_gates:
+  memory_comparator: prompt_attention_topk
+  minimum_active_reduction_fraction_vs_prompt_topk: 0.30
+  minimum_active_plus_residual_reduction_fraction_vs_prompt_topk: 0.30
+  fullkv_answer_noninferiority_margin_vs_prompt_topk: 0.05
+  fullkv_token_noninferiority_margin_vs_prompt_topk: 0.05
+  require_every_task: true
+  robust_fold_count: 4
+  expected_samples_per_fold: 8
+  fold_assignment: sha256_sorted_round_robin
+  fold_assignment_salt: choice-c-v103-fresh-identity-calibration-v1
+  require_every_fold: true
+  maximum_prototype_logical_fraction: 0.0
+  require_zero_residual_bytes: true
+  require_every_sample_to_reach_target: true
+  require_every_final_joint_logit_gate: true
+  maximum_forward_kl: 0.02
+  maximum_absolute_logit_difference: 1.0
+  require_greedy_token_match: true
+  require_all_rows_complete: true
+  forbid_nan_or_missing_measurements: true
+  latency_is_informational_not_a_gate: true
+
+calibration_and_freeze:
+  status: planned_conditionally_blocked
+  calibration_execution_authorized: false
+  candidate_freeze_authorized: false
+  full_calibration_requires_positive_preflight_seal: true
+  paired_examples_required: true
+  task_results_reported_separately: true
+  incompatible_task_metrics_must_not_be_averaged: true
+  candidate_search_or_retuning_allowed: false
+  create_frozen_candidate_only_if_every_unchanged_gate_passes: true
+  planned_frozen_candidate: /scratch/djy8hg/runs/mosaickv/choice-c-v103-fresh-identity-calibration-v1/analysis/frozen_candidate.yaml
+
+scientific_boundary:
+  v102_answers_references_scores_and_failure_identities_inspected: true
+  v102_outcomes_used_to_choose_v103_sample_identities: false
+  v102_outcomes_used_to_change_candidate_or_hyperparameters: false
+  v102_complete_selected_ledgers_excluded_conservatively: true
+  v103_labels_answers_references_scores_media_prompts_and_failure_outcomes_unaccessed: true
+  benchmark_labels_required_online: false
+  calibration_primary_reference: deterministic_fullkv_output_on_same_sample
+  method_is_training_free: true
+  future_heldout_materialization_before_candidate_freeze_forbidden: true
+  no_freshness_or_performance_claim_before_required_reviews: true
+
+review_sequence:
+  - step: commit_and_review_protocol
+    authorized: false
+    required_before: exclusion_scan
+  - step: authorize_run_hash_and_review_identity_only_exclusion_scan
+    authorized: false
+    required_before: id_catalog_reuse_review
+  - step: rehash_and_review_id_only_catalogs
+    authorized: false
+    required_before: ledger_materialization
+  - step: authorize_and_materialize_preflight_ledgers_only
+    authorized: false
+    scope_at_this_stage: preflight_ledgers_only
+    required_before: preflight_disjointness_check
+  - step: authorize_run_hash_and_review_preflight_disjointness_report
+    authorized: false
+    required_before: gpu_preflight
+  - step: authorize_gpu_preflight_only
+    authorized: false
+    required_before: calibration
+  - step: review_and_seal_positive_or_negative_preflight
+    authorized: false
+    required_before: calibration_ledger_materialization
+  - step: conditionally_authorize_calibration_ledger_materialization
+    authorized: false
+    required_before: calibration_disjointness_check
+  - step: authorize_run_hash_and_review_calibration_disjointness_report
+    authorized: false
+    required_before: calibration
+  - step: conditionally_authorize_full_calibration
+    authorized: false
+    required_before: candidate_freeze
+  - step: conditionally_freeze_only_if_every_gate_passes
+    authorized: false
+    required_before: any_heldout_protocol
+
+outputs:
+  output_root: /scratch/djy8hg/runs/mosaickv/choice-c-v103-fresh-identity-calibration-v1
+  output_root_must_not_exist_during_draft_review: true
+  no_output_created_by_this_draft: true
+
+submission_policy:
+  any_job_allowed: false
+  local_exclusion_scan_allowed: false
+  catalog_reuse_review_allowed: false
+  ledger_materialization_allowed: false
+  disjointness_check_allowed: false
+  gpu_preflight_allowed: false
+  calibration_allowed: false
+  freeze_allowed: false
+  heldout_allowed: false
+  reason: draft_requires_commit_and_stepwise_explicit_authorization

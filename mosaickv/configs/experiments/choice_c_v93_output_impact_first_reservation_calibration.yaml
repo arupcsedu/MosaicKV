@@ -1,0 +1,230 @@
+schema_version: 1
+revision: "93.1"
+experiment_id: choice_c_v93_output_impact_first_reservation_calibration
+classification: preregistered_fresh_disjoint_label_blind_output_impact_first_calibration
+analysis_label: V93
+prior_result_exclusion_boundary: v92_and_all_prior_choice_c_runs
+selection_rule_frozen_before_calibration: true
+execution_status: prepared_waiting_for_clean_commit
+frozen_candidate_classification: frozen_v93_output_impact_first_candidate
+parent_negative_result_seal: configs/ledgers/choice_c_v92_negative_calibration_seal.yaml
+
+scientific_boundary:
+  prior_choice_c_runs_used_only_as_sample_exclusion_boundaries: true
+  aggregate_v92_mechanism_activity_used_for_design: true
+  v92_answers_used_for_design: false
+  v92_references_used_for_design: false
+  v92_task_scores_used_for_design: false
+  v92_failure_identities_used_for_design: false
+  v92_generated_token_ids_used_for_design: false
+  v92_per_sample_telemetry_used_for_design: false
+  v92_candidate_revised: false
+  calibration_labels_accessed: false
+  official_task_scores_accessed: false
+  benchmark_labels_required_online: false
+  method_is_training_free: true
+  future_heldout_materialization_before_freeze_forbidden: true
+
+protocol_amendment:
+  configured_active_byte_cap_frozen_bytes: 28500000
+  block_size_frozen_tokens: 4
+  exact_only_candidate_family: true
+  prototype_heavy_candidates_allowed: false
+  residual_storage_allowed: false
+  repair_allowed: false
+  prompt_query_axis_preserved: true
+  capped_cumulative_query_mass_enabled: true
+  cross_head_query_conditioned_byte_reservation_enabled: true
+  output_impact_initial_reservation_enabled: true
+  post_selection_output_impact_gate_enabled: false
+  mandatory_blocks_never_replaced: true
+  dense_hf_physical_position_limit_unchanged: true
+  ragged_physical_head_storage_claimed: false
+  memory_gate_unchanged: true
+  fidelity_gate_unchanged: true
+
+design:
+  name: output_impact_first_cross_head_capped_cumulative_reservation
+  candidate_scope: scalar_prompt_topk_exact_optional_blocks
+  protected_core_stage: before_query_coverage_allocation
+  pooled_value_definition: fp32_mean_value_vector_over_each_source_block
+  nearest_value_deviation_formula: >-
+    min_{j in same_route_scalar_core, j != i}
+    ||v_i-v_j||_2 / (||v_i||_2+||v_j||_2+epsilon)
+  singleton_value_deviation: 1.0
+  output_impact_score_formula: >-
+    prompt_attention_i / total_optional_route_prompt_attention
+    * nearest_value_deviation_i
+  output_impact_tie_breaking: descending_score_then_descending_prompt_share_then_node_id
+  complete_reservation_fraction: 0.25
+  output_impact_share_of_reservation: 0.5
+  effective_output_impact_fraction_of_optional_capacity: 0.125
+  remaining_reservation_use: capped_cumulative_prompt_query_coverage
+  coverage_objective: sum_q_min_tau_q_sum_selected_i_attention_q_i
+  coverage_formula: "sum_q min(tau_q, sum_{i in S} a_qi)"
+  cap_definition: tau_q_equals_0.5_times_complete_route_query_mass_q
+  cumulative_cap_fraction: 0.5
+  head_allocation_risk: normalized_uncovered_capped_cumulative_mass_under_scalar_prompt_topk
+  allocation_priority: head_risk_divided_by_one_plus_already_reserved_fraction
+  within_head_query_priority: normalized_marginal_capped_query_mass_plus_weighted_prompt_mass
+  prompt_mass_weight: 0.5
+  minimum_prompt_mass_fraction_vs_same_capacity_scalar_anchor: 0.95
+  exact_capacity_rule: >-
+    protect_only_scalar_core_blocks_then_add_query_blocks_only_if_remaining
+    block_sizes_can_fill_the_target_exactly
+  active_byte_change_vs_same_capacity_anchor: 0
+  dense_layout_interpretation: >-
+    Output-impact protection changes which scalar exact blocks can be
+    displaced inside an existing head capacity. It does not create ragged
+    physical tensors or change the shared backend position limit.
+  reason: >-
+    V92 passed both task memory gates but its post-selection output-impact
+    gate rejected every query-coverage change and still failed fidelity.
+    V93 therefore moves the same label-blind signal before query allocation:
+    high-impact scalar exact blocks are protected first, and query diversity
+    competes only for the remaining reservation.
+  ocr_metadata_claimed: false
+  note: >-
+    V92 answers, references, scores, generated tokens, per-sample telemetry,
+    and failure identities were not inspected for this design. Only sealed
+    aggregate gate outcomes and aggregate mechanism activity informed V93.
+
+common_cache_policy:
+  block_size: 4
+  physical_budget_block_size: 4
+  physical_budget_mandatory_policy: last_token
+
+candidate_config: configs/experiments/choice_c_v72_frozen_candidate.yaml
+model_id: llava-hf/llava-1.5-7b-hf
+model_revision: b234b804b114d9e37bb655e11cbbb5f5e971b7a9
+backend: hf_eager_prefill_sdpa_decode
+seed: 17
+output_length: 64
+warmups_per_arm: 1
+measured_repetitions_per_arm: 1
+
+tasks:
+  - task: docvqa
+    dataset_id: lmms-lab/DocVQA
+    dataset_revision: 539088ef8a8ada01ac8e2e6d4e372586748a265e
+    split: validation
+    ledger: /scratch/djy8hg/runs/mosaickv/choice-c-v93-output-impact-first-reservation-calibration-v1/inputs/calibration_docvqa.json
+    selection_seed: 20280823
+    sample_count: 32
+  - task: textvqa
+    dataset_id: lmms-lab/textvqa
+    dataset_revision: 9c0699cd19768ac5ab97568f6b3cbac4c0062884
+    split: validation
+    ledger: /scratch/djy8hg/runs/mosaickv/choice-c-v93-output-impact-first-reservation-calibration-v1/inputs/calibration_textvqa.json
+    selection_seed: 20280823
+    sample_count: 32
+
+candidates:
+  - id: output_impact_first_cross_head_exact_b4_28_5
+    tier_policy: exact_only_replacement
+    target_active_reduction_fraction_vs_prompt_topk: 0.30
+    rationale: >-
+      Protect high output-impact blocks inside the scalar exact core before
+      allocating the remaining capped-query reservation.
+    overrides:
+      spatial_weight: 1.0
+      spatial_max_distance: 0.125
+      candidate_nonmandatory_fraction: 0.04
+      routed_head_fraction: 0.03125
+      prompt_anchor_fraction: 0.50
+      evidence_preservation_fraction: 0.35
+      minimum_stratum_fraction: 0.25
+      physical_capacity_fraction: 1.0
+      maximum_prototypes_per_head: 0
+      prototype_budget_planning_mode: disabled_exact_only
+      active_budget_bytes: 28500000
+      evidence_reservation_mode: structural_round_robin
+      evidence_grid_rows: 4
+      evidence_grid_columns: 4
+      stable_head_visual_fraction: 0.0
+      stable_head_adaptive_visual_swaps: false
+      stable_head_minimum_text_mass_fraction: 1.0
+      stable_head_visual_gain_ratio: 1.0
+      stable_head_maximum_visual_swaps: 0
+      stable_head_swap_risk_gate: false
+      stable_head_maximum_normalized_text_loss: 1.0
+      stable_head_forecast_gain_ratio: 1.0
+      stable_head_future_query_reranking: false
+      stable_head_future_minimum_prompt_mass_fraction: 1.0
+      stable_head_future_gain_ratio: 1.0
+      stable_head_maximum_future_replacements: 0
+      stable_head_future_divergence_fail_closed: false
+      stable_head_future_minimum_prompt_forecast_tv: 0.0
+      stable_head_future_risk_gate: false
+      stable_head_future_maximum_normalized_prompt_loss: 1.0
+      stable_head_future_minimum_normalized_gain: 0.0
+      stable_head_query_coverage_reranking: false
+      stable_head_query_coverage_minimum_prompt_mass_fraction: 1.0
+      stable_head_query_coverage_maximum_replacements: 0
+      stable_head_query_coverage_minimum_normalized_gain: 0.0
+      stable_head_query_coverage_initial_selection: true
+      stable_head_query_coverage_initial_fraction: 0.25
+      stable_head_query_coverage_initial_prompt_weight: 0.5
+      stable_head_query_coverage_initial_minimum_prompt_mass_fraction: 0.95
+      stable_head_query_coverage_initial_objective: capped_cumulative
+      stable_head_query_coverage_initial_cap_fraction: 0.5
+      stable_head_query_coverage_cross_head_allocation: true
+      stable_head_query_coverage_cross_head_stability_gate: false
+      stable_head_query_coverage_cross_head_stability_risk_mode: prompt_mass
+      stable_head_query_coverage_cross_head_minimum_normalized_gain: 0.0
+      stable_head_query_coverage_cross_head_gain_to_prompt_loss_ratio: 1.0
+      stable_head_query_coverage_output_impact_reservation: true
+      stable_head_query_coverage_output_impact_fraction: 0.5
+      forecast_mode: prompt_window
+      forecast_prompt_window: 16
+      forecast_draft_steps: 0
+
+calibration_objective:
+  labels_accessed: false
+  official_task_scores_accessed: false
+  primary: maximize_worst_fold_exact_answer_agreement_with_fullkv
+  secondary: maximize_worst_fold_token_agreement_with_fullkv
+  tertiary: maximize_worst_task_active_plus_residual_reduction_vs_prompt_topk
+  deterministic_tie_break: lexicographically_smallest_candidate_id
+  minimum_active_reduction_fraction_vs_prompt_topk: 0.30
+  minimum_active_plus_residual_reduction_fraction_vs_prompt_topk: 0.30
+  fullkv_answer_noninferiority_margin_vs_prompt_topk: 0.05
+  maximum_prototype_logical_fraction: 0.0
+  require_zero_residual_bytes: true
+  require_all_rows_complete: true
+
+robust_fidelity_analysis:
+  labels_accessed: false
+  official_task_scores_accessed: false
+  fold_count: 4
+  fold_assignment: sha256_sorted_round_robin
+  fold_assignment_salt: choice-c-v93-output-impact-first-reservation-v1
+  expected_samples_per_fold: 8
+  require_every_task_and_fold: true
+  require_base_memory_and_fidelity_gates: true
+  fullkv_answer_noninferiority_margin_vs_prompt_topk: 0.05
+  fullkv_token_noninferiority_margin_vs_prompt_topk: 0.05
+  selection_primary: maximize_worst_fold_exact_answer_agreement_with_fullkv
+  selection_secondary: maximize_worst_fold_token_agreement_with_fullkv
+  selection_tertiary: maximize_macro_token_agreement_with_fullkv
+
+output_impact_audit:
+  labels_accessed: false
+  official_task_scores_accessed: false
+  require_complete_route_telemetry: true
+  report_protected_count_bytes_and_score: true
+  report_allocated_and_reserved_bytes: true
+  report_query_coverage_gain: true
+  report_prompt_mass_preservation: true
+  output_impact_activity_is_not_an_extra_freeze_gate: true
+
+sample_policy:
+  materialize_from_clean_commit: true
+  exclude_all_repository_ledgers: true
+  exclude_every_prior_choice_c_input_ledger: true
+  exclude_prior_observed_result_rows: true
+  benchmark_labels_used_for_candidate_selection: false
+  future_heldout_must_exclude_this_calibration_ledger: true
+
+output_root: /scratch/djy8hg/runs/mosaickv/choice-c-v93-output-impact-first-reservation-calibration-v1
+frozen_candidate_output: /scratch/djy8hg/runs/mosaickv/choice-c-v93-output-impact-first-reservation-calibration-v1/analysis/frozen_candidate.yaml

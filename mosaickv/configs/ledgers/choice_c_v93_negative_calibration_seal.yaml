@@ -1,0 +1,198 @@
+schema_version: 1
+classification: sealed_negative_label_blind_calibration_result
+experiment_id: choice_c_v93_output_impact_first_reservation_calibration
+immutable_result: true
+overall_freeze_gate_pass: false
+memory_gate_pass: true
+aggregate_fidelity_gate_pass: false
+robust_fold_fidelity_gate_pass: false
+frozen_candidate_created: false
+heldout_evaluation_authorized: false
+failure_scope:
+  - docvqa_failed_answer_noninferiority
+  - not_every_fold_passed_answer_noninferiority
+  - not_every_fold_passed_token_noninferiority
+  - isolated_output_impact_protection_did_not_stabilize_decoding
+gate_thresholds_must_not_be_weakened_from_this_result: true
+v93_calibration_outputs_must_not_be_reclassified_as_heldout: true
+
+scientific_boundary:
+  benchmark_labels_accessed_for_selection: false
+  official_task_scores_accessed_for_selection: false
+  fullkv_generated_outputs_used_for_label_blind_fidelity: true
+  prompt_topk_generated_outputs_used_for_label_blind_comparison: true
+  v92_and_prior_used_only_as_sample_exclusion_boundaries: true
+  future_design_may_use_aggregate_label_blind_mechanism_telemetry: true
+  future_design_must_not_use_v93_answers: true
+  future_design_must_not_use_v93_references: true
+  future_design_must_not_use_v93_task_scores: true
+  future_design_must_not_use_v93_failure_identities: true
+  future_design_must_not_use_v93_generated_token_ids: true
+  future_heldout_materialized: false
+
+protocol_git_sha: 8579293127d76df05ce483327de9b65ab234542d
+source_snapshot_sha256: 94187baf9213c242dbefc68031c20dc14804593c6a47c099e1a1c612cd62c2e6
+run_root: /scratch/djy8hg/runs/mosaickv/choice-c-v93-output-impact-first-reservation-calibration-v1
+execution_jobs:
+  submitted_ledger_array: 18685335
+  ledger_array_state: completed
+  ledger_exit_codes: ["0:0", "0:0"]
+  submitted_calibration_array: 18685336
+  calibration_state: completed
+  calibration_exit_codes: ["0:0", "0:0"]
+  maximum_calibration_elapsed: "00:16:45"
+  freeze_analysis: 18685337
+  freeze_state: completed_failed_closed_no_eligible_candidate
+  freeze_exit_code: "0:0"
+
+protocol:
+  path: configs/experiments/choice_c_v93_output_impact_first_reservation_calibration.yaml
+  sha256: d0cf567ed28df422ddb9a40249745aaf4143acb5de47431568afbc3560645387
+parent_negative_result_seal:
+  path: configs/ledgers/choice_c_v92_negative_calibration_seal.yaml
+  sha256: 50f3888f86b9bd27c2fd0d1f63fcd8fb639c140cdc32a9b9abde6b7f54297d3b
+
+execution_provenance:
+  model_id: llava-hf/llava-1.5-7b-hf
+  model_revision: b234b804b114d9e37bb655e11cbbb5f5e971b7a9
+  model_precision: fp16
+  backend: huggingface
+  prefill_attention_implementation: eager
+  decode_attention_implementation: sdpa
+  gpu_type: NVIDIA A100-SXM4-80GB
+  gpu_count_per_worker: 1
+  seed: 17
+  deterministic_algorithms: true
+  output_length: 64
+  python: 3.11.15
+  cuda: "12.8"
+  driver: 595.71.05
+  pytorch: 2.8.0
+  transformers: 4.55.2
+  vllm: 0.10.2
+  sglang: 0.5.1.post3
+  environment_lock: env/common/requirements.lock
+  environment_lock_sha256: fdc56ad9edb03e8bad5cb2108322c7a12b0f33bdd5533ed596dc6b695a2db9c0
+  cache_root: /scratch/djy8hg/cache/mosaickv
+  source_git_dirty: false
+  measurement_type: method_measured
+
+execution_integrity:
+  tasks: [docvqa, textvqa]
+  samples_per_task: 32
+  arms_per_task: 3
+  measured_rows: 192
+  completed_rows: 192
+  failed_rows: 0
+  rows_with_errors: 0
+  rows_with_missing_required_values: 0
+  calibration_references_present: false
+  calibration_task_scores_present: false
+
+common_candidate_properties:
+  effective_method: mosaickv_exact
+  tier_policy: exact_only_replacement
+  configured_active_byte_cap: 28500000
+  block_size: 4
+  prototype_fraction: 0.0
+  residual_bytes: 0
+  repair_enabled: false
+  output_impact_protection_stage: before_query_coverage_allocation
+  complete_query_reservation_fraction: 0.25
+  output_impact_share_of_reservation: 0.5
+  supports_mosaickv_proto_claim: false
+  supports_mosaickv_full_claim: false
+
+observed_task_gates:
+  docvqa:
+    prompt_topk_fullkv_exact_answer_agreement: 0.875
+    candidate_fullkv_exact_answer_agreement: 0.6875
+    candidate_delta_vs_prompt_topk: -0.1875
+    candidate_fullkv_token_agreement: 0.2236328125
+    prompt_topk_fullkv_token_agreement: 0.2802734375
+    candidate_active_kv_bytes: 27492352.0
+    candidate_residual_kv_bytes: 0.0
+    active_reduction_fraction_vs_prompt_topk: 0.32284100080710254
+    active_plus_residual_reduction_fraction_vs_prompt_topk: 0.32284100080710254
+    memory_gate_pass: true
+    aggregate_fidelity_gate_pass: false
+  textvqa:
+    prompt_topk_fullkv_exact_answer_agreement: 0.875
+    candidate_fullkv_exact_answer_agreement: 0.875
+    candidate_delta_vs_prompt_topk: 0.0
+    candidate_fullkv_token_agreement: 0.29638671875
+    prompt_topk_fullkv_token_agreement: 0.33251953125
+    candidate_active_kv_bytes: 27623424.0
+    candidate_residual_kv_bytes: 0.0
+    active_reduction_fraction_vs_prompt_topk: 0.316301703163017
+    active_plus_residual_reduction_fraction_vs_prompt_topk: 0.316301703163017
+    memory_gate_pass: true
+    aggregate_fidelity_gate_pass: true
+
+robust_gate_summary:
+  answer_folds_passed: 5
+  answer_folds_total: 8
+  token_folds_passed: 4
+  token_folds_total: 8
+  worst_fold_answer_delta_vs_prompt_topk: -0.25
+  worst_fold_token_delta_vs_prompt_topk: -0.244140625
+  overall_gate_pass: false
+
+aggregate_label_blind_mechanism_telemetry:
+  docvqa:
+    exact_prompt_mass_fraction: 0.9238864429595395
+    mean_output_impact_protected_blocks: 1546.125
+    mean_output_impact_protected_bytes: 3166464.0
+    mean_output_impact_protected_score: 474.3784714125279
+  textvqa:
+    exact_prompt_mass_fraction: 0.9329520681954293
+    mean_output_impact_protected_blocks: 1565.5
+    mean_output_impact_protected_bytes: 3206144.0
+    mean_output_impact_protected_score: 477.45832766033385
+
+artifact_inventory:
+  algorithm: sha256_of_sorted_lines_each_formatted_as_file_sha256_two_spaces_relative_posix_path_newline
+  file_count: 266
+  total_bytes: 168047997
+  inventory_sha256: abcc099700fd54d30ea9b376736a3115a6ad72cb0b273b1babb879bf2155ef06
+artifacts:
+  calibration_docvqa_ledger:
+    path: inputs/calibration_docvqa.json
+    sha256: 561f989f65fac60ba48123a82049c172acb1d5528526654486880a8e1693e0ed
+  calibration_textvqa_ledger:
+    path: inputs/calibration_textvqa.json
+    sha256: efa7f8d96238a3a6702bc9e5d745ef1be82b478330d2d1eee8197674e3e97011
+  base_analysis:
+    path: analysis/label_blind_calibration.json
+    sha256: 88197858488289dba8f0e5d96ac7f18e81698c8671a04d2536d346bb2b1387ca
+  base_report:
+    path: analysis/label_blind_calibration.md
+    sha256: f93287896b49ae7df45fa98a5831ce536e9eab6bc106558d3da806e582a4ed35
+  trials:
+    path: analysis/label_blind_calibration_trials.parquet
+    sha256: 22064ea9dcb2f4ad86018d8a17bc91f095fd908ec2d6666a1b28dedd3ae96479
+  base_ranking:
+    path: analysis/label_blind_candidate_ranking.parquet
+    sha256: 617d818a4d8fd2c8c9abfac43f530ab05b7cba4834eddbdd49711ccc73b3fe5a
+  robust_analysis:
+    path: analysis/robust_fidelity_calibration.json
+    sha256: e0c7963654e6fd8d78d53633d4db74a8e71e0d606ac55107f24aefc5fd9800a6
+  robust_report:
+    path: analysis/robust_fidelity_calibration.md
+    sha256: 08014977004e91dfe3d6ca7db049fc8649e073564e849b8d6384fdd92896f3cb
+  robust_ranking:
+    path: analysis/robust_fidelity_candidate_ranking.parquet
+    sha256: db80d4369bb5a6b56079d374eb83cc1986d340b5b1911bd8871ba041b5b0bc11
+  robust_folds:
+    path: analysis/robust_fidelity_folds.parquet
+    sha256: 7af95df23bd5646b71cad7587f619a1df2b13aa0b38cbb5bb2a61c855282ab1a
+
+future_protocol:
+  v93_must_remain_negative: true
+  frozen_candidate_must_remain_absent: true
+  heldout_campaign_must_remain_blocked: true
+  v94_requires_fresh_disjoint_calibration_samples: true
+  v94_must_keep_memory_and_fidelity_gates_unchanged: true
+  v94_design_must_not_use_v93_answers_or_failure_identities: true
+  v94_must_protect_complete_spatial_layout_groups_before_query_coverage_allocation: true
+  v94_must_not_claim_ocr_metadata_when_only_grid_regions_are_available: true

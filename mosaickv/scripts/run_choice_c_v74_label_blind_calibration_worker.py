@@ -143,6 +143,33 @@ def _label_blind_record(*args: Any, arm: str, output_root: Path, **kwargs: Any) 
             "query_coverage_initial_selected_prompt_mass",
             "query_coverage_initial_normalized_prompt_loss",
             "query_coverage_initial_candidate_count",
+            "query_coverage_initial_reserved_bytes",
+            "query_coverage_initial_allocated_bytes",
+            "query_coverage_initial_cross_head_risk",
+            "query_coverage_initial_proposed_normalized_gain",
+            "query_coverage_initial_proposed_normalized_prompt_loss",
+            "query_coverage_initial_proposed_output_impact_risk",
+            "query_coverage_initial_output_impact_donor_count",
+            "query_coverage_initial_output_impact_protected_count",
+            "query_coverage_initial_output_impact_protected_bytes",
+            "query_coverage_initial_output_impact_protected_score",
+            "query_coverage_initial_layout_group_candidate_count",
+            "query_coverage_initial_layout_group_protected_group_count",
+            "query_coverage_initial_layout_group_protected_block_count",
+            "query_coverage_initial_layout_group_protected_bytes",
+            "query_coverage_initial_layout_group_protected_score",
+            "query_coverage_initial_layout_group_target_bytes",
+            "query_coverage_initial_layout_group_accepted_candidate_count",
+            "query_coverage_initial_layout_group_risk_rejected_count",
+            "query_coverage_initial_layout_group_pareto_candidate_count",
+            "query_coverage_initial_layout_group_knapsack_selected_count",
+            "query_coverage_initial_layout_group_joint_donor_candidate_count",
+            "query_coverage_initial_layout_group_normalized_query_gain",
+            "query_coverage_initial_layout_group_normalized_prompt_risk",
+            "query_coverage_initial_layout_group_output_impact_risk",
+            "query_coverage_initial_stability_rejected_route_count",
+            "query_coverage_initial_global_allocation_route_count",
+            "query_coverage_initial_allocated_route_count",
         ):
             row[f"external_stable_{field}"] = (
                 None if external_capacity is None else external_capacity.get(field)
@@ -263,6 +290,169 @@ def _label_blind_record(*args: Any, arm: str, output_root: Path, **kwargs: Any) 
                 for item in prototype_diagnostics
             )
         )
+        logit_stability = trace.get("short_horizon_logit_stability")
+        if logit_stability is not None and not isinstance(logit_stability, dict):
+            raise RuntimeError(f"{arm} short-horizon logit stability must be a mapping or null")
+        logit_record = (
+            cast("dict[str, Any]", logit_stability) if isinstance(logit_stability, dict) else None
+        )
+        enabled_logit_stability = bool(
+            logit_record is not None and logit_record.get("status") == "completed_label_blind"
+        )
+        active_logit_record = logit_record if enabled_logit_stability else None
+        evaluations = (
+            cast("list[dict[str, Any]]", active_logit_record.get("evaluated_candidates", []))
+            if active_logit_record is not None
+            else []
+        )
+        if any(not isinstance(item, dict) for item in evaluations):
+            raise RuntimeError(f"{arm} logit-stability candidates must be mappings")
+        selected_id = (
+            str(active_logit_record.get("selected_candidate_id"))
+            if active_logit_record is not None
+            else None
+        )
+        selected_evaluation = next(
+            (item for item in evaluations if str(item.get("candidate_id")) == selected_id),
+            None,
+        )
+        row["logit_stability_enabled"] = enabled_logit_stability
+        row["logit_stability_shortlist_size"] = (
+            active_logit_record.get("shortlist_size") if active_logit_record is not None else None
+        )
+        row["logit_stability_evaluated_candidate_count"] = len(evaluations)
+        row["logit_stability_selected_candidate_id"] = selected_id
+        row["logit_stability_selected_candidate_passed"] = (
+            active_logit_record.get("selected_candidate_passed")
+            if active_logit_record is not None
+            else None
+        )
+        row["logit_stability_used_fail_closed_scalar_anchor"] = (
+            active_logit_record.get("used_fail_closed_scalar_anchor")
+            if active_logit_record is not None
+            else None
+        )
+        row["logit_stability_horizon"] = (
+            active_logit_record.get("horizon") if active_logit_record is not None else None
+        )
+        row["logit_stability_maximum_kl_threshold"] = (
+            active_logit_record.get("maximum_kl_threshold")
+            if active_logit_record is not None
+            else None
+        )
+        row["logit_stability_maximum_logit_difference_threshold"] = (
+            active_logit_record.get("maximum_logit_difference_threshold")
+            if active_logit_record is not None
+            else None
+        )
+        row["logit_stability_selected_maximum_kl"] = (
+            None if selected_evaluation is None else selected_evaluation.get("maximum_kl")
+        )
+        row["logit_stability_selected_maximum_logit_difference"] = (
+            None
+            if selected_evaluation is None
+            else selected_evaluation.get("maximum_logit_difference")
+        )
+        row["logit_stability_selected_greedy_token_match"] = (
+            None if selected_evaluation is None else selected_evaluation.get("greedy_token_match")
+        )
+        row["logit_stability_fullkv_prefill_reused"] = (
+            active_logit_record.get("fullkv_prefill_reused")
+            if active_logit_record is not None
+            else None
+        )
+        row["logit_stability_second_prefill_performed"] = (
+            active_logit_record.get("second_prefill_performed")
+            if active_logit_record is not None
+            else None
+        )
+        row["logit_stability_probe_states_discarded_before_measured_decode"] = (
+            active_logit_record.get("probe_states_discarded_before_measured_decode")
+            if active_logit_record is not None
+            else None
+        )
+        row["logit_stability_benchmark_labels_accessed"] = (
+            active_logit_record.get("benchmark_labels_accessed")
+            if active_logit_record is not None
+            else None
+        )
+        row["logit_stability_overhead_seconds"] = (
+            active_logit_record.get("overhead_seconds") if active_logit_record is not None else None
+        )
+        progressive = trace.get("progressive_logit_safe_eviction")
+        if progressive is not None and not isinstance(progressive, dict):
+            raise RuntimeError(f"{arm} progressive logit-safe eviction must be a mapping or null")
+        progressive_record = (
+            cast("dict[str, Any]", progressive)
+            if isinstance(progressive, dict)
+            and progressive.get("status") == "completed_label_blind"
+            else None
+        )
+        checkpoints = (
+            cast("list[dict[str, Any]]", progressive_record.get("checkpoints", []))
+            if progressive_record is not None
+            else []
+        )
+        if any(not isinstance(item, dict) for item in checkpoints):
+            raise RuntimeError(f"{arm} progressive eviction checkpoints must be mappings")
+        accepted_checkpoints = [item for item in checkpoints if bool(item.get("accepted"))]
+        accepted_bytes = [int(item["logical_active_bytes"]) for item in accepted_checkpoints]
+        direct_fields = (
+            "started_from_fullkv",
+            "target_reached",
+            "selected_candidate_passed",
+            "used_target_fallback",
+            "horizon",
+            "maximum_kl_threshold",
+            "maximum_logit_difference_threshold",
+            "maximum_probes",
+            "probes_used",
+            "accepted_checkpoints",
+            "rejected_checkpoints",
+            "initial_fullkv_logical_bytes",
+            "target_active_bytes",
+            "final_logical_active_bytes",
+            "protected_group_candidate_count",
+            "protected_group_count",
+            "protected_group_block_count",
+            "protected_group_bytes",
+            "protected_group_target_bytes",
+            "protected_group_score",
+            "fullkv_prefill_reused",
+            "second_prefill_performed",
+            "probe_states_discarded_before_measured_decode",
+            "benchmark_labels_accessed",
+            "overhead_seconds",
+        )
+        row["progressive_eviction_enabled"] = progressive_record is not None
+        for field in direct_fields:
+            row[f"progressive_eviction_{field}"] = (
+                None if progressive_record is None else progressive_record.get(field)
+            )
+        row["progressive_eviction_checkpoint_count"] = len(checkpoints)
+        row["progressive_eviction_accepted_greedy_token_match"] = (
+            None
+            if progressive_record is None or not accepted_checkpoints
+            else all(bool(item.get("greedy_token_match")) for item in accepted_checkpoints)
+        )
+        row["progressive_eviction_accepted_maximum_kl"] = (
+            None
+            if not accepted_checkpoints
+            else max(float(item["maximum_kl"]) for item in accepted_checkpoints)
+        )
+        row["progressive_eviction_accepted_maximum_logit_difference"] = (
+            None
+            if not accepted_checkpoints
+            else max(float(item["maximum_logit_difference"]) for item in accepted_checkpoints)
+        )
+        row["progressive_eviction_accepted_bytes_strictly_decrease"] = (
+            None
+            if progressive_record is None or not accepted_checkpoints
+            else all(
+                accepted_bytes[index] < accepted_bytes[index - 1]
+                for index in range(1, len(accepted_bytes))
+            )
+        )
         final_packed = row["byte_budget_final_packed_active_bytes"]
         if final_packed is not None and int(final_packed) != int(row["active_kv_bytes"]):
             raise RuntimeError(
@@ -270,6 +460,21 @@ def _label_blind_record(*args: Any, arm: str, output_root: Path, **kwargs: Any) 
             )
     record["arm"] = arm
     return record
+
+
+def _selection_rule_frozen(spec: dict[str, Any]) -> bool:
+    """Accept the legacy freeze or the stronger sealed pre-materialization freeze."""
+    if spec.get("selection_rule_frozen_before_calibration") is True:
+        return True
+    candidate_source = spec.get("candidate_source")
+    return bool(
+        spec.get("selection_rule_frozen_before_materialization") is True
+        and isinstance(candidate_source, dict)
+        and candidate_source.get("runtime_behavior_changes_after_candidate_commit_allowed")
+        is False
+        and candidate_source.get("candidate_implementation_git_sha")
+        == spec.get("candidate_implementation_git_sha")
+    )
 
 
 def main() -> int:
@@ -285,6 +490,16 @@ def main() -> int:
     parser.add_argument(
         "--expected-ledger-classification",
         default="fresh_disjoint_label_blind_calibration",
+    )
+    parser.add_argument(
+        "--validate-only",
+        action="store_true",
+        help="validate the frozen spec, ledger, and arm construction without loading a model",
+    )
+    parser.add_argument(
+        "--warmup-only",
+        action="store_true",
+        help="run exactly one reviewed sample through every arm without measured calibration",
     )
     args = parser.parse_args()
 
@@ -304,8 +519,8 @@ def main() -> int:
         raise RuntimeError(
             "worker experiment differs from the explicitly requested calibration protocol"
         )
-    if spec.get("selection_rule_frozen_before_calibration") is not True:
-        raise RuntimeError("v74 selection rule was not frozen before calibration")
+    if not _selection_rule_frozen(spec):
+        raise RuntimeError("selection rule was not frozen before calibration")
     objective = cast("dict[str, Any]", spec["calibration_objective"])
     if (
         objective.get("labels_accessed") is not False
@@ -326,11 +541,24 @@ def main() -> int:
         "selection_seed": entry["selection_seed"],
         "sample_count": entry["sample_count"],
         "classification": args.expected_ledger_classification,
-        "canonical_eligible": True,
-        "source_git_dirty": False,
     }
     if any(ledger.get(key) != value for key, value in expected.items()):
         raise RuntimeError(f"{task} ledger differs from the frozen calibration protocol")
+    dataset_config = entry.get("dataset_config")
+    if dataset_config is not None and ledger.get("dataset_config") != dataset_config:
+        raise RuntimeError(f"{task} ledger dataset configuration differs")
+    if "materialization_git_sha" in ledger:
+        if (
+            ledger.get("materialization_git_dirty") is not False
+            or ledger.get("candidate_implementation_git_sha")
+            != spec.get("candidate_implementation_git_sha")
+            or ledger.get("labels_references_scores_or_media_inspected_for_selection") is not False
+        ):
+            raise RuntimeError(f"{task} configuration-aware ledger provenance differs")
+    elif (
+        ledger.get("canonical_eligible") is not True or ledger.get("source_git_dirty") is not False
+    ):
+        raise RuntimeError(f"{task} legacy ledger provenance differs")
     if len(sample_ids) != int(entry["sample_count"]) or len(set(sample_ids)) != len(sample_ids):
         raise RuntimeError(f"{task} calibration ledger has the wrong unique sample count")
 
@@ -371,6 +599,20 @@ def main() -> int:
     arm_order = tuple(configs)
     if arm_order[:2] != ("full_kv", "prompt_attention_topk"):
         raise RuntimeError("v74 controls must precede the candidate arms")
+    if args.validate_only:
+        print(
+            json.dumps(
+                {
+                    "arm_order": list(arm_order),
+                    "ledger_sha256": ledger_sha,
+                    "sample_count": len(sample_ids),
+                    "status": "validated_without_model_load",
+                    "task": task,
+                },
+                sort_keys=True,
+            )
+        )
+        return 0
 
     worker_id = f"{run_prefix}-{task}-{_sha(spec_path)[:10]}"
     telemetry_path = output_root / "telemetry" / f"{worker_id}.json"
@@ -441,6 +683,10 @@ def main() -> int:
                 arm=arm,
             )
             _settle(adapter)
+        if args.warmup_only:
+            telemetry["warmup_only"] = True
+            telemetry["status"] = "completed_warmup_only"
+            return 0
         telemetry["before_measurement"] = asdict(capture_gpu_environment(torch))
         repetitions = int(spec["measured_repetitions_per_arm"])
         for repetition in range(repetitions):

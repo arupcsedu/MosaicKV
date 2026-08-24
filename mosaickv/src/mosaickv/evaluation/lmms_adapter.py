@@ -88,7 +88,11 @@ def _require_lmms_version() -> None:
 
 
 @contextmanager
-def _pinned_dataset_revision(dataset_id: str, revision: str) -> Iterator[None]:
+def _pinned_dataset_revision(
+    dataset_id: str,
+    revision: str,
+    dataset_config: str | None = None,
+) -> Iterator[None]:
     """Inject one immutable Hub revision into lmms-eval's dataset load.
 
     lmms-eval 0.7.2 constructs and downloads a task inside
@@ -106,6 +110,16 @@ def _pinned_dataset_revision(dataset_id: str, revision: str) -> Iterator[None]:
     def pinned(path: object, *args: object, **kwargs: object) -> object:
         nonlocal observed
         if str(path) == dataset_id:
+            observed += 1
+            requested_config = kwargs.get("name")
+            if requested_config is None and args:
+                requested_config = args[0]
+            normalized_requested = "default" if requested_config is None else str(requested_config)
+            if dataset_config is not None and normalized_requested != dataset_config:
+                raise ValueError(
+                    "lmms task requested dataset configuration "
+                    f"{normalized_requested!r}, expected {dataset_config!r}"
+                )
             configured = kwargs.get("revision")
             if configured is not None and configured != revision:
                 raise ValueError(
@@ -119,7 +133,6 @@ def _pinned_dataset_revision(dataset_id: str, revision: str) -> Iterator[None]:
                 # token file; use HF_TOKEN when present and anonymous access
                 # otherwise.
                 kwargs["token"] = False
-            observed += 1
         return original(path, *args, **kwargs)
 
     with patch.object(datasets_module, "load_dataset", pinned):
@@ -147,6 +160,7 @@ def _lmms_template_compatibility() -> Iterator[None]:
                 "_default_template_yaml",
                 "_default_template_textvqa_yaml",
                 "_default_template_docvqa_yaml",
+                "_default_template_infovqa_yaml",
             }
             if not requested.is_file() and requested.name in missing_templates:
                 normalized = requested.resolve(strict=False)
@@ -313,11 +327,58 @@ def _canonical_reference(value: object) -> str:
     return json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
 
 
+def _prepared_reference(task: Any, spec: TaskSpec, doc: object) -> str:
+    """Return the concrete annotation used for result provenance."""
+
+    if spec.reference_field is None:
+        return _canonical_reference(task.doc_to_target(doc))
+    if not isinstance(doc, dict) or spec.reference_field not in doc:
+        raise ValueError(f"task {spec.name!r} requires reference field {spec.reference_field!r}")
+    return _canonical_reference(doc[spec.reference_field])
+
+
+def _loaded_task_split(task: Any, spec: TaskSpec) -> str:
+    """Validate and resolve one configuration-aware lmms dataset route."""
+
+    config = task.config
+    loaded_dataset_id = getattr(config, "dataset_path", None)
+    if loaded_dataset_id != spec.dataset_id:
+        raise ValueError(
+            f"lmms task {spec.development_lmms_task!r} routes dataset "
+            f"{loaded_dataset_id!r}, expected {spec.dataset_id!r}"
+        )
+    if spec.dataset_config is not None:
+        loaded_config = getattr(config, "dataset_name", None)
+        normalized_config = "default" if loaded_config is None else str(loaded_config)
+        if normalized_config != spec.dataset_config:
+            raise ValueError(
+                f"lmms task {spec.development_lmms_task!r} routes dataset configuration "
+                f"{normalized_config!r}, expected {spec.dataset_config!r}"
+            )
+    template_split = getattr(config, "test_split", None) or getattr(
+        config, "validation_split", None
+    )
+    if not isinstance(template_split, str):
+        raise ValueError(f"lmms task {spec.development_lmms_task!r} has no evaluation split")
+    if spec.lmms_split_override is None and template_split != spec.split:
+        raise ValueError(
+            f"lmms task {spec.development_lmms_task!r} uses split {template_split!r}, "
+            f"expected {spec.split!r}; an explicit split override is required"
+        )
+    selected_split = spec.lmms_split_override or template_split
+    if selected_split != spec.split:
+        raise ValueError("resolved lmms split differs from the canonical task split")
+    if selected_split not in task.dataset:
+        raise ValueError(
+            f"pinned dataset does not expose required split {selected_split!r} for {spec.name!r}"
+        )
+    return selected_split
+
+
 def _prepare_task(
     task: Any,
     *,
-    public_task: str,
-    lmms_task: str,
+    spec: TaskSpec,
     seed: int,
     subset_size: int | None,
     sample_offset: int,
@@ -325,9 +386,11 @@ def _prepare_task(
     excluded: frozenset[str],
     prepare_samples: bool,
 ) -> tuple[Any | None, tuple[PreparedLmmsSample, ...], tuple[str, ...]]:
-    split = task.config.test_split or task.config.validation_split
-    if not isinstance(split, str):
-        raise ValueError(f"lmms task {lmms_task!r} has no test or validation split")
+    public_task = spec.name
+    lmms_task = spec.development_lmms_task
+    if lmms_task is None:
+        raise ValueError(f"task {spec.name!r} is not an lmms-eval task")
+    split = _loaded_task_split(task, spec)
     dataset = task.dataset[split]
     source_ids = _source_ids(dataset, public_task)
     if explicit_sample_ids is None:
@@ -357,6 +420,14 @@ def _prepare_task(
     indices = [index_by_id[sample_id] for sample_id in pending_ids]
     subset = dataset.select(indices).add_column("_mosaickv_sample_id", list(pending_ids))
     task.dataset[split] = subset
+    if spec.lmms_split_override is not None:
+        # lmms-eval builds requests from ``config.test_split`` after this
+        # function returns. Merely selecting the requested dataset split is
+        # therefore insufficient: the task would silently evaluate its YAML
+        # default (for TextVQA, validation) instead of the preregistered train
+        # calibration split. The task object is isolated to this evaluation,
+        # so redirect its active split without mutating the shared template.
+        task.config.test_split = split
     if hasattr(task, "dataset_no_image") and split in task.dataset_no_image:
         task.dataset_no_image[split] = (
             task.dataset_no_image[split]
@@ -369,7 +440,7 @@ def _prepare_task(
             sample_id=sample_id,
             public_task=public_task,
             lmms_task=lmms_task,
-            reference=_canonical_reference(task.doc_to_target(subset[position])),
+            reference=_prepared_reference(task, spec, subset[position]),
         )
         for position, sample_id in enumerate(pending_ids)
     )
@@ -398,6 +469,11 @@ def prepare_seeded_lmms_tasks(
     tasks_module = _require_module("lmms_eval.tasks")
     tasks_root = Path(tasks_module.__file__).resolve().parent
     include_paths: set[str] = set()
+    lmms_task_names = tuple(spec.development_lmms_task for spec in specs)
+    if len(set(lmms_task_names)) != len(lmms_task_names):
+        raise ValueError(
+            "one evaluation call cannot route multiple public tasks through the same lmms task"
+        )
     for spec in specs:
         task_name = spec.development_lmms_task
         if task_name is None:
@@ -436,7 +512,11 @@ def prepare_seeded_lmms_tasks(
         else:
             with (
                 _lmms_template_compatibility(),
-                _pinned_dataset_revision(spec.dataset_id, revision),
+                _pinned_dataset_revision(
+                    spec.dataset_id,
+                    revision,
+                    dataset_config=spec.dataset_config,
+                ),
             ):
                 loaded = tasks_module.get_task_dict(
                     [task_name], task_manager=manager, task_type="simple"
@@ -446,8 +526,7 @@ def prepare_seeded_lmms_tasks(
             task = task[-1]
         subset_task, task_samples, task_selected_ids = _prepare_task(
             task,
-            public_task=spec.name,
-            lmms_task=task_name,
+            spec=spec,
             seed=seed,
             subset_size=subset_size,
             sample_offset=sample_offset,

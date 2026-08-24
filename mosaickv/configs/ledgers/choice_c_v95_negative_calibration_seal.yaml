@@ -1,0 +1,181 @@
+schema_version: 1
+classification: sealed_negative_label_blind_calibration_result
+experiment_id: choice_c_v95_atomic_layout_risk_calibration
+immutable_result: true
+overall_freeze_gate_pass: false
+memory_gate_pass: true
+aggregate_fidelity_gate_pass: false
+robust_fold_fidelity_gate_pass: false
+atomic_group_utilization_gate_pass: false
+frozen_candidate_created: false
+heldout_evaluation_authorized: false
+failure_scope:
+  - docvqa_failed_answer_noninferiority
+  - not_every_fold_passed_answer_noninferiority
+  - not_every_fold_passed_token_noninferiority
+  - atomic_group_reservation_utilization_failed
+gate_thresholds_must_not_be_weakened_from_this_result: true
+v95_calibration_outputs_must_not_be_reclassified_as_heldout: true
+
+scientific_boundary:
+  benchmark_labels_accessed_for_selection: false
+  official_task_scores_accessed_for_selection: false
+  fullkv_generated_outputs_used_for_label_blind_fidelity: true
+  prompt_topk_generated_outputs_used_for_label_blind_comparison: true
+  v94_and_prior_used_only_as_sample_exclusion_boundaries: true
+  future_design_may_use_aggregate_label_blind_mechanism_telemetry: true
+  future_design_must_not_use_v95_answers: true
+  future_design_must_not_use_v95_references: true
+  future_design_must_not_use_v95_task_scores: true
+  future_design_must_not_use_v95_failure_identities: true
+  future_design_must_not_use_v95_generated_token_ids: true
+  future_heldout_materialized: false
+
+protocol_git_sha: 4571b78dbe1c6ee574601dda342039058a0deeff
+source_snapshot_sha256: fea6a393e4bcd7117f76d8b20a8138abb0e14f55e83882015f9ac42b49da9464
+run_root: /scratch/djy8hg/runs/mosaickv/choice-c-v95-atomic-layout-risk-calibration-v1
+execution_jobs:
+  submitted_ledger_array: 18690528
+  ledger_array_states: [completed, completed]
+  ledger_exit_codes: ["0:0", "0:0"]
+  submitted_calibration_array: 18690529
+  calibration_array_states: [completed, completed]
+  calibration_exit_codes: ["0:0", "0:0"]
+  maximum_calibration_elapsed: "00:18:39"
+  freeze_analysis: 18690530
+  freeze_state: completed_failed_closed_no_eligible_candidate
+  freeze_exit_code: "0:0"
+
+protocol:
+  path: configs/experiments/choice_c_v95_atomic_layout_risk_calibration.yaml
+  sha256: 3b2e52cab3d2a5a0f4352e0fdd35630e1bfb671e8d903219623792e4aa829029
+parent_negative_result_seal:
+  path: configs/ledgers/choice_c_v94_negative_calibration_seal.yaml
+  sha256: b4a08e5efe5064474ecd6a68ccdbf1232843be3d8a18c75c805f3e0e3b16dddb
+
+execution_integrity:
+  tasks: [docvqa, textvqa]
+  samples_per_task: 32
+  arms_per_task: 3
+  measured_rows: 192
+  completed_rows: 192
+  failed_rows: 0
+  rows_with_errors: 0
+  rows_with_missing_required_values: 0
+  calibration_references_present: false
+  calibration_task_scores_present: false
+
+common_candidate_properties:
+  effective_method: mosaickv_exact
+  tier_policy: exact_only_replacement
+  configured_active_byte_cap: 28500000
+  block_size: 4
+  prototype_fraction: 0.0
+  residual_bytes: 0
+  repair_enabled: false
+  shortlist_per_route: 4
+  group_admission_risk: maximum_of_prompt_and_output_impact_risk
+  minimum_group_reservation_utilization: 0.75
+
+observed_task_gates:
+  docvqa:
+    prompt_topk_fullkv_exact_answer_agreement: 0.71875
+    candidate_fullkv_exact_answer_agreement: 0.65625
+    candidate_delta_vs_prompt_topk: -0.0625
+    candidate_fullkv_token_agreement: 0.25439453125
+    prompt_topk_fullkv_token_agreement: 0.23193359375
+    candidate_active_kv_bytes: 27590656.0
+    candidate_residual_kv_bytes: 0.0
+    active_reduction_fraction_vs_prompt_topk: 0.322061191626409
+    active_plus_residual_reduction_fraction_vs_prompt_topk: 0.322061191626409
+    memory_gate_pass: true
+    aggregate_fidelity_gate_pass: false
+  textvqa:
+    prompt_topk_fullkv_exact_answer_agreement: 0.84375
+    candidate_fullkv_exact_answer_agreement: 0.84375
+    candidate_delta_vs_prompt_topk: 0.0
+    candidate_fullkv_token_agreement: 0.2890625
+    prompt_topk_fullkv_token_agreement: 0.3359375
+    candidate_active_kv_bytes: 27590656.0
+    candidate_residual_kv_bytes: 0.0
+    active_reduction_fraction_vs_prompt_topk: 0.3132137030995106
+    active_plus_residual_reduction_fraction_vs_prompt_topk: 0.3132137030995106
+    memory_gate_pass: true
+    aggregate_fidelity_gate_pass: true
+
+robust_gate_summary:
+  answer_folds_passed: 7
+  answer_folds_total: 8
+  token_folds_passed: 6
+  token_folds_total: 8
+  worst_fold_answer_delta_vs_prompt_topk: -0.25
+  worst_fold_token_delta_vs_prompt_topk: -0.173828125
+  overall_gate_pass: false
+
+aggregate_label_blind_mechanism_telemetry:
+  docvqa:
+    mean_group_target_bytes: 3182336.0
+    mean_group_protected_bytes: 4608.0
+    minimum_per_sample_utilization: 0.0
+    mean_accepted_groups: 0.5625
+    mean_risk_rejected_proposals: 3967.375
+    mean_normalized_group_query_gain: 0.00430267664532364
+    mean_normalized_group_prompt_risk: 0.002110177434013662
+    mean_group_output_impact_risk: 0.0032356682231093037
+  textvqa:
+    mean_group_target_bytes: 3174400.0
+    mean_group_protected_bytes: 1792.0
+    minimum_per_sample_utilization: 0.0
+    mean_accepted_groups: 0.21875
+    mean_risk_rejected_proposals: 3967.75
+    mean_normalized_group_query_gain: 0.0027348956769844657
+    mean_normalized_group_prompt_risk: 0.0014454757997951772
+    mean_group_output_impact_risk: 0.0021888445447699294
+
+artifact_inventory:
+  algorithm: sha256_of_sorted_lines_each_formatted_as_file_sha256_two_spaces_relative_posix_path_newline
+  file_count: 266
+  total_bytes: 24458594
+  inventory_sha256: 372ee45a3bcc13ac88530d114a23ee3024c0e0c1cb7e77bbc28fdfd5026e60ec
+artifacts:
+  calibration_docvqa_ledger:
+    path: inputs/calibration_docvqa.json
+    sha256: f78d5e6c9f6722b5128353e06d86844947a8e334039bd0d9e3f8ecdbcff71369
+  calibration_textvqa_ledger:
+    path: inputs/calibration_textvqa.json
+    sha256: f585b8abf5b18a4e214ecf254fe55c2fbef02a7727e1d3961a4bb7662030e6fd
+  base_analysis:
+    path: analysis/label_blind_calibration.json
+    sha256: a91c1a6348d61d7426e76d0c8164daf5eedca62bb049dbdd523493365aade055
+  base_report:
+    path: analysis/label_blind_calibration.md
+    sha256: 03968eac0688f2b81b80ba0bcdf12ce3cacd127de58910df3f271f006c312940
+  trials:
+    path: analysis/label_blind_calibration_trials.parquet
+    sha256: f41210dc67b291419104eb6b2c35b0a6d0bbb7bb2d5a60d1a4ad9188e5720f90
+  base_ranking:
+    path: analysis/label_blind_candidate_ranking.parquet
+    sha256: 1234725eacecfec963335fc68adf2b34663059dbc6a699b0e927ec9a56334a6e
+  robust_analysis:
+    path: analysis/robust_fidelity_calibration.json
+    sha256: 4387bc94ec4fa67d96073d5bbf8f5166b8188a303769065b996eaf0f6c099940
+  robust_report:
+    path: analysis/robust_fidelity_calibration.md
+    sha256: 7b6b05b226d8ed707b93df95206a93ca53cf96e7b05717be17984a13552cefe8
+  robust_ranking:
+    path: analysis/robust_fidelity_candidate_ranking.parquet
+    sha256: ab3ddb3b75d44f05e9164581cb9e1a591c2be31c5bb0f1302068eacbcc74552e
+  robust_folds:
+    path: analysis/robust_fidelity_folds.parquet
+    sha256: 886ecc06692bcb306ad71d07871d45baab1bc73cbf59684d8fa76b7feb5e92a8
+
+future_protocol:
+  v95_must_remain_negative: true
+  frozen_candidate_must_remain_absent: true
+  heldout_campaign_must_remain_blocked: true
+  v96_requires_fresh_disjoint_calibration_samples: true
+  v96_must_keep_memory_fidelity_and_utilization_gates_unchanged: true
+  v96_design_must_not_use_v95_answers_or_failure_identities: true
+  v96_must_use_label_blind_gain_risk_pareto_frontiers: true
+  v96_must_select_complete_groups_with_an_atomic_byte_knapsack: true
+  v96_must_output_impact_gate_non_group_cross_head_reallocations: true

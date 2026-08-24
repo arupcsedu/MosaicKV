@@ -1,0 +1,241 @@
+schema_version: 1
+revision: "100.1-gpu-debug-verified"
+experiment_id: choice_c_v100_hierarchical_head_local_logit_safe_calibration
+classification: preregistered_gpu_debug_verified_calibration_unexecuted
+report_title: V100 hierarchical head-local logit-safe eviction design
+selection_rule_frozen_before_calibration: false
+implementation_status: bounded_hf_probe_loop_gpu_debug_verified
+execution_status: retention_one_and_one_sample_gpu_debug_passed
+submission_authorized: false
+candidate_freeze_authorized: false
+heldout_evaluation_authorized: false
+parent_negative_result_seal:
+  path: configs/ledgers/choice_c_v99_negative_calibration_seal.yaml
+  sha256: 8b2ae167c4a50d1b1671ee23a445a6064024849533f9e3ba260c35cb640437f0
+
+scientific_boundary:
+  v99_used_only_as_exclusion_boundary: true
+  v99_answers_used_for_design: false
+  v99_references_used_for_design: false
+  v99_task_scores_used_for_design: false
+  v99_failure_identities_used_for_design: false
+  v99_generated_token_ids_used_for_design: false
+  v99_per_sample_telemetry_used_for_design: false
+  benchmark_labels_accessed: false
+  official_task_scores_accessed: false
+  permitted_aggregate_v99_mechanism_facts:
+    - progressive_target_reached_on_1_of_64_samples
+    - 8073_total_candidate_cache_probes
+    - 1146_accepted_and_6927_rejected_checkpoints
+    - group_utilization_passed_on_1_of_64_samples
+    - aggregate_task_fidelity_passed_but_robust_fold_fidelity_failed
+  calibration_must_use_fresh_disjoint_ledgers: true
+  future_heldout_must_remain_unmaterialized_until_freeze: true
+
+unchanged_policy:
+  model_id: llava-hf/llava-1.5-7b-hf
+  model_revision: b234b804b114d9e37bb655e11cbbb5f5e971b7a9
+  backend: hf_eager_prefill_sdpa_decode
+  deterministic_generation: true
+  output_length: 64
+  common_block_size_tokens: 4
+  physical_budget_block_size_tokens: 4
+  mandatory_policy: last_token
+  configured_active_byte_cap: 28500000
+  candidate_tier_policy: exact_only
+  prototype_merging_enabled: false
+  residual_storage_enabled: false
+  repair_enabled: false
+  fullkv_prefill_reused: true
+  second_prefill_forbidden: true
+
+algorithm:
+  name: hierarchical_head_local_logit_safe_eviction
+  online_inputs_only:
+    - prompt_attention
+    - forecast_attention
+    - attention_times_value_deviation
+    - evidence_graph_coverage
+    - modality_and_layout_metadata
+    - fullkv_short_horizon_logits
+  initial_state: exact_fullkv
+  protected_core:
+    - mandatory_blocks
+    - atomic_coherent_layout_groups
+    - preregistered_minimum_prompt_mass
+  route_definition: one_layer_and_one_kv_head
+  route_capacity_ladders:
+    nested: true
+    block_aligned: true
+    monotonic: true
+    levels: [full, coarse_midpoint, target_adjacent]
+    blocks_at_lower_capacity_are_a_subset_of_higher_capacity: true
+    no_cross_route_block_movement: true
+  hierarchy:
+    partition_key: deterministic_layer_head_risk_and_proposed_removed_bytes
+    byte_balanced_partitions: true
+    initial_partition_count: 8
+    maximum_binary_refinement_depth: 2
+    safe_partition_behavior: retain_its_largest_verified_capacity_drop
+    unsafe_partition_behavior: split_once_per_level_then_keep_unresolved_routes_exact
+  global_assembly:
+    item: one_verified_nested_capacity_step_for_one_route_or_route_partition
+    objective: reach_cap_with_minimum_excess_savings_then_maximize_label_blind_evidence_utility
+    solver: deterministic_multiple_choice_knapsack
+    one_capacity_level_per_route: true
+    atomic_layout_groups_never_partially_removed: true
+    selected_active_bytes_must_not_exceed_cap: true
+  joint_verification:
+    required: true
+    reference: one_reused_fullkv_teacher_forced_greedy_prefix
+    failed_joint_candidate_behavior: conflict_directed_partition_rollback_and_safe_donor_exchange
+    maximum_rollback_rounds: 2
+    final_cache_must_pass_joint_gate: true
+  fail_closed_behavior:
+    execute_best_jointly_verified_exact_cache: true
+    record_actual_active_bytes: true
+    mark_target_reached_false_when_cap_is_not_met: true
+    unverified_target_cache_fallback_forbidden: true
+    failed_sample_record_required: true
+
+probe_protocol:
+  horizon_steps: 2
+  maximum_forward_kl: 0.02
+  maximum_absolute_logit_difference: 1.0
+  greedy_token_match_required: true
+  maximum_candidate_cache_evaluations: 24
+  maximum_sequential_decision_rounds: 6
+  fullkv_reference_rollout_count: 1
+  reference_logits_reused_across_candidates: true
+  candidate_states_isolated: true
+  candidate_states_discarded_before_measured_decode: true
+  candidate_evaluations_batched_where_memory_permits: false
+  candidate_evaluation_mode: sequential_initial_correctness_path
+  every_accepted_capacity_step_must_pass: true
+  final_joint_candidate_must_pass: true
+  every_sample_must_reach_target: true
+  overhead_reported_separately: true
+
+gpu_debug_authorization:
+  authorized_scope: retention_one_parity_then_one_compressed_synthetic_sample
+  environment_gate: MOSAICKV_ENABLE_V100_GPU_DEBUG=1
+  calibration_or_heldout_authorized: false
+  retention_one_must_pass_before_compressed_debug: true
+  compressed_debug_must_use_afterok_dependency: true
+
+gpu_debug_evidence:
+  evidence_scope: implementation_validation_smoke_only
+  paper_quality_claim_authorized: false
+  runtime_git_sha: 1f90a5921ad80def808cd0a0165c42166ef9fc71
+  validation_git_sha: 3d7b23e3a7b76e58c9e9bc31c6cf6cf543fab203
+  retention_one:
+    slurm_job_id: "18770404"
+    scheduler_state: COMPLETED
+    scheduler_exit_code: "0:0"
+    report_path: /scratch/djy8hg/runs/mosaickv/choice-c-v100-gpu-debug-1f90a5921ad8/retention_one/report.json
+    report_sha256: 9dfcae7046413ad33a18357d150a7ff647d1b22c6f612667f2a18b48f3dd5f0f
+    token_agreement: 1.0
+    maximum_logit_difference: 0.0
+    generated_tokens: 4
+  compressed_one_sample:
+    slurm_job_id: "18770405"
+    scheduler_state: FAILED
+    scheduler_exit_code: "1:0"
+    runtime_completed_before_postprocessing_failure: true
+    postprocessing_failure: obsolete_selection_configuration_key
+    corrected_key: online_uncertainty_routing.hierarchical_gpu_debug_authorized
+    summary_regenerated_without_gpu_rerun: true
+    report_path: /scratch/djy8hg/runs/mosaickv/choice-c-v100-gpu-debug-1f90a5921ad8/single_sample/v100_single_sample_debug.json
+    report_sha256: 9dd138a4f802ed21ff14e39d96f967313fcd6353648fffe09a561f315d517231
+    artifact_hashes_verified: true
+    required_trace_fields_verified: true
+    probe_evaluations_used: 9
+    maximum_probe_evaluations: 24
+    probe_rounds_used: 2
+    maximum_probe_rounds: 6
+    maximum_observed_kl: 0.002675463445484638
+    maximum_allowed_kl: 0.02
+    maximum_observed_logit_difference: 0.984375
+    maximum_allowed_logit_difference: 1.0
+    probe_state_discarded_before_measured_decode: true
+    target_reached: true
+    final_joint_probe_passed: true
+    used_fullkv_fallback: false
+    active_kv_bytes: 26738688
+    final_decode_active_kv_bytes: 28311552
+    configured_active_byte_cap: 28500000
+    residual_kv_bytes: 0
+
+strict_runtime_configuration:
+  stable_head_hierarchical_logit_safe_eviction: true
+  stable_head_hierarchical_partition_count: 8
+  stable_head_hierarchical_maximum_refinement_depth: 2
+  stable_head_hierarchical_maximum_candidate_evaluations: 24
+  stable_head_hierarchical_maximum_sequential_rounds: 6
+  stable_head_hierarchical_maximum_rollback_rounds: 2
+  stable_head_hierarchical_horizon: 2
+  stable_head_hierarchical_maximum_kl: 0.02
+  stable_head_hierarchical_maximum_logit_difference: 1.0
+  mutually_exclusive_with_v98_shortlist: true
+  mutually_exclusive_with_v99_progressive: true
+
+planned_calibration:
+  status: unmaterialized
+  selection_seed: 20310821
+  warmups_per_arm: 1
+  measured_repetitions_per_arm: 1
+  arms: [full_kv, prompt_attention_topk, hierarchical_head_local_logit_safe_exact]
+  tasks:
+    - task: docvqa
+      dataset_id: lmms-lab/DocVQA
+      dataset_revision: 539088ef8a8ada01ac8e2e6d4e372586748a265e
+      split: validation
+      sample_count: 32
+      ledger_status: must_be_materialized_from_a_future_clean_commit
+    - task: textvqa
+      dataset_id: lmms-lab/textvqa
+      dataset_revision: 9c0699cd19768ac5ab97568f6b3cbac4c0062884
+      split: validation
+      sample_count: 32
+      ledger_status: must_be_materialized_from_a_future_clean_commit
+
+unchanged_freeze_gates:
+  minimum_active_reduction_fraction_vs_prompt_topk: 0.30
+  minimum_active_plus_residual_reduction_fraction_vs_prompt_topk: 0.30
+  fullkv_answer_noninferiority_margin_vs_prompt_topk: 0.05
+  fullkv_token_noninferiority_margin_vs_prompt_topk: 0.05
+  require_every_task: true
+  robust_fold_count: 4
+  expected_samples_per_fold: 8
+  require_every_fold: true
+  maximum_prototype_logical_fraction: 0.0
+  require_zero_residual_bytes: true
+  minimum_per_sample_group_reservation_utilization: 0.75
+  require_every_sample_to_reach_target: true
+  require_every_final_joint_logit_gate: true
+  require_all_rows_complete: true
+  forbid_nan_or_missing_measurements: true
+
+implementation_gate_before_submission:
+  strict_config_fields_added: true
+  hierarchical_search_implemented: true
+  route_capacity_ladder_unit_tests_passed: true
+  deterministic_partition_tests_passed: true
+  multiple_choice_knapsack_tests_passed: true
+  atomic_group_invariant_tests_passed: true
+  probe_budget_tests_passed: true
+  isolated_cache_state_tests_passed: true
+  bounded_hf_probe_loop_integrated: true
+  mocked_isolated_probe_loop_tests_passed: true
+  synthetic_interaction_rollback_tests_passed: true
+  retention_one_fullkv_parity_passed: true
+  one_sample_gpu_debug_passed: true
+  clean_commit_created: true
+  all_conditions_required: true
+
+submission_policy:
+  materialization_job_allowed: false
+  calibration_job_allowed: false
+  freeze_job_allowed: false
+  heldout_job_allowed: false
+  reason: gpu_debug_gates_passed_but_fresh_calibration_requires_separate_authorization

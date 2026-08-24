@@ -32,6 +32,7 @@ from mosaickv.backends.hf_runtime import (
     _refined_budget_candidates,
     _route_head_attention,
     _selection_decision_evidence,
+    _short_horizon_candidate_evaluation,
     _trace_catalog,
     _uncertainty_exact_head_routes,
     _uniform_attainable_prototype_position_limits,
@@ -329,6 +330,15 @@ def test_routed_head_only_plan_compacts_and_defers_source_audit() -> None:
     assert len(plan.graph.nodes) < len(full.blocks)
     assert tuple(node.node_id for node in plan.graph.nodes) == tuple(range(len(plan.graph.nodes)))
     assert tuple(node.source_id for node in plan.graph.nodes) == (plan.planner_source_node_ids)
+    risks = hf_runtime._progressive_eviction_risks(plan)
+    assert len(risks) == len(full.blocks)
+    planner_sources = {node.source_id for node in plan.graph.nodes}
+    stable_sources = set(range(len(full.blocks))) - planner_sources
+    assert stable_sources
+    assert all(risks[source_id] == prompt_attention[source_id] for source_id in stable_sources)
+    assert hf_runtime._progressive_fixed_source_ids(plan) == frozenset(
+        plan.source_node_id(node_id) for node_id in plan.selection.selected_node_ids
+    )
     assert (
         tuple(sorted(plan.source_node_id(node_id) for node_id in plan.selection.selected_node_ids))
         == plan.construction.exact_node_ids
@@ -337,6 +347,47 @@ def test_routed_head_only_plan_compacts_and_defers_source_audit() -> None:
     evidence = trace["selection_decision_evidence"]
     assert isinstance(evidence, dict)
     assert evidence["record_count"] == len(full.blocks)
+
+    full_budget = hf_runtime.SelectionBudget(
+        sum(block.byte_size for block in full.blocks),
+        BudgetUnit.BYTES,
+    )
+    construction, progressive_selection, external_ids = (
+        hf_runtime._progressive_exact_construction(
+            plan,
+            _capabilities(safe=False),
+            config,
+            range(len(full.blocks)),
+            key_transform=None,
+            active_budget=full_budget,
+        )
+    )
+    assert construction.exact_node_ids == tuple(range(len(full.blocks)))
+    assert not set(external_ids).intersection(planner_sources)
+    assert {
+        plan.source_node_id(node_id)
+        for node_id in progressive_selection.selected_node_ids
+    } == planner_sources
+
+    removed_planner = min(planner_sources)
+    removed_external = min(stable_sources)
+    retained = set(range(len(full.blocks))) - {removed_planner, removed_external}
+    reduced, reduced_selection, reduced_external = (
+        hf_runtime._progressive_exact_construction(
+            plan,
+            _capabilities(safe=False),
+            config,
+            retained,
+            key_transform=None,
+            active_budget=full_budget,
+        )
+    )
+    assert set(reduced.exact_node_ids) == retained
+    assert removed_planner not in {
+        plan.source_node_id(node_id) for node_id in reduced_selection.selected_node_ids
+    }
+    assert removed_external not in reduced_external
+    assert not set(reduced_external).intersection(planner_sources)
 
 
 def test_dense_routed_plan_keeps_stable_exact_blocks_outside_objective() -> None:
@@ -2038,6 +2089,41 @@ def test_fidelity_formulas_match_known_attention_and_logit_patterns() -> None:
     reference = torch.tensor([[3.0, 1.0, -2.0]])
     assert _logit_kl(reference, reference) == pytest.approx(0.0)
     assert _logit_kl(reference, torch.tensor([[1.0, 3.0, -2.0]])) > 0
+
+
+def test_short_horizon_logit_gate_is_thresholded_and_fail_closed() -> None:
+    passed = _short_horizon_candidate_evaluation(
+        "pareto",
+        kl_values=(0.01, 0.02),
+        maximum_logit_differences=(0.5, 1.0),
+        greedy_token_matches=(True, True),
+        maximum_kl_threshold=0.02,
+        maximum_logit_difference_threshold=1.0,
+    )
+    token_changed = _short_horizon_candidate_evaluation(
+        "unsafe_token",
+        kl_values=(0.0, 0.0),
+        maximum_logit_differences=(0.0, 0.0),
+        greedy_token_matches=(True, False),
+        maximum_kl_threshold=0.02,
+        maximum_logit_difference_threshold=1.0,
+    )
+    excessive_kl = _short_horizon_candidate_evaluation(
+        "unsafe_kl",
+        kl_values=(0.01, 0.0201),
+        maximum_logit_differences=(0.5, 0.5),
+        greedy_token_matches=(True, True),
+        maximum_kl_threshold=0.02,
+        maximum_logit_difference_threshold=1.0,
+    )
+
+    assert passed.passed
+    assert passed.evaluated_steps == 2
+    assert passed.maximum_kl == pytest.approx(0.02)
+    assert passed.maximum_logit_difference == pytest.approx(1.0)
+    assert not token_changed.passed
+    assert not token_changed.greedy_token_match
+    assert not excessive_kl.passed
 
 
 @pytest.mark.parametrize("head_axis,sequence_axis", ((1, 2), (2, 1)))

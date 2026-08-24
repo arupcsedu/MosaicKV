@@ -52,6 +52,44 @@ OPTIONAL_OVERRIDE_KEYS = frozenset(
         "stable_head_query_coverage_initial_fraction",
         "stable_head_query_coverage_initial_prompt_weight",
         "stable_head_query_coverage_initial_minimum_prompt_mass_fraction",
+        "stable_head_query_coverage_initial_objective",
+        "stable_head_query_coverage_initial_cap_fraction",
+        "stable_head_query_coverage_cross_head_allocation",
+        "stable_head_query_coverage_cross_head_stability_gate",
+        "stable_head_query_coverage_cross_head_stability_risk_mode",
+        "stable_head_query_coverage_cross_head_minimum_normalized_gain",
+        "stable_head_query_coverage_cross_head_gain_to_prompt_loss_ratio",
+        "stable_head_query_coverage_output_impact_reservation",
+        "stable_head_query_coverage_output_impact_fraction",
+        "stable_head_query_coverage_layout_group_reservation",
+        "stable_head_query_coverage_layout_group_fraction",
+        "stable_head_query_coverage_layout_group_maximum_blocks",
+        "stable_head_query_coverage_layout_group_row_bins",
+        "stable_head_query_coverage_layout_group_atomic_selection",
+        "stable_head_query_coverage_layout_group_atomic_selection_mode",
+        "stable_head_query_coverage_layout_group_minimum_utilization_fraction",
+        "stable_head_query_coverage_layout_group_minimum_normalized_gain",
+        "stable_head_query_coverage_layout_group_gain_to_risk_ratio",
+        "stable_head_short_horizon_logit_stability",
+        "stable_head_logit_stability_shortlist_size",
+        "stable_head_logit_stability_horizon",
+        "stable_head_logit_stability_maximum_kl",
+        "stable_head_logit_stability_maximum_logit_difference",
+        "stable_head_progressive_logit_safe_eviction",
+        "stable_head_progressive_eviction_initial_batch_blocks",
+        "stable_head_progressive_eviction_maximum_probes",
+        "stable_head_progressive_eviction_horizon",
+        "stable_head_progressive_eviction_maximum_kl",
+        "stable_head_progressive_eviction_maximum_logit_difference",
+        "stable_head_hierarchical_logit_safe_eviction",
+        "stable_head_hierarchical_partition_count",
+        "stable_head_hierarchical_maximum_refinement_depth",
+        "stable_head_hierarchical_maximum_candidate_evaluations",
+        "stable_head_hierarchical_maximum_sequential_rounds",
+        "stable_head_hierarchical_maximum_rollback_rounds",
+        "stable_head_hierarchical_horizon",
+        "stable_head_hierarchical_maximum_kl",
+        "stable_head_hierarchical_maximum_logit_difference",
         "forecast_mode",
         "forecast_prompt_window",
         "forecast_draft_steps",
@@ -173,6 +211,68 @@ def apply_candidate(base_mosaic: Any, candidate: dict[str, Any]) -> Any:
     )
     if not isinstance(query_coverage_initial_selection, bool):
         raise ValueError("stable_head_query_coverage_initial_selection must be a boolean")
+    query_coverage_cross_head_allocation = overrides.get(
+        "stable_head_query_coverage_cross_head_allocation",
+        base_mosaic.selection.stable_head_query_coverage_cross_head_allocation,
+    )
+    if not isinstance(query_coverage_cross_head_allocation, bool):
+        raise ValueError("stable_head_query_coverage_cross_head_allocation must be a boolean")
+    query_coverage_cross_head_stability_gate = overrides.get(
+        "stable_head_query_coverage_cross_head_stability_gate",
+        base_mosaic.selection.stable_head_query_coverage_cross_head_stability_gate,
+    )
+    if not isinstance(query_coverage_cross_head_stability_gate, bool):
+        raise ValueError("stable_head_query_coverage_cross_head_stability_gate must be a boolean")
+    query_coverage_cross_head_stability_risk_mode = str(
+        overrides.get(
+            "stable_head_query_coverage_cross_head_stability_risk_mode",
+            base_mosaic.selection.stable_head_query_coverage_cross_head_stability_risk_mode,
+        )
+    )
+    if query_coverage_cross_head_stability_risk_mode not in {
+        "prompt_mass",
+        "output_impact",
+    }:
+        raise ValueError(
+            "stable_head_query_coverage_cross_head_stability_risk_mode must be "
+            "'prompt_mass' or 'output_impact'"
+        )
+    query_coverage_output_impact_reservation = overrides.get(
+        "stable_head_query_coverage_output_impact_reservation",
+        base_mosaic.selection.stable_head_query_coverage_output_impact_reservation,
+    )
+    if not isinstance(query_coverage_output_impact_reservation, bool):
+        raise ValueError("stable_head_query_coverage_output_impact_reservation must be boolean")
+    query_coverage_layout_group_reservation = overrides.get(
+        "stable_head_query_coverage_layout_group_reservation",
+        base_mosaic.selection.stable_head_query_coverage_layout_group_reservation,
+    )
+    if not isinstance(query_coverage_layout_group_reservation, bool):
+        raise ValueError("stable_head_query_coverage_layout_group_reservation must be boolean")
+    query_coverage_layout_group_atomic_selection = overrides.get(
+        "stable_head_query_coverage_layout_group_atomic_selection",
+        base_mosaic.selection.stable_head_query_coverage_layout_group_atomic_selection,
+    )
+    if not isinstance(query_coverage_layout_group_atomic_selection, bool):
+        raise ValueError("stable_head_query_coverage_layout_group_atomic_selection must be boolean")
+    short_horizon_logit_stability = overrides.get(
+        "stable_head_short_horizon_logit_stability",
+        base_mosaic.selection.stable_head_short_horizon_logit_stability,
+    )
+    if not isinstance(short_horizon_logit_stability, bool):
+        raise ValueError("stable_head_short_horizon_logit_stability must be boolean")
+    progressive_logit_safe_eviction = overrides.get(
+        "stable_head_progressive_logit_safe_eviction",
+        base_mosaic.selection.stable_head_progressive_logit_safe_eviction,
+    )
+    if not isinstance(progressive_logit_safe_eviction, bool):
+        raise ValueError("stable_head_progressive_logit_safe_eviction must be boolean")
+    hierarchical_logit_safe_eviction = overrides.get(
+        "stable_head_hierarchical_logit_safe_eviction",
+        base_mosaic.selection.stable_head_hierarchical_logit_safe_eviction,
+    )
+    if not isinstance(hierarchical_logit_safe_eviction, bool):
+        raise ValueError("stable_head_hierarchical_logit_safe_eviction must be boolean")
     forecast_mode_raw = overrides.get("forecast_mode", base_mosaic.forecasting.mode.value)
     try:
         forecast_mode = ForecastMode(str(forecast_mode_raw))
@@ -385,6 +485,199 @@ def apply_candidate(base_mosaic: Any, candidate: dict[str, Any]) -> Any:
                 overrides.get(
                     "stable_head_query_coverage_initial_minimum_prompt_mass_fraction",
                     base_mosaic.selection.stable_head_query_coverage_initial_minimum_prompt_mass_fraction,
+                )
+            ),
+            stable_head_query_coverage_initial_objective=str(
+                overrides.get(
+                    "stable_head_query_coverage_initial_objective",
+                    base_mosaic.selection.stable_head_query_coverage_initial_objective,
+                )
+            ),
+            stable_head_query_coverage_initial_cap_fraction=float(
+                overrides.get(
+                    "stable_head_query_coverage_initial_cap_fraction",
+                    base_mosaic.selection.stable_head_query_coverage_initial_cap_fraction,
+                )
+            ),
+            stable_head_query_coverage_cross_head_allocation=(query_coverage_cross_head_allocation),
+            stable_head_query_coverage_cross_head_stability_gate=(
+                query_coverage_cross_head_stability_gate
+            ),
+            stable_head_query_coverage_cross_head_stability_risk_mode=(
+                query_coverage_cross_head_stability_risk_mode
+            ),
+            stable_head_query_coverage_cross_head_minimum_normalized_gain=float(
+                overrides.get(
+                    "stable_head_query_coverage_cross_head_minimum_normalized_gain",
+                    base_mosaic.selection.stable_head_query_coverage_cross_head_minimum_normalized_gain,
+                )
+            ),
+            stable_head_query_coverage_cross_head_gain_to_prompt_loss_ratio=float(
+                overrides.get(
+                    "stable_head_query_coverage_cross_head_gain_to_prompt_loss_ratio",
+                    base_mosaic.selection.stable_head_query_coverage_cross_head_gain_to_prompt_loss_ratio,
+                )
+            ),
+            stable_head_query_coverage_output_impact_reservation=(
+                query_coverage_output_impact_reservation
+            ),
+            stable_head_query_coverage_output_impact_fraction=float(
+                overrides.get(
+                    "stable_head_query_coverage_output_impact_fraction",
+                    base_mosaic.selection.stable_head_query_coverage_output_impact_fraction,
+                )
+            ),
+            stable_head_query_coverage_layout_group_reservation=(
+                query_coverage_layout_group_reservation
+            ),
+            stable_head_query_coverage_layout_group_fraction=float(
+                overrides.get(
+                    "stable_head_query_coverage_layout_group_fraction",
+                    base_mosaic.selection.stable_head_query_coverage_layout_group_fraction,
+                )
+            ),
+            stable_head_query_coverage_layout_group_maximum_blocks=int(
+                overrides.get(
+                    "stable_head_query_coverage_layout_group_maximum_blocks",
+                    base_mosaic.selection.stable_head_query_coverage_layout_group_maximum_blocks,
+                )
+            ),
+            stable_head_query_coverage_layout_group_row_bins=int(
+                overrides.get(
+                    "stable_head_query_coverage_layout_group_row_bins",
+                    base_mosaic.selection.stable_head_query_coverage_layout_group_row_bins,
+                )
+            ),
+            stable_head_query_coverage_layout_group_atomic_selection=(
+                query_coverage_layout_group_atomic_selection
+            ),
+            stable_head_query_coverage_layout_group_atomic_selection_mode=str(
+                overrides.get(
+                    "stable_head_query_coverage_layout_group_atomic_selection_mode",
+                    base_mosaic.selection.stable_head_query_coverage_layout_group_atomic_selection_mode,
+                )
+            ),
+            stable_head_query_coverage_layout_group_minimum_utilization_fraction=float(
+                overrides.get(
+                    "stable_head_query_coverage_layout_group_minimum_utilization_fraction",
+                    base_mosaic.selection.stable_head_query_coverage_layout_group_minimum_utilization_fraction,
+                )
+            ),
+            stable_head_query_coverage_layout_group_minimum_normalized_gain=float(
+                overrides.get(
+                    "stable_head_query_coverage_layout_group_minimum_normalized_gain",
+                    base_mosaic.selection.stable_head_query_coverage_layout_group_minimum_normalized_gain,
+                )
+            ),
+            stable_head_query_coverage_layout_group_gain_to_risk_ratio=float(
+                overrides.get(
+                    "stable_head_query_coverage_layout_group_gain_to_risk_ratio",
+                    base_mosaic.selection.stable_head_query_coverage_layout_group_gain_to_risk_ratio,
+                )
+            ),
+            stable_head_short_horizon_logit_stability=(short_horizon_logit_stability),
+            stable_head_logit_stability_shortlist_size=int(
+                overrides.get(
+                    "stable_head_logit_stability_shortlist_size",
+                    base_mosaic.selection.stable_head_logit_stability_shortlist_size,
+                )
+            ),
+            stable_head_logit_stability_horizon=int(
+                overrides.get(
+                    "stable_head_logit_stability_horizon",
+                    base_mosaic.selection.stable_head_logit_stability_horizon,
+                )
+            ),
+            stable_head_logit_stability_maximum_kl=float(
+                overrides.get(
+                    "stable_head_logit_stability_maximum_kl",
+                    base_mosaic.selection.stable_head_logit_stability_maximum_kl,
+                )
+            ),
+            stable_head_logit_stability_maximum_logit_difference=float(
+                overrides.get(
+                    "stable_head_logit_stability_maximum_logit_difference",
+                    base_mosaic.selection.stable_head_logit_stability_maximum_logit_difference,
+                )
+            ),
+            stable_head_progressive_logit_safe_eviction=(progressive_logit_safe_eviction),
+            stable_head_progressive_eviction_initial_batch_blocks=int(
+                overrides.get(
+                    "stable_head_progressive_eviction_initial_batch_blocks",
+                    base_mosaic.selection.stable_head_progressive_eviction_initial_batch_blocks,
+                )
+            ),
+            stable_head_progressive_eviction_maximum_probes=int(
+                overrides.get(
+                    "stable_head_progressive_eviction_maximum_probes",
+                    base_mosaic.selection.stable_head_progressive_eviction_maximum_probes,
+                )
+            ),
+            stable_head_progressive_eviction_horizon=int(
+                overrides.get(
+                    "stable_head_progressive_eviction_horizon",
+                    base_mosaic.selection.stable_head_progressive_eviction_horizon,
+                )
+            ),
+            stable_head_progressive_eviction_maximum_kl=float(
+                overrides.get(
+                    "stable_head_progressive_eviction_maximum_kl",
+                    base_mosaic.selection.stable_head_progressive_eviction_maximum_kl,
+                )
+            ),
+            stable_head_progressive_eviction_maximum_logit_difference=float(
+                overrides.get(
+                    "stable_head_progressive_eviction_maximum_logit_difference",
+                    base_mosaic.selection.stable_head_progressive_eviction_maximum_logit_difference,
+                )
+            ),
+            stable_head_hierarchical_logit_safe_eviction=(hierarchical_logit_safe_eviction),
+            stable_head_hierarchical_partition_count=int(
+                overrides.get(
+                    "stable_head_hierarchical_partition_count",
+                    base_mosaic.selection.stable_head_hierarchical_partition_count,
+                )
+            ),
+            stable_head_hierarchical_maximum_refinement_depth=int(
+                overrides.get(
+                    "stable_head_hierarchical_maximum_refinement_depth",
+                    base_mosaic.selection.stable_head_hierarchical_maximum_refinement_depth,
+                )
+            ),
+            stable_head_hierarchical_maximum_candidate_evaluations=int(
+                overrides.get(
+                    "stable_head_hierarchical_maximum_candidate_evaluations",
+                    base_mosaic.selection.stable_head_hierarchical_maximum_candidate_evaluations,
+                )
+            ),
+            stable_head_hierarchical_maximum_sequential_rounds=int(
+                overrides.get(
+                    "stable_head_hierarchical_maximum_sequential_rounds",
+                    base_mosaic.selection.stable_head_hierarchical_maximum_sequential_rounds,
+                )
+            ),
+            stable_head_hierarchical_maximum_rollback_rounds=int(
+                overrides.get(
+                    "stable_head_hierarchical_maximum_rollback_rounds",
+                    base_mosaic.selection.stable_head_hierarchical_maximum_rollback_rounds,
+                )
+            ),
+            stable_head_hierarchical_horizon=int(
+                overrides.get(
+                    "stable_head_hierarchical_horizon",
+                    base_mosaic.selection.stable_head_hierarchical_horizon,
+                )
+            ),
+            stable_head_hierarchical_maximum_kl=float(
+                overrides.get(
+                    "stable_head_hierarchical_maximum_kl",
+                    base_mosaic.selection.stable_head_hierarchical_maximum_kl,
+                )
+            ),
+            stable_head_hierarchical_maximum_logit_difference=float(
+                overrides.get(
+                    "stable_head_hierarchical_maximum_logit_difference",
+                    base_mosaic.selection.stable_head_hierarchical_maximum_logit_difference,
                 )
             ),
         ),
