@@ -1,0 +1,135 @@
+schema_version: 1
+experiment_id: choice_c_v104_joint_reallocation_preflight
+classification: preregistered_fresh_runtime_correctness_preflight_not_calibration
+protocol_status: fresh_preflight_materialization_and_gpu_execution_authorized_after_clean_commit
+
+scientific_boundary:
+  predecessor: choice_c_v103_fresh_identity_calibration_gpu_preflight
+  predecessor_result: sealed_negative
+  predecessor_seal: configs/ledgers/choice_c_v103_negative_preflight_seal.yaml
+  v103_sample_identities_consumed: true
+  v103_labels_or_task_scores_used_for_v104_design: false
+  v103_runtime_failure_telemetry_used_for_engineering_diagnosis: true
+  thresholds_weakened: false
+  candidate_parameter_search_allowed: false
+  calibration_authorized: false
+  heldout_evaluation_authorized: false
+
+candidate_source:
+  implementation_git_sha_resolution: commit_containing_this_protocol_and_runtime
+  implementation_git_sha_recorded_in_materialized_worker_spec: true
+  source_worktree_must_be_clean: true
+  runtime_behavior_changes_after_implementation_commit_allowed: false
+  common_environment: /scratch/djy8hg/env/mosaickv
+  model_cache_root: /scratch/djy8hg/cache/mosaickv
+
+candidate:
+  model: llava-hf/llava-1.5-7b-hf
+  backend: hf
+  attention_implementation: eager
+  decode_attention_implementation: sdpa
+  method: mosaickv_exact
+  effective_variant: v104_hierarchical_fixed_capacity_joint_reallocation
+  active_budget_bytes: 28500000
+  block_size_tokens: 4
+  maximum_prototypes_per_head: 0
+  residual_storage_enabled: false
+  repair_enabled: false
+  forecast_mode: prompt_window
+  forecast_prompt_window: 16
+  forecast_draft_steps: 0
+  hierarchical_partition_count: 8
+  hierarchical_maximum_refinement_depth: 2
+  hierarchical_maximum_candidate_evaluations: 24
+  hierarchical_maximum_sequential_rounds: 6
+  hierarchical_maximum_rollback_rounds: 2
+  hierarchical_horizon: 2
+  hierarchical_maximum_forward_kl: 0.02
+  hierarchical_maximum_absolute_logit_difference: 1.0
+  hierarchical_greedy_token_match_required: true
+
+joint_reallocation:
+  trigger: initial_final_joint_probe_failed
+  source_of_candidates: label_blind_same_byte_route_boundary_swaps
+  affected_route_order: descending_evicted_output_impact_then_route_id
+  ordinary_round_width: 1
+  second_round_width_if_budget_remains: 2
+  maximum_alternatives_per_route: 2
+  every_route_active_bytes_must_equal_initial_target_route_bytes: true
+  every_route_physical_positions_must_remain_at_or_below_dense_cap: true
+  global_active_bytes_must_not_change: true
+  atomic_and_mandatory_blocks_must_remain_selected: true
+  every_candidate_requires_isolated_joint_probe: true
+  unprobed_candidate_may_not_be_selected: true
+  failed_candidates_are_discarded: true
+  fullkv_fallback_remains_fail_closed: true
+
+fresh_identity_plan:
+  selection_salt: choice-c-v104-joint-reallocation-preflight-v1
+  selection_seed: 104017
+  selection_rule: sha256_digest_ascending_then_canonical_sample_id
+  selection_preimage_separator: _null_
+  labels_references_scores_media_prompts_or_failure_outcomes_inspected_for_selection: false
+  predecessor_exclusion_manifest: /scratch/djy8hg/runs/mosaickv/choice-c-v103-fresh-identity-calibration-v1/inputs/exclusion_manifest.json
+  additionally_excluded_v103_preflight_ledgers:
+    - /scratch/djy8hg/runs/mosaickv/choice-c-v103-fresh-identity-calibration-v1/inputs/preflight_textvqa_train.json
+    - /scratch/djy8hg/runs/mosaickv/choice-c-v103-fresh-identity-calibration-v1/inputs/preflight_infovqa.json
+  sample_count_per_task: 2
+  ledgers_materialized: false
+  ledger_materialization_authorized: true
+  gpu_preflight_authorized: true
+  tasks:
+    - task: textvqa_train_calibration
+      dataset_id: lmms-lab/textvqa
+      dataset_config: default
+      dataset_revision: 9c0699cd19768ac5ab97568f6b3cbac4c0062884
+      split: train
+      id_only_catalog: /scratch/djy8hg/runs/mosaickv/choice-c-v102-v100-fresh-cross-dataset-calibration-v1/inputs/catalog_textvqa_train_id_projected_v2.json
+      id_only_catalog_sha256: 5a6f700a623da65ae62bf4abc7317dcea48f0a9388f4047d3de8cfd643aece8d
+      planned_ledger: /scratch/djy8hg/runs/mosaickv/choice-c-v104-joint-reallocation-preflight-v1/inputs/preflight_textvqa_train.json
+    - task: infovqa
+      dataset_id: lmms-lab-encoder/DocVQA
+      dataset_config: InfographicVQA
+      dataset_revision: 539088ef8a8ada01ac8e2e6d4e372586748a265e
+      split: validation
+      id_only_catalog: /scratch/djy8hg/runs/mosaickv/choice-c-v102-v100-fresh-cross-dataset-calibration-v1/inputs/catalog_infovqa_validation_id_projected_v2.json
+      id_only_catalog_sha256: 38907d03d42a6c52d898b3a543ad2cd737b85569c465ad301ca148aa72e4308c
+      planned_ledger: /scratch/djy8hg/runs/mosaickv/choice-c-v104-joint-reallocation-preflight-v1/inputs/preflight_infovqa.json
+
+preflight_gate:
+  submission_authorized_after_clean_immutable_commit: true
+  arms_on_identical_samples:
+    - full_kv
+    - prompt_attention_topk
+    - v104_hierarchical_fixed_capacity_joint_reallocation
+  warmups_per_arm: 1
+  measured_repetitions_per_arm: 1
+  output_length: 64
+  seed: 17
+  every_candidate_sample_must_complete: true
+  every_candidate_sample_must_reach_compressed_target: true
+  fullkv_fallback_passes: false
+  maximum_candidate_evaluations: 24
+  maximum_sequential_rounds: 6
+  require_correct_textvqa_annotation_list: true
+  require_zero_residual_bytes: true
+  require_no_over_budget_pack_or_decode: true
+  every_trace_must_record:
+    - status
+    - effective_method
+    - used_fullkv_fallback
+    - attempted_active_kv_bytes
+    - hard_active_kv_budget_bytes
+    - probe_decisions
+    - timing_breakdown
+    - byte_budget_materialization
+    - hierarchical_logit_safe_eviction
+  positive_result_may_authorize_calibration_automatically: false
+  separate_positive_review_required: true
+
+downstream_actions:
+  calibration_ledger_materialization_authorized: false
+  calibration_execution_authorized: false
+  candidate_freeze_authorized: false
+  heldout_materialization_authorized: false
+  heldout_execution_authorized: false

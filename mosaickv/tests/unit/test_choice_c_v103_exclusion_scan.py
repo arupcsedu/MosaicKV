@@ -23,13 +23,11 @@ def _scanner(package: Path) -> ModuleType:
         sys.path.remove(str(scripts))
 
 
-def test_v103_scan_request_is_blocked_until_resolution_commit_review() -> None:
+def test_v103_scan_request_is_blocked_until_resolution_commit_review(tmp_path: Path) -> None:
     package = Path(__file__).parents[2]
     scanner = _scanner(package)
-    output = Path(
-        "/scratch/djy8hg/runs/mosaickv/choice-c-v103-fresh-identity-calibration-v1/"
-        "inputs/exclusion_manifest.json"
-    )
+    output = tmp_path / "exclusion_manifest.json"
+    scanner.EXPECTED_OUTPUT = output
     with pytest.raises(PermissionError, match="scan retry"):
         scanner.require_scan_request(
             spec_path=(

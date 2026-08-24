@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import random
 from dataclasses import fields, replace
+from itertools import pairwise
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -22,6 +23,7 @@ from mosaickv.selection.hierarchical import (
     build_route_capacity_ladders,
     partition_route_ladders,
     plan_conflict_rollback,
+    plan_joint_reallocation_candidates,
     run_bounded_hierarchical_probe_loop,
     select_verified_capacity_levels,
     update_partition_screening,
@@ -108,6 +110,59 @@ def _ladder(
         levels=levels,
         protected_node_ids=(base_node,),
         target_active_bytes=10,
+        target_reached=True,
+    )
+
+
+def _ladder_with_reallocation(
+    route: tuple[int, int],
+    base_node: int,
+    *,
+    target_risk: float,
+) -> RouteCapacityLadder:
+    levels = (
+        RouteCapacityLevel(
+            route=route,
+            level_index=0,
+            kind=CapacityLevelKind.FULL,
+            selected_node_ids=tuple(range(base_node, base_node + 4)),
+            active_bytes=40,
+            retained_utility=40.0,
+            evicted_risk=0.0,
+        ),
+        RouteCapacityLevel(
+            route=route,
+            level_index=1,
+            kind=CapacityLevelKind.COARSE_MIDPOINT,
+            selected_node_ids=tuple(range(base_node, base_node + 3)),
+            active_bytes=30,
+            retained_utility=30.0,
+            evicted_risk=target_risk / 2,
+        ),
+        RouteCapacityLevel(
+            route=route,
+            level_index=2,
+            kind=CapacityLevelKind.TARGET_ADJACENT,
+            selected_node_ids=tuple(range(base_node, base_node + 2)),
+            active_bytes=20,
+            retained_utility=20.0,
+            evicted_risk=target_risk,
+        ),
+        RouteCapacityLevel(
+            route=route,
+            level_index=3,
+            kind=CapacityLevelKind.REALLOCATION_ALTERNATIVE,
+            selected_node_ids=(base_node, base_node + 2),
+            active_bytes=20,
+            retained_utility=19.0,
+            evicted_risk=target_risk + 0.1,
+        ),
+    )
+    return RouteCapacityLadder(
+        route=route,
+        levels=levels,
+        protected_node_ids=(base_node,),
+        target_active_bytes=20,
         target_reached=True,
     )
 
@@ -215,6 +270,39 @@ def test_route_ladders_are_nested_and_preserve_protected_blocks() -> None:
             previous = selected
 
 
+def test_route_ladders_expose_same_capacity_reallocation_alternatives() -> None:
+    blocks = [
+        RouteBlockCandidate(
+            node_id=index,
+            layer=0,
+            kv_head=0,
+            byte_size=10,
+            evidence_utility=float(4 - index),
+            eviction_risk=float(index + 1),
+            mandatory=index == 0,
+        )
+        for index in range(4)
+    ]
+
+    ladder = build_route_capacity_ladders(blocks, {(0, 0): 20})[0]
+
+    assert ladder.target_level.active_bytes == 20
+    assert ladder.target_level.kind is CapacityLevelKind.TARGET_ADJACENT
+    assert ladder.reallocation_levels
+    assert all(
+        level.active_bytes == ladder.target_level.active_bytes
+        for level in ladder.reallocation_levels
+    )
+    assert all(
+        level.kind is CapacityLevelKind.REALLOCATION_ALTERNATIVE
+        for level in ladder.reallocation_levels
+    )
+    assert all(
+        set(ladder.protected_node_ids) <= set(level.selected_node_ids)
+        for level in ladder.reallocation_levels
+    )
+
+
 def test_route_ladders_require_a_protected_core() -> None:
     block = RouteBlockCandidate(0, 0, 0, 16, 1.0, 1.0)
 
@@ -241,14 +329,19 @@ def test_random_route_ladders_preserve_nesting_and_bytes() -> None:
         full_bytes = sum(block.byte_size for block in blocks)
         target = generator.randint(1, full_bytes)
         ladder = build_route_capacity_ladders(blocks, {(seed % 3, seed % 5): target})[0]
+        ordinary_levels = tuple(
+            level
+            for level in ladder.levels
+            if level.kind is not CapacityLevelKind.REALLOCATION_ALTERNATIVE
+        )
 
         assert all(
             right.active_bytes <= left.active_bytes
-            for left, right in zip(ladder.levels, ladder.levels[1:], strict=False)
+            for left, right in pairwise(ordinary_levels)
         )
         assert all(
             set(right.selected_node_ids) <= set(left.selected_node_ids)
-            for left, right in zip(ladder.levels, ladder.levels[1:], strict=False)
+            for left, right in pairwise(ordinary_levels)
         )
 
 
@@ -369,6 +462,65 @@ def test_conflict_rollback_fails_closed_when_no_exchange_is_feasible() -> None:
     assert rollback.reason == "no_target_feasible_verified_rollback_exchange"
 
 
+def test_joint_reallocation_changes_risky_route_without_changing_capacity() -> None:
+    ladders = (
+        _ladder_with_reallocation((0, 0), 0, target_risk=20.0),
+        _ladder_with_reallocation((0, 1), 10, target_risk=2.0),
+    )
+    current = select_verified_capacity_levels(
+        ladders,
+        {(0, 0): (2,), (0, 1): (2,)},
+        40,
+        require_full_level=False,
+    )
+
+    plans = plan_joint_reallocation_candidates(
+        current,
+        ladders,
+        rollback_width=1,
+        maximum_candidates=2,
+    )
+
+    assert plans
+    first = plans[0]
+    assert first.selection.target_reached
+    assert first.selection.active_bytes == 40
+    assert first.rolled_back_routes == ((0, 0),)
+    assert first.donor_routes == ()
+    assert first.selection.level_index_by_route() == {(0, 0): 3, (0, 1): 2}
+    assert first.bytes_added_by_rollback == first.bytes_removed_by_donors == 0
+
+
+def test_joint_reallocation_is_deterministic_and_honors_candidate_cap() -> None:
+    ladders = tuple(
+        _ladder_with_reallocation((0, head), head * 10, target_risk=float(10 - head))
+        for head in range(4)
+    )
+    current = select_verified_capacity_levels(
+        ladders,
+        {(0, head): (2,) for head in range(4)},
+        80,
+        require_full_level=False,
+    )
+
+    first = plan_joint_reallocation_candidates(
+        current,
+        ladders,
+        rollback_width=1,
+        maximum_candidates=2,
+    )
+    second = plan_joint_reallocation_candidates(
+        current,
+        tuple(reversed(ladders)),
+        rollback_width=1,
+        maximum_candidates=2,
+    )
+
+    assert first == second
+    assert len(first) == 2
+    assert all(plan.selection.target_reached for plan in first)
+
+
 def _probe_result(passed: bool) -> LogitProbeResult:
     return LogitProbeResult(
         greedy_token_match=passed,
@@ -461,6 +613,80 @@ def test_bounded_hierarchy_uses_verified_rollback_after_joint_failure() -> None:
     assert len(decision.rollback_attempts) == 1
     assert decision.rollback_attempts[0].rollback_applied
     assert decision.evaluations[-1].proposal.proposal_id == "rollback-0"
+
+
+def test_bounded_hierarchy_spends_remaining_probe_budget_on_joint_reallocation() -> None:
+    ladders = (
+        _ladder_with_reallocation((0, 0), 0, target_risk=20.0),
+        _ladder_with_reallocation((0, 1), 10, target_risk=2.0),
+    )
+    budget = ProbeBudgetTracker(6, 4)
+
+    def probe(proposal: Any) -> LogitProbeResult:
+        if proposal.kind.value == "screening":
+            return _probe_result(True)
+        if proposal.proposal_id == "reallocation-0-0":
+            return _probe_result(True)
+        return _probe_result(False)
+
+    decision = run_bounded_hierarchical_probe_loop(
+        ladders,
+        target_active_bytes=40,
+        initial_partition_count=2,
+        maximum_refinement_depth=0,
+        maximum_rollback_rounds=1,
+        maximum_forward_kl=0.02,
+        maximum_absolute_logit_difference=1.0,
+        required_steps=2,
+        probe_budget=budget,
+        probe=probe,
+        fixed_route_capacity_reallocation=True,
+    )
+
+    assert decision.target_reached
+    assert decision.selected_candidate_passed
+    assert not decision.final_joint_probe_passed
+    assert not decision.used_fullkv_fallback
+    assert decision.selection.level_index_by_route() == {(0, 0): 3, (0, 1): 2}
+    assert any(
+        evaluation.proposal.proposal_id == "reallocation-0-0"
+        for evaluation in decision.evaluations
+    )
+    assert decision.evaluations_used <= budget.maximum_candidate_evaluations
+    assert decision.rounds_used <= budget.maximum_sequential_rounds
+
+
+def test_failed_joint_reallocation_exhausts_only_the_remaining_probe_allowance() -> None:
+    ladders = tuple(
+        _ladder_with_reallocation((0, head), head * 10, target_risk=float(10 - head))
+        for head in range(4)
+    )
+    budget = ProbeBudgetTracker(6, 4)
+
+    decision = run_bounded_hierarchical_probe_loop(
+        ladders,
+        target_active_bytes=80,
+        initial_partition_count=2,
+        maximum_refinement_depth=0,
+        maximum_rollback_rounds=1,
+        maximum_forward_kl=0.02,
+        maximum_absolute_logit_difference=1.0,
+        required_steps=2,
+        probe_budget=budget,
+        probe=lambda proposal: _probe_result(proposal.kind.value == "screening"),
+        fixed_route_capacity_reallocation=True,
+    )
+
+    reallocation_evaluations = tuple(
+        evaluation
+        for evaluation in decision.evaluations
+        if evaluation.proposal.kind.value == "reallocation"
+    )
+    assert len(reallocation_evaluations) == 3
+    assert decision.evaluations_used == budget.maximum_candidate_evaluations
+    assert decision.rounds_used == 3
+    assert decision.used_fullkv_fallback
+    assert not decision.target_reached
 
 
 def test_bounded_hierarchy_falls_back_to_fullkv_after_unsafe_joint_candidates() -> None:

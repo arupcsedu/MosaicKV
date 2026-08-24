@@ -5669,6 +5669,7 @@ def _run_hierarchical_logit_safe_eviction(
         required_steps=selection_config.stable_head_hierarchical_horizon,
         probe_budget=tracker,
         probe=probe,
+        fixed_route_capacity_reallocation=True,
     )
     selected_levels = tuple(
         (choice.route, choice.level_index) for choice in decision.selection.choices

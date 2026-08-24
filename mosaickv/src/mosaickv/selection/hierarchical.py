@@ -14,6 +14,7 @@ from collections import defaultdict
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
+from itertools import combinations, islice
 
 RouteId = tuple[int, int]
 
@@ -32,6 +33,7 @@ class CapacityLevelKind(StrEnum):
     FULL = "full"
     COARSE_MIDPOINT = "coarse_midpoint"
     TARGET_ADJACENT = "target_adjacent"
+    REALLOCATION_ALTERNATIVE = "reallocation_alternative"
 
 
 class HierarchicalProposalKind(StrEnum):
@@ -40,6 +42,7 @@ class HierarchicalProposalKind(StrEnum):
     SCREENING = "screening"
     JOINT = "joint"
     ROLLBACK = "rollback"
+    REALLOCATION = "reallocation"
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,17 +132,30 @@ class RouteCapacityLadder:
             raise HierarchicalSelectionError("protected node IDs must be sorted and unique")
         previous = frozenset(self.levels[0].selected_node_ids)
         previous_bytes = self.levels[0].active_bytes
+        target_level: RouteCapacityLevel | None = None
         for level in self.levels:
             selected = frozenset(level.selected_node_ids)
             if not protected <= selected:
                 raise HierarchicalSelectionError("every route level must retain the protected core")
+            if level.kind is CapacityLevelKind.REALLOCATION_ALTERNATIVE:
+                if target_level is None:
+                    raise HierarchicalSelectionError(
+                        "reallocation alternatives require an ordinary target level"
+                    )
+                if level.active_bytes != target_level.active_bytes:
+                    raise HierarchicalSelectionError(
+                        "reallocation alternatives must preserve route capacity exactly"
+                    )
+                continue
             if not selected <= previous or level.active_bytes > previous_bytes:
                 raise HierarchicalSelectionError(
                     "route levels must be nested with monotonically decreasing bytes"
                 )
+            if target_level is None and level.active_bytes <= self.target_active_bytes:
+                target_level = level
             previous = selected
             previous_bytes = level.active_bytes
-        observed_reached = self.levels[-1].active_bytes <= self.target_active_bytes
+        observed_reached = target_level is not None
         if observed_reached != self.target_reached:
             raise HierarchicalSelectionError("route target-reached flag is inconsistent")
 
@@ -149,7 +165,20 @@ class RouteCapacityLadder:
 
     @property
     def target_level(self) -> RouteCapacityLevel:
-        return self.levels[-1]
+        return next(
+            (level for level in self.levels if level.active_bytes <= self.target_active_bytes),
+            self.levels[-1],
+        )
+
+    @property
+    def reallocation_levels(self) -> tuple[RouteCapacityLevel, ...]:
+        """Return same-capacity alternatives reserved for failed joint probes."""
+
+        return tuple(
+            level
+            for level in self.levels
+            if level.kind is CapacityLevelKind.REALLOCATION_ALTERNATIVE
+        )
 
     @property
     def proposed_removed_bytes(self) -> int:
@@ -248,13 +277,77 @@ def build_route_capacity_ladders(
             if selected_frozen == frozenset(levels[-1].selected_node_ids):
                 continue
             levels.append(_level(route, len(levels), kind, selected_frozen, candidates))
+        target_level = next(
+            (level for level in levels if level.active_bytes <= target),
+            None,
+        )
+        if target_level is not None:
+            target_selected = frozenset(target_level.selected_node_ids)
+            selected_optional = sorted(
+                (
+                    candidates[node_id]
+                    for node_id in target_selected
+                    if node_id not in protected
+                ),
+                key=lambda block: (
+                    block.eviction_risk,
+                    block.evidence_utility,
+                    block.node_id,
+                ),
+            )
+            removed_optional = sorted(
+                (
+                    block
+                    for block in route_blocks
+                    if block.node_id not in target_selected and not block.protected
+                ),
+                key=lambda block: (
+                    -block.eviction_risk,
+                    -block.evidence_utility,
+                    block.node_id,
+                ),
+            )
+            used_selected: set[int] = set()
+            # Two deterministic boundary swaps provide bounded alternatives
+            # without changing route length or dense HF storage.  Each swap
+            # restores the highest-risk omitted block of a given byte size
+            # and displaces the lowest-risk retained optional block with the
+            # same byte size.  The alternatives are never inferred safe; a
+            # complete joint candidate must pass the online probe.
+            for removed in removed_optional:
+                displaced = next(
+                    (
+                        block
+                        for block in selected_optional
+                        if block.node_id not in used_selected
+                        and block.byte_size == removed.byte_size
+                    ),
+                    None,
+                )
+                if displaced is None:
+                    continue
+                alternative = frozenset(
+                    (target_selected - {displaced.node_id}) | {removed.node_id}
+                )
+                levels.append(
+                    _level(
+                        route,
+                        len(levels),
+                        CapacityLevelKind.REALLOCATION_ALTERNATIVE,
+                        alternative,
+                        candidates,
+                    )
+                )
+                used_selected.add(displaced.node_id)
+                if len(used_selected) >= 2:
+                    break
         ladders.append(
             RouteCapacityLadder(
                 route=route,
                 levels=tuple(levels),
                 protected_node_ids=tuple(sorted(protected)),
                 target_active_bytes=target,
-                target_reached=levels[-1].active_bytes <= target,
+                target_reached=target_level is not None,
             )
         )
     return tuple(ladders)
@@ -660,6 +753,128 @@ class ConflictRollbackPlan:
     reason: str
 
 
+def _selection_from_level_indices(
+    ladders: Sequence[RouteCapacityLadder],
+    level_indices: Mapping[RouteId, int],
+    target_active_bytes: int,
+    *,
+    fixed_active_bytes: int = 0,
+) -> KnapsackSelection:
+    """Materialize one deterministic selection from explicit route levels."""
+
+    ordered = tuple(sorted(ladders, key=lambda ladder: ladder.route))
+    if set(level_indices) != {ladder.route for ladder in ordered}:
+        raise HierarchicalSelectionError("explicit levels must cover every route")
+    choices = tuple(
+        RouteCapacityChoice(
+            route=ladder.route,
+            level_index=level_indices[ladder.route],
+            active_bytes=ladder.level(level_indices[ladder.route]).active_bytes,
+            retained_utility=ladder.level(level_indices[ladder.route]).retained_utility,
+            evicted_risk=ladder.level(level_indices[ladder.route]).evicted_risk,
+        )
+        for ladder in ordered
+    )
+    active_bytes = fixed_active_bytes + sum(choice.active_bytes for choice in choices)
+    return KnapsackSelection(
+        choices=choices,
+        fixed_active_bytes=fixed_active_bytes,
+        active_bytes=active_bytes,
+        target_active_bytes=target_active_bytes,
+        retained_utility=sum(choice.retained_utility for choice in choices),
+        target_reached=active_bytes <= target_active_bytes,
+        target_underfill_bytes=max(0, target_active_bytes - active_bytes),
+        target_shortfall_bytes=max(0, active_bytes - target_active_bytes),
+    )
+
+
+def plan_joint_reallocation_candidates(
+    current: KnapsackSelection,
+    ladders: Sequence[RouteCapacityLadder],
+    *,
+    rollback_width: int,
+    maximum_candidates: int,
+    excluded_level_signatures: Iterable[tuple[tuple[RouteId, int], ...]] = (),
+) -> tuple[ConflictRollbackPlan, ...]:
+    """Build bounded fixed-capacity alternatives after a failed joint probe.
+
+    Each alternative changes the eviction boundary in ``rollback_width``
+    high-risk compressed routes while retaining exactly the same bytes in
+    every route.  This is compatible with the dense HF cache layout: no head
+    exceeds the common physical sequence capacity and no padded storage is
+    hidden from byte accounting.  Alternatives are *not* inferred safe; the
+    complete reallocated cache must pass an isolated joint logit probe.
+    """
+
+    if rollback_width < 1 or maximum_candidates < 1:
+        raise HierarchicalSelectionError("reallocation width and candidate cap must be positive")
+    ordered = tuple(sorted(ladders, key=lambda ladder: ladder.route))
+    by_route = {ladder.route: ladder for ladder in ordered}
+    current_indices = current.level_index_by_route()
+    if set(by_route) != set(current_indices):
+        raise HierarchicalSelectionError("reallocation ladders do not match current routes")
+    excluded = frozenset(excluded_level_signatures)
+    rollback_routes = tuple(
+        choice.route
+        for choice in sorted(
+            (
+                choice
+                for choice in current.choices
+                if choice.level_index > 0 and by_route[choice.route].reallocation_levels
+            ),
+            key=lambda choice: (-choice.evicted_risk, choice.route),
+        )
+    )
+    if len(rollback_routes) < rollback_width:
+        return ()
+
+    # Inspect only a small deterministic multiple of the output cap.  This
+    # keeps proposal construction bounded even for thousands of layer/head
+    # routes while allowing infeasible or duplicate alternatives to be
+    # skipped.
+    combination_cap = max(maximum_candidates, maximum_candidates * 8)
+    route_sets = islice(combinations(rollback_routes, rollback_width), combination_cap)
+    plans: list[ConflictRollbackPlan] = []
+    seen: set[tuple[tuple[RouteId, int], ...]] = set(excluded)
+    for restored_routes_tuple in route_sets:
+        restored_routes = frozenset(restored_routes_tuple)
+        indices = dict(current_indices)
+        for route in restored_routes_tuple:
+            alternatives = by_route[route].reallocation_levels
+            alternative_index = min(rollback_width - 1, len(alternatives) - 1)
+            indices[route] = alternatives[alternative_index].level_index
+        signature = tuple((route, indices[route]) for route in sorted(indices))
+        if signature in seen:
+            continue
+        seen.add(signature)
+        selection = _selection_from_level_indices(
+            ordered,
+            indices,
+            current.target_active_bytes,
+            fixed_active_bytes=current.fixed_active_bytes,
+        )
+        if selection.active_bytes != current.active_bytes:
+            raise HierarchicalSelectionError(
+                "fixed-capacity reallocation changed global active bytes"
+            )
+        plans.append(
+            ConflictRollbackPlan(
+                selection=selection,
+                rollback_applied=True,
+                rolled_back_routes=tuple(sorted(restored_routes)),
+                donor_routes=(),
+                bytes_added_by_rollback=0,
+                bytes_removed_by_donors=0,
+                reason=(
+                    "joint_failure_reallocated_eviction_boundaries_at_fixed_route_capacity"
+                ),
+            )
+        )
+        if len(plans) >= maximum_candidates:
+            break
+    return tuple(plans)
+
+
 def plan_conflict_rollback(
     current: KnapsackSelection,
     ladders: Sequence[RouteCapacityLadder],
@@ -821,6 +1036,7 @@ def run_bounded_hierarchical_probe_loop(
     required_steps: int,
     probe_budget: ProbeBudgetTracker,
     probe: Callable[[HierarchicalCapacityProposal], LogitProbeResult],
+    fixed_route_capacity_reallocation: bool = False,
 ) -> BoundedHierarchicalProbeDecision:
     """Screen, assemble, jointly verify, and fail closed within hard budgets.
 
@@ -911,6 +1127,9 @@ def run_bounded_hierarchical_probe_loop(
     selected = assembled
     selected_passed = joint_passed
     rolled_back_routes: set[RouteId] = set()
+    attempted_signatures: set[tuple[tuple[RouteId, int], ...]] = {
+        joint_proposal.level_indices
+    }
     if not joint_passed:
         for rollback_index in range(maximum_rollback_rounds):
             if (
@@ -918,26 +1137,92 @@ def run_bounded_hierarchical_probe_loop(
                 or probe_budget.evaluations_used >= probe_budget.maximum_candidate_evaluations
             ):
                 break
-            rollback = plan_conflict_rollback(
-                assembled,
-                ordered,
-                verified,
-                previously_rolled_back_routes=rolled_back_routes,
+            remaining_evaluations = (
+                probe_budget.maximum_candidate_evaluations - probe_budget.evaluations_used
             )
-            rollback_attempts.append(rollback)
-            if not rollback.rollback_applied:
+            if remaining_evaluations <= 0:
                 break
-            rolled_back_routes.update(rollback.rolled_back_routes)
-            rollback_proposal = _proposal(
-                f"rollback-{rollback_index}",
-                HierarchicalProposalKind.ROLLBACK,
-                ordered,
-                rollback.selection.level_index_by_route(),
-                (*rollback.rolled_back_routes, *rollback.donor_routes),
+            # Retain the original verified-only rollback when it is feasible.
+            # It is cheapest and has the strongest per-route evidence.
+            candidates: list[ConflictRollbackPlan] = []
+            if not fixed_route_capacity_reallocation:
+                verified_rollback = plan_conflict_rollback(
+                    assembled,
+                    ordered,
+                    verified,
+                    previously_rolled_back_routes=rolled_back_routes,
+                )
+                if verified_rollback.rollback_applied:
+                    signature = tuple(
+                        sorted(verified_rollback.selection.level_index_by_route().items())
+                    )
+                    if signature not in attempted_signatures:
+                        candidates.append(verified_rollback)
+            remaining_slots = remaining_evaluations - len(candidates)
+            if remaining_slots > 0 and not candidates:
+                candidates.extend(
+                    plan_joint_reallocation_candidates(
+                        assembled,
+                        ordered,
+                        rollback_width=rollback_index + 1,
+                        maximum_candidates=remaining_slots,
+                        excluded_level_signatures=attempted_signatures
+                        | {
+                            tuple(sorted(item.selection.level_index_by_route().items()))
+                            for item in candidates
+                        },
+                    )
+                )
+            if not candidates:
+                rollback_attempts.append(
+                    ConflictRollbackPlan(
+                        selection=assembled,
+                        rollback_applied=False,
+                        rolled_back_routes=(),
+                        donor_routes=(),
+                        bytes_added_by_rollback=0,
+                        bytes_removed_by_donors=0,
+                        reason="no_target_feasible_joint_reallocation_candidate",
+                    )
+                )
+                break
+            rollback_attempts.extend(candidates)
+            proposals = tuple(
+                _proposal(
+                    (
+                        f"rollback-{rollback_index}"
+                        if candidate.reason
+                        == "highest_risk_route_rolled_back_with_verified_donor_exchange"
+                        else f"reallocation-{rollback_index}-{candidate_index}"
+                    ),
+                    (
+                        HierarchicalProposalKind.ROLLBACK
+                        if candidate.reason
+                        == "highest_risk_route_rolled_back_with_verified_donor_exchange"
+                        else HierarchicalProposalKind.REALLOCATION
+                    ),
+                    ordered,
+                    candidate.selection.level_index_by_route(),
+                    (*candidate.rolled_back_routes, *candidate.donor_routes),
+                )
+                for candidate_index, candidate in enumerate(candidates)
             )
-            probe_budget.reserve_round((rollback_proposal.proposal_id,))
-            if evaluate(rollback_proposal):
-                selected = rollback.selection
+            probe_budget.reserve_round(proposal.proposal_id for proposal in proposals)
+            passed_candidates: list[ConflictRollbackPlan] = []
+            for candidate, proposal in zip(candidates, proposals, strict=True):
+                attempted_signatures.add(proposal.level_indices)
+                rolled_back_routes.update(candidate.rolled_back_routes)
+                if evaluate(proposal):
+                    passed_candidates.append(candidate)
+            if passed_candidates:
+                selected = min(
+                    passed_candidates,
+                    key=lambda item: (
+                        -item.selection.active_bytes,
+                        -item.selection.retained_utility,
+                        tuple(sorted(item.selection.level_index_by_route().items())),
+                    ),
+                ).selection
                 selected_passed = True
                 break
 
@@ -986,6 +1271,7 @@ __all__ = [
     "build_route_capacity_ladders",
     "partition_route_ladders",
     "plan_conflict_rollback",
+    "plan_joint_reallocation_candidates",
     "run_bounded_hierarchical_probe_loop",
     "select_verified_capacity_levels",
     "split_route_partition",
