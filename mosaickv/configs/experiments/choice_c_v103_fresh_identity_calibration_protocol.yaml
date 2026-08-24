@@ -1,14 +1,14 @@
 schema_version: 1
-revision: "103.2-scan-scope-seal-reviewed-scan-only-authorized"
+revision: "103.3-hash-bound-provenance-correction-scan-retry-disabled"
 experiment_id: choice_c_v103_fresh_identity_calibration
-classification: preregistered_protocol_scan_only_authorized_unexecuted
-protocol_status: scan_scope_seal_reviewed_scan_only_authorized_downstream_disabled
+classification: preregistered_protocol_failed_scan_provenance_correction_unexecuted
+protocol_status: failed_scan_closed_resolution_authored_scan_retry_downstream_disabled
 draft_date: "2026-08-23"
 
 authorization:
   protocol_commit_created: true
   protocol_reviewed_after_commit: true
-  exclusion_scan_authorized: true
+  exclusion_scan_authorized: false
   id_catalog_reuse_review_authorized: false
   preflight_ledger_materialization_authorized: false
   calibration_ledger_materialization_authorized: false
@@ -71,7 +71,7 @@ freshness_definition:
   any_ambiguous_relevant_artifact_blocks_materialization: true
 
 fresh_exclusion_scan:
-  status: scan_only_authorized_not_executed
+  status: failed_closed_on_missing_dataset_config_retry_not_authorized
   execution_mode: local_cpu_only
   clean_committed_source_required: true
   scanner_implementation_source: scripts/choice_c_v103_exclusion_scan.py
@@ -106,23 +106,41 @@ fresh_exclusion_scan:
   immutable_write_once_output_required: true
   output_must_not_exist_before_authorized_scan: true
   manifest_hash_and_content_review_required_before_next_action: true
-  scan_authorized: true
+  scan_authorized: false
+  scan_attempted: true
+  scan_attempt_source_git_sha: e38b3423e63040d92ae32583e0084a68fb1800bd
+  scan_attempt_source_git_dirty: false
+  scan_attempt_exit_code: 1
+  scan_attempt_failure_class: SampleProtocolError
+  scan_attempt_failure_reason: configuration_aware_provenance_requires_dataset_config
+  scan_attempt_output_created: false
   scan_performed: false
   manifest_reviewed: false
   manifest_sealed: false
 
 scan_scope_seal:
   path: configs/ledgers/choice_c_v103_protocol_scan_scope_seal.yaml
-  status: committed_reviewed_scan_only_authorized_not_executed
+  status: committed_reviewed_scope_failed_scan_retry_disabled
   protocol_commit_git_sha: 75736bbc115d2ad5d82ae7c7a3a26df41c89d8fe
   protocol_file_sha256_at_protocol_commit: c87e76a7555aeea7c7722e5b0cd8604134f5da94fad5fa0f156cea0e4ce26e9f
   scope_is_identity_and_provenance_only: true
-  exclusion_scan_execution_authorized: true
+  exclusion_scan_execution_authorized: false
   seal_commit_git_sha: 07958152271b8a8d72b51679cbb92cecf20cc005
   seal_file_sha256_at_commit: 9c4a59c6f35d6d5a306dbab13e7cffec4e6fdd829542388be9761391cf7949d2
   seal_reviewed_after_commit: true
   scan_execution_performed: false
+  prior_scan_authorization_consumed_by_failed_attempt: true
   downstream_action_requires_separate_explicit_authorization: true
+
+legacy_dataset_config_resolution:
+  path: configs/ledgers/choice_c_v103_legacy_dataset_config_resolutions.yaml
+  status: authored_uncommitted_unreviewed_scan_retry_disabled
+  resolution_count: 10
+  correction_kind: hash_bound_fill_missing_dataset_config_only
+  raw_artifacts_modified: false
+  scan_retry_authorized: false
+  corrective_commit_git_sha: null
+  corrective_commit_reviewed_after_commit: false
 
 reviewed_id_catalogs:
   status: planned_reuse_review_not_authorized
@@ -443,6 +461,12 @@ review_sequence:
   - step: authorize_run_hash_and_review_identity_only_exclusion_scan
     authorized: true
     required_before: id_catalog_reuse_review
+  - step: commit_and_review_hash_bound_legacy_provenance_resolution
+    authorized: false
+    required_before: exclusion_scan_retry
+  - step: separately_authorize_exclusion_scan_retry
+    authorized: false
+    required_before: exclusion_scan_retry
   - step: rehash_and_review_id_only_catalogs
     authorized: false
     required_before: ledger_materialization
@@ -476,10 +500,11 @@ outputs:
   output_root: /scratch/djy8hg/runs/mosaickv/choice-c-v103-fresh-identity-calibration-v1
   output_root_must_not_exist_before_scan_execution: true
   no_output_created_by_this_authorization_update: true
+  failed_scan_created_no_output: true
 
 submission_policy:
   any_job_allowed: false
-  local_exclusion_scan_allowed: true
+  local_exclusion_scan_allowed: false
   catalog_reuse_review_allowed: false
   ledger_materialization_allowed: false
   disjointness_check_allowed: false
@@ -487,4 +512,4 @@ submission_policy:
   calibration_allowed: false
   freeze_allowed: false
   heldout_allowed: false
-  reason: only_the_exact_local_cpu_identity_exclusion_scan_is_authorized
+  reason: failed_scan_consumed_authorization_resolution_commit_review_required_before_retry

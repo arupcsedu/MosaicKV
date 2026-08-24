@@ -1,0 +1,163 @@
+schema_version: 1
+experiment_id: choice_c_v103_fresh_identity_calibration
+classification: hash_bound_legacy_dataset_config_provenance_resolution
+status: authored_uncommitted_unreviewed_scan_retry_disabled
+immutable: false
+
+scope:
+  resolution_kind: fill_missing_dataset_config_only
+  metadata_only: true
+  labels_answers_references_scores_prompts_media_and_failure_identities_inspected: false
+  raw_artifacts_modified: false
+  path_and_sha256_match_required: true
+  observed_dataset_id_revision_and_split_must_match: true
+  already_complete_or_conflicting_metadata_fails_closed: true
+  unlisted_ambiguous_manifest_fails_closed: true
+
+protocol_evidence:
+  path: configs/experiments/choice_c_v102_v100_fresh_cross_dataset_calibration.yaml
+  file_sha256_at_execution: 0be49b702d5ff8bc1af80f0da0ff56bdd7e0cff91f45bd8cf2fec1a13f31e81b
+  source_commits:
+    - 4449e6d673dba5b0f65235f9967f7b6da0b00444
+    - b29eec97d230811070628f15bc966ce26e9f4373
+  task_contracts:
+    - task: infovqa
+      dataset_id: lmms-lab-encoder/DocVQA
+      dataset_config: InfographicVQA
+      dataset_revision: 539088ef8a8ada01ac8e2e6d4e372586748a265e
+      split: validation
+      calibration_ledger_path: /scratch/djy8hg/runs/mosaickv/choice-c-v102-v100-fresh-cross-dataset-calibration-v1/inputs/calibration_infovqa.json
+      calibration_ledger_sha256: 3308465e540f98dac1003e85a78403968a90ed19bd7d23fe5b2ec6ad8da258c5
+      warmup_ledger_sha256: 6482eb8850430dc59f40244320ece28062ef5120b2bc5b157e56c788fa92f3d2
+    - task: textvqa_train_calibration
+      dataset_id: lmms-lab/textvqa
+      dataset_config: default
+      dataset_revision: 9c0699cd19768ac5ab97568f6b3cbac4c0062884
+      split: train
+      calibration_ledger_path: /scratch/djy8hg/runs/mosaickv/choice-c-v102-v100-fresh-cross-dataset-calibration-v1/inputs/calibration_textvqa_train.json
+      calibration_ledger_sha256: a0667e45729639b1830a308d97d46662f3e6c6c76ddda97749d0663fc329b242
+      warmup_ledger_sha256: c36bd005d801c45e906b8895e514636591faeda45e9532fe1876a1897a52486e
+
+run_evidence:
+  - run_root: /scratch/djy8hg/runs/mosaickv/choice-c-v102-v100-fresh-cross-dataset-calibration-v1-debug1
+    source_git_sha: 4449e6d673dba5b0f65235f9967f7b6da0b00444
+    source_git_dirty: false
+    spec_sha256: 0be49b702d5ff8bc1af80f0da0ff56bdd7e0cff91f45bd8cf2fec1a13f31e81b
+    task_evidence:
+      infovqa:
+        telemetry_path: /scratch/djy8hg/runs/mosaickv/choice-c-v102-v100-fresh-cross-dataset-calibration-v1-debug1/telemetry/v102-debug1-infovqa-0be49b702d.json
+        telemetry_sha256: cc3601797669c29f6577f1137e12f2f6b94e7844d719f729c2ac143ef716c827
+        warmup_ledger_path: /scratch/djy8hg/runs/mosaickv/choice-c-v102-v100-fresh-cross-dataset-calibration-v1-debug1/warmup_ledgers/infovqa.json
+      textvqa_train_calibration:
+        telemetry_path: /scratch/djy8hg/runs/mosaickv/choice-c-v102-v100-fresh-cross-dataset-calibration-v1-debug1/telemetry/v102-debug1-textvqa_train_calibration-0be49b702d.json
+        telemetry_sha256: 410e612845cd87efb6b8b32c31a2ff5f649b2dd282a0f95865cb98fa9470771d
+        warmup_ledger_path: /scratch/djy8hg/runs/mosaickv/choice-c-v102-v100-fresh-cross-dataset-calibration-v1-debug1/warmup_ledgers/textvqa_train_calibration.json
+  - run_root: /scratch/djy8hg/runs/mosaickv/choice-c-v102-v100-fresh-cross-dataset-calibration-v1-retry1
+    source_git_sha: b29eec97d230811070628f15bc966ce26e9f4373
+    source_git_dirty: false
+    spec_sha256: 0be49b702d5ff8bc1af80f0da0ff56bdd7e0cff91f45bd8cf2fec1a13f31e81b
+    task_evidence:
+      infovqa:
+        telemetry_path: /scratch/djy8hg/runs/mosaickv/choice-c-v102-v100-fresh-cross-dataset-calibration-v1-retry1/telemetry/v102-infovqa-0be49b702d.json
+        telemetry_sha256: df9fdab600d52f74732aaff7b1779835d55d9159012a7c885d3da0caf33d18ed
+        warmup_ledger_path: /scratch/djy8hg/runs/mosaickv/choice-c-v102-v100-fresh-cross-dataset-calibration-v1-retry1/warmup_ledgers/infovqa.json
+      textvqa_train_calibration:
+        telemetry_path: /scratch/djy8hg/runs/mosaickv/choice-c-v102-v100-fresh-cross-dataset-calibration-v1-retry1/telemetry/v102-textvqa_train_calibration-0be49b702d.json
+        telemetry_sha256: e22b9292ed54a06209f84d24c52b5d9e290c970a76af7fa15927315a85839fbf
+        warmup_ledger_path: /scratch/djy8hg/runs/mosaickv/choice-c-v102-v100-fresh-cross-dataset-calibration-v1-retry1/warmup_ledgers/textvqa_train_calibration.json
+
+resolutions:
+  - source_path: /scratch/djy8hg/runs/mosaickv/choice-c-v102-v100-fresh-cross-dataset-calibration-v1-debug1/v102-debug1-infovqa-warmup-full_kv/manifest.json
+    source_sha256: ded1f62b21043a14c046481452c2b0b306f1e069f2d1c8385dbce4158d64b6f1
+    task: infovqa
+    dataset_id: lmms-lab-encoder/DocVQA
+    dataset_config: InfographicVQA
+    dataset_revision: 539088ef8a8ada01ac8e2e6d4e372586748a265e
+    split: validation
+    evidence_run_root_index: 0
+  - source_path: /scratch/djy8hg/runs/mosaickv/choice-c-v102-v100-fresh-cross-dataset-calibration-v1-debug1/v102-debug1-infovqa-warmup-prompt_attention_topk/manifest.json
+    source_sha256: 088002096fd0f57b940389ae8bd04caa75115f35ba7c9cd01d9a398f9caa76e7
+    task: infovqa
+    dataset_id: lmms-lab-encoder/DocVQA
+    dataset_config: InfographicVQA
+    dataset_revision: 539088ef8a8ada01ac8e2e6d4e372586748a265e
+    split: validation
+    evidence_run_root_index: 0
+  - source_path: /scratch/djy8hg/runs/mosaickv/choice-c-v102-v100-fresh-cross-dataset-calibration-v1-debug1/v102-debug1-infovqa-warmup-v100_hierarchical_head_local_logit_safe_exact/manifest.json
+    source_sha256: 4e0320b1cb5cb3f8079a79371e8a5ffa5c7415b14cdb271daf20405d5e7e6498
+    task: infovqa
+    dataset_id: lmms-lab-encoder/DocVQA
+    dataset_config: InfographicVQA
+    dataset_revision: 539088ef8a8ada01ac8e2e6d4e372586748a265e
+    split: validation
+    evidence_run_root_index: 0
+  - source_path: /scratch/djy8hg/runs/mosaickv/choice-c-v102-v100-fresh-cross-dataset-calibration-v1-debug1/v102-debug1-textvqa_train_calibration-warmup-full_kv/manifest.json
+    source_sha256: 737a03df37dc055f941ba04eb8b4838c096c48d82f6620d3237904f860ceb8c1
+    task: textvqa_train_calibration
+    dataset_id: lmms-lab/textvqa
+    dataset_config: default
+    dataset_revision: 9c0699cd19768ac5ab97568f6b3cbac4c0062884
+    split: train
+    evidence_run_root_index: 0
+  - source_path: /scratch/djy8hg/runs/mosaickv/choice-c-v102-v100-fresh-cross-dataset-calibration-v1-debug1/v102-debug1-textvqa_train_calibration-warmup-prompt_attention_topk/manifest.json
+    source_sha256: ae6c441a79beb46737aac6acd0450142da321f6bc48716a42f7c27573a5eca2b
+    task: textvqa_train_calibration
+    dataset_id: lmms-lab/textvqa
+    dataset_config: default
+    dataset_revision: 9c0699cd19768ac5ab97568f6b3cbac4c0062884
+    split: train
+    evidence_run_root_index: 0
+  - source_path: /scratch/djy8hg/runs/mosaickv/choice-c-v102-v100-fresh-cross-dataset-calibration-v1-debug1/v102-debug1-textvqa_train_calibration-warmup-v100_hierarchical_head_local_logit_safe_exact/manifest.json
+    source_sha256: 386cf33e60b661be222b251a6ded173881943a041faaffa6c58170eb632541ca
+    task: textvqa_train_calibration
+    dataset_id: lmms-lab/textvqa
+    dataset_config: default
+    dataset_revision: 9c0699cd19768ac5ab97568f6b3cbac4c0062884
+    split: train
+    evidence_run_root_index: 0
+  - source_path: /scratch/djy8hg/runs/mosaickv/choice-c-v102-v100-fresh-cross-dataset-calibration-v1-retry1/v102-infovqa-warmup-full_kv/manifest.json
+    source_sha256: 3135803a8bdcc8dfb7117c8626472a1af45fcd2b819de1ef3d59849b55bb9fb6
+    task: infovqa
+    dataset_id: lmms-lab-encoder/DocVQA
+    dataset_config: InfographicVQA
+    dataset_revision: 539088ef8a8ada01ac8e2e6d4e372586748a265e
+    split: validation
+    evidence_run_root_index: 1
+  - source_path: /scratch/djy8hg/runs/mosaickv/choice-c-v102-v100-fresh-cross-dataset-calibration-v1-retry1/v102-infovqa-warmup-prompt_attention_topk/manifest.json
+    source_sha256: d045d30aa7ba487e2d5da0bda67386a1687b4ea6cc30629d3e800bed7e00a6eb
+    task: infovqa
+    dataset_id: lmms-lab-encoder/DocVQA
+    dataset_config: InfographicVQA
+    dataset_revision: 539088ef8a8ada01ac8e2e6d4e372586748a265e
+    split: validation
+    evidence_run_root_index: 1
+  - source_path: /scratch/djy8hg/runs/mosaickv/choice-c-v102-v100-fresh-cross-dataset-calibration-v1-retry1/v102-infovqa-warmup-v100_hierarchical_head_local_logit_safe_exact/manifest.json
+    source_sha256: 43bac3af740a4bec1d2ebdbd435e380e4108e4753d098f527659ccc1f5e0ffc2
+    task: infovqa
+    dataset_id: lmms-lab-encoder/DocVQA
+    dataset_config: InfographicVQA
+    dataset_revision: 539088ef8a8ada01ac8e2e6d4e372586748a265e
+    split: validation
+    evidence_run_root_index: 1
+  - source_path: /scratch/djy8hg/runs/mosaickv/choice-c-v102-v100-fresh-cross-dataset-calibration-v1-retry1/v102-textvqa_train_calibration-warmup-full_kv/manifest.json
+    source_sha256: 6602f0099cafa60f2bb869fcda6b9323cf7bf714eb491299d1f6434d2d39e3f9
+    task: textvqa_train_calibration
+    dataset_id: lmms-lab/textvqa
+    dataset_config: default
+    dataset_revision: 9c0699cd19768ac5ab97568f6b3cbac4c0062884
+    split: train
+    evidence_run_root_index: 1
+
+authorization:
+  corrective_commit_created: false
+  corrective_commit_reviewed_after_commit: false
+  scan_retry_authorized: false
+  catalog_access_authorized: false
+  materialization_authorized: false
+  disjointness_check_authorized: false
+  gpu_or_slurm_authorized: false
+  experiment_authorized: false
+
+next_step:
+  action: commit_and_review_provenance_resolution_only
+  scan_retry_requires_later_separate_authorization: true

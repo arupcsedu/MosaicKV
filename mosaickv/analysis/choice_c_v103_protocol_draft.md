@@ -1,10 +1,10 @@
 # V103 fresh-identity calibration protocol
 
-V103 now authorizes one narrowly scoped local CPU identity/provenance exclusion
-scan. It does not authorize catalog access, sample materialization,
+V103 authorized one narrowly scoped local CPU identity/provenance exclusion
+scan. That attempt failed closed, and scan retry is now disabled. V103 does not
+authorize catalog access, sample materialization,
 disjointness checking, a CPU or GPU experiment, Slurm submission, candidate
-freezing, or held-out evaluation. The scan has not run, so no V103 output
-directory should exist yet.
+freezing, or held-out evaluation. The failed scan created no V103 output.
 
 ## Why V103 is separate
 
@@ -87,8 +87,17 @@ loading, and CPU, GPU, or Slurm experiments.
 ## Current state
 
 The protocol and scan-scope seal have been committed and reviewed. The local
-CPU exclusion scan is the sole authorized operational action, but it has not
-run. No IDs have been selected, no dataset rows have been loaded, and no job has
-been submitted. This authorization update must first receive an immutable
-commit and review. Catalog access and every later protocol stage require their
-own subsequent review and explicit authorization.
+CPU exclusion scan was attempted from clean commit `e38b342`, but a legacy V102
+manifest omitted `dataset_config`; the configuration-aware scanner rejected it
+instead of guessing. No IDs were selected, no dataset rows were loaded, no
+manifest was written, and no job was submitted.
+
+The metadata-only audit found ten such manifests under the V102 debug and retry
+roots. Their original clean source snapshots, protocol hash, telemetry, and
+calibration/warmup ledgers consistently bind them to either TextVQA `default`
+or DocVQA `InfographicVQA`. The corrective ledger records each manifest by
+absolute path and SHA-256 and permits filling only the missing configuration.
+Changed files, conflicting metadata, unlisted ambiguities, or incomplete
+evidence still fail closed. The correction must be committed and reviewed, and
+a later separate update must authorize any scan retry. All downstream stages
+remain disabled.

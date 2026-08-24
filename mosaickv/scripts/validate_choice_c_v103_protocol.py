@@ -20,6 +20,7 @@ V103_PROTOCOL_COMMIT = "75736bbc115d2ad5d82ae7c7a3a26df41c89d8fe"
 V103_PROTOCOL_COMMIT_FILE_SHA = "c87e76a7555aeea7c7722e5b0cd8604134f5da94fad5fa0f156cea0e4ce26e9f"
 V103_SCAN_SCOPE_SEAL_COMMIT = "07958152271b8a8d72b51679cbb92cecf20cc005"
 V103_SCAN_SCOPE_SEAL_FILE_SHA = "9c4a59c6f35d6d5a306dbab13e7cffec4e6fdd829542388be9761391cf7949d2"
+V103_FAILED_SCAN_COMMIT = "e38b3423e63040d92ae32583e0084a68fb1800bd"
 V103_EXCLUSION_OUTPUT = (
     "/scratch/djy8hg/runs/mosaickv/choice-c-v103-fresh-identity-calibration-v1/"
     "inputs/exclusion_manifest.json"
@@ -86,8 +87,8 @@ def validate(path: Path) -> dict[str, Any]:
     package = Path(__file__).resolve().parents[1]
     expected = {
         "experiment_id": "choice_c_v103_fresh_identity_calibration",
-        "classification": "preregistered_protocol_scan_only_authorized_unexecuted",
-        "protocol_status": "scan_scope_seal_reviewed_scan_only_authorized_downstream_disabled",
+        "classification": "preregistered_protocol_failed_scan_provenance_correction_unexecuted",
+        "protocol_status": "failed_scan_closed_resolution_authored_scan_retry_downstream_disabled",
     }
     if any(spec.get(key) != value for key, value in expected.items()):
         raise RuntimeError("V103 is not the reviewed scan-only protocol")
@@ -96,7 +97,7 @@ def validate(path: Path) -> dict[str, Any]:
     expected_authorization = {
         "protocol_commit_created": True,
         "protocol_reviewed_after_commit": True,
-        "exclusion_scan_authorized": True,
+        "exclusion_scan_authorized": False,
         "id_catalog_reuse_review_authorized": False,
         "preflight_ledger_materialization_authorized": False,
         "calibration_ledger_materialization_authorized": False,
@@ -113,7 +114,7 @@ def validate(path: Path) -> dict[str, Any]:
     submission = cast("dict[str, Any]", spec["submission_policy"])
     expected_submission = {
         "any_job_allowed": False,
-        "local_exclusion_scan_allowed": True,
+        "local_exclusion_scan_allowed": False,
         "catalog_reuse_review_allowed": False,
         "ledger_materialization_allowed": False,
         "disjointness_check_allowed": False,
@@ -121,7 +122,9 @@ def validate(path: Path) -> dict[str, Any]:
         "calibration_allowed": False,
         "freeze_allowed": False,
         "heldout_allowed": False,
-        "reason": "only_the_exact_local_cpu_identity_exclusion_scan_is_authorized",
+        "reason": (
+            "failed_scan_consumed_authorization_resolution_commit_review_required_before_retry"
+        ),
     }
     if submission != expected_submission:
         raise RuntimeError("V103 submission policy exceeds the local scan-only scope")
@@ -166,16 +169,17 @@ def validate(path: Path) -> dict[str, Any]:
         for source in seal_sources
     }
     if (
-        scan_scope.get("status") != "committed_reviewed_scan_only_authorized_not_executed"
+        scan_scope.get("status") != "committed_reviewed_scope_failed_scan_retry_disabled"
         or scan_scope.get("protocol_commit_git_sha") != V103_PROTOCOL_COMMIT
         or scan_scope.get("protocol_file_sha256_at_protocol_commit")
         != V103_PROTOCOL_COMMIT_FILE_SHA
-        or scan_scope.get("exclusion_scan_execution_authorized") is not True
+        or scan_scope.get("exclusion_scan_execution_authorized") is not False
         or scan_scope.get("seal_commit_git_sha") != V103_SCAN_SCOPE_SEAL_COMMIT
         or scan_scope.get("seal_file_sha256_at_commit") != V103_SCAN_SCOPE_SEAL_FILE_SHA
         or scan_scope.get("seal_reviewed_after_commit") is not True
         or scan_scope.get("scan_execution_performed") is not False
-        or seal.get("status") != "committed_reviewed_scan_only_authorized_not_executed"
+        or scan_scope.get("prior_scan_authorization_consumed_by_failed_attempt") is not True
+        or seal.get("status") != "reviewed_scope_failed_scan_resolution_pending_retry_disabled"
         or seal.get("immutable") is not True
         or permitted.get("execution_mode") != "local_cpu_process_only"
         or permitted.get("allowed_read_roots")
@@ -188,7 +192,7 @@ def validate(path: Path) -> dict[str, Any]:
         or seal_authorization.get("scan_scope_definition_reviewed") is not True
         or seal_authorization.get("seal_commit_created") is not True
         or seal_authorization.get("seal_reviewed_after_commit") is not True
-        or seal_authorization.get("exclusion_scan_authorized") is not True
+        or seal_authorization.get("exclusion_scan_authorized") is not False
         or any(
             seal_authorization.get(key) is not False
             for key in (
@@ -251,8 +255,16 @@ def validate(path: Path) -> dict[str, Any]:
         or scan.get("required_v102_unique_identity_count") != 64
         or scan.get("inspect_answers_references_scores_media_prompts_or_failure_outcomes")
         is not False
-        or scan.get("status") != "scan_only_authorized_not_executed"
-        or scan.get("scan_authorized") is not True
+        or scan.get("status") != "failed_closed_on_missing_dataset_config_retry_not_authorized"
+        or scan.get("scan_authorized") is not False
+        or scan.get("scan_attempted") is not True
+        or scan.get("scan_attempt_source_git_sha") != V103_FAILED_SCAN_COMMIT
+        or scan.get("scan_attempt_source_git_dirty") is not False
+        or scan.get("scan_attempt_exit_code") != 1
+        or scan.get("scan_attempt_failure_class") != "SampleProtocolError"
+        or scan.get("scan_attempt_failure_reason")
+        != "configuration_aware_provenance_requires_dataset_config"
+        or scan.get("scan_attempt_output_created") is not False
         or scan.get("scan_performed") is not False
         or scan.get("manifest_reviewed") is not False
         or scan.get("v103_tooling_compatibility_status")
@@ -261,6 +273,41 @@ def validate(path: Path) -> dict[str, Any]:
         or scan.get("v102_specific_authorization_guards_must_not_be_bypassed") is not True
     ):
         raise RuntimeError("V103 exclusion scan differs from its unexecuted scan-only scope")
+
+    resolution_boundary = cast("dict[str, Any]", spec["legacy_dataset_config_resolution"])
+    resolution_path = package / str(resolution_boundary["path"])
+    resolution = cast("dict[str, Any]", yaml.safe_load(resolution_path.read_text(encoding="utf-8")))
+    resolution_authorization = cast("dict[str, Any]", resolution["authorization"])
+    resolution_scope = cast("dict[str, Any]", resolution["scope"])
+    records = cast("list[dict[str, Any]]", resolution["resolutions"])
+    if (
+        resolution_boundary.get("status") != "authored_uncommitted_unreviewed_scan_retry_disabled"
+        or resolution_boundary.get("resolution_count") != 10
+        or resolution_boundary.get("scan_retry_authorized") is not False
+        or resolution_boundary.get("corrective_commit_git_sha") is not None
+        or resolution_boundary.get("corrective_commit_reviewed_after_commit") is not False
+        or resolution.get("status") != "authored_uncommitted_unreviewed_scan_retry_disabled"
+        or resolution.get("immutable") is not False
+        or resolution_scope.get("resolution_kind") != "fill_missing_dataset_config_only"
+        or resolution_scope.get("metadata_only") is not True
+        or resolution_scope.get("raw_artifacts_modified") is not False
+        or resolution_scope.get("path_and_sha256_match_required") is not True
+        or resolution_scope.get("unlisted_ambiguous_manifest_fails_closed") is not True
+        or len(records) != 10
+        or any(resolution_authorization.values())
+    ):
+        raise RuntimeError("V103 provenance-resolution draft is not fail-closed")
+    resolution_paths: set[Path] = set()
+    for record in records:
+        source = Path(str(record["source_path"])).resolve()
+        if (
+            source in resolution_paths
+            or not source.is_file()
+            or _sha256(source) != record.get("source_sha256")
+            or record.get("dataset_config") not in {"default", "InfographicVQA"}
+        ):
+            raise RuntimeError("V103 hash-bound provenance-resolution source differs")
+        resolution_paths.add(source)
 
     tasks = cast("list[dict[str, Any]]", spec["tasks"])
     by_task = {str(task["task"]): task for task in tasks}
@@ -380,17 +427,20 @@ def validate(path: Path) -> dict[str, Any]:
     if (
         outputs.get("output_root_must_not_exist_before_scan_execution") is not True
         or outputs.get("no_output_created_by_this_authorization_update") is not True
+        or outputs.get("failed_scan_created_no_output") is not True
     ):
         raise RuntimeError("V103 authorization update claims execution output")
     return {
         "experiment_id": spec["experiment_id"],
-        "status": "valid_v103_scan_only_authorized_not_executed",
+        "status": "valid_v103_resolution_draft_scan_retry_disabled",
         "protocol_commit_git_sha": V103_PROTOCOL_COMMIT,
         "protocol_commit_reviewed": True,
         "scan_scope_seal_git_sha": V103_SCAN_SCOPE_SEAL_COMMIT,
         "scan_scope_seal_reviewed": True,
-        "exclusion_scan_authorized": True,
+        "exclusion_scan_authorized": False,
+        "exclusion_scan_attempted": True,
         "exclusion_scan_performed": False,
+        "exclusion_scan_retry_authorized": False,
         "downstream_actions_authorized": False,
         "selection_seed": selection["selection_seed"],
         "tasks": {name: 32 for name in sorted(by_task)},
@@ -399,7 +449,7 @@ def validate(path: Path) -> dict[str, Any]:
         "planned_unique_identities": materialization["total_planned_unique_identities"],
         "minimum_v102_exclusions": scan["required_v102_unique_identity_count"],
         "output_root": outputs["output_root"],
-        "only_local_cpu_exclusion_scan_authorized": True,
+        "provenance_resolution_count": len(records),
     }
 
 

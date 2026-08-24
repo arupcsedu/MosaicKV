@@ -1,7 +1,7 @@
 schema_version: 1
 experiment_id: choice_c_v103_fresh_identity_calibration
-classification: reviewed_scan_scope_seal_and_unexecuted_scan_only_authorization
-status: committed_reviewed_scan_only_authorized_not_executed
+classification: reviewed_scan_scope_seal_after_failed_closed_scan
+status: reviewed_scope_failed_scan_resolution_pending_retry_disabled
 immutable: true
 
 protocol_boundary:
@@ -102,7 +102,7 @@ authorization:
   scan_scope_definition_reviewed: true
   seal_commit_created: true
   seal_reviewed_after_commit: true
-  exclusion_scan_authorized: true
+  exclusion_scan_authorized: false
   catalog_access_authorized: false
   materialization_authorized: false
   disjointness_check_authorized: false
@@ -111,13 +111,17 @@ authorization:
 current_evidence:
   v103_output_root_exists: false
   exclusion_manifest_exists: false
-  scan_performed: false
+  scan_attempted: true
+  scan_attempt_source_git_sha: e38b3423e63040d92ae32583e0084a68fb1800bd
+  scan_attempt_exit_code: 1
+  scan_failed_closed: true
+  scan_performed_successfully: false
   catalog_access_performed: false
   materialization_performed: false
   job_submitted: false
 
 next_step:
-  action: commit_and_review_scan_only_authorization_before_exact_local_cpu_scan
-  exclusion_scan_is_the_only_authorized_execution: true
-  scan_has_not_run: true
+  action: commit_and_review_hash_bound_provenance_resolution_only
+  exclusion_scan_retry_authorized: false
+  failed_scan_created_no_output: true
   every_downstream_action_requires_later_separate_review_and_authorization: true

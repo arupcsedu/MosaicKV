@@ -11,6 +11,7 @@ import yaml
 
 from mosaickv.evaluation.disjoint_samples import (
     DatasetContract,
+    DatasetProvenanceResolution,
     SampleIdentity,
     SampleProtocolError,
     canonical_bytes,
@@ -332,6 +333,56 @@ def test_configuration_aware_scan_isolates_configs_and_fails_on_ambiguous_source
             contracts=(INFO, DOCUMENT),
             source_git_sha=GIT_SHA,
             source_git_dirty=False,
+        )
+
+
+def test_configuration_aware_scan_accepts_only_hash_bound_manifest_resolution(
+    tmp_path: Path,
+) -> None:
+    runs = tmp_path / "runs"
+    manifest = runs / "legacy" / "manifest.json"
+    _write_json(
+        manifest,
+        {
+            "dataset": {
+                "id": INFO.dataset_id,
+                "revision": INFO.dataset_revision,
+                "split": INFO.split,
+            }
+        },
+    )
+    results = manifest.with_name("results.jsonl")
+    results.write_text(
+        json.dumps({"task": INFO.task, "sample_id": "legacy-info"}) + "\n",
+        encoding="utf-8",
+    )
+    resolution = DatasetProvenanceResolution(
+        source_path=manifest.resolve(),
+        source_sha256=sha256_file(manifest),
+        dataset_id=INFO.dataset_id,
+        dataset_config=str(INFO.dataset_config),
+        dataset_revision=INFO.dataset_revision,
+        split=INFO.split,
+    )
+    payload = scan_exclusion_sources(
+        roots=(runs,),
+        contracts=(INFO, DOCUMENT),
+        source_git_sha=GIT_SHA,
+        source_git_dirty=False,
+        provenance_resolutions=(resolution,),
+    )
+    assert validate_exclusion_manifest(payload) == (INFO.identity("legacy-info"),)
+
+    changed = json.loads(manifest.read_text(encoding="utf-8"))
+    changed["extra"] = "mutation"
+    _write_json(manifest, changed)
+    with pytest.raises(SampleProtocolError, match="hash-bound provenance source differs"):
+        scan_exclusion_sources(
+            roots=(runs,),
+            contracts=(INFO, DOCUMENT),
+            source_git_sha=GIT_SHA,
+            source_git_dirty=False,
+            provenance_resolutions=(resolution,),
         )
 
 

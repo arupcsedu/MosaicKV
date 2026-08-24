@@ -19,6 +19,43 @@ class SampleProtocolError(ValueError):
     """Raised when a sample-protocol artifact fails closed validation."""
 
 
+@dataclass(frozen=True)
+class DatasetProvenanceResolution:
+    """Hash-bound correction for one legacy manifest missing only dataset_config."""
+
+    source_path: Path
+    source_sha256: str
+    dataset_id: str
+    dataset_config: str
+    dataset_revision: str
+    split: str
+
+    def __post_init__(self) -> None:
+        if (
+            not self.source_path.is_absolute()
+            or len(self.source_sha256) != 64
+            or any(character not in "0123456789abcdef" for character in self.source_sha256)
+            or not all(
+                value.strip()
+                for value in (
+                    self.dataset_id,
+                    self.dataset_config,
+                    self.dataset_revision,
+                    self.split,
+                )
+            )
+        ):
+            raise SampleProtocolError("invalid hash-bound dataset provenance resolution")
+
+    def metadata(self) -> tuple[str, str, str, str]:
+        return (
+            self.dataset_id,
+            self.dataset_config,
+            self.dataset_revision,
+            self.split,
+        )
+
+
 @dataclass(frozen=True, order=True)
 class DatasetContract:
     task: str
@@ -339,6 +376,31 @@ def _dataset_metadata(
     return None
 
 
+def _dataset_metadata_with_resolution(
+    value: Mapping[str, Any],
+    *,
+    path: Path,
+    resolutions: Mapping[Path, DatasetProvenanceResolution],
+) -> tuple[str, str | None, str, str] | None:
+    metadata = _dataset_metadata(value)
+    resolution = resolutions.get(path.resolve())
+    if resolution is None:
+        return metadata
+    if not path.is_file() or sha256_file(path) != resolution.source_sha256:
+        raise SampleProtocolError(f"hash-bound provenance source differs: {path}")
+    expected_incomplete = (
+        resolution.dataset_id,
+        None,
+        resolution.dataset_revision,
+        resolution.split,
+    )
+    if metadata != expected_incomplete:
+        raise SampleProtocolError(
+            f"legacy provenance resolution conflicts with observed manifest metadata: {path}"
+        )
+    return resolution.metadata()
+
+
 def _dataset_id_config_revision(
     value: Mapping[str, Any],
 ) -> tuple[str, str | None, str] | None:
@@ -413,11 +475,16 @@ def _identities_from_ledger(
     return _canonical_identities(contract.identity(str(sample_id)) for sample_id in sample_ids)
 
 
-def _result_metadata(path: Path) -> tuple[tuple[str, str | None, str, str], Path]:
+def _result_metadata(
+    path: Path,
+    resolutions: Mapping[Path, DatasetProvenanceResolution],
+) -> tuple[tuple[str, str | None, str, str], Path]:
     manifest_path = path.parent / "manifest.json"
     if not manifest_path.is_file():
         raise SampleProtocolError(f"observed results lack a companion manifest: {path}")
-    metadata = _dataset_metadata(_load_structured(manifest_path))
+    metadata = _dataset_metadata_with_resolution(
+        _load_structured(manifest_path), path=manifest_path, resolutions=resolutions
+    )
     if metadata is None:
         raise SampleProtocolError(
             f"result manifest lacks pinned dataset provenance: {manifest_path}"
@@ -429,6 +496,7 @@ def _identities_from_results(
     path: Path,
     contracts: Mapping[tuple[str, str | None, str, str], DatasetContract],
     known_identities: set[SampleIdentity],
+    resolutions: Mapping[Path, DatasetProvenanceResolution],
 ) -> tuple[tuple[SampleIdentity, ...], tuple[Path, ...], str]:
     rows: list[dict[str, Any]] = []
     for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
@@ -446,7 +514,7 @@ def _identities_from_results(
     identities: set[SampleIdentity] = set()
     manifest_path = path.parent / "manifest.json"
     if manifest_path.is_file():
-        metadata, manifest_path = _result_metadata(path)
+        metadata, manifest_path = _result_metadata(path, resolutions)
         _reject_ambiguous_missing_config(metadata, contracts, path=manifest_path)
         if metadata not in contracts:
             return (), (), "not_applicable"
@@ -486,7 +554,11 @@ def _identities_from_results(
         row_manifest = Path(raw_manifest).resolve() if isinstance(raw_manifest, str) else None
         if row_manifest is not None and row_manifest.is_file():
             manifest_value = _load_structured(row_manifest)
-            row_metadata = _dataset_metadata(manifest_value)
+            row_metadata = _dataset_metadata_with_resolution(
+                manifest_value,
+                path=row_manifest,
+                resolutions=resolutions,
+            )
             expected = (
                 contract.dataset_id,
                 contract.dataset_config,
@@ -560,6 +632,7 @@ def scan_exclusion_sources(
     source_git_sha: str,
     source_git_dirty: bool,
     ignored_paths: Iterable[Path] = (),
+    provenance_resolutions: Iterable[DatasetProvenanceResolution] = (),
 ) -> dict[str, Any]:
     """Inventory all recognizable prior ledgers/results for pinned datasets."""
 
@@ -567,6 +640,14 @@ def scan_exclusion_sources(
         raise SampleProtocolError("canonical exclusion scanning requires a clean full Git SHA")
     by_dataset = _contracts_by_identity(contracts)
     ignored = {path.resolve() for path in ignored_paths}
+    resolutions: dict[Path, DatasetProvenanceResolution] = {}
+    for resolution in provenance_resolutions:
+        path = resolution.source_path.resolve()
+        if path in resolutions:
+            raise SampleProtocolError(f"duplicate dataset provenance resolution: {path}")
+        if not path.is_file() or sha256_file(path) != resolution.source_sha256:
+            raise SampleProtocolError(f"hash-bound provenance source differs: {path}")
+        resolutions[path] = resolution
     sources: list[dict[str, Any]] = []
     all_identities: set[SampleIdentity] = set()
     discovered = _discover_sources(roots, ignored)
@@ -594,7 +675,7 @@ def scan_exclusion_sources(
         all_identities.update(identities)
     for path in result_paths:
         identities, companions, provenance_basis = _identities_from_results(
-            path, by_dataset, all_identities
+            path, by_dataset, all_identities, resolutions
         )
         if not identities:
             continue

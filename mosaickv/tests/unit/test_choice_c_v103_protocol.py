@@ -28,17 +28,17 @@ def _validator(package: Path) -> ModuleType:
     return module
 
 
-def test_v103_authorizes_only_unexecuted_local_cpu_exclusion_scan() -> None:
+def test_v103_records_failed_scan_and_disables_retry_and_downstream_actions() -> None:
     package = Path(__file__).parents[2]
     protocol = _protocol(package)
 
     assert protocol["protocol_status"] == (
-        "scan_scope_seal_reviewed_scan_only_authorized_downstream_disabled"
+        "failed_scan_closed_resolution_authored_scan_retry_downstream_disabled"
     )
     authorization = protocol["authorization"]
     assert authorization["protocol_commit_created"] is True
     assert authorization["protocol_reviewed_after_commit"] is True
-    assert authorization["exclusion_scan_authorized"] is True
+    assert authorization["exclusion_scan_authorized"] is False
     assert all(
         value is False
         for key, value in authorization.items()
@@ -46,16 +46,11 @@ def test_v103_authorizes_only_unexecuted_local_cpu_exclusion_scan() -> None:
         not in {
             "protocol_commit_created",
             "protocol_reviewed_after_commit",
-            "exclusion_scan_authorized",
         }
     )
     submission = protocol["submission_policy"]
-    assert submission["local_exclusion_scan_allowed"] is True
-    assert all(
-        value is False
-        for key, value in submission.items()
-        if key not in {"reason", "local_exclusion_scan_allowed"}
-    )
+    assert submission["local_exclusion_scan_allowed"] is False
+    assert all(value is False for key, value in submission.items() if key != "reason")
     freshness = protocol["freshness_definition"]
     assert freshness["all_v102_ledger_identities_mandatorily_excluded"] is True
     assert freshness["sample_level_freshness_claimed_before_scan_review"] is False
@@ -63,10 +58,14 @@ def test_v103_authorizes_only_unexecuted_local_cpu_exclusion_scan() -> None:
     assert protocol["outputs"]["no_output_created_by_this_authorization_update"] is True
     scan_scope = protocol["scan_scope_seal"]
     assert scan_scope["protocol_commit_git_sha"] == ("75736bbc115d2ad5d82ae7c7a3a26df41c89d8fe")
-    assert scan_scope["exclusion_scan_execution_authorized"] is True
+    assert scan_scope["exclusion_scan_execution_authorized"] is False
     assert scan_scope["seal_commit_git_sha"] == ("07958152271b8a8d72b51679cbb92cecf20cc005")
     assert scan_scope["seal_reviewed_after_commit"] is True
     assert scan_scope["scan_execution_performed"] is False
+    assert scan_scope["prior_scan_authorization_consumed_by_failed_attempt"] is True
+    resolution = protocol["legacy_dataset_config_resolution"]
+    assert resolution["resolution_count"] == 10
+    assert resolution["scan_retry_authorized"] is False
 
 
 def test_v103_uses_separate_preflight_and_calibration_identity_sets() -> None:
@@ -124,7 +123,7 @@ def test_v103_preserves_trace_reference_and_unchanged_scientific_gates() -> None
     assert provenance["clean_worktree_required"] is True
 
 
-def test_v103_validator_accepts_scan_only_update_and_rejects_widening(tmp_path: Path) -> None:
+def test_v103_validator_accepts_resolution_draft_and_rejects_widening(tmp_path: Path) -> None:
     package = Path(__file__).parents[2]
     validator = _validator(package)
     canonical = (
@@ -132,14 +131,16 @@ def test_v103_validator_accepts_scan_only_update_and_rejects_widening(tmp_path: 
     )
     result = validator.validate(canonical)
 
-    assert result["status"] == "valid_v103_scan_only_authorized_not_executed"
-    assert result["only_local_cpu_exclusion_scan_authorized"] is True
+    assert result["status"] == "valid_v103_resolution_draft_scan_retry_disabled"
     assert result["downstream_actions_authorized"] is False
     assert result["protocol_commit_reviewed"] is True
     assert result["scan_scope_seal_git_sha"] == ("07958152271b8a8d72b51679cbb92cecf20cc005")
     assert result["scan_scope_seal_reviewed"] is True
-    assert result["exclusion_scan_authorized"] is True
+    assert result["exclusion_scan_authorized"] is False
+    assert result["exclusion_scan_attempted"] is True
     assert result["exclusion_scan_performed"] is False
+    assert result["exclusion_scan_retry_authorized"] is False
+    assert result["provenance_resolution_count"] == 10
     assert result["preflight_samples"] == 4
     assert result["calibration_samples"] == 64
     assert result["planned_unique_identities"] == 68
