@@ -1,8 +1,8 @@
 schema_version: 1
 experiment_id: choice_c_v103_fresh_identity_calibration
-classification: protocol_preregistration_and_unexecuted_scan_scope_seal
-status: authored_uncommitted_unreviewed_after_commit
-immutable: false
+classification: reviewed_scan_scope_seal_and_unexecuted_scan_only_authorization
+status: committed_reviewed_scan_only_authorized_not_executed
+immutable: true
 
 protocol_boundary:
   protocol_commit_git_sha: 75736bbc115d2ad5d82ae7c7a3a26df41c89d8fe
@@ -14,10 +14,11 @@ protocol_boundary:
   protocol_candidate_and_gates_are_frozen: true
 
 seal_boundary:
-  seal_commit_git_sha: null
+  seal_commit_git_sha: 07958152271b8a8d72b51679cbb92cecf20cc005
+  seal_file_sha256_at_commit: 9c4a59c6f35d6d5a306dbab13e7cffec4e6fdd829542388be9761391cf7949d2
   seal_commit_policy: commit_containing_this_file_is_the_v103_scan_scope_seal_boundary
-  seal_reviewed_after_commit: false
-  scan_must_remain_disabled_until_seal_commit_is_reviewed: true
+  seal_reviewed_after_commit: true
+  scan_scope_changed_after_review: false
 
 permitted_future_scan_scope:
   execution_mode: local_cpu_process_only
@@ -99,9 +100,9 @@ explicitly_forbidden_actions:
 
 authorization:
   scan_scope_definition_reviewed: true
-  seal_commit_created: false
-  seal_reviewed_after_commit: false
-  exclusion_scan_authorized: false
+  seal_commit_created: true
+  seal_reviewed_after_commit: true
+  exclusion_scan_authorized: true
   catalog_access_authorized: false
   materialization_authorized: false
   disjointness_check_authorized: false
@@ -116,6 +117,7 @@ current_evidence:
   job_submitted: false
 
 next_step:
-  action: commit_and_review_this_seal_only
-  exclusion_scan_must_remain_disabled: true
-  scan_only_authorization_requires_later_separate_update: true
+  action: commit_and_review_scan_only_authorization_before_exact_local_cpu_scan
+  exclusion_scan_is_the_only_authorized_execution: true
+  scan_has_not_run: true
+  every_downstream_action_requires_later_separate_review_and_authorization: true

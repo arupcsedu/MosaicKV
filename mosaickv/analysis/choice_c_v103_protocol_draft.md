@@ -1,9 +1,10 @@
-# V103 fresh-identity calibration protocol draft
+# V103 fresh-identity calibration protocol
 
-V103 is a protocol draft only. It does not authorize an exclusion scan,
-catalog access, sample materialization, a CPU or GPU experiment, candidate
-freezing, or held-out evaluation. No V103 output directory should exist while
-this draft is under review.
+V103 now authorizes one narrowly scoped local CPU identity/provenance exclusion
+scan. It does not authorize catalog access, sample materialization,
+disjointness checking, a CPU or GPU experiment, Slurm submission, candidate
+freezing, or held-out evaluation. The scan has not run, so no V103 output
+directory should exist yet.
 
 ## Why V103 is separate
 
@@ -75,17 +76,19 @@ storage, and complete provenance. Latency remains informational.
 The protocol was committed and reviewed at
 `75736bbc115d2ad5d82ae7c7a3a26df41c89d8fe`; its committed file hash is
 `c87e76a7555aeea7c7722e5b0cd8604134f5da94fad5fa0f156cea0e4ce26e9f`.
-The subsequent scan-scope seal permits no execution. It defines only the fields,
-roots, mandatory V102 inputs, fail-closed behavior, and sole future output that
-could be authorized by a later scan-only update. In particular, it forbids
-catalog access, sample selection, dataset-row loading, materialization,
-disjointness checking, model loading, and CPU, GPU, or Slurm experiments.
+The subsequent scan-scope seal was committed at
+`07958152271b8a8d72b51679cbb92cecf20cc005` and reviewed. The present update
+authorizes only the exact local CPU scan defined by that seal: its fixed roots,
+mandatory V102 inputs, identity/provenance fields, fail-closed behavior, and
+single write-once manifest path. It continues to forbid catalog access, sample
+selection, dataset-row loading, materialization, disjointness checking, model
+loading, and CPU, GPU, or Slurm experiments.
 
 ## Current state
 
-The protocol commit has been reviewed, but every operational action flag remains
-false. The scan-scope seal is authored but is not yet committed or reviewed after
-commit. No IDs have been selected, no data have been loaded, and no job has been
-submitted. The next permitted action is one local seal commit. Exclusion scanning
-still requires a later, narrowly scoped authorization after that commit is
-reviewed.
+The protocol and scan-scope seal have been committed and reviewed. The local
+CPU exclusion scan is the sole authorized operational action, but it has not
+run. No IDs have been selected, no dataset rows have been loaded, and no job has
+been submitted. This authorization update must first receive an immutable
+commit and review. Catalog access and every later protocol stage require their
+own subsequent review and explicit authorization.

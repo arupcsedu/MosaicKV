@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate the authorization-disabled V103 fresh-identity protocol draft."""
+"""Validate the V103 scan-only authorization and disabled downstream stages."""
 
 from __future__ import annotations
 
@@ -18,6 +18,8 @@ V100_PROTOCOL_SHA = "69aed21ee82c5cf338eeb4ecff2a8dd0481d4d04fb378831339da0cfa9e
 V72_CONFIG_SHA = "8bb0add49a858df8bfa936bc932e919ce847511cdccd5e3ce5407b91cd1996b9"
 V103_PROTOCOL_COMMIT = "75736bbc115d2ad5d82ae7c7a3a26df41c89d8fe"
 V103_PROTOCOL_COMMIT_FILE_SHA = "c87e76a7555aeea7c7722e5b0cd8604134f5da94fad5fa0f156cea0e4ce26e9f"
+V103_SCAN_SCOPE_SEAL_COMMIT = "07958152271b8a8d72b51679cbb92cecf20cc005"
+V103_SCAN_SCOPE_SEAL_FILE_SHA = "9c4a59c6f35d6d5a306dbab13e7cffec4e6fdd829542388be9761391cf7949d2"
 V103_EXCLUSION_OUTPUT = (
     "/scratch/djy8hg/runs/mosaickv/choice-c-v103-fresh-identity-calibration-v1/"
     "inputs/exclusion_manifest.json"
@@ -84,17 +86,17 @@ def validate(path: Path) -> dict[str, Any]:
     package = Path(__file__).resolve().parents[1]
     expected = {
         "experiment_id": "choice_c_v103_fresh_identity_calibration",
-        "classification": "preregistered_protocol_commit_reviewed_scan_scope_defined_unexecuted",
-        "protocol_status": "scan_scope_seal_authored_pending_commit_all_execution_disabled",
+        "classification": "preregistered_protocol_scan_only_authorized_unexecuted",
+        "protocol_status": "scan_scope_seal_reviewed_scan_only_authorized_downstream_disabled",
     }
     if any(spec.get(key) != value for key, value in expected.items()):
-        raise RuntimeError("V103 is not an authorization-disabled protocol draft")
+        raise RuntimeError("V103 is not the reviewed scan-only protocol")
 
     authorization = cast("dict[str, Any]", spec["authorization"])
     expected_authorization = {
         "protocol_commit_created": True,
         "protocol_reviewed_after_commit": True,
-        "exclusion_scan_authorized": False,
+        "exclusion_scan_authorized": True,
         "id_catalog_reuse_review_authorized": False,
         "preflight_ledger_materialization_authorized": False,
         "calibration_ledger_materialization_authorized": False,
@@ -107,10 +109,22 @@ def validate(path: Path) -> dict[str, Any]:
         "slurm_or_other_job_submission_authorized": False,
     }
     if authorization != expected_authorization:
-        raise RuntimeError("V103 seal update changes an operational authorization")
+        raise RuntimeError("V103 authorization differs from the scan-only boundary")
     submission = cast("dict[str, Any]", spec["submission_policy"])
-    if any(value is not False for key, value in submission.items() if key != "reason"):
-        raise RuntimeError("V103 draft permits submission or materialization")
+    expected_submission = {
+        "any_job_allowed": False,
+        "local_exclusion_scan_allowed": True,
+        "catalog_reuse_review_allowed": False,
+        "ledger_materialization_allowed": False,
+        "disjointness_check_allowed": False,
+        "gpu_preflight_allowed": False,
+        "calibration_allowed": False,
+        "freeze_allowed": False,
+        "heldout_allowed": False,
+        "reason": "only_the_exact_local_cpu_identity_exclusion_scan_is_authorized",
+    }
+    if submission != expected_submission:
+        raise RuntimeError("V103 submission policy exceeds the local scan-only scope")
 
     boundary = cast("dict[str, Any]", spec["version_boundary"])
     canonical_protocol = (
@@ -152,15 +166,17 @@ def validate(path: Path) -> dict[str, Any]:
         for source in seal_sources
     }
     if (
-        scan_scope.get("status") != "authored_uncommitted_unreviewed_after_commit"
+        scan_scope.get("status") != "committed_reviewed_scan_only_authorized_not_executed"
         or scan_scope.get("protocol_commit_git_sha") != V103_PROTOCOL_COMMIT
         or scan_scope.get("protocol_file_sha256_at_protocol_commit")
         != V103_PROTOCOL_COMMIT_FILE_SHA
-        or scan_scope.get("exclusion_scan_execution_authorized") is not False
-        or scan_scope.get("seal_commit_git_sha") is not None
-        or scan_scope.get("seal_reviewed_after_commit") is not False
-        or seal.get("status") != "authored_uncommitted_unreviewed_after_commit"
-        or seal.get("immutable") is not False
+        or scan_scope.get("exclusion_scan_execution_authorized") is not True
+        or scan_scope.get("seal_commit_git_sha") != V103_SCAN_SCOPE_SEAL_COMMIT
+        or scan_scope.get("seal_file_sha256_at_commit") != V103_SCAN_SCOPE_SEAL_FILE_SHA
+        or scan_scope.get("seal_reviewed_after_commit") is not True
+        or scan_scope.get("scan_execution_performed") is not False
+        or seal.get("status") != "committed_reviewed_scan_only_authorized_not_executed"
+        or seal.get("immutable") is not True
         or permitted.get("execution_mode") != "local_cpu_process_only"
         or permitted.get("allowed_read_roots")
         != ["configs/ledgers", "/scratch/djy8hg/runs/mosaickv"]
@@ -170,12 +186,12 @@ def validate(path: Path) -> dict[str, Any]:
         or permitted.get("only_permitted_output") != V103_EXCLUSION_OUTPUT
         or any(value is not True for value in forbidden.values())
         or seal_authorization.get("scan_scope_definition_reviewed") is not True
+        or seal_authorization.get("seal_commit_created") is not True
+        or seal_authorization.get("seal_reviewed_after_commit") is not True
+        or seal_authorization.get("exclusion_scan_authorized") is not True
         or any(
             seal_authorization.get(key) is not False
             for key in (
-                "seal_commit_created",
-                "seal_reviewed_after_commit",
-                "exclusion_scan_authorized",
                 "catalog_access_authorized",
                 "materialization_authorized",
                 "disjointness_check_authorized",
@@ -184,6 +200,20 @@ def validate(path: Path) -> dict[str, Any]:
         )
     ):
         raise RuntimeError("V103 scan-scope seal is not fail-closed")
+    seal_boundary = cast("dict[str, Any]", seal["seal_boundary"])
+    if (
+        seal_boundary.get("seal_commit_git_sha") != V103_SCAN_SCOPE_SEAL_COMMIT
+        or seal_boundary.get("seal_file_sha256_at_commit") != V103_SCAN_SCOPE_SEAL_FILE_SHA
+        or seal_boundary.get("seal_reviewed_after_commit") is not True
+        or seal_boundary.get("scan_scope_changed_after_review") is not False
+        or _sha256_at_commit(
+            package.parent,
+            V103_SCAN_SCOPE_SEAL_COMMIT,
+            package / "configs/ledgers/choice_c_v103_protocol_scan_scope_seal.yaml",
+        )
+        != V103_SCAN_SCOPE_SEAL_FILE_SHA
+    ):
+        raise RuntimeError("V103 reviewed scan-scope seal boundary differs")
 
     candidate_boundary = cast("dict[str, Any]", spec["candidate_boundary"])
     if (
@@ -221,13 +251,16 @@ def validate(path: Path) -> dict[str, Any]:
         or scan.get("required_v102_unique_identity_count") != 64
         or scan.get("inspect_answers_references_scores_media_prompts_or_failure_outcomes")
         is not False
-        or scan.get("scan_authorized") is not False
+        or scan.get("status") != "scan_only_authorized_not_executed"
+        or scan.get("scan_authorized") is not True
         or scan.get("scan_performed") is not False
         or scan.get("manifest_reviewed") is not False
-        or scan.get("v103_tooling_compatibility_status") != "not_reviewed_not_authorized"
+        or scan.get("v103_tooling_compatibility_status")
+        != "dedicated_v103_scan_only_wrapper_cpu_tested"
+        or scan.get("scanner_implementation_source") != "scripts/choice_c_v103_exclusion_scan.py"
         or scan.get("v102_specific_authorization_guards_must_not_be_bypassed") is not True
     ):
-        raise RuntimeError("V103 exclusion scan is incomplete or authorized")
+        raise RuntimeError("V103 exclusion scan differs from its unexecuted scan-only scope")
 
     tasks = cast("list[dict[str, Any]]", spec["tasks"])
     by_task = {str(task["task"]): task for task in tasks}
@@ -344,13 +377,21 @@ def validate(path: Path) -> dict[str, Any]:
         raise RuntimeError("V103 weakens an unchanged scientific gate")
 
     outputs = cast("dict[str, Any]", spec["outputs"])
+    if (
+        outputs.get("output_root_must_not_exist_before_scan_execution") is not True
+        or outputs.get("no_output_created_by_this_authorization_update") is not True
+    ):
+        raise RuntimeError("V103 authorization update claims execution output")
     return {
         "experiment_id": spec["experiment_id"],
-        "status": "valid_uncommitted_v103_scan_scope_seal_all_execution_disabled",
+        "status": "valid_v103_scan_only_authorized_not_executed",
         "protocol_commit_git_sha": V103_PROTOCOL_COMMIT,
         "protocol_commit_reviewed": True,
-        "scan_scope_seal_commit_created": False,
-        "exclusion_scan_authorized": False,
+        "scan_scope_seal_git_sha": V103_SCAN_SCOPE_SEAL_COMMIT,
+        "scan_scope_seal_reviewed": True,
+        "exclusion_scan_authorized": True,
+        "exclusion_scan_performed": False,
+        "downstream_actions_authorized": False,
         "selection_seed": selection["selection_seed"],
         "tasks": {name: 32 for name in sorted(by_task)},
         "preflight_samples": 4,
@@ -358,7 +399,7 @@ def validate(path: Path) -> dict[str, Any]:
         "planned_unique_identities": materialization["total_planned_unique_identities"],
         "minimum_v102_exclusions": scan["required_v102_unique_identity_count"],
         "output_root": outputs["output_root"],
-        "all_actions_authorized": False,
+        "only_local_cpu_exclusion_scan_authorized": True,
     }
 
 
