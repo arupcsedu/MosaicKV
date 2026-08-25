@@ -328,6 +328,35 @@ def test_v105_candidate_applies_reserved_reallocation_beam_controls() -> None:
     assert revised.selection.stable_head_hierarchical_reserved_reallocation_evaluations == 12
     assert revised.selection.stable_head_hierarchical_reallocation_beam_width == 3
     assert revised.selection.stable_head_hierarchical_reallocation_maximum_combination_width == 3
+    assert not revised.selection.stable_head_hierarchical_logit_feedback_restore_donor
+
+
+def test_v106_candidate_applies_boolean_logit_feedback_restore_donor() -> None:
+    root = Path(__file__).parents[2]
+    base = load_config(root / "configs/experiments/choice_c_v72_frozen_candidate.yaml")
+    spec = yaml.safe_load(
+        (
+            root / "configs/experiments/choice_c_v102_v100_fresh_cross_dataset_calibration.yaml"
+        ).read_text(encoding="utf-8")
+    )
+    candidate = spec["candidates"][0]
+    candidate["id"] = "v106_logit_feedback_restore_donor"
+    candidate["overrides"].update(
+        {
+            "stable_head_hierarchical_reserved_reallocation_evaluations": 12,
+            "stable_head_hierarchical_reallocation_beam_width": 3,
+            "stable_head_hierarchical_reallocation_maximum_combination_width": 3,
+            "stable_head_hierarchical_logit_feedback_restore_donor": True,
+        }
+    )
+
+    revised = PROTOCOL.apply_candidate(base, candidate)
+
+    assert revised.selection.stable_head_hierarchical_logit_feedback_restore_donor
+
+    candidate["overrides"]["stable_head_hierarchical_logit_feedback_restore_donor"] = "true"
+    with pytest.raises(ValueError, match="restore_donor must be boolean"):
+        PROTOCOL.apply_candidate(base, candidate)
 
 
 def test_versioned_candidate_rejects_string_adaptive_swap_flag() -> None:

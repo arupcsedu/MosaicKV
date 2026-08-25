@@ -13,6 +13,9 @@ from mosaickv.backends.hf_runtime import HuggingFaceMosaicKVModel, HuggingFaceRu
 from mosaickv.config import ConfigurationError, SelectionConfig
 from mosaickv.selection.hierarchical import (
     CapacityLevelKind,
+    HierarchicalCapacityProposal,
+    HierarchicalProbeEvaluation,
+    HierarchicalProposalKind,
     HierarchicalSelectionError,
     LogitProbeResult,
     ProbeBudgetExceeded,
@@ -24,6 +27,8 @@ from mosaickv.selection.hierarchical import (
     partition_route_ladders,
     plan_conflict_rollback,
     plan_joint_reallocation_candidates,
+    plan_logit_feedback_restore_donor_candidates,
+    proposal_route_capacity_violations,
     run_bounded_hierarchical_probe_loop,
     select_verified_capacity_levels,
     update_partition_screening,
@@ -170,6 +175,107 @@ def _ladder_with_reallocation(
     )
 
 
+def test_final_proposal_route_capacity_is_checked_before_model_probe() -> None:
+    ladders = (
+        _ladder((0, 0), 0, (3.0, 2.0, 1.0), (0.0, 1.0, 2.0)),
+        _ladder((0, 1), 10, (3.0, 2.0, 1.0), (0.0, 1.0, 2.0)),
+    )
+    proposal = HierarchicalCapacityProposal(
+        proposal_id="joint-route-infeasible",
+        kind=HierarchicalProposalKind.JOINT,
+        level_indices=(((0, 0), 0), ((0, 1), 2)),
+        affected_routes=((0, 1),),
+    )
+    counts = {node_id: 4 for node_id in (*range(3), *range(10, 13))}
+
+    violations = proposal_route_capacity_violations(
+        proposal,
+        ladders,
+        counts,
+        {(0, 0): 8, (0, 1): 8},
+    )
+
+    assert len(violations) == 1
+    assert violations[0].route == (0, 0)
+    assert violations[0].selected_positions == 12
+    assert violations[0].position_limit == 8
+
+
+def test_screening_route_capacity_check_ignores_unaffected_fullkv_routes() -> None:
+    ladders = (
+        _ladder((0, 0), 0, (3.0, 2.0, 1.0), (0.0, 1.0, 2.0)),
+        _ladder((0, 1), 10, (3.0, 2.0, 1.0), (0.0, 1.0, 2.0)),
+    )
+    proposal = HierarchicalCapacityProposal(
+        proposal_id="screen-one-route",
+        kind=HierarchicalProposalKind.SCREENING,
+        level_indices=(((0, 0), 0), ((0, 1), 2)),
+        affected_routes=((0, 1),),
+    )
+    counts = {node_id: 4 for node_id in (*range(3), *range(10, 13))}
+
+    assert not proposal_route_capacity_violations(
+        proposal,
+        ladders,
+        counts,
+        {(0, 0): 8, (0, 1): 8},
+        affected_routes_only=True,
+    )
+
+
+def test_logit_feedback_restores_sensitive_route_with_equal_byte_donor() -> None:
+    ladders = (
+        _ladder((0, 0), 0, (30.0, 20.0, 10.0), (0.0, 1.0, 2.0)),
+        _ladder((0, 1), 10, (30.0, 20.0, 10.0), (0.0, 1.0, 2.0)),
+    )
+    current = select_verified_capacity_levels(
+        ladders,
+        {(0, 0): (2,), (0, 1): (0,)},
+        40,
+        require_full_level=False,
+    )
+    evaluations = (
+        HierarchicalProbeEvaluation(
+            HierarchicalCapacityProposal(
+                "screen-sensitive",
+                HierarchicalProposalKind.SCREENING,
+                (((0, 0), 2), ((0, 1), 0)),
+                ((0, 0),),
+            ),
+            LogitProbeResult(True, 0.018, 0.9, 2),
+            True,
+        ),
+        HierarchicalProbeEvaluation(
+            HierarchicalCapacityProposal(
+                "screen-donor",
+                HierarchicalProposalKind.SCREENING,
+                (((0, 0), 0), ((0, 1), 2)),
+                ((0, 1),),
+            ),
+            LogitProbeResult(True, 0.001, 0.1, 2),
+            True,
+        ),
+    )
+
+    candidates = plan_logit_feedback_restore_donor_candidates(
+        current,
+        ladders,
+        evaluations,
+        maximum_candidates=4,
+        maximum_forward_kl=0.02,
+        maximum_absolute_logit_difference=1.0,
+        required_steps=2,
+    )
+
+    assert candidates
+    first = candidates[0]
+    assert first.rolled_back_routes == ((0, 0),)
+    assert first.donor_routes == ((0, 1),)
+    assert first.bytes_added_by_rollback == first.bytes_removed_by_donors == 20
+    assert first.selection.active_bytes == current.active_bytes
+    assert first.reason.startswith("fullkv_logit_sensitive_route_restored")
+
+
 def test_hierarchical_configuration_is_strict_and_mutually_exclusive() -> None:
     config = _hierarchical_config()
 
@@ -198,6 +304,14 @@ def test_hierarchical_configuration_is_strict_and_mutually_exclusive() -> None:
         replace(config, stable_head_hierarchical_reserved_reallocation_evaluations=0)
     with pytest.raises(ConfigurationError, match="cover the beam and at least one combination"):
         replace(config, stable_head_hierarchical_reserved_reallocation_evaluations=3)
+    with pytest.raises(ConfigurationError, match="restore/donor requires a positive reservation"):
+        replace(
+            config,
+            stable_head_hierarchical_reserved_reallocation_evaluations=0,
+            stable_head_hierarchical_reallocation_beam_width=0,
+            stable_head_hierarchical_reallocation_maximum_combination_width=0,
+            stable_head_hierarchical_logit_feedback_restore_donor=True,
+        )
 
 
 def test_hierarchical_configuration_parses_all_controls_without_coercion() -> None:
@@ -816,3 +930,56 @@ def test_v105_combines_best_single_swaps_in_two_and_three_route_beam() -> None:
     assert {len(item.proposal.affected_routes) for item in beam} == {2, 3}
     assert decision.evaluations_used <= budget.maximum_candidate_evaluations
     assert decision.rounds_used == 4
+
+
+def test_v106_skips_infeasible_joint_and_probes_logit_guided_restore_donor() -> None:
+    ladders = (
+        _ladder((0, 0), 0, (30.0, 20.0, 10.0), (0.0, 1.0, 2.0)),
+        _ladder((0, 1), 10, (30.0, 20.0, 10.0), (0.0, 1.0, 2.0)),
+    )
+    budget = ProbeBudgetTracker(10, 4)
+
+    def probe(proposal: Any) -> LogitProbeResult:
+        if proposal.kind is HierarchicalProposalKind.SCREENING:
+            route = proposal.affected_routes[0]
+            return (
+                LogitProbeResult(True, 0.001, 0.1, 2)
+                if route == (0, 0)
+                else LogitProbeResult(True, 0.018, 0.9, 2)
+            )
+        assert proposal.proposal_id.startswith("restore-donor")
+        return LogitProbeResult(True, 0.01, 0.8, 2)
+
+    def route_feasible(selection: Any) -> bool:
+        return all(choice.active_bytes <= 20 for choice in selection.choices)
+
+    decision = run_bounded_hierarchical_probe_loop(
+        ladders,
+        target_active_bytes=40,
+        initial_partition_count=2,
+        maximum_refinement_depth=0,
+        maximum_rollback_rounds=2,
+        maximum_forward_kl=0.02,
+        maximum_absolute_logit_difference=1.0,
+        required_steps=2,
+        probe_budget=budget,
+        probe=probe,
+        fixed_route_capacity_reallocation=True,
+        reserved_reallocation_evaluations=7,
+        reallocation_beam_width=3,
+        reallocation_maximum_combination_width=3,
+        logit_feedback_restore_donor=True,
+        selection_feasible=route_feasible,
+    )
+
+    assert decision.target_reached
+    assert decision.selected_candidate_passed
+    assert not decision.used_fullkv_fallback
+    assert decision.logit_feedback_restore_donor
+    assert decision.infeasible_proposal_ids == ("joint-0", "restore-donor-0")
+    assert decision.selection.level_index_by_route() == {(0, 0): 1, (0, 1): 1}
+    assert [item.proposal.proposal_id for item in decision.evaluations] == [
+        "p0",
+        "p1",
+        "restore-donor-1",
+    ]

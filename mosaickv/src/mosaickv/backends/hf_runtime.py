@@ -103,16 +103,19 @@ from mosaickv.selection import (
     BoundedHierarchicalProbeDecision,
     BudgetedObjective,
     HierarchicalCapacityProposal,
+    HierarchicalProposalKind,
     InfeasibleSelectionBudgetError,
     LogitProbeResult,
     ProbeBudgetTracker,
     RouteBlockCandidate,
     RouteCapacityLadder,
+    RouteCapacityViolation,
     SelectionBudget,
     SelectionResult,
     build_route_capacity_ladders,
     compute_block_utilities,
     lazy_greedy_select,
+    proposal_route_capacity_violations,
     run_bounded_hierarchical_probe_loop,
     select_all_exact,
     select_exact_subset,
@@ -183,6 +186,66 @@ def _hard_budget_fallback_trace_payload(
             "attempted_over_budget_bytes": (
                 attempted_active_kv_bytes - hard_active_kv_budget_bytes
             ),
+            "attempted_prompt_capacity": attempted_prompt_capacity,
+            "hard_prompt_capacity": hard_prompt_capacity,
+            "packed_active_kv_bytes": None,
+        },
+    }
+
+
+def _route_capacity_failure_trace_payload(
+    proposal: HierarchicalCapacityProposal,
+    violations: Sequence[RouteCapacityViolation],
+    *,
+    attempted_active_kv_bytes: int,
+    hard_active_kv_budget_bytes: int,
+    attempted_prompt_capacity: int,
+    hard_prompt_capacity: int,
+) -> JsonObject:
+    """Build a complete fail-closed trace before an invalid logit probe."""
+
+    if not violations:
+        raise ValueError("route-capacity failure requires at least one violation")
+    violation_rows = [cast("JsonObject", asdict(item)) for item in violations]
+    rejection = cast(
+        "JsonObject",
+        {
+            "candidate_id": proposal.proposal_id,
+            "candidate_kind": proposal.kind.value,
+            "status": "rejected_before_logit_probe",
+            "route_capacity_violations": violation_rows,
+        },
+    )
+    return {
+        "failure_classification": "hierarchical_route_capacity_violation",
+        "effective_method": "mosaickv_exact_route_infeasible_rejected_before_probe",
+        "used_fullkv_fallback": False,
+        "hard_budget_enforced": True,
+        "over_budget_cache_packed": False,
+        "over_budget_cache_decoded": False,
+        "over_budget_cache_scope": "route_infeasible_candidate",
+        "attempted_active_kv_bytes": attempted_active_kv_bytes,
+        "attempted_total_kv_bytes": attempted_active_kv_bytes,
+        "attempted_residual_kv_bytes": 0,
+        "hard_active_kv_budget_bytes": hard_active_kv_budget_bytes,
+        "attempted_prompt_capacity": attempted_prompt_capacity,
+        "hard_prompt_capacity": hard_prompt_capacity,
+        "target_reached": False,
+        "probe_decisions": [rejection],
+        "hierarchical_logit_safe_eviction": {
+            "status": "rejected_route_capacity_before_logit_probe",
+            "used_fullkv_fallback": False,
+            "rejected_proposal": rejection,
+        },
+        "timing_breakdown": {
+            "hierarchical_capacity_validation": 0.0,
+            "cache_packing": 0.0,
+            "decode": 0.0,
+        },
+        "byte_budget_materialization": {
+            "status": "rejected_before_materialization",
+            "attempted_active_kv_bytes": attempted_active_kv_bytes,
+            "hard_active_kv_budget_bytes": hard_active_kv_budget_bytes,
             "attempted_prompt_capacity": attempted_prompt_capacity,
             "hard_prompt_capacity": hard_prompt_capacity,
             "packed_active_kv_bytes": None,
@@ -5486,6 +5549,34 @@ def _progressive_capacity_records(
     return tuple(result)
 
 
+def _hierarchical_effective_position_limits(
+    plan: MosaicKVCompressionPlan,
+    dense_position_limits: Mapping[tuple[int, int], int],
+) -> dict[tuple[int, int], int]:
+    """Intersect dense limits with already-attainable external-route limits."""
+
+    routes = {
+        (block.layer, block.kv_head) for block in plan.full_state.blocks
+    }
+    if set(dense_position_limits) != routes:
+        raise HuggingFaceRuntimeError(
+            "hierarchical dense position limits must cover every FullKV route"
+        )
+    effective = {route: int(limit) for route, limit in dense_position_limits.items()}
+    if any(limit < 1 for limit in effective.values()):
+        raise HuggingFaceRuntimeError("hierarchical position limits must be positive")
+    seen: set[tuple[int, int]] = set()
+    for record in plan.external_exact_capacity_records:
+        route = (record.layer, record.kv_head)
+        if route in seen:
+            raise HuggingFaceRuntimeError("external capacity records contain duplicate routes")
+        if route not in effective or record.position_limit < 1:
+            raise HuggingFaceRuntimeError("external capacity record has an invalid route limit")
+        seen.add(route)
+        effective[route] = min(effective[route], int(record.position_limit))
+    return effective
+
+
 def _hierarchical_route_ladders(
     plan: MosaicKVCompressionPlan,
     config: RunConfig,
@@ -5592,7 +5683,8 @@ def _run_hierarchical_logit_safe_eviction(
     if plan.method is not MosaicKVMethod.MOSAICKV_EXACT:
         raise HuggingFaceRuntimeError("hierarchical logit-safe eviction supports mosaickv_exact")
     selection_config = config.selection
-    ladders = _hierarchical_route_ladders(plan, config, position_limits)
+    effective_position_limits = _hierarchical_effective_position_limits(plan, position_limits)
+    ladders = _hierarchical_route_ladders(plan, config, effective_position_limits)
     teacher_inputs, reference_logits = _hierarchical_reference_rollout(
         adapter,
         prefill,
@@ -5615,6 +5707,33 @@ def _run_hierarchical_logit_safe_eviction(
 
     def probe(proposal: HierarchicalCapacityProposal) -> LogitProbeResult:
         level_indices = proposal.level_index_by_route()
+        violations = proposal_route_capacity_violations(
+            proposal,
+            ladders,
+            {
+                node_id: block.position_count
+                for node_id, block in enumerate(plan.full_state.blocks)
+            },
+            effective_position_limits,
+            affected_routes_only=(proposal.kind is HierarchicalProposalKind.SCREENING),
+        )
+        if violations:
+            attempted_active_bytes = sum(
+                ladder.level(level_indices[ladder.route]).active_bytes for ladder in ladders
+            )
+            attempted_positions = max(item.selected_positions for item in violations)
+            error = HuggingFaceRuntimeError(
+                "hierarchical proposal exceeds a route position limit before logit probing"
+            )
+            error.mosaickv_failure_trace_payload = _route_capacity_failure_trace_payload(
+                proposal,
+                violations,
+                attempted_active_kv_bytes=attempted_active_bytes,
+                hard_active_kv_budget_bytes=plan.active_budget_value,
+                attempted_prompt_capacity=attempted_positions,
+                hard_prompt_capacity=max(effective_position_limits.values()),
+            )
+            raise error
         retained_ids = frozenset(
             node_id
             for ladder in ladders
@@ -5654,6 +5773,24 @@ def _run_hierarchical_logit_safe_eviction(
         selection_config.stable_head_hierarchical_maximum_candidate_evaluations,
         selection_config.stable_head_hierarchical_maximum_sequential_rounds,
     )
+
+    def selection_is_route_feasible(selection: Any) -> bool:
+        proposal = HierarchicalCapacityProposal(
+            proposal_id="route-feasibility-only",
+            kind=HierarchicalProposalKind.JOINT,
+            level_indices=tuple(sorted(selection.level_index_by_route().items())),
+            affected_routes=tuple(sorted(selection.level_index_by_route())),
+        )
+        return not proposal_route_capacity_violations(
+            proposal,
+            ladders,
+            {
+                node_id: block.position_count
+                for node_id, block in enumerate(plan.full_state.blocks)
+            },
+            effective_position_limits,
+        )
+
     decision = run_bounded_hierarchical_probe_loop(
         ladders,
         target_active_bytes=plan.active_budget_value,
@@ -5679,6 +5816,10 @@ def _run_hierarchical_logit_safe_eviction(
         reallocation_maximum_combination_width=(
             selection_config.stable_head_hierarchical_reallocation_maximum_combination_width
         ),
+        logit_feedback_restore_donor=(
+            selection_config.stable_head_hierarchical_logit_feedback_restore_donor
+        ),
+        selection_feasible=selection_is_route_feasible,
     )
     selected_levels = tuple(
         (choice.route, choice.level_index) for choice in decision.selection.choices
@@ -5708,7 +5849,7 @@ def _run_hierarchical_logit_safe_eviction(
     reservation = _progressive_group_reservation(
         plan,
         config,
-        position_limits,
+        effective_position_limits,
         _progressive_eviction_risks(plan),
     )
     selected_plan = replace(
@@ -9384,6 +9525,9 @@ class HuggingFaceMosaicKVModel:
                             ),
                             "stable_head_hierarchical_reallocation_maximum_combination_width": (
                                 self.config.selection.stable_head_hierarchical_reallocation_maximum_combination_width
+                            ),
+                            "stable_head_hierarchical_logit_feedback_restore_donor": (
+                                self.config.selection.stable_head_hierarchical_logit_feedback_restore_donor
                             ),
                             "hierarchical_gpu_debug_authorized": (
                                 self._hierarchical_gpu_debug_authorized

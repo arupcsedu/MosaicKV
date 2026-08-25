@@ -90,6 +90,7 @@ OPTIONAL_OVERRIDE_KEYS = frozenset(
         "stable_head_hierarchical_reserved_reallocation_evaluations",
         "stable_head_hierarchical_reallocation_beam_width",
         "stable_head_hierarchical_reallocation_maximum_combination_width",
+        "stable_head_hierarchical_logit_feedback_restore_donor",
         "stable_head_hierarchical_horizon",
         "stable_head_hierarchical_maximum_kl",
         "stable_head_hierarchical_maximum_logit_difference",
@@ -276,6 +277,14 @@ def apply_candidate(base_mosaic: Any, candidate: dict[str, Any]) -> Any:
     )
     if not isinstance(hierarchical_logit_safe_eviction, bool):
         raise ValueError("stable_head_hierarchical_logit_safe_eviction must be boolean")
+    hierarchical_restore_donor = overrides.get(
+        "stable_head_hierarchical_logit_feedback_restore_donor",
+        base_mosaic.selection.stable_head_hierarchical_logit_feedback_restore_donor,
+    )
+    if not isinstance(hierarchical_restore_donor, bool):
+        raise ValueError(
+            "stable_head_hierarchical_logit_feedback_restore_donor must be boolean"
+        )
     forecast_mode_raw = overrides.get("forecast_mode", base_mosaic.forecasting.mode.value)
     try:
         forecast_mode = ForecastMode(str(forecast_mode_raw))
@@ -682,6 +691,9 @@ def apply_candidate(base_mosaic: Any, candidate: dict[str, Any]) -> Any:
                     "stable_head_hierarchical_reallocation_maximum_combination_width",
                     base_mosaic.selection.stable_head_hierarchical_reallocation_maximum_combination_width,
                 )
+            ),
+            stable_head_hierarchical_logit_feedback_restore_donor=(
+                hierarchical_restore_donor
             ),
             stable_head_hierarchical_horizon=int(
                 overrides.get(

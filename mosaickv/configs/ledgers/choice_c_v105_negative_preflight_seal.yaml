@@ -1,0 +1,148 @@
+schema_version: 1
+experiment_id: choice_c_v105_reserved_beam_preflight
+classification: sealed_negative_four_sample_gpu_preflight
+sealed_at_utc: "2026-08-25T12:52:23Z"
+immutable_result: true
+measurement_type: preregistered_runtime_correctness_preflight
+overall_pass: false
+gpu_preflight_pass: false
+calibration_authorized: false
+frozen_candidate_created: false
+heldout_evaluation_authorized: false
+
+protocol:
+  path: configs/experiments/choice_c_v105_reserved_beam_preflight.yaml
+  configured_active_byte_cap: 28500000
+  attainable_hard_active_byte_cap_observed: 27787264
+  unchanged_maximum_forward_kl: 0.02
+  unchanged_maximum_absolute_logit_difference: 1.0
+  unchanged_greedy_token_match_required: true
+  unchanged_probe_horizon: 2
+  maximum_candidate_evaluations: 24
+  maximum_sequential_rounds: 6
+  fullkv_fallback_passes_preflight: false
+
+execution:
+  source_git_sha: ef9f51b015c84c9043edf6919a7f80f6c3bd0064
+  source_git_dirty: false
+  worker_spec_path: /scratch/djy8hg/runs/mosaickv/choice-c-v105-reserved-beam-preflight-v2/inputs/gpu_preflight_worker_spec.json
+  worker_spec_sha256: 2668976809c1e7b34fc3b48c098e19f42bd4bbc69fccfcff289cdd399799ddcb
+  disjointness_report_path: /scratch/djy8hg/runs/mosaickv/choice-c-v105-reserved-beam-preflight-v2/inputs/preflight_disjointness_report.json
+  disjointness_report_sha256: 292e7590ca50116db709d6750d11b169ed2944f21208b86028bf9f1208325d19
+  output_root: /scratch/djy8hg/runs/mosaickv/choice-c-v105-reserved-beam-preflight-v2/preflight
+  slurm_array_id: "18892053"
+  gpu: NVIDIA A100-SXM4-80GB
+  gpu_count_per_worker: 1
+  array_tasks:
+    - task: textvqa_train_calibration
+      slurm_array_label: "18892053_0"
+      slurm_job_id_raw: "18892055"
+      state: FAILED
+      exit_code: "1:0"
+      elapsed: "00:05:29"
+      node: udc-an26-1
+      log_path: /scratch/djy8hg/runs/mosaickv/slurm/v105-preflight-v2-18892053_0.log
+      log_sha256: 46c8d867f8364456ae81be9ff75eb7fa23e2dcdf8aca511ce156c81f3557cad1
+    - task: infovqa
+      slurm_array_label: "18892053_1"
+      slurm_job_id_raw: "18892053"
+      state: FAILED
+      exit_code: "1:0"
+      elapsed: "00:03:06"
+      node: udc-an26-1
+      log_path: /scratch/djy8hg/runs/mosaickv/slurm/v105-preflight-v2-18892053_1.log
+      log_sha256: 97540124ff29905b40bb42ee15d6f87b40b38d65ecc8920551e726a4150ace13
+
+planned_samples:
+  textvqa_train_calibration:
+    ledger_path: /scratch/djy8hg/runs/mosaickv/choice-c-v105-reserved-beam-preflight-v2/inputs/preflight_textvqa_train.json
+    ledger_sha256: 12fa47ef3e4d1736ab14c9097cba3fac83ddd60c477be58b8046befae60a2f0b
+    sample_ids:
+      - textvqa_train_calibration:21455
+      - textvqa_train_calibration:14040
+  infovqa:
+    ledger_path: /scratch/djy8hg/runs/mosaickv/choice-c-v105-reserved-beam-preflight-v2/inputs/preflight_infovqa.json
+    ledger_sha256: 97a0db2f38e77cf85a417737093c322d86e9383a224d6c784d786618e0404192
+    sample_ids:
+      - infovqa:97784
+      - infovqa:96680
+
+observed_candidate_samples:
+  - task: textvqa_train_calibration
+    sample_id: textvqa_train_calibration:21455
+    status: failed
+    target_reached: false
+    used_fullkv_fallback: true
+    effective_method: full_kv_fallback_rejected_before_packing
+    attempted_active_kv_bytes: 319815680
+    hard_active_kv_budget_bytes: 27787264
+    prompt_topk_active_kv_bytes: 40370176
+    residual_kv_bytes: 0
+    probe_evaluations_used: 24
+    probe_rounds_used: 6
+    screening_evaluations: 11
+    passing_screening_evaluations: 9
+    final_joint_evaluations: 1
+    reallocation_evaluations: 12
+    passing_reallocation_evaluations: 0
+    every_reallocation_greedy_token_match: true
+    best_reallocation_maximum_forward_kl: 0.05598482862114906
+    best_reallocation_maximum_absolute_logit_difference: 2.146484375
+    required_failure_trace_fields_complete: true
+    correct_reference_annotation_list_recorded: true
+    reference_annotation_count: 10
+    over_budget_cache_packed: false
+    over_budget_cache_decoded: false
+    trace_path: /scratch/djy8hg/runs/mosaickv/choice-c-v105-reserved-beam-preflight-v2/preflight/traces/v105-preflight-textvqa_train_calibration-warmup-v105_reserved_label_blind_reallocation_beam/a4e2a8807aabc67c.json
+    trace_sha256: 70b7104f4bc2021d152447b26200266f5b3d5a0b9742ba088f8c5b17f2011e01
+    raw_result_path: /scratch/djy8hg/runs/mosaickv/choice-c-v105-reserved-beam-preflight-v2/preflight/v105-preflight-textvqa_train_calibration-warmup-v105_reserved_label_blind_reallocation_beam/results.jsonl
+    raw_result_sha256: 94238a999dccb81e54178a9ec6a3998354626ff306bdb753adbf4e71661c7b51
+    telemetry_path: /scratch/djy8hg/runs/mosaickv/choice-c-v105-reserved-beam-preflight-v2/preflight/telemetry/v105-preflight-textvqa_train_calibration-2668976809.json
+    telemetry_sha256: d57ebd0a77e99ba73d6ba23e85efbea65595b9fabc371b0bd82bc131f06eb516
+  - task: infovqa
+    sample_id: infovqa:97784
+    status: failed
+    target_reached: false
+    used_fullkv_fallback: null
+    effective_method: null
+    attempted_active_kv_bytes: null
+    hard_active_kv_budget_bytes: null
+    prompt_topk_active_kv_bytes: 41943040
+    residual_kv_bytes: null
+    failure: non-fallback selection exceeds its route capacity
+    required_failure_trace_fields_complete: false
+    required_failure_trace_fields_present: 1
+    required_failure_trace_fields_total: 9
+    correct_reference_annotation_list_recorded: true
+    reference_annotation_count: 1
+    trace_path: /scratch/djy8hg/runs/mosaickv/choice-c-v105-reserved-beam-preflight-v2/preflight/traces/v105-preflight-infovqa-warmup-v105_reserved_label_blind_reallocation_beam/5c82c767098f0862.json
+    trace_sha256: b2c957ce856c8d2c0f6547717103a93f84e905cb32fbdaf811338c916c25286e
+    raw_result_path: /scratch/djy8hg/runs/mosaickv/choice-c-v105-reserved-beam-preflight-v2/preflight/v105-preflight-infovqa-warmup-v105_reserved_label_blind_reallocation_beam/results.jsonl
+    raw_result_sha256: 8777c57d8082fb81481e1dd003f33c65269e8657f20586a06a3c52673e308628
+    telemetry_path: /scratch/djy8hg/runs/mosaickv/choice-c-v105-reserved-beam-preflight-v2/preflight/telemetry/v105-preflight-infovqa-2668976809.json
+    telemetry_sha256: 7288709ee72469157271675299b32daa09306021f5c9c62d9705a276fcee0e8a
+
+unexecuted_candidate_samples:
+  - textvqa_train_calibration:14040
+  - infovqa:96680
+
+gate_summary:
+  candidate_samples_completed: 0
+  candidate_samples_required: 4
+  compressed_target_samples: 0
+  compressed_target_samples_required: 4
+  candidate_fidelity_samples_evaluable: 0
+  attempted_references_verified: 2
+  complete_candidate_failure_traces: 1
+  observed_candidate_failures: 2
+  all_four_samples_pass: false
+  calibration_must_remain_blocked: true
+
+scientific_boundary:
+  v105_outputs_answers_references_and_scores_inspected: true
+  all_v105_planned_identities_consumed: true
+  future_runtime_validation_requires_fresh_identities: true
+  task_labels_answers_scores_or_failure_identities_must_not_drive_v106: true
+  aggregate_label_blind_logit_and_capacity_telemetry_may_drive_engineering: true
+  thresholds_must_not_be_weakened: true
+  calibration_requires_separate_authorization_after_a_positive_preflight: true

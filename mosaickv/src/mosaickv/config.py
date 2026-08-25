@@ -1113,6 +1113,9 @@ class SelectionConfig:
     stable_head_hierarchical_reserved_reallocation_evaluations: int = 0
     stable_head_hierarchical_reallocation_beam_width: int = 0
     stable_head_hierarchical_reallocation_maximum_combination_width: int = 0
+    # V106 uses FullKV-relative screening logits to restore the most
+    # output-sensitive route while compressing an equal-byte low-impact donor.
+    stable_head_hierarchical_logit_feedback_restore_donor: bool = False
     routed_head_only_planning: bool = False
     # MosaicKV may deliberately materialize less than the shared comparison
     # budget when evaluating a quality-matched memory point. The shared hard
@@ -1671,6 +1674,7 @@ class SelectionConfig:
             combination_width = (
                 self.stable_head_hierarchical_reallocation_maximum_combination_width
             )
+            restore_donor = self.stable_head_hierarchical_logit_feedback_restore_donor
             if reservation:
                 if not 2 <= beam_width <= 8:
                     raise ConfigurationError(
@@ -1704,6 +1708,14 @@ class SelectionConfig:
                     raise ConfigurationError(
                         "hierarchical reallocation beam requires at least four rounds"
                     )
+                if restore_donor and beam_width < 2:
+                    raise ConfigurationError(
+                        "hierarchical logit-feedback restore/donor requires reserved probes"
+                    )
+            elif restore_donor:
+                raise ConfigurationError(
+                    "hierarchical logit-feedback restore/donor requires a positive reservation"
+                )
             elif beam_width != 0 or combination_width != 0:
                 raise ConfigurationError(
                     "hierarchical reallocation beam controls require a positive reservation"
@@ -1720,6 +1732,7 @@ class SelectionConfig:
             or self.stable_head_hierarchical_reserved_reallocation_evaluations != 0
             or self.stable_head_hierarchical_reallocation_beam_width != 0
             or self.stable_head_hierarchical_reallocation_maximum_combination_width != 0
+            or self.stable_head_hierarchical_logit_feedback_restore_donor
         ):
             raise ConfigurationError(
                 "hierarchical logit-safe eviction controls require the hierarchical gate"
@@ -2033,6 +2046,7 @@ class SelectionConfig:
             "stable_head_hierarchical_reserved_reallocation_evaluations",
             "stable_head_hierarchical_reallocation_beam_width",
             "stable_head_hierarchical_reallocation_maximum_combination_width",
+            "stable_head_hierarchical_logit_feedback_restore_donor",
             "routed_head_only_planning",
             "physical_capacity_fraction",
         }
@@ -2461,6 +2475,12 @@ class SelectionConfig:
                 data,
                 "stable_head_hierarchical_reallocation_maximum_combination_width",
                 0,
+                "selection",
+            ),
+            stable_head_hierarchical_logit_feedback_restore_donor=_bool(
+                data,
+                "stable_head_hierarchical_logit_feedback_restore_donor",
+                False,
                 "selection",
             ),
             routed_head_only_planning=_bool(data, "routed_head_only_planning", False, "selection"),

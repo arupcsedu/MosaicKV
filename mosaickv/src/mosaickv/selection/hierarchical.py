@@ -591,6 +591,71 @@ class HierarchicalCapacityProposal:
 
 
 @dataclass(frozen=True, slots=True)
+class RouteCapacityViolation:
+    """One proposal route whose selected positions exceed its physical limit."""
+
+    route: RouteId
+    selected_positions: int
+    position_limit: int
+
+    def __post_init__(self) -> None:
+        if min(self.route) < 0:
+            raise HierarchicalSelectionError("capacity-violation route must be nonnegative")
+        if self.selected_positions < 0 or self.position_limit < 1:
+            raise HierarchicalSelectionError("route position counts must be valid")
+        if self.selected_positions <= self.position_limit:
+            raise HierarchicalSelectionError("a route-capacity violation must exceed its limit")
+
+
+def proposal_route_capacity_violations(
+    proposal: HierarchicalCapacityProposal,
+    ladders: Sequence[RouteCapacityLadder],
+    position_count_by_node: Mapping[int, int],
+    position_limits: Mapping[RouteId, int],
+    *,
+    affected_routes_only: bool = False,
+) -> tuple[RouteCapacityViolation, ...]:
+    """Check selected positions before a proposal reaches a model probe.
+
+    Screening candidates intentionally keep unrelated routes at FullKV, so a
+    screening call checks only its affected routes. Joint, rollback, and
+    reallocation candidates check every route because a passing candidate can
+    become the final packed cache.
+    """
+
+    ordered = tuple(sorted(ladders, key=lambda ladder: ladder.route))
+    by_route = {ladder.route: ladder for ladder in ordered}
+    indices = proposal.level_index_by_route()
+    if set(indices) != set(by_route) or set(position_limits) != set(by_route):
+        raise HierarchicalSelectionError(
+            "proposal, ladder, and position-limit routes must match exactly"
+        )
+    checked_routes = (
+        frozenset(proposal.affected_routes) if affected_routes_only else frozenset(by_route)
+    )
+    violations: list[RouteCapacityViolation] = []
+    for route in sorted(checked_routes):
+        level = by_route[route].level(indices[route])
+        try:
+            counts = tuple(
+                int(position_count_by_node[node_id]) for node_id in level.selected_node_ids
+            )
+        except KeyError as error:
+            raise HierarchicalSelectionError(
+                f"missing position count for selected node {error.args[0]}"
+            ) from error
+        if any(count < 1 for count in counts):
+            raise HierarchicalSelectionError("selected node position counts must be positive")
+        selected_positions = sum(counts)
+        limit = int(position_limits[route])
+        if limit < 1:
+            raise HierarchicalSelectionError("route position limits must be positive")
+        if selected_positions > limit:
+            violations.append(RouteCapacityViolation(route, selected_positions, limit))
+    return tuple(violations)
+
+
+@dataclass(frozen=True, slots=True)
 class HierarchicalProbeEvaluation:
     """One proposal and its backend-neutral short-horizon result."""
 
@@ -1008,6 +1073,156 @@ def plan_beam_reallocation_candidates(
     return tuple(plans)
 
 
+def plan_logit_feedback_restore_donor_candidates(
+    current: KnapsackSelection,
+    ladders: Sequence[RouteCapacityLadder],
+    screening_evaluations: Sequence[HierarchicalProbeEvaluation],
+    *,
+    maximum_candidates: int,
+    maximum_forward_kl: float,
+    maximum_absolute_logit_difference: float,
+    required_steps: int,
+    excluded_level_signatures: Iterable[tuple[tuple[RouteId, int], ...]] = (),
+) -> tuple[ConflictRollbackPlan, ...]:
+    """Exchange a sensitive recipient with an equal-byte low-impact donor.
+
+    Recipient and donor ranks use only isolated FullKV-relative token, KL,
+    and logit-difference measurements. Benchmark labels, references, scores,
+    generated answers, and sample failure identities are not inputs. Every
+    returned candidate preserves the current global logical byte count; the
+    backend must additionally reject any candidate that its physical cache
+    layout cannot represent within per-route limits.
+    """
+
+    if maximum_candidates < 1:
+        raise HierarchicalSelectionError("restore/donor candidate cap must be positive")
+    if maximum_forward_kl <= 0 or maximum_absolute_logit_difference <= 0:
+        raise HierarchicalSelectionError("restore/donor stability limits must be positive")
+    if required_steps < 1:
+        raise HierarchicalSelectionError("restore/donor probe horizon must be positive")
+    ordered = tuple(sorted(ladders, key=lambda ladder: ladder.route))
+    by_route = {ladder.route: ladder for ladder in ordered}
+    current_indices = current.level_index_by_route()
+    if set(by_route) != set(current_indices):
+        raise HierarchicalSelectionError("restore/donor ladders do not match current routes")
+
+    impact = {route: 0.0 for route in by_route}
+    evidence_count = {route: 0 for route in by_route}
+    for evaluation in screening_evaluations:
+        if evaluation.proposal.kind is not HierarchicalProposalKind.SCREENING:
+            raise HierarchicalSelectionError("restore/donor feedback must come from screening")
+        result = evaluation.result
+        gate_ratio = max(
+            result.maximum_forward_kl / maximum_forward_kl,
+            result.maximum_absolute_logit_difference / maximum_absolute_logit_difference,
+            0.0 if result.greedy_token_match else 2.0,
+            0.0 if result.evaluated_steps == required_steps else 2.0,
+        )
+        for route in evaluation.proposal.affected_routes:
+            if route not in impact:
+                raise HierarchicalSelectionError("screening feedback contains an unknown route")
+            impact[route] = max(impact[route], gate_ratio)
+            evidence_count[route] += 1
+
+    recipients = sorted(
+        (
+            choice
+            for choice in current.choices
+            if any(
+                level.active_bytes > choice.active_bytes
+                and level.kind is not CapacityLevelKind.REALLOCATION_ALTERNATIVE
+                for level in by_route[choice.route].levels
+            )
+        ),
+        key=lambda choice: (
+            evidence_count[choice.route] == 0,
+            -impact[choice.route],
+            -choice.evicted_risk,
+            choice.route,
+        ),
+    )
+    excluded = frozenset(excluded_level_signatures)
+    seen = set(excluded)
+    ranked: list[tuple[tuple[object, ...], ConflictRollbackPlan]] = []
+    for recipient in recipients:
+        safer_levels = sorted(
+            (
+                level
+                for level in by_route[recipient.route].levels
+                if level.active_bytes > recipient.active_bytes
+                and level.kind is not CapacityLevelKind.REALLOCATION_ALTERNATIVE
+            ),
+            key=lambda level: (level.active_bytes, -level.level_index),
+        )
+        for safer in safer_levels:
+            added = safer.active_bytes - recipient.active_bytes
+            donors = sorted(
+                (choice for choice in current.choices if choice.route != recipient.route),
+                key=lambda choice: (
+                    evidence_count[choice.route] == 0,
+                    impact[choice.route],
+                    choice.evicted_risk,
+                    choice.route,
+                ),
+            )
+            for donor in donors:
+                donor_levels = sorted(
+                    (
+                        level
+                        for level in by_route[donor.route].levels
+                        if donor.active_bytes - level.active_bytes == added
+                        and level.kind is not CapacityLevelKind.REALLOCATION_ALTERNATIVE
+                    ),
+                    key=lambda level: (-level.active_bytes, level.level_index),
+                )
+                for donor_level in donor_levels:
+                    indices = dict(current_indices)
+                    indices[recipient.route] = safer.level_index
+                    indices[donor.route] = donor_level.level_index
+                    signature = tuple(sorted(indices.items()))
+                    if signature in seen:
+                        continue
+                    seen.add(signature)
+                    selection = _selection_from_level_indices(
+                        ordered,
+                        indices,
+                        current.target_active_bytes,
+                        fixed_active_bytes=current.fixed_active_bytes,
+                    )
+                    if selection.active_bytes != current.active_bytes:
+                        raise HierarchicalSelectionError(
+                            "restore/donor exchange changed global active bytes"
+                        )
+                    plan = ConflictRollbackPlan(
+                        selection=selection,
+                        rollback_applied=True,
+                        rolled_back_routes=(recipient.route,),
+                        donor_routes=(donor.route,),
+                        bytes_added_by_rollback=added,
+                        bytes_removed_by_donors=added,
+                        reason=(
+                            "fullkv_logit_sensitive_route_restored_with_equal_byte_"
+                            "low_impact_donor"
+                        ),
+                    )
+                    rank: tuple[object, ...] = (
+                        evidence_count[recipient.route] == 0,
+                        -impact[recipient.route],
+                        evidence_count[donor.route] == 0,
+                        impact[donor.route],
+                        -added,
+                        recipient.route,
+                        donor.route,
+                        safer.level_index,
+                        donor_level.level_index,
+                    )
+                    ranked.append((rank, plan))
+    return tuple(
+        plan
+        for _rank, plan in sorted(ranked, key=lambda item: item[0])[:maximum_candidates]
+    )
+
+
 def plan_conflict_rollback(
     current: KnapsackSelection,
     ladders: Sequence[RouteCapacityLadder],
@@ -1125,6 +1340,8 @@ class BoundedHierarchicalProbeDecision:
     reserved_reallocation_evaluations: int = 0
     reallocation_beam_width: int = 0
     reallocation_maximum_combination_width: int = 0
+    logit_feedback_restore_donor: bool = False
+    infeasible_proposal_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.evaluations_used != len(self.evaluations):
@@ -1142,6 +1359,7 @@ class BoundedHierarchicalProbeDecision:
         if self.reserved_reallocation_evaluations == 0 and (
             self.reallocation_beam_width != 0
             or self.reallocation_maximum_combination_width != 0
+            or self.logit_feedback_restore_donor
         ):
             raise HierarchicalSelectionError("reallocation beam metadata requires a reservation")
 
@@ -1183,6 +1401,8 @@ def run_bounded_hierarchical_probe_loop(
     reserved_reallocation_evaluations: int = 0,
     reallocation_beam_width: int = 0,
     reallocation_maximum_combination_width: int = 0,
+    logit_feedback_restore_donor: bool = False,
+    selection_feasible: Callable[[KnapsackSelection], bool] | None = None,
 ) -> BoundedHierarchicalProbeDecision:
     """Screen, assemble, jointly verify, and fail closed within hard budgets.
 
@@ -1234,6 +1454,10 @@ def run_bounded_hierarchical_probe_loop(
             )
     elif reallocation_beam_width != 0 or reallocation_maximum_combination_width != 0:
         raise HierarchicalSelectionError("reallocation beam controls require a reservation")
+    if logit_feedback_restore_donor and not reserved_beam_enabled:
+        raise HierarchicalSelectionError(
+            "logit-feedback restore/donor requires reserved post-joint evaluations"
+        )
     ordered = tuple(sorted(ladders, key=lambda ladder: ladder.route))
     if not ordered or len({ladder.route for ladder in ordered}) != len(ordered):
         raise HierarchicalSelectionError("hierarchical probing requires unique route ladders")
@@ -1242,6 +1466,7 @@ def run_bounded_hierarchical_probe_loop(
     accepted_routes: set[RouteId] = set()
     unresolved_routes: set[RouteId] = set()
     evaluations: list[HierarchicalProbeEvaluation] = []
+    infeasible_proposal_ids: list[str] = []
 
     def evaluate(proposal: HierarchicalCapacityProposal) -> bool:
         result = probe(proposal)
@@ -1313,8 +1538,13 @@ def run_bounded_hierarchical_probe_loop(
         assembled.level_index_by_route(),
         (choice.route for choice in assembled.choices if choice.level_index > 0),
     )
-    probe_budget.reserve_round((joint_proposal.proposal_id,))
-    joint_passed = evaluate(joint_proposal)
+    joint_feasible = selection_feasible is None or selection_feasible(assembled)
+    if joint_feasible:
+        probe_budget.reserve_round((joint_proposal.proposal_id,))
+        joint_passed = evaluate(joint_proposal)
+    else:
+        infeasible_proposal_ids.append(joint_proposal.proposal_id)
+        joint_passed = False
     rollback_attempts: list[ConflictRollbackPlan] = []
     selected = assembled
     selected_passed = joint_passed
@@ -1322,7 +1552,66 @@ def run_bounded_hierarchical_probe_loop(
     attempted_signatures: set[tuple[tuple[RouteId, int], ...]] = {
         joint_proposal.level_indices
     }
-    if not joint_passed and reserved_beam_enabled:
+    if not joint_passed and reserved_beam_enabled and logit_feedback_restore_donor:
+        remaining_evaluations = (
+            probe_budget.maximum_candidate_evaluations - probe_budget.evaluations_used
+        )
+        restore_candidates = plan_logit_feedback_restore_donor_candidates(
+            assembled,
+            ordered,
+            tuple(
+                evaluation
+                for evaluation in evaluations
+                if evaluation.proposal.kind is HierarchicalProposalKind.SCREENING
+            ),
+            maximum_candidates=max(1, remaining_evaluations),
+            maximum_forward_kl=maximum_forward_kl,
+            maximum_absolute_logit_difference=maximum_absolute_logit_difference,
+            required_steps=required_steps,
+            excluded_level_signatures=attempted_signatures,
+        )
+        rollback_attempts.extend(restore_candidates)
+        feasible_pairs: list[tuple[ConflictRollbackPlan, HierarchicalCapacityProposal]] = []
+        for index, candidate in enumerate(restore_candidates):
+            proposal = _proposal(
+                f"restore-donor-{index}",
+                HierarchicalProposalKind.REALLOCATION,
+                ordered,
+                candidate.selection.level_index_by_route(),
+                (*candidate.rolled_back_routes, *candidate.donor_routes),
+            )
+            if selection_feasible is not None and not selection_feasible(candidate.selection):
+                infeasible_proposal_ids.append(proposal.proposal_id)
+                continue
+            feasible_pairs.append((candidate, proposal))
+        feasible_pairs = feasible_pairs[:remaining_evaluations]
+        if feasible_pairs:
+            probe_budget.reserve_round(
+                proposal.proposal_id for _candidate, proposal in feasible_pairs
+            )
+            passing: list[tuple[ConflictRollbackPlan, HierarchicalProbeEvaluation]] = []
+            for candidate, proposal in feasible_pairs:
+                attempted_signatures.add(proposal.level_indices)
+                passed = evaluate(proposal)
+                evaluation = evaluations[-1]
+                if passed:
+                    passing.append((candidate, evaluation))
+            if passing:
+                selected = min(
+                    passing,
+                    key=lambda item: _logit_stability_rank(
+                        item[1],
+                        maximum_forward_kl=maximum_forward_kl,
+                        maximum_absolute_logit_difference=maximum_absolute_logit_difference,
+                        required_steps=required_steps,
+                    ),
+                )[0].selection
+                selected_passed = True
+    if (
+        not joint_passed
+        and reserved_beam_enabled
+        and not logit_feedback_restore_donor
+    ):
         remaining_evaluations = (
             probe_budget.maximum_candidate_evaluations - probe_budget.evaluations_used
         )
@@ -1444,7 +1733,7 @@ def run_bounded_hierarchical_probe_loop(
                     reason="no_fixed_capacity_single_reallocation_candidate",
                 )
             )
-    elif not joint_passed:
+    if not joint_passed and not reserved_beam_enabled:
         for rollback_index in range(maximum_rollback_rounds):
             if (
                 probe_budget.rounds_used >= probe_budget.maximum_sequential_rounds
@@ -1564,6 +1853,8 @@ def run_bounded_hierarchical_probe_loop(
         reallocation_maximum_combination_width=(
             reallocation_maximum_combination_width
         ),
+        logit_feedback_restore_donor=logit_feedback_restore_donor,
+        infeasible_proposal_ids=tuple(infeasible_proposal_ids),
     )
 
 
@@ -1584,6 +1875,7 @@ __all__ = [
     "RouteCapacityChoice",
     "RouteCapacityLadder",
     "RouteCapacityLevel",
+    "RouteCapacityViolation",
     "RouteId",
     "RoutePartition",
     "ScreeningUpdate",
@@ -1592,6 +1884,8 @@ __all__ = [
     "plan_beam_reallocation_candidates",
     "plan_conflict_rollback",
     "plan_joint_reallocation_candidates",
+    "plan_logit_feedback_restore_donor_candidates",
+    "proposal_route_capacity_violations",
     "run_bounded_hierarchical_probe_loop",
     "select_verified_capacity_levels",
     "split_route_partition",

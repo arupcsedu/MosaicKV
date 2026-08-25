@@ -170,6 +170,7 @@ class _MockHierarchicalSelectionConfig:
     stable_head_hierarchical_reserved_reallocation_evaluations: int = 0
     stable_head_hierarchical_reallocation_beam_width: int = 0
     stable_head_hierarchical_reallocation_maximum_combination_width: int = 0
+    stable_head_hierarchical_logit_feedback_restore_donor: bool = False
 
 
 @dataclass(frozen=True)
@@ -313,7 +314,17 @@ def test_hf_hierarchical_loop_materializes_every_probe_through_isolation(
     reference = _reference_state()
     checkpoint = capture_decode_state(adapter, reference)
     prefill = SimpleNamespace(state=reference, next_token_id=torch.tensor([[2]]))
-    full_state = SimpleNamespace(blocks=tuple(SimpleNamespace(byte_size=10) for _index in range(6)))
+    full_state = SimpleNamespace(
+        blocks=tuple(
+            SimpleNamespace(
+                byte_size=10,
+                layer=0,
+                kv_head=0 if index < 3 else 1,
+                position_count=1,
+            )
+            for index in range(6)
+        )
+    )
     plan = MosaicKVCompressionPlan(
         method=MosaicKVMethod.MOSAICKV_EXACT,
         effective_method="mosaickv_exact",
@@ -324,9 +335,9 @@ def test_hf_hierarchical_loop_materializes_every_probe_through_isolation(
         selection=cast(Any, None),
         construction=cast(Any, None),
         source_budget_value=60,
-        shared_active_budget_value=40,
-        active_budget_value=40,
-        planner_active_budget_value=40,
+        shared_active_budget_value=20,
+        active_budget_value=20,
+        planner_active_budget_value=20,
         configured_physical_capacity_fraction=1.0,
         graph_seconds=0.0,
         selection_seconds=0.0,
@@ -417,8 +428,8 @@ def test_hf_hierarchical_loop_materializes_every_probe_through_isolation(
     assert decision.target_reached
     assert decision.final_joint_probe_passed
     assert decision.evaluations_used == 3
-    assert materialized_bytes == [40, 40, 40]
-    assert selected_plan.construction.state.statistics.active_kv_bytes == 40
+    assert materialized_bytes == [40, 40, 20]
+    assert selected_plan.construction.state.statistics.active_kv_bytes == 20
     assert_decode_state_unchanged(adapter, reference, checkpoint)
 
 
@@ -636,3 +647,70 @@ def test_hard_budget_fallback_trace_rejects_nonfallback_or_in_budget_records() -
             {"used_fullkv_fallback": True},
             **{**kwargs, "attempted_active_kv_bytes": 40},
         )
+
+
+def test_route_capacity_failure_trace_contains_every_preflight_field() -> None:
+    proposal = hf_runtime.HierarchicalCapacityProposal(
+        proposal_id="joint-infeasible",
+        kind=hf_runtime.HierarchicalProposalKind.JOINT,
+        level_indices=(((0, 0), 0),),
+        affected_routes=((0, 0),),
+    )
+    payload = hf_runtime._route_capacity_failure_trace_payload(
+        proposal,
+        (
+            hf_runtime.RouteCapacityViolation(
+                route=(0, 0),
+                selected_positions=12,
+                position_limit=8,
+            ),
+        ),
+        attempted_active_kv_bytes=48,
+        hard_active_kv_budget_bytes=40,
+        attempted_prompt_capacity=12,
+        hard_prompt_capacity=8,
+    )
+
+    required = {
+        "effective_method",
+        "used_fullkv_fallback",
+        "attempted_active_kv_bytes",
+        "hard_active_kv_budget_bytes",
+        "probe_decisions",
+        "timing_breakdown",
+        "byte_budget_materialization",
+        "hierarchical_logit_safe_eviction",
+    }
+    assert required <= set(payload)
+    assert payload["used_fullkv_fallback"] is False
+    assert payload["over_budget_cache_packed"] is False
+    assert payload["over_budget_cache_decoded"] is False
+    assert payload["probe_decisions"][0]["status"] == "rejected_before_logit_probe"
+
+
+def test_hierarchical_effective_limits_intersect_external_attainable_capacity() -> None:
+    plan = SimpleNamespace(
+        full_state=SimpleNamespace(
+            blocks=(
+                SimpleNamespace(layer=0, kv_head=0),
+                SimpleNamespace(layer=0, kv_head=1),
+            )
+        ),
+        external_exact_capacity_records=(
+            HeadLocalCapacityRecord(
+                layer=0,
+                kv_head=0,
+                position_limit=64,
+                selected_positions=64,
+                shortfall_positions=0,
+                selected_bytes=128,
+            ),
+        ),
+    )
+
+    effective = hf_runtime._hierarchical_effective_position_limits(
+        plan,
+        {(0, 0): 75, (0, 1): 75},
+    )
+
+    assert effective == {(0, 0): 64, (0, 1): 75}
