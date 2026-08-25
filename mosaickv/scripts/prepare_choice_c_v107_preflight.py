@@ -295,7 +295,7 @@ def main() -> int:
             json.dumps(
                 {
                     "protocol_status": protocol["protocol_status"],
-                    "status": "draft_protocol_validated_execution_disabled",
+                    "status": "protocol_validated",
                 },
                 sort_keys=True,
             )
