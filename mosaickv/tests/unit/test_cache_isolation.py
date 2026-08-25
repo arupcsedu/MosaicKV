@@ -167,6 +167,9 @@ class _MockHierarchicalSelectionConfig:
     stable_head_hierarchical_maximum_rollback_rounds: int = 1
     stable_head_hierarchical_maximum_kl: float = 0.02
     stable_head_hierarchical_maximum_logit_difference: float = 1.0
+    stable_head_hierarchical_reserved_reallocation_evaluations: int = 0
+    stable_head_hierarchical_reallocation_beam_width: int = 0
+    stable_head_hierarchical_reallocation_maximum_combination_width: int = 0
 
 
 @dataclass(frozen=True)

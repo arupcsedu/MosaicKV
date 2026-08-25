@@ -875,6 +875,139 @@ def plan_joint_reallocation_candidates(
     return tuple(plans)
 
 
+def _logit_stability_rank(
+    evaluation: HierarchicalProbeEvaluation,
+    *,
+    maximum_forward_kl: float,
+    maximum_absolute_logit_difference: float,
+    required_steps: int,
+) -> tuple[bool, bool, float, float, float, str]:
+    """Rank failed candidates using label-blind short-horizon stability only."""
+
+    result = evaluation.result
+    normalized_kl = result.maximum_forward_kl / maximum_forward_kl
+    normalized_logit = (
+        result.maximum_absolute_logit_difference / maximum_absolute_logit_difference
+    )
+    return (
+        result.evaluated_steps != required_steps,
+        not result.greedy_token_match,
+        max(normalized_kl, normalized_logit),
+        normalized_logit,
+        normalized_kl,
+        evaluation.proposal.proposal_id,
+    )
+
+
+def plan_beam_reallocation_candidates(
+    current: KnapsackSelection,
+    ladders: Sequence[RouteCapacityLadder],
+    single_route_evaluations: Sequence[HierarchicalProbeEvaluation],
+    *,
+    beam_width: int,
+    maximum_combination_width: int,
+    maximum_candidates: int,
+    maximum_forward_kl: float,
+    maximum_absolute_logit_difference: float,
+    required_steps: int,
+    excluded_level_signatures: Iterable[tuple[tuple[RouteId, int], ...]] = (),
+) -> tuple[ConflictRollbackPlan, ...]:
+    """Combine the most stable label-blind single swaps into a bounded beam.
+
+    No benchmark answer, reference, task score, or failure identity is an
+    input. The ordering depends only on the isolated short-horizon token,
+    KL, and logit-difference diagnostics already required by the safety gate.
+    Every composed candidate preserves the current byte count in each route.
+    """
+
+    if beam_width < 2:
+        raise HierarchicalSelectionError("reallocation beam width must be at least two")
+    if not 2 <= maximum_combination_width <= min(3, beam_width):
+        raise HierarchicalSelectionError(
+            "reallocation combination width must be between two and min(three, beam width)"
+        )
+    if maximum_candidates < 1:
+        raise HierarchicalSelectionError("reallocation beam candidate cap must be positive")
+    ordered = tuple(sorted(ladders, key=lambda ladder: ladder.route))
+    current_indices = current.level_index_by_route()
+    if {ladder.route for ladder in ordered} != set(current_indices):
+        raise HierarchicalSelectionError("reallocation beam ladders do not match current routes")
+    eligible: list[HierarchicalProbeEvaluation] = []
+    seen_routes: set[RouteId] = set()
+    for evaluation in sorted(
+        single_route_evaluations,
+        key=lambda item: _logit_stability_rank(
+            item,
+            maximum_forward_kl=maximum_forward_kl,
+            maximum_absolute_logit_difference=maximum_absolute_logit_difference,
+            required_steps=required_steps,
+        ),
+    ):
+        proposal = evaluation.proposal
+        if proposal.kind is not HierarchicalProposalKind.REALLOCATION:
+            raise HierarchicalSelectionError("beam inputs must be reallocation probes")
+        if len(proposal.affected_routes) != 1:
+            raise HierarchicalSelectionError("beam inputs must change exactly one route")
+        route = proposal.affected_routes[0]
+        if route in seen_routes:
+            continue
+        indices = proposal.level_index_by_route()
+        if set(indices) != set(current_indices):
+            raise HierarchicalSelectionError("beam input does not cover every route")
+        if any(
+            indices[item] != current_indices[item]
+            for item in current_indices
+            if item != route
+        ):
+            raise HierarchicalSelectionError("single-route beam input changes another route")
+        seen_routes.add(route)
+        eligible.append(evaluation)
+        if len(eligible) >= beam_width:
+            break
+    if len(eligible) < 2:
+        return ()
+
+    excluded = frozenset(excluded_level_signatures)
+    seen = set(excluded)
+    plans: list[ConflictRollbackPlan] = []
+    for width in range(2, min(maximum_combination_width, len(eligible)) + 1):
+        for members in combinations(eligible, width):
+            indices = dict(current_indices)
+            routes: list[RouteId] = []
+            for member in members:
+                route = member.proposal.affected_routes[0]
+                indices[route] = member.proposal.level_index_by_route()[route]
+                routes.append(route)
+            signature = tuple((route, indices[route]) for route in sorted(indices))
+            if signature in seen:
+                continue
+            seen.add(signature)
+            selection = _selection_from_level_indices(
+                ordered,
+                indices,
+                current.target_active_bytes,
+                fixed_active_bytes=current.fixed_active_bytes,
+            )
+            if selection.active_bytes != current.active_bytes:
+                raise HierarchicalSelectionError(
+                    "beam reallocation changed global active bytes"
+                )
+            plans.append(
+                ConflictRollbackPlan(
+                    selection=selection,
+                    rollback_applied=True,
+                    rolled_back_routes=tuple(sorted(routes)),
+                    donor_routes=(),
+                    bytes_added_by_rollback=0,
+                    bytes_removed_by_donors=0,
+                    reason="joint_failure_combined_label_blind_single_swap_beam",
+                )
+            )
+            if len(plans) >= maximum_candidates:
+                return tuple(plans)
+    return tuple(plans)
+
+
 def plan_conflict_rollback(
     current: KnapsackSelection,
     ladders: Sequence[RouteCapacityLadder],
@@ -989,6 +1122,9 @@ class BoundedHierarchicalProbeDecision:
     used_fullkv_fallback: bool
     evaluations_used: int
     rounds_used: int
+    reserved_reallocation_evaluations: int = 0
+    reallocation_beam_width: int = 0
+    reallocation_maximum_combination_width: int = 0
 
     def __post_init__(self) -> None:
         if self.evaluations_used != len(self.evaluations):
@@ -1001,6 +1137,13 @@ class BoundedHierarchicalProbeDecision:
             raise HierarchicalSelectionError("FullKV fallback cannot claim the compressed target")
         if self.final_joint_probe_passed and not self.selected_candidate_passed:
             raise HierarchicalSelectionError("a passing joint probe must select a passing cache")
+        if self.reserved_reallocation_evaluations < 0:
+            raise HierarchicalSelectionError("reserved reallocation evaluations cannot be negative")
+        if self.reserved_reallocation_evaluations == 0 and (
+            self.reallocation_beam_width != 0
+            or self.reallocation_maximum_combination_width != 0
+        ):
+            raise HierarchicalSelectionError("reallocation beam metadata requires a reservation")
 
 
 def _proposal(
@@ -1037,6 +1180,9 @@ def run_bounded_hierarchical_probe_loop(
     probe_budget: ProbeBudgetTracker,
     probe: Callable[[HierarchicalCapacityProposal], LogitProbeResult],
     fixed_route_capacity_reallocation: bool = False,
+    reserved_reallocation_evaluations: int = 0,
+    reallocation_beam_width: int = 0,
+    reallocation_maximum_combination_width: int = 0,
 ) -> BoundedHierarchicalProbeDecision:
     """Screen, assemble, jointly verify, and fail closed within hard budgets.
 
@@ -1050,6 +1196,44 @@ def run_bounded_hierarchical_probe_loop(
         raise HierarchicalSelectionError("hierarchical target and probe horizon must be positive")
     if maximum_rollback_rounds < 0:
         raise HierarchicalSelectionError("maximum rollback rounds cannot be negative")
+    if reserved_reallocation_evaluations < 0:
+        raise HierarchicalSelectionError("reserved reallocation evaluations cannot be negative")
+    reserved_beam_enabled = reserved_reallocation_evaluations > 0
+    if reserved_beam_enabled:
+        if not fixed_route_capacity_reallocation:
+            raise HierarchicalSelectionError(
+                "reserved reallocation requires fixed route capacities"
+            )
+        if maximum_rollback_rounds < 2:
+            raise HierarchicalSelectionError(
+                "reserved reallocation beam requires two post-joint rounds"
+            )
+        if reallocation_beam_width < 2:
+            raise HierarchicalSelectionError(
+                "reserved reallocation beam width must be at least two"
+            )
+        if not 2 <= reallocation_maximum_combination_width <= min(
+            3, reallocation_beam_width
+        ):
+            raise HierarchicalSelectionError("reserved reallocation combination width is invalid")
+        minimum_reservation = reallocation_beam_width + 1
+        if reserved_reallocation_evaluations < minimum_reservation:
+            raise HierarchicalSelectionError(
+                "reserved reallocation evaluations must cover the beam and one combination"
+            )
+        if (
+            initial_partition_count + 1 + reserved_reallocation_evaluations
+            > probe_budget.maximum_candidate_evaluations
+        ):
+            raise HierarchicalSelectionError(
+                "probe budget cannot cover initial screening, joint check, and reservation"
+            )
+        if probe_budget.maximum_sequential_rounds < 4:
+            raise HierarchicalSelectionError(
+                "reserved reallocation needs screening, joint, single, and combination rounds"
+            )
+    elif reallocation_beam_width != 0 or reallocation_maximum_combination_width != 0:
+        raise HierarchicalSelectionError("reallocation beam controls require a reservation")
     ordered = tuple(sorted(ladders, key=lambda ladder: ladder.route))
     if not ordered or len({ladder.route for ladder in ordered}) != len(ordered):
         raise HierarchicalSelectionError("hierarchical probing requires unique route ladders")
@@ -1070,11 +1254,19 @@ def run_bounded_hierarchical_probe_loop(
         return passed
 
     pending = partition_route_ladders(ordered, initial_partition_count)
+    post_joint_round_reservation = 2 if reserved_beam_enabled else 0
     while pending:
-        if probe_budget.rounds_used >= probe_budget.maximum_sequential_rounds - 1:
+        if probe_budget.rounds_used >= (
+            probe_budget.maximum_sequential_rounds - 1 - post_joint_round_reservation
+        ):
             unresolved_routes.update(route for item in pending for route in item.routes)
             break
-        available = probe_budget.maximum_candidate_evaluations - probe_budget.evaluations_used - 1
+        available = (
+            probe_budget.maximum_candidate_evaluations
+            - probe_budget.evaluations_used
+            - 1
+            - reserved_reallocation_evaluations
+        )
         if available <= 0:
             unresolved_routes.update(route for item in pending for route in item.routes)
             break
@@ -1130,7 +1322,129 @@ def run_bounded_hierarchical_probe_loop(
     attempted_signatures: set[tuple[tuple[RouteId, int], ...]] = {
         joint_proposal.level_indices
     }
-    if not joint_passed:
+    if not joint_passed and reserved_beam_enabled:
+        remaining_evaluations = (
+            probe_budget.maximum_candidate_evaluations - probe_budget.evaluations_used
+        )
+        maximum_beam_combinations = sum(
+            math.comb(reallocation_beam_width, width)
+            for width in range(2, reallocation_maximum_combination_width + 1)
+        )
+        combination_slots = min(
+            maximum_beam_combinations,
+            max(1, remaining_evaluations - reallocation_beam_width),
+        )
+        single_slots = remaining_evaluations - combination_slots
+        single_candidates = plan_joint_reallocation_candidates(
+            assembled,
+            ordered,
+            rollback_width=1,
+            maximum_candidates=single_slots,
+            excluded_level_signatures=attempted_signatures,
+        )
+        rollback_attempts.extend(single_candidates)
+        single_evaluations: list[HierarchicalProbeEvaluation] = []
+        if single_candidates:
+            single_proposals = tuple(
+                _proposal(
+                    f"reallocation-single-{index}",
+                    HierarchicalProposalKind.REALLOCATION,
+                    ordered,
+                    candidate.selection.level_index_by_route(),
+                    candidate.rolled_back_routes,
+                )
+                for index, candidate in enumerate(single_candidates)
+            )
+            probe_budget.reserve_round(item.proposal_id for item in single_proposals)
+            passing_single: list[
+                tuple[ConflictRollbackPlan, HierarchicalProbeEvaluation]
+            ] = []
+            for candidate, proposal in zip(single_candidates, single_proposals, strict=True):
+                attempted_signatures.add(proposal.level_indices)
+                passed = evaluate(proposal)
+                evaluation = evaluations[-1]
+                single_evaluations.append(evaluation)
+                if passed:
+                    passing_single.append((candidate, evaluation))
+            if passing_single:
+                selected = min(
+                    passing_single,
+                    key=lambda item: _logit_stability_rank(
+                        item[1],
+                        maximum_forward_kl=maximum_forward_kl,
+                        maximum_absolute_logit_difference=(
+                            maximum_absolute_logit_difference
+                        ),
+                        required_steps=required_steps,
+                    ),
+                )[0].selection
+                selected_passed = True
+        if not selected_passed and single_evaluations:
+            remaining_evaluations = (
+                probe_budget.maximum_candidate_evaluations - probe_budget.evaluations_used
+            )
+            beam_candidates = plan_beam_reallocation_candidates(
+                assembled,
+                ordered,
+                single_evaluations,
+                beam_width=reallocation_beam_width,
+                maximum_combination_width=reallocation_maximum_combination_width,
+                maximum_candidates=remaining_evaluations,
+                maximum_forward_kl=maximum_forward_kl,
+                maximum_absolute_logit_difference=maximum_absolute_logit_difference,
+                required_steps=required_steps,
+                excluded_level_signatures=attempted_signatures,
+            )
+            rollback_attempts.extend(beam_candidates)
+            if beam_candidates:
+                beam_proposals = tuple(
+                    _proposal(
+                        f"reallocation-beam-{len(candidate.rolled_back_routes)}-{index}",
+                        HierarchicalProposalKind.REALLOCATION,
+                        ordered,
+                        candidate.selection.level_index_by_route(),
+                        candidate.rolled_back_routes,
+                    )
+                    for index, candidate in enumerate(beam_candidates)
+                )
+                probe_budget.reserve_round(item.proposal_id for item in beam_proposals)
+                passing_beam: list[
+                    tuple[ConflictRollbackPlan, HierarchicalProbeEvaluation]
+                ] = []
+                for candidate, proposal in zip(
+                    beam_candidates, beam_proposals, strict=True
+                ):
+                    attempted_signatures.add(proposal.level_indices)
+                    passed = evaluate(proposal)
+                    evaluation = evaluations[-1]
+                    if passed:
+                        passing_beam.append((candidate, evaluation))
+                if passing_beam:
+                    selected = min(
+                        passing_beam,
+                        key=lambda item: _logit_stability_rank(
+                            item[1],
+                            maximum_forward_kl=maximum_forward_kl,
+                            maximum_absolute_logit_difference=(
+                                maximum_absolute_logit_difference
+                            ),
+                            required_steps=required_steps,
+                        ),
+                    )[0].selection
+                    selected_passed = True
+        if not single_candidates:
+            rollback_attempts.append(
+                ConflictRollbackPlan(
+                    selection=assembled,
+                    rollback_applied=False,
+                    rolled_back_routes=(),
+                    donor_routes=(),
+                    bytes_added_by_rollback=0,
+                    bytes_removed_by_donors=0,
+                    reason="no_fixed_capacity_single_reallocation_candidate",
+                )
+            )
+    elif not joint_passed:
         for rollback_index in range(maximum_rollback_rounds):
             if (
                 probe_budget.rounds_used >= probe_budget.maximum_sequential_rounds
@@ -1245,6 +1559,11 @@ def run_bounded_hierarchical_probe_loop(
         used_fullkv_fallback=used_fullkv_fallback,
         evaluations_used=probe_budget.evaluations_used,
         rounds_used=probe_budget.rounds_used,
+        reserved_reallocation_evaluations=reserved_reallocation_evaluations,
+        reallocation_beam_width=reallocation_beam_width,
+        reallocation_maximum_combination_width=(
+            reallocation_maximum_combination_width
+        ),
     )
 
 
@@ -1270,6 +1589,7 @@ __all__ = [
     "ScreeningUpdate",
     "build_route_capacity_ladders",
     "partition_route_ladders",
+    "plan_beam_reallocation_candidates",
     "plan_conflict_rollback",
     "plan_joint_reallocation_candidates",
     "run_bounded_hierarchical_probe_loop",

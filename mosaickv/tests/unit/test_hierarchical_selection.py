@@ -57,6 +57,9 @@ def _hierarchical_config() -> SelectionConfig:
         stable_head_hierarchical_horizon=2,
         stable_head_hierarchical_maximum_kl=0.02,
         stable_head_hierarchical_maximum_logit_difference=1.0,
+        stable_head_hierarchical_reserved_reallocation_evaluations=12,
+        stable_head_hierarchical_reallocation_beam_width=3,
+        stable_head_hierarchical_reallocation_maximum_combination_width=3,
     )
 
 
@@ -191,6 +194,10 @@ def test_hierarchical_configuration_is_strict_and_mutually_exclusive() -> None:
             stable_head_hierarchical_maximum_sequential_rounds=3,
             stable_head_hierarchical_maximum_rollback_rounds=2,
         )
+    with pytest.raises(ConfigurationError, match="controls require a positive reservation"):
+        replace(config, stable_head_hierarchical_reserved_reallocation_evaluations=0)
+    with pytest.raises(ConfigurationError, match="cover the beam and at least one combination"):
+        replace(config, stable_head_hierarchical_reserved_reallocation_evaluations=3)
 
 
 def test_hierarchical_configuration_parses_all_controls_without_coercion() -> None:
@@ -714,3 +721,98 @@ def test_bounded_hierarchy_falls_back_to_fullkv_after_unsafe_joint_candidates() 
     assert decision.used_fullkv_fallback
     assert decision.selection.active_bytes == 60
     assert all(choice.level_index == 0 for choice in decision.selection.choices)
+
+
+def test_v105_reserves_post_joint_evaluations_before_screening_refinement() -> None:
+    ladders = tuple(
+        _ladder_with_reallocation((0, head), head * 10, target_risk=float(32 - head))
+        for head in range(16)
+    )
+    budget = ProbeBudgetTracker(24, 6)
+
+    decision = run_bounded_hierarchical_probe_loop(
+        ladders,
+        target_active_bytes=320,
+        initial_partition_count=8,
+        maximum_refinement_depth=2,
+        maximum_rollback_rounds=2,
+        maximum_forward_kl=0.02,
+        maximum_absolute_logit_difference=1.0,
+        required_steps=2,
+        probe_budget=budget,
+        probe=lambda _proposal: _probe_result(False),
+        fixed_route_capacity_reallocation=True,
+        reserved_reallocation_evaluations=12,
+        reallocation_beam_width=3,
+        reallocation_maximum_combination_width=3,
+    )
+
+    screening = tuple(
+        evaluation
+        for evaluation in decision.evaluations
+        if evaluation.proposal.kind.value == "screening"
+    )
+    assert len(screening) == 11
+    assert decision.evaluations_used == 12
+    assert decision.reserved_reallocation_evaluations == 12
+    assert decision.used_fullkv_fallback
+
+
+def test_v105_combines_best_single_swaps_in_two_and_three_route_beam() -> None:
+    ladders = tuple(
+        _ladder_with_reallocation((0, head), head * 10, target_risk=float(10 - head))
+        for head in range(4)
+    )
+    budget = ProbeBudgetTracker(12, 6)
+    single_logit_difference = {(0, 0): 1.5, (0, 1): 1.4, (0, 2): 1.3, (0, 3): 1.9}
+
+    def probe(proposal: Any) -> LogitProbeResult:
+        if proposal.kind.value == "screening":
+            return _probe_result(True)
+        if proposal.kind.value == "joint":
+            return LogitProbeResult(True, 0.01, 2.0, 2)
+        if proposal.proposal_id.startswith("reallocation-single"):
+            return LogitProbeResult(
+                True,
+                0.01,
+                single_logit_difference[proposal.affected_routes[0]],
+                2,
+            )
+        passes = proposal.affected_routes == ((0, 0), (0, 1), (0, 2))
+        return LogitProbeResult(True, 0.01, 0.8 if passes else 1.2, 2)
+
+    decision = run_bounded_hierarchical_probe_loop(
+        ladders,
+        target_active_bytes=80,
+        initial_partition_count=2,
+        maximum_refinement_depth=0,
+        maximum_rollback_rounds=2,
+        maximum_forward_kl=0.02,
+        maximum_absolute_logit_difference=1.0,
+        required_steps=2,
+        probe_budget=budget,
+        probe=probe,
+        fixed_route_capacity_reallocation=True,
+        reserved_reallocation_evaluations=7,
+        reallocation_beam_width=3,
+        reallocation_maximum_combination_width=3,
+    )
+
+    assert decision.target_reached
+    assert decision.selected_candidate_passed
+    assert not decision.used_fullkv_fallback
+    assert decision.selection.active_bytes == 80
+    assert decision.selection.level_index_by_route() == {
+        (0, 0): 3,
+        (0, 1): 3,
+        (0, 2): 3,
+        (0, 3): 2,
+    }
+    beam = tuple(
+        evaluation
+        for evaluation in decision.evaluations
+        if evaluation.proposal.proposal_id.startswith("reallocation-beam")
+    )
+    assert {len(item.proposal.affected_routes) for item in beam} == {2, 3}
+    assert decision.evaluations_used <= budget.maximum_candidate_evaluations
+    assert decision.rounds_used == 4

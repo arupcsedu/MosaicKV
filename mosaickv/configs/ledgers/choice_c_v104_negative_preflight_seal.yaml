@@ -1,0 +1,153 @@
+schema_version: 1
+experiment_id: choice_c_v104_joint_reallocation_preflight
+classification: sealed_negative_four_sample_gpu_preflight
+sealed_at_utc: "2026-08-25T00:42:29Z"
+immutable_result: true
+measurement_type: preregistered_runtime_correctness_preflight
+overall_pass: false
+gpu_preflight_pass: false
+calibration_authorized: false
+frozen_candidate_created: false
+heldout_evaluation_authorized: false
+
+protocol:
+  path: configs/experiments/choice_c_v104_joint_reallocation_preflight.yaml
+  unchanged_active_byte_cap_configured: 28500000
+  unchanged_maximum_forward_kl: 0.02
+  unchanged_maximum_absolute_logit_difference: 1.0
+  unchanged_greedy_token_match_required: true
+  unchanged_probe_horizon: 2
+  maximum_candidate_evaluations: 24
+  maximum_sequential_rounds: 6
+  fullkv_fallback_passes_preflight: false
+  every_candidate_sample_must_complete: true
+  every_candidate_sample_must_reach_compressed_target: true
+
+execution:
+  source_git_sha: 0809ed28e032e1e390a11404f527ec5121c2b712
+  source_git_dirty: false
+  worker_spec_path: /scratch/djy8hg/runs/mosaickv/choice-c-v104-joint-reallocation-preflight-v1/inputs/gpu_preflight_worker_spec.json
+  worker_spec_sha256: a9b9c500514482577436e1499c246aae9bce71ce9c6e3b5d524c40d2afe47a4b
+  disjointness_report_path: /scratch/djy8hg/runs/mosaickv/choice-c-v104-joint-reallocation-preflight-v1/inputs/preflight_disjointness_report.json
+  disjointness_report_sha256: d770cb2fe6d019d6f968d412739208131ad49c16e1a32e191b63fd17fe9cd742
+  output_root: /scratch/djy8hg/runs/mosaickv/choice-c-v104-joint-reallocation-preflight-v1/preflight
+  slurm_array_id: "18871215"
+  gpu: NVIDIA A100-SXM4-80GB
+  gpu_count_per_worker: 1
+  slurm_time_limit: "03:30:00"
+  array_tasks:
+    - task: textvqa_train_calibration
+      slurm_array_label: "18871215_0"
+      slurm_job_id_raw: "18871220"
+      state: FAILED
+      exit_code: "1:0"
+      elapsed: "00:05:12"
+      node: udc-an26-1
+      log_path: /scratch/djy8hg/runs/mosaickv/slurm/v104-preflight-18871215_0.log
+      log_sha256: 0706c0cffe4aa8ed8e9c13930da1d26b06ce2f8f400c9fa573a662db30352257
+    - task: infovqa
+      slurm_array_label: "18871215_1"
+      slurm_job_id_raw: "18871215"
+      state: FAILED
+      exit_code: "1:0"
+      elapsed: "00:05:36"
+      node: udc-an26-1
+      log_path: /scratch/djy8hg/runs/mosaickv/slurm/v104-preflight-18871215_1.log
+      log_sha256: 03ecbfa2271c57673614077907928dd3d7edc4be3328008ca0a7d3852751a64a
+
+planned_samples:
+  textvqa_train_calibration:
+    ledger_path: /scratch/djy8hg/runs/mosaickv/choice-c-v104-joint-reallocation-preflight-v1/inputs/preflight_textvqa_train.json
+    ledger_sha256: bdf014559974a4b1d00e6d028d88c13f4c8da75694265483d914295a49e070e1
+    sample_ids:
+      - textvqa_train_calibration:13205
+      - textvqa_train_calibration:33509
+  infovqa:
+    ledger_path: /scratch/djy8hg/runs/mosaickv/choice-c-v104-joint-reallocation-preflight-v1/inputs/preflight_infovqa.json
+    ledger_sha256: a74a9ce4d8e9305f7b37946d2c94998b513ae718baf7f3fdbd0bdd4b291684d3
+    sample_ids:
+      - infovqa:96199
+      - infovqa:91239
+
+observed_candidate_samples:
+  - task: textvqa_train_calibration
+    sample_id: textvqa_train_calibration:13205
+    status: failed
+    target_reached: false
+    used_fullkv_fallback: true
+    effective_method: full_kv_fallback_rejected_before_packing
+    attempted_active_kv_bytes: 317718528
+    hard_active_kv_budget_bytes: 27787264
+    prompt_topk_active_kv_bytes: 40370176
+    target_reduction_fraction_vs_prompt_topk: 0.3116883116883117
+    residual_kv_bytes: 0
+    probe_evaluations_used: 24
+    screening_evaluations: 23
+    final_joint_evaluations: 1
+    reallocation_evaluations: 0
+    final_joint_greedy_token_match: true
+    final_joint_maximum_forward_kl: 0.0240909643471241
+    final_joint_maximum_absolute_logit_difference: 2.36328125
+    reference_matches_fullkv_and_prompt_topk: true
+    reference_annotation_count: 10
+    required_failure_trace_fields_complete: true
+    over_budget_cache_packed: false
+    over_budget_cache_decoded: false
+    trace_path: /scratch/djy8hg/runs/mosaickv/choice-c-v104-joint-reallocation-preflight-v1/preflight/traces/v104-preflight-textvqa_train_calibration-warmup-v104_hierarchical_fixed_capacity_joint_reallocation/cc82453ee04fc4ab.json
+    trace_sha256: 41ffd991a84c01925cc2461a76a35e1c447ad0dda0e7ec755089d799c3ab1422
+    raw_result_path: /scratch/djy8hg/runs/mosaickv/choice-c-v104-joint-reallocation-preflight-v1/preflight/v104-preflight-textvqa_train_calibration-warmup-v104_hierarchical_fixed_capacity_joint_reallocation/results.jsonl
+    raw_result_sha256: e520f7301e7ff5772abc7162403cc9d9619d358f06c483754fe571d4239500a7
+    telemetry_path: /scratch/djy8hg/runs/mosaickv/choice-c-v104-joint-reallocation-preflight-v1/preflight/telemetry/v104-preflight-textvqa_train_calibration-a9b9c50051.json
+    telemetry_sha256: c4d506d4f63ba6f57b7712fca17dde5a6499740071409420ba150bd12195c970
+  - task: infovqa
+    sample_id: infovqa:96199
+    status: failed
+    target_reached: false
+    used_fullkv_fallback: true
+    effective_method: full_kv_fallback_rejected_before_packing
+    attempted_active_kv_bytes: 319291392
+    hard_active_kv_budget_bytes: 27262976
+    prompt_topk_active_kv_bytes: 39845888
+    target_reduction_fraction_vs_prompt_topk: 0.3157894736842105
+    residual_kv_bytes: 0
+    probe_evaluations_used: 24
+    screening_evaluations: 12
+    final_joint_evaluations: 1
+    reallocation_evaluations: 11
+    passing_reallocation_evaluations: 0
+    every_reallocation_greedy_token_match: true
+    reallocation_maximum_forward_kl_range: [0.0024449406191706657, 0.0030394569039344788]
+    reallocation_maximum_absolute_logit_difference_range: [1.796875, 1.8125]
+    reference_matches_fullkv_and_prompt_topk: true
+    reference_annotation_count: 2
+    required_failure_trace_fields_complete: true
+    over_budget_cache_packed: false
+    over_budget_cache_decoded: false
+    trace_path: /scratch/djy8hg/runs/mosaickv/choice-c-v104-joint-reallocation-preflight-v1/preflight/traces/v104-preflight-infovqa-warmup-v104_hierarchical_fixed_capacity_joint_reallocation/632bb5f6d5101fdc.json
+    trace_sha256: c372eec0231c47b1d18a65e86c4538d353526b9af4a74fff60b3f77114364c9d
+    raw_result_path: /scratch/djy8hg/runs/mosaickv/choice-c-v104-joint-reallocation-preflight-v1/preflight/v104-preflight-infovqa-warmup-v104_hierarchical_fixed_capacity_joint_reallocation/results.jsonl
+    raw_result_sha256: 9e1ef8282cd07492308a49415f881fac325158ac76cf2c887717eb311aaae6e8
+    telemetry_path: /scratch/djy8hg/runs/mosaickv/choice-c-v104-joint-reallocation-preflight-v1/preflight/telemetry/v104-preflight-infovqa-a9b9c50051.json
+    telemetry_sha256: 871358a10330e15eb3ed52aee4be280980274ec85184d3ebbe347f638d6b41a0
+
+unexecuted_candidate_samples:
+  - textvqa_train_calibration:33509
+  - infovqa:91239
+
+gate_summary:
+  candidate_samples_completed: 0
+  candidate_samples_required: 4
+  compressed_target_samples: 0
+  compressed_target_samples_required: 4
+  attempted_references_verified: 2
+  required_traces_complete: 2
+  all_four_samples_pass: false
+  calibration_must_remain_blocked: true
+
+scientific_boundary:
+  v104_outputs_inspected: true
+  all_v104_planned_identities_consumed: true
+  future_runtime_validation_requires_fresh_identities: true
+  task_labels_or_scores_must_not_drive_v105_ranking: true
+  thresholds_must_not_be_weakened: true
+  calibration_requires_separate_authorization_after_a_positive_preflight: true

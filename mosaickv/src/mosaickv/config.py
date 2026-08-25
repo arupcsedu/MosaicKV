@@ -1107,6 +1107,12 @@ class SelectionConfig:
     stable_head_hierarchical_horizon: int = 0
     stable_head_hierarchical_maximum_kl: float = 0.0
     stable_head_hierarchical_maximum_logit_difference: float = 0.0
+    # V105 reserves a fixed part of the bounded probe ledger before route
+    # screening. Failed single-route swaps are ranked only by their isolated
+    # token/KL/logit diagnostics and combined into a width-two/three beam.
+    stable_head_hierarchical_reserved_reallocation_evaluations: int = 0
+    stable_head_hierarchical_reallocation_beam_width: int = 0
+    stable_head_hierarchical_reallocation_maximum_combination_width: int = 0
     routed_head_only_planning: bool = False
     # MosaicKV may deliberately materialize less than the shared comparison
     # budget when evaluating a quality-matched memory point. The shared hard
@@ -1660,6 +1666,48 @@ class SelectionConfig:
                 raise ConfigurationError(
                     "hierarchical logit-safe eviction requires a positive logit threshold"
                 )
+            reservation = self.stable_head_hierarchical_reserved_reallocation_evaluations
+            beam_width = self.stable_head_hierarchical_reallocation_beam_width
+            combination_width = (
+                self.stable_head_hierarchical_reallocation_maximum_combination_width
+            )
+            if reservation:
+                if not 2 <= beam_width <= 8:
+                    raise ConfigurationError(
+                        "hierarchical reallocation beam width must be between 2 and 8"
+                    )
+                if not 2 <= combination_width <= min(3, beam_width):
+                    raise ConfigurationError(
+                        "hierarchical reallocation combination width must be 2 or 3 and "
+                        "cannot exceed the beam width"
+                    )
+                if reservation < beam_width + 1:
+                    raise ConfigurationError(
+                        "hierarchical reallocation reservation must cover the beam and "
+                        "at least one combination"
+                    )
+                if (
+                    self.stable_head_hierarchical_partition_count
+                    + 1
+                    + reservation
+                    > self.stable_head_hierarchical_maximum_candidate_evaluations
+                ):
+                    raise ConfigurationError(
+                        "hierarchical evaluation budget must cover initial partitions, "
+                        "joint verification, and the reallocation reservation"
+                    )
+                if self.stable_head_hierarchical_maximum_rollback_rounds != 2:
+                    raise ConfigurationError(
+                        "hierarchical reallocation beam requires two post-joint rounds"
+                    )
+                if self.stable_head_hierarchical_maximum_sequential_rounds < 4:
+                    raise ConfigurationError(
+                        "hierarchical reallocation beam requires at least four rounds"
+                    )
+            elif beam_width != 0 or combination_width != 0:
+                raise ConfigurationError(
+                    "hierarchical reallocation beam controls require a positive reservation"
+                )
         elif (
             self.stable_head_hierarchical_partition_count != 0
             or self.stable_head_hierarchical_maximum_refinement_depth != 0
@@ -1669,6 +1717,9 @@ class SelectionConfig:
             or self.stable_head_hierarchical_horizon != 0
             or self.stable_head_hierarchical_maximum_kl != 0.0
             or self.stable_head_hierarchical_maximum_logit_difference != 0.0
+            or self.stable_head_hierarchical_reserved_reallocation_evaluations != 0
+            or self.stable_head_hierarchical_reallocation_beam_width != 0
+            or self.stable_head_hierarchical_reallocation_maximum_combination_width != 0
         ):
             raise ConfigurationError(
                 "hierarchical logit-safe eviction controls require the hierarchical gate"
@@ -1979,6 +2030,9 @@ class SelectionConfig:
             "stable_head_hierarchical_horizon",
             "stable_head_hierarchical_maximum_kl",
             "stable_head_hierarchical_maximum_logit_difference",
+            "stable_head_hierarchical_reserved_reallocation_evaluations",
+            "stable_head_hierarchical_reallocation_beam_width",
+            "stable_head_hierarchical_reallocation_maximum_combination_width",
             "routed_head_only_planning",
             "physical_capacity_fraction",
         }
@@ -2389,6 +2443,24 @@ class SelectionConfig:
                 data,
                 "stable_head_hierarchical_maximum_logit_difference",
                 0.0,
+                "selection",
+            ),
+            stable_head_hierarchical_reserved_reallocation_evaluations=_int(
+                data,
+                "stable_head_hierarchical_reserved_reallocation_evaluations",
+                0,
+                "selection",
+            ),
+            stable_head_hierarchical_reallocation_beam_width=_int(
+                data,
+                "stable_head_hierarchical_reallocation_beam_width",
+                0,
+                "selection",
+            ),
+            stable_head_hierarchical_reallocation_maximum_combination_width=_int(
+                data,
+                "stable_head_hierarchical_reallocation_maximum_combination_width",
+                0,
                 "selection",
             ),
             routed_head_only_planning=_bool(data, "routed_head_only_planning", False, "selection"),

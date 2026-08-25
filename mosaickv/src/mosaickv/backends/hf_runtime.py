@@ -5670,6 +5670,15 @@ def _run_hierarchical_logit_safe_eviction(
         probe_budget=tracker,
         probe=probe,
         fixed_route_capacity_reallocation=True,
+        reserved_reallocation_evaluations=(
+            selection_config.stable_head_hierarchical_reserved_reallocation_evaluations
+        ),
+        reallocation_beam_width=(
+            selection_config.stable_head_hierarchical_reallocation_beam_width
+        ),
+        reallocation_maximum_combination_width=(
+            selection_config.stable_head_hierarchical_reallocation_maximum_combination_width
+        ),
     )
     selected_levels = tuple(
         (choice.route, choice.level_index) for choice in decision.selection.choices
@@ -9366,6 +9375,15 @@ class HuggingFaceMosaicKVModel:
                             ),
                             "stable_head_hierarchical_maximum_logit_difference": (
                                 self.config.selection.stable_head_hierarchical_maximum_logit_difference
+                            ),
+                            "stable_head_hierarchical_reserved_reallocation_evaluations": (
+                                self.config.selection.stable_head_hierarchical_reserved_reallocation_evaluations
+                            ),
+                            "stable_head_hierarchical_reallocation_beam_width": (
+                                self.config.selection.stable_head_hierarchical_reallocation_beam_width
+                            ),
+                            "stable_head_hierarchical_reallocation_maximum_combination_width": (
+                                self.config.selection.stable_head_hierarchical_reallocation_maximum_combination_width
                             ),
                             "hierarchical_gpu_debug_authorized": (
                                 self._hierarchical_gpu_debug_authorized
