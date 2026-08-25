@@ -46,7 +46,7 @@ def test_v106_restore_donor_is_label_blind_exact_byte_and_route_feasible() -> No
     )
 
 
-def test_v106_uses_fresh_ids_but_keeps_every_execution_action_disabled() -> None:
+def test_v106_authorizes_only_fresh_preflight_materialization_and_execution() -> None:
     protocol = _protocol()
     identity = protocol["fresh_identity_plan"]
     downstream = protocol["downstream_actions"]
@@ -56,6 +56,12 @@ def test_v106_uses_fresh_ids_but_keeps_every_execution_action_disabled() -> None
     assert identity["selection_seed"] == 106_017
     assert identity["sample_count_per_task"] == 2
     assert len(identity["additionally_excluded_v105_preflight_ledgers"]) == 2
-    assert identity["ledger_materialization_authorized"] is False
-    assert identity["gpu_preflight_authorized"] is False
-    assert all(value is False for value in downstream.values())
+    assert identity["ledger_materialization_authorized"] is True
+    assert identity["gpu_preflight_authorized"] is True
+    assert downstream["preflight_materialization_authorized"] is True
+    assert downstream["preflight_execution_authorized"] is True
+    assert downstream["calibration_ledger_materialization_authorized"] is False
+    assert downstream["calibration_execution_authorized"] is False
+    assert downstream["candidate_freeze_authorized"] is False
+    assert downstream["heldout_materialization_authorized"] is False
+    assert downstream["heldout_execution_authorized"] is False

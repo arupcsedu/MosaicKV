@@ -24,7 +24,7 @@ def _materializer(package: Path) -> ModuleType:
         sys.path.remove(str(scripts))
 
 
-def test_v106_materializer_validates_draft_but_fails_closed_on_execution() -> None:
+def test_v106_materializer_accepts_narrow_preflight_authorization() -> None:
     package = Path(__file__).parents[2]
     materializer = _materializer(package)
     protocol = yaml.safe_load(
@@ -35,7 +35,21 @@ def test_v106_materializer_validates_draft_but_fails_closed_on_execution() -> No
     )
 
     materializer.validate_protocol(protocol)
-    with pytest.raises(PermissionError, match="not authorized"):
+    materializer.require_authorization(protocol)
+
+
+def test_v106_materializer_rejects_any_calibration_authorization() -> None:
+    package = Path(__file__).parents[2]
+    materializer = _materializer(package)
+    protocol = yaml.safe_load(
+        (
+            package
+            / "configs/experiments/choice_c_v106_logit_feedback_restore_donor_preflight.yaml"
+        ).read_text(encoding="utf-8")
+    )
+    protocol["downstream_actions"]["calibration_execution_authorized"] = True
+
+    with pytest.raises(materializer.SampleProtocolError, match="calibration or held-out"):
         materializer.require_authorization(protocol)
 
 

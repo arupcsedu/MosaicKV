@@ -323,7 +323,15 @@ def main() -> int:
     args = parser.parse_args()
     if args.validate_protocol_only:
         validate_protocol(_protocol())
-        print(json.dumps({"status": "draft_protocol_validated_execution_disabled"}))
+        print(
+            json.dumps(
+                {
+                    "status": "protocol_validated",
+                    "protocol_status": _protocol()["protocol_status"],
+                },
+                sort_keys=True,
+            )
+        )
         return 0
     git_sha = ledger_support._clean_git_sha()
     result = (
