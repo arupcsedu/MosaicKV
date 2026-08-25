@@ -427,8 +427,11 @@ def test_hf_hierarchical_loop_materializes_every_probe_through_isolation(
 
     assert decision.target_reached
     assert decision.final_joint_probe_passed
-    assert decision.evaluations_used == 3
-    assert materialized_bytes == [40, 40, 20]
+    # FullKV exceeds each route's one-position physical limit, so V107 removes
+    # it from the final-candidate ladder. The feasible target becomes the
+    # baseline and only the complete joint cache is isolated and probed.
+    assert decision.evaluations_used == 1
+    assert materialized_bytes == [20]
     assert selected_plan.construction.state.statistics.active_kv_bytes == 20
     assert_decode_state_unchanged(adapter, reference, checkpoint)
 

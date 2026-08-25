@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import prepare_choice_c_v104_preflight as ledger_support
-import yaml
+import yaml  # type: ignore[import-untyped]
 
 from mosaickv.evaluation.disjoint_samples import (
     SampleProtocolError,

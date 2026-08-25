@@ -29,6 +29,7 @@ from mosaickv.selection.hierarchical import (
     plan_joint_reallocation_candidates,
     plan_logit_feedback_restore_donor_candidates,
     proposal_route_capacity_violations,
+    restrict_route_capacity_ladders_to_position_limits,
     run_bounded_hierarchical_probe_loop,
     select_verified_capacity_levels,
     update_partition_screening,
@@ -221,6 +222,136 @@ def test_screening_route_capacity_check_ignores_unaffected_fullkv_routes() -> No
         {(0, 0): 8, (0, 1): 8},
         affected_routes_only=True,
     )
+
+
+@pytest.mark.parametrize("unresolved_route_count", [32, 128])
+def test_v107_unresolved_routes_use_largest_feasible_baseline(
+    unresolved_route_count: int,
+) -> None:
+    route_count = unresolved_route_count + 16
+    unrestricted = tuple(
+        _ladder(
+            (layer, 0),
+            layer * 10,
+            (30.0, 20.0, 10.0),
+            (0.0, 1.0, 2.0),
+        )
+        for layer in range(route_count)
+    )
+    position_counts = {
+        node_id: 4
+        for layer in range(route_count)
+        for node_id in range(layer * 10, layer * 10 + 3)
+    }
+    limits = {(layer, 0): 8 for layer in range(route_count)}
+
+    feasible = restrict_route_capacity_ladders_to_position_limits(
+        unrestricted,
+        position_counts,
+        limits,
+    )
+    unresolved = {(layer, 0) for layer in range(unresolved_route_count)}
+    verified = {
+        ladder.route: (0,) if ladder.route in unresolved else (0, 1)
+        for ladder in feasible
+    }
+    expected_bytes = unresolved_route_count * 20 + 16 * 10
+    selection = select_verified_capacity_levels(
+        feasible,
+        verified,
+        expected_bytes,
+        require_full_level=False,
+    )
+    proposal = HierarchicalCapacityProposal(
+        proposal_id=f"v107-{unresolved_route_count}-unresolved",
+        kind=HierarchicalProposalKind.JOINT,
+        level_indices=tuple(sorted(selection.level_index_by_route().items())),
+        affected_routes=tuple(sorted(selection.level_index_by_route())),
+    )
+
+    assert all(
+        ladder.full_level.kind is CapacityLevelKind.FEASIBLE_BASELINE
+        for ladder in feasible
+    )
+    assert all(ladder.full_level.active_bytes == 20 for ladder in feasible)
+    assert selection.active_bytes == expected_bytes
+    assert not proposal_route_capacity_violations(
+        proposal,
+        feasible,
+        position_counts,
+        limits,
+    )
+
+
+def test_v107_restore_donor_candidates_contain_only_position_feasible_levels() -> None:
+    unrestricted = (
+        _ladder((0, 0), 0, (30.0, 20.0, 10.0), (0.0, 2.0, 8.0)),
+        _ladder((0, 1), 10, (30.0, 20.0, 10.0), (0.0, 1.0, 2.0)),
+    )
+    counts = {node_id: 4 for node_id in (*range(3), *range(10, 13))}
+    limits = {(0, 0): 8, (0, 1): 8}
+    feasible = restrict_route_capacity_ladders_to_position_limits(
+        unrestricted,
+        counts,
+        limits,
+    )
+    current = select_verified_capacity_levels(
+        feasible,
+        {(0, 0): (1,), (0, 1): (0,)},
+        30,
+        require_full_level=False,
+    )
+    evaluations = (
+        HierarchicalProbeEvaluation(
+            HierarchicalCapacityProposal(
+                "screen-sensitive-feasible",
+                HierarchicalProposalKind.SCREENING,
+                (((0, 0), 1), ((0, 1), 0)),
+                ((0, 0),),
+            ),
+            LogitProbeResult(True, 0.019, 0.95, 2),
+            True,
+        ),
+        HierarchicalProbeEvaluation(
+            HierarchicalCapacityProposal(
+                "screen-donor-feasible",
+                HierarchicalProposalKind.SCREENING,
+                (((0, 0), 0), ((0, 1), 1)),
+                ((0, 1),),
+            ),
+            LogitProbeResult(True, 0.001, 0.1, 2),
+            True,
+        ),
+    )
+
+    candidates = plan_logit_feedback_restore_donor_candidates(
+        current,
+        feasible,
+        evaluations,
+        maximum_candidates=4,
+        maximum_forward_kl=0.02,
+        maximum_absolute_logit_difference=1.0,
+        required_steps=2,
+    )
+
+    assert candidates
+    for candidate_index, candidate in enumerate(candidates):
+        proposal = HierarchicalCapacityProposal(
+            proposal_id=f"v107-restore-donor-{candidate_index}",
+            kind=HierarchicalProposalKind.REALLOCATION,
+            level_indices=tuple(
+                sorted(candidate.selection.level_index_by_route().items())
+            ),
+            affected_routes=tuple(
+                sorted((*candidate.rolled_back_routes, *candidate.donor_routes))
+            ),
+        )
+        assert not proposal_route_capacity_violations(
+            proposal,
+            feasible,
+            counts,
+            limits,
+        )
 
 
 def test_logit_feedback_restores_sensitive_route_with_equal_byte_donor() -> None:

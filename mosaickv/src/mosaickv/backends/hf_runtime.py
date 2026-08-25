@@ -116,9 +116,11 @@ from mosaickv.selection import (
     compute_block_utilities,
     lazy_greedy_select,
     proposal_route_capacity_violations,
+    restrict_route_capacity_ladders_to_position_limits,
     run_bounded_hierarchical_probe_loop,
     select_all_exact,
     select_exact_subset,
+    select_verified_capacity_levels,
 )
 from mosaickv.types import (
     AblationVariant,
@@ -5684,7 +5686,23 @@ def _run_hierarchical_logit_safe_eviction(
         raise HuggingFaceRuntimeError("hierarchical logit-safe eviction supports mosaickv_exact")
     selection_config = config.selection
     effective_position_limits = _hierarchical_effective_position_limits(plan, position_limits)
-    ladders = _hierarchical_route_ladders(plan, config, effective_position_limits)
+    unrestricted_ladders = _hierarchical_route_ladders(
+        plan, config, effective_position_limits
+    )
+    position_count_by_node = {
+        node_id: block.position_count
+        for node_id, block in enumerate(plan.full_state.blocks)
+    }
+    ladders = restrict_route_capacity_ladders_to_position_limits(
+        unrestricted_ladders,
+        position_count_by_node,
+        effective_position_limits,
+    )
+    fullkv_fallback_selection = select_verified_capacity_levels(
+        unrestricted_ladders,
+        {ladder.route: (0,) for ladder in unrestricted_ladders},
+        plan.active_budget_value,
+    )
     teacher_inputs, reference_logits = _hierarchical_reference_rollout(
         adapter,
         prefill,
@@ -5710,10 +5728,7 @@ def _run_hierarchical_logit_safe_eviction(
         violations = proposal_route_capacity_violations(
             proposal,
             ladders,
-            {
-                node_id: block.position_count
-                for node_id, block in enumerate(plan.full_state.blocks)
-            },
+            position_count_by_node,
             effective_position_limits,
             affected_routes_only=(proposal.kind is HierarchicalProposalKind.SCREENING),
         )
@@ -5784,10 +5799,7 @@ def _run_hierarchical_logit_safe_eviction(
         return not proposal_route_capacity_violations(
             proposal,
             ladders,
-            {
-                node_id: block.position_count
-                for node_id, block in enumerate(plan.full_state.blocks)
-            },
+            position_count_by_node,
             effective_position_limits,
         )
 
@@ -5820,15 +5832,19 @@ def _run_hierarchical_logit_safe_eviction(
             selection_config.stable_head_hierarchical_logit_feedback_restore_donor
         ),
         selection_feasible=selection_is_route_feasible,
+        fullkv_fallback_selection=fullkv_fallback_selection,
     )
     selected_levels = tuple(
         (choice.route, choice.level_index) for choice in decision.selection.choices
     )
     selected_artifact = artifacts.get(selected_levels)
     if selected_artifact is None:
+        artifact_ladders = (
+            unrestricted_ladders if decision.used_fullkv_fallback else ladders
+        )
         retained_ids = frozenset(
             node_id
-            for ladder in ladders
+            for ladder in artifact_ladders
             for node_id in ladder.level(
                 decision.selection.level_index_by_route()[ladder.route]
             ).selected_node_ids

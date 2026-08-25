@@ -12,7 +12,7 @@ from __future__ import annotations
 import math
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from itertools import combinations, islice
 
@@ -31,6 +31,7 @@ class CapacityLevelKind(StrEnum):
     """Semantic position of one nested route-capacity choice."""
 
     FULL = "full"
+    FEASIBLE_BASELINE = "feasible_baseline"
     COARSE_MIDPOINT = "coarse_midpoint"
     TARGET_ADJACENT = "target_adjacent"
     REALLOCATION_ALTERNATIVE = "reallocation_alternative"
@@ -121,8 +122,13 @@ class RouteCapacityLadder:
             raise HierarchicalSelectionError("a route ladder requires at least one level")
         if self.target_active_bytes < 1:
             raise HierarchicalSelectionError("route target bytes must be positive")
-        if self.levels[0].kind is not CapacityLevelKind.FULL:
-            raise HierarchicalSelectionError("the first route level must be FullKV")
+        if self.levels[0].kind not in {
+            CapacityLevelKind.FULL,
+            CapacityLevelKind.FEASIBLE_BASELINE,
+        }:
+            raise HierarchicalSelectionError(
+                "the first route level must be FullKV or a feasible baseline"
+            )
         if tuple(level.level_index for level in self.levels) != tuple(range(len(self.levels))):
             raise HierarchicalSelectionError("route level indices must be contiguous")
         if any(level.route != self.route for level in self.levels):
@@ -653,6 +659,95 @@ def proposal_route_capacity_violations(
         if selected_positions > limit:
             violations.append(RouteCapacityViolation(route, selected_positions, limit))
     return tuple(violations)
+
+
+def restrict_route_capacity_ladders_to_position_limits(
+    ladders: Sequence[RouteCapacityLadder],
+    position_count_by_node: Mapping[int, int],
+    position_limits: Mapping[RouteId, int],
+) -> tuple[RouteCapacityLadder, ...]:
+    """Build final-candidate ladders containing only representable levels.
+
+    FullKV remains the reference state outside this returned view.  For every
+    route, the first returned level is the largest existing level whose exact
+    selected positions fit the route's physical cache extent.  All safer or
+    reallocation levels that exceed that extent are removed before knapsack
+    assembly or restore/donor proposal generation.
+    """
+
+    ordered = tuple(sorted(ladders, key=lambda item: item.route))
+    by_route = {ladder.route: ladder for ladder in ordered}
+    if not ordered or len(by_route) != len(ordered):
+        raise HierarchicalSelectionError("position filtering requires unique route ladders")
+    if set(position_limits) != set(by_route):
+        raise HierarchicalSelectionError(
+            "position limits must exactly cover the route ladders"
+        )
+    result: list[RouteCapacityLadder] = []
+    for ladder in ordered:
+        limit = int(position_limits[ladder.route])
+        if limit < 1:
+            raise HierarchicalSelectionError("route position limits must be positive")
+
+        def fits(level: RouteCapacityLevel, position_limit: int = limit) -> bool:
+            try:
+                counts = tuple(
+                    int(position_count_by_node[node_id])
+                    for node_id in level.selected_node_ids
+                )
+            except KeyError as error:
+                raise HierarchicalSelectionError(
+                    f"missing position count for selected node {error.args[0]}"
+                ) from error
+            if any(count < 1 for count in counts):
+                raise HierarchicalSelectionError(
+                    "selected node position counts must be positive"
+                )
+            return sum(counts) <= position_limit
+
+        feasible_ordinary = tuple(
+            level
+            for level in ladder.levels
+            if level.kind is not CapacityLevelKind.REALLOCATION_ALTERNATIVE
+            and fits(level)
+        )
+        if not feasible_ordinary:
+            raise HierarchicalSelectionError(
+                f"route {ladder.route} has no physically feasible protected level"
+            )
+        baseline = feasible_ordinary[0]
+        kept: list[RouteCapacityLevel] = list(feasible_ordinary)
+        if any(level.active_bytes <= ladder.target_active_bytes for level in feasible_ordinary):
+            kept.extend(
+                level
+                for level in ladder.reallocation_levels
+                if fits(level)
+            )
+        rebuilt: list[RouteCapacityLevel] = []
+        for index, level in enumerate(kept):
+            kind = level.kind
+            if index == 0 and kind is not CapacityLevelKind.FULL:
+                kind = CapacityLevelKind.FEASIBLE_BASELINE
+            rebuilt.append(replace(level, level_index=index, kind=kind))
+        target_reached = any(
+            level.kind is not CapacityLevelKind.REALLOCATION_ALTERNATIVE
+            and level.active_bytes <= ladder.target_active_bytes
+            for level in rebuilt
+        )
+        result.append(
+            RouteCapacityLadder(
+                route=ladder.route,
+                levels=tuple(rebuilt),
+                protected_node_ids=ladder.protected_node_ids,
+                target_active_bytes=ladder.target_active_bytes,
+                target_reached=target_reached,
+            )
+        )
+        if result[-1].full_level.active_bytes != baseline.active_bytes:
+            raise HierarchicalSelectionError(
+                "position filtering did not preserve the largest feasible baseline"
+            )
+    return tuple(result)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1403,11 +1498,13 @@ def run_bounded_hierarchical_probe_loop(
     reallocation_maximum_combination_width: int = 0,
     logit_feedback_restore_donor: bool = False,
     selection_feasible: Callable[[KnapsackSelection], bool] | None = None,
+    fullkv_fallback_selection: KnapsackSelection | None = None,
 ) -> BoundedHierarchicalProbeDecision:
     """Screen, assemble, jointly verify, and fail closed within hard budgets.
 
     Screening probes each route partition at its most aggressive ladder level
-    while every other route remains FullKV. Refinement is truncated before it
+    while every other route remains at its largest physically feasible
+    baseline. Refinement is truncated before it
     can consume the one evaluation and one round reserved for joint checking.
     Only explicitly passing levels enter the knapsack or rollback donor pool.
     """
@@ -1462,6 +1559,14 @@ def run_bounded_hierarchical_probe_loop(
     if not ordered or len({ladder.route for ladder in ordered}) != len(ordered):
         raise HierarchicalSelectionError("hierarchical probing requires unique route ladders")
     by_route = {ladder.route: ladder for ladder in ordered}
+    if fullkv_fallback_selection is not None and (
+        set(fullkv_fallback_selection.level_index_by_route()) != set(by_route)
+        or fullkv_fallback_selection.target_active_bytes != target_active_bytes
+        or fullkv_fallback_selection.target_reached
+    ):
+        raise HierarchicalSelectionError(
+            "the external FullKV fallback selection is inconsistent"
+        )
     verified: dict[RouteId, set[int]] = {ladder.route: {0} for ladder in ordered}
     accepted_routes: set[RouteId] = set()
     unresolved_routes: set[RouteId] = set()
@@ -1530,6 +1635,7 @@ def run_bounded_hierarchical_probe_loop(
         ordered,
         verified,
         target_active_bytes,
+        require_full_level=False,
     )
     joint_proposal = _proposal(
         "joint-0",
@@ -1831,10 +1937,14 @@ def run_bounded_hierarchical_probe_loop(
 
     used_fullkv_fallback = not selected_passed
     if used_fullkv_fallback:
-        selected = select_verified_capacity_levels(
-            ordered,
-            {ladder.route: (0,) for ladder in ordered},
-            target_active_bytes,
+        selected = (
+            fullkv_fallback_selection
+            if fullkv_fallback_selection is not None
+            else select_verified_capacity_levels(
+                ordered,
+                {ladder.route: (0,) for ladder in ordered},
+                target_active_bytes,
+            )
         )
     return BoundedHierarchicalProbeDecision(
         selection=selected,
@@ -1886,6 +1996,7 @@ __all__ = [
     "plan_joint_reallocation_candidates",
     "plan_logit_feedback_restore_donor_candidates",
     "proposal_route_capacity_violations",
+    "restrict_route_capacity_ladders_to_position_limits",
     "run_bounded_hierarchical_probe_loop",
     "select_verified_capacity_levels",
     "split_route_partition",
