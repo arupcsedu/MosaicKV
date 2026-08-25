@@ -33,7 +33,7 @@ V104_SPEC = Path(
 )
 V104_SPEC_SHA256 = "a9b9c500514482577436e1499c246aae9bce71ce9c6e3b5d524c40d2afe47a4b"
 OUTPUT_ROOT = Path(
-    "/scratch/djy8hg/runs/mosaickv/choice-c-v105-reserved-beam-preflight-v1"
+    "/scratch/djy8hg/runs/mosaickv/choice-c-v105-reserved-beam-preflight-v2"
 )
 INPUT_NAMES = support.INPUT_NAMES
 
@@ -51,9 +51,19 @@ def require_authorization(protocol: dict[str, Any]) -> None:
     if protocol.get("experiment_id") != EXPERIMENT_ID:
         raise SampleProtocolError("wrong V105 protocol")
     if protocol.get("protocol_status") != (
-        "fresh_preflight_materialization_and_gpu_execution_authorized_after_clean_commit"
+        "corrective_retry_materialization_and_gpu_execution_authorized_after_clean_commit"
     ):
         raise PermissionError("V105 materialization is not authorized")
+    retry = cast("dict[str, Any]", protocol.get("corrective_retry"))
+    if (
+        not isinstance(retry, dict)
+        or retry.get("retry_id") != 1
+        or Path(str(retry.get("output_root"))) != OUTPUT_ROOT
+        or retry.get("predecessor_gpu_execution_started") is not False
+        or retry.get("selected_identities_remain_unexecuted_and_label_blind") is not True
+        or retry.get("candidate_algorithm_or_threshold_changed") is not False
+    ):
+        raise SampleProtocolError("V105 corrective-retry provenance is incomplete")
     source = cast("dict[str, Any]", protocol["candidate_source"])
     if (
         source.get("implementation_git_sha_resolution")

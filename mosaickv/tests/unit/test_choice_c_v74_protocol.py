@@ -304,6 +304,32 @@ def test_v102_candidate_builds_bounded_hierarchical_logit_safe_eviction() -> Non
     assert not revised.selection.stable_head_short_horizon_logit_stability
 
 
+def test_v105_candidate_applies_reserved_reallocation_beam_controls() -> None:
+    root = Path(__file__).parents[2]
+    base = load_config(root / "configs/experiments/choice_c_v72_frozen_candidate.yaml")
+    spec = yaml.safe_load(
+        (
+            root / "configs/experiments/choice_c_v102_v100_fresh_cross_dataset_calibration.yaml"
+        ).read_text(encoding="utf-8")
+    )
+    candidate = spec["candidates"][0]
+    candidate["id"] = "v105_reserved_label_blind_reallocation_beam"
+    candidate["overrides"].update(
+        {
+            "stable_head_hierarchical_reserved_reallocation_evaluations": 12,
+            "stable_head_hierarchical_reallocation_beam_width": 3,
+            "stable_head_hierarchical_reallocation_maximum_combination_width": 3,
+        }
+    )
+
+    revised = PROTOCOL.apply_candidate(base, candidate)
+
+    assert revised.selection.stable_head_hierarchical_maximum_candidate_evaluations == 24
+    assert revised.selection.stable_head_hierarchical_reserved_reallocation_evaluations == 12
+    assert revised.selection.stable_head_hierarchical_reallocation_beam_width == 3
+    assert revised.selection.stable_head_hierarchical_reallocation_maximum_combination_width == 3
+
+
 def test_versioned_candidate_rejects_string_adaptive_swap_flag() -> None:
     root = Path(__file__).parents[2]
     base = load_config(root / "configs/experiments/choice_c_v72_frozen_candidate.yaml")

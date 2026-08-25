@@ -9,7 +9,7 @@
 #SBATCH --reservation=bi_fox_dgx
 #SBATCH --gres=gpu:a100:1
 #SBATCH --array=0-1%2
-#SBATCH --output=/scratch/djy8hg/runs/mosaickv/slurm/v105-preflight-%A_%a.log
+#SBATCH --output=/scratch/djy8hg/runs/mosaickv/slurm/v105-preflight-v2-%A_%a.log
 #SBATCH --export=ALL
 
 set -euo pipefail
@@ -17,8 +17,8 @@ set -euo pipefail
 PROJECT_ROOT=/scratch/djy8hg/workdir/MosaicKV
 PACKAGE_ROOT=${PROJECT_ROOT}/mosaickv
 PYTHON=/scratch/djy8hg/env/mosaickv/bin/python
-SPEC=/scratch/djy8hg/runs/mosaickv/choice-c-v105-reserved-beam-preflight-v1/inputs/gpu_preflight_worker_spec.json
-OUTPUT_ROOT=/scratch/djy8hg/runs/mosaickv/choice-c-v105-reserved-beam-preflight-v1/preflight
+SPEC=/scratch/djy8hg/runs/mosaickv/choice-c-v105-reserved-beam-preflight-v2/inputs/gpu_preflight_worker_spec.json
+OUTPUT_ROOT=/scratch/djy8hg/runs/mosaickv/choice-c-v105-reserved-beam-preflight-v2/preflight
 : "${MOSAICKV_V105_EXPECTED_GIT_SHA:?expected immutable V105 source SHA is required}"
 : "${MOSAICKV_V105_EXPECTED_SPEC_SHA:?expected immutable V105 worker-spec SHA is required}"
 

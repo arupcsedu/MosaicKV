@@ -77,3 +77,15 @@ def test_v105_resolves_candidate_sha_from_the_clean_authorized_commit() -> None:
     assert source["implementation_git_sha_recorded_in_materialized_worker_spec"] is True
     assert source["source_worktree_must_be_clean"] is True
     assert source["runtime_behavior_changes_after_implementation_commit_allowed"] is False
+
+
+def test_v105_corrective_retry_preserves_candidate_and_unexecuted_identities() -> None:
+    protocol = _protocol()
+    retry = protocol["corrective_retry"]
+    assert isinstance(retry, dict)
+
+    assert retry["retry_id"] == 1
+    assert retry["output_root"].endswith("choice-c-v105-reserved-beam-preflight-v2")
+    assert retry["predecessor_gpu_execution_started"] is False
+    assert retry["selected_identities_remain_unexecuted_and_label_blind"] is True
+    assert retry["candidate_algorithm_or_threshold_changed"] is False

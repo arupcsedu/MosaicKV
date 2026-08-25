@@ -1,7 +1,19 @@
 schema_version: 1
 experiment_id: choice_c_v105_reserved_beam_preflight
 classification: preregistered_fresh_runtime_correctness_preflight_not_calibration
-protocol_status: fresh_preflight_materialization_and_gpu_execution_authorized_after_clean_commit
+protocol_status: corrective_retry_materialization_and_gpu_execution_authorized_after_clean_commit
+
+corrective_retry:
+  retry_id: 1
+  output_root: /scratch/djy8hg/runs/mosaickv/choice-c-v105-reserved-beam-preflight-v2
+  predecessor_output_root: /scratch/djy8hg/runs/mosaickv/choice-c-v105-reserved-beam-preflight-v1
+  predecessor_gpu_execution_started: false
+  predecessor_validation_result: rejected_unknown_candidate_overrides_before_submission
+  selected_identities_remain_unexecuted_and_label_blind: true
+  correction_scope:
+    - register_reserved_reallocation_overrides_in_shared_protocol_runner
+    - propagate_reserved_reallocation_overrides_into_selection_configuration
+  candidate_algorithm_or_threshold_changed: false
 
 scientific_boundary:
   predecessor: choice_c_v104_joint_reallocation_preflight
@@ -102,7 +114,7 @@ fresh_identity_plan:
       split: train
       id_only_catalog: /scratch/djy8hg/runs/mosaickv/choice-c-v102-v100-fresh-cross-dataset-calibration-v1/inputs/catalog_textvqa_train_id_projected_v2.json
       id_only_catalog_sha256: 5a6f700a623da65ae62bf4abc7317dcea48f0a9388f4047d3de8cfd643aece8d
-      planned_ledger: /scratch/djy8hg/runs/mosaickv/choice-c-v105-reserved-beam-preflight-v1/inputs/preflight_textvqa_train.json
+      planned_ledger: /scratch/djy8hg/runs/mosaickv/choice-c-v105-reserved-beam-preflight-v2/inputs/preflight_textvqa_train.json
     - task: infovqa
       dataset_id: lmms-lab-encoder/DocVQA
       dataset_config: InfographicVQA
@@ -110,7 +122,7 @@ fresh_identity_plan:
       split: validation
       id_only_catalog: /scratch/djy8hg/runs/mosaickv/choice-c-v102-v100-fresh-cross-dataset-calibration-v1/inputs/catalog_infovqa_validation_id_projected_v2.json
       id_only_catalog_sha256: 38907d03d42a6c52d898b3a543ad2cd737b85569c465ad301ca148aa72e4308c
-      planned_ledger: /scratch/djy8hg/runs/mosaickv/choice-c-v105-reserved-beam-preflight-v1/inputs/preflight_infovqa.json
+      planned_ledger: /scratch/djy8hg/runs/mosaickv/choice-c-v105-reserved-beam-preflight-v2/inputs/preflight_infovqa.json
 
 preflight_gate:
   submission_authorized_after_clean_immutable_commit: true

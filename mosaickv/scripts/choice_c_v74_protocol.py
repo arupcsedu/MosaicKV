@@ -87,6 +87,9 @@ OPTIONAL_OVERRIDE_KEYS = frozenset(
         "stable_head_hierarchical_maximum_candidate_evaluations",
         "stable_head_hierarchical_maximum_sequential_rounds",
         "stable_head_hierarchical_maximum_rollback_rounds",
+        "stable_head_hierarchical_reserved_reallocation_evaluations",
+        "stable_head_hierarchical_reallocation_beam_width",
+        "stable_head_hierarchical_reallocation_maximum_combination_width",
         "stable_head_hierarchical_horizon",
         "stable_head_hierarchical_maximum_kl",
         "stable_head_hierarchical_maximum_logit_difference",
@@ -660,6 +663,24 @@ def apply_candidate(base_mosaic: Any, candidate: dict[str, Any]) -> Any:
                 overrides.get(
                     "stable_head_hierarchical_maximum_rollback_rounds",
                     base_mosaic.selection.stable_head_hierarchical_maximum_rollback_rounds,
+                )
+            ),
+            stable_head_hierarchical_reserved_reallocation_evaluations=int(
+                overrides.get(
+                    "stable_head_hierarchical_reserved_reallocation_evaluations",
+                    base_mosaic.selection.stable_head_hierarchical_reserved_reallocation_evaluations,
+                )
+            ),
+            stable_head_hierarchical_reallocation_beam_width=int(
+                overrides.get(
+                    "stable_head_hierarchical_reallocation_beam_width",
+                    base_mosaic.selection.stable_head_hierarchical_reallocation_beam_width,
+                )
+            ),
+            stable_head_hierarchical_reallocation_maximum_combination_width=int(
+                overrides.get(
+                    "stable_head_hierarchical_reallocation_maximum_combination_width",
+                    base_mosaic.selection.stable_head_hierarchical_reallocation_maximum_combination_width,
                 )
             ),
             stable_head_hierarchical_horizon=int(
