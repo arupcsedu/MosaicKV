@@ -255,6 +255,59 @@ def _route_capacity_failure_trace_payload(
     }
 
 
+def _hierarchical_accounting_failure_trace_payload(
+    decision_record: JsonObject,
+    accounting: ExactCacheStorageAccounting,
+    *,
+    hard_active_kv_budget_bytes: int,
+    elapsed_seconds: float,
+) -> JsonObject:
+    """Emit the complete preflight trace for a byte-boundary disagreement."""
+
+    if accounting.logical_boundaries_aligned:
+        raise ValueError("accounting failure trace requires a logical byte mismatch")
+    accounting_record = cast("JsonObject", asdict(accounting))
+    accounting_record["constructed_physical_bytes"] = accounting.constructed_physical_bytes
+    accounting_record["logical_boundaries_aligned"] = False
+    attempted_active_bytes = accounting.constructed_active_bytes
+    return {
+        "status": "failed",
+        "failure_classification": "hierarchical_exact_storage_accounting_mismatch",
+        "effective_method": "mosaickv_exact_storage_accounting_rejected_before_final_decode",
+        "used_fullkv_fallback": bool(decision_record.get("used_fullkv_fallback", False)),
+        "hard_budget_enforced": True,
+        "over_budget_cache_packed": False,
+        "over_budget_cache_decoded": False,
+        "over_budget_cache_scope": "exact_construction_storage_boundary",
+        "attempted_active_kv_bytes": attempted_active_bytes,
+        "attempted_total_kv_bytes": attempted_active_bytes,
+        "attempted_residual_kv_bytes": 0,
+        "hard_active_kv_budget_bytes": hard_active_kv_budget_bytes,
+        "target_reached": False,
+        "probe_decisions": decision_record.get("evaluations", []),
+        "knapsack_bytes": accounting.knapsack_bytes,
+        "unique_selected_source_bytes": accounting.unique_selected_source_bytes,
+        "planner_tier_bytes": accounting.planner_tier_bytes,
+        "external_exact_bytes": accounting.external_exact_bytes,
+        "constructed_active_bytes": accounting.constructed_active_bytes,
+        "physical_padding_bytes": accounting.physical_padding_bytes,
+        "hierarchical_logit_safe_eviction": {
+            "status": "failed_closed_storage_accounting_mismatch",
+            **decision_record,
+        },
+        "timing_breakdown": {
+            "hierarchical_eviction_before_failure": elapsed_seconds,
+            "cache_packing": 0.0,
+            "decode": 0.0,
+        },
+        "byte_budget_materialization": {
+            "status": "rejected_before_final_decode",
+            **accounting_record,
+            "hard_active_kv_budget_bytes": hard_active_kv_budget_bytes,
+        },
+    }
+
+
 @dataclass(frozen=True, slots=True)
 class RuntimePhaseTimings:
     """Single-run phase timings in seconds."""
@@ -441,6 +494,7 @@ class MosaicKVCompressionPlan:
     planner_mapping_seconds: float
     graph_head_routes: tuple[tuple[int, int], ...]
     graph_routing_provenance: str
+    hierarchical_storage_accounting: ExactCacheStorageAccounting | None = None
 
     @property
     def uses_compact_node_ids(self) -> bool:
@@ -492,6 +546,65 @@ class DensePhysicalCacheBudget:
         if block_size < 1:
             raise ValueError("block_size must be positive")
         return max(0, self.target_bytes - (block_size - 1) * self.bytes_per_position)
+
+
+@dataclass(frozen=True, slots=True)
+class ExactCacheStorageAccounting:
+    """One exact-cache selection measured at every relevant byte boundary.
+
+    ``knapsack_bytes`` is the controller's predicted cost.  The next three
+    fields count unique source descriptors split across the compact planner
+    and external-exact namespaces.  ``constructed_active_bytes`` is the
+    logical K/V payload actually gathered by :class:`ExactTier`, and
+    ``physical_padding_bytes`` is the additional storage required by the
+    dense Hugging Face cache layout.
+    """
+
+    knapsack_bytes: int
+    unique_selected_source_bytes: int
+    planner_tier_bytes: int
+    external_exact_bytes: int
+    constructed_active_bytes: int
+    physical_padding_bytes: int
+    selected_source_block_count: int
+    planner_source_block_count: int
+    external_source_block_count: int
+
+    def __post_init__(self) -> None:
+        values = asdict(self)
+        if any(int(value) < 0 for value in values.values()):
+            raise ValueError("exact-cache storage accounting cannot be negative")
+        if self.selected_source_block_count < 1:
+            raise ValueError("exact-cache storage accounting requires selected source blocks")
+        if self.unique_selected_source_bytes != (
+            self.planner_tier_bytes + self.external_exact_bytes
+        ):
+            raise ValueError("planner and external bytes do not partition unique source bytes")
+        if self.selected_source_block_count != (
+            self.planner_source_block_count + self.external_source_block_count
+        ):
+            raise ValueError("planner and external blocks do not partition selected blocks")
+
+    @property
+    def constructed_physical_bytes(self) -> int:
+        return self.constructed_active_bytes + self.physical_padding_bytes
+
+    @property
+    def logical_boundaries_aligned(self) -> bool:
+        return (
+            self.knapsack_bytes
+            == self.unique_selected_source_bytes
+            == self.constructed_active_bytes
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class _HierarchicalExactArtifact:
+    construction: ThreeTierCacheConstruction
+    selection: SelectionResult
+    external_source_node_ids: tuple[int, ...]
+    retained_source_node_ids: tuple[int, ...]
+    packed_physical_bytes: int
 
 
 def _dense_physical_cache_budget(
@@ -5358,6 +5471,67 @@ def _progressive_exact_construction(
     return construction, selection, external_ids
 
 
+def _exact_cache_storage_accounting(
+    plan: MosaicKVCompressionPlan,
+    retained_source_node_ids: Iterable[int],
+    construction: ThreeTierCacheConstruction,
+    external_source_node_ids: Iterable[int],
+    *,
+    knapsack_bytes: int,
+    packed_physical_bytes: int,
+) -> ExactCacheStorageAccounting:
+    """Reconcile controller costs with exact construction and dense packing.
+
+    The exact tier's storage boundary is the unique set of FullKV source
+    descriptors.  Planner-local IDs are intentionally not counted here: they
+    are translated back to immutable FullKV source IDs before accounting.
+    This also prevents compact-planner and external-exact blocks from being
+    double counted.
+    """
+
+    raw_retained = tuple(int(node_id) for node_id in retained_source_node_ids)
+    retained = tuple(sorted(set(raw_retained)))
+    external = frozenset(int(node_id) for node_id in external_source_node_ids)
+    if len(retained) != len(raw_retained):
+        raise HuggingFaceRuntimeError(
+            "hierarchical retained source IDs must be unique at the storage boundary"
+        )
+    if any(node_id < 0 or node_id >= len(plan.full_state.blocks) for node_id in retained):
+        raise HuggingFaceRuntimeError(
+            "hierarchical accounting references a source block outside FullKV"
+        )
+    retained_set = frozenset(retained)
+    if not external <= retained_set:
+        raise HuggingFaceRuntimeError(
+            "external-exact accounting contains a block outside the retained source set"
+        )
+    planner = retained_set - external
+    constructed_ids = tuple(sorted(construction.exact_node_ids))
+    if constructed_ids != retained:
+        raise HuggingFaceRuntimeError(
+            "exact construction membership differs from the hierarchical retained source set"
+        )
+    unique_source_bytes = sum(plan.full_state.blocks[node_id].byte_size for node_id in retained)
+    planner_bytes = sum(plan.full_state.blocks[node_id].byte_size for node_id in planner)
+    external_bytes = sum(plan.full_state.blocks[node_id].byte_size for node_id in external)
+    constructed_active_bytes = construction.state.statistics.active_kv_bytes
+    if packed_physical_bytes < constructed_active_bytes:
+        raise HuggingFaceRuntimeError(
+            "packed physical storage is smaller than its exact logical payload"
+        )
+    return ExactCacheStorageAccounting(
+        knapsack_bytes=knapsack_bytes,
+        unique_selected_source_bytes=unique_source_bytes,
+        planner_tier_bytes=planner_bytes,
+        external_exact_bytes=external_bytes,
+        constructed_active_bytes=constructed_active_bytes,
+        physical_padding_bytes=packed_physical_bytes - constructed_active_bytes,
+        selected_source_block_count=len(retained),
+        planner_source_block_count=len(planner),
+        external_source_block_count=len(external),
+    )
+
+
 def _progressive_eviction_risks(plan: MosaicKVCompressionPlan) -> tuple[float, ...]:
     """Map compact planner utilities back to immutable FullKV source IDs once."""
 
@@ -5587,6 +5761,16 @@ def _hierarchical_route_ladders(
     """Build V100 route ladders from FullKV and label-blind online signals."""
 
     full_state = plan.full_state
+    # KVBlockDescriptor.byte_size is the exact-tier logical storage boundary:
+    # FullKVState validates its sum against tensor numel*dtype bytes, and
+    # ExactTier validates each gathered payload against the same descriptor.
+    # Build every knapsack cost from this immutable source table so compact
+    # planner IDs and external-exact IDs cannot introduce a second boundary.
+    source_storage_costs = tuple(block.byte_size for block in full_state.blocks)
+    if sum(source_storage_costs) != full_state.active_bytes:
+        raise HuggingFaceRuntimeError(
+            "hierarchical source costs do not match FullKV exact storage"
+        )
     risks = _progressive_eviction_risks(plan)
     reservation = _progressive_group_reservation(plan, config, position_limits, risks)
     group_by_node: dict[int, str] = {}
@@ -5609,7 +5793,7 @@ def _hierarchical_route_ladders(
                 node_id=node_id,
                 layer=block.layer,
                 kv_head=block.kv_head,
-                byte_size=block.byte_size,
+                byte_size=source_storage_costs[node_id],
                 evidence_utility=risk,
                 eviction_risk=risk,
                 mandatory=block.mandatory or node_id in fixed_ids,
@@ -5623,18 +5807,18 @@ def _hierarchical_route_ladders(
     target_bytes_by_route: dict[tuple[int, int], int] = {}
     for route, node_ids in sorted(route_blocks.items()):
         bytes_per_position = {
-            full_state.blocks[node_id].byte_size // full_state.blocks[node_id].position_count
+            source_storage_costs[node_id] // full_state.blocks[node_id].position_count
             for node_id in node_ids
         }
         if len(bytes_per_position) != 1 or any(
-            full_state.blocks[node_id].byte_size % full_state.blocks[node_id].position_count
+            source_storage_costs[node_id] % full_state.blocks[node_id].position_count
             for node_id in node_ids
         ):
             raise HuggingFaceRuntimeError(
                 "hierarchical route blocks do not have a uniform integral byte cost"
             )
         unit = next(iter(bytes_per_position))
-        full_bytes = sum(full_state.blocks[node_id].byte_size for node_id in node_ids)
+        full_bytes = sum(source_storage_costs[node_id] for node_id in node_ids)
         target_bytes_by_route[route] = min(
             full_bytes,
             max(1, int(position_limits[route]) * unit),
@@ -5682,6 +5866,7 @@ def _run_hierarchical_logit_safe_eviction(
 ) -> tuple[MosaicKVCompressionPlan, BoundedHierarchicalProbeDecision]:
     """Run V100's bounded hierarchy using only disposable isolated states."""
 
+    hierarchical_started = time.perf_counter()
     if plan.method is not MosaicKVMethod.MOSAICKV_EXACT:
         raise HuggingFaceRuntimeError("hierarchical logit-safe eviction supports mosaickv_exact")
     selection_config = config.selection
@@ -5718,9 +5903,13 @@ def _run_hierarchical_logit_safe_eviction(
             total_storage_budget_bytes=full_logical_bytes,
         ),
     )
+    # This cache contains only position-feasible ladder artifacts. FullKV
+    # fallback uses the unrestricted ladder, whose level-zero signatures can
+    # collide after feasible ladders are reindexed. It must therefore never
+    # read this namespace.
     artifacts: dict[
         tuple[tuple[tuple[int, int], int], ...],
-        tuple[ThreeTierCacheConstruction, SelectionResult, tuple[int, ...]],
+        _HierarchicalExactArtifact,
     ] = {}
 
     def probe(proposal: HierarchicalCapacityProposal) -> LogitProbeResult:
@@ -5774,7 +5963,13 @@ def _run_hierarchical_logit_safe_eviction(
             physical_prompt_capacity=maximum_positions,
             packing_mode=config.cache.packing_mode,
         )
-        artifacts[proposal.level_indices] = (construction, selection, external)
+        artifacts[proposal.level_indices] = _HierarchicalExactArtifact(
+            construction=construction,
+            selection=selection,
+            external_source_node_ids=external,
+            retained_source_node_ids=tuple(sorted(retained_ids)),
+            packed_physical_bytes=_cache_payload_bytes(adapter, packed.snapshot),
+        )
         return probe_isolated_packed_candidate(
             adapter,
             prefill.state,
@@ -5837,7 +6032,9 @@ def _run_hierarchical_logit_safe_eviction(
     selected_levels = tuple(
         (choice.route, choice.level_index) for choice in decision.selection.choices
     )
-    selected_artifact = artifacts.get(selected_levels)
+    selected_artifact = (
+        None if decision.used_fullkv_fallback else artifacts.get(selected_levels)
+    )
     if selected_artifact is None:
         artifact_ladders = (
             unrestricted_ladders if decision.used_fullkv_fallback else ladders
@@ -5849,7 +6046,7 @@ def _run_hierarchical_logit_safe_eviction(
                 decision.selection.level_index_by_route()[ladder.route]
             ).selected_node_ids
         )
-        selected_artifact = _progressive_exact_construction(
+        construction, selection, external = _progressive_exact_construction(
             plan,
             adapter.capabilities,
             probe_config,
@@ -5857,11 +6054,56 @@ def _run_hierarchical_logit_safe_eviction(
             key_transform=key_transform,
             active_budget=probe_budget,
         )
-    construction, selection, external = selected_artifact
-    if construction.state.statistics.active_kv_bytes != decision.selection.active_bytes:
-        raise HuggingFaceRuntimeError(
-            "hierarchical knapsack and exact construction byte counts differ"
+        if decision.used_fullkv_fallback:
+            # FullKV already has the common dense layout and no physical
+            # padding. Do not materialize a second over-budget packed cache;
+            # the caller rejects this fallback before final packing.
+            packed_physical_bytes = construction.state.statistics.active_kv_bytes
+        else:
+            maximum_positions = max(
+                layout.active_cache_length for layout in construction.active_layouts
+            )
+            packed = pack_runtime_cache(
+                adapter,
+                plan.full_state,
+                construction.state,
+                (),
+                (),
+                physical_prompt_capacity=maximum_positions,
+                packing_mode=config.cache.packing_mode,
+            )
+            packed_physical_bytes = _cache_payload_bytes(adapter, packed.snapshot)
+        selected_artifact = _HierarchicalExactArtifact(
+            construction=construction,
+            selection=selection,
+            external_source_node_ids=external,
+            retained_source_node_ids=tuple(sorted(retained_ids)),
+            packed_physical_bytes=packed_physical_bytes,
         )
+    construction = selected_artifact.construction
+    selection = selected_artifact.selection
+    external = selected_artifact.external_source_node_ids
+    accounting = _exact_cache_storage_accounting(
+        plan,
+        selected_artifact.retained_source_node_ids,
+        construction,
+        external,
+        knapsack_bytes=decision.selection.active_bytes,
+        packed_physical_bytes=selected_artifact.packed_physical_bytes,
+    )
+    if not accounting.logical_boundaries_aligned:
+        decision_record = cast("JsonObject", asdict(decision))
+        error = HuggingFaceRuntimeError(
+            "hierarchical knapsack, source selection, and exact construction byte "
+            "counts differ"
+        )
+        error.mosaickv_failure_trace_payload = _hierarchical_accounting_failure_trace_payload(
+            decision_record,
+            accounting,
+            hard_active_kv_budget_bytes=plan.active_budget_value,
+            elapsed_seconds=time.perf_counter() - hierarchical_started,
+        )
+        raise error
     reservation = _progressive_group_reservation(
         plan,
         config,
@@ -5884,6 +6126,7 @@ def _run_hierarchical_logit_safe_eviction(
             reservation,
             allow_fullkv_capacity_expansion=decision.used_fullkv_fallback,
         ),
+        hierarchical_storage_accounting=accounting,
     )
     return selected_plan, decision
 
@@ -7163,6 +7406,9 @@ def _byte_budget_materialization_trace(
     )
     prototype_bytes = 0 if plan is None else plan.construction.state.statistics.prototype_kv_bytes
     selected_planner_bytes = None if plan is None else plan.selection.active_bytes
+    hierarchical_accounting = (
+        None if plan is None else plan.hierarchical_storage_accounting
+    )
     return cast(
         "JsonObject",
         {
@@ -7199,6 +7445,41 @@ def _byte_budget_materialization_trace(
             "final_packed_active_bytes": packed_prefill_active_kv_bytes,
             "packed_padding_bytes": (
                 packed_prefill_active_kv_bytes - logical_prefill_active_kv_bytes
+            ),
+            "knapsack_bytes": (
+                None
+                if hierarchical_accounting is None
+                else hierarchical_accounting.knapsack_bytes
+            ),
+            "unique_selected_source_bytes": (
+                None
+                if hierarchical_accounting is None
+                else hierarchical_accounting.unique_selected_source_bytes
+            ),
+            "planner_tier_bytes": (
+                None
+                if hierarchical_accounting is None
+                else hierarchical_accounting.planner_tier_bytes
+            ),
+            "external_exact_bytes": (
+                None
+                if hierarchical_accounting is None
+                else hierarchical_accounting.external_exact_bytes
+            ),
+            "constructed_active_bytes": (
+                None
+                if hierarchical_accounting is None
+                else hierarchical_accounting.constructed_active_bytes
+            ),
+            "physical_padding_bytes": (
+                None
+                if hierarchical_accounting is None
+                else hierarchical_accounting.physical_padding_bytes
+            ),
+            "hierarchical_logical_boundaries_aligned": (
+                None
+                if hierarchical_accounting is None
+                else hierarchical_accounting.logical_boundaries_aligned
             ),
             "final_underfill_vs_dense_budget_bytes": max(
                 0,

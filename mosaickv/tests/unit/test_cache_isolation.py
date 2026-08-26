@@ -383,6 +383,7 @@ def test_hf_hierarchical_loop_materializes_every_probe_through_isolation(
         construction = SimpleNamespace(
             state=SimpleNamespace(statistics=SimpleNamespace(active_kv_bytes=active_bytes)),
             active_layouts=(SimpleNamespace(active_cache_length=2),),
+            exact_node_ids=retained_ids,
         )
         return construction, SimpleNamespace(), retained_ids
 
@@ -434,6 +435,203 @@ def test_hf_hierarchical_loop_materializes_every_probe_through_isolation(
     assert materialized_bytes == [20]
     assert selected_plan.construction.state.statistics.active_kv_bytes == 20
     assert_decode_state_unchanged(adapter, reference, checkpoint)
+
+
+def test_hf_hierarchical_fullkv_fallback_does_not_reuse_feasible_level_zero_artifact(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Filtered and unrestricted ladders have distinct level-zero namespaces."""
+
+    adapter = MockCacheAdapter()
+    adapter.capabilities = SimpleNamespace()
+    reference = _reference_state()
+    prefill = SimpleNamespace(state=reference, next_token_id=torch.tensor([[2]]))
+    full_state = SimpleNamespace(
+        blocks=tuple(
+            SimpleNamespace(
+                byte_size=10,
+                layer=0,
+                kv_head=0 if index < 3 else 1,
+                position_count=1,
+            )
+            for index in range(6)
+        )
+    )
+    plan = MosaicKVCompressionPlan(
+        method=MosaicKVMethod.MOSAICKV_EXACT,
+        effective_method="mosaickv_exact",
+        full_state=cast(Any, full_state),
+        forecast=None,
+        graph=cast(Any, None),
+        utilities=cast(Any, None),
+        selection=cast(Any, None),
+        construction=cast(Any, None),
+        source_budget_value=60,
+        shared_active_budget_value=20,
+        active_budget_value=20,
+        planner_active_budget_value=20,
+        configured_physical_capacity_fraction=1.0,
+        graph_seconds=0.0,
+        selection_seconds=0.0,
+        utility_seconds=0.0,
+        reservation_seconds=0.0,
+        selector_seconds=0.0,
+        tier_seconds=0.0,
+        similarity_candidate_node_ids=None,
+        optimization_node_ids=None,
+        planner_source_node_ids=None,
+        external_exact_node_ids=(),
+        external_exact_capacity_records=(),
+        external_exact_logit_shortlist=(),
+        prompt_attention_by_node=None,
+        stable_routing_seconds=0.0,
+        similarity_shortlist_seconds=0.0,
+        planner_mapping_seconds=0.0,
+        graph_head_routes=(),
+        graph_routing_provenance="mock",
+    )
+    ladders = (_mock_ladder((0, 0), 0), _mock_ladder((0, 1), 3))
+    packed = PackedRuntimeCache(
+        snapshot=_packed_snapshot(),
+        validity_masks=(torch.ones((2, 2), dtype=torch.bool),) * 2,
+        prompt_capacity=2,
+        all_slots_valid=True,
+        prototype_slots=(),
+        prototype_attention_biases=(),
+        slot_records=(),
+    )
+    materialized: list[tuple[int, ...]] = []
+
+    def exact_construction(
+        _plan: Any,
+        _capabilities: Any,
+        _config: Any,
+        retained: Any,
+        **_kwargs: Any,
+    ) -> tuple[Any, Any, tuple[int, ...]]:
+        retained_ids = tuple(sorted(retained))
+        materialized.append(retained_ids)
+        active_bytes = len(retained_ids) * 10
+        construction = SimpleNamespace(
+            state=SimpleNamespace(statistics=SimpleNamespace(active_kv_bytes=active_bytes)),
+            active_layouts=(SimpleNamespace(active_cache_length=len(retained_ids)),),
+            exact_node_ids=retained_ids,
+        )
+        return construction, SimpleNamespace(), retained_ids
+
+    def force_fallback(
+        filtered_ladders: Any,
+        *,
+        probe: Any,
+        fullkv_fallback_selection: Any,
+        **_kwargs: Any,
+    ) -> Any:
+        proposal = hf_runtime.HierarchicalCapacityProposal(
+            proposal_id="filtered-level-zero",
+            kind=hf_runtime.HierarchicalProposalKind.JOINT,
+            level_indices=tuple((ladder.route, 0) for ladder in filtered_ladders),
+            affected_routes=tuple(ladder.route for ladder in filtered_ladders),
+        )
+        _ = probe(proposal)
+        return hf_runtime.BoundedHierarchicalProbeDecision(
+            selection=fullkv_fallback_selection,
+            evaluations=(SimpleNamespace(),),
+            accepted_target_routes=(),
+            unresolved_exact_routes=tuple(ladder.route for ladder in filtered_ladders),
+            rollback_attempts=(),
+            target_reached=False,
+            selected_candidate_passed=False,
+            final_joint_probe_passed=False,
+            used_fullkv_fallback=True,
+            evaluations_used=1,
+            rounds_used=1,
+        )
+
+    monkeypatch.setattr(hf_runtime, "_hierarchical_route_ladders", lambda *_args: ladders)
+    monkeypatch.setattr(
+        hf_runtime,
+        "_hierarchical_reference_rollout",
+        lambda *_args: (
+            (torch.tensor([[1]]), torch.tensor([[2]])),
+            (
+                torch.tensor([[0.0, 1.0, 2.0]]),
+                torch.tensor([[0.0, 1.0, 2.0]]),
+            ),
+        ),
+    )
+    monkeypatch.setattr(hf_runtime, "_progressive_exact_construction", exact_construction)
+    monkeypatch.setattr(hf_runtime, "pack_runtime_cache", lambda *_args, **_kwargs: packed)
+    monkeypatch.setattr(hf_runtime, "run_bounded_hierarchical_probe_loop", force_fallback)
+    monkeypatch.setattr(
+        hf_runtime,
+        "_progressive_group_reservation",
+        lambda *_args: SimpleNamespace(),
+    )
+    monkeypatch.setattr(hf_runtime, "_progressive_eviction_risks", lambda *_args: (0.0,) * 6)
+    monkeypatch.setattr(
+        hf_runtime,
+        "_progressive_capacity_records",
+        lambda *_args, **_kwargs: (),
+    )
+
+    selected_plan, decision = hf_runtime._run_hierarchical_logit_safe_eviction(
+        cast(Any, adapter),
+        cast(Any, prefill),
+        plan,
+        cast(Any, _MockRunConfig()),
+        key_transform=None,
+        position_limits={(0, 0): 1, (0, 1): 1},
+    )
+
+    assert decision.used_fullkv_fallback
+    assert materialized == [(0, 3), (0, 1, 2, 3, 4, 5)]
+    assert selected_plan.construction.state.statistics.active_kv_bytes == 60
+
+
+def test_hierarchical_accounting_failure_trace_contains_all_nine_preflight_fields() -> None:
+    accounting = hf_runtime.ExactCacheStorageAccounting(
+        knapsack_bytes=48,
+        unique_selected_source_bytes=40,
+        planner_tier_bytes=24,
+        external_exact_bytes=16,
+        constructed_active_bytes=40,
+        physical_padding_bytes=8,
+        selected_source_block_count=5,
+        planner_source_block_count=3,
+        external_source_block_count=2,
+    )
+    payload = hf_runtime._hierarchical_accounting_failure_trace_payload(
+        {
+            "used_fullkv_fallback": False,
+            "evaluations": [{"proposal_id": "joint"}],
+        },
+        accounting,
+        hard_active_kv_budget_bytes=44,
+        elapsed_seconds=0.25,
+    )
+
+    required = {
+        "status",
+        "effective_method",
+        "used_fullkv_fallback",
+        "attempted_active_kv_bytes",
+        "hard_active_kv_budget_bytes",
+        "probe_decisions",
+        "timing_breakdown",
+        "byte_budget_materialization",
+        "hierarchical_logit_safe_eviction",
+    }
+    assert required <= set(payload)
+    assert {
+        "knapsack_bytes",
+        "unique_selected_source_bytes",
+        "planner_tier_bytes",
+        "external_exact_bytes",
+        "constructed_active_bytes",
+        "physical_padding_bytes",
+    } <= set(payload)
+    assert payload["over_budget_cache_packed"] is False
+    assert payload["over_budget_cache_decoded"] is False
 
 
 def test_two_candidates_are_independent_from_each_other_and_reference() -> None:

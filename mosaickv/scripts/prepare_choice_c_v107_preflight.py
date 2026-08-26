@@ -30,6 +30,7 @@ OUTPUT_ROOT = Path(
     "/scratch/djy8hg/runs/mosaickv/choice-c-v107-feasible-route-preflight-v1"
 )
 INPUT_NAMES = predecessor.INPUT_NAMES
+ADDITIONAL_EXCLUSION_KEY = "additionally_excluded_v106_preflight_ledgers"
 
 
 def _protocol() -> dict[str, Any]:
@@ -203,7 +204,7 @@ def materialize(output_root: Path = OUTPUT_ROOT) -> dict[str, Any]:
     additional = [
         Path(str(path))
         for path in cast(
-            "list[str]", identity["additionally_excluded_v106_preflight_ledgers"]
+            "list[str]", identity[ADDITIONAL_EXCLUSION_KEY]
         )
     ]
     manifest = predecessor.ledger_support.build_augmented_exclusion_manifest(

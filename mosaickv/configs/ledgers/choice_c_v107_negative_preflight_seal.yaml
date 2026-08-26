@@ -1,0 +1,141 @@
+schema_version: 1
+experiment_id: choice_c_v107_feasible_route_preflight
+classification: sealed_negative_four_sample_gpu_preflight
+sealed_at_utc: "2026-08-26T03:02:03Z"
+immutable_result: true
+measurement_type: preregistered_runtime_correctness_preflight
+overall_pass: false
+gpu_preflight_pass: false
+calibration_authorized: false
+frozen_candidate_created: false
+heldout_evaluation_authorized: false
+
+protocol:
+  path: configs/experiments/choice_c_v107_feasible_route_preflight.yaml
+  configured_active_byte_cap: 28500000
+  unchanged_maximum_forward_kl: 0.02
+  unchanged_maximum_absolute_logit_difference: 1.0
+  unchanged_greedy_token_match_required: true
+  unchanged_probe_horizon: 2
+  maximum_candidate_evaluations: 24
+  maximum_sequential_rounds: 6
+  fullkv_fallback_passes_preflight: false
+
+execution:
+  source_git_sha: 8234c93bb9f0addd692109588d0ef1f673a55720
+  source_git_dirty: false
+  worker_spec_path: /scratch/djy8hg/runs/mosaickv/choice-c-v107-feasible-route-preflight-v1/inputs/gpu_preflight_worker_spec.json
+  worker_spec_sha256: 922593be58e6c413535eab23d47e37936622380f02f94e17cf8071d75f07d64d
+  disjointness_report_path: /scratch/djy8hg/runs/mosaickv/choice-c-v107-feasible-route-preflight-v1/inputs/preflight_disjointness_report.json
+  disjointness_report_sha256: 97de86750ff36ce5d56390d615492aed50bdeaf4c334584018bb1abddcb8735d
+  output_root: /scratch/djy8hg/runs/mosaickv/choice-c-v107-feasible-route-preflight-v1/preflight
+  slurm_array_id: "18903212"
+  gpu: NVIDIA A100-SXM4-80GB
+  gpu_count_per_worker: 1
+  array_tasks:
+    - task: textvqa_train_calibration
+      slurm_array_label: "18903212_0"
+      slurm_job_id_raw: "18903213"
+      state: FAILED
+      exit_code: "1:0"
+      elapsed: "00:01:37"
+      node: udc-an26-1
+      log_path: /scratch/djy8hg/runs/mosaickv/slurm/v107-preflight-18903212_0.log
+      log_sha256: 649ead8e20e654cb4c9418639675bbdf7751b2c5413c29099c5d46bde505dfc1
+    - task: infovqa
+      slurm_array_label: "18903212_1"
+      slurm_job_id_raw: "18903212"
+      state: FAILED
+      exit_code: "1:0"
+      elapsed: "00:01:34"
+      node: udc-an26-1
+      log_path: /scratch/djy8hg/runs/mosaickv/slurm/v107-preflight-18903212_1.log
+      log_sha256: 3fa61dfb58354e1ace982962d9f11adb1c1b566b9fb3fbc0d140e35f6ad063e8
+
+planned_samples:
+  textvqa_train_calibration:
+    ledger_path: /scratch/djy8hg/runs/mosaickv/choice-c-v107-feasible-route-preflight-v1/inputs/preflight_textvqa_train.json
+    ledger_sha256: 1fb4ad062462c4b977acb1f0b74e164e45db921522a7b04a151bed9edd23dbdd
+    sample_ids:
+      - textvqa_train_calibration:8160
+      - textvqa_train_calibration:34428
+  infovqa:
+    ledger_path: /scratch/djy8hg/runs/mosaickv/choice-c-v107-feasible-route-preflight-v1/inputs/preflight_infovqa.json
+    ledger_sha256: c179dd8f8c52fbd61e48e5b93a97cba9c9dcaab4d9ba5ed4efcbc32ea059d199
+    sample_ids:
+      - infovqa:93568
+      - infovqa:93362
+
+observed_candidate_samples:
+  - task: textvqa_train_calibration
+    sample_id: textvqa_train_calibration:8160
+    status: failed
+    target_reached: false
+    effective_method: null
+    failure: hierarchical knapsack and exact construction byte counts differ
+    prompt_topk_active_kv_bytes: 40370176
+    fullkv_active_kv_bytes: 319815680
+    correct_reference_annotation_list_recorded: true
+    reference_annotation_count: 10
+    required_failure_trace_fields_present: 1
+    required_failure_trace_fields_total: 9
+    trace_path: /scratch/djy8hg/runs/mosaickv/choice-c-v107-feasible-route-preflight-v1/preflight/traces/v107-preflight-textvqa_train_calibration-warmup-v107_position_feasible_route_baseline_logit_feedback_restore_donor/d9668fe3ef0a0d1d.json
+    trace_sha256: 938283584184b3be33a7a7b1a4a16003b0cd2598e6167b0b1d5d3a71c9f235e4
+    raw_result_path: /scratch/djy8hg/runs/mosaickv/choice-c-v107-feasible-route-preflight-v1/preflight/v107-preflight-textvqa_train_calibration-warmup-v107_position_feasible_route_baseline_logit_feedback_restore_donor/results.jsonl
+    raw_result_sha256: c2a8dfa9a235745bc413651ad04883682a7bd8da96b38c8f66ff1a85cf3f8bb6
+    telemetry_path: /scratch/djy8hg/runs/mosaickv/choice-c-v107-feasible-route-preflight-v1/preflight/telemetry/v107-preflight-textvqa_train_calibration-922593be58.json
+    telemetry_sha256: 6d8a21eebc5b05a9ce51a62a3b54b14337a32c44fdf5e50d2a56c07e33aab40b
+  - task: infovqa
+    sample_id: infovqa:93568
+    status: failed
+    target_reached: false
+    effective_method: null
+    failure: hierarchical knapsack and exact construction byte counts differ
+    prompt_topk_active_kv_bytes: 40370176
+    fullkv_active_kv_bytes: 317718528
+    correct_reference_annotation_list_recorded: true
+    reference_annotation_count: 2
+    required_failure_trace_fields_present: 1
+    required_failure_trace_fields_total: 9
+    trace_path: /scratch/djy8hg/runs/mosaickv/choice-c-v107-feasible-route-preflight-v1/preflight/traces/v107-preflight-infovqa-warmup-v107_position_feasible_route_baseline_logit_feedback_restore_donor/653bf67ca7a07a39.json
+    trace_sha256: 6f55c8959a45875507821522d90fa76cc5479544fbfb7c2dcdacb93ce25adbc3
+    raw_result_path: /scratch/djy8hg/runs/mosaickv/choice-c-v107-feasible-route-preflight-v1/preflight/v107-preflight-infovqa-warmup-v107_position_feasible_route_baseline_logit_feedback_restore_donor/results.jsonl
+    raw_result_sha256: 9f649e7668b40a108ab87bc89add19542be1eeb1ac24cad7b9ec47fd4dd4f6fb
+    telemetry_path: /scratch/djy8hg/runs/mosaickv/choice-c-v107-feasible-route-preflight-v1/preflight/telemetry/v107-preflight-infovqa-922593be58.json
+    telemetry_sha256: b0ddb1cdcdb27de65250e07d2a09bda4ade901f8a553deffb495d22307ea5fb3
+
+unexecuted_candidate_samples:
+  - textvqa_train_calibration:34428
+  - infovqa:93362
+
+gate_summary:
+  candidate_samples_completed: 0
+  candidate_samples_required: 4
+  compressed_target_samples: 0
+  compressed_target_samples_required: 4
+  candidate_fidelity_samples_evaluable: 0
+  attempted_references_verified: 2
+  complete_candidate_failure_traces: 0
+  planned_candidate_traces_required: 4
+  byte_accounting_invariant_passed: false
+  all_four_samples_pass: false
+  calibration_must_remain_blocked: true
+
+scientific_boundary:
+  v107_outputs_answers_references_scores_and_failure_identities_inspected: true
+  all_v107_planned_identities_consumed: true
+  future_runtime_validation_requires_fresh_identities: true
+  task_labels_answers_scores_or_failure_identities_must_not_drive_v108: true
+  aggregate_label_blind_storage_accounting_telemetry_may_drive_engineering: true
+  thresholds_must_not_be_weakened: true
+  calibration_requires_separate_authorization_after_a_positive_preflight: true
+
+root_cause:
+  classification: feasible_and_unrestricted_level_namespace_collision
+  details: >-
+    Position-feasible ladders reindexed their largest feasible level to zero,
+    while the unrestricted FullKV fallback also used level zero. The runtime
+    artifact cache keyed only on route/level indices and could therefore
+    retrieve a feasible compressed construction for a FullKV fallback
+    decision. The resulting logical byte mismatch was correctly fatal, but
+    the old exception did not emit the required structured accounting trace.

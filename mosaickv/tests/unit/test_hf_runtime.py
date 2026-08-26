@@ -388,6 +388,24 @@ def test_routed_head_only_plan_compacts_and_defers_source_audit() -> None:
     }
     assert removed_external not in reduced_external
     assert not set(reduced_external).intersection(planner_sources)
+    knapsack_bytes = sum(full.blocks[node_id].byte_size for node_id in retained)
+    accounting = hf_runtime._exact_cache_storage_accounting(
+        plan,
+        retained,
+        reduced,
+        reduced_external,
+        knapsack_bytes=knapsack_bytes,
+        packed_physical_bytes=reduced.state.statistics.active_kv_bytes + 64,
+    )
+    assert accounting.logical_boundaries_aligned
+    assert accounting.knapsack_bytes == knapsack_bytes
+    assert accounting.unique_selected_source_bytes == knapsack_bytes
+    assert accounting.planner_tier_bytes == reduced_selection.active_bytes
+    assert accounting.external_exact_bytes == sum(
+        full.blocks[node_id].byte_size for node_id in reduced_external
+    )
+    assert accounting.constructed_active_bytes == knapsack_bytes
+    assert accounting.physical_padding_bytes == 64
 
 
 def test_dense_routed_plan_keeps_stable_exact_blocks_outside_objective() -> None:
