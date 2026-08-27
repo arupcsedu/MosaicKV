@@ -1,0 +1,153 @@
+schema_version: 1
+experiment_id: choice_c_v108_storage_aligned_preflight
+classification: sealed_negative_four_sample_gpu_preflight
+sealed_at_utc: "2026-08-27T23:39:32Z"
+immutable_result: true
+measurement_type: preregistered_runtime_correctness_preflight
+overall_pass: false
+gpu_preflight_pass: false
+calibration_authorized: false
+frozen_candidate_created: false
+heldout_evaluation_authorized: false
+
+protocol:
+  path: configs/experiments/choice_c_v108_storage_aligned_preflight.yaml
+  configured_active_byte_cap: 28500000
+  unchanged_maximum_forward_kl: 0.02
+  unchanged_maximum_absolute_logit_difference: 1.0
+  unchanged_greedy_token_match_required: true
+  unchanged_probe_horizon: 2
+  maximum_candidate_evaluations: 24
+  maximum_sequential_rounds: 6
+  fullkv_fallback_passes_preflight: false
+
+execution:
+  source_git_sha: f54ad9b5d80aca9b916cb8ebbd23ec869b94ee1e
+  source_git_dirty: false
+  worker_spec_path: /scratch/djy8hg/runs/mosaickv/choice-c-v108-storage-aligned-preflight-v1/inputs/gpu_preflight_worker_spec.json
+  worker_spec_sha256: e6d670b1937a41a2f95a2b1f578933725aa7ef1aae346b7ab0554bf5f9be1026
+  disjointness_report_path: /scratch/djy8hg/runs/mosaickv/choice-c-v108-storage-aligned-preflight-v1/inputs/preflight_disjointness_report.json
+  disjointness_report_sha256: 5876b7a67fe1a25769291d0c2e578daf2623f6c1856fbc81cde3acdb83248a3a
+  output_root: /scratch/djy8hg/runs/mosaickv/choice-c-v108-storage-aligned-preflight-v1/preflight
+  slurm_array_id: "18922461"
+  gpu: NVIDIA A100-SXM4-80GB
+  gpu_count_per_worker: 1
+  array_tasks:
+    - task: textvqa_train_calibration
+      slurm_array_label: "18922461_0"
+      slurm_job_id_raw: "18922462"
+      state: FAILED
+      exit_code: "1:0"
+      elapsed: "00:01:58"
+      node: udc-an26-1
+      log_path: /scratch/djy8hg/runs/mosaickv/slurm/v108-preflight-18922461_0.log
+      log_sha256: e9b71e4f0e2084a59dccffb3691c31182f7618914022384040c78317e7ad0126
+    - task: infovqa
+      slurm_array_label: "18922461_1"
+      slurm_job_id_raw: "18922461"
+      state: FAILED
+      exit_code: "1:0"
+      elapsed: "00:02:00"
+      node: udc-an26-1
+      log_path: /scratch/djy8hg/runs/mosaickv/slurm/v108-preflight-18922461_1.log
+      log_sha256: 721820ebb51d88e101696c3eb5997f6e39f94bd0c77c3d00d99b7d3b53daf67b
+
+planned_samples:
+  textvqa_train_calibration:
+    ledger_path: /scratch/djy8hg/runs/mosaickv/choice-c-v108-storage-aligned-preflight-v1/inputs/preflight_textvqa_train.json
+    ledger_sha256: 12cf00a98025ef5ffa2f346d037d5f78c78a1fd31c8ba806e72cd11792f4e397
+    sample_ids:
+      - textvqa_train_calibration:15455
+      - textvqa_train_calibration:31961
+  infovqa:
+    ledger_path: /scratch/djy8hg/runs/mosaickv/choice-c-v108-storage-aligned-preflight-v1/inputs/preflight_infovqa.json
+    ledger_sha256: 584529382bd47518f6d9a5f315d1eb9d60710838a1a8dcd31ee35aa62d4c8a28
+    sample_ids:
+      - infovqa:96176
+      - infovqa:91392
+
+observed_candidate_samples:
+  - task: textvqa_train_calibration
+    sample_id: textvqa_train_calibration:15455
+    status: failed
+    target_reached: false
+    failure: hierarchical logit-safe eviction returned an over-budget FullKV fallback
+    prompt_topk_active_kv_bytes: 40894464
+    fullkv_active_kv_bytes: 318242816
+    hard_target_active_kv_bytes: 28311552
+    prompt_topk_to_target_reduction_fraction: 0.3076923077
+    probe_evaluations_used: 1
+    joint_greedy_token_match: true
+    joint_maximum_forward_kl: 1.3117519617
+    joint_maximum_absolute_logit_difference: 7.23291015625
+    correct_reference_annotation_list_recorded: true
+    reference_annotation_count: 10
+    required_failure_trace_fields_present: 9
+    required_failure_trace_fields_total: 9
+    required_storage_accounting_fields_present: 0
+    required_storage_accounting_fields_total: 6
+    trace_path: /scratch/djy8hg/runs/mosaickv/choice-c-v108-storage-aligned-preflight-v1/preflight/traces/v108-preflight-textvqa_train_calibration-warmup-v108_storage_aligned_feasible_route_logit_feedback/c8e497966b541eff.json
+    trace_sha256: 8c5ef0e9d8a1b82b3689c97913c38231d39577cecb6a348754076c8805081cdd
+    raw_result_sha256: ac4a30bda9ac9b860757a906068c68ecc64c2e278e762a91fc0fc33be9b98baa
+    telemetry_sha256: 858642cc5c3f9d57b070f051271cfec59ee5b55a386ac821ee1ec9a9d9c188b
+  - task: infovqa
+    sample_id: infovqa:96176
+    status: failed
+    target_reached: false
+    failure: hierarchical logit-safe eviction returned an over-budget FullKV fallback
+    prompt_topk_active_kv_bytes: 40894464
+    fullkv_active_kv_bytes: 322437120
+    hard_target_active_kv_bytes: 28311552
+    prompt_topk_to_target_reduction_fraction: 0.3076923077
+    probe_evaluations_used: 1
+    joint_greedy_token_match: false
+    joint_maximum_forward_kl: 1.3056555986
+    joint_maximum_absolute_logit_difference: 6.1337890625
+    correct_reference_annotation_list_recorded: true
+    reference_annotation_count: 1
+    required_failure_trace_fields_present: 9
+    required_failure_trace_fields_total: 9
+    required_storage_accounting_fields_present: 0
+    required_storage_accounting_fields_total: 6
+    trace_path: /scratch/djy8hg/runs/mosaickv/choice-c-v108-storage-aligned-preflight-v1/preflight/traces/v108-preflight-infovqa-warmup-v108_storage_aligned_feasible_route_logit_feedback/44ee91b66b01011d.json
+    trace_sha256: 1e85466cc284730404795f9411898d7067216c33564954523860b33193155d0d
+    raw_result_sha256: b8909ce5c0a71e342a39cf16e2012a0ce411a542f5e38adfd6236ad720f98e13
+    telemetry_sha256: 3d365a2008d85a655904a40da3a5fb4ca64f45be3eaad3854a8840072ce96e4
+
+unexecuted_candidate_samples:
+  - textvqa_train_calibration:31961
+  - infovqa:91392
+
+gate_summary:
+  candidate_samples_completed: 0
+  candidate_samples_required: 4
+  compressed_target_samples: 0
+  compressed_target_samples_required: 4
+  attempted_references_verified: 2
+  complete_candidate_failure_traces: 2
+  planned_candidate_traces_required: 4
+  complete_six_field_accounting_traces: 0
+  distinct_compressed_joint_probes_per_attempt: 1
+  memory_gate_evaluable: false
+  fidelity_gate_evaluable: false
+  all_four_samples_pass: false
+  calibration_must_remain_blocked: true
+
+scientific_boundary:
+  v108_outputs_answers_references_scores_and_failure_identities_inspected: true
+  all_v108_planned_identities_consumed: true
+  future_runtime_validation_requires_fresh_identities: true
+  task_labels_answers_scores_or_failure_identities_must_not_drive_v109: true
+  aggregate_label_blind_ladder_and_accounting_telemetry_may_drive_engineering: true
+  thresholds_must_not_be_weakened: true
+  calibration_requires_separate_authorization_after_a_positive_preflight: true
+
+root_cause:
+  classification: single_position_feasible_joint_candidate_and_incomplete_fallback_accounting
+  details: >-
+    Filtering each FullKV-to-54-position ladder rebased its sole representable
+    target as level zero. That left zero positive-savings screening partitions,
+    so each attempted sample evaluated only joint-0 and used one of 24 allowed
+    probes before failing closed to FullKV. The runtime computed exact storage
+    accounting internally, but the hard-budget fallback serializer omitted all
+    six fields and did not retain the rejected compressed proposal separately.

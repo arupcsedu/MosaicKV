@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -179,6 +179,7 @@ class _MockCacheConfig:
     total_storage_budget_bytes: int | None = 40
     packing_mode: str = "gather"
     budget_unit: BudgetUnit = BudgetUnit.BYTES
+    block_size: int = 1
 
 
 @dataclass(frozen=True)
@@ -387,7 +388,11 @@ def test_hf_hierarchical_loop_materializes_every_probe_through_isolation(
         )
         return construction, SimpleNamespace(), retained_ids
 
-    monkeypatch.setattr(hf_runtime, "_hierarchical_route_ladders", lambda *_args: ladders)
+    monkeypatch.setattr(
+        hf_runtime,
+        "_hierarchical_route_ladders",
+        lambda *_args, **_kwargs: ladders,
+    )
     monkeypatch.setattr(
         hf_runtime,
         "_hierarchical_reference_rollout",
@@ -535,7 +540,7 @@ def test_hf_hierarchical_fullkv_fallback_does_not_reuse_feasible_level_zero_arti
         _ = probe(proposal)
         return hf_runtime.BoundedHierarchicalProbeDecision(
             selection=fullkv_fallback_selection,
-            evaluations=(SimpleNamespace(),),
+            evaluations=(SimpleNamespace(proposal=proposal, passed=False),),
             accepted_target_routes=(),
             unresolved_exact_routes=tuple(ladder.route for ladder in filtered_ladders),
             rollback_attempts=(),
@@ -547,7 +552,11 @@ def test_hf_hierarchical_fullkv_fallback_does_not_reuse_feasible_level_zero_arti
             rounds_used=1,
         )
 
-    monkeypatch.setattr(hf_runtime, "_hierarchical_route_ladders", lambda *_args: ladders)
+    monkeypatch.setattr(
+        hf_runtime,
+        "_hierarchical_route_ladders",
+        lambda *_args, **_kwargs: ladders,
+    )
     monkeypatch.setattr(
         hf_runtime,
         "_hierarchical_reference_rollout",
@@ -790,6 +799,28 @@ def test_hierarchical_fullkv_fallback_records_actual_route_capacity() -> None:
 
 
 def test_hard_budget_fallback_trace_is_complete_and_rejects_before_packing() -> None:
+    fallback_accounting = hf_runtime.ExactCacheStorageAccounting(
+        knapsack_bytes=320,
+        unique_selected_source_bytes=320,
+        planner_tier_bytes=240,
+        external_exact_bytes=80,
+        constructed_active_bytes=320,
+        physical_padding_bytes=0,
+        selected_source_block_count=32,
+        planner_source_block_count=24,
+        external_source_block_count=8,
+    )
+    rejected_accounting = hf_runtime.ExactCacheStorageAccounting(
+        knapsack_bytes=40,
+        unique_selected_source_bytes=40,
+        planner_tier_bytes=40,
+        external_exact_bytes=0,
+        constructed_active_bytes=40,
+        physical_padding_bytes=8,
+        selected_source_block_count=4,
+        planner_source_block_count=4,
+        external_source_block_count=0,
+    )
     payload = hf_runtime._hard_budget_fallback_trace_payload(
         {
             "used_fullkv_fallback": True,
@@ -809,6 +840,9 @@ def test_hard_budget_fallback_trace_is_complete_and_rejects_before_packing() -> 
         attempted_prompt_capacity=608,
         hard_prompt_capacity=75,
         timing_breakdown={"hierarchical_eviction": 2.5, "cache_packing": 0.0},
+        fullkv_fallback_accounting=fallback_accounting,
+        rejected_compressed_proposal_accounting=rejected_accounting,
+        rejected_compressed_proposal_id="joint-0",
     )
 
     assert payload["failure_classification"] == "hard_budget_fullkv_fallback"
@@ -827,16 +861,47 @@ def test_hard_budget_fallback_trace_is_complete_and_rejects_before_packing() -> 
     materialization = payload["byte_budget_materialization"]
     assert materialization["status"] == "rejected_before_materialization"
     assert materialization["packed_active_kv_bytes"] is None
+    assert materialization["knapsack_bytes"] == 320
+    assert payload["rejected_compressed_proposal_id"] == "joint-0"
+    assert payload["rejected_compressed_proposal_accounting"] == asdict(
+        rejected_accounting
+    )
+    assert payload["fullkv_fallback_accounting"] == asdict(fallback_accounting)
     assert payload["timing_breakdown"]["cache_packing"] == 0.0
 
 
 def test_hard_budget_fallback_trace_rejects_nonfallback_or_in_budget_records() -> None:
+    fallback_accounting = hf_runtime.ExactCacheStorageAccounting(
+        knapsack_bytes=320,
+        unique_selected_source_bytes=320,
+        planner_tier_bytes=320,
+        external_exact_bytes=0,
+        constructed_active_bytes=320,
+        physical_padding_bytes=0,
+        selected_source_block_count=32,
+        planner_source_block_count=32,
+        external_source_block_count=0,
+    )
+    rejected_accounting = hf_runtime.ExactCacheStorageAccounting(
+        knapsack_bytes=40,
+        unique_selected_source_bytes=40,
+        planner_tier_bytes=40,
+        external_exact_bytes=0,
+        constructed_active_bytes=40,
+        physical_padding_bytes=0,
+        selected_source_block_count=4,
+        planner_source_block_count=4,
+        external_source_block_count=0,
+    )
     kwargs = {
         "attempted_active_kv_bytes": 320,
         "hard_active_kv_budget_bytes": 40,
         "attempted_prompt_capacity": 608,
         "hard_prompt_capacity": 75,
         "timing_breakdown": {},
+        "fullkv_fallback_accounting": fallback_accounting,
+        "rejected_compressed_proposal_accounting": rejected_accounting,
+        "rejected_compressed_proposal_id": "joint-0",
     }
     with pytest.raises(ValueError, match="FullKV fallback"):
         hf_runtime._hard_budget_fallback_trace_payload(
@@ -848,6 +913,59 @@ def test_hard_budget_fallback_trace_rejects_nonfallback_or_in_budget_records() -
             {"used_fullkv_fallback": True},
             **{**kwargs, "attempted_active_kv_bytes": 40},
         )
+
+
+def test_feasible_route_ladder_has_multiple_levels_below_54_positions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    blocks = tuple(
+        SimpleNamespace(
+            byte_size=8,
+            layer=0,
+            kv_head=0,
+            position_count=1,
+            mandatory=index == 0,
+        )
+        for index in range(64)
+    )
+    plan = SimpleNamespace(
+        full_state=SimpleNamespace(blocks=blocks, active_bytes=512),
+    )
+    reservation = SimpleNamespace(groups_by_route={})
+    monkeypatch.setattr(
+        hf_runtime,
+        "_progressive_eviction_risks",
+        lambda _plan: tuple(float(index) for index in range(64)),
+    )
+    monkeypatch.setattr(
+        hf_runtime,
+        "_progressive_group_reservation",
+        lambda *_args: reservation,
+    )
+    monkeypatch.setattr(
+        hf_runtime,
+        "_progressive_fixed_source_ids",
+        lambda _plan: frozenset(),
+    )
+
+    ladders = hf_runtime._hierarchical_route_ladders(
+        cast(Any, plan),
+        cast(Any, SimpleNamespace()),
+        {(0, 0): 54},
+        feasible_baseline_node_ids_by_route={(0, 0): frozenset(range(54))},
+        refinement_positions=8,
+    )
+
+    assert len(ladders) == 1
+    ordinary = tuple(
+        level
+        for level in ladders[0].levels
+        if level.kind is not CapacityLevelKind.REALLOCATION_ALTERNATIVE
+    )
+    assert [level.active_bytes // 8 for level in ordinary] == [54, 50, 46]
+    assert ordinary[0].kind is CapacityLevelKind.FEASIBLE_BASELINE
+    assert all(len(level.selected_node_ids) <= 54 for level in ladders[0].levels)
+    assert ladders[0].proposed_removed_bytes == 8 * 8
 
 
 def test_route_capacity_failure_trace_contains_every_preflight_field() -> None:

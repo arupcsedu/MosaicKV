@@ -102,6 +102,7 @@ from mosaickv.selection import (
     BlockUtilityTable,
     BoundedHierarchicalProbeDecision,
     BudgetedObjective,
+    CapacityLevelKind,
     HierarchicalCapacityProposal,
     HierarchicalProposalKind,
     InfeasibleSelectionBudgetError,
@@ -147,6 +148,9 @@ def _hard_budget_fallback_trace_payload(
     attempted_prompt_capacity: int,
     hard_prompt_capacity: int,
     timing_breakdown: JsonObject,
+    fullkv_fallback_accounting: ExactCacheStorageAccounting,
+    rejected_compressed_proposal_accounting: ExactCacheStorageAccounting,
+    rejected_compressed_proposal_id: str,
 ) -> JsonObject:
     """Build the complete trace emitted when a safe search returns FullKV."""
 
@@ -156,6 +160,14 @@ def _hard_budget_fallback_trace_payload(
         raise ValueError("fallback attempt must exceed the hard active-byte budget")
     if attempted_prompt_capacity <= hard_prompt_capacity:
         raise ValueError("fallback attempt must exceed the hard prompt capacity")
+    if not rejected_compressed_proposal_id:
+        raise ValueError("fallback trace requires a rejected compressed proposal ID")
+    if fullkv_fallback_accounting.constructed_active_bytes != attempted_active_kv_bytes:
+        raise ValueError("FullKV fallback accounting differs from the attempted active bytes")
+    fallback_accounting = cast("JsonObject", asdict(fullkv_fallback_accounting))
+    rejected_accounting = cast(
+        "JsonObject", asdict(rejected_compressed_proposal_accounting)
+    )
     return {
         "failure_classification": "hard_budget_fullkv_fallback",
         "effective_method": "full_kv_fallback_rejected_before_packing",
@@ -172,6 +184,19 @@ def _hard_budget_fallback_trace_payload(
         "hard_active_kv_budget_bytes": hard_active_kv_budget_bytes,
         "attempted_prompt_capacity": attempted_prompt_capacity,
         "hard_prompt_capacity": hard_prompt_capacity,
+        "knapsack_bytes": fullkv_fallback_accounting.knapsack_bytes,
+        "unique_selected_source_bytes": (
+            fullkv_fallback_accounting.unique_selected_source_bytes
+        ),
+        "planner_tier_bytes": fullkv_fallback_accounting.planner_tier_bytes,
+        "external_exact_bytes": fullkv_fallback_accounting.external_exact_bytes,
+        "constructed_active_bytes": (
+            fullkv_fallback_accounting.constructed_active_bytes
+        ),
+        "physical_padding_bytes": fullkv_fallback_accounting.physical_padding_bytes,
+        "fullkv_fallback_accounting": fallback_accounting,
+        "rejected_compressed_proposal_id": rejected_compressed_proposal_id,
+        "rejected_compressed_proposal_accounting": rejected_accounting,
         "target_reached": False,
         "probe_decisions": decision_record.get("evaluations", []),
         "probe_evaluations_used": decision_record.get("evaluations_used"),
@@ -191,6 +216,19 @@ def _hard_budget_fallback_trace_payload(
             "attempted_prompt_capacity": attempted_prompt_capacity,
             "hard_prompt_capacity": hard_prompt_capacity,
             "packed_active_kv_bytes": None,
+            "knapsack_bytes": fullkv_fallback_accounting.knapsack_bytes,
+            "unique_selected_source_bytes": (
+                fullkv_fallback_accounting.unique_selected_source_bytes
+            ),
+            "planner_tier_bytes": fullkv_fallback_accounting.planner_tier_bytes,
+            "external_exact_bytes": fullkv_fallback_accounting.external_exact_bytes,
+            "constructed_active_bytes": (
+                fullkv_fallback_accounting.constructed_active_bytes
+            ),
+            "physical_padding_bytes": fullkv_fallback_accounting.physical_padding_bytes,
+            "fullkv_fallback_accounting": fallback_accounting,
+            "rejected_compressed_proposal_id": rejected_compressed_proposal_id,
+            "rejected_compressed_proposal_accounting": rejected_accounting,
         },
     }
 
@@ -495,6 +533,10 @@ class MosaicKVCompressionPlan:
     graph_head_routes: tuple[tuple[int, int], ...]
     graph_routing_provenance: str
     hierarchical_storage_accounting: ExactCacheStorageAccounting | None = None
+    hierarchical_rejected_proposal_storage_accounting: (
+        ExactCacheStorageAccounting | None
+    ) = None
+    hierarchical_rejected_proposal_id: str | None = None
 
     @property
     def uses_compact_node_ids(self) -> bool:
@@ -605,6 +647,7 @@ class _HierarchicalExactArtifact:
     external_source_node_ids: tuple[int, ...]
     retained_source_node_ids: tuple[int, ...]
     packed_physical_bytes: int
+    storage_accounting: ExactCacheStorageAccounting | None = None
 
 
 def _dense_physical_cache_budget(
@@ -5757,8 +5800,27 @@ def _hierarchical_route_ladders(
     plan: MosaicKVCompressionPlan,
     config: RunConfig,
     position_limits: Mapping[tuple[int, int], int],
+    *,
+    feasible_baseline_node_ids_by_route: (
+        Mapping[tuple[int, int], frozenset[int]] | None
+    ) = None,
+    refinement_positions: int = 0,
 ) -> tuple[RouteCapacityLadder, ...]:
-    """Build V100 route ladders from FullKV and label-blind online signals."""
+    """Build FullKV or position-feasible label-blind route ladders.
+
+    A feasible refinement ladder is deliberately rebuilt from an already
+    representable baseline.  Filtering a FullKV-to-cap ladder after the fact
+    leaves the cap candidate as level zero and erases every positive-savings
+    screening step.  Rebuilding from the baseline yields nested levels whose
+    physical position counts all remain within the dense-cache limit.
+    """
+
+    if refinement_positions < 0:
+        raise HuggingFaceRuntimeError("hierarchical refinement positions cannot be negative")
+    if (feasible_baseline_node_ids_by_route is None) != (refinement_positions == 0):
+        raise HuggingFaceRuntimeError(
+            "feasible ladder baselines and positive refinement positions are required together"
+        )
 
     full_state = plan.full_state
     # KVBlockDescriptor.byte_size is the exact-tier logical storage boundary:
@@ -5804,6 +5866,28 @@ def _hierarchical_route_ladders(
         raise HuggingFaceRuntimeError(
             "hierarchical position limits must cover every FullKV layer/head route"
         )
+    if feasible_baseline_node_ids_by_route is not None:
+        if set(feasible_baseline_node_ids_by_route) != set(route_blocks):
+            raise HuggingFaceRuntimeError(
+                "feasible ladder baselines must cover every FullKV layer/head route"
+            )
+        candidate_by_id = {candidate.node_id: candidate for candidate in candidates}
+        baseline_candidates: list[RouteBlockCandidate] = []
+        for route, baseline_node_ids in sorted(
+            feasible_baseline_node_ids_by_route.items()
+        ):
+            expected = set(route_blocks[route])
+            if not baseline_node_ids or not set(baseline_node_ids) <= expected:
+                raise HuggingFaceRuntimeError(
+                    "feasible ladder baseline contains an empty or cross-route selection"
+                )
+            baseline_candidates.extend(
+                candidate_by_id[node_id] for node_id in sorted(baseline_node_ids)
+            )
+        candidates = baseline_candidates
+        route_blocks = defaultdict(list)
+        for candidate in candidates:
+            route_blocks[candidate.route].append(candidate.node_id)
     target_bytes_by_route: dict[tuple[int, int], int] = {}
     for route, node_ids in sorted(route_blocks.items()):
         bytes_per_position = {
@@ -5819,11 +5903,37 @@ def _hierarchical_route_ladders(
             )
         unit = next(iter(bytes_per_position))
         full_bytes = sum(source_storage_costs[node_id] for node_id in node_ids)
-        target_bytes_by_route[route] = min(
-            full_bytes,
-            max(1, int(position_limits[route]) * unit),
+        if feasible_baseline_node_ids_by_route is None:
+            target_bytes_by_route[route] = min(
+                full_bytes,
+                max(1, int(position_limits[route]) * unit),
+            )
+        else:
+            protected_bytes = sum(
+                candidate.byte_size
+                for candidate in candidates
+                if candidate.route == route and candidate.protected
+            )
+            target_bytes_by_route[route] = max(
+                protected_bytes,
+                full_bytes - refinement_positions * unit,
+            )
+    built = build_route_capacity_ladders(candidates, target_bytes_by_route)
+    if feasible_baseline_node_ids_by_route is None:
+        return built
+    return tuple(
+        RouteCapacityLadder(
+            route=ladder.route,
+            levels=(
+                replace(ladder.levels[0], kind=CapacityLevelKind.FEASIBLE_BASELINE),
+                *ladder.levels[1:],
+            ),
+            protected_node_ids=ladder.protected_node_ids,
+            target_active_bytes=ladder.target_active_bytes,
+            target_reached=ladder.target_reached,
         )
-    return build_route_capacity_ladders(candidates, target_bytes_by_route)
+        for ladder in built
+    )
 
 
 def _hierarchical_reference_rollout(
@@ -5878,8 +5988,27 @@ def _run_hierarchical_logit_safe_eviction(
         node_id: block.position_count
         for node_id, block in enumerate(plan.full_state.blocks)
     }
-    ladders = restrict_route_capacity_ladders_to_position_limits(
+    position_limited_ladders = restrict_route_capacity_ladders_to_position_limits(
         unrestricted_ladders,
+        position_count_by_node,
+        effective_position_limits,
+    )
+    feasible_baseline_node_ids_by_route = {
+        ladder.route: frozenset(ladder.full_level.selected_node_ids)
+        for ladder in position_limited_ladders
+    }
+    ladders = _hierarchical_route_ladders(
+        plan,
+        config,
+        effective_position_limits,
+        feasible_baseline_node_ids_by_route=feasible_baseline_node_ids_by_route,
+        refinement_positions=2 * config.cache.block_size,
+    )
+    # The rebuilt ladder contains only subsets of the largest feasible
+    # baseline. Keep this check explicit so a future candidate-builder change
+    # cannot silently reintroduce a route-overflow probe.
+    ladders = restrict_route_capacity_ladders_to_position_limits(
+        ladders,
         position_count_by_node,
         effective_position_limits,
     )
@@ -5963,12 +6092,24 @@ def _run_hierarchical_logit_safe_eviction(
             physical_prompt_capacity=maximum_positions,
             packing_mode=config.cache.packing_mode,
         )
+        knapsack_bytes = sum(
+            ladder.level(level_indices[ladder.route]).active_bytes for ladder in ladders
+        )
+        storage_accounting = _exact_cache_storage_accounting(
+            plan,
+            tuple(sorted(retained_ids)),
+            construction,
+            external,
+            knapsack_bytes=knapsack_bytes,
+            packed_physical_bytes=_cache_payload_bytes(adapter, packed.snapshot),
+        )
         artifacts[proposal.level_indices] = _HierarchicalExactArtifact(
             construction=construction,
             selection=selection,
             external_source_node_ids=external,
             retained_source_node_ids=tuple(sorted(retained_ids)),
-            packed_physical_bytes=_cache_payload_bytes(adapter, packed.snapshot),
+            packed_physical_bytes=storage_accounting.constructed_physical_bytes,
+            storage_accounting=storage_accounting,
         )
         return probe_isolated_packed_candidate(
             adapter,
@@ -6091,6 +6232,35 @@ def _run_hierarchical_logit_safe_eviction(
         knapsack_bytes=decision.selection.active_bytes,
         packed_physical_bytes=selected_artifact.packed_physical_bytes,
     )
+    rejected_evaluation = next(
+        (
+            evaluation
+            for evaluation in reversed(decision.evaluations)
+            if not evaluation.passed
+            and evaluation.proposal.kind
+            in {
+                HierarchicalProposalKind.JOINT,
+                HierarchicalProposalKind.ROLLBACK,
+                HierarchicalProposalKind.REALLOCATION,
+            }
+            and evaluation.proposal.level_indices in artifacts
+        ),
+        None,
+    )
+    rejected_artifact = (
+        None
+        if rejected_evaluation is None
+        else artifacts[rejected_evaluation.proposal.level_indices]
+    )
+    rejected_accounting = (
+        None if rejected_artifact is None else rejected_artifact.storage_accounting
+    )
+    if decision.used_fullkv_fallback and (
+        rejected_evaluation is None or rejected_accounting is None
+    ):
+        raise HuggingFaceRuntimeError(
+            "hierarchical FullKV fallback lost the rejected compressed proposal accounting"
+        )
     if not accounting.logical_boundaries_aligned:
         decision_record = cast("JsonObject", asdict(decision))
         error = HuggingFaceRuntimeError(
@@ -6127,6 +6297,12 @@ def _run_hierarchical_logit_safe_eviction(
             allow_fullkv_capacity_expansion=decision.used_fullkv_fallback,
         ),
         hierarchical_storage_accounting=accounting,
+        hierarchical_rejected_proposal_storage_accounting=rejected_accounting,
+        hierarchical_rejected_proposal_id=(
+            None
+            if rejected_evaluation is None
+            else rejected_evaluation.proposal.proposal_id
+        ),
     )
     return selected_plan, decision
 
@@ -8567,6 +8743,20 @@ class HuggingFaceMosaicKVModel:
                                 ),
                             },
                         )
+                        fallback_accounting = plan.hierarchical_storage_accounting
+                        rejected_accounting = (
+                            plan.hierarchical_rejected_proposal_storage_accounting
+                        )
+                        rejected_proposal_id = plan.hierarchical_rejected_proposal_id
+                        if fallback_accounting is None:
+                            raise HuggingFaceRuntimeError(
+                                "hierarchical FullKV fallback is missing final accounting"
+                            )
+                        if rejected_accounting is None or rejected_proposal_id is None:
+                            raise HuggingFaceRuntimeError(
+                                "hierarchical FullKV fallback is missing rejected proposal "
+                                "accounting"
+                            )
                         failure_payload = _hard_budget_fallback_trace_payload(
                             decision_record,
                             attempted_active_kv_bytes=attempted_active_bytes,
@@ -8574,6 +8764,9 @@ class HuggingFaceMosaicKVModel:
                             attempted_prompt_capacity=attempted_capacity,
                             hard_prompt_capacity=dense_budget.prompt_capacity,
                             timing_breakdown=failure_timings,
+                            fullkv_fallback_accounting=fallback_accounting,
+                            rejected_compressed_proposal_accounting=rejected_accounting,
+                            rejected_compressed_proposal_id=rejected_proposal_id,
                         )
                         error = HuggingFaceRuntimeError(
                             "hierarchical logit-safe eviction returned an over-budget "
