@@ -208,6 +208,7 @@ def require_clean_snapshot(
         ).stdout.splitlines()
     )
     authorization_relative = authorization_path.resolve().relative_to(repository.resolve())
+    expected_scanner_changes.add(authorization_relative.as_posix())
     if (
         dirty
         or len(head) != 40

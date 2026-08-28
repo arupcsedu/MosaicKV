@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import subprocess
 import sys
 from pathlib import Path
 from types import ModuleType
@@ -47,6 +48,58 @@ def _manifest(path: Path) -> None:
         ),
         encoding="utf-8",
     )
+
+
+def _git(repository: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", "-C", str(repository), *args],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+def _snapshot_repository(tmp_path: Path, *, unexpected_path: bool) -> tuple[Path, str, Path]:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    _git(repository, "init", "-q")
+    _git(repository, "config", "user.name", "MosaicKV Test")
+    _git(repository, "config", "user.email", "mosaickv-test@example.invalid")
+    (repository / "README.md").write_text("scope\n", encoding="utf-8")
+    _git(repository, "add", "README.md")
+    _git(repository, "commit", "-q", "-m", "scope")
+    scope_commit = _git(repository, "rev-parse", "HEAD")
+
+    scanner_files = (
+        "mosaickv/src/mosaickv/evaluation/identity_exclusion_scan.py",
+        "mosaickv/scripts/scan_paper_quality_memory_v2_exclusions.py",
+        "mosaickv/tests/unit/test_paper_quality_memory_v2_exclusion_scan.py",
+    )
+    for relative in scanner_files:
+        path = repository / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"{relative}\n", encoding="utf-8")
+    _git(repository, "add", "mosaickv")
+    _git(repository, "commit", "-q", "-m", "scanner")
+
+    authorization = repository / "mosaickv/configs/ledgers/authorization.yaml"
+    authorization.parent.mkdir(parents=True)
+    authorization.write_text("authorized: false\n", encoding="utf-8")
+    _git(repository, "add", str(authorization.relative_to(repository)))
+    _git(repository, "commit", "-q", "-m", "disabled authorization")
+
+    corrected = repository / scanner_files[0]
+    corrected.write_text("corrected scanner\n", encoding="utf-8")
+    if unexpected_path:
+        unexpected = repository / "mosaickv/unexpected.txt"
+        unexpected.write_text("not allowed\n", encoding="utf-8")
+    _git(repository, "add", "mosaickv")
+    _git(repository, "commit", "-q", "-m", "correct scanner")
+
+    authorization.write_text("authorized: true\n", encoding="utf-8")
+    _git(repository, "add", str(authorization.relative_to(repository)))
+    _git(repository, "commit", "-q", "-m", "activate authorization")
+    return repository, scope_commit, authorization
 
 
 def test_identity_scan_projects_ledgers_results_and_parquet(tmp_path: Path) -> None:
@@ -230,3 +283,34 @@ def test_canonical_scope_cannot_authorize_execution(tmp_path: Path) -> None:
             package_root=fake_package,
         )
     assert not output.exists()
+
+
+def test_clean_snapshot_allows_only_authorization_ledger_beside_scanner_files(
+    tmp_path: Path,
+) -> None:
+    package = Path(__file__).parents[2]
+    scanner = _scanner(package)
+    repository, scope_commit, authorization = _snapshot_repository(
+        tmp_path, unexpected_path=False
+    )
+    scanner.__dict__["SCOPE_COMMIT"] = scope_commit
+    scanner_commit = _git(repository, "rev-parse", "HEAD^")
+
+    observed = scanner.require_clean_snapshot(
+        repository, scanner_commit, authorization
+    )
+
+    assert observed == _git(repository, "rev-parse", "HEAD")
+
+
+def test_clean_snapshot_rejects_any_other_scope_to_scanner_path(tmp_path: Path) -> None:
+    package = Path(__file__).parents[2]
+    scanner = _scanner(package)
+    repository, scope_commit, authorization = _snapshot_repository(
+        tmp_path, unexpected_path=True
+    )
+    scanner.__dict__["SCOPE_COMMIT"] = scope_commit
+    scanner_commit = _git(repository, "rev-parse", "HEAD^")
+
+    with pytest.raises(PermissionError, match="clean committed descendant"):
+        scanner.require_clean_snapshot(repository, scanner_commit, authorization)
