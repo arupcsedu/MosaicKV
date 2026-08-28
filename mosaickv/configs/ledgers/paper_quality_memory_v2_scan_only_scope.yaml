@@ -1,0 +1,143 @@
+schema_version: 1
+record_type: realworldqa_exclusion_scan_only_scope
+experiment_id: paper_quality_memory_v2_frozen_candidate
+scope_date: "2026-08-28"
+status: drafted_uncommitted_review_required_scan_not_executable
+immutable: false
+
+reviewed_route_boundary:
+  route_seal_commit_git_sha: 8be259137e55b7397106bf7ff1f3ed8ab2dc5adc
+  route_seal_commit_subject: Seal RealWorldQA routing boundary
+  route_seal_path: configs/ledgers/paper_quality_memory_v2_realworldqa_route_seal.yaml
+  route_seal_sha256: ca0e6b67711ab8f8e5e6522f501640857950d55224d4928b3540b96090783e54
+  route_seal_commit_reviewed_by_user: true
+  routing_commit_git_sha: 307cc7cf41d17d3c68af0f677b6ad4dcb422bda4
+  preregistration_commit_git_sha: 3eb8ef7461cf0a5b9c91774acc5819c0d10bed29
+  frozen_candidate_source_git_sha: 99a412bf0d2c639a095ff6efc5ca02e435b5e889
+
+scan_scope:
+  operation: cpu_identity_and_provenance_only_exclusion_scan
+  purpose: determine_whether_any_realworldqa_sample_identity_was_previously_used
+  dataset_id: lmms-lab/RealWorldQA
+  dataset_config: default
+  dataset_revision: 907c4e5228fd1703c710ed937601cb5f89ab8d5c
+  split: test
+  canonical_identity_fields:
+    - dataset_id
+    - dataset_config
+    - dataset_revision
+    - split
+    - sample_id
+  allowed_read_roots:
+    - /scratch/djy8hg/workdir/MosaicKV/mosaickv/configs/ledgers
+    - /scratch/djy8hg/runs/mosaickv
+  allowed_artifact_kinds:
+    - json
+    - jsonl
+    - yaml
+    - yml
+    - parquet_schema_and_identity_columns_only
+  allowed_record_fields:
+    - schema_version
+    - task
+    - task_name
+    - dataset_id
+    - dataset_config
+    - dataset_revision
+    - split
+    - sample_id
+    - canonical_sample_identity
+    - run_id
+    - source_path
+    - source_sha256
+    - source_record_count
+    - identity_count
+    - worktree_dirty
+    - git_sha
+    - config_sha
+  forbidden_record_fields:
+    - answer
+    - answers
+    - reference
+    - references
+    - task_score
+    - generated_tokens
+    - token_agreement
+    - logits
+    - logit_kl
+    - attention
+    - media
+    - image
+    - prompt
+    - error
+    - failure_identity
+  required_behavior:
+    - recursively_enumerate_both_allowed_read_roots
+    - inspect_only_identity_and_provenance_fields
+    - bind_every_scanned_source_path_to_sha256_and_record_count
+    - normalize_only_explicitly_complete_canonical_identities
+    - deduplicate_by_complete_canonical_identity
+    - treat_dataset_level_mentions_without_sample_ids_as_nonidentity_metadata
+    - fail_closed_on_realworldqa_sample_records_with_incomplete_or_ambiguous_provenance
+    - never_load_dataset_rows_media_prompts_answers_references_scores_or_failures
+    - never_rank_or_select_candidate_samples
+    - never_modify_source_artifacts
+  only_permitted_output: /scratch/djy8hg/runs/mosaickv/paper-quality-memory-v2-frozen-99a412b/inputs/exclusion_manifest_realworldqa.json
+  output_must_not_exist_before_scan: true
+  output_must_be_created_atomically: true
+  output_must_be_write_once_and_read_only: true
+  output_must_record_source_paths_hashes_record_counts_and_canonical_identities: true
+  manifest_hash_and_content_review_required_before_any_next_action: true
+
+execution_environment:
+  execution_mode: local_cpu_only
+  common_environment: /scratch/djy8hg/env/mosaickv
+  cache_policy_must_be_sourced: true
+  cache_root: /scratch/djy8hg/cache/mosaickv
+  network_access_allowed: false
+  dataset_download_allowed: false
+  home_cache_allowed: false
+  model_loading_allowed: false
+  gpu_access_allowed: false
+  slurm_submission_allowed: false
+
+scope_update_boundary:
+  scope_update_commit_git_sha: null
+  scope_update_file_sha256_at_commit: null
+  scope_update_commit_reviewed: false
+  commit_policy: commit_containing_only_this_file_becomes_the_scan_scope_boundary
+  scan_may_run_before_clean_commit_and_review: false
+
+authorization:
+  route_seal_reviewed: true
+  scan_only_scope_update_authorized_by_user: true
+  scan_only_scope_file_committed: false
+  scan_only_scope_commit_reviewed: false
+  exclusion_scan_execution_authorized: false
+  exclusion_manifest_review_authorized: false
+  catalog_access_or_construction_authorized: false
+  sample_ranking_or_selection_authorized: false
+  sample_materialization_authorized: false
+  disjointness_check_authorized: false
+  retention_one_gpu_parity_authorized: false
+  model_or_dataset_execution_authorized: false
+  gpu_evaluation_authorized: false
+  slurm_or_other_job_submission_authorized: false
+  result_analysis_authorized: false
+  paper_result_claim_authorized: false
+  automatic_follow_on_authorized: false
+
+explicitly_forbidden_now:
+  - exclusion_scan_execution_before_this_scope_is_committed_and_reviewed
+  - catalog_access_or_construction
+  - dataset_row_or_media_loading
+  - sample_identity_ranking_selection_or_materialization
+  - disjointness_check
+  - model_loading_or_inference
+  - gpu_or_slurm_submission
+  - evaluation_or_result_analysis
+
+next_step:
+  action: review_and_authorize_one_local_commit_containing_only_this_scope_file
+  action_after_commit: review_the_immutable_scope_commit_before_separately_running_the_cpu_scan
+  downstream_actions_remain_disabled_after_scan: true
