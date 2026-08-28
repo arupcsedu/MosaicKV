@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import replace
 
 import numpy as np
@@ -2228,6 +2229,119 @@ def test_dense_selector_reserves_each_layer_head_stratum_before_global_greedy() 
     }
     assert selected_per_head == {0: 4, 1: 4}
     assert any(decision.reason is SelectionReason.STRATUM_RESERVE for decision in result.decisions)
+
+
+def test_joint_reservation_transaction_relaxes_optional_blocks_for_all_strata() -> None:
+    sequence = 64
+    key = np.arange(3 * sequence * 2, dtype=np.float32).reshape(1, 3, sequence, 2)
+    full = FullKVState.from_tensors(
+        ((key, key.copy()),),
+        modality_spans=(ModalitySpan(0, sequence, Modality.TEXT),),
+        block_size=4,
+        mandatory_logical_positions=(sequence - 1,),
+    )
+    graph = build_evidence_graph(full, _isolated_graph_config())
+    utilities = compute_block_utilities(
+        graph,
+        UtilityConfig(lambda_v=0.0, lambda_o=0.0),
+        forecast_attention_by_node={node.node_id: 1.0 for node in graph.nodes},
+        attention_provenance="synthetic_joint_reservation_fixture",
+        rope_aware=True,
+    )
+    objective = BudgetedObjective(
+        graph,
+        utilities,
+        SelectionConfig(
+            lambda_g=0.0,
+            lambda_m=0.0,
+            stop_on_nonpositive_gain=False,
+            minimum_stratum_fraction=0.15,
+        ),
+    )
+    by_head = {
+        head: tuple(
+            node.node_id for node in graph.nodes if node.block.kv_head == head
+        )
+        for head in range(3)
+    }
+    required = (by_head[0][0],)
+    prompt = (*by_head[0][1:10], *by_head[1][1:6])
+    evidence = (*by_head[1][6:10], *by_head[2][1:10])
+
+    first = lazy_greedy_select(
+        objective,
+        SelectionBudget(40, BudgetUnit.RETAINED_SLOTS),
+        position_limits={(0, 0): 61, (0, 1): 55, (0, 2): 54},
+        required_node_ids=required,
+        prompt_anchor_node_ids=prompt,
+        evidence_node_ids=evidence,
+        # Reproduce routed planning where the ordinary optimization shortlist
+        # is too small to satisfy every head on its own.
+        optimization_node_ids=(by_head[0][1], by_head[1][1], by_head[2][1]),
+    )
+    second = lazy_greedy_select(
+        objective,
+        SelectionBudget(40, BudgetUnit.RETAINED_SLOTS),
+        position_limits={(0, 0): 61, (0, 1): 55, (0, 2): 54},
+        required_node_ids=required,
+        prompt_anchor_node_ids=prompt,
+        evidence_node_ids=evidence,
+        optimization_node_ids=(by_head[0][1], by_head[1][1], by_head[2][1]),
+    )
+
+    selected_positions = {
+        head: sum(
+            graph.nodes[node_id].block.position_count
+            for node_id in first.selected_node_ids
+            if graph.nodes[node_id].block.kv_head == head
+        )
+        for head in range(3)
+    }
+    assert selected_positions[0] >= math.floor(61 * 0.15)
+    assert selected_positions[1] >= math.floor(55 * 0.15)
+    assert selected_positions[2] >= math.floor(54 * 0.15)
+    assert first.budget_spent <= 40
+    assert first.selected_node_ids == second.selected_node_ids
+    assert set(required).issubset(first.selected_node_ids)
+    assert not set((*prompt, *evidence)).issubset(first.selected_node_ids)
+
+
+def test_joint_reservation_transaction_fills_observed_54_to_61_position_lattice() -> None:
+    sequence = 64
+    key = np.arange(3 * sequence * 2, dtype=np.float32).reshape(1, 3, sequence, 2)
+    full = FullKVState.from_tensors(
+        ((key, key.copy()),),
+        modality_spans=(ModalitySpan(0, sequence, Modality.TEXT),),
+        block_size=4,
+        mandatory_logical_positions=(sequence - 1,),
+    )
+    _graph, _utilities, objective = _utilities_and_objective(
+        full,
+        selection_config=SelectionConfig(
+            lambda_g=0.0,
+            lambda_m=0.0,
+            stop_on_nonpositive_gain=False,
+            minimum_stratum_fraction=0.15,
+        ),
+    )
+
+    result = lazy_greedy_select(
+        objective,
+        SelectionBudget(170, BudgetUnit.RETAINED_SLOTS),
+        position_limits={(0, 0): 61, (0, 1): 55, (0, 2): 54},
+        fill_position_limits=True,
+        position_fill_quantum=4,
+    )
+
+    positions = {
+        head: sum(
+            block.position_count for block in result.selected_blocks if block.kv_head == head
+        )
+        for head in range(3)
+    }
+    assert positions == {0: 60, 1: 52, 2: 52}
+    assert result.budget_spent == 164
+    assert result.budget_spent <= result.budget.value
 
 
 def test_dense_fill_removes_padding_even_after_nonpositive_stop() -> None:

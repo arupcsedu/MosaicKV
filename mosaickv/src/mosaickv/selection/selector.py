@@ -292,7 +292,7 @@ def lazy_greedy_select(
             reason=SelectionReason.MANDATORY_EXACT,
         )
 
-    def select_required_nodes(
+    def select_hard_nodes(
         node_ids: Iterable[int],
         reason: SelectionReason,
         label: str,
@@ -366,35 +366,205 @@ def lazy_greedy_select(
                 reason=reason,
             )
 
-    # Prompt anchors are a quality guard, evidence nodes preserve fine local
-    # structure, and prototype anchors are representation constraints. All are
-    # auditable hard reservations inside the same active budget.
-    # A modality boundary can produce a short block that is nevertheless the
-    # highest-attention Prompt Top-K choice. Preserve it exactly and let the
-    # deterministic residue-completion pass below fill the remaining dense
-    # head capacity, just as it already does for partial prototype anchors.
-    select_required_nodes(
-        prompt_anchors,
-        SelectionReason.PROMPT_ANCHOR,
-        "prompt anchor",
-        allow_partial=True,
-        atomic=True,
-    )
-    select_required_nodes(
-        evidence_nodes,
-        SelectionReason.EVIDENCE_PRESERVATION,
-        "evidence-preservation block",
-    )
-    # A modality boundary may leave a short source block. Prototype planning
-    # prefers aligned anchors, but an unavoidable partial anchor remains a
-    # valid exact payload. A deterministic residue-completion pass below adds
-    # complementary boundary blocks before the ordinary fixed-block greedy
-    # sweep, preserving an exactly filled dense head layout.
-    select_required_nodes(
+    # Prototype anchors are representation constraints: unlike prompt and
+    # evidence preferences, they cannot be discarded without invalidating the
+    # planned prototype assignment. Commit them immediately after mandatory
+    # blocks so every later reservation sees their real byte/position cost.
+    # A modality boundary may leave a short source block. The residue pass
+    # below finds complementary fragments before ordinary fixed-block fill.
+    select_hard_nodes(
         required,
         SelectionReason.PROTOTYPE_ANCHOR,
         "prototype anchor",
         allow_partial=True,
+    )
+
+    def reserve_minimum_strata() -> None:
+        """Reserve each layer/head minimum before optional quality anchors.
+
+        The former ordering committed prompt and evidence blocks first, then
+        discovered that a later layer/head could not reach its configured
+        minimum despite the overall hard budget being feasible.  This pass is
+        the feasibility boundary of one reservation transaction: mandatory
+        and prototype blocks are already occupied, every stratum receives its
+        minimum next, and only the remaining capacity is offered to optional
+        prompt/evidence reservations.
+        """
+
+        nonlocal spent
+        if position_limits is None or objective.config.minimum_stratum_fraction <= 0:
+            return
+        groups: defaultdict[tuple[int, int], list[int]] = defaultdict(list)
+        for node in graph.nodes:
+            groups[(node.block.layer, node.block.kv_head)].append(node.node_id)
+        prompt_set = frozenset(prompt_anchors)
+        evidence_set = frozenset(evidence_nodes)
+        planned_by_identity: dict[tuple[int, int], tuple[int, ...]] = {}
+        planned_cost = 0
+        for identity in sorted(position_limits):
+            limit = position_limits[identity]
+            reserve = math.floor(limit * objective.config.minimum_stratum_fraction)
+            deficit = max(0, reserve - selected_positions[identity])
+            if deficit == 0:
+                planned_by_identity[identity] = ()
+                continue
+            capacity = limit - selected_positions[identity]
+            # position sum -> (budget cost, quality-class penalty,
+            # negative static gain, node IDs).  This bounded subset DP finds
+            # the least-cost physically representable way to reach the
+            # stratum minimum.  Solving every head before mutating selection
+            # prevents an early head from consuming capacity needed later.
+            attainable: dict[int, tuple[int, int, float, tuple[int, ...]]] = {
+                0: (0, 0, 0.0, ())
+            }
+            for node_id in sorted(groups.get(identity, ())):
+                if node_id in selected:
+                    continue
+                if not is_position_representable(node_id):
+                    constrained.add(node_id)
+                    continue
+                block = graph.nodes[node_id].block
+                cost = costs[node_id]
+                gain = incremental.marginal_gain(node_id)
+                quality_priority = (
+                    0 if node_id in prompt_set else 1 if node_id in evidence_set else 2
+                )
+                updates = dict(attainable)
+                for positions, state in attainable.items():
+                    candidate_positions = positions + block.position_count
+                    if candidate_positions > capacity:
+                        continue
+                    current_cost, priority, negative_gain, identifiers = state
+                    candidate = (
+                        current_cost + cost,
+                        priority + quality_priority,
+                        negative_gain - gain,
+                        (*identifiers, node_id),
+                    )
+                    previous = updates.get(candidate_positions)
+                    if previous is None or candidate < previous:
+                        updates[candidate_positions] = candidate
+                attainable = updates
+            feasible = (
+                (state[0], positions - deficit, state[1], state[2], state[3])
+                for positions, state in attainable.items()
+                if positions >= deficit
+            )
+            best = min(feasible, default=None)
+            if best is None:
+                raise InfeasibleSelectionBudgetError(
+                    "mandatory/prototype constraints leave no physically feasible "
+                    "per-stratum minimum allocation: "
+                    f"identity={identity}, selected_positions="
+                    f"{selected_positions[identity]}, reserve={reserve}, limit={limit}"
+                )
+            planned_cost += best[0]
+            planned_by_identity[identity] = best[4]
+        if planned_cost > budget.value - spent:
+            raise InfeasibleSelectionBudgetError(
+                "mandatory/prototype constraints and per-stratum minima exceed the "
+                "hard budget before optional reservations: "
+                f"required={spent + planned_cost}, budget={budget.value}, "
+                f"unit={budget.unit.value}"
+            )
+        for identity in sorted(planned_by_identity):
+            for node_id in planned_by_identity[identity]:
+                block = graph.nodes[node_id].block
+                cost = costs[node_id]
+                gain = incremental.select(node_id)
+                rank = len(selection_order)
+                selected.add(node_id)
+                selection_order.append(node_id)
+                spent += cost
+                selected_positions[identity] += block.position_count
+                decisions[node_id] = SelectionDecision._from_validated(
+                    node_id=node_id,
+                    selected=True,
+                    selection_rank=rank,
+                    marginal_gain=gain,
+                    marginal_gain_per_cost=gain / cost,
+                    cost=cost,
+                    reason=SelectionReason.STRATUM_RESERVE,
+                )
+
+    def select_optional_nodes(
+        node_ids: Iterable[int],
+        reason: SelectionReason,
+        *,
+        allow_partial: bool = False,
+        atomic: bool = False,
+    ) -> None:
+        """Admit a deterministic feasible subset of an optional reservation."""
+
+        nonlocal spent
+        candidates: list[tuple[float, float, int, int]] = []
+        for node_id in node_ids:
+            if node_id in selected:
+                continue
+            block = graph.nodes[node_id].block
+            if not allow_partial and not is_position_representable(node_id):
+                constrained.add(node_id)
+                continue
+            gain = incremental.marginal_gain(node_id)
+            cost = costs[node_id]
+            candidates.append((-gain / cost, -gain, cost, node_id))
+        pending: list[tuple[int, int]] = []
+        for _density, _negative_gain, cost, node_id in sorted(candidates):
+            block = graph.nodes[node_id].block
+            identity = (block.layer, block.kv_head)
+            limit = None if position_limits is None else position_limits.get(identity)
+            if cost > budget.value - spent:
+                continue
+            if limit is not None and selected_positions[identity] + block.position_count > limit:
+                constrained.add(node_id)
+                continue
+            rank = len(selection_order)
+            selected.add(node_id)
+            selection_order.append(node_id)
+            spent += cost
+            selected_positions[identity] += block.position_count
+            if atomic:
+                pending.append((node_id, cost))
+                continue
+            gain = incremental.select(node_id)
+            decisions[node_id] = SelectionDecision._from_validated(
+                node_id=node_id,
+                selected=True,
+                selection_rank=rank,
+                marginal_gain=gain,
+                marginal_gain_per_cost=gain / cost,
+                cost=cost,
+                reason=reason,
+            )
+        if not pending:
+            return
+        gains = incremental.reserve_many(node_id for node_id, _cost in pending)
+        first_rank = len(selection_order) - len(pending)
+        for offset, ((node_id, cost), gain) in enumerate(zip(pending, gains, strict=True)):
+            decisions[node_id] = SelectionDecision._from_validated(
+                node_id=node_id,
+                selected=True,
+                selection_rank=first_rank + offset,
+                marginal_gain=gain,
+                marginal_gain_per_cost=gain / cost,
+                cost=cost,
+                reason=reason,
+            )
+
+    # This is one ordered feasibility transaction. Hard representation
+    # constraints and stratum minima cannot be displaced by optional quality
+    # preferences. Prompt/evidence reservations are then reduced only as much
+    # as required by the same byte and position limits.
+    reserve_minimum_strata()
+    select_optional_nodes(
+        prompt_anchors,
+        SelectionReason.PROMPT_ANCHOR,
+        allow_partial=True,
+        atomic=True,
+    )
+    select_optional_nodes(
+        evidence_nodes,
+        SelectionReason.EVIDENCE_PRESERVATION,
     )
 
     if position_fill_quantum is not None:
@@ -506,56 +676,6 @@ def lazy_greedy_select(
                     marginal_gain_per_cost=gain / cost,
                     cost=cost,
                     reason=SelectionReason.DENSE_CACHE_FILL,
-                )
-
-    if position_limits is not None and objective.config.minimum_stratum_fraction > 0:
-        groups: defaultdict[tuple[int, int], list[int]] = defaultdict(list)
-        for node in graph.nodes:
-            groups[(node.block.layer, node.block.kv_head)].append(node.node_id)
-        for identity in sorted(position_limits):
-            limit = position_limits[identity]
-            reserve = math.floor(limit * objective.config.minimum_stratum_fraction)
-            while selected_positions[identity] < reserve:
-                candidates: list[tuple[float, float, int, int, float]] = []
-                for node_id in groups.get(identity, ()):
-                    if node_id in selected:
-                        continue
-                    if node_id not in optimization_nodes:
-                        continue
-                    if not is_position_representable(node_id):
-                        constrained.add(node_id)
-                        continue
-                    block = graph.nodes[node_id].block
-                    cost = costs[node_id]
-                    if selected_positions[identity] + block.position_count > limit:
-                        continue
-                    if cost > budget.value - spent:
-                        continue
-                    gain = incremental.marginal_gain(node_id)
-                    candidates.append((-gain / cost, -gain, cost, node_id, gain))
-                if not candidates:
-                    raise InfeasibleSelectionBudgetError(
-                        "configured per-stratum reserve cannot be represented within the "
-                        f"hard budget: identity={identity}, selected_positions="
-                        f"{selected_positions[identity]}, reserve={reserve}, limit={limit}, "
-                        f"remaining_budget={budget.value - spent}"
-                    )
-                _density, _negative_gain, cost, node_id, gain = min(candidates)
-                block = graph.nodes[node_id].block
-                gain = incremental.select(node_id)
-                rank = len(selection_order)
-                selected.add(node_id)
-                selection_order.append(node_id)
-                spent += cost
-                selected_positions[identity] += block.position_count
-                decisions[node_id] = SelectionDecision._from_validated(
-                    node_id=node_id,
-                    selected=True,
-                    selection_rank=rank,
-                    marginal_gain=gain,
-                    marginal_gain_per_cost=gain / cost,
-                    cost=cost,
-                    reason=SelectionReason.STRATUM_RESERVE,
                 )
 
     heap_pops = 0
