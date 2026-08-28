@@ -1,0 +1,110 @@
+schema_version: 1
+record_type: paper_quality_memory_v2_exclusion_scan_execution_authorization
+experiment_id: paper_quality_memory_v2_frozen_candidate
+ledger_date: "2026-08-28"
+status: drafted_uncommitted_unreviewed_execution_disabled
+immutable: false
+
+scope_boundary:
+  commit_git_sha: 15169135b96161b53bf1f56ab220b6a3f2217e8a
+  path: configs/ledgers/paper_quality_memory_v2_scan_only_scope.yaml
+  sha256: fb46ca1dbc030037b2b92b3182b661bdd0b4138f8eb060fd8f0bb4eb28a48110
+  reviewed_before_scanner_implementation: true
+
+scanner_boundary:
+  commit_git_sha: 370093df1ac5b9ff021b10d60a575a14f6e3a5bc
+  commit_parent_git_sha: 15169135b96161b53bf1f56ab220b6a3f2217e8a
+  exact_file_count: 3
+  files:
+    - path: src/mosaickv/evaluation/identity_exclusion_scan.py
+      sha256: cd90472501b08898e768e42876ad65d8aea6795b775ca18acb2fe6794b3a82ef
+    - path: scripts/scan_paper_quality_memory_v2_exclusions.py
+      sha256: f550aedb9d3a6380990acf064c2b98866cc6609dfea802a0a4bec8b8ccd569e8
+    - path: tests/unit/test_paper_quality_memory_v2_exclusion_scan.py
+      sha256: 5215c3ae175cad9c5f1eff9d54f422922003725e17d494bb05cf8e42c6e4f365
+  reviewed_before_authorization_ledger_draft: true
+  cpu_validation:
+    targeted_pytest: 30_passed
+    ruff: passed
+    mypy: passed
+    real_scan_roots_accessed: false
+    canonical_output_created: false
+
+scan_contract:
+  operation: one_cpu_identity_and_provenance_only_exclusion_scan
+  maximum_successful_execution_count: 1
+  dataset_id: lmms-lab/RealWorldQA
+  dataset_config: default
+  dataset_revision: 907c4e5228fd1703c710ed937601cb5f89ab8d5c
+  split: test
+  canonical_identity_fields:
+    - dataset_id
+    - dataset_config
+    - dataset_revision
+    - split
+    - sample_id
+  allowed_read_roots:
+    - /scratch/djy8hg/workdir/MosaicKV/mosaickv/configs/ledgers
+    - /scratch/djy8hg/runs/mosaickv
+  output: /scratch/djy8hg/runs/mosaickv/paper-quality-memory-v2-frozen-99a412b/inputs/exclusion_manifest_realworldqa.json
+  output_must_be_absent_before_execution: true
+  output_must_be_atomic_write_once_and_mode_0444: true
+  source_inventory_must_include_path_sha256_and_record_count: true
+  manifest_review_required_before_any_follow_on: true
+  catalog_files_must_not_be_opened: true
+  forbidden_content_fields_must_not_be_accessed: true
+  dataset_rows_or_media_must_not_be_loaded: true
+  network_access_allowed: false
+  gpu_access_allowed: false
+  slurm_access_allowed: false
+
+output: /scratch/djy8hg/runs/mosaickv/paper-quality-memory-v2-frozen-99a412b/inputs/exclusion_manifest_realworldqa.json
+reviewed_by_user: false
+
+ledger_boundary:
+  initial_ledger_commit_git_sha: null
+  initial_ledger_sha256_at_commit: null
+  initial_ledger_commit_reviewed: false
+  activation_commit_git_sha: null
+  activation_ledger_sha256_at_commit: null
+  activation_commit_reviewed: false
+  commit_policy: initial_commit_must_contain_only_this_disabled_ledger
+
+authorization:
+  exclusion_scan_execution_authorized: false
+  exclusion_manifest_review_authorized: false
+  catalog_access_or_construction_authorized: false
+  sample_ranking_or_selection_authorized: false
+  sample_materialization_authorized: false
+  disjointness_check_authorized: false
+  model_or_dataset_execution_authorized: false
+  retention_one_gpu_parity_authorized: false
+  gpu_evaluation_authorized: false
+  slurm_or_other_job_submission_authorized: false
+  result_analysis_authorized: false
+  paper_result_claim_authorized: false
+  automatic_follow_on_authorized: false
+
+activation_requirements:
+  - commit_this_disabled_ledger_as_the_only_changed_file
+  - review_the_committed_ledger_sha_and_content
+  - receive_separate_explicit_user_authorization_for_one_cpu_scan
+  - change_only_reviewed_by_user_and_exclusion_scan_execution_authorized_to_true
+  - commit_and_review_that_single_file_activation_before_execution
+  - retain_every_other_authorization_as_false
+  - require_a_clean_worktree_and_the_bound_scanner_git_objects
+  - require_the_canonical_output_to_be_absent
+
+explicitly_forbidden_now:
+  - exclusion_scan_execution
+  - catalog_access_or_construction
+  - dataset_row_or_media_loading
+  - sample_ranking_selection_or_materialization
+  - disjointness_check
+  - model_loading_or_inference
+  - gpu_or_slurm_submission
+  - evaluation_or_result_analysis
+
+next_step:
+  action: review_and_authorize_one_local_commit_containing_only_this_disabled_ledger
+  scan_execution_requires_later_separate_authorization_and_activation_commit: true
