@@ -61,7 +61,7 @@ scan_contract:
   slurm_access_allowed: false
 
 output: /scratch/djy8hg/runs/mosaickv/paper-quality-memory-v2-frozen-99a412b/inputs/exclusion_manifest_realworldqa.json
-reviewed_by_user: false
+reviewed_by_user: true
 
 ledger_boundary:
   initial_ledger_commit_git_sha: null
@@ -73,7 +73,7 @@ ledger_boundary:
   commit_policy: initial_commit_must_contain_only_this_disabled_ledger
 
 authorization:
-  exclusion_scan_execution_authorized: false
+  exclusion_scan_execution_authorized: true
   exclusion_manifest_review_authorized: false
   catalog_access_or_construction_authorized: false
   sample_ranking_or_selection_authorized: false
