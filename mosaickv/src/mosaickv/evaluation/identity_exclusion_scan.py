@@ -26,6 +26,7 @@ from mosaickv.evaluation.disjoint_samples import (
 )
 
 _SUPPORTED_SUFFIXES = frozenset({".json", ".jsonl", ".yaml", ".yml", ".parquet"})
+_SCHEDULER_LOG_NAMES = frozenset({"stderr.jsonl", "stdout.jsonl"})
 _FORBIDDEN_KEYS = frozenset(
     {
         "answer",
@@ -312,6 +313,13 @@ def _sha256_stream(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _is_attempt_scheduler_log(path: Path) -> bool:
+    return (
+        path.name.casefold() in _SCHEDULER_LOG_NAMES
+        and path.parent.parent.name.casefold() == "attempts"
+    )
+
+
 def discover_identity_sources(
     roots: Iterable[Path], *, ignored: Iterable[Path] = ()
 ) -> tuple[Path, ...]:
@@ -349,6 +357,8 @@ def discover_identity_sources(
                 # The canonical target is enumerated through its real in-root path.
                 continue
             if not path.is_file() or path.suffix.casefold() not in _SUPPORTED_SUFFIXES:
+                continue
+            if _is_attempt_scheduler_log(path):
                 continue
             try:
                 resolved = path.resolve(strict=True)

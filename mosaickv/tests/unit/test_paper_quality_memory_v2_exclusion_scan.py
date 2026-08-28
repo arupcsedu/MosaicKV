@@ -241,6 +241,41 @@ def test_source_discovery_rejects_symlink_outside_allowed_roots(tmp_path: Path) 
         discover_identity_sources((root,))
 
 
+def test_identity_scan_skips_attempt_scheduler_logs_without_parsing(tmp_path: Path) -> None:
+    root = tmp_path / "runs"
+    attempt = root / "run-a/attempts/12345"
+    attempt.mkdir(parents=True)
+    (attempt / "stdout.jsonl").write_text("not JSON output\n", encoding="utf-8")
+    (attempt / "stderr.jsonl").write_text("not JSON error output\n", encoding="utf-8")
+
+    payload = scan_identity_sources(
+        roots=(root,),
+        target=TARGET,
+        source_git_sha="a" * 40,
+        source_git_dirty=False,
+    )
+
+    assert payload["sources"] == []
+    assert payload["excluded_unique_sample_count"] == 0
+
+
+def test_identity_scan_still_rejects_malformed_canonical_raw_jsonl(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "runs"
+    root.mkdir()
+    raw = root / "raw.jsonl"
+    raw.write_text("not JSON result data\n", encoding="utf-8")
+
+    with pytest.raises(SampleProtocolError, match=r"invalid JSON at .*raw\.jsonl:1"):
+        scan_identity_sources(
+            roots=(root,),
+            target=TARGET,
+            source_git_sha="a" * 40,
+            source_git_dirty=False,
+        )
+
+
 def test_write_once_exclusive_is_read_only_and_refuses_overwrite(tmp_path: Path) -> None:
     output = tmp_path / "inputs/exclusion.json"
     first = write_once_exclusive(output, {"schema_version": 2})
