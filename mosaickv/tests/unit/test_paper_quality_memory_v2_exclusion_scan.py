@@ -11,6 +11,7 @@ import yaml  # type: ignore[import-untyped]
 
 from mosaickv.evaluation.disjoint_samples import DatasetContract, SampleProtocolError
 from mosaickv.evaluation.identity_exclusion_scan import (
+    discover_identity_sources,
     scan_identity_sources,
     write_once_exclusive,
 )
@@ -147,6 +148,44 @@ def test_identity_scan_fails_closed_on_incomplete_or_conflicting_provenance(
             source_git_sha="a" * 40,
             source_git_dirty=False,
         )
+
+
+def test_source_discovery_skips_in_root_alias_and_deduplicates_overlapping_roots(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "runs"
+    canonical = root / "canonical"
+    alias = root / "alias"
+    canonical.mkdir(parents=True)
+    source = canonical / "manifest.json"
+    source.write_text("{}", encoding="utf-8")
+    alias.symlink_to(canonical, target_is_directory=True)
+
+    discovered = discover_identity_sources((root, canonical))
+
+    assert discovered == (source.resolve(),)
+
+
+def test_source_discovery_rejects_broken_symlink(tmp_path: Path) -> None:
+    root = tmp_path / "runs"
+    root.mkdir()
+    (root / "broken.json").symlink_to(root / "missing.json")
+
+    with pytest.raises(SampleProtocolError, match="broken symbolic link"):
+        discover_identity_sources((root,))
+
+
+def test_source_discovery_rejects_symlink_outside_allowed_roots(tmp_path: Path) -> None:
+    root = tmp_path / "runs"
+    outside = tmp_path / "outside"
+    root.mkdir()
+    outside.mkdir()
+    target = outside / "manifest.json"
+    target.write_text("{}", encoding="utf-8")
+    (root / "escape.json").symlink_to(target)
+
+    with pytest.raises(SampleProtocolError, match="escapes allowed roots"):
+        discover_identity_sources((root,))
 
 
 def test_write_once_exclusive_is_read_only_and_refuses_overwrite(tmp_path: Path) -> None:

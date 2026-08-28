@@ -315,23 +315,50 @@ def _sha256_stream(path: Path) -> str:
 def discover_identity_sources(
     roots: Iterable[Path], *, ignored: Iterable[Path] = ()
 ) -> tuple[Path, ...]:
-    """Return supported non-catalog artifacts without following symlinks."""
+    """Return canonical sources once, skipping only safe in-root aliases."""
 
     ignored_paths = {path.resolve() for path in ignored}
-    discovered: set[Path] = set()
+    resolved_roots: list[Path] = []
     for raw_root in roots:
-        root = raw_root.resolve()
+        try:
+            root = raw_root.resolve(strict=True)
+        except (FileNotFoundError, OSError, RuntimeError) as error:
+            raise SampleProtocolError(
+                f"exclusion scan root cannot be resolved: {raw_root}"
+            ) from error
         if not root.is_dir():
             raise SampleProtocolError(f"exclusion scan root does not exist: {root}")
+        resolved_roots.append(root)
+    if not resolved_roots:
+        raise SampleProtocolError("exclusion scan requires at least one root")
+
+    discovered: set[Path] = set()
+    for root in resolved_roots:
         for path in root.rglob("*"):
             if path.is_symlink():
-                raise SampleProtocolError(f"exclusion scan refuses symbolic links: {path}")
+                try:
+                    target = path.resolve(strict=True)
+                except (FileNotFoundError, OSError, RuntimeError) as error:
+                    raise SampleProtocolError(
+                        f"exclusion scan encountered a broken symbolic link: {path}"
+                    ) from error
+                if not any(target.is_relative_to(candidate) for candidate in resolved_roots):
+                    raise SampleProtocolError(
+                        f"exclusion scan symbolic link escapes allowed roots: {path} -> {target}"
+                    )
+                # The canonical target is enumerated through its real in-root path.
+                continue
             if not path.is_file() or path.suffix.casefold() not in _SUPPORTED_SUFFIXES:
                 continue
-            resolved = path.resolve()
+            try:
+                resolved = path.resolve(strict=True)
+            except (FileNotFoundError, OSError, RuntimeError) as error:
+                raise SampleProtocolError(
+                    f"exclusion source cannot be resolved: {path}"
+                ) from error
             if resolved in ignored_paths or "catalog" in path.name.casefold():
                 continue
-            if not resolved.is_relative_to(root):  # pragma: no cover - symlinks rejected above.
+            if not any(resolved.is_relative_to(candidate) for candidate in resolved_roots):
                 raise SampleProtocolError(f"exclusion source escapes its root: {path}")
             discovered.add(resolved)
     return tuple(sorted(discovered, key=str))
