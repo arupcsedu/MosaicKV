@@ -1,0 +1,98 @@
+schema_version: 1
+record_type: realworldqa_route_implementation_seal
+experiment_id: paper_quality_memory_v2_frozen_candidate
+seal_date: "2026-08-28"
+status: drafted_uncommitted_review_required
+immutable: false
+
+preregistration_boundary:
+  commit_git_sha: 3eb8ef7461cf0a5b9c91774acc5819c0d10bed29
+  commit_subject: Preregister frozen paper candidate evaluation
+  protocol_path: configs/experiments/paper_quality_memory_v2_preregistered.yaml
+  protocol_sha256: c2a0c3df36cb657f4f45c3b4c966de562d4b9dc5add87a44f8e0e8369003360e
+  freeze_record_path: configs/ledgers/paper_candidate_v1_frozen_99a412b.yaml
+  freeze_record_sha256: 0693ab9b24d24d38d67fec61954877c12459f8240445d2697f259b2adba6d05f
+  reviewed_by_user_before_routing_commit: true
+
+routing_boundary:
+  commit_git_sha: 307cc7cf41d17d3c68af0f677b6ad4dcb422bda4
+  commit_parent_git_sha: 3eb8ef7461cf0a5b9c91774acc5819c0d10bed29
+  commit_subject: Add preregistered RealWorldQA routing
+  exact_changed_file_count: 6
+  changed_files:
+    - path: src/mosaickv/evaluation/__init__.py
+      sha256: 2e6eff3d76d50b151dda6dc9e4c8b4d78bb525a2b551965b9714210b81a90d07
+    - path: src/mosaickv/evaluation/paper_candidate.py
+      sha256: 8f9a827accc270878fb4bace2f9838809b44bbc80a8e86ed95ee1d37a8acadcf
+    - path: src/mosaickv/evaluation/tasks.py
+      sha256: b3eb4b9e881e90c832f304bc2254174347ecba6b05b89fb189ee45f2ad02ffcf
+    - path: tests/unit/test_evaluation_tasks.py
+      sha256: 5c664430573454d7459d3608f58ff02dd6c6f7d4303d23e0d9f90e217c1738e9
+    - path: tests/unit/test_lmms_adapter.py
+      sha256: fcb8fe26f855b56ec22e11be3ea6181cda5fb03a37db266fb8be634c88f1c60c
+    - path: tests/unit/test_paper_quality_memory_v2_preregistration.py
+      sha256: aabe5a4a0cb5af85ffdca6bf3385129112de2e7a852b4867ce9c8047e86ded5d
+
+route_contract:
+  public_task_name: realworldqa
+  lmms_eval_task_name: realworldqa
+  dataset_id: lmms-lab/RealWorldQA
+  dataset_config: default
+  dataset_revision: 907c4e5228fd1703c710ed937601cb5f89ab8d5c
+  split: test
+  reference_field: answer
+  official_metric: exact_match
+  external_judge_required: false
+  v1_mmstar_contract_unchanged: true
+  candidate_algorithm_or_hyperparameters_changed: false
+  candidate_config_sha256_after_routing_commit: 6d9237e40dc95e46708077ad57abd6d6422bacb33b6323b0f860d4d3b7443a2f
+  selector_sha256_after_routing_commit: b2d91c8e8e715db5d0b209295a1c8552549d51f05aeff05d0c868776e1201fdc
+
+cpu_validation:
+  common_environment: /scratch/djy8hg/env/mosaickv
+  cache_policy_sourced: true
+  model_weights_loaded: false
+  dataset_rows_loaded: false
+  dataset_media_loaded: false
+  lmms_eval_version: 0.7.2
+  lmms_task_manager_indexed_realworldqa: true
+  targeted_pytest_result: 31_passed
+  targeted_ruff_result: passed
+  targeted_mypy_result: passed
+  validation_is_not_dataset_or_model_execution: true
+
+seal_boundary:
+  seal_commit_git_sha: null
+  seal_file_sha256_at_commit: null
+  seal_commit_reviewed: false
+  route_commit_reviewed_through_this_seal: false
+  seal_commit_policy: commit_containing_only_this_file_becomes_the_route_review_boundary
+
+authorization:
+  route_source_committed: true
+  route_seal_committed: false
+  route_seal_reviewed: false
+  exclusion_scan_authorized: false
+  candidate_catalog_construction_authorized: false
+  sample_materialization_authorized: false
+  disjointness_check_authorized: false
+  retention_one_gpu_parity_authorized: false
+  gpu_evaluation_authorized: false
+  slurm_or_other_job_submission_authorized: false
+  analysis_authorized: false
+  paper_result_claim_authorized: false
+  automatic_follow_on_authorized: false
+
+explicitly_forbidden_before_seal_review:
+  - exclusion_scan
+  - dataset_catalog_access_or_construction
+  - sample_identity_selection
+  - sample_ledger_materialization
+  - dataset_row_or_media_loading
+  - model_loading_or_inference
+  - gpu_or_slurm_submission
+  - evaluation_or_result_analysis
+
+next_step:
+  action: review_and_authorize_one_local_commit_containing_only_this_seal
+  scan_or_evaluation_may_run_after_that_commit_without_separate_authorization: false
