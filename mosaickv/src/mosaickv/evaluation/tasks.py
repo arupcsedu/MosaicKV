@@ -136,7 +136,7 @@ def default_task_registry() -> TaskRegistry:
             TaskSpec(
                 "mmstar",
                 "Lin-Chen/MMStar",
-                "test",
+                "val",
                 "mmstar",
                 "mmstar",
                 "average",

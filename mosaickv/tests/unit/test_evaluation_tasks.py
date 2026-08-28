@@ -26,6 +26,12 @@ def test_registry_routes_public_scoring_to_lmms_eval() -> None:
         "video_mme",
     }
     assert registry.resolve("textvqa").development_lmms_task == "textvqa_val"
+    assert registry.resolve("mmstar").route_key == (
+        "Lin-Chen/MMStar",
+        None,
+        "val",
+        "mmstar",
+    )
     assert registry.resolve("docvqa").development_lmms_task == "docvqa_val"
     assert registry.resolve("chartqa").development_lmms_task == "chartqa"
     text_train = registry.resolve("textvqa_train_calibration")

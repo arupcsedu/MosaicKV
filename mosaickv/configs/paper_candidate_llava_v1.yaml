@@ -11,7 +11,7 @@ model:
 dataset:
   id: Lin-Chen/MMStar
   revision: bc98d668301da7b14f648724866e57302778ab27
-  split: test
+  split: val
 
 execution:
   backend: huggingface

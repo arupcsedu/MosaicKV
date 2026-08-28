@@ -27,7 +27,7 @@ PAPER_CANDIDATE_TASK_ROUTES = {
     "mmstar": DatasetConfig(
         "Lin-Chen/MMStar",
         "bc98d668301da7b14f648724866e57302778ab27",
-        "test",
+        "val",
     ),
     "textvqa": DatasetConfig(
         "lmms-lab/textvqa",

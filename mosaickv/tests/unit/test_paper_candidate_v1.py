@@ -77,6 +77,13 @@ def test_candidate_source_resolves_only_the_registered_model_and_tasks() -> None
     assert resolved.dataset.id == "lmms-lab/textvqa"
     assert resolved.dataset.revision == "9c0699cd19768ac5ab97568f6b3cbac4c0062884"
     assert resolved.cache.budget_value < 28_000_000
+    mmstar = PaperCandidateContract().resolve_run_config(
+        template,
+        task="mmstar",
+        baseline_active_bytes=40_000_000,
+        storage_quantum_bytes=32_768,
+    )
+    assert mmstar.dataset.split == "val"
     with pytest.raises(ValueError, match="unsupported paper-candidate task"):
         PaperCandidateContract().resolve_run_config(
             template,
