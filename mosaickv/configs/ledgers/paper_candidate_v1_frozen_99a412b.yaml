@@ -1,0 +1,65 @@
+schema_version: 1
+record_type: frozen_candidate_boundary
+freeze_date: "2026-08-28"
+status: frozen_pending_record_commit
+
+candidate:
+  name: paper_candidate_llava_v1
+  effective_method: mosaickv_full__paper_candidate_v1
+  source_git_sha: 99a412bf0d2c639a095ff6efc5ca02e435b5e889
+  source_git_sha_short: 99a412b
+  config_path: configs/paper_candidate_llava_v1.yaml
+  config_sha256: 6d9237e40dc95e46708077ad57abd6d6422bacb33b6323b0f860d4d3b7443a2f
+  selector_path: src/mosaickv/selection/selector.py
+  selector_sha256: b2d91c8e8e715db5d0b209295a1c8552549d51f05aeff05d0c868776e1201fdc
+  selector_test_path: tests/unit/test_selection.py
+  selector_test_sha256: 0fbb0727eaac5c5105e5e8a54fcad03f8cf7747c9d408093c1e46df0e931a67b
+  model_id: llava-hf/llava-1.5-7b-hf
+  model_revision: b234b804b114d9e37bb655e11cbbb5f5e971b7a9
+  precision: fp16
+  backend: hf_eager
+
+freeze_contract:
+  algorithm_or_hyperparameter_change_allowed: false
+  candidate_config_change_allowed: false
+  candidate_source_change_allowed: false
+  benchmark_label_tuning_allowed: false
+  failure_identity_tuning_allowed: false
+  future_evaluation_may_change_candidate: false
+  task_routing_and_provenance_tooling_may_be_added: true
+  task_routing_must_not_change_cache_or_decode_behavior: true
+  any_behavior_change_requires_a_new_candidate_name_and_protocol: true
+
+development_evidence:
+  classification: retrospective_development_only_not_paper_evidence
+  run_root: /scratch/djy8hg/runs/mosaickv/paper-candidate-v1-retrospective-99a412bf0d2c
+  gate_report_path: analysis/gate.json
+  gate_report_sha256: dee6d407d32772fae3c11514989bb27cc905fa1efab4201611ccf53942e4f9e6
+  narrative_report_path: analysis/gate.md
+  narrative_report_sha256: 4f3a399c76907c347dfbe34876a6932405e87b5700854e8c8b9666fcab0d52ad
+  samples_per_task: 2
+  nearest_baseline: prompt_attention_topk
+  observed_mean_active_memory_reduction_fraction:
+    mmstar: 0.3415
+    textvqa: 0.3138
+    docvqa: 0.3308
+  exact_answer_string_agreement_with_nearest_baseline: true
+  paper_claim_eligible: false
+  result_used_only_to_choose_the_frozen_candidate_boundary: true
+
+execution_authorization:
+  candidate_is_frozen: true
+  exclusion_scan_authorized: false
+  candidate_catalog_construction_authorized: false
+  sample_materialization_authorized: false
+  disjointness_check_authorized: false
+  gpu_evaluation_authorized: false
+  slurm_submission_authorized: false
+  paper_result_claim_authorized: false
+  automatic_follow_on_authorized: false
+
+immutability:
+  candidate_source_is_already_an_immutable_git_commit: true
+  this_freeze_record_requires_a_separate_reviewed_commit_before_execution: true
+  freeze_record_commit_git_sha: null
+  freeze_record_sha256_at_commit: null
