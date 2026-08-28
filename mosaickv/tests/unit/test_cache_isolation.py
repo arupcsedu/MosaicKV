@@ -968,6 +968,64 @@ def test_feasible_route_ladder_has_multiple_levels_below_54_positions(
     assert ladders[0].proposed_removed_bytes == 8 * 8
 
 
+def test_feasible_ladder_retains_equal_byte_baseline_evidence_swaps() -> None:
+    route = (0, 0)
+    refined = RouteCapacityLadder(
+        route=route,
+        levels=(
+            RouteCapacityLevel(
+                route, 0, CapacityLevelKind.FEASIBLE_BASELINE, (0, 1, 2), 30, 3.0, 0.0
+            ),
+            RouteCapacityLevel(
+                route, 1, CapacityLevelKind.COARSE_MIDPOINT, (0, 1), 20, 2.0, 1.0
+            ),
+            RouteCapacityLevel(
+                route, 2, CapacityLevelKind.TARGET_ADJACENT, (0,), 10, 1.0, 2.0
+            ),
+            RouteCapacityLevel(
+                route,
+                3,
+                CapacityLevelKind.REALLOCATION_ALTERNATIVE,
+                (0, 3),
+                10,
+                1.5,
+                1.5,
+            ),
+        ),
+        protected_node_ids=(0,),
+        target_active_bytes=10,
+        target_reached=True,
+    )
+    source = RouteCapacityLadder(
+        route=route,
+        levels=(
+            RouteCapacityLevel(
+                route, 0, CapacityLevelKind.FEASIBLE_BASELINE, (0, 1, 2), 30, 3.0, 0.0
+            ),
+            RouteCapacityLevel(
+                route,
+                1,
+                CapacityLevelKind.REALLOCATION_ALTERNATIVE,
+                (0, 1, 3),
+                30,
+                3.5,
+                0.5,
+            ),
+        ),
+        protected_node_ids=(0,),
+        target_active_bytes=30,
+        target_reached=True,
+    )
+
+    merged = hf_runtime._attach_feasible_baseline_reallocation_levels(
+        (refined,), (source,)
+    )[0]
+
+    assert [level.active_bytes for level in merged.reallocation_levels] == [10, 30]
+    assert merged.reallocation_levels[-1].selected_node_ids == (0, 1, 3)
+    assert merged.full_level.selected_node_ids == (0, 1, 2)
+
+
 def test_route_capacity_failure_trace_contains_every_preflight_field() -> None:
     proposal = hf_runtime.HierarchicalCapacityProposal(
         proposal_id="joint-infeasible",

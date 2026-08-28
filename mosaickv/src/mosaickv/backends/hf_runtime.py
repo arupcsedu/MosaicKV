@@ -5936,6 +5936,62 @@ def _hierarchical_route_ladders(
     )
 
 
+def _attach_feasible_baseline_reallocation_levels(
+    ladders: Sequence[RouteCapacityLadder],
+    position_limited_source_ladders: Sequence[RouteCapacityLadder],
+) -> tuple[RouteCapacityLadder, ...]:
+    """Retain same-capacity source swaps around each feasible baseline.
+
+    Refinement ladders are built from baseline membership so every ordinary
+    level is physically safe. That subset construction intentionally cannot
+    propose restoring a block omitted at the baseline boundary. The original
+    position-limited ladder already contains deterministic equal-byte swaps
+    at that boundary; attach them as reallocation-only choices without
+    changing any ordinary capacity level.
+    """
+
+    ordered = tuple(sorted(ladders, key=lambda item: item.route))
+    source_by_route = {
+        ladder.route: ladder for ladder in position_limited_source_ladders
+    }
+    if set(source_by_route) != {ladder.route for ladder in ordered}:
+        raise HuggingFaceRuntimeError(
+            "baseline reallocation sources must cover every feasible route ladder"
+        )
+    result: list[RouteCapacityLadder] = []
+    for ladder in ordered:
+        source = source_by_route[ladder.route]
+        baseline_bytes = ladder.full_level.active_bytes
+        ordinary = tuple(
+            level
+            for level in ladder.levels
+            if level.kind is not CapacityLevelKind.REALLOCATION_ALTERNATIVE
+        )
+        alternatives = list(ladder.reallocation_levels)
+        seen_memberships = {level.selected_node_ids for level in alternatives}
+        for level in source.reallocation_levels:
+            if (
+                level.active_bytes == baseline_bytes
+                and level.selected_node_ids not in seen_memberships
+            ):
+                alternatives.append(level)
+                seen_memberships.add(level.selected_node_ids)
+        rebuilt = tuple(
+            replace(level, level_index=index)
+            for index, level in enumerate((*ordinary, *alternatives))
+        )
+        result.append(
+            RouteCapacityLadder(
+                route=ladder.route,
+                levels=rebuilt,
+                protected_node_ids=ladder.protected_node_ids,
+                target_active_bytes=ladder.target_active_bytes,
+                target_reached=ladder.target_reached,
+            )
+        )
+    return tuple(result)
+
+
 def _hierarchical_reference_rollout(
     adapter: HuggingFaceMultimodalAdapter,
     prefill: PrefillOutput,
@@ -6011,6 +6067,10 @@ def _run_hierarchical_logit_safe_eviction(
         ladders,
         position_count_by_node,
         effective_position_limits,
+    )
+    ladders = _attach_feasible_baseline_reallocation_levels(
+        ladders,
+        position_limited_ladders,
     )
     fullkv_fallback_selection = select_verified_capacity_levels(
         unrestricted_ladders,
@@ -6166,6 +6226,10 @@ def _run_hierarchical_logit_safe_eviction(
         ),
         logit_feedback_restore_donor=(
             selection_config.stable_head_hierarchical_logit_feedback_restore_donor
+        ),
+        adaptive_no_pass_refinement=bool(
+            selection_config.stable_head_hierarchical_logit_feedback_restore_donor
+            and selection_config.stable_head_hierarchical_maximum_refinement_depth >= 3
         ),
         selection_feasible=selection_is_route_feasible,
         fullkv_fallback_selection=fullkv_fallback_selection,

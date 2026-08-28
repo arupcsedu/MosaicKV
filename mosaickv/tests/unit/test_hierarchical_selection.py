@@ -176,6 +176,109 @@ def _ladder_with_reallocation(
     )
 
 
+def _baseline_reallocation_ladder(
+    route: tuple[int, int],
+    base_node: int,
+) -> RouteCapacityLadder:
+    levels = (
+        RouteCapacityLevel(
+            route=route,
+            level_index=0,
+            kind=CapacityLevelKind.FEASIBLE_BASELINE,
+            selected_node_ids=(base_node, base_node + 1, base_node + 2),
+            active_bytes=30,
+            retained_utility=30.0,
+            evicted_risk=0.0,
+        ),
+        RouteCapacityLevel(
+            route=route,
+            level_index=1,
+            kind=CapacityLevelKind.COARSE_MIDPOINT,
+            selected_node_ids=(base_node, base_node + 1),
+            active_bytes=20,
+            retained_utility=20.0,
+            evicted_risk=1.0,
+        ),
+        RouteCapacityLevel(
+            route=route,
+            level_index=2,
+            kind=CapacityLevelKind.TARGET_ADJACENT,
+            selected_node_ids=(base_node,),
+            active_bytes=10,
+            retained_utility=10.0,
+            evicted_risk=2.0,
+        ),
+        RouteCapacityLevel(
+            route=route,
+            level_index=3,
+            kind=CapacityLevelKind.REALLOCATION_ALTERNATIVE,
+            selected_node_ids=(base_node, base_node + 1, base_node + 3),
+            active_bytes=30,
+            retained_utility=31.0,
+            evicted_risk=0.5,
+        ),
+    )
+    return RouteCapacityLadder(
+        route=route,
+        levels=levels,
+        protected_node_ids=(base_node,),
+        target_active_bytes=10,
+        target_reached=True,
+    )
+
+
+def test_adaptive_no_pass_refinement_reclaims_probes_and_checks_equal_byte_swaps() -> None:
+    ladders = tuple(
+        _baseline_reallocation_ladder((0, head), 4 * head) for head in range(16)
+    )
+    tracker = ProbeBudgetTracker(18, 6)
+    seen: list[HierarchicalCapacityProposal] = []
+
+    def probe(proposal: HierarchicalCapacityProposal) -> LogitProbeResult:
+        seen.append(proposal)
+        if proposal.proposal_id.startswith("relative-restore-donor-"):
+            return LogitProbeResult(True, 0.0, 0.0, 2)
+        severity = 2.0 + 0.01 * sum(route[1] for route in proposal.affected_routes)
+        return LogitProbeResult(True, 0.01, severity, 2)
+
+    decision = run_bounded_hierarchical_probe_loop(
+        ladders,
+        target_active_bytes=16 * 30,
+        initial_partition_count=2,
+        maximum_refinement_depth=6,
+        maximum_rollback_rounds=2,
+        maximum_forward_kl=0.02,
+        maximum_absolute_logit_difference=1.0,
+        required_steps=2,
+        probe_budget=tracker,
+        probe=probe,
+        fixed_route_capacity_reallocation=True,
+        reserved_reallocation_evaluations=4,
+        reallocation_beam_width=2,
+        reallocation_maximum_combination_width=2,
+        logit_feedback_restore_donor=True,
+        adaptive_no_pass_refinement=True,
+    )
+
+    assert not decision.used_fullkv_fallback
+    assert decision.selected_candidate_passed
+    assert decision.evaluations_used == 18
+    assert decision.rounds_used == 6
+    assert decision.reclaimed_reallocation_evaluations == 2
+    assert decision.retained_reallocation_evaluations == 2
+    assert decision.smallest_screened_partition_route_count == 1
+    assert decision.relative_impact_reallocation_candidates == 3
+    reallocation = [
+        item
+        for item in seen
+        if item.proposal_id.startswith("relative-restore-donor-")
+    ]
+    assert len(reallocation) == 3
+    for proposal in reallocation:
+        changed = [index for _route, index in proposal.level_indices if index != 0]
+        assert changed == [3]
+
+
 def test_final_proposal_route_capacity_is_checked_before_model_probe() -> None:
     ladders = (
         _ladder((0, 0), 0, (3.0, 2.0, 1.0), (0.0, 1.0, 2.0)),

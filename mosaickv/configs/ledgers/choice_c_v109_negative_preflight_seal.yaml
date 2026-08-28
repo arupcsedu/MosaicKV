@@ -1,0 +1,144 @@
+schema_version: 1
+experiment_id: choice_c_v109_multi_feasible_ladder_preflight
+classification: sealed_negative_four_sample_gpu_preflight
+sealed_at_utc: "2026-08-28T00:43:42Z"
+immutable_result: true
+measurement_type: preregistered_runtime_correctness_preflight
+overall_pass: false
+gpu_preflight_pass: false
+calibration_authorized: false
+frozen_candidate_created: false
+heldout_evaluation_authorized: false
+
+protocol:
+  path: configs/experiments/choice_c_v109_multi_feasible_ladder_preflight.yaml
+  configured_active_byte_cap: 28500000
+  unchanged_maximum_forward_kl: 0.02
+  unchanged_maximum_absolute_logit_difference: 1.0
+  unchanged_greedy_token_match_required: true
+  unchanged_probe_horizon: 2
+  maximum_candidate_evaluations: 24
+  maximum_sequential_rounds: 6
+  fullkv_fallback_passes_preflight: false
+
+execution:
+  source_git_sha: afa58bb11fef0002314e5238d20e0bd8e617c895
+  source_git_dirty: false
+  worker_spec_path: /scratch/djy8hg/runs/mosaickv/choice-c-v109-multi-feasible-ladder-preflight-v1/inputs/gpu_preflight_worker_spec.json
+  worker_spec_sha256: a12e43f54e3385bddaaffc86b62dca2dadac8d3ed1e68318b117e1ca9fada535
+  disjointness_report_sha256: 4f6af5aba33611c5132417a76a3360a49a72d4ff1307eef46deca9d05ecd4ca0
+  slurm_array_id: "18973734"
+  gpu: NVIDIA A100-SXM4-80GB
+  gpu_count_per_worker: 1
+  array_tasks:
+    - task: textvqa_train_calibration
+      slurm_array_label: "18973734_0"
+      slurm_job_id_raw: "18973739"
+      state: FAILED
+      exit_code: "1:0"
+      elapsed: "00:02:20"
+      node: udc-an26-1
+      log_sha256: 47197ac095816452489da6b491e1df789e6d3f12ef0bc71266ab0771404a2dd0
+    - task: infovqa
+      slurm_array_label: "18973734_1"
+      slurm_job_id_raw: "18973734"
+      state: FAILED
+      exit_code: "1:0"
+      elapsed: "00:02:22"
+      node: udc-an26-1
+      log_sha256: fc379378a0ca56b6c1ccfba223f588c19a8c5302127d2bd16fd0fcc8d0f45c3a
+
+planned_samples:
+  textvqa_train_calibration:
+    ledger_sha256: 2e9db24c862d928df791ebdabb624a97f24417908b8b5709488824926226ded4
+    sample_ids:
+      - textvqa_train_calibration:5568
+      - textvqa_train_calibration:12798
+  infovqa:
+    ledger_sha256: 8cd1215054f8f4b84ccaf422d9bcae0c5805b3bda85a97628f8defecf2208bc4
+    sample_ids:
+      - infovqa:80135
+      - infovqa:97678
+
+observed_candidate_samples:
+  - task: textvqa_train_calibration
+    sample_id: textvqa_train_calibration:5568
+    status: failed_closed_fullkv_fallback
+    candidate_completed: false
+    prompt_topk_active_kv_bytes: 40370176
+    rejected_logical_active_kv_bytes: 27758080
+    rejected_physical_active_kv_bytes: 27787264
+    rejected_physical_reduction_fraction_vs_prompt_topk: 0.3116883117
+    rejected_greedy_token_match: true
+    rejected_maximum_forward_kl: 0.0119557083
+    rejected_maximum_absolute_logit_difference: 1.34326171875
+    probe_evaluations_used: 12
+    probe_rounds_used: 3
+    required_trace_fields_present: 9
+    required_trace_fields_total: 9
+    fullkv_fallback_accounting_complete: true
+    rejected_compressed_proposal_accounting_complete: true
+    correct_reference_annotation_list_recorded: true
+    reference_annotation_count: 10
+    trace_sha256: 4e0bce9fbe90d059aae602aebdc0556b7bdc94cc8dd969c7f2c5c7a4d0c3986b
+    raw_result_sha256: d83f51d08a9e1a46712a03d979894d22fea6ddf45d4a71bbf8dc7f3c6ab8937f
+    telemetry_sha256: 1e60f9c7348bb94e3024b8ada0c0e3f51a029acdeaaa24a4d38efe8ce8f21ecd
+  - task: infovqa
+    sample_id: infovqa:80135
+    status: failed_closed_fullkv_fallback
+    candidate_completed: false
+    prompt_topk_active_kv_bytes: 40370176
+    rejected_logical_active_kv_bytes: 27758080
+    rejected_physical_active_kv_bytes: 27787264
+    rejected_physical_reduction_fraction_vs_prompt_topk: 0.3116883117
+    rejected_greedy_token_match: false
+    rejected_maximum_forward_kl: 0.6532073617
+    rejected_maximum_absolute_logit_difference: 4.744140625
+    probe_evaluations_used: 12
+    probe_rounds_used: 3
+    required_trace_fields_present: 9
+    required_trace_fields_total: 9
+    fullkv_fallback_accounting_complete: true
+    rejected_compressed_proposal_accounting_complete: true
+    correct_reference_annotation_list_recorded: true
+    reference_annotation_count: 1
+    trace_sha256: 386a12cbf706ef924110e8b3045887e03e43aefee5c312a0e286b6634cd2b77c
+    raw_result_sha256: a449f0a2489c84aa94a0d63a57d3aa3b18a2817490d607f936815d59cc51add2
+    telemetry_sha256: 89a36e1d3081006000779cbadba1791b9bfd5cbca0c59dd28e6bc0d6f94811be
+
+unexecuted_candidate_samples:
+  - textvqa_train_calibration:12798
+  - infovqa:97678
+
+gate_summary:
+  candidate_samples_completed: 0
+  candidate_samples_required: 4
+  compressed_target_samples: 0
+  compressed_target_samples_required: 4
+  rejected_proposals_meeting_memory_gate: 2
+  rejected_proposals_meeting_every_fidelity_gate: 0
+  attempted_references_verified: 2
+  complete_nine_field_failure_traces: 2
+  complete_dual_six_field_accounting_traces: 2
+  multiple_probe_attempts: 2
+  all_four_samples_pass: false
+  calibration_must_remain_blocked: true
+
+scientific_boundary:
+  v109_outputs_answers_references_scores_and_failure_identities_inspected: true
+  all_v109_planned_identities_consumed: true
+  future_runtime_validation_requires_fresh_identities: true
+  task_labels_answers_scores_or_failure_identities_must_not_drive_v110: true
+  aggregate_label_blind_probe_and_accounting_telemetry_may_drive_engineering: true
+  thresholds_must_not_be_weakened: true
+  calibration_requires_separate_authorization_after_a_positive_preflight: true
+
+root_cause:
+  classification: reserved_probes_stranded_after_all_screening_partitions_failed
+  details: >-
+    The feasible ladder correction created multiple candidates and both
+    attempts used twelve probes, but every absolute screening probe failed.
+    The controller retained twelve evaluations for post-joint reallocation;
+    with no verified compressed route, it could construct no restore/donor
+    proposal and those evaluations remained unused. The final 54-position
+    baseline failed the unchanged absolute fidelity gate on both attempts.

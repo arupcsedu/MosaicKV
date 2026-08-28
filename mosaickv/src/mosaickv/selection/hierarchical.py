@@ -139,18 +139,19 @@ class RouteCapacityLadder:
         previous = frozenset(self.levels[0].selected_node_ids)
         previous_bytes = self.levels[0].active_bytes
         target_level: RouteCapacityLevel | None = None
+        ordinary_bytes: set[int] = set()
         for level in self.levels:
             selected = frozenset(level.selected_node_ids)
             if not protected <= selected:
                 raise HierarchicalSelectionError("every route level must retain the protected core")
             if level.kind is CapacityLevelKind.REALLOCATION_ALTERNATIVE:
-                if target_level is None:
+                if not ordinary_bytes:
                     raise HierarchicalSelectionError(
-                        "reallocation alternatives require an ordinary target level"
+                        "reallocation alternatives require an ordinary anchor level"
                     )
-                if level.active_bytes != target_level.active_bytes:
+                if level.active_bytes not in ordinary_bytes:
                     raise HierarchicalSelectionError(
-                        "reallocation alternatives must preserve route capacity exactly"
+                        "reallocation alternatives must match an ordinary route capacity"
                     )
                 continue
             if not selected <= previous or level.active_bytes > previous_bytes:
@@ -161,6 +162,7 @@ class RouteCapacityLadder:
                 target_level = level
             previous = selected
             previous_bytes = level.active_bytes
+            ordinary_bytes.add(level.active_bytes)
         observed_reached = target_level is not None
         if observed_reached != self.target_reached:
             raise HierarchicalSelectionError("route target-reached flag is inconsistent")
@@ -980,7 +982,10 @@ def plan_joint_reallocation_candidates(
             (
                 choice
                 for choice in current.choices
-                if choice.level_index > 0 and by_route[choice.route].reallocation_levels
+                if any(
+                    level.active_bytes == choice.active_bytes
+                    for level in by_route[choice.route].reallocation_levels
+                )
             ),
             key=lambda choice: (-choice.evicted_risk, choice.route),
         )
@@ -1000,7 +1005,14 @@ def plan_joint_reallocation_candidates(
         restored_routes = frozenset(restored_routes_tuple)
         indices = dict(current_indices)
         for route in restored_routes_tuple:
-            alternatives = by_route[route].reallocation_levels
+            current_bytes = next(
+                choice.active_bytes for choice in current.choices if choice.route == route
+            )
+            alternatives = tuple(
+                level
+                for level in by_route[route].reallocation_levels
+                if level.active_bytes == current_bytes
+            )
             alternative_index = min(rollback_width - 1, len(alternatives) - 1)
             indices[route] = alternatives[alternative_index].level_index
         signature = tuple((route, indices[route]) for route in sorted(indices))
@@ -1318,6 +1330,226 @@ def plan_logit_feedback_restore_donor_candidates(
     )
 
 
+def _normalized_logit_instability(
+    result: LogitProbeResult,
+    *,
+    maximum_forward_kl: float,
+    maximum_absolute_logit_difference: float,
+    required_steps: int,
+) -> float:
+    """One label-blind scalar used only to rank bounded search proposals."""
+
+    return max(
+        result.maximum_forward_kl / maximum_forward_kl,
+        result.maximum_absolute_logit_difference / maximum_absolute_logit_difference,
+        0.0 if result.greedy_token_match else 2.0,
+        0.0 if result.evaluated_steps == required_steps else 2.0,
+    )
+
+
+def plan_relative_logit_impact_reallocation_candidates(
+    current: KnapsackSelection,
+    ladders: Sequence[RouteCapacityLadder],
+    screening_evaluations: Sequence[HierarchicalProbeEvaluation],
+    baseline_evaluation: HierarchicalProbeEvaluation,
+    *,
+    maximum_candidates: int,
+    maximum_forward_kl: float,
+    maximum_absolute_logit_difference: float,
+    required_steps: int,
+    excluded_level_signatures: Iterable[tuple[tuple[RouteId, int], ...]] = (),
+) -> tuple[ConflictRollbackPlan, ...]:
+    """Swap equal-byte route evidence using relative FullKV-logit impact.
+
+    The compressed baseline and every screening candidate are evaluated
+    against the same FullKV logits.  Their normalized-instability difference
+    is used only to rank routes; it never relaxes the absolute acceptance
+    gate.  Each proposal restores omitted evidence and displaces an equal-byte
+    donor block through a same-capacity route alternative, so global and
+    per-route storage remain unchanged.
+    """
+
+    if maximum_candidates < 1:
+        raise HierarchicalSelectionError("relative-impact candidate cap must be positive")
+    if baseline_evaluation.proposal.kind is not HierarchicalProposalKind.JOINT:
+        raise HierarchicalSelectionError("relative-impact baseline must be a joint probe")
+    ordered = tuple(sorted(ladders, key=lambda ladder: ladder.route))
+    by_route = {ladder.route: ladder for ladder in ordered}
+    current_indices = current.level_index_by_route()
+    if set(by_route) != set(current_indices):
+        raise HierarchicalSelectionError("relative-impact ladders do not match current routes")
+    baseline_instability = _normalized_logit_instability(
+        baseline_evaluation.result,
+        maximum_forward_kl=maximum_forward_kl,
+        maximum_absolute_logit_difference=maximum_absolute_logit_difference,
+        required_steps=required_steps,
+    )
+    route_evidence: dict[RouteId, tuple[int, float, float, str]] = {}
+    for evaluation in screening_evaluations:
+        if evaluation.proposal.kind is not HierarchicalProposalKind.SCREENING:
+            raise HierarchicalSelectionError("relative-impact evidence must be screening probes")
+        absolute = _normalized_logit_instability(
+            evaluation.result,
+            maximum_forward_kl=maximum_forward_kl,
+            maximum_absolute_logit_difference=maximum_absolute_logit_difference,
+            required_steps=required_steps,
+        )
+        relative = absolute - baseline_instability
+        group_size = len(evaluation.proposal.affected_routes)
+        for route in evaluation.proposal.affected_routes:
+            if route not in by_route:
+                raise HierarchicalSelectionError(
+                    "relative-impact evidence contains an unknown route"
+                )
+            candidate = (
+                group_size,
+                relative,
+                absolute,
+                evaluation.proposal.proposal_id,
+            )
+            previous = route_evidence.get(route)
+            if (
+                previous is None
+                or group_size < previous[0]
+                or (
+                    group_size == previous[0]
+                    and (-relative, -absolute, candidate[3])
+                    < (-previous[1], -previous[2], previous[3])
+                )
+            ):
+                route_evidence[route] = candidate
+
+    current_choice = {choice.route: choice for choice in current.choices}
+    ranked_routes: list[tuple[tuple[object, ...], RouteId, RouteCapacityLevel]] = []
+    for route, choice in current_choice.items():
+        alternatives = tuple(
+            level
+            for level in by_route[route].reallocation_levels
+            if level.active_bytes == choice.active_bytes
+        )
+        if not alternatives:
+            continue
+        group_size, relative, absolute, proposal_id = route_evidence.get(
+            route,
+            (10**9, 0.0, baseline_instability, "no_screening_evidence"),
+        )
+        for alternative in alternatives:
+            ranked_routes.append(
+                (
+                    (
+                        group_size,
+                        -relative,
+                        -absolute,
+                        -alternative.retained_utility,
+                        alternative.evicted_risk,
+                        route,
+                        alternative.level_index,
+                        proposal_id,
+                    ),
+                    route,
+                    alternative,
+                )
+            )
+    excluded = frozenset(excluded_level_signatures)
+    seen = set(excluded)
+    plans: list[ConflictRollbackPlan] = []
+    for _rank, route, alternative in sorted(ranked_routes, key=lambda item: item[0]):
+        indices = dict(current_indices)
+        indices[route] = alternative.level_index
+        signature = tuple(sorted(indices.items()))
+        if signature in seen:
+            continue
+        seen.add(signature)
+        selection = _selection_from_level_indices(
+            ordered,
+            indices,
+            current.target_active_bytes,
+            fixed_active_bytes=current.fixed_active_bytes,
+        )
+        if selection.active_bytes != current.active_bytes:
+            raise HierarchicalSelectionError(
+                "relative-impact restore/donor changed global active bytes"
+            )
+        plans.append(
+            ConflictRollbackPlan(
+                selection=selection,
+                rollback_applied=True,
+                rolled_back_routes=(route,),
+                donor_routes=(route,),
+                bytes_added_by_rollback=0,
+                bytes_removed_by_donors=0,
+                reason="relative_fullkv_logit_impact_equal_byte_intra_route_restore_donor",
+            )
+        )
+        if len(plans) >= maximum_candidates:
+            break
+    return tuple(plans)
+
+
+def select_adaptive_refinement_frontier(
+    pending: Sequence[RoutePartition],
+    screening_evaluations: Sequence[HierarchicalProbeEvaluation],
+    *,
+    maximum_partitions: int,
+    maximum_forward_kl: float,
+    maximum_absolute_logit_difference: float,
+    required_steps: int,
+) -> tuple[RoutePartition, ...]:
+    """Keep both high- and low-impact branches for bounded deep refinement."""
+
+    if maximum_partitions < 1:
+        raise HierarchicalSelectionError("adaptive refinement cap must be positive")
+    if len(pending) <= maximum_partitions:
+        return tuple(pending)
+    evaluation_by_id = {
+        evaluation.proposal.proposal_id: evaluation
+        for evaluation in screening_evaluations
+        if evaluation.proposal.kind is HierarchicalProposalKind.SCREENING
+    }
+    children_by_parent: dict[str, list[RoutePartition]] = defaultdict(list)
+    for partition in pending:
+        parent_id, separator, _suffix = partition.partition_id.rpartition(".")
+        if not separator or parent_id not in evaluation_by_id:
+            raise HierarchicalSelectionError(
+                "adaptive refinement partition lacks evaluated parent evidence"
+            )
+        children_by_parent[parent_id].append(partition)
+    ranked_parents = sorted(
+        children_by_parent,
+        key=lambda parent_id: (
+            _normalized_logit_instability(
+                evaluation_by_id[parent_id].result,
+                maximum_forward_kl=maximum_forward_kl,
+                maximum_absolute_logit_difference=maximum_absolute_logit_difference,
+                required_steps=required_steps,
+            ),
+            parent_id,
+        ),
+    )
+    alternating: list[str] = []
+    lower = 0
+    upper = len(ranked_parents) - 1
+    while lower <= upper:
+        alternating.append(ranked_parents[upper])
+        upper -= 1
+        if lower <= upper:
+            alternating.append(ranked_parents[lower])
+            lower += 1
+    selected: list[RoutePartition] = []
+    for parent_id in alternating:
+        children = sorted(
+            children_by_parent[parent_id], key=lambda item: item.partition_id
+        )
+        if len(selected) + len(children) > maximum_partitions:
+            continue
+        selected.extend(children)
+        if len(selected) == maximum_partitions:
+            break
+    if not selected:
+        raise HierarchicalSelectionError("adaptive refinement could not select a frontier")
+    return tuple(sorted(selected, key=lambda item: item.partition_id))
+
+
 def plan_conflict_rollback(
     current: KnapsackSelection,
     ladders: Sequence[RouteCapacityLadder],
@@ -1437,6 +1669,11 @@ class BoundedHierarchicalProbeDecision:
     reallocation_maximum_combination_width: int = 0
     logit_feedback_restore_donor: bool = False
     infeasible_proposal_ids: tuple[str, ...] = ()
+    adaptive_no_pass_refinement: bool = False
+    reclaimed_reallocation_evaluations: int = 0
+    retained_reallocation_evaluations: int = 0
+    smallest_screened_partition_route_count: int = 0
+    relative_impact_reallocation_candidates: int = 0
 
     def __post_init__(self) -> None:
         if self.evaluations_used != len(self.evaluations):
@@ -1457,6 +1694,22 @@ class BoundedHierarchicalProbeDecision:
             or self.logit_feedback_restore_donor
         ):
             raise HierarchicalSelectionError("reallocation beam metadata requires a reservation")
+        if min(
+            self.reclaimed_reallocation_evaluations,
+            self.retained_reallocation_evaluations,
+            self.smallest_screened_partition_route_count,
+            self.relative_impact_reallocation_candidates,
+        ) < 0:
+            raise HierarchicalSelectionError("adaptive hierarchy telemetry cannot be negative")
+        if self.reclaimed_reallocation_evaluations > self.reserved_reallocation_evaluations:
+            raise HierarchicalSelectionError("reclaimed probes exceed their reservation")
+        if not self.adaptive_no_pass_refinement and (
+            self.reclaimed_reallocation_evaluations != 0
+            or self.relative_impact_reallocation_candidates != 0
+        ):
+            raise HierarchicalSelectionError(
+                "adaptive hierarchy telemetry requires adaptive refinement"
+            )
 
 
 def _proposal(
@@ -1497,6 +1750,7 @@ def run_bounded_hierarchical_probe_loop(
     reallocation_beam_width: int = 0,
     reallocation_maximum_combination_width: int = 0,
     logit_feedback_restore_donor: bool = False,
+    adaptive_no_pass_refinement: bool = False,
     selection_feasible: Callable[[KnapsackSelection], bool] | None = None,
     fullkv_fallback_selection: KnapsackSelection | None = None,
 ) -> BoundedHierarchicalProbeDecision:
@@ -1555,6 +1809,14 @@ def run_bounded_hierarchical_probe_loop(
         raise HierarchicalSelectionError(
             "logit-feedback restore/donor requires reserved post-joint evaluations"
         )
+    if adaptive_no_pass_refinement and (
+        not logit_feedback_restore_donor
+        or maximum_refinement_depth < 3
+        or probe_budget.maximum_sequential_rounds < 6
+    ):
+        raise HierarchicalSelectionError(
+            "adaptive no-pass refinement requires logit feedback, depth >= 3, and six rounds"
+        )
     ordered = tuple(sorted(ladders, key=lambda ladder: ladder.route))
     if not ordered or len({ladder.route for ladder in ordered}) != len(ordered):
         raise HierarchicalSelectionError("hierarchical probing requires unique route ladders")
@@ -1585,6 +1847,9 @@ def run_bounded_hierarchical_probe_loop(
 
     pending = partition_route_ladders(ordered, initial_partition_count)
     post_joint_round_reservation = 2 if reserved_beam_enabled else 0
+    effective_reallocation_reservation = reserved_reallocation_evaluations
+    reclaimed_reallocation_evaluations = 0
+    smallest_screened_partition_route_count = 0
     while pending:
         if probe_budget.rounds_used >= (
             probe_budget.maximum_sequential_rounds - 1 - post_joint_round_reservation
@@ -1595,17 +1860,36 @@ def run_bounded_hierarchical_probe_loop(
             probe_budget.maximum_candidate_evaluations
             - probe_budget.evaluations_used
             - 1
-            - reserved_reallocation_evaluations
+            - effective_reallocation_reservation
         )
         if available <= 0:
             unresolved_routes.update(route for item in pending for route in item.routes)
             break
-        current = pending[:available]
-        skipped = pending[available:]
+        if reclaimed_reallocation_evaluations:
+            current = select_adaptive_refinement_frontier(
+                pending,
+                evaluations,
+                maximum_partitions=min(4, available),
+                maximum_forward_kl=maximum_forward_kl,
+                maximum_absolute_logit_difference=maximum_absolute_logit_difference,
+                required_steps=required_steps,
+            )
+            selected_partition_ids = {item.partition_id for item in current}
+            skipped = tuple(
+                item for item in pending if item.partition_id not in selected_partition_ids
+            )
+        else:
+            current = pending[:available]
+            skipped = pending[available:]
         unresolved_routes.update(route for item in skipped for route in item.routes)
         probe_budget.reserve_round(item.partition_id for item in current)
         outcomes: dict[str, bool] = {}
         for partition in current:
+            smallest_screened_partition_route_count = (
+                len(partition.routes)
+                if smallest_screened_partition_route_count == 0
+                else min(smallest_screened_partition_route_count, len(partition.routes))
+            )
             levels = {ladder.route: 0 for ladder in ordered}
             for route in partition.routes:
                 levels[route] = by_route[route].target_level.level_index
@@ -1630,6 +1914,17 @@ def run_bounded_hierarchical_probe_loop(
         )
         unresolved_routes.update(update.unresolved_exact_routes)
         pending = update.next_partitions
+        if (
+            adaptive_no_pass_refinement
+            and not accepted_routes
+            and reclaimed_reallocation_evaluations == 0
+        ):
+            retained = max(1, reallocation_beam_width)
+            reclaimed_reallocation_evaluations = max(
+                0, reserved_reallocation_evaluations - retained
+            )
+            effective_reallocation_reservation = retained
+            post_joint_round_reservation = 1
 
     assembled = select_verified_capacity_levels(
         ordered,
@@ -1662,25 +1957,44 @@ def run_bounded_hierarchical_probe_loop(
         remaining_evaluations = (
             probe_budget.maximum_candidate_evaluations - probe_budget.evaluations_used
         )
-        restore_candidates = plan_logit_feedback_restore_donor_candidates(
-            assembled,
-            ordered,
-            tuple(
-                evaluation
-                for evaluation in evaluations
-                if evaluation.proposal.kind is HierarchicalProposalKind.SCREENING
-            ),
-            maximum_candidates=max(1, remaining_evaluations),
-            maximum_forward_kl=maximum_forward_kl,
-            maximum_absolute_logit_difference=maximum_absolute_logit_difference,
-            required_steps=required_steps,
-            excluded_level_signatures=attempted_signatures,
+        screening_evaluations = tuple(
+            evaluation
+            for evaluation in evaluations
+            if evaluation.proposal.kind is HierarchicalProposalKind.SCREENING
         )
+        if reclaimed_reallocation_evaluations:
+            baseline_evaluation = evaluations[-1]
+            restore_candidates = plan_relative_logit_impact_reallocation_candidates(
+                assembled,
+                ordered,
+                screening_evaluations,
+                baseline_evaluation,
+                maximum_candidates=max(1, remaining_evaluations),
+                maximum_forward_kl=maximum_forward_kl,
+                maximum_absolute_logit_difference=maximum_absolute_logit_difference,
+                required_steps=required_steps,
+                excluded_level_signatures=attempted_signatures,
+            )
+        else:
+            restore_candidates = plan_logit_feedback_restore_donor_candidates(
+                assembled,
+                ordered,
+                screening_evaluations,
+                maximum_candidates=max(1, remaining_evaluations),
+                maximum_forward_kl=maximum_forward_kl,
+                maximum_absolute_logit_difference=maximum_absolute_logit_difference,
+                required_steps=required_steps,
+                excluded_level_signatures=attempted_signatures,
+            )
         rollback_attempts.extend(restore_candidates)
         feasible_pairs: list[tuple[ConflictRollbackPlan, HierarchicalCapacityProposal]] = []
         for index, candidate in enumerate(restore_candidates):
             proposal = _proposal(
-                f"restore-donor-{index}",
+                (
+                    f"relative-restore-donor-{index}"
+                    if reclaimed_reallocation_evaluations
+                    else f"restore-donor-{index}"
+                ),
                 HierarchicalProposalKind.REALLOCATION,
                 ordered,
                 candidate.selection.level_index_by_route(),
@@ -1965,6 +2279,17 @@ def run_bounded_hierarchical_probe_loop(
         ),
         logit_feedback_restore_donor=logit_feedback_restore_donor,
         infeasible_proposal_ids=tuple(infeasible_proposal_ids),
+        adaptive_no_pass_refinement=adaptive_no_pass_refinement,
+        reclaimed_reallocation_evaluations=reclaimed_reallocation_evaluations,
+        retained_reallocation_evaluations=effective_reallocation_reservation,
+        smallest_screened_partition_route_count=(
+            smallest_screened_partition_route_count
+        ),
+        relative_impact_reallocation_candidates=(
+            len(restore_candidates)
+            if reclaimed_reallocation_evaluations and not joint_passed
+            else 0
+        ),
     )
 
 
@@ -1995,9 +2320,11 @@ __all__ = [
     "plan_conflict_rollback",
     "plan_joint_reallocation_candidates",
     "plan_logit_feedback_restore_donor_candidates",
+    "plan_relative_logit_impact_reallocation_candidates",
     "proposal_route_capacity_violations",
     "restrict_route_capacity_ladders_to_position_limits",
     "run_bounded_hierarchical_probe_loop",
+    "select_adaptive_refinement_frontier",
     "select_verified_capacity_levels",
     "split_route_partition",
     "update_partition_screening",

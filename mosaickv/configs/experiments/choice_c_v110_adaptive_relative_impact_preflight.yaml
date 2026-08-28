@@ -1,0 +1,161 @@
+schema_version: 1
+experiment_id: choice_c_v110_adaptive_relative_impact_preflight
+classification: preregistered_fresh_runtime_correctness_preflight_not_calibration
+protocol_status: fresh_preflight_materialization_and_gpu_execution_authorized_after_clean_commit
+
+scientific_boundary:
+  predecessor: choice_c_v109_multi_feasible_ladder_preflight
+  predecessor_result: sealed_negative
+  predecessor_seal: configs/ledgers/choice_c_v109_negative_preflight_seal.yaml
+  all_v109_planned_sample_identities_consumed: true
+  v109_task_labels_answers_scores_or_failure_identities_used_for_v110_design: false
+  aggregate_label_blind_probe_and_accounting_telemetry_used: true
+  thresholds_weakened: false
+  candidate_parameter_search_allowed: false
+  calibration_authorized: false
+  heldout_evaluation_authorized: false
+
+candidate_source:
+  reviewed_implementation_git_sha: clean_authorization_commit_containing_reviewed_runtime
+  implementation_git_sha_resolution: exact_clean_HEAD_recorded_during_materialization
+  source_worktree_must_be_clean: true
+  runtime_behavior_changes_after_implementation_commit_allowed: false
+  common_environment: /scratch/djy8hg/env/mosaickv
+  model_cache_root: /scratch/djy8hg/cache/mosaickv
+
+candidate:
+  model: llava-hf/llava-1.5-7b-hf
+  backend: hf
+  attention_implementation: eager
+  decode_attention_implementation: sdpa
+  method: mosaickv_exact
+  effective_variant: v110_adaptive_relative_impact_restore_donor
+  active_budget_bytes: 28500000
+  block_size_tokens: 4
+  dense_prompt_position_cap: 54
+  feasible_baseline_policy: largest_physically_feasible_level_at_or_below_cap
+  refinement_positions_below_baseline: 8
+  maximum_prototypes_per_head: 0
+  residual_storage_enabled: false
+  repair_enabled: false
+  forecast_mode: prompt_window
+  forecast_prompt_window: 16
+  hierarchical_partition_count: 8
+  hierarchical_maximum_refinement_depth: 6
+  hierarchical_maximum_candidate_evaluations: 24
+  hierarchical_maximum_sequential_rounds: 6
+  hierarchical_maximum_rollback_rounds: 2
+  hierarchical_horizon: 2
+  hierarchical_maximum_forward_kl: 0.02
+  hierarchical_maximum_absolute_logit_difference: 1.0
+  hierarchical_greedy_token_match_required: true
+
+adaptive_probe_policy:
+  initial_screening_evaluations: 8
+  original_reallocation_reservation: 12
+  activate_only_when_no_partition_passes: true
+  reclaimed_reallocation_evaluations: 9
+  retained_final_reallocation_evaluations: 3
+  maximum_refinement_frontier_per_round: 4
+  refine_high_and_low_impact_branches: true
+  expected_smallest_partition_routes_for_1024_routes: 16
+  relative_impact_uses_fullkv_relative_token_kl_and_logit_only: true
+  relative_impact_changes_candidate_order_only: true
+  final_candidate_uses_absolute_fullkv_gate: true
+  equal_byte_restore_donor_scope: same_route_feasible_baseline_swap
+  global_and_per_route_bytes_must_remain_unchanged: true
+  benchmark_labels_answers_references_scores_or_failure_identities_accessed: false
+
+fresh_identity_plan:
+  selection_salt: choice-c-v110-adaptive-relative-impact-preflight-v1
+  selection_seed: 110019
+  selection_rule: sha256_digest_ascending_then_canonical_sample_id
+  selection_preimage_separator: _null_
+  labels_references_scores_media_prompts_or_failure_outcomes_inspected_for_selection: false
+  predecessor_exclusion_manifest: /scratch/djy8hg/runs/mosaickv/choice-c-v109-multi-feasible-ladder-preflight-v1/inputs/exclusion_manifest.json
+  additionally_excluded_v109_preflight_ledgers:
+    - /scratch/djy8hg/runs/mosaickv/choice-c-v109-multi-feasible-ladder-preflight-v1/inputs/preflight_textvqa_train.json
+    - /scratch/djy8hg/runs/mosaickv/choice-c-v109-multi-feasible-ladder-preflight-v1/inputs/preflight_infovqa.json
+  sample_count_per_task: 2
+  ledger_materialization_authorized: true
+  gpu_preflight_authorized: true
+  tasks:
+    - task: textvqa_train_calibration
+      dataset_id: lmms-lab/textvqa
+      dataset_config: default
+      dataset_revision: 9c0699cd19768ac5ab97568f6b3cbac4c0062884
+      split: train
+      id_only_catalog: /scratch/djy8hg/runs/mosaickv/choice-c-v102-v100-fresh-cross-dataset-calibration-v1/inputs/catalog_textvqa_train_id_projected_v2.json
+      id_only_catalog_sha256: 5a6f700a623da65ae62bf4abc7317dcea48f0a9388f4047d3de8cfd643aece8d
+      planned_ledger: /scratch/djy8hg/runs/mosaickv/choice-c-v110-adaptive-relative-impact-preflight-v1/inputs/preflight_textvqa_train.json
+    - task: infovqa
+      dataset_id: lmms-lab-encoder/DocVQA
+      dataset_config: InfographicVQA
+      dataset_revision: 539088ef8a8ada01ac8e2e6d4e372586748a265e
+      split: validation
+      id_only_catalog: /scratch/djy8hg/runs/mosaickv/choice-c-v102-v100-fresh-cross-dataset-calibration-v1/inputs/catalog_infovqa_validation_id_projected_v2.json
+      id_only_catalog_sha256: 38907d03d42a6c52d898b3a543ad2cd737b85569c465ad301ca148aa72e4308c
+      planned_ledger: /scratch/djy8hg/runs/mosaickv/choice-c-v110-adaptive-relative-impact-preflight-v1/inputs/preflight_infovqa.json
+
+unchanged_memory_and_fidelity_gates:
+  minimum_active_reduction_fraction_vs_prompt_topk: 0.30
+  minimum_active_plus_residual_reduction_fraction_vs_prompt_topk: 0.30
+  fullkv_answer_noninferiority_margin_vs_prompt_topk: 0.05
+  fullkv_token_noninferiority_margin_vs_prompt_topk: 0.05
+  maximum_forward_kl: 0.02
+  maximum_absolute_logit_difference: 1.0
+  greedy_token_match_required: true
+  require_every_task: true
+  require_every_sample_in_preflight: true
+  require_zero_residual_bytes: true
+
+preflight_gate:
+  submission_authorized_after_clean_immutable_commit: true
+  arms_on_identical_samples:
+    - full_kv
+    - prompt_attention_topk
+    - v110_adaptive_relative_impact_restore_donor
+  warmups_per_arm: 1
+  measured_repetitions_per_arm: 1
+  output_length: 64
+  seed: 17
+  every_candidate_sample_must_complete: true
+  every_candidate_sample_must_reach_compressed_target: true
+  fullkv_fallback_passes: false
+  require_correct_reference_annotation_list: true
+  require_no_over_budget_pack_or_decode: true
+  every_final_candidate_checked_against_fullkv: true
+  every_trace_must_record:
+    - status
+    - effective_method
+    - used_fullkv_fallback
+    - attempted_active_kv_bytes
+    - hard_active_kv_budget_bytes
+    - probe_decisions
+    - timing_breakdown
+    - byte_budget_materialization
+    - hierarchical_logit_safe_eviction
+  adaptive_trace_must_record:
+    - adaptive_no_pass_refinement
+    - reclaimed_reallocation_evaluations
+    - retained_reallocation_evaluations
+    - smallest_screened_partition_route_count
+    - relative_impact_reallocation_candidates
+  accounting_trace_must_record:
+    - knapsack_bytes
+    - unique_selected_source_bytes
+    - planner_tier_bytes
+    - external_exact_bytes
+    - constructed_active_bytes
+    - physical_padding_bytes
+  positive_result_may_authorize_calibration_automatically: false
+  separate_positive_review_and_authorization_required: true
+
+downstream_actions:
+  preflight_materialization_authorized: true
+  preflight_execution_authorized: true
+  calibration_ledger_materialization_authorized: false
+  calibration_execution_authorized: false
+  candidate_freeze_authorized: false
+  heldout_materialization_authorized: false
+  heldout_execution_authorized: false
