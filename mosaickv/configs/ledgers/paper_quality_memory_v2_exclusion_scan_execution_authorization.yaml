@@ -4,6 +4,8 @@ experiment_id: paper_quality_memory_v2_frozen_candidate
 ledger_date: "2026-08-28"
 status: drafted_uncommitted_unreviewed_execution_disabled
 immutable: false
+scope_commit_git_sha: 15169135b96161b53bf1f56ab220b6a3f2217e8a
+scope_file_sha256: fb46ca1dbc030037b2b92b3182b661bdd0b4138f8eb060fd8f0bb4eb28a48110
 
 scope_boundary:
   commit_git_sha: 15169135b96161b53bf1f56ab220b6a3f2217e8a
