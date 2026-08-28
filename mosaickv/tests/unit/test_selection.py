@@ -2344,6 +2344,89 @@ def test_joint_reservation_transaction_fills_observed_54_to_61_position_lattice(
     assert result.budget_spent <= result.budget.value
 
 
+@pytest.mark.parametrize(
+    ("limit", "boundary_split", "mandatory_position", "minimum_positions"),
+    (
+        (56, False, 63, 8),
+        (51, True, 0, 7),
+        (53, True, 63, 9),
+    ),
+)
+def test_dense_feasibility_fill_uses_graph_beyond_routed_shortlist(
+    limit: int,
+    boundary_split: bool,
+    mandatory_position: int,
+    minimum_positions: int,
+) -> None:
+    sequence = 64
+    key = np.arange(sequence * 2, dtype=np.float32).reshape(1, 1, sequence, 2)
+    spans = (
+        (
+            ModalitySpan(0, 3, Modality.TEXT),
+            ModalitySpan(3, sequence, Modality.IMAGE),
+        )
+        if boundary_split
+        else (ModalitySpan(0, sequence, Modality.TEXT),)
+    )
+    full = FullKVState.from_tensors(
+        ((key, key.copy()),),
+        modality_spans=spans,
+        block_size=4,
+        mandatory_logical_positions=(mandatory_position,),
+    )
+    graph, _utilities, objective = _utilities_and_objective(
+        full,
+        selection_config=SelectionConfig(
+            lambda_g=0.0,
+            lambda_m=0.0,
+            stop_on_nonpositive_gain=False,
+            minimum_stratum_fraction=0.15,
+        ),
+    )
+    mandatory_ids = {
+        node.node_id for node in graph.nodes if node.block.mandatory
+    }
+    aligned_optional = tuple(
+        node.node_id
+        for node in graph.nodes
+        if not node.block.mandatory and node.block.position_count == 4
+    )
+    shortlist_count = 2 if minimum_positions == 9 else 1
+    optimization_shortlist = aligned_optional[:shortlist_count]
+
+    result = lazy_greedy_select(
+        objective,
+        SelectionBudget(limit, BudgetUnit.RETAINED_SLOTS),
+        position_limits={(0, 0): limit},
+        fill_position_limits=True,
+        position_fill_quantum=4,
+        optimization_node_ids=optimization_shortlist,
+    )
+
+    reserved_positions = sum(
+        graph.nodes[decision.node_id].block.position_count
+        for decision in result.decisions
+        if decision.reason
+        in {SelectionReason.MANDATORY_EXACT, SelectionReason.STRATUM_RESERVE}
+    )
+    assert reserved_positions == minimum_positions
+    assert result.budget_spent == limit
+    assert sum(block.position_count for block in result.selected_blocks) == limit
+    assert any(
+        decision.selected
+        and decision.node_id not in mandatory_ids
+        and decision.node_id not in optimization_shortlist
+        and decision.reason is SelectionReason.DENSE_CACHE_FILL
+        for decision in result.decisions
+    )
+    assert all(
+        decision.node_id in optimization_shortlist
+        for decision in result.decisions
+        if decision.reason
+        in {SelectionReason.LAZY_GREEDY, SelectionReason.VECTORIZED_COVERAGE}
+    )
+
+
 def test_dense_fill_removes_padding_even_after_nonpositive_stop() -> None:
     sequence = 6
     key = np.arange(2 * sequence * 2, dtype=np.float32).reshape(1, 2, sequence, 2)

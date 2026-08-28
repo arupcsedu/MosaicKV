@@ -589,8 +589,6 @@ def lazy_greedy_select(
             for node_id in sorted(nodes_by_identity.get(identity, ())):
                 if node_id in selected:
                     continue
-                if node_id not in optimization_nodes:
-                    continue
                 block = graph.nodes[node_id].block
                 local_residue = block.position_count % position_fill_quantum
                 if local_residue == 0:
@@ -630,7 +628,7 @@ def lazy_greedy_select(
                 # only to make equal-cost choices deterministic.
                 attainable: dict[int, tuple[int, tuple[int, ...]]] = {0: (0, ())}
                 for node_id in sorted(nodes_by_identity.get(identity, ())):
-                    if node_id in selected or node_id not in optimization_nodes:
+                    if node_id in selected:
                         continue
                     block = graph.nodes[node_id].block
                     if block.position_count % position_fill_quantum != 0:
@@ -839,8 +837,11 @@ def lazy_greedy_select(
                 for node_id in fill_groups.get(identity, ()):
                     if node_id in selected:
                         continue
-                    if node_id not in optimization_nodes:
-                        continue
+                    # This is physical feasibility completion, not an
+                    # optimization decision. Every node already admitted to
+                    # the planner graph is compatible with this layer/head;
+                    # the routed shortlist remains enforced only in the
+                    # lazy/vectorized objective passes above.
                     if not is_position_representable(node_id):
                         constrained.add(node_id)
                         continue
