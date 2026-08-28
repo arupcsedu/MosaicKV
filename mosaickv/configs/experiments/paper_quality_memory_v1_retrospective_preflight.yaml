@@ -1,0 +1,62 @@
+schema_version: 1
+experiment_id: paper_quality_memory_v1_retrospective_preflight
+classification: retrospective_nonheldout_development_preflight
+
+candidate_source:
+  protocol: configs/experiments/paper_quality_memory_v1.yaml
+  run_config_template: configs/paper_candidate_llava_v1.yaml
+  effective_method: mosaickv_full__paper_candidate_v1
+  candidate_parameters_changed: false
+
+scope:
+  model_id: llava-hf/llava-1.5-7b-hf
+  model_revision: b234b804b114d9e37bb655e11cbbb5f5e971b7a9
+  backend: hf_eager
+  tasks: [mmstar, textvqa, docvqa]
+  methods: [full_kv, prompt_attention_topk, mosaickv_full]
+  nearest_baseline: prompt_attention_topk
+
+sample_boundary:
+  sample_count_per_task: 2
+  selection_seed: 20270828
+  disjoint_from_every_explicit_sample_ledger: true
+  exclude_repository_ledgers: true
+  exclude_scratch_run_input_ledgers: true
+  prior_model_outputs_exist_for_complete_benchmark_splits: true
+  answers_references_scores_or_failure_identities_used_for_selection: false
+  held_out: false
+  fresh: false
+  paper_claim_eligible: false
+
+preflight:
+  classification: retrospective_nonheldout_development_preflight
+  sample_count_per_task: 2
+  selection_seed: 20270828
+  output_length: 64
+  gpu_workers: 3
+  gpus_per_worker: 1
+  methods: [full_kv, prompt_attention_topk, mosaickv_full]
+  require_clean_worktree: true
+  require_immutable_source_sha: true
+  require_all_samples_complete: true
+  automatic_paper_submission: false
+
+development_gates:
+  active_memory:
+    accounting: measured_attention_active_key_and_value_tensor_storage_bytes
+    require_every_paired_sample_reduction_strictly_greater_than: 0.30
+  quality:
+    require_candidate_official_score_at_least_prompt_topk_per_task: true
+    margin: 0.0
+    prohibit_cross_task_metric_average: true
+
+execution_authorization:
+  retrospective_gpu_preflight_authorized: true
+  paper_experiment_authorized: false
+  paper_result_generation_authorized: false
+  automatic_follow_on_authorized: false
+
+required_follow_on_for_paper:
+  replace_mmstar_with_genuinely_untouched_general_vqa_pool: true
+  preregister_before_materialization: true
+  no_reuse_of_this_preflight_as_paper_evidence: true

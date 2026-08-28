@@ -41,6 +41,8 @@ from mosaickv.measurements.telemetry import capture_gpu_environment
 from mosaickv.types import ForecastMode, MosaicKVMethod, RepairPolicy
 
 METHOD_ORDER = ("full_kv", "prompt_attention_topk", "mosaickv_full")
+FRESH_CLASSIFICATION = "fresh_disjoint_heldout_quality_validation"
+RETROSPECTIVE_CLASSIFICATION = "retrospective_nonheldout_development_preflight"
 
 
 def _sha(path: Path) -> str:
@@ -305,14 +307,30 @@ def main() -> int:
     output_root = args.output_root.resolve()
     protocol_path = args.protocol.resolve()
     protocol = cast("dict[str, Any]", yaml.safe_load(protocol_path.read_text()))
-    if protocol.get("experiment_id") != "paper_quality_memory_v1":
-        raise RuntimeError("worker requires paper_quality_memory_v1")
+    experiment_id = str(protocol.get("experiment_id", ""))
+    if experiment_id not in {
+        "paper_quality_memory_v1",
+        "paper_quality_memory_v1_retrospective_preflight",
+    }:
+        raise RuntimeError("worker requires a registered paper-candidate preflight")
     authorization = cast("dict[str, Any]", protocol["execution_authorization"])
-    if authorization.get("gpu_preflight_authorized") is not True:
+    if experiment_id == "paper_quality_memory_v1":
+        authorized = authorization.get("gpu_preflight_authorized") is True
+    else:
+        authorized = authorization.get("retrospective_gpu_preflight_authorized") is True
+    if not authorized:
         raise PermissionError("GPU preflight is not authorized")
     if authorization.get("paper_experiment_authorized") is not False:
         raise RuntimeError("worker refuses a protocol that authorizes the paper campaign")
     preflight = cast("dict[str, Any]", protocol["preflight"])
+    classification = str(preflight.get("classification", ""))
+    expected_classification = (
+        FRESH_CLASSIFICATION
+        if experiment_id == "paper_quality_memory_v1"
+        else RETROSPECTIVE_CLASSIFICATION
+    )
+    if classification != expected_classification:
+        raise RuntimeError("preflight classification differs from its experiment protocol")
     if tuple(cast("list[str]", preflight["methods"])) != METHOD_ORDER:
         raise RuntimeError("preflight method order changed")
     _require_clean(repository)
@@ -334,8 +352,9 @@ def main() -> int:
         "sample_count": int(preflight["sample_count_per_task"]),
         "source_git_sha": expected_sha,
         "source_git_dirty": False,
-        "canonical_eligible": True,
-        "classification": "fresh_disjoint_heldout_quality_validation",
+        "canonical_eligible": classification == FRESH_CLASSIFICATION,
+        "paper_claim_eligible": classification == FRESH_CLASSIFICATION,
+        "classification": classification,
         "selection_freeze_sha256": _sha(protocol_path),
     }
     if any(ledger.get(key) != value for key, value in expected_ledger.items()):
@@ -354,7 +373,8 @@ def main() -> int:
         seed=int(template.execution.seed),
         output_length=int(preflight["output_length"]),
     )
-    worker_id = f"paper-v1-{task}-{expected_sha[:10]}"
+    prefix = "paper-v1" if classification == FRESH_CLASSIFICATION else "paper-v1-retro"
+    worker_id = f"{prefix}-{task}-{expected_sha[:10]}"
     telemetry_path = output_root / "telemetry" / f"{worker_id}.json"
     if telemetry_path.exists():
         recorded = json.loads(telemetry_path.read_text(encoding="utf-8"))
@@ -365,8 +385,10 @@ def main() -> int:
 
     telemetry: dict[str, Any] = {
         "schema_version": 1,
-        "classification": "fresh_disjoint_heldout_quality_validation",
-        "canonical_eligible": True,
+        "classification": classification,
+        "canonical_eligible": classification == FRESH_CLASSIFICATION,
+        "paper_claim_eligible": classification == FRESH_CLASSIFICATION,
+        "source_clean": True,
         "worker_id": worker_id,
         "task": task,
         "task_index": args.task_index,

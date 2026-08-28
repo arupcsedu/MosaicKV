@@ -13,6 +13,9 @@ from typing import Any, cast
 
 from mosaickv.evaluation.paper_candidate import PAPER_CANDIDATE_TASKS
 
+FRESH_CLASSIFICATION = "fresh_disjoint_heldout_quality_validation"
+RETROSPECTIVE_CLASSIFICATION = "retrospective_nonheldout_development_preflight"
+
 
 def _sha(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
@@ -50,7 +53,9 @@ def _markdown(report: dict[str, Any]) -> str:
     lines = [
         "# Paper candidate v1 GPU preflight",
         "",
-        f"Overall gate: **{'PASS' if report['passed'] else 'FAIL'}**",
+        f"Classification: `{report['classification']}`",
+        "",
+        f"Development gate: **{'PASS' if report['passed'] else 'FAIL'}**",
         "",
         "| Task | N | Prompt Top-K score | MosaicKV score | Delta | "
         "Mean active reduction | Minimum active reduction | Memory | Quality |",
@@ -73,6 +78,7 @@ def _markdown(report: dict[str, Any]) -> str:
             "Only measured attention-active K/V tensor-storage bytes are used for the memory gate.",
             "Task metrics are evaluated separately and are not averaged across benchmarks.",
             "Latency is not an acceptance gate. This analyzer cannot submit the paper campaign.",
+            "A retrospective pass is not paper evidence and does not authorize a larger run.",
             "",
         ]
     )
@@ -103,13 +109,22 @@ def main() -> int:
     }
     if len(source_shas) != 1:
         raise RuntimeError("preflight workers used different source commits")
+    classifications = {str(worker.get("classification")) for worker in workers}
+    if len(classifications) != 1:
+        raise RuntimeError("preflight workers used different scientific classifications")
+    classification = next(iter(classifications))
+    if classification not in {FRESH_CLASSIFICATION, RETROSPECTIVE_CLASSIFICATION}:
+        raise RuntimeError("preflight classification is unsupported")
 
     task_reports: list[dict[str, Any]] = []
     worker_records: list[dict[str, Any]] = []
     for task in PAPER_CANDIDATE_TASKS:
         path, worker = indexed[task]
-        if worker.get("status") != "completed" or worker.get("canonical_eligible") is not True:
-            raise RuntimeError(f"{task} worker is not a completed canonical record")
+        if worker.get("status") != "completed" or worker.get("source_clean") is not True:
+            raise RuntimeError(f"{task} worker is not a completed clean-source record")
+        expected_paper_eligibility = classification == FRESH_CLASSIFICATION
+        if worker.get("paper_claim_eligible") is not expected_paper_eligibility:
+            raise RuntimeError(f"{task} worker paper-eligibility label differs")
         if worker.get("paper_experiment_authorized") is not False:
             raise RuntimeError(f"{task} worker unexpectedly authorizes the paper campaign")
         pairs = worker.get("paired_samples")
@@ -172,6 +187,7 @@ def main() -> int:
     report = {
         "schema_version": 1,
         "experiment_id": "paper_quality_memory_v1_preflight",
+        "classification": classification,
         "source_git_sha": next(iter(source_shas)),
         "workers": worker_records,
         "tasks": task_reports,
@@ -181,8 +197,11 @@ def main() -> int:
             "candidate_mean_official_score_greater_than_or_equal_to_prompt_topk_per_task"
         ),
         "paper_experiment_authorized": False,
+        "paper_claim_eligible": classification == FRESH_CLASSIFICATION and passed,
         "next_action": (
-            "eligible_for_separate_paper_experiment_authorization"
+            "replace_mmstar_with_untouched_general_vqa_pool_before_paper_experiment"
+            if classification == RETROSPECTIVE_CLASSIFICATION
+            else "eligible_for_separate_paper_experiment_authorization"
             if passed
             else "paper_experiment_blocked"
         ),
