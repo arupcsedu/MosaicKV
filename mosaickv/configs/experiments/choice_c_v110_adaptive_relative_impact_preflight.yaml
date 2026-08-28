@@ -148,6 +148,10 @@ preflight_gate:
     - external_exact_bytes
     - constructed_active_bytes
     - physical_padding_bytes
+  fallback_trace_must_record:
+    - fullkv_fallback_accounting
+    - rejected_compressed_proposal_id
+    - rejected_compressed_proposal_accounting
   positive_result_may_authorize_calibration_automatically: false
   separate_positive_review_and_authorization_required: true
 

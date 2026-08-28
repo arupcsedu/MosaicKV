@@ -87,6 +87,13 @@ def validate_protocol(protocol: dict[str, Any]) -> None:
         or gates.get("greedy_token_match_required") is not True
     ):
         raise SampleProtocolError("V110 changed a preregistered gate")
+    preflight = cast("dict[str, Any]", protocol.get("preflight_gate"))
+    if preflight.get("fallback_trace_must_record") != [
+        "fullkv_fallback_accounting",
+        "rejected_compressed_proposal_id",
+        "rejected_compressed_proposal_accounting",
+    ]:
+        raise SampleProtocolError("V110 fallback trace contract is incomplete")
     downstream = cast("dict[str, Any]", protocol.get("downstream_actions"))
     if any(
         value is not False

@@ -28,6 +28,11 @@ def test_v110_reclaims_probes_but_keeps_absolute_gates() -> None:
     assert gates["maximum_forward_kl"] == 0.02
     assert gates["maximum_absolute_logit_difference"] == 1.0
     assert gates["greedy_token_match_required"] is True
+    assert protocol["preflight_gate"]["fallback_trace_must_record"] == [
+        "fullkv_fallback_accounting",
+        "rejected_compressed_proposal_id",
+        "rejected_compressed_proposal_accounting",
+    ]
 
 
 def test_v110_uses_fresh_ids_and_keeps_calibration_blocked() -> None:
