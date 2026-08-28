@@ -1,0 +1,160 @@
+schema_version: 1
+method: mosaickv_full
+
+model:
+  id: llava-hf/llava-1.5-7b-hf
+  revision: b234b804b114d9e37bb655e11cbbb5f5e971b7a9
+  precision: fp16
+
+# MMStar is the template route. PaperCandidateContract replaces this complete
+# dataset tuple for TextVQA and DocVQA; it never mutates only the task name.
+dataset:
+  id: Lin-Chen/MMStar
+  revision: bc98d668301da7b14f648724866e57302778ab27
+  split: test
+
+execution:
+  backend: huggingface
+  attention_implementation: eager
+  decode_attention_implementation: eager
+  seed: 17
+  deterministic_algorithms: true
+
+generation:
+  max_new_tokens: 64
+  do_sample: false
+  temperature: 0.0
+  top_p: 1.0
+  output_length_policy: fixed_max_new_tokens
+
+cache:
+  # Template only. The paired Prompt Top-K row is measured first and the
+  # source resolver replaces this with a block-aligned 69% cap per sample.
+  budget_value: 28500000
+  budget_unit: bytes
+  retention_ratio: 0.13
+  block_size: 4
+  physical_budget_block_size: 4
+  physical_budget_mandatory_policy: last_token
+  accounting_spec_sha: 60915ac01ad35843c4de56620864145d5b81b973a3bfec03fb322d5e4f6ff695
+  exact_gather_mode: source_views
+  packing_mode: preallocated_layer
+  total_storage_budget_bytes: 100000000
+
+forecasting:
+  enabled: true
+  mode: hybrid
+  prompt_window: 16
+  draft_steps: 4
+  centroid_count: 4
+  covariance: diagonal
+  low_memory_centroids: true
+  centroid_iterations: 4
+  centroid_execution_mode: batched_layer
+  adaptive_head_routing: true
+  head_shift_threshold: 0.15
+  stable_head_prompt_weight: 1.0
+  shifted_head_prompt_weight: 0.25
+  uncertainty_exact_head_fraction: 0.0625
+
+graph:
+  enabled: true
+  max_neighbors: 8
+  min_edge_weight: 0.0
+  similarity_chunk_size: 256
+  semantic_weight: 1.0
+  attention_weight: 1.0
+  spatial_weight: 1.0
+  layout_weight: 1.0
+  temporal_weight: 0.0
+  same_region_weight: 1.0
+  cross_modal_weight: 1.0
+  fallback_weight: 0.25
+  fallback_max_position_span: 128
+  spatial_max_distance: 0.125
+  attention_host_transfer_mode: deferred_layer_vectorized
+  edge_accumulation_mode: preselected
+  similarity_shortlist_multiplier: 3.0
+  similarity_shortlist_min_nodes: 64
+  candidate_descriptor_pooling: true
+  candidate_graph_mode: shortlist_rerank
+  candidate_neighbor_hops: 1
+  screening_group_blocks: 2
+  uncertain_head_only: true
+  uncertain_head_fraction: 0.125
+  uncertain_head_threshold: 0.15
+  candidate_nonmandatory_fraction: 0.08
+
+utility:
+  lambda_q: 1.0
+  lambda_v: -0.3
+  lambda_o: -0.3
+  normalization: layer_head_l1
+  execution_mode: vectorized_edges
+
+selection:
+  enabled: true
+  algorithm: vectorized_coverage
+  lambda_g: -0.25
+  lambda_m: -0.25
+  stop_on_nonpositive_gain: false
+  exhaustive_max_nodes: 20
+  # Keep question/text anchors exact, then reserve structured image evidence.
+  prompt_anchor_fraction: 0.50
+  evidence_preservation_fraction: 0.35
+  evidence_reservation_mode: spatial_stratified_prompt
+  evidence_grid_rows: 6
+  evidence_grid_columns: 6
+  minimum_stratum_fraction: 0.15
+  coverage_correction_rounds: 2
+  stable_head_prompt_routing: true
+  stable_head_uniform_fill: false
+  routed_head_only_planning: true
+  physical_capacity_fraction: 1.0
+
+prototypes:
+  enabled: true
+  group_size: 15
+  max_position_span: 512
+  maximum_prototypes_per_head: 2
+  min_anchor_weight: 0.0
+  allowed_modality_pairs: [image:image]
+  source_modalities: [image]
+  pooling_mode: exact_medoid_key_forecast_value
+  anchor_position_strategy: forecast_weighted_member_medoid
+  forecast_weight: 0.5
+  attention_log_bias_scale: 1.0
+  attention_bias_basis: forecast_attention_entropy
+  source_gather_mode: batched_layer
+  budget_planning_mode: one_pass_bounded_anchor_cover
+  uncertain_head_only: true
+  uncertain_head_fraction: 0.125
+  uncertain_head_threshold: 0.15
+
+residual:
+  enabled: true
+  rank: 8
+  storage_dtype: lossless
+  require_pinned_memory: true
+  index_mode: compact
+  max_source_blocks: 512
+  max_bytes: 33554432
+  selection_policy: prototype_coverage_then_risk
+
+repair:
+  enabled: true
+  policy: decision_aware
+  entropy_threshold: 0.45
+  prototype_risk_threshold: 0.02
+  prototype_risk_min_entropy: 0.15
+  decision_margin_threshold: 0.20
+  draft_kl_threshold: 0.02
+  counterfactual_draft_steps: 0
+  draft_require_token_mismatch: false
+  counterfactual_route_heads: false
+  normalize_prototype_risk: true
+  decision_high_risk_threshold: 0.05
+  max_blocks_per_step: 4
+  candidate_ranking: decision_influence
+  preserve_partial_prototype: true
+  evaluation_only: false

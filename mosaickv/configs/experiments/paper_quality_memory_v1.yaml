@@ -1,0 +1,70 @@
+schema_version: 1
+experiment_id: paper_quality_memory_v1
+classification: candidate_source_ready_gpu_unverified
+
+scope:
+  model_id: llava-hf/llava-1.5-7b-hf
+  model_revision: b234b804b114d9e37bb655e11cbbb5f5e971b7a9
+  backend: hf_eager
+  deterministic_generation: true
+  tasks: [mmstar, textvqa, docvqa]
+  methods: [full_kv, prompt_attention_topk, mosaickv_full]
+  nearest_baseline: prompt_attention_topk
+
+candidate_source:
+  run_config_template: configs/paper_candidate_llava_v1.yaml
+  python_contract: mosaickv.evaluation.paper_candidate.PaperCandidateContract
+  effective_method: mosaickv_full__paper_candidate_v1
+  training_free: true
+  benchmark_labels_used_for_cache_construction: false
+
+budget_contract:
+  accounting: measured_attention_active_key_and_value_tensor_storage_bytes
+  baseline_measured_first_on_same_sample: true
+  target_active_fraction_of_prompt_attention_topk: 0.699
+  minimum_active_reduction_fraction: 0.30
+  storage_quantization: adapter_reported_dense_block_storage_quantum
+  require_every_paired_sample_above_minimum_reduction: true
+  residual_bytes_are_not_active_bytes: true
+
+quality_contract:
+  margin: 0.0
+  require_candidate_official_score_at_least_baseline: true
+  require_each_task_separately: true
+  prohibit_cross_task_metric_average: true
+  metrics:
+    mmstar: lmms_eval_mmstar_average_accuracy
+    textvqa: lmms_eval_textvqa_exact_match
+    docvqa: lmms_eval_docvqa_anls
+
+candidate_design:
+  exact_tier: prompt_anchors_plus_spatially_stratified_cross_modal_evidence
+  prototype_tier: rope_safe_image_only_exact_medoid_key_forecast_value
+  residual_tier: lossless_pinned_cpu_prototype_coverage_then_risk
+  repair: decision_aware_equal_active_budget_promotion_and_eviction
+  future_query_forecast: hybrid_prompt_window_16_plus_4_token_draft
+  graph: sparse_uncertain_head_semantic_attention_spatial_layout_same_region
+  value_utility: attention_plus_value_contribution_plus_uniqueness
+
+execution_authorization:
+  candidate_source_implemented: true
+  cpu_validation_authorized: true
+  gpu_preflight_authorized: true
+  paper_experiment_authorized: false
+
+preflight:
+  classification: fresh_disjoint_heldout_quality_validation
+  sample_count_per_task: 2
+  selection_seed: 20270827
+  output_length: 64
+  gpu_workers: 3
+  gpus_per_worker: 1
+  methods: [full_kv, prompt_attention_topk, mosaickv_full]
+  require_clean_worktree: true
+  require_immutable_source_sha: true
+  require_all_samples_complete: true
+  automatic_paper_submission: false
+
+paper_acceptance:
+  pass_only_if_all_three_tasks_pass_both_gates: true
+  no_claim_before_clean_immutable_gpu_run: true

@@ -8,6 +8,12 @@ from mosaickv.evaluation.model import (
     LocalEvaluationModel,
     ModelGeneration,
 )
+from mosaickv.evaluation.paper_candidate import (
+    PaperCandidateContract,
+    PaperCandidateGateReport,
+    PaperCandidateTaskGate,
+    evaluate_paper_candidate_gate,
+)
 from mosaickv.evaluation.results import EvaluationResult, ResultStatus
 from mosaickv.evaluation.tasks import TaskRegistry, TaskSample, TaskSpec, default_task_registry
 
@@ -22,9 +28,13 @@ __all__ = [
     "MediaKind",
     "ModelGeneration",
     "MultimodalMessage",
+    "PaperCandidateContract",
+    "PaperCandidateGateReport",
+    "PaperCandidateTaskGate",
     "ResultStatus",
     "TaskRegistry",
     "TaskSample",
     "TaskSpec",
     "default_task_registry",
+    "evaluate_paper_candidate_gate",
 ]
