@@ -14,19 +14,19 @@ scope_boundary:
   reviewed_before_scanner_implementation: true
 
 scanner_boundary:
-  commit_git_sha: 370093df1ac5b9ff021b10d60a575a14f6e3a5bc
-  commit_parent_git_sha: 15169135b96161b53bf1f56ab220b6a3f2217e8a
+  commit_git_sha: fa136d83d441d11c90f1fdab924d64c82e6362d9
+  commit_parent_git_sha: c9e93bfa5d485ac2a5223cc8ac6fa3c40d32c668
   exact_file_count: 3
   files:
     - path: src/mosaickv/evaluation/identity_exclusion_scan.py
-      sha256: cd90472501b08898e768e42876ad65d8aea6795b775ca18acb2fe6794b3a82ef
+      sha256: 0f41304cea642ac0f742d3201fef17079caeab412268517cd5c930fa999845d7
     - path: scripts/scan_paper_quality_memory_v2_exclusions.py
       sha256: f550aedb9d3a6380990acf064c2b98866cc6609dfea802a0a4bec8b8ccd569e8
     - path: tests/unit/test_paper_quality_memory_v2_exclusion_scan.py
-      sha256: 5215c3ae175cad9c5f1eff9d54f422922003725e17d494bb05cf8e42c6e4f365
+      sha256: cffd5637d848cc6535efdb51b65048dfa366e255e161db41078ae1038b766b23
   reviewed_before_authorization_ledger_draft: true
   cpu_validation:
-    targeted_pytest: 30_passed
+    targeted_pytest: 33_passed
     ruff: passed
     mypy: passed
     real_scan_roots_accessed: false
@@ -61,7 +61,7 @@ scan_contract:
   slurm_access_allowed: false
 
 output: /scratch/djy8hg/runs/mosaickv/paper-quality-memory-v2-frozen-99a412b/inputs/exclusion_manifest_realworldqa.json
-reviewed_by_user: true
+reviewed_by_user: false
 
 ledger_boundary:
   initial_ledger_commit_git_sha: null
@@ -73,7 +73,7 @@ ledger_boundary:
   commit_policy: initial_commit_must_contain_only_this_disabled_ledger
 
 authorization:
-  exclusion_scan_execution_authorized: true
+  exclusion_scan_execution_authorized: false
   exclusion_manifest_review_authorized: false
   catalog_access_or_construction_authorized: false
   sample_ranking_or_selection_authorized: false
