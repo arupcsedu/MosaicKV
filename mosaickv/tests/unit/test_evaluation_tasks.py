@@ -20,6 +20,7 @@ def test_registry_routes_public_scoring_to_lmms_eval() -> None:
         "infovqa",
         "mmstar",
         "mmvet",
+        "realworldqa",
         "synthetic_ci",
         "textvqa",
         "textvqa_train_calibration",
@@ -34,6 +35,16 @@ def test_registry_routes_public_scoring_to_lmms_eval() -> None:
     )
     assert registry.resolve("docvqa").development_lmms_task == "docvqa_val"
     assert registry.resolve("chartqa").development_lmms_task == "chartqa"
+    realworldqa = registry.resolve("realworldqa")
+    assert realworldqa.route_key == (
+        "lmms-lab/RealWorldQA",
+        "default",
+        "test",
+        "realworldqa",
+    )
+    assert realworldqa.sample_metric == "exact_match"
+    assert realworldqa.scoring_deterministic is True
+    assert realworldqa.reference_field == "answer"
     text_train = registry.resolve("textvqa_train_calibration")
     assert text_train.route_key == (
         "lmms-lab/textvqa",

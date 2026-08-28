@@ -12,6 +12,7 @@ from mosaickv.evaluation.paper_candidate import (
     PaperCandidateContract,
     PaperCandidateGateReport,
     PaperCandidateTaskGate,
+    PaperCandidateV2Contract,
     evaluate_paper_candidate_gate,
 )
 from mosaickv.evaluation.results import EvaluationResult, ResultStatus
@@ -31,6 +32,7 @@ __all__ = [
     "PaperCandidateContract",
     "PaperCandidateGateReport",
     "PaperCandidateTaskGate",
+    "PaperCandidateV2Contract",
     "ResultStatus",
     "TaskRegistry",
     "TaskSample",

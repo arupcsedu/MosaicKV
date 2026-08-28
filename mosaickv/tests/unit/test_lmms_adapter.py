@@ -258,6 +258,32 @@ def test_textvqa_reference_provenance_uses_annotations_not_template_field_name()
         lmms_adapter._prepared_reference(task, spec, {"question_id": 7})
 
 
+def test_realworldqa_route_and_reference_are_explicit_and_cpu_only() -> None:
+    spec = default_task_registry().resolve("realworldqa")
+    task = SimpleNamespace(
+        config=SimpleNamespace(
+            dataset_path="lmms-lab/RealWorldQA",
+            dataset_name=None,
+            test_split="test",
+            validation_split=None,
+        ),
+        dataset={"test": object()},
+        doc_to_target=lambda _doc: "template-placeholder",
+    )
+
+    assert lmms_adapter._loaded_task_split(task, spec) == "test"
+    assert (
+        lmms_adapter._prepared_reference(
+            task,
+            spec,
+            {"question_id": 17, "answer": "Downhill"},
+        )
+        == "Downhill"
+    )
+    with pytest.raises(ValueError, match="requires reference field 'answer'"):
+        lmms_adapter._prepared_reference(task, spec, {"question_id": 17})
+
+
 def test_loaded_task_route_rejects_configuration_or_implicit_split_mismatch() -> None:
     registry = default_task_registry()
     info = registry.resolve("infovqa")

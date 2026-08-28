@@ -4,7 +4,16 @@ import hashlib
 from pathlib import Path
 from typing import Any
 
+import pytest
 import yaml  # type: ignore[import-untyped]
+
+from mosaickv.config import load_config
+from mosaickv.evaluation.paper_candidate import (
+    PAPER_CANDIDATE_TASKS,
+    PAPER_CANDIDATE_V2_TASKS,
+    PaperCandidateContract,
+    PaperCandidateV2Contract,
+)
 
 
 def _package_root() -> Path:
@@ -84,3 +93,30 @@ def test_preregistration_is_larger_fixed_and_fully_execution_disabled() -> None:
     assert all(value is False for value in authorization.values())
     assert protocol["controlled_runtime"]["deterministic_generation"] is True
     assert protocol["controlled_runtime"]["max_new_tokens"] == 64
+
+
+def test_v2_contract_routes_realworldqa_without_mutating_v1_contract() -> None:
+    template = load_config(_package_root() / "configs/paper_candidate_llava_v1.yaml")
+    v2 = PaperCandidateV2Contract().resolve_run_config(
+        template,
+        task="realworldqa",
+        baseline_active_bytes=40_000_000,
+        storage_quantum_bytes=524_288,
+    )
+
+    assert PAPER_CANDIDATE_TASKS == ("mmstar", "textvqa", "docvqa")
+    assert PAPER_CANDIDATE_V2_TASKS == ("realworldqa", "textvqa", "docvqa")
+    assert v2.dataset.id == "lmms-lab/RealWorldQA"
+    assert v2.dataset.revision == "907c4e5228fd1703c710ed937601cb5f89ab8d5c"
+    assert v2.dataset.split == "test"
+    assert v2.cache.budget_value == PaperCandidateContract().active_budget(
+        40_000_000,
+        524_288,
+    )
+    with pytest.raises(ValueError, match="unsupported paper-candidate-v2 task"):
+        PaperCandidateV2Contract().resolve_run_config(
+            template,
+            task="mmstar",
+            baseline_active_bytes=40_000_000,
+            storage_quantum_bytes=524_288,
+        )

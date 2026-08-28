@@ -41,6 +41,20 @@ PAPER_CANDIDATE_TASK_ROUTES = {
     ),
 }
 
+# The v1 constants above remain immutable because they identify the completed
+# retrospective development contract.  The paper preregistration replaces
+# only MMStar with RealWorldQA and therefore uses a separate route boundary.
+PAPER_CANDIDATE_V2_TASKS = ("realworldqa", "textvqa", "docvqa")
+PAPER_CANDIDATE_V2_TASK_ROUTES = {
+    "realworldqa": DatasetConfig(
+        "lmms-lab/RealWorldQA",
+        "907c4e5228fd1703c710ed937601cb5f89ab8d5c",
+        "test",
+    ),
+    "textvqa": PAPER_CANDIDATE_TASK_ROUTES["textvqa"],
+    "docvqa": PAPER_CANDIDATE_TASK_ROUTES["docvqa"],
+}
+
 
 @dataclass(frozen=True, slots=True)
 class PaperCandidateContract:
@@ -108,6 +122,44 @@ class PaperCandidateContract:
         return replace(
             template,
             dataset=PAPER_CANDIDATE_TASK_ROUTES[task],
+            cache=replace(template.cache, budget_value=budget),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class PaperCandidateV2Contract(PaperCandidateContract):
+    """Frozen candidate routed to the preregistered v2 task set.
+
+    This class changes only dataset identity.  Budget calculation, model and
+    method validation, cache configuration, and all runtime behavior are
+    inherited unchanged from :class:`PaperCandidateContract`.
+    """
+
+    def resolve_run_config(
+        self,
+        template: RunConfig,
+        *,
+        task: str,
+        baseline_active_bytes: int,
+        storage_quantum_bytes: int,
+    ) -> RunConfig:
+        """Bind the frozen candidate to a preregistered v2 dataset route."""
+
+        if task not in PAPER_CANDIDATE_V2_TASKS:
+            raise ValueError(f"unsupported paper-candidate-v2 task: {task!r}")
+        if template.model.id != PAPER_CANDIDATE_MODEL_ID:
+            raise ValueError("paper candidate is restricted to the pinned LLaVA-1.5-7B model")
+        if template.method is not PAPER_CANDIDATE_METHOD:
+            raise ValueError("paper candidate template must use mosaickv_full")
+        if template.cache.budget_unit is not BudgetUnit.BYTES:
+            raise ValueError("paper candidate requires byte-based cache accounting")
+        budget = self.active_budget(baseline_active_bytes, storage_quantum_bytes)
+        total_storage = template.cache.total_storage_budget_bytes
+        if total_storage is not None and total_storage < budget:
+            raise ValueError("candidate total-storage cap cannot be below its active cap")
+        return replace(
+            template,
+            dataset=PAPER_CANDIDATE_V2_TASK_ROUTES[task],
             cache=replace(template.cache, budget_value=budget),
         )
 
@@ -249,8 +301,11 @@ __all__ = [
     "PAPER_CANDIDATE_STORAGE_QUANTUM_BYTES",
     "PAPER_CANDIDATE_TASKS",
     "PAPER_CANDIDATE_TASK_ROUTES",
+    "PAPER_CANDIDATE_V2_TASKS",
+    "PAPER_CANDIDATE_V2_TASK_ROUTES",
     "PaperCandidateContract",
     "PaperCandidateGateReport",
     "PaperCandidateTaskGate",
+    "PaperCandidateV2Contract",
     "evaluate_paper_candidate_gate",
 ]
