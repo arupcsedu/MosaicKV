@@ -179,7 +179,7 @@ def _trace_map(trace_directory: Path, *, expected_run_id: str) -> dict[str, dict
 
 def _validate_vllm_trace(
     trace: Mapping[str, Any], *, row: EvaluationResult
-) -> tuple[int, ...]:
+) -> tuple[tuple[int, ...], tuple[int, ...]]:
     if (
         trace.get("status") != "completed"
         or trace.get("measurement_type") != "vllm_fullkv"
@@ -227,10 +227,45 @@ def _validate_vllm_trace(
         or accounting.get("excludes_free_block_pool") is not True
     ):
         raise VLLMVerificationError(f"vLLM active-KV accounting differs for {row.sample_id}")
-    return token_sequences[0]
+    tokens = token_sequences[0]
+    return tokens, _quality_token_prefix(trace, tokens, label=f"vLLM/{row.sample_id}")
 
 
-def _validate_hf_trace(trace: Mapping[str, Any], *, row: EvaluationResult) -> tuple[int, ...]:
+def _quality_token_prefix(
+    trace: Mapping[str, Any], tokens: tuple[int, ...], *, label: str
+) -> tuple[int, ...]:
+    """Return the decoded completion through the first terminal token.
+
+    Fixed-length timing runs intentionally continue after EOS. Tokens sampled
+    after that boundary are timing filler and are not part of the decoded
+    answer. Cross-backend parity therefore gates this prefix while preserving
+    the complete timed-sequence comparison as a separate diagnostic.
+    """
+
+    decoding = _object(trace.get("quality_decoding"), f"{label}.quality_decoding")
+    terminal_index = decoding.get("terminal_token_index")
+    if terminal_index is None:
+        quality_tokens = tokens
+    else:
+        if (
+            isinstance(terminal_index, bool)
+            or not isinstance(terminal_index, int)
+            or terminal_index < 0
+            or terminal_index >= len(tokens)
+        ):
+            raise VLLMVerificationError(f"{label} has an invalid terminal-token index")
+        quality_tokens = tokens[: terminal_index + 1]
+    recorded_count = decoding.get("quality_completion_tokens")
+    if recorded_count != len(quality_tokens):
+        raise VLLMVerificationError(
+            f"{label} quality-token count {recorded_count!r} differs from {len(quality_tokens)}"
+        )
+    return quality_tokens
+
+
+def _validate_hf_trace(
+    trace: Mapping[str, Any], *, row: EvaluationResult
+) -> tuple[tuple[int, ...], tuple[int, ...]]:
     if (
         trace.get("status") != "completed"
         or trace.get("backend") != "huggingface"
@@ -241,7 +276,8 @@ def _validate_hf_trace(trace: Mapping[str, Any], *, row: EvaluationResult) -> tu
     raw_tokens = trace.get("generated_token_ids")
     if not isinstance(raw_tokens, list) or not raw_tokens:
         raise VLLMVerificationError(f"HF trace {row.sample_id} lacks generated token IDs")
-    return tuple(int(token) for token in raw_tokens)
+    tokens = tuple(int(token) for token in raw_tokens)
+    return tokens, _quality_token_prefix(trace, tokens, label=f"HF/{row.sample_id}")
 
 
 def verify_task_pair(task_root: Path, *, task: str, expected_samples: int) -> JsonObject:
@@ -274,24 +310,34 @@ def verify_task_pair(task_root: Path, *, task: str, expected_samples: int) -> Js
     if set(hf_rows) != set(vllm_rows):
         raise VLLMVerificationError(f"HF/vLLM sample IDs differ for {task}")
     sample_records: list[JsonValue] = []
-    token_matches = 0
+    quality_token_matches = 0
+    timed_token_matches = 0
     answer_matches = 0
     score_matches = 0
     for sample_id in sorted(hf_rows):
         hf_row = hf_rows[sample_id]
         vllm_row = vllm_rows[sample_id]
-        hf_tokens = _validate_hf_trace(hf_traces[sample_id], row=hf_row)
-        vllm_tokens = _validate_vllm_trace(vllm_traces[sample_id], row=vllm_row)
-        token_match = hf_tokens == vllm_tokens
+        hf_tokens, hf_quality_tokens = _validate_hf_trace(
+            hf_traces[sample_id], row=hf_row
+        )
+        vllm_tokens, vllm_quality_tokens = _validate_vllm_trace(
+            vllm_traces[sample_id], row=vllm_row
+        )
+        quality_token_match = hf_quality_tokens == vllm_quality_tokens
+        timed_token_match = hf_tokens == vllm_tokens
         answer_match = hf_row.answer == vllm_row.answer
         score_match = hf_row.task_score == vllm_row.task_score
-        token_matches += int(token_match)
+        quality_token_matches += int(quality_token_match)
+        timed_token_matches += int(timed_token_match)
         answer_matches += int(answer_match)
         score_matches += int(score_match)
         sample_records.append(
             {
                 "sample_id": sample_id,
-                "token_ids_match": token_match,
+                "quality_token_ids_match": quality_token_match,
+                "timed_token_ids_match": timed_token_match,
+                "hf_quality_token_count": len(hf_quality_tokens),
+                "vllm_quality_token_count": len(vllm_quality_tokens),
                 "answer_match": answer_match,
                 "task_score_match": score_match,
                 "hf_task_score": hf_row.task_score,
@@ -308,7 +354,7 @@ def verify_task_pair(task_root: Path, *, task: str, expected_samples: int) -> Js
         if isinstance(trace.get("request_isolation"), dict)
     )
     parity_passed = (
-        token_matches == expected_samples
+        quality_token_matches == expected_samples
         and answer_matches == expected_samples
         and score_matches == expected_samples
     )
@@ -317,7 +363,9 @@ def verify_task_pair(task_root: Path, *, task: str, expected_samples: int) -> Js
         "expected_samples": expected_samples,
         "completed_samples": len(sample_records),
         "request_isolation_verified": isolation_verified,
-        "token_parity_count": token_matches,
+        "quality_token_parity_count": quality_token_matches,
+        "timed_token_parity_count": timed_token_matches,
+        "post_terminal_timed_token_parity_is_gate": False,
         "answer_parity_count": answer_matches,
         "score_parity_count": score_matches,
         "parity_passed": parity_passed,
@@ -345,7 +393,7 @@ def verify_campaign(
     ]
     passed = all(payload["status"] == "passed" for payload in task_payloads)
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "model": MODEL_ID,
         "model_revision": MODEL_REVISION,
         "backends": ["huggingface", "vllm"],

@@ -2,127 +2,81 @@
 
 ## Current status
 
-MosaicKV is not paper-ready yet. The latest A100 run is useful implementation
-evidence, but it used a dirty worktree and two retrospectively selected DocVQA
-examples. It showed genuine exact, prototype, and residual tiers and about 40%
-less active-plus-residual storage than the tested competitors. It did not show
-quality noninferiority to Prompt Attention Top-K, and its end-to-end latency was
-slower. Those rows must not be used as paper measurements.
+The implementation is ready for a larger, fixed **LLaVA-1.5 exact-selection
+quality-memory experiment** on HF and vLLM. It is not yet ready to support a
+paper claim that complete MosaicKV is generally superior.
 
-The next protocol is versioned in
-`configs/experiments/choice_c_paper_candidate_v37.yaml`. It is deliberately
-blocked until the implementation is committed, the worktree is clean, and a
-new disjoint evaluation ledger is materialized. Previously opened held-out IDs
-remain excluded.
+The immutable implementation SHA
+`0a0d6e546a0798a6540b967802b2f70947ed1391` passed 838 unit tests, 42 CPU
+integration tests, Ruff, and strict MyPy. Clean A100 arrays then established:
 
-## New quality-recovery paths
+- HF eager and ordinary vLLM FullKV produced identical scored completion
+  tokens, answers, and official task scores for six samples across MMStar,
+  TextVQA, and DocVQA;
+- fixed-length post-EOS tokens are reported separately and do not alter the
+  decoded completion;
+- the hash-bound common-selector bridge produced native request-wide
+  `mosaickv_exact` plans without fallback;
+- every tested MosaicKV row used at least 30% fewer measured active KV bytes
+  than its paired Prompt Attention Top-K row;
+- mean official task score was equal or better on each of the three tasks; and
+- two distinct compressed requests in one persistent vLLM engine passed an
+  A-B-A isolation probe.
 
-### Prototype-covered residual storage
+The compressed gate contained only two retrospective examples per task. It is
+therefore development evidence, not a statistically adequate paper result.
+Its exact answer agreement was 100% on MMStar and 0% on TextVQA and DocVQA,
+even though official task scores were noninferior. This distinction is exposed,
+not hidden: official benchmark score is primary, while exact string agreement
+is a secondary diagnostic.
 
-A bounded residual tier used to rank all source blocks globally. If several
-high-error blocks belonged to one prototype, they could consume most of a small
-CPU budget while another prototype received no recoverable member. At decode
-time, MosaicKV could correctly identify that second prototype as risky but had
-nothing to restore.
+## Supported paper scope
 
-The new `prototype_coverage_then_risk` policy first ranks prototype clusters by
-their best label-free reconstruction/value priority. It stores one member from
-each highest-priority cluster before storing a second member from any cluster.
-The original ordering is retained in the materialized residual index, so this
-does not change logical positions or determinism. The existing global policy
-remains available as an ablation.
+The next fixed evaluation may use:
 
-### Prefix-safe FullKV-draft disagreement
+- model: `llava-hf/llava-1.5-7b-hf` at revision
+  `b234b804b114d9e37bb655e11cbbb5f5e971b7a9`;
+- tasks: MMStar, TextVQA, and DocVQA, reported separately;
+- HF eager FullKV, Prompt Attention Top-K, and the frozen HF MosaicKV candidate;
+- ordinary vLLM FullKV, hash-bound vLLM Prompt Attention Top-K, and
+  `mosaickv_exact__vllm_requestwide_projection`; and
+- deterministic greedy decoding with one pinned common environment and model,
+  dataset, prompt, media, tokenization, precision, generation, attention, and
+  hardware provenance.
 
-The isolated draft rollout already evaluates a few future steps using the
-untouched FullKV prefill. Previously, MosaicKV kept its query vectors and
-attention maps but discarded its next-token distributions. This lost a useful
-training-free warning signal: compressed decoding can be confident and still
-disagree with FullKV, so entropy alone may not trigger repair.
+The vLLM result is exact-selection MosaicKV. vLLM prototype injection and
+residual repair are unsupported and must not be labeled `mosaickv_proto` or
+`mosaickv_full`. SGLang is outside the paper scope.
 
-The runtime now retains the draft probability distribution and computes
-`KL(compressed || FullKV draft)` for the corresponding decode step. It exposes
-this signal only while every draft input token matches the online prefix. Once
-the prefixes differ or the draft horizon ends, the signal is disabled. A
-disjoint, label-free calibration stage may choose a KL threshold under the same
-trigger-rate and precision limits as other repair signals. If no threshold
-passes, repair remains disabled. The online compressor never receives dataset
-answers or oracle future queries.
+## Unchanged primary gates
 
-### Budget-neutral quality recovery
+For every task independently:
 
-Residual capacity must be resolved from a total-storage ceiling, not added on
-top of an active-KV budget. The candidate protocol limits active KV plus encoded
-residual payloads to at most 70% of the paired competitor's measured storage.
-Within that ceiling, additional residual coverage may be used only if it
-improves counterfactual repair precision on calibration data. FP8 or INT8 is not
-presumed beneficial merely because it is smaller; lossless residuals remain the
-default until a separate fidelity gate passes.
+1. every paired MosaicKV row must use at least 30% fewer measured active KV
+   bytes than Prompt Attention Top-K;
+2. MosaicKV's paired mean official task score must be no lower than Prompt
+   Attention Top-K;
+3. paired bootstrap confidence intervals must be reported;
+4. exact answer/token agreement, residual storage, compression time, TTFT,
+   decode time, and end-to-end latency must be reported as secondary metrics;
+5. missing, failed, non-finite, fallback, dirty-source, or provenance-mismatched
+   rows fail the run; and
+6. incompatible benchmark metrics must never be macro-averaged without an
+   explicitly defined normalization.
 
-## New latency paths
+Latency is not a rejection criterion, but it must include selector planning
+and compression overhead. The clean development run was slower than Prompt
+Top-K and cannot support a speedup claim.
 
-The runtime now reports `host_orchestration`, the nonnegative gap between wall
-clock end-to-end latency and the synchronized GPU-event phases. It also splits
-the first explicit decode step from the mean of later steady-state steps. This
-prevents a paper table from making named GPU phases appear to explain latency
-that was actually spent in Python, tensor metadata work, or host/device
-coordination.
+## Remaining critical evidence blocker
 
-Candidate optimizations must be evaluated in this order:
+The only blocker for the scoped LLaVA exact-selection quality-memory table is a
+larger, fixed paired execution with enough examples to make the per-task score
+and confidence intervals meaningful. The existing two-example result cannot
+establish generalization.
 
-1. reduce sparse-graph degree and shortlist size, accepting the change only if
-   the frozen FullKV-fidelity gate still passes;
-2. compare RoPE-safe prototype groups of 15 and 31 blocks, which can reduce the
-   number of prototype payloads and release slots for exact evidence;
-3. remove host orchestration identified by the new timing residual, without
-   changing selected blocks or prototype tensors;
-4. test SDPA decode only as a common backend for every repair-disabled method,
-   after eager token/logit parity passes; and
-5. keep repair-enabled eager results separate until an attention-observation
-   interface with equivalent numerics is verified.
-
-A steady-state decode improvement is useful diagnostic evidence, but it cannot
-replace the primary end-to-end result. Compression overhead must remain in the
-reported total.
-
-## Claims that can pass
-
-Two questions must remain distinct.
-
-1. **Equal active memory:** at paired measured active-KV bytes within 2%, does
-   MosaicKV reduce the preregistered FullKV-fidelity error by at least 30% while
-   remaining within the task-score noninferiority margin?
-2. **End-to-end systems cost:** at the same model, examples, active-byte budget,
-   backend, generation length, and measurement protocol, is MosaicKV at least
-   5% faster in the point estimate with a positive paired-bootstrap lower
-   bound?
-
-Active-plus-residual storage is reported in addition to active device memory.
-A quality-matched Pareto observation at different budgets may be described as a
-frontier result, but not as an identical-budget row. Nominal retention ratios
-are never the primary comparison.
-
-## Evidence required before a paper table
-
-- Retention 1.0 must pass the documented FullKV identity tolerance.
-- The source tree must be clean and committed; every manifest must record the
-  source/config SHA and complete hardware/software provenance.
-- Candidate selection may use only disjoint design data and FullKV-fidelity
-  diagnostics, never evaluation labels.
-- A fresh evaluation ledger must exclude every opened design, internal, and
-  held-out ID. Its size must be fixed by a power analysis before access.
-- Each latency cell needs five warmups and at least twenty blocked, paired
-  repetitions on an isolated GPU, with background-process and clock evidence.
-- Point estimates, per-example/per-trial rows, and paired confidence intervals
-  must all pass. A favorable mean alone is insufficient.
-- `mosaickv_full` rows must actually exercise all three tiers. The repair claim
-  additionally requires positive held-out repair recall, adequate precision,
-  net quality gain, and measured overhead. A disabled or zero-trigger policy
-  cannot support a repair-benefit claim.
-- The final confirmation must include general VQA, document/OCR, and chart
-  tasks and both LLaVA and Qwen-VL model families. Unsupported combinations are
-  reported, not silently omitted.
-
-Failure of any primary gate stops the full sweep. Negative results remain part
-of the artifact and the method is described according to the evidence it
-actually supports.
+Broader claims have additional blockers: Qwen/LLaVA family generalization,
+HF prototype quality, repair benefit, latency competitiveness, and native
+vLLM prototype/repair support each require separate positive evidence. A
+disabled or unsupported component must remain an explicit unsupported row,
+never a simulated or renamed result.

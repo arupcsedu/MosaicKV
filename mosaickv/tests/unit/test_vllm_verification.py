@@ -90,7 +90,12 @@ def _vllm_trial(tokens: list[int]) -> dict[str, object]:
     }
 
 
-def _materialize_pair(root: Path, *, mismatch_second_token: bool = False) -> None:
+def _materialize_pair(
+    root: Path,
+    *,
+    mismatch_quality_token: bool = False,
+    mismatch_post_terminal_token: bool = False,
+) -> None:
     for backend in ("hf", "vllm"):
         run_id = f"{backend}-run"
         base = root / "mmstar" / backend
@@ -106,9 +111,15 @@ def _materialize_pair(root: Path, *, mismatch_second_token: bool = False) -> Non
             JsonlResultStore(run_root / "results.jsonl").append(
                 _row(run_id, sample_id, backend, manifest_path)
             )
-            tokens = [7, 9]
-            if backend == "vllm" and mismatch_second_token and index == 1:
-                tokens = [7, 10]
+            tokens = [7, 2, 9]
+            if backend == "vllm" and mismatch_quality_token and index == 1:
+                tokens = [8, 2, 9]
+            if backend == "vllm" and mismatch_post_terminal_token and index == 1:
+                tokens = [7, 2, 10]
+            quality_decoding = {
+                "terminal_token_index": 1,
+                "quality_completion_tokens": 2,
+            }
             if backend == "hf":
                 trace: dict[str, object] = {
                     "sample_id": sample_id,
@@ -117,6 +128,7 @@ def _materialize_pair(root: Path, *, mismatch_second_token: bool = False) -> Non
                     "method": "full_kv",
                     "retention_ratio": 1.0,
                     "generated_token_ids": tokens,
+                    "quality_decoding": quality_decoding,
                 }
             else:
                 trace = {
@@ -126,6 +138,7 @@ def _materialize_pair(root: Path, *, mismatch_second_token: bool = False) -> Non
                     "backend": "vllm",
                     "method": "full_kv",
                     "native_mosaickv": False,
+                    "quality_decoding": quality_decoding,
                     "trials": [_vllm_trial(tokens), _vllm_trial(tokens)],
                     "kv_cache_accounting": {
                         "boundary": "packed_prefill_active_kv_tensor_storage",
@@ -149,12 +162,13 @@ def test_campaign_verifier_accepts_complete_paired_fullkv_artifacts(tmp_path: Pa
     assert isinstance(tasks, list)
     task = tasks[0]
     assert isinstance(task, dict)
-    assert task["token_parity_count"] == 2
+    assert task["quality_token_parity_count"] == 2
+    assert task["timed_token_parity_count"] == 2
     assert task["request_isolation_verified"] is True
 
 
-def test_campaign_verifier_reports_token_parity_failure(tmp_path: Path) -> None:
-    _materialize_pair(tmp_path, mismatch_second_token=True)
+def test_campaign_verifier_reports_quality_token_parity_failure(tmp_path: Path) -> None:
+    _materialize_pair(tmp_path, mismatch_quality_token=True)
 
     payload = verify_campaign(tmp_path, tasks=("mmstar",), expected_samples=2)
 
@@ -163,4 +177,21 @@ def test_campaign_verifier_reports_token_parity_failure(tmp_path: Path) -> None:
     assert isinstance(tasks, list)
     task = tasks[0]
     assert isinstance(task, dict)
-    assert task["token_parity_count"] == 1
+    assert task["quality_token_parity_count"] == 1
+
+
+def test_campaign_verifier_reports_but_does_not_gate_post_terminal_tokens(
+    tmp_path: Path,
+) -> None:
+    _materialize_pair(tmp_path, mismatch_post_terminal_token=True)
+
+    payload = verify_campaign(tmp_path, tasks=("mmstar",), expected_samples=2)
+
+    assert payload["status"] == "passed"
+    tasks = payload["tasks"]
+    assert isinstance(tasks, list)
+    task = tasks[0]
+    assert isinstance(task, dict)
+    assert task["quality_token_parity_count"] == 2
+    assert task["timed_token_parity_count"] == 1
+    assert task["post_terminal_timed_token_parity_is_gate"] is False

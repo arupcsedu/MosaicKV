@@ -99,9 +99,25 @@ MOSAICKV_ALLOW_DIRTY_EXPLORATORY=1 \
 sbatch mosaickv/slurm/native_backend_parity.sbatch
 ```
 
-The native fallback selection policy is only a transport validator. It cannot
-be emitted as a paper method row, and the versioned experiment matrix continues
-to reject it until a plan from the common MosaicKV selector is bridged and
-selection equivalence is tested. No HF fallback or logical-only byte counter is
-labeled native. Prototype injection and repair remain unsupported. See
-`vllm_native_blocker.md` for the exact transaction and evidence.
+The common selector bridge is now implemented. HF forecast/graph/utility
+traces carry a request-wide block projection; write-once catalog builders bind
+each entry to the model, revision, task, dataset revision, method, source trace,
+and SHA-256; and vLLM consumes the per-request selected and mandatory block IDs
+through `SamplingParams.extra_args`. Request-wide aggregation caps repeated
+per-head votes, normalizes utility within layer/head routes, reserves the best
+available image/OCR evidence block, and fills the remaining hard byte ceiling
+deterministically. The plugin records the committed selection and catalog
+provenance in both its scheduler audit and the model trace.
+
+Clean LLaVA development arrays `19022147` and `19022148` passed scored-prefix
+HF/vLLM FullKV parity, official score parity, measured active-byte accounting,
+and persistent-engine A-B-A isolation. The compressed two-example-per-task
+gate used 33.33--40.00% fewer active KV bytes than Prompt Top-K without a lower
+mean official task score on MMStar, TextVQA, or DocVQA. Because the examples
+were retrospective and very small, these observations are implementation
+evidence rather than paper results.
+
+No HF fallback or logical-only byte counter is labeled native. The supported
+method name is `mosaickv_exact__vllm_requestwide_projection`; prototype
+injection and repair remain unsupported. See `vllm_native_blocker.md` for the
+exact transaction, fail-closed boundary, and evidence.
