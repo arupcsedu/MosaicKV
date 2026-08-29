@@ -6,7 +6,7 @@
 #SBATCH --cpus-per-task=12
 #SBATCH --mem=64G
 #SBATCH --time=00:30:00
-#SBATCH --partition=parallel
+#SBATCH --partition=bii
 #SBATCH --output=/scratch/djy8hg/slurm-logs/%x-%A_%a.out
 #SBATCH --error=/scratch/djy8hg/slurm-logs/%x-%A_%a.err
 #SBATCH --export=ALL
