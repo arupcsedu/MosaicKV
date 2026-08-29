@@ -64,7 +64,10 @@ unsupported:
   - combination: vllm_qwen7b_or_llava7b
     reason: No matching common-lock parity pass exists for this bounded campaign.
   - combination: native_mosaickv_vllm_or_sglang
-    reason: Audited native block-mutation APIs are unavailable and remain fail-closed.
+    reason: >-
+      This bounded campaign predates the hash-bound vLLM exact-selector bridge
+      and cannot provide its selector-plan input. SGLang and vLLM prototype or
+      repair rows remain unsupported.
   - combination: mosaickv_proto_or_mosaickv_full
     reason: Cached keys are post-RoPE and safe prototype phase handling is not implemented.
   - combination: hf_batch_size_2_or_4

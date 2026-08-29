@@ -1,13 +1,13 @@
 # Backend capability matrix
 
 Audit target: the common environment at `/scratch/djy8hg/env/mosaickv`,
-2026-08-02. A package import, a model-serving pass, token parity, and a native
+2026-08-29. A package import, a model-serving pass, token parity, and a native
 cache-mutation pass are separate evidence levels.
 
 | Component | Installed version | Package state | FullKV model gate | Native MosaicKV |
 |---|---:|---|---|---|
 | Hugging Face Transformers | 4.55.2 | Imports; CUDA smoke passed | Qwen2.5-VL-3B SDPA job `17346718` and FA2 job `17348171`; LLaVA-1.5 eager job `17855955`; OneVision-7B BF16 eager job `17856497` passed checkpoint-specific gates | Exact selection for supported adapters; Qwen2.5-VL M-RoPE and LLaVA/OneVision standard-RoPE prototype/repair transforms on eager; fused compressed paths fail closed |
-| vLLM V1 | 0.10.2 | Imports and loads Qwen2.5-VL-3B | Job `17351185` passed Stage A and its report has exact 16/16 HF token parity | Version-pinned whole-block transport passed job `17869843`; paper method rows remain unsupported until the common-selector plan bridge passes |
+| vLLM V1 | 0.10.2 | Imports and loads Qwen2.5-VL-3B and LLaVA-1.5 | Job `17351185` passed Qwen Stage A; clean LLaVA job `19022147` passed scored-prefix, answer, score, and A-B-A parity on three tasks | Hash-bound common-selector `mosaickv_exact` request-wide projection passed clean development job `19022148`; prototype/repair unsupported |
 | SGLang | 0.5.1.post3 | Imports and launches Qwen2.5-VL-3B | Job `17351612` passed Stage A, request isolation, byte accounting, and exact 32/32 parity with the numerically corresponding HF-SDPA reference | Version-pinned whole-block transport passed job `17871006`; paper method rows remain unsupported until the common-selector plan bridge passes |
 
 Rows remain non-canonical while the worktree is dirty. No pending or failed
@@ -18,7 +18,7 @@ job is a support claim.
 | Required operation | Hugging Face eager | vLLM 0.10.2 V1 | SGLang 0.5.1.post3 |
 |---|---|---|---|
 | Inspect KV after prefill | Supported through returned `past_key_values` | Unsupported request-scoped API | Unsupported request-scoped API |
-| Select whole KV blocks | Supported in the owned explicit loop | Supported by the repository plugin's request-wide transport transaction; current selector is validation-only | Supported by the spawn-safe request-wide transaction; current selector is validation-only |
+| Select whole KV blocks | Supported in the owned explicit loop | Supported by the repository plugin using a SHA-bound common-selector request-wide projection | Supported by the spawn-safe request-wide transaction; current selector is validation-only |
 | Inject modified KV | Supported through a compatible HF cache object | Unsupported | Storage write exists, ownership transaction unsupported |
 | Preserve original logical positions | Explicit adapter state and position inputs | Supported by the version-pinned plugin: scheduler counters remain logical while attention receives compact physical tables | Supported by separate active `seq_lens` and logical `orig_seq_lens` plus patched decode/M-RoPE positions |
 | Restore blocks during decode | Owned explicit loop | Unsupported | Unsupported |
@@ -59,8 +59,11 @@ repository now supplies a fail-closed 0.10.2 general plugin spanning
 `GPUModelRunner._prepare_inputs`. Prefix caching is disabled and logical/M-RoPE
 positions remain unchanged. A100 job `17869843` passed identity token parity,
 50% physical-block release, exact accounting, determinism, and A-B-A request
-isolation. This proves the native transport, not the common MosaicKV selector;
-see `vllm_native_blocker.md`.
+isolation. The later clean common-selector job `19022148` bound per-request HF
+selector traces into vLLM plans, retained mandatory blocks and normalized
+cross-head evidence, reduced active bytes by at least 30% relative to Prompt
+Top-K on every tested row, and passed an A-B-A compressed-request probe. This
+supports exact selection only; see `vllm_native_blocker.md`.
 
 ## SGLang installed-source boundary
 

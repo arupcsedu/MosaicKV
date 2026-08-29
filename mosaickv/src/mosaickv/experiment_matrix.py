@@ -53,7 +53,7 @@ from mosaickv.types import (
 )
 
 MATRIX_SCHEMA_VERSION = 1
-CAPABILITY_CATALOG_VERSION = "common-env-2026-08-02-v3"
+CAPABILITY_CATALOG_VERSION = "common-env-2026-08-29-v4"
 ACCOUNTING_SPEC_SHA = "60915ac01ad35843c4de56620864145d5b81b973a3bfec03fb322d5e4f6ff695"
 
 REQUIRED_MODELS = frozenset(
@@ -175,8 +175,8 @@ BACKEND_CATALOG: dict[str, BackendCapability] = {
         "eager",
         True,
         (
-            "audited vLLM 0.10.2 FullKV path and native whole-block transport; "
-            "paper compression rows await a common-selector plan bridge"
+            "audited vLLM 0.10.2 FullKV path and hash-bound common-selector "
+            "request-wide exact whole-block projection; prototype/repair unsupported"
         ),
     ),
     "sglang": BackendCapability(

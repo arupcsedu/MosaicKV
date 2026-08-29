@@ -76,7 +76,10 @@ unsupported:
   - combination: llava_onevision_7b_optional/*
     reason: The pinned 7B checkpoint is not cached and has no exact registered runtime gate.
   - combination: vllm/mosaickv_*
-    reason: vLLM 0.10.2 exposes no safe native sparse logical-position cache transaction.
+    reason: >-
+      This historical campaign has no hash-bound common-selector catalog input.
+      The separate pinned vLLM 0.10.2 exact-selection launcher is supported;
+      prototype and repair rows remain unsupported.
   - combination: sglang/mosaickv_*
     reason: SGLang 0.5.1 exposes no atomic request mapping, allocator, Radix, and position transaction.
   - combination: hf_sdpa/mosaickv_proto_or_full

@@ -1,6 +1,6 @@
 matrix_schema_version: 1
 matrix_revision: 1
-capability_catalog_version: common-env-2026-08-02-v3
+capability_catalog_version: common-env-2026-08-29-v4
 experiment_id: pilot
 description: Twenty-sample development gate for HF eager FullKV, simple baselines, and MosaicKV exact selection.
 enabled: true
