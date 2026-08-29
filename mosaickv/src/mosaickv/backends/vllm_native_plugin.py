@@ -25,6 +25,7 @@ _ENABLE_ENV = "MOSAICKV_NATIVE_VLLM"
 _RATIO_ENV = "MOSAICKV_NATIVE_RETENTION_RATIO"
 _BLOCK_ENV = "MOSAICKV_NATIVE_BLOCK_SIZE"
 _AUDIT_ENV = "MOSAICKV_NATIVE_AUDIT_DIR"
+_VIT_SDPA_ENV = "MOSAICKV_VLLM_VIT_SDPA"
 
 
 def _enabled() -> bool:
@@ -47,6 +48,35 @@ def _settings() -> tuple[float, int, str]:
     except ValueError as error:
         raise RuntimeError(str(error)) from error
     return ratio, block_size, audit_directory
+
+
+def _patch_vit_attention_to_sdpa(
+    platform: Any | None = None,
+    torch_sdpa_backend: Any | None = None,
+) -> None:
+    """Route cache-free ViT attention through vLLM's Torch SDPA branch.
+
+    vLLM 0.10.2 otherwise sends LLaVA's CLIP encoder through xFormers.
+    xFormers 0.0.32.post1 rejects the common environment's external
+    FlashAttention 2.8.3 before inference. Decoder paged attention is not
+    affected by this narrowly scoped platform hook.
+    """
+
+    if platform is None or torch_sdpa_backend is None:
+        from vllm.platforms import _Backend, current_platform
+
+        platform = current_platform
+        torch_sdpa_backend = _Backend.TORCH_SDPA
+    platform_class: Any = type(platform)
+    if getattr(platform_class, "_mosaickv_vit_sdpa_patch_v1", False):
+        return
+
+    def get_vit_attn_backend(cls: Any, support_fa: bool = False) -> Any:
+        del cls, support_fa
+        return torch_sdpa_backend
+
+    platform_class.get_vit_attn_backend = classmethod(get_vit_attn_backend)
+    platform_class._mosaickv_vit_sdpa_patch_v1 = True
 
 
 def _compress_ready_requests(scheduler: Any, scheduler_output: Any) -> None:
@@ -287,14 +317,19 @@ def _patch_worker() -> None:
 def register() -> None:
     """Install the audited patch in every vLLM scheduler/worker process."""
 
-    if not _enabled():
+    native_enabled = _enabled()
+    vit_sdpa_enabled = os.environ.get(_VIT_SDPA_ENV) == "1"
+    if not native_enabled and not vit_sdpa_enabled:
         return
     installed = importlib.metadata.version("vllm")
     if installed != _VERSION:
-        raise RuntimeError(f"native MosaicKV audited vLLM {_VERSION}; installed {installed}")
-    _settings()
-    _patch_scheduler()
-    _patch_worker()
+        raise RuntimeError(f"MosaicKV audited vLLM {_VERSION}; installed {installed}")
+    if vit_sdpa_enabled:
+        _patch_vit_attention_to_sdpa()
+    if native_enabled:
+        _settings()
+        _patch_scheduler()
+        _patch_worker()
 
 
-__all__ = ["register"]
+__all__ = ["_patch_vit_attention_to_sdpa", "register"]

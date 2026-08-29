@@ -27,6 +27,7 @@ class QualityDecode:
             "JsonObject",
             {
                 "policy": "decode_before_first_terminal_token",
+                "outer_whitespace": "stripped",
                 "timed_token_count": self.timed_token_count,
                 "scored_token_count": self.scored_token_count,
                 "quality_completion_tokens": self.quality_completion_tokens,
@@ -113,14 +114,14 @@ def decode_quality_output(
         skip_special_tokens=True,
         clean_up_tokenization_spaces=False,
     )
-    text = str(answers[0]) if answers else ""
+    text = str(answers[0]).strip() if answers else ""
     if not text.strip() and scored and terminal_index is None:
         fallback = decoder(
             _decoder_input(scored),
             skip_special_tokens=False,
             clean_up_tokenization_spaces=False,
         )
-        text = str(fallback[0]) if fallback else ""
+        text = str(fallback[0]).strip() if fallback else ""
     terminal_id = None if terminal_index is None else timed[terminal_index]
     quality_completion_tokens = len(timed) if terminal_index is None else terminal_index + 1
     return QualityDecode(

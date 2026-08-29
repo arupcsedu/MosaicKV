@@ -16,6 +16,8 @@ def _validate_trace(
 ) -> dict[str, object]:
     if payload.get("measurement_type") != "vllm_fullkv":
         raise ValueError("trace is not labeled vllm_fullkv")
+    if payload.get("status") != "completed":
+        raise ValueError("trace is not a completed vLLM observation")
     if payload.get("backend") != "vllm" or payload.get("method") != "full_kv":
         raise ValueError("trace backend/method must be vllm/full_kv")
     if payload.get("native_mosaickv") is not False:
@@ -76,11 +78,23 @@ def _validate_trace(
         raise ValueError("trace must document all three cache-observation boundaries")
     if require_gpu_measurements and len(trials) < 2:
         raise ValueError("GPU cache validation requires at least two identical trials")
+    accounting = payload.get("kv_cache_accounting")
+    if not isinstance(accounting, dict):
+        raise ValueError("trace must contain logical KV-cache accounting")
+    if (
+        accounting.get("boundary") != "packed_prefill_active_kv_tensor_storage"
+        or accounting.get("includes_live_block_padding") is not True
+        or accounting.get("excludes_free_block_pool") is not True
+        or not isinstance(accounting.get("active_kv_bytes"), int)
+        or int(accounting["active_kv_bytes"]) < 1
+    ):
+        raise ValueError("trace contains invalid logical KV-cache accounting")
     return {
         "status": "validated",
         "trials": len(trials),
         "generated_tokens": len(token_ids or ()),
         "deterministic_token_ids": True,
+        "active_kv_bytes": int(accounting["active_kv_bytes"]),
     }
 
 

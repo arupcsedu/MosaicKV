@@ -1,5 +1,24 @@
 # vLLM backend
 
+## Paper backend scope
+
+The current paper scope uses vLLM and does not use SGLang. The controlled
+one-model verification target is
+`llava-hf/llava-1.5-7b-hf@b234b804b114d9e37bb655e11cbbb5f5e971b7a9`
+on MMStar, TextVQA, and DocVQA. `slurm/vllm_llava15_three_tasks.sbatch`
+runs two deterministically selected examples per task through both HF FullKV
+and vLLM FullKV, then checks official lmms-eval scoring, repeated-token
+determinism, A-B-A request isolation, timing and cache telemetry, logical KV
+byte accounting, immutable provenance, and retention-1 HF token/answer/score
+parity. This is a verification workload, not a paper result table.
+
+The vLLM result schema reports active KV bytes at the
+`packed_prefill_active_kv_tensor_storage` boundary: live prefill blocks times
+the configured vLLM block size and the pinned model's layer/head/dtype
+geometry. Live final-block padding is included. The free pool and reserved
+engine capacity are excluded; logical prefill bytes, padding bytes, and the
+trace-only post-decode size are recorded separately.
+
 ## Stage A: FullKV measurement wrapper
 
 The common environment pins `vllm==0.10.2`. The wrapper uses the V1
@@ -17,6 +36,13 @@ wrapper records:
 - process GPU memory sampled with `nvidia-smi`; and
 - exact engine arguments, immutable model revision, raw repeated trials, and
   trace provenance.
+
+For LLaVA-1.5 only, the repository's version-pinned general plugin routes the
+cache-free CLIP vision encoder's existing vLLM `MultiHeadAttention` branch to
+PyTorch SDPA. Decoder paged attention remains vLLM FlashAttention. This avoids
+xFormers 0.0.32.post1 importing external FlashAttention 2.8.3, which exceeds
+xFormers' declared audited maximum of 2.8.2; the version check is not ignored
+and no environment package is modified.
 
 The same MosaicKV message builder, processor/chat template, prompt, media,
 checkpoint-compatible slow image processor, and deterministic generation
@@ -47,6 +73,7 @@ Commands:
 source mosaickv/scripts/cache_env.sh
 sbatch mosaickv/slurm/vllm_fullkv.sbatch
 sbatch mosaickv/slurm/vllm_hf_fullkv_parity.sbatch
+sbatch mosaickv/slurm/vllm_llava15_three_tasks.sbatch
 ```
 
 All caches and outputs must be below `/scratch/djy8hg`; `HF_TOKEN` is accepted

@@ -32,6 +32,19 @@ class FakeProcessor:
     tokenizer: FakeTokenizer
 
 
+class SpacedTokenizer(FakeTokenizer):
+    @staticmethod
+    def batch_decode(
+        batches: Any,
+        *,
+        skip_special_tokens: bool,
+        clean_up_tokenization_spaces: bool,
+    ) -> list[str]:
+        del batches, skip_special_tokens
+        assert clean_up_tokenization_spaces is False
+        return ["  answer text \n"]
+
+
 def test_terminal_token_ids_are_collected_from_nested_model_objects() -> None:
     model = type(
         "Model",
@@ -74,3 +87,14 @@ def test_quality_decode_uses_all_tokens_when_no_terminal_is_generated() -> None:
     assert result.quality_completion_tokens == 2
     assert result.terminal_token_id is None
     assert result.terminal_token_index is None
+
+
+def test_quality_decode_strips_only_outer_decoded_whitespace() -> None:
+    result = decode_quality_output(
+        FakeProcessor(SpacedTokenizer()),
+        (12, 13),
+        (99,),
+    )
+
+    assert result.text == "answer text"
+    assert result.to_record()["outer_whitespace"] == "stripped"

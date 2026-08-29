@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
 
@@ -21,7 +22,12 @@ from mosaickv.evaluation.harness import EvaluationHarness
 from mosaickv.evaluation.lmms_adapter import run_lmms_development_evaluation
 from mosaickv.evaluation.storage import JsonlResultStore
 from mosaickv.evaluation.tasks import default_task_registry, load_synthetic_samples
-from mosaickv.hf_cli import _direct_config, _input_provenance, _pil_synthetic_samples
+from mosaickv.hf_cli import (
+    _direct_config,
+    _input_provenance,
+    _load_sample_id_file,
+    _pil_synthetic_samples,
+)
 from mosaickv.manifest import (
     ArtifactProvenance,
     ManifestError,
@@ -84,6 +90,57 @@ def _task_name(config: RunConfig, explicit: str | None) -> str:
         return matches[0]
 
 
+@dataclass(frozen=True, slots=True)
+class _VLLMSampleSelection:
+    subset_size: int | None
+    sample_offset: int
+    explicit_sample_ids: tuple[str, ...] | None
+    expected_rows: int | None
+
+
+def _resolve_sample_selection(
+    args: argparse.Namespace,
+    *,
+    config: RunConfig,
+    task_name: str,
+    local_sample_count: int | None,
+) -> _VLLMSampleSelection:
+    """Apply the same immutable sample-selection contract as the HF harness."""
+
+    full_dataset = bool(getattr(args, "full_dataset", False))
+    sample_offset = int(getattr(args, "sample_offset", 0))
+    explicit_sample_ids = _load_sample_id_file(
+        cast("str | None", getattr(args, "sample_id_file", None)),
+        cast("str | None", getattr(args, "sample_id_file_sha", None)),
+        task_name=task_name,
+        config=config,
+    )
+    if full_dataset and args.subset_size is not None:
+        raise ValueError("--full-dataset and --subset-size are mutually exclusive")
+    if explicit_sample_ids is not None and (
+        full_dataset or args.subset_size is not None or sample_offset
+    ):
+        raise ValueError(
+            "--sample-id-file cannot be combined with --full-dataset, --subset-size, "
+            "or --sample-offset"
+        )
+    if sample_offset < 0:
+        raise ValueError("--sample-offset must be >= 0")
+    if local_sample_count is not None:
+        if explicit_sample_ids is not None or sample_offset:
+            raise ValueError(
+                "synthetic vLLM evaluation does not support sample files or offsets"
+            )
+        requested = None if full_dataset else cast("int | None", args.subset_size)
+        selected = local_sample_count if requested is None else min(requested, local_sample_count)
+        return _VLLMSampleSelection(requested, 0, None, selected)
+    subset_size = (
+        None if full_dataset or explicit_sample_ids is not None else int(args.subset_size or 20)
+    )
+    expected = len(explicit_sample_ids) if explicit_sample_ids is not None else subset_size
+    return _VLLMSampleSelection(subset_size, sample_offset, explicit_sample_ids, expected)
+
+
 def _resume_payload(
     *,
     config: RunConfig,
@@ -93,12 +150,12 @@ def _resume_payload(
     parquet_path: Path | None,
     manifest_path: Path,
     trace_root: Path,
-    expected: int,
+    expected: int | None,
 ) -> tuple[int, JsonObject]:
     rows = JsonlResultStore(raw_path).results(run_id=run_id)
     if not rows:
         raise ManifestError("an immutable manifest exists but the run has no result rows")
-    if len(rows) != expected:
+    if expected is not None and len(rows) != expected:
         raise ManifestError(
             "immutable manifest terminal count differs from the requested subset "
             f"({len(rows)} != {expected})"
@@ -163,16 +220,22 @@ def run_vllm_evaluation(args: argparse.Namespace, config: RunConfig) -> tuple[in
     output_root = Path(str(args.output_dir)).resolve()
     run_root = output_root / run_id
     raw_path = Path(args.raw_output).resolve() if args.raw_output else run_root / "results.jsonl"
-    parquet_path = Path(args.parquet_output).resolve() if args.parquet_output else None
+    parquet_path = (
+        Path(args.parquet_output).resolve()
+        if args.parquet_output
+        else run_root / "aggregate.parquet"
+    )
     manifest_path = Path(args.manifest).resolve() if args.manifest else run_root / "manifest.json"
     trace_root = (
         Path(args.trace_directory).resolve() if args.trace_directory else output_root / "traces"
     )
     run_root.mkdir(parents=True, exist_ok=True)
-    expected = (
-        min(int(args.subset_size or len(load_synthetic_samples())), len(load_synthetic_samples()))
-        if task.local_scorer is not None
-        else int(args.subset_size or 20)
+    local_samples = load_synthetic_samples() if task.local_scorer is not None else None
+    selection = _resolve_sample_selection(
+        args,
+        config=config,
+        task_name=task_name,
+        local_sample_count=None if local_samples is None else len(local_samples),
     )
     if manifest_path.exists():
         return _resume_payload(
@@ -183,10 +246,11 @@ def run_vllm_evaluation(args: argparse.Namespace, config: RunConfig) -> tuple[in
             parquet_path=parquet_path,
             manifest_path=manifest_path,
             trace_root=trace_root,
-            expected=expected,
+            expected=selection.expected_rows,
         )
 
     runtime = VLLMFullKVModel.from_config(config, options, trace_directory=trace_root)
+    request_isolation_verified = False
     try:
         if task.local_scorer is not None:
             summary: JsonObject = (
@@ -199,7 +263,7 @@ def run_vllm_evaluation(args: argparse.Namespace, config: RunConfig) -> tuple[in
                     raw_output=raw_path,
                     manifest_path=str(manifest_path),
                     seed=config.execution.seed,
-                    subset_size=cast("int | None", args.subset_size),
+                    subset_size=selection.subset_size,
                     parquet_output=parquet_path,
                 )
                 .to_json_object()
@@ -212,12 +276,14 @@ def run_vllm_evaluation(args: argparse.Namespace, config: RunConfig) -> tuple[in
                 raw_output=raw_path,
                 manifest_path=str(manifest_path),
                 seed=config.execution.seed,
-                subset_size=int(args.subset_size or 20),
+                subset_size=selection.subset_size,
+                sample_offset=selection.sample_offset,
+                explicit_sample_ids=selection.explicit_sample_ids,
                 parquet_output=parquet_path,
                 registry=registry,
                 dataset_revision=config.dataset.revision,
             )
-        runtime.verify_request_isolation()
+        request_isolation_verified = runtime.verify_request_isolation()
     finally:
         runtime.close()
 
@@ -248,6 +314,7 @@ def run_vllm_evaluation(args: argparse.Namespace, config: RunConfig) -> tuple[in
             "vllm_block_size": runtime.runner.engine_metadata.get("block_size", "unavailable"),
             "prefix_caching": runtime.runner.engine_metadata.get("prefix_caching", "unavailable"),
             "model_source": runtime.runner.engine_metadata.get("model_source", "unavailable"),
+            "request_isolation_verified": request_isolation_verified,
         },
         attention_implementation_override=(
             "vllm_"
@@ -264,6 +331,7 @@ def run_vllm_evaluation(args: argparse.Namespace, config: RunConfig) -> tuple[in
             "manifest_path": str(manifest_path),
             "trace_directory": str((trace_root / run_id).resolve()),
             "failed_samples": failed,
+            "request_isolation_verified": request_isolation_verified,
         }
     )
     return (0 if failed == 0 else 1), summary

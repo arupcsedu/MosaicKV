@@ -245,13 +245,14 @@ def test_fullkv_wrapper_writes_raw_trials_and_uses_first_measurement(tmp_path: P
         trace_directory=tmp_path,
         generation={"max_new_tokens": 2, "temperature": 0.0, "top_p": 1.0, "seed": 0},
         cache_probe_repeats=2,
+        cache_geometry=VLLMKVCacheGeometry(2, 2, 4, 2),
     )
     request = EvaluationRequest(
         run_id="run",
         sample_id="sample/one",
         task="synthetic_smoke",
         messages=build_multimodal_messages("What color?", (MediaItem(MediaKind.IMAGE, b"image"),)),
-        generation_kwargs={},
+        generation_kwargs={"max_new_tokens": 32, "temperature": 0.7},
     )
 
     output = model.generate(request)
@@ -260,7 +261,7 @@ def test_fullkv_wrapper_writes_raw_trials_and_uses_first_measurement(tmp_path: P
     assert output.effective_method == "full_kv"
     assert output.metrics.ttft == 0.1
     assert output.metrics.generated_tokens == 2
-    assert output.metrics.active_kv_bytes is None
+    assert output.metrics.active_kv_bytes == 16 * 2 * 2 * 2 * 4 * 2
     traces = list((tmp_path / "run").glob("*.json"))
     assert len(traces) == 1
     payload = json.loads(traces[0].read_text(encoding="utf-8"))
@@ -270,8 +271,30 @@ def test_fullkv_wrapper_writes_raw_trials_and_uses_first_measurement(tmp_path: P
     assert payload["trials"][1]["prefix_cache_hit_rate"] == 1.0
     assert payload["effective_sampling_parameters"]["ignore_eos"] is True
     assert payload["effective_sampling_parameters"]["max_new_tokens"] == 2
+    assert payload["generation"] == {
+        "max_new_tokens": 2,
+        "seed": 0,
+        "temperature": 0.0,
+        "top_p": 1.0,
+    }
+    assert payload["task_generation_kwargs_policy"] == {
+        "authority": "resolved_run_config",
+        "ignored_task_generation_keys": ["max_new_tokens", "temperature"],
+    }
     assert payload["quality_answer"] == "blue"
     assert payload["trials"][1]["mm_cache_hit_rate"] == 1.0
+    assert payload["kv_cache_accounting"] == {
+        "boundary": "packed_prefill_active_kv_tensor_storage",
+        "logical_prefill_positions": 8,
+        "physical_prefill_positions": 16,
+        "logical_prefill_kv_bytes": 8 * 2 * 2 * 2 * 4 * 2,
+        "active_kv_bytes": 16 * 2 * 2 * 2 * 4 * 2,
+        "packed_padding_kv_bytes": 8 * 2 * 2 * 2 * 4 * 2,
+        "final_active_kv_bytes": 16 * 2 * 2 * 2 * 4 * 2,
+        "geometry": {"layers": 2, "kv_heads": 2, "head_dim": 4, "dtype_bytes": 2},
+        "includes_live_block_padding": True,
+        "excludes_free_block_pool": True,
+    }
 
 
 def test_native_feature_is_version_pinned_and_unaudited_versions_fail() -> None:
@@ -350,7 +373,7 @@ def test_native_wrapper_requires_audit_and_accounts_selected_storage(tmp_path: P
 
     assert output.effective_method == "mosaickv_exact"
     assert output.metrics.compression_time == pytest.approx(0.003)
-    assert output.metrics.active_kv_bytes == 9 * 2 * 2 * 2 * 4 * 2
+    assert output.metrics.active_kv_bytes == 16 * 2 * 2 * 2 * 4 * 2
     trace = json.loads(next((tmp_path / "native").glob("*.json")).read_text())
     assert trace["measurement_type"] == "vllm_native_mosaickv"
     assert trace["trials"][0]["native_audit"]["logical_next_position"] == 8

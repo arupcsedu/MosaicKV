@@ -33,7 +33,7 @@ from mosaickv.config import RunConfig
 from mosaickv.evaluation.messages import MultimodalMessage
 from mosaickv.evaluation.model import EvaluationRequest, GenerationMetrics, ModelGeneration
 from mosaickv.generation import QualityDecode, decode_quality_output, terminal_token_ids
-from mosaickv.types import JsonObject, Precision
+from mosaickv.types import JsonObject, JsonValue, Precision
 
 _AUDITED_VLLM_VERSION = "0.10.2"
 _SUPPORTED_MODELS: dict[str, bool] = {
@@ -757,6 +757,7 @@ class AsyncVLLMTrialRunner:
         # will never be used. Select vLLM's native sampler explicitly; parity
         # tests below remain the authority for output equivalence.
         os.environ["VLLM_USE_FLASHINFER_SAMPLER"] = "0"
+        use_vit_sdpa = self.config.model.id == "llava-hf/llava-1.5-7b-hf"
         if self.options.enable_mosaickv:
             if self.options.enable_prefix_caching:
                 raise VLLMRuntimeError("native MosaicKV requires vLLM prefix caching disabled")
@@ -771,7 +772,10 @@ class AsyncVLLMTrialRunner:
             # The evaluation process may construct a native engine and a
             # FullKV engine sequentially.  Never let the process-global
             # plugin controls leak into the reference engine.
-            if os.environ.get("VLLM_PLUGINS") == "mosaickv_native":
+            if (
+                not use_vit_sdpa
+                and os.environ.get("VLLM_PLUGINS") == "mosaickv_native"
+            ):
                 os.environ.pop("VLLM_PLUGINS", None)
             for variable in (
                 "MOSAICKV_NATIVE_VLLM",
@@ -780,6 +784,14 @@ class AsyncVLLMTrialRunner:
                 "MOSAICKV_NATIVE_AUDIT_DIR",
             ):
                 os.environ.pop(variable, None)
+        if use_vit_sdpa:
+            # LLaVA's CLIP encoder is cache-free. Route only its existing
+            # vLLM MultiHeadAttention implementation to Torch SDPA; decoder
+            # paged attention remains unchanged.
+            os.environ["VLLM_PLUGINS"] = "mosaickv_native"
+            os.environ["MOSAICKV_VLLM_VIT_SDPA"] = "1"
+        else:
+            os.environ.pop("MOSAICKV_VLLM_VIT_SDPA", None)
         # FlashInfer JIT compilation is performed in vLLM's spawned engine
         # process and invokes the locked ``ninja`` executable by name. Direct
         # execution of ``<venv>/bin/python`` does not activate the environment,
@@ -876,6 +888,7 @@ class AsyncVLLMTrialRunner:
                 if self._model_source != self.config.model.id
                 else "model_id_and_revision"
             ),
+            "vit_attention_backend": "TORCH_SDPA" if use_vit_sdpa else "vllm_default",
             "mm_processor_kwargs": kwargs.get("mm_processor_kwargs", {}),
         }
         return engine
@@ -1263,8 +1276,15 @@ class VLLMFullKVModel:
 
     def generate(self, request: EvaluationRequest) -> ModelGeneration:
         prepared = prepare_vllm_prompt(self.processor, self.model_id, request.messages)
+        # lmms-eval task definitions carry their own generation defaults.  They
+        # are useful when lmms owns generation, but this backend is paired with
+        # the HF runtime under the resolved MosaicKV RunConfig.  Letting task
+        # kwargs override that config changes output length across tasks (for
+        # example, DocVQA requests 32 tokens) and invalidates the controlled
+        # comparison.  The immutable run configuration is therefore the sole
+        # authority for every behavior-affecting sampling parameter.
         generation = dict(self.generation)
-        generation.update(request.generation_kwargs)
+        ignored_task_generation_keys = sorted(request.generation_kwargs)
         trials = tuple(
             self.runner.run(
                 prepared.engine_prompt,
@@ -1296,6 +1316,8 @@ class VLLMFullKVModel:
         )
         native = self.method == "mosaickv_exact"
         active_kv_bytes: int | None = None
+        logical_prefill_positions: int | None = first.prompt_tokens
+        physical_prefill_positions: int | None = None
         compression_seconds = 0.0
         if native:
             if first.native_audit is None or self.cache_geometry is None:
@@ -1304,15 +1326,53 @@ class VLLMFullKVModel:
             if not isinstance(selection, Mapping):
                 raise VLLMRuntimeError("native vLLM audit omitted its selection")
             raw_selected = selection.get("selected_positions")
+            raw_selected_blocks = selection.get("selected_blocks")
             raw_compression = first.native_audit.get("compression_seconds")
             if isinstance(raw_selected, bool) or not isinstance(raw_selected, int):
                 raise VLLMRuntimeError("native vLLM selected-position count is invalid")
+            if not isinstance(raw_selected_blocks, list) or not all(
+                isinstance(block, int) and not isinstance(block, bool) and block >= 0
+                for block in raw_selected_blocks
+            ):
+                raise VLLMRuntimeError("native vLLM selected-block list is invalid")
             if isinstance(raw_compression, bool) or not isinstance(raw_compression, (int, float)):
                 raise VLLMRuntimeError("native vLLM compression timing is invalid")
-            selected_prompt_positions = raw_selected
-            active_positions = selected_prompt_positions + max(0, first.generated_tokens - 1)
-            active_kv_bytes = self.cache_geometry.active_bytes(active_positions)
+            logical_prefill_positions = raw_selected
+            physical_prefill_positions = len(raw_selected_blocks) * self.block_size
+            active_kv_bytes = self.cache_geometry.active_bytes(physical_prefill_positions)
             compression_seconds = float(raw_compression)
+        elif self.cache_geometry is not None and first.prompt_tokens is not None:
+            # vLLM allocates whole physical blocks. The paper's primary
+            # active-memory field is the live prefill cache before decoding,
+            # including backend layout padding but excluding the free pool.
+            physical_prefill_positions = (
+                (first.prompt_tokens + self.block_size - 1) // self.block_size
+            ) * self.block_size
+            active_kv_bytes = self.cache_geometry.active_bytes(physical_prefill_positions)
+        logical_prefill_kv_bytes = (
+            None
+            if self.cache_geometry is None or logical_prefill_positions is None
+            else self.cache_geometry.active_bytes(logical_prefill_positions)
+        )
+        packed_padding_kv_bytes = (
+            None
+            if active_kv_bytes is None or logical_prefill_kv_bytes is None
+            else active_kv_bytes - logical_prefill_kv_bytes
+        )
+        final_active_kv_bytes = (
+            None
+            if self.cache_geometry is None or logical_prefill_positions is None
+            else self.cache_geometry.active_bytes(
+                (
+                    logical_prefill_positions
+                    + max(0, first.generated_tokens - 1)
+                    + self.block_size
+                    - 1
+                )
+                // self.block_size
+                * self.block_size
+            )
+        )
         trace: JsonObject = {
             "schema_version": 1,
             "measurement_type": "vllm_native_mosaickv" if native else "vllm_fullkv",
@@ -1325,8 +1385,31 @@ class VLLMFullKVModel:
             "prompt_sha256": prepared.prompt_sha256,
             "media_sha256": prepared.media_sha256,
             "generation": cast("JsonObject", generation),
+            "task_generation_kwargs_policy": {
+                "authority": "resolved_run_config",
+                "ignored_task_generation_keys": cast(
+                    "list[JsonValue]", ignored_task_generation_keys
+                ),
+            },
             "quality_answer": quality.text,
             "quality_decoding": quality.to_record(),
+            "status": "completed",
+            "kv_cache_accounting": {
+                "boundary": "packed_prefill_active_kv_tensor_storage",
+                "logical_prefill_positions": logical_prefill_positions,
+                "physical_prefill_positions": physical_prefill_positions,
+                "logical_prefill_kv_bytes": logical_prefill_kv_bytes,
+                "active_kv_bytes": active_kv_bytes,
+                "packed_padding_kv_bytes": packed_padding_kv_bytes,
+                "final_active_kv_bytes": final_active_kv_bytes,
+                "geometry": (
+                    None
+                    if self.cache_geometry is None
+                    else self.cache_geometry.to_json_object()
+                ),
+                "includes_live_block_padding": True,
+                "excludes_free_block_pool": True,
+            },
             "effective_sampling_parameters": {
                 "max_new_tokens": cast("int", generation["max_new_tokens"]),
                 "temperature": 0.0,
