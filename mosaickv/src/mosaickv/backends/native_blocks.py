@@ -104,6 +104,65 @@ def select_native_blocks(
     return result
 
 
+def validated_native_block_plan(
+    logical_positions: int,
+    block_size: int,
+    retention_ratio: float,
+    selected_blocks: tuple[int, ...],
+    *,
+    policy: str,
+    mandatory_blocks: tuple[int, ...] | None = None,
+    expected_selected_blocks: int | None = None,
+) -> NativeBlockSelection:
+    """Validate an externally planned selection against the native boundary."""
+
+    _validate_inputs(logical_positions, block_size, retention_ratio)
+    source_blocks = math.ceil(logical_positions / block_size)
+    boundaries = {0, source_blocks - 1}
+    mandatory = (
+        tuple(sorted(boundaries))
+        if mandatory_blocks is None
+        else tuple(sorted(set(mandatory_blocks)))
+    )
+    if mandatory_blocks is not None and mandatory != mandatory_blocks:
+        raise ValueError("external mandatory blocks must be strictly increasing and unique")
+    if not mandatory or mandatory[0] < 0 or mandatory[-1] >= source_blocks:
+        raise ValueError("external mandatory block is outside the logical prompt")
+    if not boundaries.issubset(mandatory):
+        raise ValueError("external mandatory blocks omit a request boundary block")
+    expected = (
+        source_blocks
+        if retention_ratio == 1
+        else math.ceil(source_blocks * retention_ratio)
+    )
+    if expected_selected_blocks is not None:
+        if expected_selected_blocks < 1 or expected_selected_blocks > source_blocks:
+            raise ValueError("external selected-block target is outside the source block table")
+        expected = expected_selected_blocks
+    expected = min(source_blocks, max(expected, len(mandatory)))
+    normalized = tuple(sorted(set(selected_blocks)))
+    if normalized != selected_blocks:
+        raise ValueError("external selected blocks must be strictly increasing and unique")
+    if len(normalized) != expected:
+        raise ValueError(
+            f"external selected-block count {len(normalized)} does not match target {expected}"
+        )
+    if not normalized or normalized[0] < 0 or normalized[-1] >= source_blocks:
+        raise ValueError("external selected block is outside the logical prompt")
+    if not set(mandatory).issubset(normalized):
+        raise ValueError("external selected blocks omit a mandatory block")
+    if not policy.strip():
+        raise ValueError("external selection policy must be non-empty")
+    return NativeBlockSelection(
+        logical_positions=logical_positions,
+        block_size=block_size,
+        retention_ratio=retention_ratio,
+        selected_blocks=normalized,
+        mandatory_blocks=mandatory,
+        policy=policy,
+    )
+
+
 def selected_position_count(
     logical_positions: int,
     block_size: int,
@@ -184,5 +243,6 @@ __all__ = [
     "require_scratch_path",
     "select_native_blocks",
     "selected_position_count",
+    "validated_native_block_plan",
     "write_native_audit",
 ]

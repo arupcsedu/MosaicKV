@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
-import yaml  # type: ignore[import-untyped]
+import yaml
 
 from mosaickv.evaluation.disjoint_samples import (
     DatasetContract,
@@ -267,7 +267,7 @@ def _project_parquet(
     context: _DatasetContext,
 ) -> int:
     try:
-        import pyarrow.parquet as pq  # type: ignore[import-untyped]
+        import pyarrow.parquet as pq
     except ImportError as error:  # pragma: no cover - locked environment includes pyarrow.
         raise SampleProtocolError(
             "pyarrow is required to project Parquet identity columns"

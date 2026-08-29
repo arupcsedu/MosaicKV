@@ -29,6 +29,10 @@ from mosaickv.adapters.huggingface.qwen2_5_vl import (
     QWEN25_VL_MIN_PIXELS,
 )
 from mosaickv.backends.native_blocks import native_audit_path
+from mosaickv.backends.native_selector_plan import (
+    NativeSelectorPlanCatalog,
+    load_native_selector_plan_catalog,
+)
 from mosaickv.config import RunConfig
 from mosaickv.evaluation.messages import MultimodalMessage
 from mosaickv.evaluation.model import EvaluationRequest, GenerationMetrics, ModelGeneration
@@ -128,6 +132,9 @@ class VLLMRuntimeOptions:
     local_files_only: bool = False
     enable_prefix_caching: bool = False
     enable_mosaickv: bool = False
+    native_selector_plan: str | None = None
+    native_selector_plan_sha256: str | None = None
+    native_selector_task: str | None = None
 
     def __post_init__(self) -> None:
         if self.tensor_parallel_size < 1:
@@ -140,6 +147,19 @@ class VLLMRuntimeOptions:
             raise ValueError("max_model_len must be >= 2 or null")
         if self.cache_probe_repeats < 1:
             raise ValueError("cache_probe_repeats must be >= 1")
+        plan_values = (
+            self.native_selector_plan,
+            self.native_selector_plan_sha256,
+            self.native_selector_task,
+        )
+        if any(value is not None for value in plan_values) != all(
+            value is not None for value in plan_values
+        ):
+            raise ValueError(
+                "native selector plan, SHA-256, and task must be supplied together"
+            )
+        if self.native_selector_plan is not None and not self.enable_mosaickv:
+            raise ValueError("native selector plans require enable_mosaickv=True")
 
 
 @dataclass(frozen=True, slots=True)
@@ -921,6 +941,30 @@ class AsyncVLLMTrialRunner:
                         "retention_ratio": self.config.cache.retention_ratio,
                         "block_size": self.config.cache.block_size,
                         "scope": "request_wide_token_blocks",
+                        **(
+                            {
+                                "selected_blocks": generation["native_selected_blocks"],
+                                "mandatory_blocks": generation["native_mandatory_blocks"],
+                                "selected_block_count": len(
+                                    cast(
+                                        "list[int]",
+                                        generation["native_selected_blocks"],
+                                    )
+                                ),
+                                "logical_positions": generation["native_logical_positions"],
+                                "policy": generation["native_policy"],
+                                "method": generation["native_method"],
+                                "catalog_sha256": generation["native_catalog_sha256"],
+                                "selector_planning_seconds": generation[
+                                    "native_selector_planning_seconds"
+                                ],
+                                "source_trace_sha256": generation[
+                                    "native_source_trace_sha256"
+                                ],
+                            }
+                            if "native_selected_blocks" in generation
+                            else {}
+                        ),
                     }
                 }
                 if self.options.enable_mosaickv
@@ -1159,6 +1203,8 @@ class VLLMFullKVModel:
         retention_ratio: float = 1.0,
         block_size: int = 16,
         cache_geometry: VLLMKVCacheGeometry | None = None,
+        native_enabled: bool | None = None,
+        selector_plan_catalog: NativeSelectorPlanCatalog | None = None,
     ) -> None:
         if model_id not in _SUPPORTED_MODELS:
             known = ", ".join(sorted(_SUPPORTED_MODELS))
@@ -1176,6 +1222,10 @@ class VLLMFullKVModel:
         self.retention_ratio = retention_ratio
         self.block_size = block_size
         self.cache_geometry = cache_geometry
+        self.native_enabled = method != "full_kv" if native_enabled is None else native_enabled
+        self.selector_plan_catalog = selector_plan_catalog
+        if self.selector_plan_catalog is not None and not self.native_enabled:
+            raise ValueError("selector-plan catalog requires native block compaction")
         self._isolation_anchor: (
             tuple[
                 PreparedVLLMPrompt,
@@ -1207,10 +1257,16 @@ class VLLMFullKVModel:
                 attention_backend=config.execution.attention_implementation,
             )
         native = options.enable_mosaickv
-        if native and config.method.value != "mosaickv_exact":
+        supported_native_methods = {"mosaickv_exact", "prompt_attention_topk", "random_kv"}
+        if native and config.method.value not in supported_native_methods:
             raise VLLMRuntimeError(
-                "native vLLM Stage B currently supports only method=mosaickv_exact"
+                "native vLLM selector plans support only mosaickv_exact, "
+                "prompt_attention_topk, or random_kv"
             )
+        if native and config.method.value != "mosaickv_exact" and (
+            options.native_selector_plan is None
+        ):
+            raise VLLMRuntimeError("native vLLM baselines require a hash-bound selector plan")
         if not native and (not config.method.is_full_cache or config.cache.retention_ratio != 1.0):
             raise VLLMRuntimeError("vLLM FullKV requires retention_ratio=1.0")
         if config.model.id not in _SUPPORTED_MODELS:
@@ -1249,6 +1305,31 @@ class VLLMFullKVModel:
             config_kwargs["revision"] = config.model.revision
         model_config = AutoConfig.from_pretrained(model_source, **config_kwargs)
         geometry = _vllm_kv_cache_geometry(model_config, config.model.precision)
+        selector_catalog = (
+            None
+            if options.native_selector_plan is None
+            else load_native_selector_plan_catalog(
+                options.native_selector_plan,
+                cast("str", options.native_selector_plan_sha256),
+                model_id=config.model.id,
+                model_revision=config.model.revision,
+                task=cast("str", options.native_selector_task),
+                dataset_revision=config.dataset.revision,
+                method=config.method.value,
+            )
+        )
+        if selector_catalog is not None:
+            for entry in selector_catalog.entries:
+                projection = entry.projection
+                if projection.block_size != config.cache.block_size or not math.isclose(
+                    projection.retention_ratio,
+                    config.cache.retention_ratio,
+                    rel_tol=0.0,
+                    abs_tol=1e-12,
+                ):
+                    raise VLLMRuntimeError(
+                        "selector-plan block size/retention differs from resolved run config"
+                    )
         runner = AsyncVLLMTrialRunner(
             config,
             options,
@@ -1272,6 +1353,8 @@ class VLLMFullKVModel:
             retention_ratio=config.cache.retention_ratio,
             block_size=config.cache.block_size,
             cache_geometry=geometry,
+            native_enabled=native,
+            selector_plan_catalog=selector_catalog,
         )
 
     def generate(self, request: EvaluationRequest) -> ModelGeneration:
@@ -1285,6 +1368,27 @@ class VLLMFullKVModel:
         # authority for every behavior-affecting sampling parameter.
         generation = dict(self.generation)
         ignored_task_generation_keys = sorted(request.generation_kwargs)
+        selector_catalog = self.selector_plan_catalog
+        selector_entry = (
+            None if selector_catalog is None else selector_catalog.entry(request.sample_id)
+        )
+        if selector_entry is not None:
+            assert selector_catalog is not None
+            projection = selector_entry.projection
+            generation.update(
+                {
+                    "native_selected_blocks": list(projection.selected_blocks),
+                    "native_mandatory_blocks": list(projection.mandatory_blocks),
+                    "native_logical_positions": projection.logical_positions,
+                    "native_block_size": projection.block_size,
+                    "native_retention_ratio": projection.retention_ratio,
+                    "native_policy": projection.policy,
+                    "native_method": projection.method,
+                    "native_catalog_sha256": selector_catalog.catalog_sha256,
+                    "native_selector_planning_seconds": selector_entry.selector_planning_seconds,
+                    "native_source_trace_sha256": selector_entry.source_trace_sha256,
+                }
+            )
         trials = tuple(
             self.runner.run(
                 prepared.engine_prompt,
@@ -1314,7 +1418,7 @@ class VLLMFullKVModel:
                 terminal_token_index=None,
             )
         )
-        native = self.method == "mosaickv_exact"
+        native = self.native_enabled
         active_kv_bytes: int | None = None
         logical_prefill_positions: int | None = first.prompt_tokens
         physical_prefill_positions: int | None = None
@@ -1337,10 +1441,24 @@ class VLLMFullKVModel:
                 raise VLLMRuntimeError("native vLLM selected-block list is invalid")
             if isinstance(raw_compression, bool) or not isinstance(raw_compression, (int, float)):
                 raise VLLMRuntimeError("native vLLM compression timing is invalid")
+            if selector_entry is not None:
+                assert selector_catalog is not None
+                if (
+                    first.native_audit.get("selector_source")
+                    != "hash_bound_common_hf_selector_projection"
+                    or first.native_audit.get("selector_method") != self.method
+                    or first.native_audit.get("selector_catalog_sha256")
+                    != selector_catalog.catalog_sha256
+                    or first.native_audit.get("source_trace_sha256")
+                    != selector_entry.source_trace_sha256
+                ):
+                    raise VLLMRuntimeError("native vLLM audit differs from the selector plan")
             logical_prefill_positions = raw_selected
             physical_prefill_positions = len(raw_selected_blocks) * self.block_size
             active_kv_bytes = self.cache_geometry.active_bytes(physical_prefill_positions)
-            compression_seconds = float(raw_compression)
+            compression_seconds = float(raw_compression) + (
+                0.0 if selector_entry is None else selector_entry.selector_planning_seconds
+            )
         elif self.cache_geometry is not None and first.prompt_tokens is not None:
             # vLLM allocates whole physical blocks. The paper's primary
             # active-memory field is the live prefill cache before decoding,
@@ -1373,12 +1491,29 @@ class VLLMFullKVModel:
                 * self.block_size
             )
         )
+        selector_plan_trace: JsonObject | None = None
+        if selector_entry is not None:
+            assert selector_catalog is not None
+            selector_plan_trace = {
+                "catalog_path": str(selector_catalog.path),
+                "catalog_sha256": selector_catalog.catalog_sha256,
+                "source_trace": selector_entry.source_trace,
+                "source_trace_sha256": selector_entry.source_trace_sha256,
+                "selector_planning_seconds": selector_entry.selector_planning_seconds,
+                "projection": selector_entry.projection.to_json_object(),
+            }
         trace: JsonObject = {
             "schema_version": 1,
-            "measurement_type": "vllm_native_mosaickv" if native else "vllm_fullkv",
+            "measurement_type": (
+                "vllm_native_mosaickv"
+                if native and self.method == "mosaickv_exact"
+                else "vllm_native_baseline" if native else "vllm_fullkv"
+            ),
             "backend": "vllm",
             "method": self.method,
-            "native_mosaickv": native,
+            "native_mosaickv": native and self.method == "mosaickv_exact",
+            "native_block_compaction": native,
+            "selector_plan": selector_plan_trace,
             "run_id": request.run_id,
             "sample_id": request.sample_id,
             "model": self.model_id,
@@ -1420,7 +1555,9 @@ class VLLMFullKVModel:
             "engine": self.runner.engine_metadata,
             "trials": [trial.to_json_object() for trial in trials],
             "native_scope": (
-                "request_wide_whole_token_blocks_transport_gate" if native else "not_used"
+                "hash_bound_common_selector_request_wide_projection"
+                if selector_entry is not None
+                else "request_wide_whole_token_blocks_transport_gate" if native else "not_used"
             ),
             "cache_measurement": {
                 "prefix_cache": "RequestOutput.num_cached_tokens",
@@ -1450,11 +1587,21 @@ class VLLMFullKVModel:
         return ModelGeneration(
             answer=quality.text,
             metrics=GenerationMetrics(
-                ttft=first.ttft_seconds,
+                ttft=(
+                    None
+                    if first.ttft_seconds is None
+                    else first.ttft_seconds
+                    + (
+                        0.0
+                        if selector_entry is None
+                        else selector_entry.selector_planning_seconds
+                    )
+                ),
                 prefill_time=first.engine_prefill_seconds,
                 compression_time=compression_seconds,
                 decode_time=first.decode_seconds,
-                end_to_end_time=first.request_latency_seconds,
+                end_to_end_time=first.request_latency_seconds
+                + (0.0 if selector_entry is None else selector_entry.selector_planning_seconds),
                 generated_tokens=first.generated_tokens,
                 active_kv_bytes=active_kv_bytes,
                 residual_kv_bytes=0,
@@ -1462,7 +1609,11 @@ class VLLMFullKVModel:
                 repair_count=0,
                 repaired_bytes=0,
             ),
-            effective_method=self.method,
+            effective_method=(
+                f"{self.method}__vllm_requestwide_projection"
+                if selector_entry is not None
+                else self.method
+            ),
         )
 
     def verify_request_isolation(self) -> bool:

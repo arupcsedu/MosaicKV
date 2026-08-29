@@ -382,6 +382,14 @@ def build_parser() -> argparse.ArgumentParser:
             "defaults off until cold/cached token parity is established"
         ),
     )
+    evaluate_parser.add_argument(
+        "--vllm-selector-plan",
+        help="hash-bound common-selector plan catalog under /scratch/djy8hg",
+    )
+    evaluate_parser.add_argument(
+        "--vllm-selector-plan-sha",
+        help="required SHA-256 for --vllm-selector-plan",
+    )
     evaluate_parser.add_argument("--sglang-context-length", type=int, default=4096)
     evaluate_parser.add_argument("--sglang-mem-fraction-static", type=float, default=0.8)
     evaluate_parser.add_argument("--sglang-port", type=int, default=0)

@@ -190,6 +190,7 @@ def _resume_payload(
 def run_vllm_evaluation(args: argparse.Namespace, config: RunConfig) -> tuple[int, JsonObject]:
     """Execute vLLM FullKV with raw streaming/cache measurements."""
 
+    task_name = _task_name(config, cast("str | None", args.task))
     options = VLLMRuntimeOptions(
         tensor_parallel_size=int(args.tensor_parallel_size),
         gpu_memory_utilization=float(args.gpu_memory_utilization),
@@ -198,6 +199,11 @@ def run_vllm_evaluation(args: argparse.Namespace, config: RunConfig) -> tuple[in
         local_files_only=bool(args.local_files_only),
         enable_prefix_caching=bool(args.enable_vllm_prefix_caching),
         enable_mosaickv=bool(args.enable_mosaickv),
+        native_selector_plan=cast("str | None", args.vllm_selector_plan),
+        native_selector_plan_sha256=cast("str | None", args.vllm_selector_plan_sha),
+        native_selector_task=(
+            task_name if args.vllm_selector_plan is not None else None
+        ),
     )
     if options.enable_mosaickv:
         require_native_mosaickv_support(
@@ -206,14 +212,24 @@ def run_vllm_evaluation(args: argparse.Namespace, config: RunConfig) -> tuple[in
             enforce_eager=True,
             attention_backend=config.execution.attention_implementation,
         )
-    if options.enable_mosaickv and config.method.value != "mosaickv_exact":
-        raise ValueError("vLLM native Stage B supports only --method mosaickv_exact")
+    if options.enable_mosaickv and config.method.value not in {
+        "mosaickv_exact",
+        "prompt_attention_topk",
+        "random_kv",
+    }:
+        raise ValueError(
+            "vLLM native selector plans support mosaickv_exact, "
+            "prompt_attention_topk, or random_kv"
+        )
+    if options.enable_mosaickv and config.method.value != "mosaickv_exact" and (
+        options.native_selector_plan is None
+    ):
+        raise ValueError("vLLM native baselines require --vllm-selector-plan")
     if not options.enable_mosaickv and (
         not config.method.is_full_cache or config.cache.retention_ratio != 1.0
     ):
         raise ValueError("vLLM FullKV requires --method full_kv --retention-ratio 1.0")
     _external_cache()
-    task_name = _task_name(config, cast("str | None", args.task))
     registry = default_task_registry()
     task = registry.resolve(task_name)
     run_id = str(args.run_id or uuid.uuid4().hex)
@@ -315,6 +331,11 @@ def run_vllm_evaluation(args: argparse.Namespace, config: RunConfig) -> tuple[in
             "prefix_caching": runtime.runner.engine_metadata.get("prefix_caching", "unavailable"),
             "model_source": runtime.runner.engine_metadata.get("model_source", "unavailable"),
             "request_isolation_verified": request_isolation_verified,
+            "selector_plan_sha256": (
+                runtime.selector_plan_catalog.catalog_sha256
+                if runtime.selector_plan_catalog is not None
+                else "not_used"
+            ),
         },
         attention_implementation_override=(
             "vllm_"

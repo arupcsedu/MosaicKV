@@ -32,6 +32,9 @@ from mosaickv.backends.cache_isolation import (
     IsolatedDecodeStateHandle,
     construct_isolated_decode_state,
 )
+from mosaickv.backends.native_selector_plan import (
+    project_common_selector_to_request_blocks,
+)
 from mosaickv.baselines import (
     BaselineCompressionPlan,
     HeadLocalCapacityRecord,
@@ -7018,6 +7021,62 @@ def _utility_trace(plan: MosaicKVCompressionPlan) -> JsonObject:
     }
 
 
+def _mosaickv_request_wide_projection(plan: MosaicKVCompressionPlan) -> JsonObject:
+    """Project exact source membership onto a serving-engine token-block table."""
+
+    utility_by_source = {
+        plan.source_node_id(graph_node_id): utility.local_utility
+        for graph_node_id, utility in enumerate(plan.utilities.blocks)
+    }
+    exact_source_ids = tuple(sorted(set(plan.construction.exact_node_ids)))
+    exact_source_set = frozenset(exact_source_ids)
+    selected = tuple(
+        (plan.full_state.blocks[source_id], utility_by_source.get(source_id, 0.0))
+        for source_id in exact_source_ids
+    )
+    fallback = tuple(
+        (plan.full_state.blocks[source_id], score)
+        for source_id, score in sorted(utility_by_source.items())
+        if source_id not in exact_source_set
+    )
+    ratio = plan.shared_active_budget_value / plan.source_budget_value
+    return project_common_selector_to_request_blocks(
+        plan.full_state,
+        selected,
+        method=plan.method.value,
+        retention_ratio=min(1.0, ratio),
+        fallback_candidates=fallback,
+    ).to_json_object()
+
+
+def _baseline_request_wide_projection(plan: BaselineCompressionPlan) -> JsonObject:
+    """Project a simple exact baseline onto the same serving block boundary."""
+
+    score_by_node = {decision.node_id: decision.score for decision in plan.selection.decisions}
+    selected = tuple(
+        (block, score_by_node[node_id])
+        for node_id, block in zip(
+            plan.selection.selected_node_ids,
+            plan.selection.selected_blocks,
+            strict=True,
+        )
+    )
+    selected_node_ids = frozenset(plan.selection.selected_node_ids)
+    fallback = tuple(
+        (plan.full_state.blocks[decision.node_id], decision.score)
+        for decision in plan.selection.decisions
+        if decision.node_id not in selected_node_ids
+    )
+    ratio = plan.active_budget_value / plan.source_budget_value
+    return project_common_selector_to_request_blocks(
+        plan.full_state,
+        selected,
+        method=plan.method.value,
+        retention_ratio=min(1.0, ratio),
+        fallback_candidates=fallback,
+    ).to_json_object()
+
+
 def _prototype_diagnostics_by_head(plan: MosaicKVCompressionPlan) -> list[JsonObject]:
     grouped: dict[tuple[int, int], list[PrototypeRecord]] = {}
     for record in plan.construction.prototypes:
@@ -7474,6 +7533,7 @@ def _plan_trace(
         {
             "requested_method": plan.method.value,
             "effective_method": plan.effective_method,
+            "request_wide_native_projection": _mosaickv_request_wide_projection(plan),
             "tier_mode": plan.construction.mode.value,
             "tier_reason": plan.construction.reason,
             "prototype_safety": cast("JsonObject", asdict(plan.construction.safety)),
@@ -7858,6 +7918,7 @@ def _baseline_plan_trace(
             ),
             "tier_mode": "retention_one" if plan.state.is_retention_one else "exact_only_baseline",
             "tier_reason": "simple baselines retain exact source blocks only",
+            "request_wide_native_projection": _baseline_request_wide_projection(plan),
             "source_budget_value": plan.source_budget_value,
             "active_budget_value": plan.active_budget_value,
             "selected_source_bytes": plan.selection.active_bytes,

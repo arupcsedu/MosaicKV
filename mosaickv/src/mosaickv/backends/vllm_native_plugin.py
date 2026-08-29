@@ -8,6 +8,7 @@ sequence length.  Query and M-RoPE positions therefore remain logical.
 
 from __future__ import annotations
 
+import importlib
 import importlib.metadata
 import math
 import os
@@ -17,6 +18,7 @@ from typing import Any
 from mosaickv.backends.native_blocks import (
     require_scratch_path,
     select_native_blocks,
+    validated_native_block_plan,
     write_native_audit,
 )
 
@@ -63,10 +65,12 @@ def _patch_vit_attention_to_sdpa(
     """
 
     if platform is None or torch_sdpa_backend is None:
-        from vllm.platforms import _Backend, current_platform
-
-        platform = current_platform
-        torch_sdpa_backend = _Backend.TORCH_SDPA
+        # ``_Backend`` is deliberately private in the audited vLLM 0.10.2
+        # boundary. Resolve it dynamically so this version-pinned plugin does
+        # not claim that vLLM exposes a public typed API here.
+        vllm_platforms = importlib.import_module("vllm.platforms")
+        platform = vllm_platforms.current_platform
+        torch_sdpa_backend = vllm_platforms._Backend.TORCH_SDPA
     platform_class: Any = type(platform)
     if getattr(platform_class, "_mosaickv_vit_sdpa_patch_v1", False):
         return
@@ -77,6 +81,80 @@ def _patch_vit_attention_to_sdpa(
 
     platform_class.get_vit_attn_backend = classmethod(get_vit_attn_backend)
     platform_class._mosaickv_vit_sdpa_patch_v1 = True
+
+
+def _request_selection(
+    request: Any,
+    *,
+    logical_positions: int,
+    block_size: int,
+    retention_ratio: float,
+) -> tuple[Any, dict[str, Any]]:
+    """Resolve an optional hash-bound common-selector plan from SamplingParams."""
+
+    sampling = getattr(request, "sampling_params", None)
+    extra_args = getattr(sampling, "extra_args", None)
+    native = extra_args.get("mosaickv_native") if isinstance(extra_args, dict) else None
+    if not isinstance(native, dict) or "selected_blocks" not in native:
+        return (
+            select_native_blocks(logical_positions, block_size, retention_ratio),
+            {"selector_source": "transport_validation_fallback"},
+        )
+    if int(native.get("logical_positions", -1)) != logical_positions:
+        raise RuntimeError(
+            "common-selector plan logical length differs from vLLM prefill: "
+            f"plan={native.get('logical_positions')}, vllm={logical_positions}"
+        )
+    if int(native.get("block_size", -1)) != block_size:
+        raise RuntimeError("common-selector plan block size differs from vLLM")
+    if not math.isclose(
+        float(native.get("retention_ratio", -1.0)), retention_ratio, rel_tol=0.0, abs_tol=1e-12
+    ):
+        raise RuntimeError("common-selector plan retention ratio differs from vLLM")
+    raw_selected = native.get("selected_blocks")
+    if not isinstance(raw_selected, list) or not all(
+        isinstance(value, int) and not isinstance(value, bool) for value in raw_selected
+    ):
+        raise RuntimeError("common-selector selected_blocks must be an integer list")
+    raw_mandatory = native.get("mandatory_blocks")
+    if not isinstance(raw_mandatory, list) or not all(
+        isinstance(value, int) and not isinstance(value, bool) for value in raw_mandatory
+    ):
+        raise RuntimeError("common-selector mandatory_blocks must be an integer list")
+    raw_selected_count = native.get("selected_block_count")
+    if (
+        not isinstance(raw_selected_count, int)
+        or isinstance(raw_selected_count, bool)
+        or raw_selected_count < 1
+    ):
+        raise RuntimeError("common-selector selected_block_count must be a positive integer")
+    policy = str(native.get("policy", ""))
+    selection = validated_native_block_plan(
+        logical_positions,
+        block_size,
+        retention_ratio,
+        tuple(raw_selected),
+        policy=policy,
+        mandatory_blocks=tuple(raw_mandatory),
+        expected_selected_blocks=raw_selected_count,
+    )
+    catalog_sha = str(native.get("catalog_sha256", ""))
+    if len(catalog_sha) != 64:
+        raise RuntimeError("common-selector catalog SHA-256 is invalid")
+    planning_seconds = float(native.get("selector_planning_seconds", -1.0))
+    source_trace_sha = str(native.get("source_trace_sha256", ""))
+    method = str(native.get("method", ""))
+    if not method or not math.isfinite(planning_seconds) or planning_seconds < 0:
+        raise RuntimeError("common-selector method/planning timing is invalid")
+    if len(source_trace_sha) != 64:
+        raise RuntimeError("common-selector source-trace SHA-256 is invalid")
+    return selection, {
+        "selector_source": "hash_bound_common_hf_selector_projection",
+        "selector_method": method,
+        "selector_catalog_sha256": catalog_sha,
+        "selector_planning_seconds": planning_seconds,
+        "source_trace_sha256": source_trace_sha,
+    }
 
 
 def _compress_ready_requests(scheduler: Any, scheduler_output: Any) -> None:
@@ -104,10 +182,11 @@ def _compress_ready_requests(scheduler: Any, scheduler_output: Any) -> None:
             raise RuntimeError("native vLLM reached first decode without a prefill transaction")
         started = time.perf_counter()
         blocks = group.req_to_blocks[request_id]
-        selection = select_native_blocks(
-            request.num_prompt_tokens,
-            configured_block_size,
-            ratio,
+        selection, selector_provenance = _request_selection(
+            request,
+            logical_positions=request.num_prompt_tokens,
+            block_size=configured_block_size,
+            retention_ratio=ratio,
         )
         if len(blocks) != selection.source_blocks:
             raise RuntimeError(
@@ -145,6 +224,7 @@ def _compress_ready_requests(scheduler: Any, scheduler_output: Any) -> None:
                 "compression_seconds": compression_seconds,
                 "logical_next_position": request.num_computed_tokens,
                 "prefix_cache_disabled": True,
+                **selector_provenance,
             },
         )
 

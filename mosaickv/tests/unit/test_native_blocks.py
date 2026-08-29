@@ -120,6 +120,70 @@ def test_vllm_scheduler_transaction_frees_only_dropped_owned_blocks(
     assert audit["logical_next_position"] == 64
 
 
+def test_vllm_scheduler_consumes_hash_bound_common_selector_plan(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    class Block:
+        def __init__(self, block_id: int, *, is_null: bool = False) -> None:
+            self.block_id = block_id
+            self.is_null = is_null
+
+    class Pool:
+        def __init__(self) -> None:
+            self.null_block = Block(0, is_null=True)
+            self.freed: list[int] = []
+
+        def free_blocks(self, blocks: list[Block]) -> None:
+            self.freed.extend(block.block_id for block in blocks)
+
+    class FullAttentionManager:
+        block_size = 16
+
+        def __init__(self, blocks: list[Block]) -> None:
+            self.req_to_blocks = {"request": blocks}
+
+    pool = Pool()
+    source = [Block(index) for index in range(1, 7)]
+    group = FullAttentionManager(source)
+    coordinator = SimpleNamespace(single_type_managers=[group], block_pool=pool)
+    manager = SimpleNamespace(enable_caching=False, coordinator=coordinator)
+    request = SimpleNamespace(
+        num_computed_tokens=96,
+        num_prompt_tokens=96,
+        output_token_ids=[],
+        sampling_params=SimpleNamespace(
+            extra_args={
+                "mosaickv_native": {
+                    "logical_positions": 96,
+                    "block_size": 16,
+                    "retention_ratio": 0.5,
+                    "selected_blocks": [0, 2, 5],
+                    "mandatory_blocks": [0, 5],
+                    "selected_block_count": 3,
+                    "policy": "common_selector_request_wide_vote_projection_v2",
+                    "method": "mosaickv_exact",
+                    "catalog_sha256": "a" * 64,
+                    "selector_planning_seconds": 0.25,
+                    "source_trace_sha256": "b" * 64,
+                }
+            }
+        ),
+    )
+    scheduler: Any = SimpleNamespace(kv_cache_manager=manager, requests={"request": request})
+    output = SimpleNamespace(num_scheduled_tokens={"request": 96})
+    monkeypatch.setenv("MOSAICKV_NATIVE_RETENTION_RATIO", "0.5")
+    monkeypatch.setenv("MOSAICKV_NATIVE_BLOCK_SIZE", "16")
+    monkeypatch.setenv("MOSAICKV_NATIVE_AUDIT_DIR", str(tmp_path))
+
+    _compress_ready_requests(scheduler, output)
+
+    assert [block.block_id for block in source] == [1, 0, 3, 0, 0, 6]
+    audit = json.loads(native_audit_path(tmp_path, "vllm", "request").read_text())
+    assert audit["selector_source"] == "hash_bound_common_hf_selector_projection"
+    assert audit["selection"]["selected_blocks"] == [0, 2, 5]
+    assert audit["selector_catalog_sha256"] == "a" * 64
+
+
 def test_sglang_release_frees_only_compacted_active_ownership() -> None:
     class Allocator:
         freed: torch.Tensor | None = None
