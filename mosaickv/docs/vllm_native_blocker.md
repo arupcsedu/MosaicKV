@@ -89,6 +89,15 @@ scores were 0.5 versus 0.5, 0.0 versus 0.0, and 0.5 versus 0.0. A two-request
 MosaicKV A-B-A probe passed. These are small, retrospective development
 results; they establish implementation behavior, not paper-level efficacy.
 
+Clean-source job `19022355`, pinned to
+`e4b29a4d9c278ba2ede4dc0370a281e0464472a3`, reran the model-independent
+native transaction gate. Both synthetic multimodal requests matched ordinary
+vLLM across all 16 fixed-length token IDs at retention 1.0. Retention 0.5 kept
+9 of 18 physical blocks, both compressed requests completed, and the A-B-A
+isolation check passed. The verifier correctly marked the transport fallback
+as not authorized for a paper method row; common-selector evidence comes from
+the separate `19022148` run.
+
 ## Remaining boundary
 
 vLLM still has no equivalent public transaction API. The repository plugin is

@@ -23,6 +23,11 @@ integration tests, Ruff, and strict MyPy. Clean A100 arrays then established:
 - two distinct compressed requests in one persistent vLLM engine passed an
   A-B-A isolation probe.
 
+Clean native transaction job `19022355` additionally matched ordinary vLLM
+over the complete 16-token timing stream for two retention-1 requests and
+passed physical-block release, accounting, determinism, and isolation checks.
+Its fallback selector is transport-only and did not produce a paper method row.
+
 The compressed gate contained only two retrospective examples per task. It is
 therefore development evidence, not a statistically adequate paper result.
 Its exact answer agreement was 100% on MMStar and 0% on TextVQA and DocVQA,
