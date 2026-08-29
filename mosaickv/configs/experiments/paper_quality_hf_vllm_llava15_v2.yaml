@@ -1,0 +1,104 @@
+schema_version: 1
+experiment_id: paper_quality_hf_vllm_llava15_v2
+classification: fixed_preregistered_paper_quality_memory
+execution_authorized: true
+
+# This protocol is deliberately narrow enough to complete in one four-A100
+# allocation while retaining a useful paired sample size. Enabling execution
+# requires this reviewed, clean source commit and immutable sample-ledger hashes.
+scope:
+  primary_scientific_backend: hf_eager
+  backend_comparisons_are_separate: true
+  latency_is_reported_secondary: true
+  latency_is_not_a_rejection_gate: true
+  vllm_native_prototype_or_repair_claimed: false
+  incompatible_task_metrics_are_not_macro_averaged: true
+
+candidate:
+  model_id: llava-hf/llava-1.5-7b-hf
+  model_revision: b234b804b114d9e37bb655e11cbbb5f5e971b7a9
+  frozen_algorithm_commit: 02b272514e6ed7c35b2f48df9c8db15875b726e5
+  config: configs/paper_candidate_llava_v1.yaml
+  config_sha256: 6d9237e40dc95e46708077ad57abd6d6422bacb33b6323b0f860d4d3b7443a2f
+
+experiment:
+  tasks:
+    mmstar:
+      dataset_id: Lin-Chen/MMStar
+      dataset_revision: bc98d668301da7b14f648724866e57302778ab27
+      split: val
+    textvqa:
+      dataset_id: lmms-lab/textvqa
+      dataset_revision: 9c0699cd19768ac5ab97568f6b3cbac4c0062884
+      split: validation
+    docvqa:
+      dataset_id: lmms-lab/DocVQA
+      dataset_revision: 539088ef8a8ada01ac8e2e6d4e372586748a265e
+      split: validation
+  sample_count_per_task: 256
+  shards_per_task: 4
+  samples_per_shard: 64
+  selection_seed: 20271001
+  deterministic_generation: true
+  output_length: 64
+  precision: fp16
+  bootstrap_resamples: 10000
+  bootstrap_seed: 20271002
+  backends:
+    hf_eager:
+      attention_backend: eager
+      methods: [full_kv, prompt_attention_topk, mosaickv_full]
+      block_size: 4
+      prompt_topk_retention_ratio: 0.13
+      mosaickv_seed_retention_ratio: 0.075
+      mosaickv_cache_budget_bytes: 28500000
+      effective_method_must_be_reported: true
+    vllm:
+      attention_backend: eager
+      methods: [full_kv, prompt_attention_topk, mosaickv_exact]
+      serving_block_size: 16
+      prompt_topk_retention_ratio: 0.13
+      mosaickv_seed_retention_ratio: 0.075
+      minimum_competitor_anchor_blocks: 1
+      competitor_tail_dominance_threshold: 9.0
+      coherent_evidence_minimum_route_ratio: 0.90
+      native_scope: hash_bound_common_selector_request_wide_projection
+      prototype_merging: false
+      residual_repair: false
+
+primary_gates:
+  comparison_baseline: prompt_attention_topk
+  minimum_per_sample_active_memory_reduction_fraction: 0.30
+  minimum_per_task_paired_mean_official_score_delta: 0.0
+  require_complete_paired_rows: true
+  require_identical_samples_within_and_across_backends: true
+  require_clean_source_commit: true
+  require_exact_model_dataset_and_config_revisions: true
+  require_vllm_request_isolation_evidence: true
+
+execution_plan:
+  sample_shards: 12
+  backend_jobs: 24
+  maximum_concurrent_a100_jobs: 4
+  a100s_per_job: 1
+  per_worker_slurm_time_limit: "03:00:00"
+  expected_gpu_hours: 26.0
+  expected_wall_hours_with_four_a100s: 7.0
+  planning_upper_bound_wall_hours: 8.0
+  queue_wait_is_excluded: true
+  measured_runtime_evidence:
+    vllm_job: 19023196
+    vllm_samples_per_task: 32
+    vllm_task_minutes: [15.05, 14.55, 14.73]
+    hf_job: 19028932
+    hf_samples_per_task: 8
+    hf_task_minutes: [11.50, 11.10, 11.10]
+
+outputs:
+  raw_jsonl: true
+  parquet: true
+  manifests: true
+  debug_traces: true
+  per_backend_analysis: true
+  paired_bootstrap_intervals: true
+  expected_new_artifact_bytes_upper_bound: 1000000000
