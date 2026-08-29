@@ -404,6 +404,9 @@ def fit_projection_to_competitor_budget(
     minimum_reduction_fraction: float,
     minimum_evidence_blocks: int = 1,
     maximum_evidence_blocks: int = 2,
+    minimum_competitor_anchor_blocks: int = 0,
+    competitor_tail_dominance_threshold: float = 0.0,
+    coherent_evidence_minimum_route_ratio: float = 0.0,
 ) -> RequestWideSelectorProjection:
     """Fill the largest whole-block budget that remains below a competitor.
 
@@ -425,6 +428,22 @@ def fit_projection_to_competitor_budget(
         raise NativeSelectorPlanError("minimum reduction must be finite and in (0, 1)")
     if minimum_evidence_blocks < 0 or maximum_evidence_blocks < minimum_evidence_blocks:
         raise NativeSelectorPlanError("evidence reservation bounds are invalid")
+    if minimum_competitor_anchor_blocks < 0:
+        raise NativeSelectorPlanError("competitor anchor count must be nonnegative")
+    if (
+        not math.isfinite(competitor_tail_dominance_threshold)
+        or competitor_tail_dominance_threshold < 0
+    ):
+        raise NativeSelectorPlanError(
+            "competitor tail-dominance threshold must be finite and nonnegative"
+        )
+    if (
+        not math.isfinite(coherent_evidence_minimum_route_ratio)
+        or not 0 <= coherent_evidence_minimum_route_ratio <= 1
+    ):
+        raise NativeSelectorPlanError(
+            "coherent-evidence route ratio must be finite and in [0, 1]"
+        )
     competitor_blocks = len(competitor.selected_blocks)
     maximum_blocks = math.floor(
         math.nextafter(
@@ -439,21 +458,123 @@ def fit_projection_to_competitor_budget(
     source_blocks = projection.selection.source_blocks
     target = min(source_blocks, maximum_blocks)
     chosen = set(projection.mandatory_blocks)
+    available_optional_slots = target - len(chosen)
+    if available_optional_slots < minimum_competitor_anchor_blocks:
+        raise NativeSelectorPlanError(
+            "competitor-relative byte ceiling cannot satisfy the prompt anchor reservation"
+        )
+    competitor_anchor_candidates = tuple(
+        index for index in competitor.selected_blocks if index not in chosen
+    )
+    if len(competitor_anchor_candidates) < minimum_competitor_anchor_blocks:
+        raise NativeSelectorPlanError(
+            "competitor plan has too few optional blocks for the prompt anchor reservation"
+        )
+    ranked_competitor_anchors = sorted(
+        competitor_anchor_candidates,
+        key=lambda index: (
+            -competitor.selected_route_votes[index],
+            -competitor.normalized_utility_scores[index],
+            -competitor.selected_position_votes[index],
+            -competitor.selected_score_sums[index],
+            index,
+        ),
+    )
+    selected_competitor_anchors = list(
+        ranked_competitor_anchors[:minimum_competitor_anchor_blocks]
+    )
+    prompt_tail = (
+        max(competitor_anchor_candidates) if competitor_anchor_candidates else None
+    )
+    interior_competitor_anchors = tuple(
+        index
+        for index in ranked_competitor_anchors
+        if prompt_tail is not None and index < prompt_tail - 1
+    )
+
+    # A unanimous suffix block can dominate a raw cross-head vote even when it
+    # contains only the question/chat boundary. With one optional serving
+    # block, replace that tail with the strongest selected interior block when
+    # the normalized suffix utility is pathologically concentrated. This is a
+    # label-blind risk gate: it uses only the paired selector telemetry.
+    if (
+        competitor_tail_dominance_threshold > 0
+        and available_optional_slots == 1
+        and minimum_competitor_anchor_blocks == 1
+        and prompt_tail is not None
+        and interior_competitor_anchors
+    ):
+        interior = interior_competitor_anchors[0]
+        interior_utility = competitor.normalized_utility_scores[interior]
+        tail_utility = competitor.normalized_utility_scores[prompt_tail]
+        dominance = (
+            math.inf if interior_utility <= 0 < tail_utility else tail_utility / max(
+                interior_utility, 1e-12
+            )
+        )
+        if dominance >= competitor_tail_dominance_threshold:
+            selected_competitor_anchors = [interior]
+
+    # When exactly two optional blocks fit, preserve a coherent adjacent
+    # interior group if both members carry nearly as many cross-head votes as
+    # the prompt tail. Treating the pair atomically prevents the projection
+    # from retaining one half of an OCR word/number while spending the other
+    # slot on redundant prompt suffix context.
+    if (
+        coherent_evidence_minimum_route_ratio > 0
+        and available_optional_slots == 2
+        and prompt_tail is not None
+    ):
+        interior_set = set(interior_competitor_anchors)
+        tail_votes = max(1, competitor.selected_route_votes[prompt_tail])
+        coherent_pairs: list[tuple[int, int]] = [
+            (index, index + 1)
+            for index in sorted(interior_set)
+            if index + 1 in interior_set
+            and min(
+                competitor.selected_route_votes[index],
+                competitor.selected_route_votes[index + 1],
+            )
+            / tail_votes
+            >= coherent_evidence_minimum_route_ratio
+        ]
+        if coherent_pairs:
+            def coherent_pair_rank(pair: tuple[int, int]) -> tuple[int, float, int]:
+                return (
+                    min(
+                        competitor.selected_route_votes[pair[0]],
+                        competitor.selected_route_votes[pair[1]],
+                    ),
+                    sum(
+                        competitor.normalized_utility_scores[index]
+                        for index in pair
+                    ),
+                    -pair[0],
+                )
+
+            selected_competitor_anchors = list(
+                sorted(coherent_pairs, key=coherent_pair_rank, reverse=True)[0]
+            )
+    chosen.update(selected_competitor_anchors)
     evidence_candidates = tuple(
         index for index in projection.evidence_blocks if index not in chosen
     )
     available_optional_slots = target - len(chosen)
-    if evidence_candidates and available_optional_slots < minimum_evidence_blocks:
+    selected_evidence_blocks = len(chosen.intersection(projection.evidence_blocks))
+    minimum_additional_evidence = max(
+        0, minimum_evidence_blocks - selected_evidence_blocks
+    )
+    if evidence_candidates and available_optional_slots < minimum_additional_evidence:
         raise NativeSelectorPlanError(
             "competitor-relative byte ceiling cannot satisfy the evidence reservation"
         )
     evidence_target = min(
-        maximum_evidence_blocks,
+        max(0, maximum_evidence_blocks - selected_evidence_blocks),
         available_optional_slots,
         len(evidence_candidates),
     )
     if evidence_candidates:
-        evidence_target = max(minimum_evidence_blocks, evidence_target)
+        evidence_target = max(minimum_additional_evidence, evidence_target)
     ranked_evidence = sorted(
         evidence_candidates,
         key=lambda index: (
@@ -493,7 +614,16 @@ def fit_projection_to_competitor_budget(
         evidence_route_votes=projection.evidence_route_votes,
         evidence_utility_scores=projection.evidence_utility_scores,
         evidence_blocks=projection.evidence_blocks,
-        policy="common_selector_competitor_relative_evidence_budget_v2",
+        policy=(
+            "common_selector_adaptive_prompt_evidence_budget_v4"
+            if (
+                competitor_tail_dominance_threshold > 0
+                or coherent_evidence_minimum_route_ratio > 0
+            )
+            else "common_selector_prompt_anchored_evidence_budget_v3"
+            if minimum_competitor_anchor_blocks
+            else "common_selector_competitor_relative_evidence_budget_v2"
+        ),
     )
 
 

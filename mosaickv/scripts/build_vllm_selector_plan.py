@@ -82,6 +82,9 @@ def build_catalog(
     competitor_catalog: Path | None = None,
     competitor_catalog_sha256: str | None = None,
     minimum_reduction_fraction: float | None = None,
+    minimum_competitor_anchor_blocks: int = 0,
+    competitor_tail_dominance_threshold: float = 0.0,
+    coherent_evidence_minimum_route_ratio: float = 0.0,
 ) -> JsonObject:
     manifest = _object(json.loads(manifest_path.read_text(encoding="utf-8")), "manifest")
     model = _object(manifest.get("model"), "manifest.model")
@@ -158,6 +161,15 @@ def build_catalog(
                     entry.projection,
                     competitor.entry(entry.sample_id).projection,
                     minimum_reduction_fraction=minimum_reduction_fraction,
+                    minimum_competitor_anchor_blocks=(
+                        minimum_competitor_anchor_blocks
+                    ),
+                    competitor_tail_dominance_threshold=(
+                        competitor_tail_dominance_threshold
+                    ),
+                    coherent_evidence_minimum_route_ratio=(
+                        coherent_evidence_minimum_route_ratio
+                    ),
                 ),
                 selector_planning_seconds=entry.selector_planning_seconds,
                 source_trace=entry.source_trace,
@@ -203,6 +215,11 @@ def main() -> int:
     parser.add_argument("--competitor-catalog", type=Path)
     parser.add_argument("--competitor-catalog-sha256")
     parser.add_argument("--minimum-reduction-fraction", type=float)
+    parser.add_argument("--minimum-competitor-anchor-blocks", type=int, default=0)
+    parser.add_argument("--competitor-tail-dominance-threshold", type=float, default=0.0)
+    parser.add_argument(
+        "--coherent-evidence-minimum-route-ratio", type=float, default=0.0
+    )
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     _write_once(
@@ -220,6 +237,13 @@ def main() -> int:
             ),
             competitor_catalog_sha256=args.competitor_catalog_sha256,
             minimum_reduction_fraction=args.minimum_reduction_fraction,
+            minimum_competitor_anchor_blocks=args.minimum_competitor_anchor_blocks,
+            competitor_tail_dominance_threshold=(
+                args.competitor_tail_dominance_threshold
+            ),
+            coherent_evidence_minimum_route_ratio=(
+                args.coherent_evidence_minimum_route_ratio
+            ),
         ),
     )
     return 0

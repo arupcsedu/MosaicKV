@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -162,6 +163,189 @@ def test_evidence_reservation_beats_universal_suffix_votes_inside_same_budget() 
     assert len(fitted.selected_blocks) == 3
     assert fitted.selected_blocks == (0, 4, 7)
     assert 4 in fitted.evidence_blocks
+
+
+def test_prompt_anchor_and_evidence_share_the_same_hard_budget() -> None:
+    layers = tuple(
+        (
+            np.zeros((1, 1, 32, 2), dtype=np.float32),
+            np.zeros((1, 1, 32, 2), dtype=np.float32),
+        )
+        for _ in range(2)
+    )
+    full = FullKVState.from_tensors(
+        layers,
+        block_size=4,
+        modality_spans=(
+            ModalitySpan(0, 4, Modality.TEXT),
+            ModalitySpan(4, 28, Modality.IMAGE),
+            ModalitySpan(28, 32, Modality.TEXT),
+        ),
+        mandatory_logical_positions=(0, 31),
+    )
+    # Prompt attention most strongly supports request block 6, adjacent to the
+    # final text block. MosaicKV independently prefers evidence block 4.
+    prompt = project_common_selector_to_request_blocks(
+        full,
+        ((full.blocks[6], 5.0), (full.blocks[14], 5.0)),
+        method="prompt_attention_topk",
+        retention_ratio=0.75,
+    )
+    candidate = project_common_selector_to_request_blocks(
+        full,
+        ((full.blocks[4], 5.0), (full.blocks[12], 5.0)),
+        method="mosaickv_exact",
+        retention_ratio=0.25,
+    )
+
+    fitted = fit_projection_to_competitor_budget(
+        candidate,
+        prompt,
+        minimum_reduction_fraction=0.30,
+        minimum_competitor_anchor_blocks=1,
+    )
+
+    assert fitted.selected_blocks == (0, 4, 6, 7)
+    assert len(fitted.selected_blocks) == 4
+    assert fitted.policy == "common_selector_prompt_anchored_evidence_budget_v3"
+
+
+def test_prompt_anchor_can_satisfy_evidence_minimum_at_three_block_capacity() -> None:
+    layers = tuple(
+        (
+            np.zeros((1, 1, 32, 2), dtype=np.float32),
+            np.zeros((1, 1, 32, 2), dtype=np.float32),
+        )
+        for _ in range(2)
+    )
+    full = FullKVState.from_tensors(
+        layers,
+        block_size=4,
+        modality_spans=(
+            ModalitySpan(0, 4, Modality.TEXT),
+            ModalitySpan(4, 28, Modality.IMAGE),
+            ModalitySpan(28, 32, Modality.TEXT),
+        ),
+        mandatory_logical_positions=(0, 31),
+    )
+    prompt = project_common_selector_to_request_blocks(
+        full,
+        ((full.blocks[6], 3.0), (full.blocks[14], 3.0)),
+        method="prompt_attention_topk",
+        retention_ratio=0.625,
+    )
+    candidate = project_common_selector_to_request_blocks(
+        full,
+        ((full.blocks[4], 1.0),),
+        method="mosaickv_exact",
+        retention_ratio=0.375,
+    )
+
+    fitted = fit_projection_to_competitor_budget(
+        candidate,
+        prompt,
+        minimum_reduction_fraction=0.30,
+        minimum_competitor_anchor_blocks=1,
+    )
+
+    assert fitted.selected_blocks == (0, 6, 7)
+    assert len(fitted.selected_blocks) == 3
+
+
+def test_tail_dominance_gate_reserves_interior_evidence_at_three_blocks() -> None:
+    full = FullKVState.from_tensors(
+        tuple(
+            (
+                np.zeros((1, 1, 32, 2), dtype=np.float32),
+                np.zeros((1, 1, 32, 2), dtype=np.float32),
+            )
+            for _ in range(2)
+        ),
+        block_size=4,
+        modality_spans=(
+            ModalitySpan(0, 4, Modality.TEXT),
+            ModalitySpan(4, 28, Modality.IMAGE),
+            ModalitySpan(28, 32, Modality.TEXT),
+        ),
+        mandatory_logical_positions=(0, 31),
+    )
+    prompt = project_common_selector_to_request_blocks(
+        full,
+        ((full.blocks[2], 1.0), (full.blocks[6], 1.0)),
+        method="prompt_attention_topk",
+        retention_ratio=0.625,
+    )
+    prompt = replace(
+        prompt,
+        selected_blocks=(0, 2, 5, 6, 7),
+        selected_route_votes=(1000, 0, 80, 0, 0, 60, 100, 1024),
+        normalized_utility_scores=(1.0, 0.0, 0.05, 0.0, 0.0, 0.04, 0.9, 1.0),
+    )
+    candidate = project_common_selector_to_request_blocks(
+        full,
+        ((full.blocks[4], 1.0),),
+        method="mosaickv_exact",
+        retention_ratio=0.375,
+    )
+
+    fitted = fit_projection_to_competitor_budget(
+        candidate,
+        prompt,
+        minimum_reduction_fraction=0.30,
+        minimum_competitor_anchor_blocks=1,
+        competitor_tail_dominance_threshold=9.0,
+    )
+
+    assert fitted.selected_blocks == (0, 2, 7)
+    assert fitted.policy == "common_selector_adaptive_prompt_evidence_budget_v4"
+
+
+def test_coherent_interior_pair_is_atomic_at_four_block_capacity() -> None:
+    full = FullKVState.from_tensors(
+        tuple(
+            (
+                np.zeros((1, 1, 32, 2), dtype=np.float32),
+                np.zeros((1, 1, 32, 2), dtype=np.float32),
+            )
+            for _ in range(2)
+        ),
+        block_size=4,
+        modality_spans=(
+            ModalitySpan(0, 4, Modality.TEXT),
+            ModalitySpan(4, 28, Modality.IMAGE),
+            ModalitySpan(28, 32, Modality.TEXT),
+        ),
+        mandatory_logical_positions=(0, 31),
+    )
+    prompt = project_common_selector_to_request_blocks(
+        full,
+        ((full.blocks[2], 1.0), (full.blocks[3], 1.0), (full.blocks[6], 1.0)),
+        method="prompt_attention_topk",
+        retention_ratio=0.75,
+    )
+    prompt = replace(
+        prompt,
+        selected_blocks=(0, 2, 3, 5, 6, 7),
+        selected_route_votes=(1000, 0, 95, 94, 0, 70, 100, 1024),
+        normalized_utility_scores=(1.0, 0.0, 0.2, 0.2, 0.0, 0.1, 0.4, 1.0),
+    )
+    candidate = project_common_selector_to_request_blocks(
+        full,
+        ((full.blocks[4], 1.0),),
+        method="mosaickv_exact",
+        retention_ratio=0.5,
+    )
+
+    fitted = fit_projection_to_competitor_budget(
+        candidate,
+        prompt,
+        minimum_reduction_fraction=0.30,
+        minimum_competitor_anchor_blocks=1,
+        coherent_evidence_minimum_route_ratio=0.90,
+    )
+
+    assert fitted.selected_blocks == (0, 2, 3, 7)
+    assert fitted.policy == "common_selector_adaptive_prompt_evidence_budget_v4"
 
 
 def test_hash_bound_catalog_rejects_provenance_mismatch(tmp_path: Path) -> None:
