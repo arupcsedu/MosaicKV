@@ -101,7 +101,11 @@ class EvaluationHarness:
                     model=model.model_id,
                     backend=model.backend,
                     method=generation.effective_method or model.method,
-                    retention_ratio=model.retention_ratio,
+                    retention_ratio=(
+                        model.retention_ratio
+                        if generation.effective_retention_ratio is None
+                        else generation.effective_retention_ratio
+                    ),
                     answer=generation.answer,
                     reference=sample.canonical_reference(),
                     task_score=score,

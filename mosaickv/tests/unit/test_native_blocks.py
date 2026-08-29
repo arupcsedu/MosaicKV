@@ -171,7 +171,9 @@ def test_vllm_scheduler_consumes_hash_bound_common_selector_plan(
     )
     scheduler: Any = SimpleNamespace(kv_cache_manager=manager, requests={"request": request})
     output = SimpleNamespace(num_scheduled_tokens={"request": 96})
-    monkeypatch.setenv("MOSAICKV_NATIVE_RETENTION_RATIO", "0.5")
+    # The environment ratio is only the fail-closed fallback. A hash-bound
+    # request plan owns its exact per-request ratio.
+    monkeypatch.setenv("MOSAICKV_NATIVE_RETENTION_RATIO", "0.75")
     monkeypatch.setenv("MOSAICKV_NATIVE_BLOCK_SIZE", "16")
     monkeypatch.setenv("MOSAICKV_NATIVE_AUDIT_DIR", str(tmp_path))
 

@@ -706,7 +706,7 @@ def merge_native_selector_plan_catalogs(
         first.method,
     )
     entries: list[NativeSelectorPlanEntry] = []
-    block_boundary: tuple[int, float] | None = None
+    block_size: int | None = None
     for catalog in catalogs:
         observed = (
             catalog.model_id,
@@ -718,23 +718,11 @@ def merge_native_selector_plan_catalogs(
         if observed != expected:
             raise NativeSelectorPlanError("selector catalogs have incompatible provenance")
         for entry in catalog.entries:
-            projection_boundary = (
-                entry.projection.block_size,
-                entry.projection.retention_ratio,
-            )
-            if block_boundary is None:
-                block_boundary = projection_boundary
-            elif (
-                projection_boundary[0] != block_boundary[0]
-                or not math.isclose(
-                    projection_boundary[1],
-                    block_boundary[1],
-                    rel_tol=0.0,
-                    abs_tol=1e-12,
-                )
-            ):
+            if block_size is None:
+                block_size = entry.projection.block_size
+            elif entry.projection.block_size != block_size:
                 raise NativeSelectorPlanError(
-                    "persistent-engine selector entries require one block size and ratio"
+                    "persistent-engine selector entries require one block size"
                 )
             entries.append(entry)
     identities = tuple(entry.sample_id for entry in entries)

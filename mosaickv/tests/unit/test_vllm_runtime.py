@@ -372,6 +372,7 @@ def test_native_wrapper_requires_audit_and_accounts_selected_storage(tmp_path: P
     )
 
     assert output.effective_method == "mosaickv_exact"
+    assert output.effective_retention_ratio == 1.0
     assert output.metrics.compression_time == pytest.approx(0.003)
     assert output.metrics.active_kv_bytes == 16 * 2 * 2 * 2 * 4 * 2
     trace = json.loads(next((tmp_path / "native").glob("*.json")).read_text())

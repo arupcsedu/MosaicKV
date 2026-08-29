@@ -213,14 +213,14 @@ def test_hash_bound_catalog_rejects_provenance_mismatch(tmp_path: Path) -> None:
 
 
 def test_merge_catalogs_produces_disjoint_two_request_plan(tmp_path: Path) -> None:
-    projection = project_common_selector_to_request_blocks(
-        _full_state(),
-        ((_full_state().blocks[0], 1.0),),
-        method="mosaickv_exact",
-        retention_ratio=0.5,
-    )
     catalogs = []
     for index in range(2):
+        projection = project_common_selector_to_request_blocks(
+            _full_state(),
+            ((_full_state().blocks[0], 1.0),),
+            method="mosaickv_exact",
+            retention_ratio=0.5 if index == 0 else 0.75,
+        )
         entry = NativeSelectorPlanEntry(
             sample_id=f"textvqa:{index}",
             projection=projection,
@@ -255,6 +255,10 @@ def test_merge_catalogs_produces_disjoint_two_request_plan(tmp_path: Path) -> No
     assert [entry["sample_id"] for entry in merged["entries"]] == [
         "textvqa:0",
         "textvqa:1",
+    ]
+    assert [entry["projection"]["retention_ratio"] for entry in merged["entries"]] == [
+        0.5,
+        0.75,
     ]
 
 

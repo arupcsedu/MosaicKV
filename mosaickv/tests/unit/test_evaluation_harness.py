@@ -28,6 +28,7 @@ class EffectiveMethodModel(SyntheticColorModel):
             generated.answer,
             generated.metrics,
             effective_method="mosaickv_full__mosaickv_exact_safety_fallback",
+            effective_retention_ratio=0.625,
         )
 
 
@@ -116,4 +117,6 @@ def test_result_records_effective_method_instead_of_requested_fallback(tmp_path:
         subset_size=1,
     )
 
-    assert load_jsonl(raw)[0].method == "mosaickv_full__mosaickv_exact_safety_fallback"
+    row = load_jsonl(raw)[0]
+    assert row.method == "mosaickv_full__mosaickv_exact_safety_fallback"
+    assert row.retention_ratio == 0.625

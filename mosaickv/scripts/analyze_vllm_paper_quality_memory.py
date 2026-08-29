@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import numpy as np
+import yaml
 
 TASKS = ("mmstar", "textvqa", "docvqa")
 METHODS = ("full_kv", "prompt_attention_topk", "mosaickv_exact")
@@ -212,6 +213,7 @@ def analyze(
     bootstrap_resamples: int,
     bootstrap_seed: int,
     require_clean_source: bool,
+    protocol_path: Path | None = None,
 ) -> dict[str, Any]:
     if expected_samples < 2:
         raise ValueError("expected_samples must be at least two")
@@ -219,6 +221,35 @@ def analyze(
         raise ValueError("paper analysis requires at least 1000 bootstrap resamples")
     if not math.isfinite(minimum_reduction) or not 0 < minimum_reduction < 1:
         raise ValueError("minimum_reduction must be finite and in (0, 1)")
+    protocol: dict[str, Any] | None = None
+    protocol_sha256: str | None = None
+    if protocol_path is not None:
+        protocol_path = protocol_path.resolve()
+        value = yaml.safe_load(protocol_path.read_text(encoding="utf-8"))
+        if not isinstance(value, dict):
+            raise ValueError("paper protocol must be a YAML object")
+        protocol = cast("dict[str, Any]", value)
+        experiment = _object(protocol.get("experiment"), "protocol.experiment")
+        gates = _object(protocol.get("primary_gates"), "protocol.primary_gates")
+        expected = {
+            "sample_count_per_task": expected_samples,
+            "bootstrap_resamples": bootstrap_resamples,
+            "bootstrap_seed": bootstrap_seed,
+        }
+        if any(experiment.get(key) != expected_value for key, expected_value in expected.items()):
+            raise ValueError("analysis scale/bootstrap settings differ from the protocol")
+        if experiment.get("tasks") != list(TASKS) or experiment.get("methods") != list(METHODS):
+            raise ValueError("analysis task/method scope differs from the protocol")
+        if not math.isclose(
+            float(gates.get("minimum_per_sample_active_memory_reduction_fraction", -1)),
+            minimum_reduction,
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        ):
+            raise ValueError("analysis memory gate differs from the protocol")
+        if gates.get("minimum_per_task_paired_mean_official_score_delta") != 0.0:
+            raise ValueError("paper protocol changed the zero-margin quality gate")
+        protocol_sha256 = hashlib.sha256(protocol_path.read_bytes()).hexdigest()
     failures: list[str] = []
     task_reports: list[dict[str, Any]] = []
     source_shas: set[str] = set()
@@ -236,6 +267,20 @@ def analyze(
         identities = tuple(sorted(by_method["full_kv"]))
         if any(tuple(sorted(rows)) != identities for rows in by_method.values()):
             raise ValueError(f"{task} methods do not cover identical samples")
+        if protocol is not None:
+            ledger_path = root / "inputs" / f"{task}.json"
+            ledger = _object(
+                json.loads(ledger_path.read_text(encoding="utf-8")), str(ledger_path)
+            )
+            if (
+                ledger.get("classification")
+                != "fixed_preregistered_paper_quality_memory"
+                or ledger.get("sample_count") != expected_samples
+                or tuple(sorted(str(value) for value in ledger.get("sample_ids", [])))
+                != identities
+                or ledger.get("selection_freeze_sha256") != protocol_sha256
+            ):
+                raise ValueError(f"{task} sample ledger differs from the fixed protocol")
         score_differences: list[float] = []
         reductions: list[float] = []
         answer_agreements: list[bool] = []
@@ -283,6 +328,12 @@ def analyze(
             sample_reports.append(
                 {
                     "sample_id": sample_id,
+                    "fullkv_official_score": float(full["task_score"]),
+                    "prompt_topk_official_score": float(prompt["task_score"]),
+                    "mosaickv_official_score": float(mosaic["task_score"]),
+                    "fullkv_active_kv_bytes": int(full["active_kv_bytes"]),
+                    "prompt_topk_active_kv_bytes": prompt_bytes,
+                    "mosaickv_active_kv_bytes": mosaic_bytes,
                     "active_memory_reduction_fraction": reduction,
                     "score_difference_vs_prompt_topk": score_difference,
                     "answer_agreement_with_prompt_topk": answer_agreement,
@@ -301,10 +352,14 @@ def analyze(
         )
         prompt_rows = [by_method["prompt_attention_topk"][value].row for value in identities]
         mosaic_rows = [by_method["mosaickv_exact"][value].row for value in identities]
+        full_rows = [by_method["full_kv"][value].row for value in identities]
         task_reports.append(
             {
                 "task": task,
                 "sample_count": len(identities),
+                "fullkv_mean_official_score": statistics.fmean(
+                    float(value["task_score"]) for value in full_rows
+                ),
                 "prompt_topk_mean_official_score": statistics.fmean(
                     float(value["task_score"]) for value in prompt_rows
                 ),
@@ -315,6 +370,15 @@ def analyze(
                 "paired_bootstrap_score_difference_95_ci": interval,
                 "mean_active_memory_reduction_fraction": statistics.fmean(reductions),
                 "minimum_active_memory_reduction_fraction": min(reductions),
+                "mean_fullkv_active_kv_bytes": statistics.fmean(
+                    int(value["active_kv_bytes"]) for value in full_rows
+                ),
+                "mean_prompt_topk_active_kv_bytes": statistics.fmean(
+                    int(value["active_kv_bytes"]) for value in prompt_rows
+                ),
+                "mean_mosaickv_active_kv_bytes": statistics.fmean(
+                    int(value["active_kv_bytes"]) for value in mosaic_rows
+                ),
                 "answer_agreement_with_prompt_topk": statistics.fmean(answer_agreements),
                 "answer_agreement_with_fullkv": statistics.fmean(fullkv_agreements),
                 "mean_prompt_topk_end_to_end_seconds": statistics.fmean(
@@ -341,8 +405,9 @@ def analyze(
     return {
         "schema_version": 1,
         "classification": (
-            "paired_llava_vllm_quality_memory_gate"
-            if require_clean_source
+            "fixed_preregistered_paper_quality_memory"
+            if protocol is not None
+            else "paired_llava_vllm_quality_memory_gate" if require_clean_source
             else "dirty_source_retrospective_development_gate"
         ),
         "canonical_eligible": require_clean_source,
@@ -357,6 +422,8 @@ def analyze(
         "bootstrap_resamples": bootstrap_resamples,
         "source_git_sha": next(iter(source_shas)) if len(source_shas) == 1 else None,
         "request_isolation_verified": isolation,
+        "protocol_path": None if protocol_path is None else str(protocol_path),
+        "protocol_sha256": protocol_sha256,
         "passed": not failures,
         "failures": failures,
         "task_results": task_reports,
@@ -369,14 +436,15 @@ def _markdown(report: Mapping[str, Any]) -> str:
         "",
         f"Gate: **{'PASS' if report['passed'] else 'FAIL'}**",
         "",
-        "| Task | N | Prompt score | MosaicKV score | Delta | 95% CI | "
+        "| Task | N | FullKV score | Prompt score | MosaicKV score | Delta | 95% CI | "
         "Mean smaller | Minimum smaller | Exact agreement |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for task in cast("list[dict[str, Any]]", report["task_results"]):
         interval = task["paired_bootstrap_score_difference_95_ci"]
         lines.append(
             f"| {task['task']} | {task['sample_count']} | "
+            f"{task['fullkv_mean_official_score']:.4f} | "
             f"{task['prompt_topk_mean_official_score']:.4f} | "
             f"{task['mosaickv_mean_official_score']:.4f} | "
             f"{task['paired_mean_score_difference']:+.4f} | "
@@ -407,6 +475,7 @@ def main() -> int:
     parser.add_argument("--minimum-reduction", type=float, default=0.30)
     parser.add_argument("--bootstrap-resamples", type=int, default=10_000)
     parser.add_argument("--bootstrap-seed", type=int, default=20270831)
+    parser.add_argument("--protocol", type=Path)
     parser.add_argument("--allow-dirty-development", action="store_true")
     args = parser.parse_args()
     report = analyze(
@@ -416,6 +485,7 @@ def main() -> int:
         bootstrap_resamples=args.bootstrap_resamples,
         bootstrap_seed=args.bootstrap_seed,
         require_clean_source=not args.allow_dirty_development,
+        protocol_path=args.protocol,
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")

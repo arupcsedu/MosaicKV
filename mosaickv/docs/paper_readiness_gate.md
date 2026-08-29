@@ -73,15 +73,27 @@ Latency is not a rejection criterion, but it must include selector planning
 and compression overhead. The clean development run was slower than Prompt
 Top-K and cannot support a speedup claim.
 
-## Remaining critical evidence blocker
+## Fixed paper-quality execution
 
-The only blocker for the scoped LLaVA exact-selection quality-memory table is a
-larger, fixed paired execution with enough examples to make the per-task score
-and confidence intervals meaningful. The existing two-example result cannot
-establish generalization.
+`configs/experiments/paper_quality_memory_llava_vllm_v1.yaml` resolves the
+two-sample and missing-confidence-interval blockers at the experiment-design
+level. It freezes 32 paired samples per task, 10,000 paired bootstrap
+resamples, one model/revision, one deterministic 64-token generation policy,
+and exactly three methods: FullKV, Prompt Attention Top-K, and
+`mosaickv_exact`. The corresponding Slurm array is
+`slurm/vllm_llava15_paper_quality_memory_v1.sbatch`; one A100 owns each task,
+and every method within that task consumes the same immutable sample ledger.
 
-Broader claims have additional blockers: Qwen/LLaVA family generalization,
-HF prototype quality, repair benefit, latency competitiveness, and native
-vLLM prototype/repair support each require separate positive evidence. A
-disabled or unsupported component must remain an explicit unsupported row,
-never a simulated or renamed result.
+The serving bridge accepts a hash-bound retention ratio per request. This is
+needed because whole-block fitting can produce different attainable physical
+ratios for different prompt lengths. The effective ratio is written in each
+result row and trace; the run-config ratio is only the fail-closed fallback.
+This permits one persistent vLLM engine per method and task rather than one
+7B model load per sample, while preserving exact byte accounting and A-B-A
+request-isolation evidence.
+
+The fixed cohort is not described as untouched: prior dataset exposure is
+disclosed in the protocol, as explicitly allowed for this run. Paper claims
+must state that limitation. Per the current paper scope, latency and native
+vLLM prototype/repair support are reported or marked unsupported but are not
+release gates. No simulated prototype or repair row is permitted.

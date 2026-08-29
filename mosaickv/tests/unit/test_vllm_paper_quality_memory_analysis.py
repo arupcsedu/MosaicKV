@@ -8,6 +8,8 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any
 
+import yaml
+
 
 def _load_analysis() -> ModuleType:
     path = Path(__file__).parents[2] / "scripts" / "analyze_vllm_paper_quality_memory.py"
@@ -177,3 +179,51 @@ def test_paper_gate_rejects_negative_official_score_delta(tmp_path: Path) -> Non
 
     assert report["passed"] is False
     assert any("mean official-score difference" in value for value in report["failures"])
+
+
+def test_paper_gate_binds_fixed_protocol_and_sample_ledgers(tmp_path: Path) -> None:
+    root = _root(tmp_path, candidate_score=0.5)
+    protocol = {
+        "experiment": {
+            "tasks": list(ANALYSIS.TASKS),
+            "methods": list(ANALYSIS.METHODS),
+            "sample_count_per_task": 2,
+            "bootstrap_resamples": 1000,
+            "bootstrap_seed": 7,
+        },
+        "primary_gates": {
+            "minimum_per_sample_active_memory_reduction_fraction": 0.30,
+            "minimum_per_task_paired_mean_official_score_delta": 0.0,
+        },
+    }
+    protocol_path = tmp_path / "protocol.yaml"
+    protocol_path.write_text(yaml.safe_dump(protocol), encoding="utf-8")
+    protocol_sha = hashlib.sha256(protocol_path.read_bytes()).hexdigest()
+    inputs = root / "inputs"
+    inputs.mkdir()
+    for task in ANALYSIS.TASKS:
+        (inputs / f"{task}.json").write_text(
+            json.dumps(
+                {
+                    "classification": "fixed_preregistered_paper_quality_memory",
+                    "sample_count": 2,
+                    "sample_ids": [f"{task}:0", f"{task}:1"],
+                    "selection_freeze_sha256": protocol_sha,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    report = ANALYSIS.analyze(
+        root,
+        expected_samples=2,
+        minimum_reduction=0.30,
+        bootstrap_resamples=1000,
+        bootstrap_seed=7,
+        require_clean_source=True,
+        protocol_path=protocol_path,
+    )
+
+    assert report["passed"] is True
+    assert report["classification"] == "fixed_preregistered_paper_quality_memory"
+    assert report["protocol_sha256"] == protocol_sha

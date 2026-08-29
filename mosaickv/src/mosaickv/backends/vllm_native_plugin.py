@@ -107,10 +107,9 @@ def _request_selection(
         )
     if int(native.get("block_size", -1)) != block_size:
         raise RuntimeError("common-selector plan block size differs from vLLM")
-    if not math.isclose(
-        float(native.get("retention_ratio", -1.0)), retention_ratio, rel_tol=0.0, abs_tol=1e-12
-    ):
-        raise RuntimeError("common-selector plan retention ratio differs from vLLM")
+    plan_retention_ratio = float(native.get("retention_ratio", -1.0))
+    if not math.isfinite(plan_retention_ratio) or not 0 < plan_retention_ratio <= 1:
+        raise RuntimeError("common-selector plan retention ratio must be finite and in (0, 1]")
     raw_selected = native.get("selected_blocks")
     if not isinstance(raw_selected, list) or not all(
         isinstance(value, int) and not isinstance(value, bool) for value in raw_selected
@@ -132,7 +131,7 @@ def _request_selection(
     selection = validated_native_block_plan(
         logical_positions,
         block_size,
-        retention_ratio,
+        plan_retention_ratio,
         tuple(raw_selected),
         policy=policy,
         mandatory_blocks=tuple(raw_mandatory),

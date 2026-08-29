@@ -117,6 +117,16 @@ mean official task score on MMStar, TextVQA, or DocVQA. Because the examples
 were retrospective and very small, these observations are implementation
 evidence rather than paper results.
 
+The fixed follow-up protocol uses 32 paired samples per task and 10,000 paired
+bootstrap resamples. Selector catalogs may contain different physically
+attainable retention ratios across requests while retaining one common block
+size. The hash-bound catalog ratio, not the engine's fallback ratio, controls
+each scheduler transaction and is recorded as the row's effective retention
+ratio. This allows all 32 requests to share one persistent engine and avoids
+sample-wise model reloads. See
+`configs/experiments/paper_quality_memory_llava_vllm_v1.yaml` and
+`slurm/vllm_llava15_paper_quality_memory_v1.sbatch`.
+
 No HF fallback or logical-only byte counter is labeled native. The supported
 method name is `mosaickv_exact__vllm_requestwide_projection`; prototype
 injection and repair remain unsupported. See `vllm_native_blocker.md` for the

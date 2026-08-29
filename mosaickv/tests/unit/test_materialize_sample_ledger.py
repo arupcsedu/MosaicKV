@@ -229,3 +229,26 @@ def test_calibration_ledger_has_explicit_label_blind_classification(
     payload = json.loads(output.read_text(encoding="utf-8"))
     assert payload["classification"] == "fresh_disjoint_label_blind_calibration"
     assert payload["selection_freeze"] is None
+
+
+def test_fixed_paper_ledger_discloses_its_non_untouched_classification(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _stub_task(monkeypatch)
+    monkeypatch.setattr(MATERIALIZER, "_source_provenance", lambda: ("3" * 40, False))
+    output = tmp_path / "paper.json"
+
+    MATERIALIZER.materialize(
+        task_name="mmstar",
+        dataset_revision="4" * 40,
+        model_name="llava-hf/llava-1.5-7b-hf",
+        seed=20270901,
+        output=output,
+        resume=False,
+        subset_size=2,
+        classification="fixed_preregistered_paper_quality_memory",
+    )
+
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    assert payload["classification"] == "fixed_preregistered_paper_quality_memory"
+    assert payload["sample_count"] == 2

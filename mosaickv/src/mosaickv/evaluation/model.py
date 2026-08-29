@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -50,10 +51,16 @@ class ModelGeneration:
     answer: str
     metrics: GenerationMetrics = GenerationMetrics()
     effective_method: str | None = None
+    effective_retention_ratio: float | None = None
 
     def __post_init__(self) -> None:
         if self.effective_method is not None and not self.effective_method.strip():
             raise ValueError("effective_method must be non-empty when present")
+        if self.effective_retention_ratio is not None and (
+            not math.isfinite(self.effective_retention_ratio)
+            or not 0 < self.effective_retention_ratio <= 1
+        ):
+            raise ValueError("effective_retention_ratio must be finite and in (0, 1]")
 
 
 class LocalEvaluationModel(Protocol):

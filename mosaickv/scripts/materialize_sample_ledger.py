@@ -91,11 +91,13 @@ def materialize(
     allowed_classifications = {
         "fresh_disjoint_heldout_quality_validation",
         "fresh_disjoint_label_blind_calibration",
+        "fixed_preregistered_paper_quality_memory",
     }
     if classification not in allowed_classifications:
         raise ValueError(
-            "classification must be fresh_disjoint_heldout_quality_validation or "
-            "fresh_disjoint_label_blind_calibration"
+            "classification must be fresh_disjoint_heldout_quality_validation, "
+            "fresh_disjoint_label_blind_calibration, or "
+            "fixed_preregistered_paper_quality_memory"
         )
     selection_freeze_record: dict[str, Any] | None = None
     if selection_freeze is not None:
@@ -296,6 +298,7 @@ def main() -> int:
         choices=(
             "fresh_disjoint_heldout_quality_validation",
             "fresh_disjoint_label_blind_calibration",
+            "fixed_preregistered_paper_quality_memory",
         ),
         default="fresh_disjoint_heldout_quality_validation",
     )

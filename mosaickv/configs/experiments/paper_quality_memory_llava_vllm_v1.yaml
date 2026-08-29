@@ -1,0 +1,47 @@
+schema_version: 1
+experiment_id: paper_quality_memory_llava_vllm_v1
+classification: fixed_preregistered_paper_quality_memory
+execution_authorized: true
+
+scope:
+  native_vllm_prototype_and_repair_are_not_paper_blockers: true
+  latency_is_not_a_paper_gate: true
+  latency_is_reported_secondary: true
+
+candidate:
+  method: mosaickv_exact
+  frozen_algorithm_commit: 99a412bf0d2c639a095ff6efc5ca02e435b5e889
+  config: configs/paper_candidate_llava_v1.yaml
+  config_sha256: 6d9237e40dc95e46708077ad57abd6d6422bacb33b6323b0f860d4d3b7443a2f
+
+experiment:
+  model_id: llava-hf/llava-1.5-7b-hf
+  model_revision: b234b804b114d9e37bb655e11cbbb5f5e971b7a9
+  backend: vllm
+  attention_backend: eager
+  tasks: [mmstar, textvqa, docvqa]
+  methods: [full_kv, prompt_attention_topk, mosaickv_exact]
+  sample_count_per_task: 32
+  selection_seed: 20270901
+  deterministic_generation: true
+  output_length: 64
+  serving_block_size: 16
+  prompt_topk_retention_ratio: 0.13
+  mosaickv_seed_retention_ratio: 0.075
+  bootstrap_resamples: 10000
+  bootstrap_seed: 20270902
+
+primary_gates:
+  comparison_baseline: prompt_attention_topk
+  minimum_per_sample_active_memory_reduction_fraction: 0.30
+  minimum_per_task_paired_mean_official_score_delta: 0.0
+  require_complete_paired_rows: true
+  require_one_clean_source_commit: true
+
+reporting:
+  official_task_scores_are_not_macro_averaged: true
+  paired_bootstrap_confidence_interval: [0.025, 0.975]
+  answer_agreement_is_secondary: true
+  fullkv_is_quality_reference: true
+  latency_is_secondary_nonblocking: true
+  prior_dataset_exposure_disclosed: true

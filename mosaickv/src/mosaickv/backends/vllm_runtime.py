@@ -1321,14 +1321,9 @@ class VLLMFullKVModel:
         if selector_catalog is not None:
             for entry in selector_catalog.entries:
                 projection = entry.projection
-                if projection.block_size != config.cache.block_size or not math.isclose(
-                    projection.retention_ratio,
-                    config.cache.retention_ratio,
-                    rel_tol=0.0,
-                    abs_tol=1e-12,
-                ):
+                if projection.block_size != config.cache.block_size:
                     raise VLLMRuntimeError(
-                        "selector-plan block size/retention differs from resolved run config"
+                        "selector-plan block size differs from resolved run config"
                     )
         runner = AsyncVLLMTrialRunner(
             config,
@@ -1389,6 +1384,11 @@ class VLLMFullKVModel:
                     "native_source_trace_sha256": selector_entry.source_trace_sha256,
                 }
             )
+        effective_retention_ratio = (
+            self.retention_ratio
+            if selector_entry is None
+            else selector_entry.projection.retention_ratio
+        )
         trials = tuple(
             self.runner.run(
                 prepared.engine_prompt,
@@ -1511,6 +1511,7 @@ class VLLMFullKVModel:
             ),
             "backend": "vllm",
             "method": self.method,
+            "effective_retention_ratio": effective_retention_ratio,
             "native_mosaickv": native and self.method == "mosaickv_exact",
             "native_block_compaction": native,
             "selector_plan": selector_plan_trace,
@@ -1614,6 +1615,7 @@ class VLLMFullKVModel:
                 if selector_entry is not None
                 else self.method
             ),
+            effective_retention_ratio=effective_retention_ratio,
         )
 
     def verify_request_isolation(self) -> bool:

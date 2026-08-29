@@ -684,7 +684,11 @@ def run_lmms_development_evaluation(
                         model=model.model_id,
                         backend=model.backend,
                         method=capture.generation.effective_method or model.method,
-                        retention_ratio=model.retention_ratio,
+                        retention_ratio=(
+                            model.retention_ratio
+                            if capture.generation.effective_retention_ratio is None
+                            else capture.generation.effective_retention_ratio
+                        ),
                         answer=answer,
                         reference=prepared_sample.reference,
                         task_score=_extract_score(sample, spec.sample_metric),
@@ -703,7 +707,13 @@ def run_lmms_development_evaluation(
                             if capture is None or capture.generation is None
                             else capture.generation.effective_method or model.method
                         ),
-                        retention_ratio=model.retention_ratio,
+                        retention_ratio=(
+                            model.retention_ratio
+                            if capture is None
+                            or capture.generation is None
+                            or capture.generation.effective_retention_ratio is None
+                            else capture.generation.effective_retention_ratio
+                        ),
                         answer=(
                             None
                             if capture is None or capture.generation is None
@@ -738,7 +748,13 @@ def run_lmms_development_evaluation(
                     if capture is None or capture.generation is None
                     else capture.generation.effective_method or model.method
                 ),
-                retention_ratio=model.retention_ratio,
+                retention_ratio=(
+                    model.retention_ratio
+                    if capture is None
+                    or capture.generation is None
+                    or capture.generation.effective_retention_ratio is None
+                    else capture.generation.effective_retention_ratio
+                ),
                 answer=(
                     None
                     if capture is None or capture.generation is None
