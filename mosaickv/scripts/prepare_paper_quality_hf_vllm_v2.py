@@ -18,6 +18,11 @@ import yaml  # type: ignore[import-untyped]
 TASKS = ("mmstar", "textvqa", "docvqa")
 BACKENDS = ("hf_eager", "vllm")
 CLASSIFICATION = "fixed_preregistered_paper_quality_memory"
+CONTINUATION_CLASSIFICATION = "fixed_preregistered_paper_quality_memory_continuation"
+PROTOCOL_IDS = {
+    "paper_quality_hf_vllm_llava15_v2",
+    "paper_quality_hf_vllm_llava15_v3_continuation",
+}
 
 
 def _canonical_bytes(value: object) -> bytes:
@@ -81,9 +86,12 @@ def _load_protocol(path: Path, *, require_execution_authorized: bool) -> dict[st
     protocol = _object(yaml.safe_load(path.read_text(encoding="utf-8")), "protocol")
     if protocol.get("schema_version") != 1:
         raise ValueError("unsupported paper protocol schema")
-    if protocol.get("experiment_id") != "paper_quality_hf_vllm_llava15_v2":
+    if protocol.get("experiment_id") not in PROTOCOL_IDS:
         raise ValueError("wrong paper protocol")
-    if protocol.get("classification") != CLASSIFICATION:
+    if protocol.get("classification") not in {
+        CLASSIFICATION,
+        CONTINUATION_CLASSIFICATION,
+    }:
         raise ValueError("wrong paper protocol classification")
     if require_execution_authorized and protocol.get("execution_authorized") is not True:
         raise PermissionError("paper campaign execution has not been authorized")
@@ -92,11 +100,31 @@ def _load_protocol(path: Path, *, require_execution_authorized: bool) -> dict[st
         raise ValueError("paper protocol task order changed")
     if tuple(_object(experiment.get("backends"), "protocol.experiment.backends")) != BACKENDS:
         raise ValueError("paper protocol backend order changed")
-    sample_count = int(experiment.get("sample_count_per_task", 0))
-    shard_count = int(experiment.get("shards_per_task", 0))
-    shard_size = int(experiment.get("samples_per_shard", 0))
-    if sample_count != shard_count * shard_size or min(sample_count, shard_count, shard_size) < 1:
-        raise ValueError("sample count must equal shards_per_task * samples_per_shard")
+    if protocol.get("experiment_id") == "paper_quality_hf_vllm_llava15_v2":
+        sample_count = int(experiment.get("sample_count_per_task", 0))
+        shard_count = int(experiment.get("shards_per_task", 0))
+        shard_size = int(experiment.get("samples_per_shard", 0))
+        if (
+            sample_count != shard_count * shard_size
+            or min(sample_count, shard_count, shard_size) < 1
+        ):
+            raise ValueError("sample count must equal shards_per_task * samples_per_shard")
+    else:
+        target_counts = _object(
+            experiment.get("target_sample_counts"),
+            "protocol.experiment.target_sample_counts",
+        )
+        continuation_counts = _object(
+            experiment.get("continuation_sample_counts"),
+            "protocol.experiment.continuation_sample_counts",
+        )
+        reuse = _object(protocol.get("reuse"), "protocol.reuse")
+        reused = int(reuse.get("reused_samples_per_task", 0))
+        if reused < 1 or int(experiment.get("samples_per_continuation_shard", 0)) < 1:
+            raise ValueError("continuation reuse and shard sizes must be positive")
+        for task in TASKS:
+            if int(target_counts.get(task, 0)) != reused + int(continuation_counts.get(task, 0)):
+                raise ValueError(f"continuation sample arithmetic differs for {task}")
     candidate = _object(protocol.get("candidate"), "protocol.candidate")
     commit = str(candidate.get("frozen_algorithm_commit", ""))
     if len(commit) != 40:

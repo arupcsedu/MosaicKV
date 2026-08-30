@@ -32,6 +32,7 @@ from mosaickv.evaluation.paper_candidate import (
 from mosaickv.types import ForecastMode, MosaicKVMethod, RepairPolicy
 
 CLASSIFICATION = "fixed_preregistered_paper_quality_memory"
+CONTINUATION_CLASSIFICATION = "fixed_preregistered_paper_quality_memory_continuation"
 
 
 def _sha(path: Path) -> str:
@@ -171,7 +172,10 @@ def main() -> int:
     protocol = yaml.safe_load(protocol_path.read_text(encoding="utf-8"))
     if not isinstance(protocol, dict):
         raise ValueError("protocol must be a YAML object")
-    if protocol.get("classification") != CLASSIFICATION:
+    if protocol.get("classification") not in {
+        CLASSIFICATION,
+        CONTINUATION_CLASSIFICATION,
+    }:
         raise ValueError("wrong paper protocol classification")
     if protocol.get("execution_authorized") is not True:
         raise PermissionError("paper quality-memory execution is not authorized")
@@ -194,15 +198,15 @@ def main() -> int:
     output_root = args.output_root.resolve()
     records: dict[str, Any] = {}
     for method, config in configs.items():
-        encoded = yaml.safe_dump(
-            json.loads(canonical_config_json(config)), sort_keys=True
-        ).encode("utf-8")
+        encoded = yaml.safe_dump(json.loads(canonical_config_json(config)), sort_keys=True).encode(
+            "utf-8"
+        )
         path = output_root / f"{method}.yaml"
         _write_once(path, encoded)
         records[method] = {"path": str(path), "sha256": hashlib.sha256(encoded).hexdigest()}
     descriptor = {
         "schema_version": 1,
-        "classification": CLASSIFICATION,
+        "classification": protocol["classification"],
         "source_git_sha": source_sha,
         "source_git_dirty": False,
         "protocol": str(protocol_path),
@@ -216,9 +220,7 @@ def main() -> int:
         "configs": records,
     }
     descriptor_path = output_root / "descriptor.json"
-    encoded_descriptor = (
-        json.dumps(descriptor, indent=2, sort_keys=True) + "\n"
-    ).encode("utf-8")
+    encoded_descriptor = (json.dumps(descriptor, indent=2, sort_keys=True) + "\n").encode("utf-8")
     _write_once(descriptor_path, encoded_descriptor)
     print(json.dumps(descriptor, sort_keys=True))
     return 0

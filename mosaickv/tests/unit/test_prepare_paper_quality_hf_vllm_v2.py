@@ -191,3 +191,26 @@ def test_checked_in_protocol_has_paper_scale_and_explicit_authorization() -> Non
     assert experiment["shards_per_task"] == 4
     assert experiment["samples_per_shard"] == 64
     assert protocol["execution_plan"]["maximum_concurrent_a100_jobs"] == 4
+
+
+def test_checked_in_continuation_reuses_prefix_and_caps_concurrency() -> None:
+    module = _module()
+    protocol_path = (
+        Path(__file__).parents[2]
+        / "configs"
+        / "experiments"
+        / "paper_quality_hf_vllm_llava15_v3_continuation.yaml"
+    )
+    protocol = module._load_protocol(
+        protocol_path,
+        require_execution_authorized=True,
+    )
+    experiment = protocol["experiment"]
+    reused = protocol["reuse"]["reused_samples_per_task"]
+    for task in ("mmstar", "textvqa", "docvqa"):
+        assert experiment["target_sample_counts"][task] == (
+            reused + experiment["continuation_sample_counts"][task]
+        )
+    assert sum(experiment["continuation_sample_counts"].values()) == 8232
+    assert protocol["execution_plan"]["continuation_backend_jobs"] == 260
+    assert protocol["execution_plan"]["maximum_concurrent_a100_jobs"] == 6

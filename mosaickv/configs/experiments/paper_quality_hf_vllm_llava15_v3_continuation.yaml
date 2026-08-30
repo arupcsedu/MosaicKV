@@ -1,0 +1,117 @@
+schema_version: 1
+experiment_id: paper_quality_hf_vllm_llava15_v3_continuation
+classification: fixed_preregistered_paper_quality_memory_continuation
+execution_authorized: true
+
+scope:
+  primary_scientific_backend: hf_eager
+  backend_comparisons_are_separate: true
+  latency_is_reported_secondary: true
+  latency_is_not_a_rejection_gate: true
+  incompatible_task_metrics_are_not_macro_averaged: true
+  vllm_native_prototype_or_repair_claimed: false
+
+candidate:
+  model_id: llava-hf/llava-1.5-7b-hf
+  model_revision: b234b804b114d9e37bb655e11cbbb5f5e971b7a9
+  frozen_algorithm_commit: 02b272514e6ed7c35b2f48df9c8db15875b726e5
+  config: configs/paper_candidate_llava_v1.yaml
+  config_sha256: 6d9237e40dc95e46708077ad57abd6d6422bacb33b6323b0f860d4d3b7443a2f
+
+reuse:
+  prior_source_git_sha: db8031ee82ecf216cdfbfb11f29149d5294f3faa
+  prior_campaign_root: /scratch/djy8hg/runs/mosaickv/paper-hf-vllm-llava15-v2-db8031ee82ec
+  prior_protocol_sha256: 404c8db98c85082c27da630c365172d75f61a1f2120dc6569241b5f78facbdf6
+  prior_index_sha256: 77d7b81eadcb0ed08768b3bca548cce74b00e779d3b68530039c23101f5aa990
+  prior_report_sha256: 0a4806ecfb40ef07cf31ba03b767ddc3d91be61975962dce2e832ae0ce853ec6
+  prior_paired_rows_sha256: 13c871720f285206b260a5d106b7f09f3e9976b580526875017da2a9724918f3
+  reused_samples_per_task: 256
+  prior_master_ledger_sha256:
+    mmstar: 58551316cc37ad3189ce2a726f8f619db19785b40146d2f7a80ed98a4f41ffca
+    textvqa: a28dd1a9dbb0023587e7673f475b40d32063efee083cfb3ef44fe892afaa6b5
+    docvqa: d935779a76167f3ef574a7e4c73b06a52d3a743a7ae8cc947888fb3f6f22b426
+  require_exact_prefix_identity_match: true
+  require_no_new_sample_overlap_with_reused_prefix: true
+  runtime_candidate_config_must_be_identical: true
+
+experiment:
+  tasks:
+    mmstar:
+      dataset_id: Lin-Chen/MMStar
+      dataset_revision: bc98d668301da7b14f648724866e57302778ab27
+      split: val
+    textvqa:
+      dataset_id: lmms-lab/textvqa
+      dataset_revision: 9c0699cd19768ac5ab97568f6b3cbac4c0062884
+      split: validation
+    docvqa:
+      dataset_id: lmms-lab/DocVQA
+      dataset_revision: 539088ef8a8ada01ac8e2e6d4e372586748a265e
+      split: validation
+  target_sample_counts:
+    mmstar: 1500
+    textvqa: 3000
+    docvqa: 4500
+  continuation_sample_counts:
+    mmstar: 1244
+    textvqa: 2744
+    docvqa: 4244
+  samples_per_continuation_shard: 64
+  selection_seed: 20271001
+  deterministic_generation: true
+  output_length: 64
+  precision: fp16
+  bootstrap_resamples: 10000
+  bootstrap_seed: 20271002
+  backends:
+    hf_eager:
+      attention_backend: eager
+      methods: [full_kv, prompt_attention_topk, mosaickv_full]
+      block_size: 4
+      prompt_topk_retention_ratio: 0.13
+      mosaickv_seed_retention_ratio: 0.075
+      mosaickv_cache_budget_bytes: 28500000
+      effective_method_must_be_reported: true
+    vllm:
+      attention_backend: eager
+      methods: [full_kv, prompt_attention_topk, mosaickv_exact]
+      serving_block_size: 16
+      prompt_topk_retention_ratio: 0.13
+      mosaickv_seed_retention_ratio: 0.075
+      minimum_competitor_anchor_blocks: 1
+      competitor_tail_dominance_threshold: 9.0
+      coherent_evidence_minimum_route_ratio: 0.90
+      native_scope: hash_bound_common_selector_request_wide_projection
+      prototype_merging: false
+      residual_repair: false
+
+primary_gates:
+  comparison_baseline: prompt_attention_topk
+  minimum_per_sample_active_memory_reduction_fraction: 0.30
+  minimum_per_task_paired_mean_official_score_delta: 0.0
+  require_complete_paired_rows: true
+  require_identical_samples_within_and_across_backends: true
+  require_clean_source_commits: true
+  require_exact_model_dataset_and_candidate_config_revisions: true
+  require_vllm_request_isolation_evidence: true
+
+execution_plan:
+  continuation_sample_shards: 130
+  continuation_backend_jobs: 260
+  maximum_concurrent_a100_jobs: 6
+  a100s_per_job: 1
+  per_worker_slurm_time_limit: "03:00:00"
+  expected_remaining_gpu_hours: 244.0
+  expected_wall_hours_with_six_a100s: 41.0
+  practical_wall_hours_with_six_a100s: [44.0, 48.0]
+  queue_wait_is_excluded: true
+
+outputs:
+  expected_primary_rows_in_composite_report: 54000
+  expected_total_unique_samples: 9000
+  estimated_total_artifact_bytes: [3900000000, 4200000000]
+  raw_jsonl: true
+  parquet: true
+  manifests: true
+  debug_traces: true
+  paired_bootstrap_intervals: true
