@@ -122,7 +122,11 @@ def _load_protocol(path: Path, *, require_execution_authorized: bool) -> dict[st
         reused = int(reuse.get("reused_samples_per_task", 0))
         if reused < 1 or int(experiment.get("samples_per_continuation_shard", 0)) < 1:
             raise ValueError("continuation reuse and shard sizes must be positive")
-        reuse_hashes = {str(value) for key, value in reuse.items() if key.endswith("_sha256")}
+        reuse_hashes = {
+            str(value)
+            for key, value in reuse.items()
+            if key.endswith("_sha256") and isinstance(value, str)
+        }
         reuse_hashes.update(
             str(value)
             for value in _object(
