@@ -122,6 +122,19 @@ def _load_protocol(path: Path, *, require_execution_authorized: bool) -> dict[st
         reused = int(reuse.get("reused_samples_per_task", 0))
         if reused < 1 or int(experiment.get("samples_per_continuation_shard", 0)) < 1:
             raise ValueError("continuation reuse and shard sizes must be positive")
+        reuse_hashes = {str(value) for key, value in reuse.items() if key.endswith("_sha256")}
+        reuse_hashes.update(
+            str(value)
+            for value in _object(
+                reuse.get("prior_master_ledger_sha256"),
+                "protocol.reuse.prior_master_ledger_sha256",
+            ).values()
+        )
+        if any(
+            len(value) != 64 or any(character not in "0123456789abcdef" for character in value)
+            for value in reuse_hashes
+        ):
+            raise ValueError("continuation reuse contains an invalid SHA-256 digest")
         for task in TASKS:
             if int(target_counts.get(task, 0)) != reused + int(continuation_counts.get(task, 0)):
                 raise ValueError(f"continuation sample arithmetic differs for {task}")

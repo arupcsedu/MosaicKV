@@ -214,3 +214,19 @@ def test_checked_in_continuation_reuses_prefix_and_caps_concurrency() -> None:
     assert sum(experiment["continuation_sample_counts"].values()) == 8232
     assert protocol["execution_plan"]["continuation_backend_jobs"] == 260
     assert protocol["execution_plan"]["maximum_concurrent_a100_jobs"] == 6
+
+
+def test_continuation_rejects_malformed_reuse_digest(tmp_path: Path) -> None:
+    module = _module()
+    checked_in = (
+        Path(__file__).parents[2]
+        / "configs"
+        / "experiments"
+        / "paper_quality_hf_vllm_llava15_v3_continuation.yaml"
+    )
+    protocol = yaml.safe_load(checked_in.read_text(encoding="utf-8"))
+    protocol["reuse"]["prior_master_ledger_sha256"]["textvqa"] = "a" * 63
+    path = tmp_path / "protocol.yaml"
+    path.write_text(yaml.safe_dump(protocol, sort_keys=False), encoding="utf-8")
+    with pytest.raises(ValueError, match="invalid SHA-256"):
+        module._load_protocol(path, require_execution_authorized=True)

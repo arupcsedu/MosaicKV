@@ -28,7 +28,7 @@ reuse:
   reused_samples_per_task: 256
   prior_master_ledger_sha256:
     mmstar: 58551316cc37ad3189ce2a726f8f619db19785b40146d2f7a80ed98a4f41ffca
-    textvqa: a28dd1a9dbb0023587e7673f475b40d32063efee083cfb3ef44fe892afaa6b5
+    textvqa: a28dd1a9dbdb0023587e7673f475b40d32063efee083cfb3ef44fe892afaa6b5
     docvqa: d935779a76167f3ef574a7e4c73b06a52d3a743a7ae8cc947888fb3f6f22b426
   require_exact_prefix_identity_match: true
   require_no_new_sample_overlap_with_reused_prefix: true
