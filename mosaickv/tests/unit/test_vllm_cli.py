@@ -140,3 +140,33 @@ def test_vllm_selection_rejects_conflicting_full_dataset_controls() -> None:
             task_name="mmstar",
             local_sample_count=None,
         )
+
+
+@pytest.mark.parametrize(
+    ("method", "extra"),
+    (
+        ("lookm_reimpl", ("--lookm-recent-ratio", "0.25", "--lookm-important-ratio", "0.25")),
+        ("prefixkv_reimpl", ("--prefixkv-profile-mode", "fixed_global")),
+        ("vl_cache_reimpl", ()),
+    ),
+)
+def test_vllm_published_baseline_config_uses_serving_block_size(
+    method: str,
+    extra: tuple[str, ...],
+) -> None:
+    args = _llava_args(
+        "--method",
+        method,
+        "--retention-ratio",
+        "0.5",
+        "--block-size",
+        "16",
+        "--enable-mosaickv",
+        *extra,
+    )
+
+    config = resolve_vllm_config(args)
+
+    assert config is not None
+    assert config.method.value == method
+    assert config.cache.block_size == 16

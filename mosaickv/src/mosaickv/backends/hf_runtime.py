@@ -7077,6 +7077,93 @@ def _baseline_request_wide_projection(plan: BaselineCompressionPlan) -> JsonObje
     ).to_json_object()
 
 
+def _token_block_lookup(full_state: FullKVState) -> dict[tuple[int, int, int], KVBlockDescriptor]:
+    """Index token-sized source blocks for published-baseline projections."""
+
+    lookup: dict[tuple[int, int, int], KVBlockDescriptor] = {}
+    for block in full_state.blocks:
+        if block.position_count != 1 or len(block.physical_cache_indices) != 1:
+            raise HuggingFaceRuntimeError(
+                "published-baseline vLLM projection requires token-sized HF source blocks"
+            )
+        identity = (block.layer, block.kv_head, block.physical_cache_indices[0])
+        if identity in lookup:
+            raise HuggingFaceRuntimeError(
+                "published-baseline source cache contains a duplicate route/position"
+            )
+        lookup[identity] = block
+    return lookup
+
+
+def _lookm_request_wide_projection(plan: LookMCompressionPlan) -> JsonObject:
+    """Project LOOK-M's paper-selected pivots without pretending to inject merged KV."""
+
+    lookup = _token_block_lookup(plan.full_state)
+    selected: list[tuple[KVBlockDescriptor, float]] = []
+    fallback: list[tuple[KVBlockDescriptor, float]] = []
+    for head in plan.heads:
+        selected_positions = frozenset(head.selected_physical_positions)
+        for position, score in enumerate(head.cumulative_attention_scores):
+            item = (lookup[(head.layer, head.kv_head, position)], float(score))
+            (selected if position in selected_positions else fallback).append(item)
+    return project_common_selector_to_request_blocks(
+        plan.full_state,
+        tuple(selected),
+        method=MosaicKVMethod.LOOKM_REIMPL.value,
+        retention_ratio=plan.active_slots / plan.source_blocks,
+        fallback_candidates=tuple(fallback),
+    ).to_json_object()
+
+
+def _prefixkv_request_wide_projection(plan: PrefixKVCompressionPlan) -> JsonObject:
+    """Project PrefixKV layer-wise exact membership to shared vLLM blocks."""
+
+    lookup = _token_block_lookup(plan.full_state)
+    selected: list[tuple[KVBlockDescriptor, float]] = []
+    fallback: list[tuple[KVBlockDescriptor, float]] = []
+    for layer in plan.layers:
+        selected_positions = frozenset(layer.selected_physical_positions)
+        # PrefixKV stores a hash and aggregate rather than its full score vector.
+        # Membership votes therefore carry the paper decision; this finite mean
+        # is only a deterministic cross-layer tie breaker.
+        mean_score = layer.attention_score_sum / layer.source_positions
+        for head in range(plan.full_state.layers[layer.layer].kv_heads):
+            for position in range(layer.source_positions):
+                item = (lookup[(layer.layer, head, position)], mean_score)
+                (selected if position in selected_positions else fallback).append(item)
+    return project_common_selector_to_request_blocks(
+        plan.full_state,
+        tuple(selected),
+        method=MosaicKVMethod.PREFIXKV_REIMPL.value,
+        retention_ratio=plan.active_slots / plan.source_slots,
+        fallback_candidates=tuple(fallback),
+    ).to_json_object()
+
+
+def _vl_cache_request_wide_projection(plan: VLCacheCompressionPlan) -> JsonObject:
+    """Project VL-Cache per-head paper selections to shared vLLM blocks."""
+
+    lookup = _token_block_lookup(plan.full_state)
+    selected: list[tuple[KVBlockDescriptor, float]] = []
+    fallback: list[tuple[KVBlockDescriptor, float]] = []
+    for layer in plan.layers:
+        for head in layer.heads:
+            selected_positions = frozenset(head.selected_physical_positions)
+            # As with PrefixKV, the retained membership is exact while the
+            # persisted paper trace intentionally keeps only score provenance.
+            mean_score = head.token_score_sum / head.source_positions
+            for position in range(head.source_positions):
+                item = (lookup[(head.layer, head.kv_head, position)], mean_score)
+                (selected if position in selected_positions else fallback).append(item)
+    return project_common_selector_to_request_blocks(
+        plan.full_state,
+        tuple(selected),
+        method=MosaicKVMethod.VL_CACHE_REIMPL.value,
+        retention_ratio=plan.active_slots / plan.source_slots,
+        fallback_candidates=tuple(fallback),
+    ).to_json_object()
+
+
 def _prototype_diagnostics_by_head(plan: MosaicKVCompressionPlan) -> list[JsonObject]:
     grouped: dict[tuple[int, int], list[PrototypeRecord]] = {}
     for record in plan.construction.prototypes:
@@ -7955,6 +8042,11 @@ def _lookm_plan_trace(plan: LookMCompressionPlan) -> JsonObject:
             "tier_reason": (
                 "local paper-faithful LOOK-M equations; this is not official LOOK-M code"
             ),
+            "request_wide_native_projection": _lookm_request_wide_projection(plan),
+            "native_projection_semantics": (
+                "paper-selected exact pivots projected to vLLM request blocks; LOOK-M KV "
+                "merge is intentionally not injected"
+            ),
             "source_budget_value": plan.source_blocks,
             "active_budget_value": plan.active_slots,
             "selected_blocks": [
@@ -7988,6 +8080,10 @@ def _prefixkv_plan_trace(plan: PrefixKVCompressionPlan) -> JsonObject:
         "effective_method": plan.implementation_label,
         "tier_mode": "prefixkv_layerwise_exact_selection",
         "tier_reason": "paper layer profile and prompt-attention prefix selection",
+        "request_wide_native_projection": _prefixkv_request_wide_projection(plan),
+        "native_projection_semantics": (
+            "paper-selected layer positions projected to vLLM request-wide whole blocks"
+        ),
         "selected_blocks": [
             {
                 "layer": layer.layer,
@@ -8013,6 +8109,10 @@ def _vl_cache_plan_trace(plan: VLCacheCompressionPlan) -> JsonObject:
         "effective_method": MosaicKVMethod.VL_CACHE_REIMPL.value,
         "tier_mode": "vl_cache_layer_adaptive_exact_selection",
         "tier_reason": "paper sparsity allocation and accumulated post-vision attention Top-K",
+        "request_wide_native_projection": _vl_cache_request_wide_projection(plan),
+        "native_projection_semantics": (
+            "paper-selected layer/head positions projected to vLLM request-wide whole blocks"
+        ),
         "selected_blocks": [
             {
                 "layer": head.layer,

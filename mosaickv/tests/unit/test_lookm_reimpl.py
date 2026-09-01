@@ -3,6 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from mosaickv.backends.hf_runtime import _lookm_request_wide_projection
 from mosaickv.baselines import LookMReimplementationError, build_lookm_reimpl_plan
 from mosaickv.cache_state import FullKVState, Modality, ModalitySpan
 from mosaickv.config import CacheConfig, LookMConfig
@@ -149,3 +150,20 @@ def test_lookm_honors_common_physical_byte_capacity() -> None:
 
     assert all(len(head.selected_physical_positions) == 3 for head in plan.heads)
     assert plan.active_bytes == 3 * bytes_per_position
+
+
+def test_lookm_exposes_a_vllm_exact_selection_projection_without_merge_claims() -> None:
+    state = _state()
+    plan = build_lookm_reimpl_plan(
+        state,
+        _attention(),
+        _config(LookMMergeStrategy.PIVOTAL),
+        CacheConfig(4, BudgetUnit.BLOCKS, 0.5, 1),
+    )
+
+    projection = _lookm_request_wide_projection(plan)
+
+    assert projection["method"] == "lookm_reimpl"
+    assert projection["selected_blocks"] == (0, 3)
+    assert projection["source_selected_positions"] == plan.active_slots
+    assert projection["retention_ratio"] == 0.5

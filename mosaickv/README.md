@@ -164,6 +164,7 @@ semantics.
 - [Unified Hugging Face runtime](docs/huggingface_runtime.md) — method orchestration, packed-cache masks, safety fallbacks, YAML/CLI usage, traces, and validation progression.
 - [Decode-latency optimization audit](docs/decode_latency_optimization.md) — implemented fast paths, diagnostic evidence, and correctness-gated next optimizations.
 - [vLLM backend](docs/vllm_backend.md) and [native transaction status](docs/vllm_native_blocker.md) — version-pinned atomic compaction, A100 evidence, fail-closed boundaries, and the remaining selector-plan gate.
+- [vLLM published-baseline projections](docs/vllm_published_baselines.md) — hash-bound whole-block projections for `lookm_reimpl`, `prefixkv_reimpl`, and `vl_cache_reimpl`, with explicit semantic limits and result labels.
 - [SGLang backend](docs/sglang_backend.md) and [native transaction status](docs/sglang_native_blocker.md) — spawn-safe allocator/mapping compaction, A100 evidence, and the remaining selector-plan gate.
 - [Simple baselines](docs/simple_baselines.md) — exact-only policies, common budgets, deterministic allocation, traces, and configuration.
 - [LOOK-M specification](docs/baselines/lookm_spec.md) and [parity report](docs/baselines/lookm_parity_report.md) — pinned official source, paper equations, source deviations, unified `lookm_reimpl`, and current comparison blockers.

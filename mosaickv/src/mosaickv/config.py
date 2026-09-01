@@ -3587,7 +3587,7 @@ class RunConfig:
                     "method='lookm_reimpl' is the paper text-prior variant and requires "
                     "lookm.text_prior=true"
                 )
-            if self.cache.block_size != 1:
+            if self.cache.block_size != 1 and self.execution.backend is not Backend.VLLM:
                 raise ConfigurationError(
                     "method='lookm_reimpl' requires cache.block_size=1 for token/head selection"
                 )
@@ -3627,7 +3627,7 @@ class RunConfig:
         if self.method.is_prefixkv_reimplementation:
             if not self.prefixkv.enabled:
                 raise ConfigurationError("method='prefixkv_reimpl' requires prefixkv.enabled=true")
-            if self.cache.block_size != 1:
+            if self.cache.block_size != 1 and self.execution.backend is not Backend.VLLM:
                 raise ConfigurationError(
                     "method='prefixkv_reimpl' requires cache.block_size=1 for token selection"
                 )
@@ -3660,7 +3660,7 @@ class RunConfig:
         if self.method.is_vl_cache_reimplementation:
             if not self.vl_cache.enabled:
                 raise ConfigurationError("method='vl_cache_reimpl' requires vl_cache.enabled=true")
-            if self.cache.block_size != 1:
+            if self.cache.block_size != 1 and self.execution.backend is not Backend.VLLM:
                 raise ConfigurationError(
                     "method='vl_cache_reimpl' requires cache.block_size=1 for token/head selection"
                 )

@@ -1257,11 +1257,19 @@ class VLLMFullKVModel:
                 attention_backend=config.execution.attention_implementation,
             )
         native = options.enable_mosaickv
-        supported_native_methods = {"mosaickv_exact", "prompt_attention_topk", "random_kv"}
+        supported_native_methods = {
+            "mosaickv_exact",
+            "prompt_attention_topk",
+            "random_kv",
+            "lookm_reimpl",
+            "prefixkv_reimpl",
+            "vl_cache_reimpl",
+        }
         if native and config.method.value not in supported_native_methods:
             raise VLLMRuntimeError(
                 "native vLLM selector plans support only mosaickv_exact, "
-                "prompt_attention_topk, or random_kv"
+                "prompt_attention_topk, random_kv, lookm_reimpl, "
+                "prefixkv_reimpl, or vl_cache_reimpl"
             )
         if native and config.method.value != "mosaickv_exact" and (
             options.native_selector_plan is None

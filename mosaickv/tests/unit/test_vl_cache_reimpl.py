@@ -3,6 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from mosaickv.backends.hf_runtime import _vl_cache_request_wide_projection
 from mosaickv.baselines import (
     VLCacheReimplementationError,
     VLCacheSensitivityPoint,
@@ -102,6 +103,11 @@ def test_denser_layer_receives_more_budget_and_hard_total_is_exact() -> None:
     assert len(payloads) == 4
     assert len(records) == first.active_slots
     assert all(record["tier"] == "vl_cache_reimpl_exact" for record in records)
+
+    projection = _vl_cache_request_wide_projection(first)
+    assert projection["method"] == "vl_cache_reimpl"
+    assert projection["source_selected_positions"] == first.active_slots
+    assert len(projection["selected_blocks"]) == 3
 
 
 def test_physical_byte_capacity_scales_layer_adaptation_without_overflow() -> None:

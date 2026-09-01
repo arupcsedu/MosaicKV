@@ -7,7 +7,7 @@ cache-mutation pass are separate evidence levels.
 | Component | Installed version | Package state | FullKV model gate | Native MosaicKV |
 |---|---:|---|---|---|
 | Hugging Face Transformers | 4.55.2 | Imports; CUDA smoke passed | Qwen2.5-VL-3B SDPA job `17346718` and FA2 job `17348171`; LLaVA-1.5 eager job `17855955`; OneVision-7B BF16 eager job `17856497` passed checkpoint-specific gates | Exact selection for supported adapters; Qwen2.5-VL M-RoPE and LLaVA/OneVision standard-RoPE prototype/repair transforms on eager; fused compressed paths fail closed |
-| vLLM V1 | 0.10.2 | Imports and loads Qwen2.5-VL-3B and LLaVA-1.5 | Job `17351185` passed Qwen Stage A; clean LLaVA job `19022147` passed scored-prefix, answer, score, and A-B-A parity on three tasks | Hash-bound common-selector `mosaickv_exact` request-wide projection passed clean development job `19022148`; prototype/repair unsupported |
+| vLLM V1 | 0.10.2 | Imports and loads Qwen2.5-VL-3B and LLaVA-1.5 | Job `17351185` passed Qwen Stage A; clean LLaVA job `19022147` passed scored-prefix, answer, score, and A-B-A parity on three tasks | Hash-bound common-selector `mosaickv_exact` projection passed job `19022148`; request-wide `lookm_reimpl`, `prefixkv_reimpl`, and `vl_cache_reimpl` projection transport passed development job `19166158`; prototype/repair and LOOK-M merged-KV injection unsupported |
 | SGLang | 0.5.1.post3 | Imports and launches Qwen2.5-VL-3B | Job `17351612` passed Stage A, request isolation, byte accounting, and exact 32/32 parity with the numerically corresponding HF-SDPA reference | Version-pinned whole-block transport passed job `17871006`; paper method rows remain unsupported until the common-selector plan bridge passes |
 
 Rows remain non-canonical while the worktree is dirty. No pending or failed
@@ -64,6 +64,15 @@ selector traces into vLLM plans, retained mandatory blocks and normalized
 cross-head evidence, reduced active bytes by at least 30% relative to Prompt
 Top-K on every tested row, and passed an A-B-A compressed-request probe. This
 supports exact selection only; see `vllm_native_blocker.md`.
+
+Development job `19166158` applied the same transaction to hash-bound
+request-wide projections of LOOK-M, PrefixKV, and VL-Cache reimplementation
+selectors. All 36 result rows completed, their manifests used
+`baseline_reimpl_measured`, and every compressed method recorded A-B-A request
+isolation plus native selector audits. This establishes backend transport, not
+paper-algorithm equivalence: LOOK-M merging and independent layer/head cache
+layouts remain unavailable. The pilot's memory gate passed but its DocVQA
+quality gate failed, so it is not a paper-result support claim.
 
 ## SGLang installed-source boundary
 

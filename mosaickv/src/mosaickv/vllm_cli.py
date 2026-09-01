@@ -216,10 +216,14 @@ def run_vllm_evaluation(args: argparse.Namespace, config: RunConfig) -> tuple[in
         "mosaickv_exact",
         "prompt_attention_topk",
         "random_kv",
+        "lookm_reimpl",
+        "prefixkv_reimpl",
+        "vl_cache_reimpl",
     }:
         raise ValueError(
             "vLLM native selector plans support mosaickv_exact, "
-            "prompt_attention_topk, or random_kv"
+            "prompt_attention_topk, random_kv, lookm_reimpl, "
+            "prefixkv_reimpl, or vl_cache_reimpl"
         )
     if options.enable_mosaickv and config.method.value != "mosaickv_exact" and (
         options.native_selector_plan is None
@@ -312,10 +316,18 @@ def run_vllm_evaluation(args: argparse.Namespace, config: RunConfig) -> tuple[in
         ),
         log_sha=_trace_sha(trace_root, run_id, raw_path),
     )
+    if config.method.is_full_cache:
+        measurement_type = MeasurementType.REFERENCE
+    elif config.method.is_published_reimplementation:
+        measurement_type = MeasurementType.BASELINE_REIMPL
+    elif config.method.is_simple_baseline:
+        measurement_type = MeasurementType.BASELINE_SIMPLE
+    else:
+        measurement_type = MeasurementType.METHOD
     RunManifestWriter().write(
         manifest_path,
         config,
-        MeasurementType.METHOD if options.enable_mosaickv else MeasurementType.REFERENCE,
+        measurement_type,
         _input_provenance(config, task_name, raw_path),
         artifacts,
         run_id=run_id,

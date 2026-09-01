@@ -13,7 +13,10 @@ from mosaickv.adapters.huggingface import (
     CacheSnapshot,
     DecodeState,
 )
-from mosaickv.backends.hf_runtime import maintain_prefixkv_decode_cache
+from mosaickv.backends.hf_runtime import (
+    _prefixkv_request_wide_projection,
+    maintain_prefixkv_decode_cache,
+)
 from mosaickv.baselines import (
     PrefixKVCalibrationObservation,
     PrefixKVOfflineProfile,
@@ -89,6 +92,11 @@ def test_fixed_global_budget_sums_exactly_and_selection_is_deterministic() -> No
     payloads, records = prefixkv_runtime_payloads(first)
     assert len(payloads) == 4
     assert len(records) == first.active_slots
+
+    projection = _prefixkv_request_wide_projection(first)
+    assert projection["method"] == "prefixkv_reimpl"
+    assert projection["source_selected_positions"] == first.active_slots
+    assert len(projection["selected_blocks"]) == 3
 
 
 def test_fixed_global_physical_byte_capacity_is_exact() -> None:
