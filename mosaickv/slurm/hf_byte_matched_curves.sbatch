@@ -7,7 +7,7 @@
 #SBATCH --time=02:00:00
 #SBATCH --partition=bii-gpu
 #SBATCH --reservation=bi_fox_dgx
-#SBATCH --gres=gpu:1
+#SBATCH --gres=gpu:a100:1
 #SBATCH --output=/scratch/djy8hg/slurm-logs/%x-%A_%a.out
 #SBATCH --error=/scratch/djy8hg/slurm-logs/%x-%A_%a.err
 #SBATCH --export=ALL
