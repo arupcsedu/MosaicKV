@@ -7,6 +7,7 @@ from mosaickv.adapters.huggingface.base import (
 )
 from mosaickv.adapters.huggingface.internvl import InternVL25Adapter, InternVLVideo
 from mosaickv.adapters.huggingface.llava import Llava15Adapter
+from mosaickv.adapters.huggingface.llava_next import LlavaNextMistralAdapter
 from mosaickv.adapters.huggingface.llava_onevision import LlavaOneVisionAdapter
 from mosaickv.adapters.huggingface.parity import (
     compare_cache_reinjection,
@@ -56,6 +57,7 @@ __all__ = [
     "InternVL25Adapter",
     "InternVLVideo",
     "Llava15Adapter",
+    "LlavaNextMistralAdapter",
     "LlavaOneVisionAdapter",
     "Modality",
     "ModalitySpan",

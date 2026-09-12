@@ -13,6 +13,7 @@ from mosaickv.adapters.huggingface.base import (
 )
 from mosaickv.adapters.huggingface.internvl import InternVL25Adapter
 from mosaickv.adapters.huggingface.llava import Llava15Adapter
+from mosaickv.adapters.huggingface.llava_next import LlavaNextMistralAdapter
 from mosaickv.adapters.huggingface.llava_onevision import LlavaOneVisionAdapter
 from mosaickv.adapters.huggingface.qwen2_5_vl import Qwen25VLAdapter
 
@@ -20,6 +21,7 @@ RuntimeAdapterType = type[HuggingFaceMultimodalAdapter]
 
 _MODEL_IDS: dict[str, RuntimeAdapterType] = {
     "llava-hf/llava-1.5-7b-hf": Llava15Adapter,
+    "llava-hf/llava-v1.6-mistral-7b-hf": LlavaNextMistralAdapter,
     "Qwen/Qwen2.5-VL-3B-Instruct": Qwen25VLAdapter,
     "Qwen/Qwen2.5-VL-7B-Instruct": Qwen25VLAdapter,
     "llava-hf/llava-onevision-qwen2-0.5b-ov-hf": LlavaOneVisionAdapter,
@@ -29,6 +31,7 @@ _MODEL_IDS: dict[str, RuntimeAdapterType] = {
 
 _AUDITED_REVISIONS: dict[str, str] = {
     "llava-hf/llava-1.5-7b-hf": "b234b804b114d9e37bb655e11cbbb5f5e971b7a9",
+    "llava-hf/llava-v1.6-mistral-7b-hf": "2424fdd47412fccc66d91719126b420e9fbd7065",
     "Qwen/Qwen2.5-VL-3B-Instruct": "66285546d2b821cf421d4f5eb2576359d3770cd3",
     "Qwen/Qwen2.5-VL-7B-Instruct": "cc594898137f460bfe9f0759e9844b3ce807cfb5",
     "llava-hf/llava-onevision-qwen2-0.5b-ov-hf": ("74dd0bf867a4cda7950c17663794267c60cf4b40"),

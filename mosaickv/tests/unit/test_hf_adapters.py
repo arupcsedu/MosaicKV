@@ -18,6 +18,7 @@ from mosaickv.adapters.huggingface import (
     HuggingFaceMultimodalAdapter,
     InternVL25Adapter,
     Llava15Adapter,
+    LlavaNextMistralAdapter,
     LlavaOneVisionAdapter,
     Modality,
     ModalitySpan,
@@ -82,9 +83,7 @@ def test_attention_capture_reduces_query_groups_during_prefill() -> None:
 
     class _Attention(torch.nn.Module):
         def forward(self, value: Any) -> tuple[Any, Any]:
-            probabilities = torch.arange(1 * 4 * 3 * 5, dtype=torch.float32).reshape(
-                1, 4, 3, 5
-            )
+            probabilities = torch.arange(1 * 4 * 3 * 5, dtype=torch.float32).reshape(1, 4, 3, 5)
             return value, probabilities
 
     attention = _Attention()
@@ -173,6 +172,7 @@ class _FakeAdapter(HuggingFaceMultimodalAdapter):
 
 def test_runtime_registry_is_fail_closed() -> None:
     assert runtime_adapter_class("llava-hf/llava-1.5-7b-hf") is Llava15Adapter
+    assert runtime_adapter_class("llava-hf/llava-v1.6-mistral-7b-hf") is LlavaNextMistralAdapter
     assert runtime_adapter_class("Qwen/Qwen2.5-VL-3B-Instruct") is Qwen25VLAdapter
     assert (
         runtime_adapter_class("llava-hf/llava-onevision-qwen2-0.5b-ov-hf") is LlavaOneVisionAdapter
@@ -227,9 +227,15 @@ def test_qwen_video_paths_use_pinned_qwen_vision_preprocessing(
 
 
 def test_adapter_capability_metadata_records_rope_and_safely_gated_features() -> None:
-    for adapter_type in (Llava15Adapter, Qwen25VLAdapter, LlavaOneVisionAdapter, InternVL25Adapter):
+    for adapter_type in (
+        Llava15Adapter,
+        LlavaNextMistralAdapter,
+        Qwen25VLAdapter,
+        LlavaOneVisionAdapter,
+        InternVL25Adapter,
+    ):
         capabilities = adapter_type.capabilities
-        if adapter_type is InternVL25Adapter:
+        if adapter_type in {InternVL25Adapter, LlavaNextMistralAdapter}:
             assert capabilities.attention_implementations == ("eager",)
         else:
             assert capabilities.attention_implementations == (
@@ -239,7 +245,10 @@ def test_adapter_capability_metadata_records_rope_and_safely_gated_features() ->
             )
         assert capabilities.cached_key_state is CachedKeyState.POST_ROPE
         assert capabilities.query_vector_state is QueryVectorState.Q_PROJ_PRE_ROPE
-        expected_phase_transform_support = adapter_type is not InternVL25Adapter
+        expected_phase_transform_support = adapter_type not in {
+            InternVL25Adapter,
+            LlavaNextMistralAdapter,
+        }
         assert capabilities.supports_prototype_merge is expected_phase_transform_support
         assert capabilities.supports_residual_repair is expected_phase_transform_support
 

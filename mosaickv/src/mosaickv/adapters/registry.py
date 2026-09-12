@@ -48,6 +48,14 @@ def default_registry() -> AdapterRegistry:
                 capabilities=ModelCapabilities(True, True, False, True, True, True, True, True),
             ),
             StaticModelAdapter(
+                name="llava_next_mistral_7b",
+                pattern=r"llava-hf/llava-v1\.6-mistral-7b-hf",
+                audited_revision="2424fdd47412fccc66d91719126b420e9fbd7065",
+                architecture="LlavaNextForConditionalGeneration",
+                cache_layout="32 x (K,V)[B,8,S,128]",
+                capabilities=ModelCapabilities(True, True, False, True, True, False, False, False),
+            ),
+            StaticModelAdapter(
                 name="qwen2_5_vl_3b",
                 pattern=r"Qwen/Qwen2\.5-VL-3B-Instruct",
                 audited_revision="66285546d2b821cf421d4f5eb2576359d3770cd3",

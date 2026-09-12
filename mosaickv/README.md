@@ -151,6 +151,9 @@ semantics.
   scratch-only caches, the common environment, and the no-sibling-import rule.
 - [Backend capability matrix](docs/backend_capability_matrix.md) and [model capability matrix](docs/model_capability_matrix.md) — source-backed integration boundaries.
 - [Evaluation harness](docs/evaluation_harness.md) — task routes, lmms-eval adapter contract, synthetic CI, result storage, and failure handling.
+- [HF byte-matched selector curves](docs/hf_byte_matched_curves.md) — identical
+  per-sample byte caps for MosaicKV and Prompt Top-K, fail-closed realized-byte
+  matching, Slurm execution, and curve artifacts.
 - [Hugging Face adapters](docs/huggingface_adapters.md) — explicit cache loop, cache/query metadata, InternVL boundary, and correctness gates.
 - [FullKV reference](docs/fullkv_reference.md) — no-compression contract, synchronized timing, memory accounting, workload schema, and local/Slurm commands.
 - [Cache-state model](docs/cache_state.md) — block descriptors, tier membership, logical positions, byte accounting, and lossless reinjection.

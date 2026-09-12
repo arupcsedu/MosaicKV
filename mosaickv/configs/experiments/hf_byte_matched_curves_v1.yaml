@@ -1,0 +1,95 @@
+schema_version: 1
+experiment_id: hf_byte_matched_curves_llava15_v1
+classification: canonical_byte_matched_selector_curve
+execution_authorized: true
+
+purpose:
+  review_issue: single_memory_point_per_method
+  comparison: mosaickv_exact_vs_prompt_attention_topk
+  claim_scope: paired_hf_eager_selection_policy_curve
+  previously_evaluated_examples: true
+  sample_use: fixed_curve_characterization_subset_not_algorithm_tuning
+
+source:
+  paired_result_artifact: /scratch/djy8hg/runs/mosaickv/vllm-published-baseline-full-9000-5025983094/analysis/combined_rows_108000.parquet
+  paired_result_sha256: 1bda547acbb5d13d7829f84dc59c4c571214145e78ab76490a523a0ce075058b
+  candidate_config: configs/paper_candidate_llava_v1.yaml
+  candidate_config_sha256: 6d9237e40dc95e46708077ad57abd6d6422bacb33b6323b0f860d4d3b7443a2f
+  frozen_algorithm_commit: 02b272514e6ed7c35b2f48df9c8db15875b726e5
+
+model:
+  id: llava-hf/llava-1.5-7b-hf
+  revision: b234b804b114d9e37bb655e11cbbb5f5e971b7a9
+  precision: fp16
+
+tasks:
+  mmstar:
+    dataset_id: Lin-Chen/MMStar
+    dataset_revision: bc98d668301da7b14f648724866e57302778ab27
+    split: val
+  textvqa:
+    dataset_id: lmms-lab/textvqa
+    dataset_revision: 9c0699cd19768ac5ab97568f6b3cbac4c0062884
+    split: validation
+  docvqa:
+    dataset_id: lmms-lab/DocVQA
+    dataset_revision: 539088ef8a8ada01ac8e2e6d4e372586748a265e
+    split: validation
+
+evaluation:
+  methods: [prompt_attention_topk, mosaickv_exact]
+  budgets_mib: [16, 22, 30, 40, 60]
+  budget_unit: bytes
+  retention_ratio_upper_bound: 0.99
+  sample_count_per_task: 256
+  samples_per_shard: 16
+  sample_selection_seed: 20271011
+  selection_seed: 20271001
+  output_length: 64
+  deterministic_generation: true
+  attention_backend: eager
+  decode_attention_backend: eager
+  block_size: 4
+  physical_budget_block_size: 4
+  physical_budget_mandatory_policy: last_token
+  exact_gather_mode: source_views
+  packing_mode: preallocated_layer
+  prototype_merging: false
+  residual_repair: false
+
+paired_controls:
+  require_identical_prompts_media_and_sample_ids: true
+  require_identical_processor_and_chat_template: true
+  require_identical_model_revision_and_precision: true
+  require_identical_generation_parameters: true
+  require_identical_block_and_mandatory_policy: true
+  require_identical_configured_byte_cap: true
+  require_exact_per_sample_active_byte_match: true
+  require_complete_rows: true
+  require_clean_source: true
+
+statistics:
+  paired_bootstrap_resamples: 10000
+  paired_bootstrap_seed: 20271012
+  report_each_task_separately: true
+  macro_average_incompatible_metrics: false
+
+execution_plan:
+  gpu_jobs: 48
+  a100s_per_job: 1
+  maximum_concurrent_a100_jobs: 4
+  cpus_per_job: 12
+  memory_per_job: 180G
+  time_limit_per_job: "02:00:00"
+  backend: hf_eager
+
+outputs:
+  raw_jsonl: true
+  parquet: true
+  manifests: true
+  traces: true
+  summary_parquet: true
+  paired_comparisons_parquet: true
+  byte_match_validation_parquet: true
+  tikz_curve_fragment: true
+  latex_table_fragment: true

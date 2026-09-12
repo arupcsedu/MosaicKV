@@ -1,0 +1,83 @@
+schema_version: 1
+experiment_id: baseline_fidelity_review_v1
+classification: canonical_published_baseline_fidelity_diagnostic
+execution_authorized: true
+
+purpose:
+  review_issues:
+    - prefixkv_reimplementation_quality_collapse
+    - vl_cache_reimplementation_trend_validation
+  claim_scope: reimplementation_fidelity_and_budget_regime_diagnostic
+  official_code_claimed: false
+
+source:
+  sample_identity_artifact: /scratch/djy8hg/runs/mosaickv/vllm-published-baseline-full-9000-5025983094/analysis/combined_rows_108000.parquet
+  sample_identity_sha256: 1bda547acbb5d13d7829f84dc59c4c571214145e78ab76490a523a0ce075058b
+
+tasks:
+  textvqa:
+    dataset_id: lmms-lab/textvqa
+    dataset_revision: 9c0699cd19768ac5ab97568f6b3cbac4c0062884
+    split: validation
+  docvqa:
+    dataset_id: lmms-lab/DocVQA
+    dataset_revision: 539088ef8a8ada01ac8e2e6d4e372586748a265e
+    split: validation
+
+families:
+  prefixkv:
+    model_id: llava-hf/llava-1.5-7b-hf
+    model_revision: b234b804b114d9e37bb655e11cbbb5f5e971b7a9
+    methods: [full_kv, prompt_attention_topk, prefixkv_reimpl]
+    retention_ratios: [0.13, 0.20, 0.40, 0.60]
+    profile_forget_ratio_by_retention:
+      "0.13": "0.8"
+      "0.20": "0.8"
+      "0.40": "0.6"
+      "0.60": "0.4"
+    interpretation: official_profile_shape_rescaled_to_common_hard_budget
+  vl_cache:
+    model_id: llava-hf/llava-v1.6-mistral-7b-hf
+    model_revision: 2424fdd47412fccc66d91719126b420e9fbd7065
+    methods: [full_kv, prompt_attention_topk, vl_cache_reimpl]
+    retention_ratios: [0.10, 0.20, 0.40, 0.60]
+    interpretation: paper_equations_reference_hf_implementation
+
+evaluation:
+  sample_count_per_task: 64
+  samples_per_shard: 8
+  sample_selection_seed: 20271101
+  selection_seed: 20271102
+  output_length: 64
+  deterministic_generation: true
+  precision: fp16
+  attention_backend: eager
+  block_size: 1
+  budget_unit: bytes
+  physical_budget_block_size: 1
+  physical_budget_mandatory_policy: method
+
+controls:
+  identical_samples_prompts_media: true
+  identical_processor_chat_template_within_family: true
+  identical_generation_within_family: true
+  identical_model_revision_precision_within_family: true
+  identical_attention_backend_within_family: true
+  paired_prompt_topk_at_each_retention: true
+  primary_budget_reported_as_active_kv_bytes: true
+  exact_active_byte_match_with_prompt_topk: true
+  no_cross_family_direct_comparison: true
+
+statistics:
+  paired_bootstrap_resamples: 10000
+  paired_bootstrap_seed: 20271103
+  report_each_task_model_ratio_separately: true
+  macro_average_incompatible_metrics: false
+
+execution_plan:
+  gpu_jobs: 32
+  a100s_per_job: 1
+  maximum_concurrent_a100_jobs: 4
+  cpus_per_job: 12
+  memory_per_job: 180G
+  time_limit_per_job: "02:00:00"
