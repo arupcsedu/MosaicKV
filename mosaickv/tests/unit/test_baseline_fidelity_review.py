@@ -51,3 +51,21 @@ def test_identity_selection_reads_only_completed_fullkv_rows() -> None:
     second = module.select_ids(frame, task="textvqa", count=3, seed=7)
     assert first == second
     assert "bad" not in first
+
+
+def test_sample_ledger_identity_matches_hf_evaluator_schema() -> None:
+    module = _module("prepare_baseline_fidelity_review")
+    identity = module.sample_ledger_identity(
+        "textvqa",
+        {
+            "dataset_id": "lmms-lab/textvqa",
+            "dataset_revision": "revision-sha",
+            "split": "validation",
+        },
+    )
+    assert identity == {
+        "task": "textvqa",
+        "dataset_id": "lmms-lab/textvqa",
+        "dataset_revision": "revision-sha",
+        "split": "validation",
+    }

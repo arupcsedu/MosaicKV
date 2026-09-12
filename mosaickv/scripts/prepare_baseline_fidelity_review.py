@@ -119,6 +119,22 @@ def select_ids(frame: pd.DataFrame, *, task: str, count: int, seed: int) -> tupl
     return tuple(identities[:count])
 
 
+def sample_ledger_identity(task: str, dataset: object) -> dict[str, str]:
+    """Return the top-level identity fields required by the HF evaluator."""
+
+    contract = _object(dataset, f"tasks.{task}")
+    required = ("dataset_id", "dataset_revision", "split")
+    missing = [key for key in required if not isinstance(contract.get(key), str)]
+    if missing:
+        raise ValueError(f"tasks.{task} is missing string fields: {missing}")
+    return {
+        "task": task,
+        "dataset_id": str(contract["dataset_id"]),
+        "dataset_revision": str(contract["dataset_revision"]),
+        "split": str(contract["split"]),
+    }
+
+
 def prepare(
     protocol_path: Path, destination: Path, output_root: Path, repository: Path
 ) -> dict[str, Any]:
@@ -152,6 +168,7 @@ def prepare(
         for task in TASKS:
             if task not in selected:
                 selected[task] = list(select_ids(frame, task=task, count=count, seed=seed))
+            dataset = _object(protocol["tasks"], "tasks")[task]
             for shard_index, offset in enumerate(range(0, count, shard_size)):
                 members = selected[task][offset : offset + shard_size]
                 ledger = {
@@ -167,7 +184,8 @@ def prepare(
                     "shard_index": shard_index,
                     "shard_count": count // shard_size,
                     "sample_selection_seed": seed,
-                    "dataset": _object(protocol["tasks"], "tasks")[task],
+                    **sample_ledger_identity(task, dataset),
+                    "dataset": dataset,
                 }
                 ledger_path = destination / "ledgers" / family / task / f"{shard_index:02d}.json"
                 ledger_sha = _write_once(ledger_path, ledger)
