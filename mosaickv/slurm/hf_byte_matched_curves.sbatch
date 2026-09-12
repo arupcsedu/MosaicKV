@@ -26,7 +26,7 @@ export MOSAICKV_CACHE_ROOT=${MOSAICKV_CACHE_ROOT:-/scratch/djy8hg/cache/mosaickv
 source "${PROJECT_ROOT}/scripts/cache_env.sh"
 "${PROJECT_ROOT}/scripts/assert_clean_worktree.sh"
 export PYTHONNOUSERSITE=1
-export PYTHONPATH="${PROJECT_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
+export PYTHONPATH="${PROJECT_ROOT}:${PROJECT_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
 export PATH="$(dirname "${PYTHON}"):${PATH}"
 export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1

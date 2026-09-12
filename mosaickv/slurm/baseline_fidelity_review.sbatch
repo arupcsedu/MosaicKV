@@ -18,6 +18,7 @@ PYTHON=${MOSAICKV_PYTHON:-/scratch/djy8hg/env/mosaickv/bin/python}
 INDEX=${MOSAICKV_JOB_INDEX:?MOSAICKV_JOB_INDEX is required}
 source "${PROJECT_ROOT}/scripts/cache_env.sh"
 "${PROJECT_ROOT}/scripts/assert_clean_worktree.sh"
+export PYTHONPATH="${PROJECT_ROOT}:${PROJECT_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
 
 readarray -t JOB < <(
   "${PYTHON}" - "${INDEX}" "${SLURM_ARRAY_TASK_ID}" <<'PY'
@@ -33,4 +34,3 @@ cd "${PROJECT_ROOT}"
 srun "${PYTHON}" scripts/run_baseline_fidelity_review_worker.py \
   --job-spec "${JOB[0]}" \
   --job-spec-sha256 "${JOB[1]}"
-
