@@ -7,6 +7,8 @@
 #SBATCH --time=00:20:00
 #SBATCH --partition=bii
 #SBATCH --export=ALL
+#SBATCH --output=/scratch/djy8hg/slurm-logs/%x-%j.out
+#SBATCH --error=/scratch/djy8hg/slurm-logs/%x-%j.err
 
 set -euo pipefail
 
@@ -19,4 +21,3 @@ cd "${PROJECT_ROOT}"
 srun "${PYTHON}" scripts/analyze_baseline_fidelity_review.py \
   --input-root "${MOSAICKV_OUTPUT_ROOT:?MOSAICKV_OUTPUT_ROOT is required}" \
   --output-root "${MOSAICKV_OUTPUT_ROOT}/analysis"
-
