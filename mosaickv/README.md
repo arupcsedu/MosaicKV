@@ -173,6 +173,7 @@ semantics.
 - [LOOK-M specification](docs/baselines/lookm_spec.md) and [parity report](docs/baselines/lookm_parity_report.md) — pinned official source, paper equations, source deviations, unified `lookm_reimpl`, and current comparison blockers.
 - [PrefixKV specification](docs/baselines/prefixkv_spec.md) and [parity report](docs/baselines/prefixkv_parity_report.md) — adaptive layer profiles, ratio conventions, fixed-distance decoding, strict leakage checks, unified `prefixkv_reimpl`, and the completed non-canonical official LLaVA parity diagnostic.
 - [VL-Cache specification](docs/baselines/vl_cache_spec.md) — ICLR post-vision scoring and sparsity allocation equations, ambiguity decisions, leakage-safe calibration, sensitivity diagnostics, and explicit non-reproduction status for `vl_cache_reimpl`.
+- [Paper-native baseline evaluation](docs/baselines/paper_native_evaluation.md) — separate PrefixKV PPL/ROUGE, VL-Cache CIDEr/ANLS/MathVista, and LOOK-M MileBench reproduction tracks with fail-closed method provenance.
 
 ## License
 

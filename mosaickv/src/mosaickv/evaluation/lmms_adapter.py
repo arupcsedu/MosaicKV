@@ -35,7 +35,7 @@ from mosaickv.evaluation.tasks import (
     default_task_registry,
     deterministic_sample_ids,
 )
-from mosaickv.types import JsonObject
+from mosaickv.types import JsonObject, JsonValue
 
 
 class LmmsEvalUnavailable(RuntimeError):
@@ -478,7 +478,9 @@ def prepare_seeded_lmms_tasks(
         task_name = spec.development_lmms_task
         if task_name is None:
             raise ValueError(f"task {spec.name!r} is not an lmms-eval task")
-        task_directory = tasks_root / task_name.split("_", maxsplit=1)[0]
+        task_directory = tasks_root / (
+            spec.lmms_task_directory or task_name.split("_", maxsplit=1)[0]
+        )
         if not task_directory.is_dir():
             raise RuntimeError(
                 f"lmms-eval task directory is unavailable for {task_name!r}: {task_directory}"
@@ -554,10 +556,23 @@ def _extract_answer(sample: dict[str, object]) -> str:
 def _extract_score(sample: dict[str, object], metric: str) -> float:
     value = sample.get(metric)
     if isinstance(value, dict):
+        if metric == "llm_as_judge_eval" and isinstance(value.get("true_false"), bool):
+            return float(value["true_false"])
         value = value.get("score")
     if isinstance(value, bool) or not isinstance(value, Real):
         raise ValueError(f"lmms metric {metric!r} is not a numeric per-sample score")
     return float(value)
+
+
+def _extract_optional_score(sample: dict[str, object], metric: str) -> float | None:
+    """Return a sample score, or ``None`` for genuinely corpus-only metrics."""
+
+    try:
+        return _extract_score(sample, metric)
+    except ValueError:
+        if metric == "coco_CIDEr" and isinstance(sample.get(metric), dict):
+            return None
+        raise
 
 
 def _extract_preserved_id(sample: dict[str, object], lmms_task: str) -> str:
@@ -590,6 +605,10 @@ def run_lmms_development_evaluation(
     sample_offset: int = 0,
     explicit_sample_ids: tuple[str, ...] | None = None,
     parquet_output: str | Path | None = None,
+    metric_output: str | Path | None = None,
+    metric_parquet_output: str | Path | None = None,
+    metric_observations_parquet_output: str | Path | None = None,
+    metric_aggregates_parquet_output: str | Path | None = None,
     registry: TaskRegistry | None = None,
     dataset_revision: str | None = None,
 ) -> JsonObject:
@@ -599,6 +618,15 @@ def run_lmms_development_evaluation(
         raise ValueError("at least one task name is required")
     if len(set(task_names)) != len(task_names):
         raise ValueError("task names must be unique")
+    split_metric_outputs = (
+        metric_observations_parquet_output,
+        metric_aggregates_parquet_output,
+    )
+    if sum(output is not None for output in split_metric_outputs) == 1:
+        raise ValueError(
+            "metric_observations_parquet_output and metric_aggregates_parquet_output "
+            "must be provided together"
+        )
     selected_registry = registry or default_task_registry()
     specs = tuple(selected_registry.resolve(name) for name in task_names)
     for spec in specs:
@@ -691,7 +719,7 @@ def run_lmms_development_evaluation(
                         ),
                         answer=answer,
                         reference=prepared_sample.reference,
-                        task_score=_extract_score(sample, spec.sample_metric),
+                        task_score=_extract_optional_score(sample, spec.sample_metric),
                         metrics=capture.generation.metrics,
                         manifest_path=manifest_path,
                     )
@@ -775,6 +803,52 @@ def run_lmms_development_evaluation(
     parquet_path = None
     if parquet_output is not None:
         parquet_path = str(write_parquet_aggregate(rows, parquet_output).resolve())
+    metric_path = None
+    metric_parquet_path = None
+    metric_observations_parquet_path = None
+    metric_aggregates_parquet_path = None
+    metric_errors: list[str] = []
+    if any(
+        output is not None
+        for output in (
+            metric_output,
+            metric_parquet_output,
+            *split_metric_outputs,
+        )
+    ):
+        from mosaickv.evaluation.metric_export import export_task_metrics
+
+        metric_rows, metric_errors = export_task_metrics(
+            rows,
+            specs=specs,
+            manifest_path=manifest_path,
+        )
+        from mosaickv.evaluation.metrics.storage import (
+            JsonlMetricStore,
+            write_metric_parquet,
+            write_metric_parquet_tables,
+        )
+
+        if metric_output is not None:
+            metric_store = JsonlMetricStore(metric_output)
+            for metric_row in metric_rows:
+                metric_store.append(metric_row)
+            metric_path = str(Path(metric_output).resolve())
+        if metric_parquet_output is not None:
+            metric_parquet_path = str(
+                write_metric_parquet(metric_rows, metric_parquet_output).resolve()
+            )
+        if (
+            metric_observations_parquet_output is not None
+            and metric_aggregates_parquet_output is not None
+        ):
+            observation_path, aggregate_path = write_metric_parquet_tables(
+                metric_rows,
+                observations_output=metric_observations_parquet_output,
+                aggregates_output=metric_aggregates_parquet_output,
+            )
+            metric_observations_parquet_path = str(observation_path.resolve())
+            metric_aggregates_parquet_path = str(aggregate_path.resolve())
     return {
         "run_id": run_id,
         "tasks": list(task_names),
@@ -783,6 +857,11 @@ def run_lmms_development_evaluation(
         "resumed_samples": len(set(selected_ids) & prior_ids),
         "raw_output": str(Path(raw_output).resolve()),
         "parquet_output": parquet_path,
+        "metric_output": metric_path,
+        "metric_parquet_output": metric_parquet_path,
+        "metric_observations_parquet_output": metric_observations_parquet_path,
+        "metric_aggregates_parquet_output": metric_aggregates_parquet_path,
+        "metric_errors": cast("list[JsonValue]", metric_errors),
         "lmms_eval_version": _LMMS_EVAL_VERSION,
         "dataset_revisions": {
             spec.dataset_id: dataset_revision for spec in specs if dataset_revision is not None

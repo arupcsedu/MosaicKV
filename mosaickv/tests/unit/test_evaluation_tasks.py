@@ -16,10 +16,12 @@ def test_registry_routes_public_scoring_to_lmms_eval() -> None:
     registry = default_task_registry()
     assert set(registry.names()) == {
         "chartqa",
+        "coco_caption",
         "docvqa",
         "infovqa",
         "mmstar",
         "mmvet",
+        "mathvista",
         "realworldqa",
         "synthetic_ci",
         "textvqa",
@@ -35,6 +37,13 @@ def test_registry_routes_public_scoring_to_lmms_eval() -> None:
     )
     assert registry.resolve("docvqa").development_lmms_task == "docvqa_val"
     assert registry.resolve("chartqa").development_lmms_task == "chartqa"
+    coco = registry.resolve("coco_caption")
+    assert coco.sample_metric == "coco_CIDEr"
+    assert coco.paper_metrics == ("cider",)
+    assert coco.lmms_task_directory == "coco_cap"
+    mathvista = registry.resolve("mathvista")
+    assert mathvista.sample_metric == "llm_as_judge_eval"
+    assert mathvista.paper_metrics == ("mathvista_accuracy",)
     realworldqa = registry.resolve("realworldqa")
     assert realworldqa.route_key == (
         "lmms-lab/RealWorldQA",

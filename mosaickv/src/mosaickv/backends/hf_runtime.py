@@ -76,6 +76,7 @@ from mosaickv.evaluation.oracle_queries import (
     EvaluationOnlyOracleQueries,
     collect_evaluation_only_true_future_queries,
 )
+from mosaickv.evaluation.prefixkv_metrics import TeacherForcedNll
 from mosaickv.forecasting import QueryForecast, build_query_forecast, forecast_with_rollout
 from mosaickv.forecasting.huggingface import (
     IsolatedQueryRollout,
@@ -8243,6 +8244,7 @@ class HuggingFaceMosaicKVModel:
         self.retention_ratio = config.cache.retention_ratio
         self._terminal_token_ids = terminal_token_ids(adapter.model, adapter.processor)
         self.supports_video = adapter.capabilities.video
+        self._teacher_forced_outputs: dict[tuple[str, str], TeacherForcedNll] = {}
         self._prefixkv_profile: PrefixKVOfflineProfile | None = None
         if config.method.is_prefixkv_reimplementation and config.prefixkv.profile_path is not None:
             self._prefixkv_profile = load_prefixkv_profile(
@@ -8277,6 +8279,57 @@ class HuggingFaceMosaicKVModel:
                 return candidate
             attempt += 1
 
+    def _teacher_forced_target_ids(self, target: str) -> tuple[int, ...]:
+        """Tokenize a PrefixKV PPL target without adding a second prompt."""
+
+        tokenizer = getattr(self.adapter.processor, "tokenizer", self.adapter.processor)
+        encoded = tokenizer(target, add_special_tokens=False, return_tensors="pt")
+        input_ids = (
+            encoded.get("input_ids")
+            if isinstance(encoded, Mapping)
+            else getattr(encoded, "input_ids", None)
+        )
+        if input_ids is None:
+            raise HuggingFaceRuntimeError("processor tokenizer returned no target input_ids")
+        target_ids = tuple(int(value) for value in input_ids.reshape(-1).tolist())
+        if not target_ids:
+            raise ValueError("teacher-forced target must contain at least one token")
+        if len(target_ids) > self.config.generation.max_new_tokens:
+            raise ValueError(
+                "teacher-forced target exceeds generation.max_new_tokens; "
+                "increase the configured limit rather than truncating the target"
+            )
+        return target_ids
+
+    def teacher_forced_nll(
+        self,
+        request: EvaluationRequest,
+        target: str,
+    ) -> TeacherForcedNll:
+        """Score human target tokens through the ordinary compressed cache path."""
+
+        target_ids = self._teacher_forced_target_ids(target)
+        key = (request.run_id, request.sample_id)
+        if key in self._teacher_forced_outputs:
+            raise HuggingFaceRuntimeError("duplicate pending teacher-forced request identity")
+        kwargs = dict(request.generation_kwargs)
+        kwargs["_mosaickv_teacher_forced_token_ids"] = target_ids
+        self.generate(
+            EvaluationRequest(
+                run_id=request.run_id,
+                sample_id=request.sample_id,
+                task=request.task,
+                messages=request.messages,
+                generation_kwargs=kwargs,
+            )
+        )
+        try:
+            return self._teacher_forced_outputs.pop(key)
+        except KeyError as error:
+            raise HuggingFaceRuntimeError(
+                "teacher-forced generation completed without NLL statistics"
+            ) from error
+
     def generate(self, request: EvaluationRequest) -> ModelGeneration:
         """Run one explicit prefill/compress/decode request and always write a trace."""
 
@@ -8304,6 +8357,24 @@ class HuggingFaceMosaicKVModel:
             "ablation_evaluation_only": self.config.ablation.evaluation_only,
         }
         started = time.perf_counter()
+        raw_teacher_ids = request.generation_kwargs.get("_mosaickv_teacher_forced_token_ids")
+        if raw_teacher_ids is None:
+            teacher_forced_ids: tuple[int, ...] = ()
+        elif (
+            isinstance(raw_teacher_ids, tuple)
+            and raw_teacher_ids
+            and all(
+                isinstance(value, int) and not isinstance(value, bool) and value >= 0
+                for value in raw_teacher_ids
+            )
+        ):
+            teacher_forced_ids = raw_teacher_ids
+        else:
+            raise ValueError(
+                "_mosaickv_teacher_forced_token_ids must be a non-empty tuple "
+                "of nonnegative integers"
+            )
+        teacher_forced_nll_sum = 0.0
         trace_instrumentation_seconds = 0.0
         deferred_trace_builder: Callable[[], JsonObject] | None = None
         try:
@@ -9461,8 +9532,28 @@ class HuggingFaceMosaicKVModel:
             )
             decode_runtime_policy["decode_attention_implementation"] = decode_attention
 
-            tokens = [prefill.next_token_id]
-            token = prefill.next_token_id
+            if teacher_forced_ids:
+                vocabulary = int(prefill.logits.shape[-1])
+                first_target = teacher_forced_ids[0]
+                if first_target >= vocabulary:
+                    raise ValueError("teacher-forced target token exceeds model vocabulary")
+                first_logits = prefill.logits.reshape(-1, vocabulary)[-1].float()
+                teacher_forced_nll_sum += float(
+                    torch.nn.functional.cross_entropy(
+                        first_logits.reshape(1, -1),
+                        torch.tensor(
+                            [first_target],
+                            dtype=torch.long,
+                            device=first_logits.device,
+                        ),
+                        reduction="sum",
+                    ).item()
+                )
+                token = torch.full_like(prefill.next_token_id, first_target)
+                tokens = [token]
+            else:
+                tokens = [prefill.next_token_id]
+                token = prefill.next_token_id
             decode_seconds = 0.0
             oracle_repair_diagnostic_seconds = 0.0
             per_token_decode_seconds: list[float] = []
@@ -9475,7 +9566,12 @@ class HuggingFaceMosaicKVModel:
                 if repair_state is not None and self.config.repair.policy is RepairPolicy.ORACLE
                 else None
             )
-            for step_index in range(1, self.config.generation.max_new_tokens):
+            decode_token_count = (
+                len(teacher_forced_ids)
+                if teacher_forced_ids
+                else self.config.generation.max_new_tokens
+            )
+            for step_index in range(1, decode_token_count):
                 # Hugging Face cache objects normally grow in place.  A
                 # provisional repair step therefore needs an isolated copy so
                 # it can be discarded and re-decoded, but every non-repair
@@ -9550,7 +9646,26 @@ class HuggingFaceMosaicKVModel:
                         per_token_decode_seconds[-1] += maintenance_seconds
                     else:
                         state = provisional.state
-                    token = provisional.next_token_id
+                    if teacher_forced_ids:
+                        target_id = teacher_forced_ids[step_index]
+                        vocabulary = int(provisional.logits.shape[-1])
+                        if target_id >= vocabulary:
+                            raise ValueError("teacher-forced target token exceeds model vocabulary")
+                        step_logits = provisional.logits.reshape(-1, vocabulary)[-1].float()
+                        teacher_forced_nll_sum += float(
+                            torch.nn.functional.cross_entropy(
+                                step_logits.reshape(1, -1),
+                                torch.tensor(
+                                    [target_id],
+                                    dtype=torch.long,
+                                    device=step_logits.device,
+                                ),
+                                reduction="sum",
+                            ).item()
+                        )
+                        token = torch.full_like(provisional.next_token_id, target_id)
+                    else:
+                        token = provisional.next_token_id
                     tokens.append(token)
                     continue
 
@@ -9692,10 +9807,30 @@ class HuggingFaceMosaicKVModel:
                     final = repaired_output[0]
                     state = final.state
                     token = final.next_token_id
+                    scoring_logits = final.logits
                     decode_finite_flags.append(torch.isfinite(final.logits).all())
                 else:
                     state = provisional.state
                     token = provisional.next_token_id
+                    scoring_logits = provisional.logits
+                if teacher_forced_ids:
+                    target_id = teacher_forced_ids[step_index]
+                    vocabulary = int(scoring_logits.shape[-1])
+                    if target_id >= vocabulary:
+                        raise ValueError("teacher-forced target token exceeds model vocabulary")
+                    step_logits = scoring_logits.reshape(-1, vocabulary)[-1].float()
+                    teacher_forced_nll_sum += float(
+                        torch.nn.functional.cross_entropy(
+                            step_logits.reshape(1, -1),
+                            torch.tensor(
+                                [target_id],
+                                dtype=torch.long,
+                                device=step_logits.device,
+                            ),
+                            reduction="sum",
+                        ).item()
+                    )
+                    token = torch.full_like(token, target_id)
                 tokens.append(token)
 
             if decode_finite_flags:
@@ -9875,6 +10010,14 @@ class HuggingFaceMosaicKVModel:
                     "status": "completed",
                     "answer": answer,
                     "generated_token_ids": list(timed_token_ids),
+                    "teacher_forced_evaluation": {
+                        "enabled": bool(teacher_forced_ids),
+                        "evaluated_tokens": len(teacher_forced_ids),
+                        "negative_log_likelihood_sum": (
+                            teacher_forced_nll_sum if teacher_forced_ids else None
+                        ),
+                        "target_was_not_truncated": True,
+                    },
                     "quality_decoding": {
                         **quality.to_record(),
                         "configured_terminal_token_ids": list(self._terminal_token_ids),
@@ -10303,6 +10446,13 @@ class HuggingFaceMosaicKVModel:
                 else None
             )
             effective_method = str(trace.get("effective_method", self.method))
+            if teacher_forced_ids:
+                self._teacher_forced_outputs[(request.run_id, request.sample_id)] = (
+                    TeacherForcedNll(
+                        negative_log_likelihood_sum=teacher_forced_nll_sum,
+                        evaluated_tokens=len(teacher_forced_ids),
+                    )
+                )
             return ModelGeneration(
                 answer,
                 GenerationMetrics(

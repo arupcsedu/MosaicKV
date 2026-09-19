@@ -1,0 +1,152 @@
+schema_version: 1
+suite_id: published_paper_native_metrics_v1
+
+# This file defines metric- and dataset-faithful reproduction tracks.  It does
+# not authorize execution.  Each track must first receive immutable model,
+# dataset, sample, and environment revisions in its run manifest.
+protocols:
+  - protocol_id: prefixkv_native_v1
+    paper: "PrefixKV: Adaptive Prefix KV Cache is What Vision Instruction-Following Models Need for Efficient Generation"
+    primary_source: https://arxiv.org/abs/2412.03409
+    model: liuhaotian/llava-v1.5-7b
+    model_revision: resolve_before_execution
+    retention_ratios: [1.0, 0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1]
+    execution_authorized: false
+    tasks:
+      - name: llava_description
+        dataset: official PrefixKV detail_1k.json plus COCO train2017 images
+        split: official 1000-example file
+        sample_count: 1000
+        metrics: [perplexity, rouge_l_f1]
+        aggregation: token-weighted corpus PPL and mean per-sample ROUGE-L F1
+      - name: mmvet_prefixkv
+        dataset: official PrefixKV MM-Vet package
+        split: official 218-example file
+        sample_count: 218
+        metrics: [perplexity, rouge_l_f1]
+        aggregation: token-weighted corpus PPL and mean per-sample ROUGE-L F1
+    methods:
+      - name: prefixkv_official
+        source: third_party/PrefixKV
+        status: official_pinned
+        repository_commit: 597f1ab032704951550f93bcc8a23f1454b80aa4
+      - name: prefixkv_reimpl
+        source: mosaickv.baselines.prefixkv
+        status: local_reimplementation
+        repository_commit: null
+      - name: full_kv
+        source: mosaickv FullKV reference
+        status: local_reference
+        repository_commit: null
+      - name: mosaickv_exact
+        source: mosaickv exact-selection tier
+        status: local_reference
+        repository_commit: null
+      - name: elastic_cache_reimpl
+        source: implementation not pinned in this repository
+        status: unsupported_unpinned
+        repository_commit: null
+      - name: pyramidkv_reimpl
+        source: implementation not pinned in this repository
+        status: unsupported_unpinned
+        repository_commit: null
+      - name: h2o_reimpl
+        source: implementation not pinned in this repository
+        status: unsupported_unpinned
+        repository_commit: null
+
+  - protocol_id: vl_cache_native_v1
+    paper: "VL-Cache: Sparsity and Modality-Aware KV Cache Compression for Vision-Language Model Inference Acceleration"
+    primary_source: https://arxiv.org/abs/2410.23317
+    model: llava-hf/llava-v1.6-mistral-7b-hf
+    model_revision: 2424fdd47412fccc66d91719126b420e9fbd7065
+    retention_ratios: [1.0, 0.8, 0.6, 0.4, 0.2, 0.1, 0.05, 0.01]
+    execution_authorized: false
+    tasks:
+      - name: coco_caption
+        dataset: lmms-lab/COCO-Caption
+        split: val
+        sample_count: null
+        metrics: [cider]
+        aggregation: pycocoevalcap corpus CIDEr multiplied by 100
+      - name: docvqa
+        dataset: lmms-lab/DocVQA
+        split: validation
+        sample_count: null
+        metrics: [anls]
+        aggregation: official mean ANLS
+      - name: mathvista
+        dataset: AI4Math/MathVista
+        split: testmini
+        sample_count: null
+        metrics: [mathvista_accuracy]
+        aggregation: official answer-extraction accuracy in percentage points
+    methods:
+      - name: vl_cache_reimpl
+        source: mosaickv.baselines.vl_cache; no official implementation released
+        status: local_reimplementation
+        repository_commit: null
+      - name: full_kv
+        source: mosaickv FullKV reference
+        status: local_reference
+        repository_commit: null
+      - name: mosaickv_exact
+        source: mosaickv exact-selection tier
+        status: local_reference
+        repository_commit: null
+      - name: streamingllm_reimpl
+        source: implementation not pinned in this repository
+        status: unsupported_unpinned
+        repository_commit: null
+      - name: h2o_reimpl
+        source: implementation not pinned in this repository
+        status: unsupported_unpinned
+        repository_commit: null
+      - name: pyramidkv_reimpl
+        source: implementation not pinned in this repository
+        status: unsupported_unpinned
+        repository_commit: null
+
+  - protocol_id: lookm_native_v1
+    paper: "LOOK-M: Look-Once Optimization in KV Cache for Efficient Multimodal Long-Context Inference"
+    primary_source: https://aclanthology.org/2024.findings-emnlp.235/
+    model: liuhaotian/llava-v1.5-7b
+    model_revision: resolve_before_execution
+    retention_ratios: [1.0, 0.5, 0.35, 0.2, 0.05]
+    execution_authorized: false
+    tasks:
+      - name: milebench
+        dataset: MileBench official benchmark
+        split: official evaluation tasks
+        sample_count: null
+        metrics: [accuracy, rouge_l_f1]
+        aggregation: dataset metric followed by equal-dataset subtask mean; no mixed-metric macro
+    methods:
+      - name: lookm_official
+        source: third_party/LOOK-M
+        status: official_pinned
+        repository_commit: ecf0f51a9c416c2d85e47faf2638502f01a6d748
+      - name: lookm_reimpl
+        source: mosaickv.baselines.lookm
+        status: local_reimplementation
+        repository_commit: null
+      - name: full_kv
+        source: mosaickv FullKV reference
+        status: local_reference
+        repository_commit: null
+      - name: mosaickv_exact
+        source: mosaickv exact-selection tier
+        status: local_reference
+        repository_commit: null
+      - name: snapkv_reimpl
+        source: implementation not pinned in this repository
+        status: unsupported_unpinned
+        repository_commit: null
+      - name: roco_reimpl
+        source: implementation not pinned in this repository
+        status: unsupported_unpinned
+        repository_commit: null
+      - name: h2o_reimpl
+        source: implementation not pinned in this repository
+        status: unsupported_unpinned
+        repository_commit: null

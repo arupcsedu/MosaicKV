@@ -480,6 +480,14 @@ def run_hf_evaluation(
             sample_offset=sample_offset,
             explicit_sample_ids=explicit_sample_ids,
             parquet_output=parquet_path,
+            metric_output=cast("str | None", getattr(args, "metric_output", None)),
+            metric_parquet_output=cast("str | None", getattr(args, "metric_parquet_output", None)),
+            metric_observations_parquet_output=cast(
+                "str | None", getattr(args, "metric_observations_parquet_output", None)
+            ),
+            metric_aggregates_parquet_output=cast(
+                "str | None", getattr(args, "metric_aggregates_parquet_output", None)
+            ),
             registry=registry,
             dataset_revision=config.dataset.revision,
         )

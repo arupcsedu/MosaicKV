@@ -205,6 +205,16 @@ def run_sglang_evaluation(args: argparse.Namespace, config: RunConfig) -> tuple[
                 seed=config.execution.seed,
                 subset_size=int(args.subset_size or 20),
                 parquet_output=parquet_path,
+                metric_output=cast("str | None", getattr(args, "metric_output", None)),
+                metric_parquet_output=cast(
+                    "str | None", getattr(args, "metric_parquet_output", None)
+                ),
+                metric_observations_parquet_output=cast(
+                    "str | None", getattr(args, "metric_observations_parquet_output", None)
+                ),
+                metric_aggregates_parquet_output=cast(
+                    "str | None", getattr(args, "metric_aggregates_parquet_output", None)
+                ),
                 registry=registry,
                 dataset_revision=config.dataset.revision,
             )

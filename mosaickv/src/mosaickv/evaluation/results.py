@@ -116,7 +116,7 @@ class EvaluationResult:
         retention_ratio: float,
         answer: str,
         reference: str,
-        task_score: float,
+        task_score: float | None,
         metrics: GenerationMetrics,
         manifest_path: str,
     ) -> EvaluationResult:

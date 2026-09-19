@@ -96,6 +96,34 @@ the per-sample rows. “Aggregate” means a merged analysis dataset, not an ave
 statistical reduction must remain a separate, versioned transformation with run/sample lineage.
 Parquet requires `pyarrow` from the locked HF evaluation environment.
 
+## Paper-native metric stream
+
+The legacy `task_score` remains available for existing FullKV, Prompt Top-K,
+and MosaicKV artifacts. New paper-reproduction runs can additionally write a
+typed metric stream:
+
+```text
+--metric-output /scratch/djy8hg/results/mosaickv/RUN/metrics.jsonl
+--metric-observations-parquet-output \
+  /scratch/djy8hg/results/mosaickv/RUN/metric_observations.parquet
+--metric-aggregates-parquet-output \
+  /scratch/djy8hg/results/mosaickv/RUN/metric_aggregates.parquet
+```
+
+The observation table contains only `metric_scope=sample` rows and the
+aggregate table contains only `metric_scope=corpus` rows. Both use the
+long-form schema containing `run_id`, `sample_id`, `task`, `metric_name`,
+`metric_value`, `metric_direction`, `metric_scope`, `metric_implementation`,
+`metric_version`, `evaluator_commit`, `reference_artifact_sha`,
+`evaluated_token_count`, and `measurement_type`. Additional model, backend,
+method, budget, unit, sufficient-statistic, and manifest columns preserve
+comparison provenance. COCO CIDEr is recomputed as a corpus metric; PrefixKV
+PPL stores per-sample NLL and evaluated-token sufficient statistics as well as
+the final corpus value. `--metric-parquet-output` remains available only as a
+backward-compatible combined-table export. See
+[paper-native baseline evaluation](baselines/paper_native_evaluation.md) for
+the PrefixKV, VL-Cache, and LOOK-M protocols.
+
 ## CPU synthetic check
 
 The packaged synthetic task uses four one-pixel RGB fixtures and a deterministic weight-free

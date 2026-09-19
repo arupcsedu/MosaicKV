@@ -56,6 +56,8 @@ class TaskSpec:
     dataset_config: str | None = None
     lmms_split_override: str | None = None
     reference_field: str | None = None
+    paper_metrics: tuple[str, ...] = ()
+    lmms_task_directory: str | None = None
 
     def __post_init__(self) -> None:
         for field_name in ("name", "dataset_id", "split", "sample_metric", "scoring_owner"):
@@ -65,6 +67,12 @@ class TaskSpec:
             raise ValueError("dataset_config must be non-empty when specified")
         if self.reference_field is not None and not self.reference_field.strip():
             raise ValueError("reference_field must be non-empty when specified")
+        if self.lmms_task_directory is not None and not self.lmms_task_directory.strip():
+            raise ValueError("lmms_task_directory must be non-empty when specified")
+        if len(set(self.paper_metrics)) != len(self.paper_metrics) or any(
+            not metric.strip() for metric in self.paper_metrics
+        ):
+            raise ValueError("paper_metrics must contain unique non-empty names")
         if self.lmms_split_override is not None:
             if not self.lmms_split_override.strip():
                 raise ValueError("lmms_split_override must be non-empty when specified")
@@ -143,6 +151,7 @@ def default_task_registry() -> TaskRegistry:
                 image,
                 "lmms_eval",
                 True,
+                paper_metrics=("accuracy",),
             ),
             TaskSpec(
                 "mmvet",
@@ -154,6 +163,34 @@ def default_task_registry() -> TaskRegistry:
                 image,
                 "lmms_eval_external_judge",
                 False,
+                paper_metrics=("perplexity", "rouge_l_f1"),
+            ),
+            TaskSpec(
+                "coco_caption",
+                "lmms-lab/COCO-Caption",
+                "val",
+                "coco2014_cap_val",
+                "coco2014_cap_val",
+                "coco_CIDEr",
+                image,
+                "lmms_eval_corpus",
+                True,
+                reference_field="answer",
+                paper_metrics=("cider",),
+                lmms_task_directory="coco_cap",
+            ),
+            TaskSpec(
+                "mathvista",
+                "AI4Math/MathVista",
+                "testmini",
+                "mathvista_testmini_cot",
+                "mathvista_testmini_cot",
+                "llm_as_judge_eval",
+                image,
+                "lmms_eval",
+                True,
+                reference_field="answer",
+                paper_metrics=("mathvista_accuracy",),
             ),
             TaskSpec(
                 "realworldqa",
@@ -179,6 +216,7 @@ def default_task_registry() -> TaskRegistry:
                 "lmms_eval",
                 True,
                 reference_field="answers",
+                paper_metrics=("vqa_accuracy",),
             ),
             TaskSpec(
                 "textvqa_train_calibration",
@@ -204,6 +242,7 @@ def default_task_registry() -> TaskRegistry:
                 image,
                 "lmms_eval",
                 True,
+                paper_metrics=("anls",),
             ),
             TaskSpec(
                 "infovqa",

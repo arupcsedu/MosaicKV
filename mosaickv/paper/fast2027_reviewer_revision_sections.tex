@@ -1,0 +1,163 @@
+% Drop-in FAST 2027 replacement sections addressing reviewer comments on
+% byte-matched Pareto evidence, baseline fidelity, eager-only decode behavior,
+% and inactive prototype/residual tiers.
+%
+% Required packages in the main paper:
+%   booktabs, multirow, tikz, pgfplots
+% Required TikZ/PGFPlots libraries:
+%   arrows.meta, positioning, groupplots
+
+% ---------------------------------------------------------------------------
+% Replacement abstract
+% ---------------------------------------------------------------------------
+\begin{abstract}
+Multimodal large language models retain visual, OCR, layout, and text states
+throughout decoding, making the key--value (KV) cache a capacity bottleneck.
+MosaicKV is a training-free framework that forecasts future query demand,
+organizes cross-modal evidence, and selects exact KV blocks under a physical
+byte budget.  MosaicKV defines an extensible three-tier cache, but this paper
+evaluates only its conservative exact-selection path; prototype merging and
+residual repair are specified but inactive.  On 9,000 paired LLaVA-1.5-7B
+examples, the selected operating point uses approximately 43.5\% less active
+KV memory than Prompt Top-K while retaining 98.99--100\% of FullKV task
+quality.  To separate selector quality from operating-point choice, we also
+sweep 16, 22, 30, 40, and 60 MiB on 256 MMStar, TextVQA, and DocVQA examples
+per task.  At exactly matched per-sample bytes, MosaicKV matches or exceeds
+Prompt Top-K at 13 of 15 points, with statistically resolved gains at low
+TextVQA and DocVQA budgets.  The observed HF-eager decode reduction vanishes
+under vLLM, and online planning dominates end-to-end latency.  We therefore
+claim a low-budget quality--memory improvement, not serving acceleration or
+an empirical benefit from the inactive tiers.
+\end{abstract}
+
+% ---------------------------------------------------------------------------
+% Replacement end of Introduction: result paragraph and contributions
+% ---------------------------------------------------------------------------
+\paragraph{Results and claim boundary.}
+Our original 9,000-example LLaVA-1.5 operating point preserves
+98.99--100\% of FullKV task quality while using approximately 43.5\% fewer
+active KV bytes than Prompt Top-K.  Because the two methods originally ran at
+different byte budgets, we add an exactly byte-matched five-cap sweep.  On
+256 examples per task, MosaicKV matches or improves Prompt Top-K at 13 of 15
+points; its clearest gains occur at low TextVQA and DocVQA budgets.  This
+supports the selection policy in the measured low-memory regime, while the
+two higher-memory reversals prevent a universal dominance claim.  Separate
+published-baseline diagnostics expose unresolved PrefixKV
+checkpoint/profile mismatch and are not used in the headline comparison.
+Finally, the HF-eager decode reduction does not transfer to vLLM and is
+overwhelmed by planning cost, so we make no end-to-end serving claim.
+
+Our contributions are:
+\begin{itemize}
+  \item a future-conditioned formulation of multimodal KV selection that
+  combines query forecasting, sparse evidence relations, and value-sensitive
+  utility under an explicit physical-byte budget;
+  \item a compatibility-gated exact-selection implementation that preserves
+  the tensors and logical positions of retained blocks, together with an
+  extensible but currently unevaluated prototype/residual interface; and
+  \item an exactly byte-matched quality--memory study that separates selector
+  quality from operating-point choice and reports negative baseline-fidelity,
+  backend-transfer, peak-memory, and end-to-end-latency results.
+\end{itemize}
+
+% ---------------------------------------------------------------------------
+% Replacement for design overview / cache-construction scope
+% ---------------------------------------------------------------------------
+\subsection{Validated Path and Extensible Cache Tiers}
+\label{sec:validated-design-scope}
+
+MosaicKV's validated path starts from the full multimodal cache, predicts
+which evidence future decoder queries may need, constructs sparse relations
+among compatible evidence blocks, and chooses exact blocks under a hard byte
+cap.  For selected set \(S_{\mathrm{exact}}\), the active cache used in this
+paper is
+\begin{equation}
+  \widetilde S_{\mathrm{KV}}=S_{\mathrm{exact}},\qquad
+  \operatorname{bytes}(S_{\mathrm{exact}})\le B.
+\end{equation}
+Every retained K/V tensor is copied or aliased without averaging,
+quantization, or position renumbering.  This preserves the numerical state of
+\emph{kept} blocks; it does not preserve evidence assigned to evicted blocks.
+
+The broader architecture admits
+\begin{equation}
+  \widetilde S_{\mathrm{KV}}=
+  (S_{\mathrm{exact}},S_{\mathrm{proto}},S_{\mathrm{residual}}),
+\end{equation}
+where compatible source blocks could be summarized as prototypes and retained
+outside the active device cache for repair.  These operations are guarded by
+layer, KV-head, modality, logical-span, and positional-encoding compatibility.
+In the reported LLaVA campaign, the gate rejected the prototype assignments;
+residual storage and repair consequently remained inactive.  We specify these
+interfaces for extensibility but do not attribute any measured result to
+them.
+
+\input{mosaickv/figures/mosaickv_validated_scope.tex}
+
+% ---------------------------------------------------------------------------
+% Replacement Evaluation section
+% ---------------------------------------------------------------------------
+\input{mosaickv/paper/evaluation.tex}
+
+% ---------------------------------------------------------------------------
+% Replacement Discussion and Limitations
+% ---------------------------------------------------------------------------
+\section{Discussion and Limitations}
+\label{sec:discussion}
+
+\paragraph{What the byte-matched experiment establishes.}
+The 16--60 MiB sweep removes the operating-point confound for Prompt Top-K:
+within every pair, active KV storage, blocks, mandatory policy, model, input,
+and decoding controls are identical.  MosaicKV's advantage at low TextVQA and
+DocVQA budgets therefore reflects which blocks are retained rather than how
+many bytes are allocated.  MMStar is flat, and Prompt Top-K has higher point
+estimates at 60 MiB on TextVQA and DocVQA, so the result is a regime-specific
+improvement rather than universal selector superiority.
+
+\paragraph{Published baselines.}
+The PrefixKV diagnostic does not reproduce the paper's near-lossless behavior
+and must not be presented as evidence against PrefixKV.  Its legacy
+checkpoint, patched Transformers runtime, incompletely documented profile
+calibration, and different cache-budget definition are material differences
+from the common HF run.  We retain the negative rows, explain the mismatch,
+and remove PrefixKV from the primary ranking.  VL-Cache-Reimpl shows the
+expected improvement as retention grows on its paper model family and reaches
+FullKV TextVQA score at 40\%, but it is not an exact published-table
+reproduction.  LOOK-M-Reimpl is treated similarly.  The primary comparative
+claim is restricted to the exactly controlled Prompt Top-K baseline.
+
+\paragraph{Systems scope.}
+HF eager attention performs sequence-length-dependent score, mask, and
+softmax work, making its 5.19--5.89\% decode reduction plausible even when the
+saved KV payload is small relative to model weights.  vLLM's paged attention
+shows only \(-0.21\) to \(-0.09\)\% change in the same short-context regime,
+which is the relevant evidence for an optimized serving engine.  Since online
+planning also dominates end-to-end time and temporary tensors raise peak
+allocation, MosaicKV is presently a capacity/quality method rather than a
+latency optimization.  Long multimodal contexts, batching, and a fused
+planner require separate measurement.
+
+\paragraph{Generality and statistical scope.}
+The central result uses one LLaVA model family.  The byte-matched identities
+come from the earlier campaign, so they validate the plotted selector curve
+but are not an independent held-out replication.  Confidence intervals are
+paired but uncorrected for 15 comparisons.  A paper-level architecture claim
+requires preregistered held-out tests on additional model families.
+
+% ---------------------------------------------------------------------------
+% Replacement Conclusion
+% ---------------------------------------------------------------------------
+\section{Conclusion}
+
+MosaicKV combines future-query forecasting, cross-modal evidence modeling,
+and value-aware exact-block selection under a measured byte budget.  On
+LLaVA-1.5-7B, its low-memory operating point retains near-FullKV task quality,
+and an exactly byte-matched sweep shows that its advantage over Prompt Top-K
+persists across the 16--40 MiB regime on MMStar, TextVQA, and DocVQA.  The
+result is strongest for OCR and document questions; it does not extend to
+every 60 MiB point.  Published-method reimplementations are reported only as
+fidelity diagnostics, and the current experiments do not evaluate prototype
+merging or residual repair.  Because the HF-eager decode observation
+disappears under vLLM and planning dominates total time, our supported claim
+is improved low-budget quality per active KV byte, not end-to-end serving
+acceleration.

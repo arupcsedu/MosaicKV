@@ -1,272 +1,227 @@
-% Evaluation section for
-% BigData2026__MosaicKV__Query_Forecasted_Inter_Modal_KV_Cache_Compression (1).pdf
+% Revised FAST 2027 evaluation section.
 %
-% This section is derived only from canonical measurements at Git SHA
-% 2d9e316398367094ab3e6f7497748e9fc43bd2ed.  It intentionally labels the
-% evaluated method MosaicKV-Exact: the canonical quality-memory campaign did
-% not contain verified prototype or residual-repair rows.
+% Numeric sources (all immutable measured artifacts):
+% 1. Large operating-point study:
+%    /scratch/djy8hg/runs/mosaickv/vllm-published-baseline-full-9000-5025983094/
+% 2. Exact-byte selector curves:
+%    /scratch/djy8hg/runs/mosaickv/hf-byte-matched-ce6f766dbd/
+% 3. Published-baseline fidelity diagnostic:
+%    /scratch/djy8hg/runs/mosaickv/baseline-fidelity-review-9e2c3e87de/
+%
+% The byte-curve analysis validated 7,680 complete result rows and exact
+% per-sample active-byte equality.  The fidelity analysis validated 2,304
+% complete result rows and exact per-sample active-byte equality.  Neither
+% analysis found a failed or missing primary row.
 
 \section{Evaluation}
 \label{sec:evaluation}
 
-We evaluate whether query-forecasted, graph-aware selection preserves
-multimodal task quality as the active KV-cache budget is reduced.  The main
-experiment is a paired quality--memory study: every method receives the same
-model weights, prompt, media, preprocessing, tokenizer, chat template,
-generation parameters, maximum output length, precision, and attention
-backend.  We use realized active KV bytes as the primary resource variable;
-nominal token-retention ratios are reported only as sweep labels.  This
-distinction matters because mandatory tokens and method-specific granularity
-can make two nominally equal retention ratios consume different numbers of
-bytes.
+We separate three questions that the original single-point figure conflated:
+(i) whether MosaicKV offers a useful low-memory operating point, (ii) whether
+its selector is better than Prompt Top-K at the \emph{same} physical cache
+size, and (iii) whether our local published-method reimplementations are
+faithful enough to support comparative claims.  The first question uses the
+9,000-example campaign from the original submission.  The second uses a new
+five-cap, exactly byte-matched selector sweep.  The third is a separate
+fidelity diagnostic and is not pooled with the main MosaicKV result.
 
-\subsection{Experimental Setup}
-\label{sec:eval_setup}
+\subsection{Experimental Protocol}
+\label{sec:eval-protocol}
 
-\textbf{Models and tasks.}
-We test Qwen2.5-VL-3B-Instruct, Qwen2.5-VL-7B-Instruct, and
-LLaVA-1.5-7B using their pinned Hugging Face revisions.  Qwen is evaluated on
-MMStar, TextVQA, DocVQA, ChartQA, and Video-MME.  LLaVA-1.5 is evaluated on the
-four image tasks because this adapter does not provide the required video path.
-The task metrics are MMStar average accuracy, TextVQA exact match, DocVQA
-average normalized Levenshtein similarity (ANLS), ChartQA relaxed accuracy,
-and the Video-MME perception score.  Scoring is delegated to the corresponding
-\texttt{lmms-eval} task implementation.  We do not combine these incompatible
-benchmark metrics into a macro-average.
+\paragraph{Large operating-point campaign.}
+We evaluate LLaVA-1.5-7B at revision
+\texttt{b234b804b114d9e37bb655e11cbbb5f5e971b7a9} on 1,500 MMStar,
+3,000 TextVQA, and 4,500 DocVQA examples.  Every paired method sees the same
+image, prompt, processor, chat template, tokenizer, and exactly 64 greedily
+decoded tokens.  The run contains 108,000 result rows and no failed samples.
+Its compressed methods occupy different memory points, so it establishes
+operating-point behavior only; it is not used to infer equal-budget selector
+superiority.
 
-\textbf{Methods.}
-FullKV is the uncompressed reference.  RandomKV samples non-mandatory blocks
-under the same byte budget, Prompt-Attention Top-K ranks blocks using only
-prompt-window attention mass, and LOOK-M-reimpl is our paper-faithful local
-reimplementation of LOOK-M; it is not official LOOK-M code and is evaluated
-only on LLaVA-1.5.  The evaluated MosaicKV variant is
-\emph{MosaicKV-Exact} (\texttt{mosaickv\_exact}): hybrid future-query
-forecasting, sparse evidence-graph construction, value-aware utility, and
-budgeted exact-block selection are enabled, while prototype merging and
-residual repair are disabled.  No result in this section should therefore be
-attributed to the prototype or repair mechanisms.  PrefixKV-reimpl,
-VL-Cache-reimpl, MosaicKV-Proto, and MosaicKV-Full lacked a verified canonical
-path for this campaign and are omitted instead of being represented by a
-fallback or simulated result.
+\paragraph{Exact-byte selector curves.}
+We compare Prompt Top-K with MosaicKV-Exact at hard caps of
+\(\{16,22,30,40,60\}\) MiB.  Both methods use the same four-token blocks,
+last-token mandatory policy, packed-cache layout, model revision, FP16
+precision, HF eager attention, deterministic seed, and 64-token output.  We
+use the same 256 examples per task at every cap.  The analysis verifies that
+the realized physical active KV bytes are equal for \emph{every sample and
+cap}, not merely equal on average.  It contains 7,680 complete rows, zero
+failures, and one immutable manifest per run.  The 256 identities per task
+are a deterministic subset of the earlier campaign; consequently this is a
+fixed curve-characterization study rather than an independent held-out
+generalization result.
 
-\textbf{Cache and generation configuration.}
-Common-interface methods use 16-token blocks, with system, question, and
-configured attention-sink tokens treated as mandatory.  LOOK-M-reimpl retains
-its paper-faithful token granularity (block size one); its comparison is made
-using actual bytes, and the granularity difference remains a design
-distinction.  We sweep nominal retention ratios
-\(\{1.0,0.8,0.6,0.4,0.2,0.1,0.05\}\).  MosaicKV-Exact uses the last 16 prompt
-queries and four isolated greedy draft steps, four low-memory forecast
-centroids, a maximum sparse-graph degree of eight, and deterministic lazy
-greedy selection.  The draft rollout reuses the original prefill and is
-discarded before final decoding.  Decoding is greedy with temperature zero,
-\texttt{top\_p}=1, and at most 128 new tokens.
+\paragraph{Published-baseline fidelity diagnostic.}
+We separately sweep PrefixKV-Reimpl at retention
+\(\{0.13,0.20,0.40,0.60\}\) on LLaVA-1.5-7B and VL-Cache-Reimpl at
+\(\{0.10,0.20,0.40,0.60\}\) on the paper's
+LLaVA-v1.6-Mistral-7B family.  Each reimplementation is paired with FullKV
+and Prompt Top-K on 64 TextVQA and 64 DocVQA examples.  At every compressed
+point, the reimplementation and Prompt Top-K have exactly equal physical
+active bytes.  This diagnostic contributes 2,304 complete rows and no
+failures.  It is designed to detect implementation or regime mismatch, not
+to make a MosaicKV-versus-published-method headline claim.
 
-\textbf{Execution and provenance.}
-All canonical rows use Hugging Face eager attention in BF16 on one NVIDIA
-A100-SXM4-80GB GPU.  The software stack is Python~3.11.15, PyTorch~2.8.0,
-Transformers~4.55.2, CUDA~12.8, and NVIDIA driver~595.71.05.  We use five
-warmups and 20 timed repetitions for recorded timing fields.  Deterministic
-methods use seed 17; RandomKV is averaged over independent selection seeds 17,
-29, and 43.  Each manifest records the exact model and dataset revisions,
-configuration SHA, source Git SHA, hardware, and complete backend versions.
+All campaigns use one NVIDIA A100-SXM4-80GB per worker and keep model and
+dataset caches under \texttt{/scratch}.  The relevant common stack is
+Python~3.11.15, PyTorch~2.8.0, Transformers~4.55.2, CUDA~12.8, and NVIDIA
+driver~595.71.05.  Manifests record source and configuration hashes, exact
+model and dataset revisions, backend, attention implementation, precision,
+seed, and measurement type.
 
-The campaign contains 532 immutable configurations and 4,256 measured rows,
-covering 14 model--task strata.  To bound execution time, each stratum uses the
-same eight deterministically selected examples.  This sample size makes the
-experiment a reproducible, time-bounded quality study rather than a
-full-benchmark estimate; we return to this limitation in
-Section~\ref{sec:eval_limits}.
+\paragraph{Tasks and scoring.}
+MMStar uses exact-match category accuracy.  TextVQA uses the EvalAI
+normalizer and ten-annotator VQA consensus score \(\min(1,m/3)\).  DocVQA
+uses average normalized Levenshtein similarity (ANLS).  We report these
+native metrics separately and never average them into a cross-task score.
 
 \subsection{Metrics and Statistical Procedure}
-\label{sec:eval_metrics}
+\label{sec:eval-metrics}
 
-For task metric \(s\), we report the paired score difference
+For paired sample \(j\), candidate \(m\), and comparator \(c\), the quality
+difference is
 \begin{equation}
-    \Delta s = s_{\mathrm{method}} - s_{\mathrm{FullKV}}.
+  \Delta Q_{m,c}=\frac{1}{N}\sum_{j=1}^{N}
+  \left(q_{jm}-q_{jc}\right).
 \end{equation}
-The primary memory metric is the active-cache compression ratio
+We report task scores and \(\Delta Q\) in percentage points.  Confidence
+intervals for the byte-matched curves use 10,000 paired percentile-bootstrap
+resamples.  Because 15 task--cap comparisons are reported, the intervals are
+descriptive and are not adjusted for multiplicity.
+
+The primary systems coordinate is realized active KV storage,
 \begin{equation}
-    r_{\mathrm{bytes}} =
-    \frac{M_{\mathrm{active}}}{M_{\mathrm{FullKV}}},
+  B_{jm}=\sum_{T\in\{K,V\}} \operatorname{numel}(T)
+  \operatorname{element\_size}(T),
 \end{equation}
-where both terms are computed directly from KV tensor storage.  We separately
-record residual bytes; these are zero for all methods evaluated in this
-section.  For diagnostic examples, token agreement is the fraction of greedy
-tokens equal to the paired FullKV trajectory, and sequence agreement is one
-only if the entire generated token sequence is identical.
+measured after cache construction.  We do not substitute nominal retention
+for bytes.  Residual storage is reported separately and is zero for the
+evaluated exact-selection path.  Answer agreement is exact equality of the
+stored generated answers; it complements, but does not replace, the official
+task metric.
 
-We also measure distributional and representation fidelity.  Given FullKV
-next-token distribution \(p_t\) and compressed distribution \(q_t\), logit
-divergence is
-\begin{equation}
-    D_{\mathrm{KL}}(p_t\Vert q_t)
-      = \sum_v p_t(v)\log\frac{p_t(v)}{q_t(v)}.
-\end{equation}
-Attention-output error is the relative layer-aggregated Frobenius error
-\begin{equation}
-    E_{\mathrm{attn}} =
-    \sqrt{\frac{\sum_\ell\lVert A_\ell^{\mathrm{FullKV}}
-    - A_\ell^{\mathrm{method}}\rVert_F^2}
-    {\sum_\ell\lVert A_\ell^{\mathrm{FullKV}}\rVert_F^2}}.
-\end{equation}
-The diagnostic decodes clone the original prefill state and do not perform a
-second prefill.
+\subsection{A Byte-Matched Quality--Memory Frontier}
+\label{sec:eval-byte-matched}
 
-We form 95\% confidence intervals with 10,000 paired bootstrap resamples over
-the eight examples in each model--task stratum.  Pareto dominance is computed
-independently within each model, task, and output length.  A point is dominated
-when another measured point has no lower task score and no greater resource
-cost, with at least one strict inequality.  We evaluate three resource axes:
-active KV bytes, end-to-end latency, and decode latency.  Because the campaign
-was not fully isolated from unrelated processes on the host, memory Pareto
-results are primary; latency Pareto results are diagnostic.
+The original 9,000-example study placed MosaicKV at 21.75--23.63 MiB and
+Prompt Top-K at 38.64--41.83 MiB.  MosaicKV used approximately 43.5\% fewer
+bytes while matching or improving Prompt Top-K's mean task score, but those
+isolated points could not distinguish a better selector from a more
+aggressive operating point.
 
-\subsection{Quality at Aggressive Compression}
-\label{sec:eval_quality}
+Figure~\ref{fig:hf-byte-matched-curves} and
+Table~\ref{tab:hf-byte-matched-curves} resolve that ambiguity.  At exactly
+the same bytes, MosaicKV matches or exceeds Prompt Top-K's mean score at 13
+of 15 task--cap points.  On MMStar, both curves are flat within one example:
+there is no evidence of a material selector advantage.  On TextVQA,
+MosaicKV gains 1.56 points at 16 MiB
+(95\% CI \([0.39,3.12]\)); the 22--40 MiB differences are smaller, and at
+60 MiB MosaicKV is 0.51 points lower (CI \([-1.41,0.00]\)).  On DocVQA,
+MosaicKV gains 2.74 points at 22 MiB (CI \([0.35,5.24]\)) and 2.76 points at
+30 MiB (CI \([0.46,5.25]\)).  At 60 MiB it is 1.05 points lower, with an
+interval spanning zero.  Thus the strongest evidence for the selection
+policy is in the low-memory OCR/document regime; we do not claim uniform
+dominance at every budget.
 
-Table~\ref{tab:quality_r01} reports all model--task strata at nominal retention
-0.1, not a selected subset.  The final column shows that mandatory-block
-rounding yields 8.47--9.79\% realized active bytes for Qwen and 8.80--9.22\%
-for LLaVA.  Scores are shown on a 0--100 scale; RandomKV entries are means over
-three selection seeds.
+\input{mosaickv/figures/hf_byte_matched_curves.tex}
+\input{mosaickv/tables/hf_byte_matched_selector.tex}
 
-\begin{table*}[t]
-\centering
-\caption{Task score at nominal retention 0.1.  ``Prompt'' denotes
-Prompt-Attention Top-K.  LOOK-M-reimpl is a local reimplementation, not
-official LOOK-M.  The active/full column is the realized MosaicKV-Exact KV-byte
-ratio.  A dash denotes an unsupported combination, not a zero score.}
-\label{tab:quality_r01}
-\scriptsize
-\resizebox{\textwidth}{!}{%
-\begin{tabular}{llrrrrrr}
-\hline
-Model & Task (metric) & FullKV & RandomKV & Prompt & LOOK-M-reimpl & MosaicKV-Exact & Active/Full (\%) \\
-\hline
-Qwen2.5-VL-3B & ChartQA (relaxed) & 62.50 & 29.17 & 50.00 & -- & 62.50 & 8.47 \\
-                 & DocVQA (ANLS) & 100.00 & 58.33 & 100.00 & -- & 100.00 & 9.60 \\
-                 & MMStar (accuracy) & 62.50 & 62.50 & 62.50 & -- & 62.50 & 8.78 \\
-                 & TextVQA (exact match) & 78.75 & 50.83 & 66.25 & -- & 78.75 & 9.47 \\
-                 & Video-MME (perception) & 62.50 & 62.50 & 62.50 & -- & 62.50 & 9.79 \\
-\hline
-Qwen2.5-VL-7B & ChartQA (relaxed) & 75.00 & 54.17 & 62.50 & -- & 75.00 & 8.47 \\
-                 & DocVQA (ANLS) & 100.00 & 65.54 & 100.00 & -- & 100.00 & 9.60 \\
-                 & MMStar (accuracy) & 50.00 & 50.00 & 50.00 & -- & 50.00 & 8.78 \\
-                 & TextVQA (exact match) & 78.75 & 78.75 & 66.25 & -- & 78.75 & 9.47 \\
-                 & Video-MME (perception) & 62.50 & 62.50 & 62.50 & -- & 62.50 & 9.79 \\
-\hline
-LLaVA-1.5-7B & ChartQA (relaxed) & 0.00 & 0.00 & 0.00 & 0.00 & 0.00 & 9.22 \\
-                & DocVQA (ANLS) & 41.77 & 2.08 & 31.25 & 30.83 & 6.25 & 8.80 \\
-                & MMStar (accuracy) & 25.00 & 29.17 & 25.00 & 25.00 & 25.00 & 9.12 \\
-                & TextVQA (exact match) & 37.50 & 0.00 & 25.00 & 12.50 & 12.50 & 9.01 \\
-\hline
-\end{tabular}}
-\end{table*}
+The curve also changes the Pareto interpretation.  MosaicKV is not merely a
+single leftmost marker: between 16 and 40 MiB it attains no lower mean score
+than the same-byte Prompt Top-K point in all 12 task--cap comparisons.  At
+60 MiB, Prompt Top-K has the higher point estimate on the two OCR tasks,
+although neither difference is statistically resolved.  The defensible
+claim is therefore a measured low-budget selector advantage, not universal
+Pareto dominance over all methods and budgets.
 
-On both Qwen models, MosaicKV-Exact matches the measured FullKV task score in
-all five strata at this budget.  The largest advantages over the equal-byte
-Prompt baseline occur on ChartQA and TextVQA: MosaicKV-Exact is 12.5 percentage
-points higher on each task for both model sizes.  Relative to RandomKV, the
-Qwen-3B gains are 33.33 points on ChartQA, 41.67 on DocVQA, and 27.92 on
-TextVQA; the corresponding Qwen-7B gains are 20.83, 34.46, and 0 points.  The
-paired confidence intervals for the RandomKV losses exclude zero on Qwen-3B
-ChartQA, DocVQA, and TextVQA and on Qwen-7B ChartQA and DocVQA.  In contrast,
-the Prompt-baseline differences have intervals that include zero, so the
-12.5-point estimates should not be described as statistically established.
+\subsection{Fidelity of Published-Method Reimplementations}
+\label{sec:eval-baseline-fidelity}
 
-These task-level results do not imply trajectory equivalence.  At retention
-0.1, whole-sequence agreement is often zero and KL or attention-output error
-can remain large even when the final task score matches FullKV.  The correct
-interpretation is that the retained evidence was sufficient for the measured
-answer metric on these examples, not that compressed decoding reproduced the
-FullKV distribution.
+Table~\ref{tab:published-baseline-fidelity} reports the diagnostic demanded
+by the unexpectedly low published-baseline scores.  These rows are explicitly
+labeled \texttt{prefixkv\_reimpl} and \texttt{vl\_cache\_reimpl}; they are
+not official-code measurements.
 
-\begin{figure*}[t]
-    \centering
-    \includegraphics[width=0.96\textwidth]{mosaickv/figures/quality_memory_pareto.pdf}
-    \caption{Per-model, per-task quality versus realized active KV bytes.
-    Pareto status is computed within each model--task stratum; incompatible
-    task metrics are never averaged.}
-    \label{fig:quality_memory_pareto}
-\end{figure*}
+\input{mosaickv/tables/published_baseline_fidelity.tex}
 
-\subsection{Pareto Frontier and Mechanism-Level Interpretation}
-\label{sec:eval_pareto}
+\paragraph{PrefixKV.}
+The low-budget collapse persists after exact byte matching.  At 39.19 MiB,
+PrefixKV-Reimpl scores 4.69 on TextVQA while same-byte Prompt Top-K scores
+56.72.  Increasing active storage to 182.03 MiB raises the PrefixKV-Reimpl
+score to 37.66, still 20.62 points below FullKV.  DocVQA is non-monotone,
+which is itself a warning against interpreting the result as published
+PrefixKV behavior.
 
-Across all retention ratios, the analysis contains 336 measured
-model--task--method operating points and 1,008 resource projections.
-MosaicKV-Exact is Pareto-optimal in 32 of its 294 projections: 17 for quality
-versus active KV bytes, 11 for quality versus decode latency, and four for
-quality versus total latency.  Its active-memory frontier points are
-concentrated at retention 0.05 and 0.1.  Conversely, 262 MosaicKV projections
-are non-Pareto; 245 are dominated by at least one non-Mosaic baseline.  Most
-notably, 94 of 98 MosaicKV total-latency projections are non-Pareto.  We
-therefore find a selective memory-quality advantage rather than a general
-systems-speed advantage.
+There are concrete regime differences.  The released PrefixKV code uses a
+legacy LLaVA checkpoint and Transformers~4.31 attention patch, and its bundled
+profile filenames encode the \emph{forgotten} ratio.  Our common runtime uses
+the HF-converted checkpoint and rescales the pinned layer-profile shape to an
+exact whole-cache byte cap.  The upstream profile-generation aggregation and
+calibration identities are not released.  A previous one-sample development
+parity check on the legacy checkpoint matched official and reimplemented
+generated tokens and 31 of 32 layer sizes at 50\% retention, but it used a
+dirty tree and one trial and is not paper evidence.  Therefore the benchmark
+collapse is classified as an unresolved checkpoint/profile/runtime-regime
+mismatch.  PrefixKV-Reimpl is removed from the headline ranking and cannot be
+used to claim that MosaicKV beats published PrefixKV.
 
-The Qwen pattern is consistent with the design motivation.  RandomKV spends
-the same number of bytes without estimating evidence utility and loses quality
-on visually precise and document-oriented examples.  Prompt-Attention Top-K
-uses a stronger signal but sees only prompt-side attention; it can miss blocks
-whose relevance emerges during decoding or blocks needed to complete a
-cross-modal evidence chain.  MosaicKV-Exact instead combines a prompt/draft
-future-query forecast with graph coverage and value-aware utility.  At a fixed
-byte budget, this objective can retain a small OCR span, chart label, or visual
-region that has modest prompt attention but high forecasted contribution or
-connects otherwise incomplete evidence.  This provides a mechanism-level
-explanation for the ChartQA and TextVQA score estimates.
+\paragraph{VL-Cache.}
+No official implementation is available, so we evaluate the paper equations
+on LLaVA-v1.6-Mistral rather than treating the LLaVA-1.5 adaptation as
+canonical.  The expected retention trend is visible: on DocVQA the gap to
+FullKV narrows from 24.25 points at 10\% retention to 4.83 points at 60\%; on
+TextVQA the reimplementation reaches the FullKV score at 40\% retention.
+However, same-byte Prompt Top-K is higher at most other points.  These results
+validate formula execution and a published qualitative trend, not exact
+reproduction of the paper's tables.  VL-Cache therefore remains a secondary
+diagnostic, not part of the primary MosaicKV selector claim.  LOOK-M is also
+a local reimplementation and is excluded from that primary claim until an
+equivalent official-code benchmark is available.
 
-This explanation is an interpretation, not a causal conclusion from the main
-experiment: the canonical campaign does not contain paper-eligible component
-ablations.  A larger disjoint ablation study is required to attribute gains
-separately to forecasting, graph coverage, and value-aware scoring.
+\subsection{Why the HF Decode Observation Does Not Transfer}
+\label{sec:eval-systems}
 
-\begin{figure*}[t]
-    \centering
-    \includegraphics[width=0.96\textwidth]{mosaickv/figures/quality_retention_curves.pdf}
-    \caption{Task score across nominal retention ratios.  The tables and
-    Pareto analysis use realized bytes; nominal retention is used here only to
-    visualize the sweep.}
-    \label{fig:quality_retention}
-\end{figure*}
+In the original operating-point campaign, reducing the HF-eager active cache
+from approximately 39--42 MiB to 22--24 MiB reduced 64-token decode time by
+5.19--5.89\% relative to Prompt Top-K.  The same comparison under vLLM changed
+decode time by only \(-0.21\) to \(-0.09\)\%.  This contrast is consistent
+with the execution mechanisms rather than contradictory measurements.
 
-\subsection{Correctness, Negative Results, and Limitations}
-\label{sec:eval_limits}
+HF eager attention explicitly forms and normalizes attention scores over the
+active sequence for every layer and head.  Shortening that sequence reduces
+score-matrix, softmax, masking, and Python/runtime work even though the saved
+KV payload is small relative to the FP16 model weights streamed during each
+token step.  vLLM instead uses paged attention over a preallocated engine
+pool; at these one-image, batch-one, 64-token contexts, weight traffic and
+kernel overhead dominate the modest KV-byte difference.  The near-zero vLLM
+change is therefore the serving-relevant result for this regime.
 
-\textbf{Full-cache equivalence.}
-At retention 1.0, every compression method follows an identity path.  All 368
-non-FullKV paired rows match the FullKV active-byte count and generated token
-sequence exactly: token and sequence agreement are 1.0, while logit KL and
-attention-output error are zero.  Three initial Video-MME attempts were
-decoder-consensus outliers on corrupted videos; they were rerun with unchanged
-model and experiment configurations under a larger host-memory allocation and
-increased decoder EOF retries.  Superseded attempts remain archived rather
-than silently removed.
+Moreover, MosaicKV's online HF planning costs approximately 42--45 seconds
+per request in the original campaign, so the eager decode reduction does not
+produce an end-to-end speedup.  Temporary planning tensors also raise peak
+allocation relative to Prompt Top-K.  We consequently treat the 5.19--5.89\%
+HF decode reduction as an implementation-specific secondary observation,
+remove it from the abstract and contribution claims, and make no serving
+latency claim.  Establishing a real systems benefit requires long multimodal
+contexts or larger batches where aggregate KV traffic is material, together
+with a fused low-overhead planner.
 
-\textbf{Architecture dependence.}
-MosaicKV-Exact is not uniformly better.  On LLaVA-1.5 DocVQA at retention 0.1,
-it scores 6.25 versus 31.25 for Prompt Top-K, 30.83 for LOOK-M-reimpl, and
-41.77 for FullKV.  On LLaVA TextVQA, it scores 12.5 versus 25.0 for Prompt
-Top-K and 37.5 for FullKV.  The LLaVA ChartQA subset has zero FullKV score and
-cannot support a useful compression claim.  These failures indicate that the
-current frozen forecast and utility configuration is not yet
-architecture-general.
+\subsection{Validated Scope and Limitations}
+\label{sec:eval-limitations}
 
-\textbf{Latency.}
-MosaicKV-Exact pays for draft forecasting, graph construction, and lazy-greedy
-selection.  Only four of 98 total-latency projections are Pareto-optimal, and
-compression overhead usually exceeds the decode saving for the 128-token
-outputs used here.  A faster selector or amortization over longer outputs is
-needed before presenting MosaicKV as an end-to-end latency optimization.
+The protocol name in the original artifact is \texttt{mosaickv\_full}, but
+the effective label records an exact-only compatibility fallback.  Prototype
+assignments are rejected, residual bytes are zero, and repair never fires.
+The measured method therefore consists of future-query forecasting, sparse
+evidence modeling, value-aware selection, and exact K/V retention.  Kept
+blocks are unchanged, but evicted evidence is still lost; exact retention
+must not be described as ``zero evidence corruption.''  Prototype merging
+and residual repair are specified extensions without empirical support in
+this paper.
 
-\textbf{Statistical scope.}
-Eight examples per stratum produce broad, discrete bootstrap intervals and
-make individual scores sensitive to one example.  The experiment is fully
-paired and provenance-complete, but it is underpowered for definitive
-full-benchmark claims.  The absence of verified PrefixKV-reimpl,
-VL-Cache-reimpl, prototype, and repair rows further limits the method coverage.
-Accordingly, our supported conclusion is narrow: MosaicKV-Exact exposes useful
-low-memory operating points on the evaluated Qwen subsets, while the present
-evidence does not establish universal quality, architecture-generalization,
-or end-to-end latency superiority.
+The large campaign uses one model family, and the byte-matched study reuses a
+subset of its identities.  The results establish a LLaVA-1.5 low-budget
+quality--memory advantage over Prompt Top-K, not architecture-wide
+generalization.  Published-method reimplementations remain diagnostic, the
+vLLM mapping is a request-wide projection rather than native layer/head-aware
+MosaicKV, and the present planner is not an end-to-end latency optimization.

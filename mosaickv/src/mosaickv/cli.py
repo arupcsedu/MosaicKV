@@ -404,6 +404,22 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate_parser.add_argument("--run-id")
     evaluate_parser.add_argument("--raw-output")
     evaluate_parser.add_argument("--parquet-output")
+    evaluate_parser.add_argument(
+        "--metric-output",
+        help="append-only JSONL for paper-native sample/corpus metrics",
+    )
+    evaluate_parser.add_argument(
+        "--metric-parquet-output",
+        help="legacy combined sample/corpus metric Parquet output",
+    )
+    evaluate_parser.add_argument(
+        "--metric-observations-parquet-output",
+        help="immutable Parquet table containing only sample-scoped metric observations",
+    )
+    evaluate_parser.add_argument(
+        "--metric-aggregates-parquet-output",
+        help="immutable Parquet table containing only corpus-scoped metric aggregates",
+    )
     evaluate_parser.add_argument("--manifest")
     evaluate_parser.add_argument("--seed", type=int, default=0)
     evaluate_parser.add_argument("--subset-size", type=int)

@@ -194,14 +194,25 @@ No official code parity is possible because no author implementation was found.
 
 ## Recommended baseline execution order
 
-1. Implement simple in-tree full-cache, recent-only, uniform block, and random
-   baselines under the common HF harness.
-2. Validate `prefixkv_reimpl`, `lookm_reimpl`, and `vl_cache_reimpl` from a
-   clean SHA with the common environment.
-3. Use the implemented `prefixkv_reimpl`, `lookm_reimpl`, and
-   `vl_cache_reimpl` only for identical-model comparisons. Never merge official and reimpl
-   rows or compare them under unequal prompts, media, tokenization, generation,
-   output length, cache budget, precision, or backend configuration.
+1. Preserve the verified FullKV, Prompt Top-K, and MosaicKV common-runtime
+   metrics and raw rows.
+2. Reproduce PrefixKV on its LLaVA-Description/MM-Vet PPL and ROUGE protocol,
+   using the pinned official code before accepting `prefixkv_reimpl` rows.
+3. Validate `vl_cache_reimpl` on COCO CIDEr, DocVQA ANLS, and MathVista
+   accuracy over the paper's retention sweep; no row may be labeled official.
+4. Reproduce pinned LOOK-M on MileBench with its dataset-specific Accuracy or
+   ROUGE route and equal-dataset subtask aggregation, then compare
+   `lookm_reimpl` under identical controls.
+5. Add H2O, StreamingLLM/Local, PyramidKV, Elastic Cache, SnapKV, or RoCo only
+   after pinning and native-benchmark validation. Until then their status is
+   `unsupported_unpinned`, not an approximation by another selector.
+6. Use published reimplementations only for identical-model comparisons.
+   Never merge official and reimplementation rows or compare them under
+   unequal prompts, media, tokenization, generation, output length, active-byte
+   budget, precision, or backend configuration.
+
+The exact metrics, task routes, code identities, and executable validation
+commands are in [paper-native baseline evaluation](baselines/paper_native_evaluation.md).
 
 LOOK-M/PrefixKV source and their local `*_reimpl` code were added after the
 original audit. Official execution is disabled in the common environment;

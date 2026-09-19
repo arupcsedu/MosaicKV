@@ -1,0 +1,41 @@
+% Measured artifact:
+% /scratch/djy8hg/runs/mosaickv/baseline-fidelity-review-9e2c3e87de/results/analysis/
+% Source SHA: 9e2c3e87de0d6537d11d0e9df4f986189fd43ee3
+% These rows are reimplementation diagnostics, not official-code results.
+\begin{table*}[t]
+\centering
+\caption{Published-baseline fidelity diagnostic.  Each reimplementation and
+Prompt Top-K use exactly matched physical active bytes.  PrefixKV FullKV
+scores are 58.28 (TextVQA) and 28.73 (DocVQA); VL-Cache FullKV scores are
+76.09 and 64.21 on its LLaVA-v1.6-Mistral model.  $\Delta$ is relative to the
+corresponding FullKV score.  These are local reimplementations, not official
+code results.}
+\label{tab:published-baseline-fidelity}
+\scriptsize
+\setlength{\tabcolsep}{3.2pt}
+\begin{tabular}{lllrrrrl}
+\toprule
+Family/model & Task & Retention & Active (MiB) & Reimpl. score & Same-byte Prompt & $\Delta$ Full & 95\% CI \\
+\midrule
+PrefixKV/LLaVA-1.5 & TextVQA & 0.13 & 39.19 & 4.69 & 56.72 & $-53.59$ & $[-65.31,-41.72]$ \\
+ & & 0.20 & 60.54 & 4.69 & 58.28 & $-53.59$ & $[-65.00,-41.72]$ \\
+ & & 0.40 & 121.26 & 32.97 & 58.28 & $-25.31$ & $[-36.41,-14.38]$ \\
+ & & 0.60 & 182.03 & 37.66 & 58.28 & $-20.62$ & $[-31.09,-10.78]$ \\
+\cmidrule(lr){2-8}
+ & DocVQA & 0.13 & 39.41 & 11.00 & 26.47 & $-17.73$ & $[-29.03,-6.27]$ \\
+ & & 0.20 & 60.84 & 2.12 & 27.90 & $-26.62$ & $[-37.45,-16.40]$ \\
+ & & 0.40 & 121.86 & 13.22 & 27.17 & $-15.51$ & $[-23.89,-7.99]$ \\
+ & & 0.60 & 182.92 & 11.97 & 28.73 & $-16.76$ & $[-25.81,-8.66]$ \\
+\midrule
+VL-Cache/LLaVA-v1.6-Mistral & TextVQA & 0.10 & 29.03 & 67.81 & 75.00 & $-8.28$ & $[-16.56,-0.47]$ \\
+ & & 0.20 & 58.11 & 71.88 & 75.00 & $-4.22$ & $[-10.78,1.56]$ \\
+ & & 0.40 & 116.27 & 76.09 & 76.09 & $+0.00$ & $[0.00,0.00]$ \\
+ & & 0.60 & 174.42 & 72.97 & 76.09 & $-3.12$ & $[-7.81,0.00]$ \\
+\cmidrule(lr){2-8}
+ & DocVQA & 0.10 & 30.09 & 39.96 & 54.18 & $-24.25$ & $[-32.94,-15.82]$ \\
+ & & 0.20 & 60.23 & 45.36 & 58.83 & $-18.85$ & $[-27.57,-10.78]$ \\
+ & & 0.40 & 120.54 & 54.88 & 62.19 & $-9.33$ & $[-16.32,-3.07]$ \\
+ & & 0.60 & 180.82 & 59.37 & 61.86 & $-4.83$ & $[-10.38,-0.11]$ \\
+\bottomrule
+\end{tabular}
+\end{table*}

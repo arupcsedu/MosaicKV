@@ -1,0 +1,51 @@
+% Measured artifact:
+% /scratch/djy8hg/runs/mosaickv/hf-byte-matched-ce6f766dbd/analysis/
+% Source SHA: ce6f766dbd751d9c34e460d125ae65ece66966da
+% Classification: canonical_byte_matched_selector_curve
+\begin{figure*}[t]
+\centering
+\begin{tikzpicture}
+\begin{groupplot}[
+  group style={group size=3 by 1,horizontal sep=1.0cm},
+  width=0.31\textwidth,
+  height=0.24\textwidth,
+  xlabel={Measured active KV (MiB)},
+  ylabel={Task score (\%)},
+  grid=both,
+  legend style={font=\scriptsize},
+]
+\nextgroupplot[title={MMStar},ymin=31.141,ymax=32.531]
+\addplot[color=blue!70!black,mark=triangle*,thick] coordinates
+  {(15.2773,32.0312) (21.2773,32.0312) (29.2773,31.6406)
+   (39.2773,32.0312) (59.2773,32.0312)};
+\addlegendentry{Prompt Top-K}
+\addplot[color=green!50!black,mark=star,mark size=3pt,very thick] coordinates
+  {(15.2773,32.0312) (21.2773,32.0312) (29.2773,32.0312)
+   (39.2773,32.0312) (59.2773,32.0312)};
+\addlegendentry{MosaicKV-Exact}
+
+\nextgroupplot[title={TextVQA},ymin=43.016,ymax=46.281]
+\addplot[color=blue!70!black,mark=triangle*,thick] coordinates
+  {(15.1895,43.7500) (21.1895,43.5156) (29.1895,44.1016)
+   (39.1895,44.8828) (59.1895,45.7812)};
+\addplot[color=green!50!black,mark=star,mark size=3pt,very thick] coordinates
+  {(15.1895,45.3125) (21.1895,44.2969) (29.1895,44.6094)
+   (39.1895,45.3906) (59.1895,45.2734)};
+
+\nextgroupplot[title={DocVQA},ymin=17.620,ymax=22.444]
+\addplot[color=blue!70!black,mark=triangle*,thick] coordinates
+  {(15.2227,18.3959) (21.2227,18.1770) (29.2227,18.2111)
+   (39.2227,18.9969) (59.2227,21.8877)};
+\addplot[color=green!50!black,mark=star,mark size=3pt,very thick] coordinates
+  {(15.2227,20.5190) (21.2227,20.9136) (29.2227,20.9711)
+   (39.2227,20.4340) (59.2227,20.8345)};
+\end{groupplot}
+\end{tikzpicture}
+\caption{Byte-matched HF-eager selector curves.  Each pair uses the same
+samples, hard byte cap, four-token blocks, mandatory-token policy, model,
+processor, and deterministic generation settings.  Better points move
+toward the upper left.  These 256-example-per-task subsets characterize the
+selector curve; they are drawn from previously evaluated identities and are
+not a new held-out generalization study.}
+\label{fig:hf-byte-matched-curves}
+\end{figure*}

@@ -65,7 +65,7 @@ class _TextOnlyProcessor:
     def apply_chat_template(self, *_args: Any, **_kwargs: Any) -> str:
         return "tiny prompt"
 
-    def __call__(self, **_kwargs: Any) -> dict[str, Any]:
+    def __call__(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
         return {
             "input_ids": torch.tensor([[1, 3, 4, 5]], dtype=torch.long),
             "attention_mask": torch.ones((1, 4), dtype=torch.long),
@@ -637,6 +637,35 @@ def test_unified_runtime_methods_decode_and_write_complete_traces(
         assert trace["prototypes"]
     if method is MosaicKVMethod.MOSAICKV_FULL:
         assert all(event["re_decode_count"] <= 1 for event in trace["repair_events"])
+
+
+@pytest.mark.hf
+@pytest.mark.integration
+def test_teacher_forced_nll_uses_compressed_decode_path_and_complete_trace(
+    tmp_path: Path,
+) -> None:
+    torch.manual_seed(31)
+    runtime = HuggingFaceMosaicKVModel(
+        _llava(),
+        _runtime_config(MosaicKVMethod.MOSAICKV_EXACT, 0.5),
+        trace_directory=tmp_path,
+    )
+    request = _runtime_request("tiny-teacher-forced")
+
+    loss = runtime.teacher_forced_nll(request, "human target")
+
+    assert loss.evaluated_tokens == 4
+    assert loss.negative_log_likelihood_sum > 0
+    trace_path = next((tmp_path / request.run_id).glob("*.json"))
+    trace = json.loads(trace_path.read_text(encoding="utf-8"))
+    assert trace["teacher_forced_evaluation"] == {
+        "enabled": True,
+        "evaluated_tokens": 4,
+        "negative_log_likelihood_sum": pytest.approx(loss.negative_log_likelihood_sum),
+        "target_was_not_truncated": True,
+    }
+    assert trace["status"] == "completed"
+    assert trace["active_kv_bytes"] > 0
 
 
 @pytest.mark.hf

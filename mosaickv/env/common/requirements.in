@@ -17,6 +17,7 @@ flashinfer-python==0.2.14.post1
 hf-transfer==0.1.9
 huggingface-hub==0.36.2
 lmms-eval==0.7.2
+pycocoevalcap==1.2
 modelscope==1.38.1
 mypy==1.20.2
 ninja==1.13.0

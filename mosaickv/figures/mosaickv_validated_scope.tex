@@ -1,0 +1,46 @@
+% Replacement for the original architecture figure.  Solid green stages are
+% exercised by the reported HF result; dashed gray stages are specified but
+% inactive.  Requires TikZ libraries arrows.meta and positioning.
+\begin{figure*}[t]
+\centering
+\begin{tikzpicture}[
+  node distance=5mm and 7mm,
+  active/.style={draw=green!45!black,fill=green!8,rounded corners,
+    minimum width=2.45cm,minimum height=0.88cm,align=center,font=\small},
+  inactive/.style={draw=gray!65,fill=gray!8,dashed,rounded corners,
+    minimum width=2.25cm,minimum height=0.88cm,align=center,font=\small,
+    text=gray!75!black},
+  flow/.style={-{Latex[length=2mm]},thick,draw=green!45!black},
+  inactiveflow/.style={-{Latex[length=2mm]},dashed,draw=gray!65},
+  note/.style={font=\scriptsize,align=center},
+]
+\node[active] (full) {Full multimodal\\KV cache};
+\node[active,right=of full] (forecast) {Future-query\\forecast};
+\node[active,right=of forecast] (graph) {Sparse evidence\\graph};
+\node[active,right=of graph] (select) {Value-aware\\byte selector};
+\node[active,right=of select] (exact) {Exact retained\\blocks};
+
+\node[inactive,below=8mm of graph] (proto) {Prototype tier\\specified, inactive};
+\node[inactive,right=of proto] (residual) {Residual tier\\specified, inactive};
+\node[inactive,right=of residual] (repair) {Uncertainty repair\\specified, inactive};
+
+\draw[flow] (full) -- (forecast);
+\draw[flow] (forecast) -- (graph);
+\draw[flow] (graph) -- (select);
+\draw[flow] (select) -- (exact);
+\draw[inactiveflow] (select.south) |- (proto.west);
+\draw[inactiveflow] (proto) -- (residual);
+\draw[inactiveflow] (residual) -- (repair);
+\draw[inactiveflow] (repair.east) -| (exact.south);
+
+\node[note,above=2mm of select] {validated execution path};
+\node[note,below=2mm of residual,text=gray!75!black]
+  {not used by any reported result};
+\end{tikzpicture}
+\caption{MosaicKV architecture and validated scope.  Solid stages are
+executed in the reported HF experiments.  Exact selected K/V blocks are
+copied unchanged, while unselected evidence is removed.  Prototype merging,
+residual storage, and repair are part of the extensible design but are shown
+dashed because compatibility checks disabled them in the reported campaign.}
+\label{fig:mosaickv-validated-scope}
+\end{figure*}

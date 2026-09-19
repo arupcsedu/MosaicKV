@@ -128,9 +128,7 @@ def _resolve_sample_selection(
         raise ValueError("--sample-offset must be >= 0")
     if local_sample_count is not None:
         if explicit_sample_ids is not None or sample_offset:
-            raise ValueError(
-                "synthetic vLLM evaluation does not support sample files or offsets"
-            )
+            raise ValueError("synthetic vLLM evaluation does not support sample files or offsets")
         requested = None if full_dataset else cast("int | None", args.subset_size)
         selected = local_sample_count if requested is None else min(requested, local_sample_count)
         return _VLLMSampleSelection(requested, 0, None, selected)
@@ -201,9 +199,7 @@ def run_vllm_evaluation(args: argparse.Namespace, config: RunConfig) -> tuple[in
         enable_mosaickv=bool(args.enable_mosaickv),
         native_selector_plan=cast("str | None", args.vllm_selector_plan),
         native_selector_plan_sha256=cast("str | None", args.vllm_selector_plan_sha),
-        native_selector_task=(
-            task_name if args.vllm_selector_plan is not None else None
-        ),
+        native_selector_task=(task_name if args.vllm_selector_plan is not None else None),
     )
     if options.enable_mosaickv:
         require_native_mosaickv_support(
@@ -225,8 +221,10 @@ def run_vllm_evaluation(args: argparse.Namespace, config: RunConfig) -> tuple[in
             "prompt_attention_topk, random_kv, lookm_reimpl, "
             "prefixkv_reimpl, or vl_cache_reimpl"
         )
-    if options.enable_mosaickv and config.method.value != "mosaickv_exact" and (
-        options.native_selector_plan is None
+    if (
+        options.enable_mosaickv
+        and config.method.value != "mosaickv_exact"
+        and (options.native_selector_plan is None)
     ):
         raise ValueError("vLLM native baselines require --vllm-selector-plan")
     if not options.enable_mosaickv and (
@@ -300,6 +298,16 @@ def run_vllm_evaluation(args: argparse.Namespace, config: RunConfig) -> tuple[in
                 sample_offset=selection.sample_offset,
                 explicit_sample_ids=selection.explicit_sample_ids,
                 parquet_output=parquet_path,
+                metric_output=cast("str | None", getattr(args, "metric_output", None)),
+                metric_parquet_output=cast(
+                    "str | None", getattr(args, "metric_parquet_output", None)
+                ),
+                metric_observations_parquet_output=cast(
+                    "str | None", getattr(args, "metric_observations_parquet_output", None)
+                ),
+                metric_aggregates_parquet_output=cast(
+                    "str | None", getattr(args, "metric_aggregates_parquet_output", None)
+                ),
                 registry=registry,
                 dataset_revision=config.dataset.revision,
             )

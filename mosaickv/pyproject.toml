@@ -28,6 +28,7 @@ dev = [
 ]
 evaluation = [
   "lmms-eval==0.7.2",
+  "pycocoevalcap==1.2",
   "pyarrow>=25,<26",
 ]
 

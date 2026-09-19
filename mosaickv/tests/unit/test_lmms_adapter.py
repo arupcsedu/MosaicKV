@@ -321,3 +321,32 @@ def test_lmms_auxiliary_outputs_are_routed_beside_raw_artifact(tmp_path: Path) -
     assert args.output_path == str(raw_output.parent.resolve())
     assert args.process_with_media is True
     assert not Path(args.output_path).is_relative_to(Path.cwd())
+
+
+def test_paper_native_nested_and_corpus_only_scores_are_distinguished() -> None:
+    assert (
+        lmms_adapter._extract_optional_score(
+            {"llm_as_judge_eval": {"true_false": True}}, "llm_as_judge_eval"
+        )
+        == 1.0
+    )
+    assert (
+        lmms_adapter._extract_optional_score(
+            {"coco_CIDEr": {"answer": ["caption"], "pred": "caption"}}, "coco_CIDEr"
+        )
+        is None
+    )
+
+
+def test_split_metric_parquet_outputs_must_be_configured_as_a_pair(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="must be provided together"):
+        lmms_adapter.run_lmms_development_evaluation(
+            run_id="run",
+            task_names=("mmstar",),
+            model=InspectingModel(),
+            raw_output=tmp_path / "raw.jsonl",
+            manifest_path="manifest.json",
+            seed=0,
+            subset_size=1,
+            metric_observations_parquet_output=tmp_path / "observations.parquet",
+        )
