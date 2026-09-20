@@ -3239,6 +3239,86 @@ class VLCacheConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class PublishedKVConfig:
+    """Audited controls for Elastic Cache and five exact-token policies.
+
+    These controls describe the algorithms' token-level policies.  The common
+    cache budget remains authoritative and is always accounted in physical K/V
+    bytes by the runtime.
+    """
+
+    enabled: bool = False
+    observation_window: int = 32
+    attention_pool_kernel: int = 5
+    attention_pooling: str = "avgpool"
+    sink_tokens: int = 4
+    recent_fraction: float = 0.3
+    pyramid_beta: int = 20
+    roco_protected_fraction: float = 0.3
+    elastic_start_tokens: int = 1
+    elastic_protect_tokens: int = 1
+    elastic_decode_offset: int = -25
+
+    def __post_init__(self) -> None:
+        if self.observation_window < 1:
+            raise ConfigurationError("published_kv.observation_window must be >= 1")
+        if self.attention_pool_kernel < 1 or self.attention_pool_kernel % 2 == 0:
+            raise ConfigurationError(
+                "published_kv.attention_pool_kernel must be a positive odd integer"
+            )
+        if self.attention_pooling not in {"avgpool", "maxpool"}:
+            raise ConfigurationError(
+                "published_kv.attention_pooling must be 'avgpool' or 'maxpool'"
+            )
+        if self.sink_tokens < 1:
+            raise ConfigurationError("published_kv.sink_tokens must be >= 1")
+        for name in ("recent_fraction", "roco_protected_fraction"):
+            value = getattr(self, name)
+            if not math.isfinite(value) or not 0 <= value < 1:
+                raise ConfigurationError(f"published_kv.{name} must be finite and in [0, 1)")
+        if self.pyramid_beta < 1:
+            raise ConfigurationError("published_kv.pyramid_beta must be >= 1")
+        if self.elastic_start_tokens < 1:
+            raise ConfigurationError("published_kv.elastic_start_tokens must be >= 1")
+        if self.elastic_protect_tokens < 1:
+            raise ConfigurationError("published_kv.elastic_protect_tokens must be >= 1")
+
+    @classmethod
+    def from_mapping(cls, value: object) -> PublishedKVConfig:
+        data = _mapping(value, "published_kv")
+        _reject_unknown(
+            data,
+            {
+                "enabled",
+                "observation_window",
+                "attention_pool_kernel",
+                "attention_pooling",
+                "sink_tokens",
+                "recent_fraction",
+                "pyramid_beta",
+                "roco_protected_fraction",
+                "elastic_start_tokens",
+                "elastic_protect_tokens",
+                "elastic_decode_offset",
+            },
+            "published_kv",
+        )
+        return cls(
+            enabled=_bool(data, "enabled", False, "published_kv"),
+            observation_window=_int(data, "observation_window", 32, "published_kv"),
+            attention_pool_kernel=_int(data, "attention_pool_kernel", 5, "published_kv"),
+            attention_pooling=_optional_str(data, "attention_pooling", "avgpool", "published_kv"),
+            sink_tokens=_int(data, "sink_tokens", 4, "published_kv"),
+            recent_fraction=_float(data, "recent_fraction", 0.3, "published_kv"),
+            pyramid_beta=_int(data, "pyramid_beta", 20, "published_kv"),
+            roco_protected_fraction=_float(data, "roco_protected_fraction", 0.3, "published_kv"),
+            elastic_start_tokens=_int(data, "elastic_start_tokens", 1, "published_kv"),
+            elastic_protect_tokens=_int(data, "elastic_protect_tokens", 1, "published_kv"),
+            elastic_decode_offset=_int(data, "elastic_decode_offset", -25, "published_kv"),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class RepairConfig:
     """Uncertainty-guided residual repair controls."""
 
@@ -3389,6 +3469,7 @@ class RunConfig:
     lookm: LookMConfig = field(default_factory=LookMConfig)
     prefixkv: PrefixKVConfig = field(default_factory=PrefixKVConfig)
     vl_cache: VLCacheConfig = field(default_factory=VLCacheConfig)
+    published_kv: PublishedKVConfig = field(default_factory=PublishedKVConfig)
     schema_version: int = 1
 
     def __post_init__(self) -> None:
@@ -3690,6 +3771,41 @@ class RunConfig:
             raise ConfigurationError(
                 "vl_cache.enabled=true is reserved for method='vl_cache_reimpl'"
             )
+        if self.method.is_published_eviction_reimplementation:
+            if not self.published_kv.enabled:
+                raise ConfigurationError(
+                    f"method={self.method.value!r} requires published_kv.enabled=true"
+                )
+            if self.cache.block_size != 1:
+                raise ConfigurationError(
+                    f"method={self.method.value!r} requires cache.block_size=1"
+                )
+            if self.cache.budget_unit not in {BudgetUnit.BLOCKS, BudgetUnit.BYTES}:
+                raise ConfigurationError(
+                    f"method={self.method.value!r} requires a block or byte budget"
+                )
+            enabled = []
+            if self.forecasting.enabled:
+                enabled.append("forecasting")
+            if self.graph.enabled:
+                enabled.append("graph")
+            if self.selection.enabled:
+                enabled.append("selection")
+            if self.prototypes.enabled:
+                enabled.append("prototypes")
+            if self.residual.enabled:
+                enabled.append("residual")
+            if self.repair.enabled or self.repair.policy is not RepairPolicy.NONE:
+                enabled.append("repair")
+            if enabled:
+                raise ConfigurationError(
+                    f"method={self.method.value!r} requires disabled MosaicKV stages: "
+                    + ", ".join(enabled)
+                )
+        elif self.published_kv.enabled:
+            raise ConfigurationError(
+                "published_kv.enabled=true is reserved for an audited published-KV reimplementation"
+            )
 
     @classmethod
     def from_mapping(cls, value: object) -> RunConfig:
@@ -3714,6 +3830,7 @@ class RunConfig:
             "lookm",
             "prefixkv",
             "vl_cache",
+            "published_kv",
         }
         _reject_unknown(data, allowed, "config")
         required = {"model", "dataset", "execution", "generation", "cache"}
@@ -3743,6 +3860,7 @@ class RunConfig:
             lookm=LookMConfig.from_mapping(data.get("lookm", {})),
             prefixkv=PrefixKVConfig.from_mapping(data.get("prefixkv", {})),
             vl_cache=VLCacheConfig.from_mapping(data.get("vl_cache", {})),
+            published_kv=PublishedKVConfig.from_mapping(data.get("published_kv", {})),
             schema_version=_int(data, "schema_version", 1, "config"),
         )
 
@@ -3849,6 +3967,7 @@ __all__ = [
     "ModelConfig",
     "PrefixKVConfig",
     "PrototypeConfig",
+    "PublishedKVConfig",
     "RepairConfig",
     "ResidualConfig",
     "RunConfig",

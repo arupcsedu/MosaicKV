@@ -338,6 +338,32 @@ def test_paper_native_nested_and_corpus_only_scores_are_distinguished() -> None:
     )
 
 
+def test_mathvista_score_matches_pinned_lmms_extraction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # lmms-eval 0.7.2 creates its judge provider at import time even when its
+    # deterministic quick extractor is sufficient.  The dummy provider keeps
+    # this source-parity fixture offline; production runs retain their explicit
+    # API_TYPE/provider configuration.
+    monkeypatch.setenv("API_TYPE", "dummy")
+    from lmms_eval.tasks.mathvista.utils import mathvista_process_results
+
+    doc = {
+        "question_type": "free_form",
+        "answer_type": "integer",
+        "query": "What is one plus one?",
+        "choices": [],
+        "answer": "2",
+        "precision": 0,
+        "pid": "fixture",
+        "metadata": {"split": "testmini"},
+    }
+    result = mathvista_process_results(doc, ["2"])
+
+    assert result["llm_as_judge_eval"]["true_false"] is True
+    assert lmms_adapter._extract_optional_score(result, "llm_as_judge_eval") == 1.0
+
+
 def test_split_metric_parquet_outputs_must_be_configured_as_a_pair(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="must be provided together"):
         lmms_adapter.run_lmms_development_evaluation(

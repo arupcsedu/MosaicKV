@@ -30,10 +30,11 @@ unit tests, synthetic 100%-retention equivalence, and pinned Qwen2.5-VL-3B HF
 eager/SDPA/FlashAttention parity gates pass in exploratory dirty-tree runs.
 Qwen2.5-VL-3B FullKV cross-parity now passes for the current-lock vLLM and
 SGLang Torch-native wrappers. Dataset progression remains incomplete.
-Official LOOK-M and PrefixKV source is pinned for inspection,
-but official execution is disabled; only the explicitly labeled
-reimplementations belong to the common runtime. This repository currently
-reports **no paper-eligible measured experimental results**.
+Official LOOK-M and PrefixKV source is pinned and remains unmodified. Their
+fail-closed control-plane launcher verifies exact isolated author environments;
+only explicitly labeled reimplementations execute inside the common runtime.
+This repository currently reports **no paper-eligible measured experimental
+results**.
 
 The bounded dirty-tree Experiment-3 validation completed 84/84 rows on A100
 GPUs with identical per-sample active byte budgets. It provides implementation
@@ -172,6 +173,7 @@ semantics.
 - [Simple baselines](docs/simple_baselines.md) — exact-only policies, common budgets, deterministic allocation, traces, and configuration.
 - [LOOK-M specification](docs/baselines/lookm_spec.md) and [parity report](docs/baselines/lookm_parity_report.md) — pinned official source, paper equations, source deviations, unified `lookm_reimpl`, and current comparison blockers.
 - [PrefixKV specification](docs/baselines/prefixkv_spec.md) and [parity report](docs/baselines/prefixkv_parity_report.md) — adaptive layer profiles, ratio conventions, fixed-distance decoding, strict leakage checks, unified `prefixkv_reimpl`, and the completed non-canonical official LLaVA parity diagnostic.
+- [Published KV-policy specification](docs/baselines/published_kv_spec.md) — pinned source mapping, formulas, implementation choices, and fail-closed execution for `elastic_cache_reimpl`, `h2o_reimpl`, `streamingllm_reimpl`, `pyramidkv_reimpl`, `snapkv_reimpl`, and `roco_reimpl`.
 - [VL-Cache specification](docs/baselines/vl_cache_spec.md) — ICLR post-vision scoring and sparsity allocation equations, ambiguity decisions, leakage-safe calibration, sensitivity diagnostics, and explicit non-reproduction status for `vl_cache_reimpl`.
 - [Paper-native baseline evaluation](docs/baselines/paper_native_evaluation.md) — separate PrefixKV PPL/ROUGE, VL-Cache CIDEr/ANLS/MathVista, and LOOK-M MileBench reproduction tracks with fail-closed method provenance.
 

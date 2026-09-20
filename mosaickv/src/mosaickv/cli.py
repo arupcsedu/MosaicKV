@@ -347,6 +347,18 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate_parser.add_argument("--vl-cache-max-layer-retention", type=float, default=1.0)
     evaluate_parser.add_argument("--vl-cache-recent-window-fraction", type=float, default=0.1)
     evaluate_parser.add_argument("--vl-cache-max-post-vision-queries", type=int)
+    evaluate_parser.add_argument("--published-kv-observation-window", type=int, default=32)
+    evaluate_parser.add_argument("--published-kv-pool-kernel", type=int, default=5)
+    evaluate_parser.add_argument(
+        "--published-kv-pooling", choices=["avgpool", "maxpool"], default="avgpool"
+    )
+    evaluate_parser.add_argument("--published-kv-sink-tokens", type=int, default=4)
+    evaluate_parser.add_argument("--published-kv-recent-fraction", type=float, default=0.3)
+    evaluate_parser.add_argument("--published-kv-pyramid-beta", type=int, default=20)
+    evaluate_parser.add_argument("--published-kv-roco-protected-fraction", type=float, default=0.3)
+    evaluate_parser.add_argument("--published-kv-elastic-start-tokens", type=int, default=1)
+    evaluate_parser.add_argument("--published-kv-elastic-protect-tokens", type=int, default=1)
+    evaluate_parser.add_argument("--published-kv-elastic-decode-offset", type=int, default=-25)
     evaluate_parser.add_argument(
         "--repair-policy",
         default="entropy_or_prototype_risk",
@@ -419,6 +431,34 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate_parser.add_argument(
         "--metric-aggregates-parquet-output",
         help="immutable Parquet table containing only corpus-scoped metric aggregates",
+    )
+    evaluate_parser.add_argument(
+        "--published-protocol",
+        help="versioned published-baseline protocol YAML used to guard this run",
+    )
+    evaluate_parser.add_argument(
+        "--published-protocol-id",
+        help="protocol_id selected from --published-protocol",
+    )
+    evaluate_parser.add_argument(
+        "--paper-native-ledger",
+        help="materialized PrefixKV/MileBench sample ledger (JSON)",
+    )
+    evaluate_parser.add_argument(
+        "--paper-native-ledger-sha",
+        help="required SHA-256 for --paper-native-ledger",
+    )
+    evaluate_parser.add_argument(
+        "--fullkv-reference-input",
+        help="frozen FullKV output artifact used by compressed PrefixKV ROUGE",
+    )
+    evaluate_parser.add_argument(
+        "--fullkv-reference-sha",
+        help="required file SHA-256 for --fullkv-reference-input",
+    )
+    evaluate_parser.add_argument(
+        "--fullkv-reference-output",
+        help="write-once FullKV output artifact produced by a PrefixKV reference run",
     )
     evaluate_parser.add_argument("--manifest")
     evaluate_parser.add_argument("--seed", type=int, default=0)

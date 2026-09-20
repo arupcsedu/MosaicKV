@@ -189,9 +189,10 @@ through the shared eager HF cache and metrics runtime. The exact specification,
 official-source differences, model assumptions, and labeling rules are in
 [the LOOK-M specification](docs/baselines/lookm_spec.md). A strict artifact
 comparator rejects unequal checkpoints, samples, tokenization, generation,
-precision, and backend controls. Official LOOK-M execution is disabled under
-the common-environment policy; `lookm_reimpl` remains separately labeled. See
-the [parity boundary](docs/baselines/lookm_parity_report.md). Official PrefixKV
+precision, and backend controls. Official LOOK-M uses the fail-closed isolated
+launcher because its author stack is incompatible with the common runtime;
+`lookm_reimpl` remains separately labeled. See the
+[parity boundary](docs/baselines/lookm_parity_report.md). Official PrefixKV
 is also pinned, unmodified, at
 `597f1ab032704951550f93bcc8a23f1454b80aa4` with its MIT license. The shared
 runtime now contains `prefixkv_reimpl`: eager prompt-attention importance,
@@ -199,9 +200,9 @@ adaptive offline profiles, exact global per-layer budgets, protected boundary
 tokens, fixed-distance decode eviction, strict calibration/evaluation
 separation, LLaVA/generalized labeling, and a controlled parity artifact
 comparator. See the [PrefixKV specification](docs/baselines/prefixkv_spec.md)
-and [execution status](docs/baselines/prefixkv_parity_report.md). Official
-PrefixKV execution is disabled under the common-environment policy;
-`prefixkv_reimpl` remains separately labeled.
+and [execution status](docs/baselines/prefixkv_parity_report.md). The official
+PrefixKV launcher passes its pinned legacy-environment preflight;
+`prefixkv_reimpl` remains separately labeled in the common runtime.
 The ICLR `vl_cache_reimpl` now applies relative-threshold post-vision sparsity,
 prompt-adaptive layer allocation, and accumulated post-vision Top-K through the
 same exact-cache packer. Its [specification](docs/baselines/vl_cache_spec.md)
@@ -211,6 +212,16 @@ grid. Formula, budget, determinism, leakage, and tensor-level retention-one
 tests pass; paper-model task and Triton latency trends remain unmeasured. Clean
 common-lock reimplementation measurements and VL-Cache paper-model trend runs
 keep this phase `in_progress`.
+
+The common exact-cache interface also implements separately labeled
+`elastic_cache_reimpl`, `h2o_reimpl`, `streamingllm_reimpl`,
+`pyramidkv_reimpl`, `snapkv_reimpl`, and `roco_reimpl`. Licensed source audits
+are pinned as submodules for Elastic Cache, StreamingLLM, PyramidKV, and
+SnapKV; H2O and EasyKV/RoCo are paper-derived
+because their audited trees have no top-level redistribution license. Their
+[shared specification](docs/baselines/published_kv_spec.md) records equations,
+interpretations, fail-closed constraints, and native-reproduction work still
+required before paper claims.
 
 **Deliverables**
 

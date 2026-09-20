@@ -41,6 +41,13 @@ from mosaickv.baselines.prefixkv_parity import (
     load_prefixkv_parity_artifact,
     prefixkv_control_mismatches,
 )
+from mosaickv.baselines.published_kv import (
+    PublishedKVCompressionPlan,
+    PublishedKVHeadState,
+    PublishedKVReimplementationError,
+    build_published_kv_reimpl_plan,
+    published_kv_runtime_payloads,
+)
 from mosaickv.baselines.selectors import (
     HeadLocalCapacityRecord,
     HeadLocalPromptSelection,
@@ -106,6 +113,9 @@ __all__ = [
     "PrefixKVParityError",
     "PrefixKVReimplementationError",
     "PrefixKVSampleObservation",
+    "PublishedKVCompressionPlan",
+    "PublishedKVHeadState",
+    "PublishedKVReimplementationError",
     "VLCacheAttentionStatistics",
     "VLCacheCompressionPlan",
     "VLCacheHeadState",
@@ -118,6 +128,7 @@ __all__ = [
     "build_lookm_parity_report",
     "build_lookm_reimpl_plan",
     "build_prefixkv_reimpl_plan",
+    "build_published_kv_reimpl_plan",
     "build_vl_cache_reimpl_plan",
     "coherent_layout_groups",
     "compare_lookm_artifacts",
@@ -134,6 +145,7 @@ __all__ = [
     "prefixkv_calibration_observation",
     "prefixkv_control_mismatches",
     "prefixkv_runtime_payloads",
+    "published_kv_runtime_payloads",
     "resolve_baseline_budget",
     "search_prefixkv_layer_sizes",
     "select_exact_baseline",

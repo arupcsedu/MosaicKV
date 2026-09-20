@@ -145,6 +145,12 @@ class MosaicKVMethod(StrEnum):
     LOOKM_REIMPL = "lookm_reimpl"
     PREFIXKV_REIMPL = "prefixkv_reimpl"
     VL_CACHE_REIMPL = "vl_cache_reimpl"
+    ELASTIC_CACHE_REIMPL = "elastic_cache_reimpl"
+    H2O_REIMPL = "h2o_reimpl"
+    STREAMINGLLM_REIMPL = "streamingllm_reimpl"
+    PYRAMIDKV_REIMPL = "pyramidkv_reimpl"
+    SNAPKV_REIMPL = "snapkv_reimpl"
+    ROCO_REIMPL = "roco_reimpl"
     MOSAICKV_EXACT = "mosaickv_exact"
     MOSAICKV_PROTO = "mosaickv_proto"
     MOSAICKV_FULL = "mosaickv_full"
@@ -196,6 +202,25 @@ class MosaicKVMethod(StrEnum):
             self.LOOKM_REIMPL,
             self.PREFIXKV_REIMPL,
             self.VL_CACHE_REIMPL,
+            self.ELASTIC_CACHE_REIMPL,
+            self.H2O_REIMPL,
+            self.STREAMINGLLM_REIMPL,
+            self.PYRAMIDKV_REIMPL,
+            self.SNAPKV_REIMPL,
+            self.ROCO_REIMPL,
+        }
+
+    @property
+    def is_published_eviction_reimplementation(self) -> bool:
+        """Whether this is a locally audited KV policy using the shared packer."""
+
+        return self in {
+            self.ELASTIC_CACHE_REIMPL,
+            self.H2O_REIMPL,
+            self.STREAMINGLLM_REIMPL,
+            self.PYRAMIDKV_REIMPL,
+            self.SNAPKV_REIMPL,
+            self.ROCO_REIMPL,
         }
 
     @property

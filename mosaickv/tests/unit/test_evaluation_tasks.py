@@ -19,8 +19,11 @@ def test_registry_routes_public_scoring_to_lmms_eval() -> None:
         "coco_caption",
         "docvqa",
         "infovqa",
+        "llava_description",
         "mmstar",
+        "milebench",
         "mmvet",
+        "mmvet_prefixkv",
         "mathvista",
         "realworldqa",
         "synthetic_ci",
@@ -44,6 +47,12 @@ def test_registry_routes_public_scoring_to_lmms_eval() -> None:
     mathvista = registry.resolve("mathvista")
     assert mathvista.sample_metric == "llm_as_judge_eval"
     assert mathvista.paper_metrics == ("mathvista_accuracy",)
+    assert registry.resolve("llava_description").scoring_owner == "paper_native_prefixkv"
+    assert registry.resolve("mmvet_prefixkv").paper_metrics == (
+        "teacher_forced_ppl",
+        "rouge_l_f1",
+    )
+    assert registry.resolve("milebench").scoring_owner == "paper_native_milebench"
     realworldqa = registry.resolve("realworldqa")
     assert realworldqa.route_key == (
         "lmms-lab/RealWorldQA",

@@ -102,6 +102,7 @@ def _schema(pa: Any) -> Any:
         "measurement_type",
         "manifest_path",
         "sample_id",
+        "metadata_json",
         "evaluator_commit",
         "reference_artifact_sha",
     }

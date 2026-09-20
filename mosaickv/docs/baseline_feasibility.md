@@ -203,9 +203,12 @@ No official code parity is possible because no author implementation was found.
 4. Reproduce pinned LOOK-M on MileBench with its dataset-specific Accuracy or
    ROUGE route and equal-dataset subtask aggregation, then compare
    `lookm_reimpl` under identical controls.
-5. Add H2O, StreamingLLM/Local, PyramidKV, Elastic Cache, SnapKV, or RoCo only
-   after pinning and native-benchmark validation. Until then their status is
-   `unsupported_unpinned`, not an approximation by another selector.
+5. Elastic Cache, H2O, StreamingLLM, PyramidKV, SnapKV, and RoCo are available as the
+   explicitly named local reimplementations documented in
+   [published_kv_spec.md](baselines/published_kv_spec.md). Their structural
+   tests do not replace native-benchmark validation. The licensed Elastic
+   Cache source is pinned under `third_party/ElasticCache`; H2O and EasyKV/RoCo
+   remain non-vendored because their audited revisions provide no license file.
 6. Use published reimplementations only for identical-model comparisons.
    Never merge official and reimplementation rows or compare them under
    unequal prompts, media, tokenization, generation, output length, active-byte
@@ -215,5 +218,6 @@ The exact metrics, task routes, code identities, and executable validation
 commands are in [paper-native baseline evaluation](baselines/paper_native_evaluation.md).
 
 LOOK-M/PrefixKV source and their local `*_reimpl` code were added after the
-original audit. Official execution is disabled in the common environment;
-LOOK-M remains unmeasured and prior diagnostics are not paper-eligible.
+original audit. A common control-plane launcher now validates and starts their
+unmodified official code in exact isolated legacy environments. LOOK-M remains
+unmeasured and prior diagnostics are not paper-eligible.

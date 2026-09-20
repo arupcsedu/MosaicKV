@@ -42,33 +42,47 @@ class MetricRegistry:
 
     def __init__(self, definitions: Iterable[MetricDefinition] = ()) -> None:
         self._definitions: dict[str, MetricDefinition] = {}
+        self._aliases: dict[str, str] = {}
         for definition in definitions:
             self.register(definition)
 
     def register(self, definition: MetricDefinition) -> None:
-        if definition.name in self._definitions:
+        if definition.name in self._definitions or definition.name in self._aliases:
             raise ValueError(f"metric {definition.name!r} is already registered")
         self._definitions[definition.name] = definition
 
+    def register_alias(self, alias: str, canonical_name: str) -> None:
+        if not alias.strip():
+            raise ValueError("metric alias must be non-empty")
+        if alias in self._definitions or alias in self._aliases:
+            raise ValueError(f"metric {alias!r} is already registered")
+        if canonical_name not in self._definitions:
+            raise LookupError(f"cannot alias unknown metric {canonical_name!r}")
+        self._aliases[alias] = canonical_name
+
     def resolve(self, name: str) -> MetricDefinition:
         try:
-            return self._definitions[name]
+            canonical = self._aliases.get(name, name)
+            return self._definitions[canonical]
         except KeyError as error:
             raise LookupError(
                 f"unknown metric {name!r}; known metrics: {', '.join(self.names())}"
             ) from error
 
     def names(self) -> tuple[str, ...]:
-        return tuple(sorted(self._definitions))
+        return tuple(sorted((*self._definitions, *self._aliases)))
+
+    def canonical_name(self, name: str) -> str:
+        return self.resolve(name).name
 
 
 def default_metric_registry() -> MetricRegistry:
     mean = (
         ("accuracy", "lmms_eval.task_owned", "fraction"),
         ("vqa_accuracy", "lmms_eval.textvqa", "fraction"),
-        ("anls", "lmms_eval.docvqa", "fraction"),
-        ("rouge_l_f1", "mosaickv.rouge_l_lcs", "fraction"),
-        ("mathvista_accuracy", "lmms_eval.mathvista", "percentage_points"),
+        ("anls", "lmms_eval.api.metrics.anls@0.7.2", "fraction"),
+        ("rouge_l_f1", "rouge==1.0.1.rouge-l.f", "fraction"),
+        ("mathvista_accuracy", "lmms_eval.mathvista@0.7.2", "percentage_points"),
     )
     definitions = [
         MetricDefinition(
@@ -86,7 +100,7 @@ def default_metric_registry() -> MetricRegistry:
     definitions.extend(
         [
             MetricDefinition(
-                "perplexity",
+                "teacher_forced_ppl",
                 MetricDirection.LOWER,
                 MetricScope.CORPUS,
                 "mosaickv.teacher_forced_token_nll",
@@ -99,7 +113,7 @@ def default_metric_registry() -> MetricRegistry:
                 "cider",
                 MetricDirection.HIGHER,
                 MetricScope.CORPUS,
-                "pycocoevalcap.cider.Cider_x100",
+                "lmms_eval.coco_cap.PTBTokenizer+Cider_x100@0.7.2",
                 "1.2",
                 "score_points",
                 aggregate_cider,
@@ -107,7 +121,9 @@ def default_metric_registry() -> MetricRegistry:
             ),
         ]
     )
-    return MetricRegistry(definitions)
+    registry = MetricRegistry(definitions)
+    registry.register_alias("perplexity", "teacher_forced_ppl")
+    return registry
 
 
 __all__ = ["MetricDefinition", "MetricRegistry", "default_metric_registry"]

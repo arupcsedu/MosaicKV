@@ -85,6 +85,7 @@ class MetricObservation:
     measurement_type: str
     manifest_path: str
     sample_id: str | None = None
+    metadata_json: str = "{}"
     evaluator_commit: str = "not_used"
     reference_artifact_sha: str = "not_used"
     evaluated_token_count: int | None = None
@@ -122,6 +123,12 @@ class MetricObservation:
             raise ValueError("sample-scoped observations require sample_id")
         if self.metric_scope is MetricScope.CORPUS and self.sample_id is not None:
             raise ValueError("corpus-scoped observations cannot have sample_id")
+        try:
+            metadata = json.loads(self.metadata_json)
+        except json.JSONDecodeError as error:
+            raise ValueError("metadata_json must be valid JSON") from error
+        if not isinstance(metadata, dict):
+            raise ValueError("metadata_json must encode an object")
         if self.denominator is not None and self.denominator <= 0:
             raise ValueError("denominator must be positive when present")
         if self.evaluated_token_count is not None and (

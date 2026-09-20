@@ -11,7 +11,7 @@ from mosaickv.evaluation.metrics.registry import MetricDefinition
 from mosaickv.evaluation.metrics.types import MetricSample
 
 
-def _percentile(sorted_values: Sequence[float], probability: float) -> float:
+def percentile(sorted_values: Sequence[float], probability: float) -> float:
     if not sorted_values:
         raise ValueError("percentile requires at least one value")
     location = probability * (len(sorted_values) - 1)
@@ -29,8 +29,11 @@ class PairedMetricComparison:
     reference_value: float
     candidate_value: float
     candidate_minus_reference: float
+    relative_difference: float | None
     ci_low: float
     ci_high: float
+    relative_ci_low: float | None
+    relative_ci_high: float | None
     confidence: float
     bootstrap_resamples: int
     bootstrap_seed: int
@@ -77,13 +80,21 @@ def paired_bootstrap(
         )
     differences.sort()
     tail = (1.0 - confidence) / 2.0
+    difference = candidate_value - reference_value
+    denominator = abs(reference_value)
+    relative_difference = None if denominator == 0.0 else difference / denominator
+    ci_low = percentile(differences, tail)
+    ci_high = percentile(differences, 1.0 - tail)
     return PairedMetricComparison(
         metric_name=definition.name,
         reference_value=reference_value,
         candidate_value=candidate_value,
-        candidate_minus_reference=candidate_value - reference_value,
-        ci_low=_percentile(differences, tail),
-        ci_high=_percentile(differences, 1.0 - tail),
+        candidate_minus_reference=difference,
+        relative_difference=relative_difference,
+        ci_low=ci_low,
+        ci_high=ci_high,
+        relative_ci_low=None if denominator == 0.0 else ci_low / denominator,
+        relative_ci_high=None if denominator == 0.0 else ci_high / denominator,
         confidence=confidence,
         bootstrap_resamples=resamples,
         bootstrap_seed=seed,
@@ -91,4 +102,4 @@ def paired_bootstrap(
     )
 
 
-__all__ = ["PairedMetricComparison", "paired_bootstrap"]
+__all__ = ["PairedMetricComparison", "paired_bootstrap", "percentile"]

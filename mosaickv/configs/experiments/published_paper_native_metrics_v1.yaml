@@ -1,35 +1,37 @@
 schema_version: 1
 suite_id: published_paper_native_metrics_v1
 
-# This file defines metric- and dataset-faithful reproduction tracks.  It does
-# not authorize execution.  Each track must first receive immutable model,
-# dataset, sample, and environment revisions in its run manifest.
+# This file defines authorized metric- and dataset-faithful reproduction
+# tracks. Every run must still record immutable dataset, sample, and
+# environment revisions in its manifest. Methods with execution_enabled=false
+# are provenance records only and must not produce rows.
 protocols:
-  - protocol_id: prefixkv_native_v1
+  - protocol_id: prefixkv_hf_reimpl_native_metrics_v1
     paper: "PrefixKV: Adaptive Prefix KV Cache is What Vision Instruction-Following Models Need for Efficient Generation"
     primary_source: https://arxiv.org/abs/2412.03409
-    model: liuhaotian/llava-v1.5-7b
-    model_revision: resolve_before_execution
+    model: llava-hf/llava-1.5-7b-hf
+    model_revision: b234b804b114d9e37bb655e11cbbb5f5e971b7a9
     retention_ratios: [1.0, 0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1]
-    execution_authorized: false
+    execution_authorized: true
     tasks:
       - name: llava_description
-        dataset: official PrefixKV detail_1k.json plus COCO train2017 images
-        split: official 1000-example file
+        dataset: PrefixKV/LLaVA-Description
+        split: official_1000
         sample_count: 1000
-        metrics: [perplexity, rouge_l_f1]
+        metrics: [teacher_forced_ppl, rouge_l_f1]
         aggregation: token-weighted corpus PPL and mean per-sample ROUGE-L F1
       - name: mmvet_prefixkv
-        dataset: official PrefixKV MM-Vet package
-        split: official 218-example file
+        dataset: PrefixKV/MM-Vet
+        split: official_218
         sample_count: 218
-        metrics: [perplexity, rouge_l_f1]
+        metrics: [teacher_forced_ppl, rouge_l_f1]
         aggregation: token-weighted corpus PPL and mean per-sample ROUGE-L F1
     methods:
       - name: prefixkv_official
         source: third_party/PrefixKV
         status: official_pinned
         repository_commit: 597f1ab032704951550f93bcc8a23f1454b80aa4
+        execution_enabled: false
       - name: prefixkv_reimpl
         source: mosaickv.baselines.prefixkv
         status: local_reimplementation
@@ -43,16 +45,16 @@ protocols:
         status: local_reference
         repository_commit: null
       - name: elastic_cache_reimpl
-        source: implementation not pinned in this repository
-        status: unsupported_unpinned
-        repository_commit: null
+        source: mosaickv.baselines.published_kv; audited against third_party/ElasticCache
+        status: local_reimplementation
+        repository_commit: 3138e03fc8894231d98a2e5353f27a59af854cc3
       - name: pyramidkv_reimpl
-        source: implementation not pinned in this repository
-        status: unsupported_unpinned
-        repository_commit: null
+        source: mosaickv.baselines.published_kv; audited against third_party/PyramidKV
+        status: local_reimplementation
+        repository_commit: 1ca16d6ea0bc3e48fc4cc8623bc4901bc131d511
       - name: h2o_reimpl
-        source: implementation not pinned in this repository
-        status: unsupported_unpinned
+        source: mosaickv.baselines.published_kv; paper-derived H2O policy
+        status: local_reimplementation
         repository_commit: null
 
   - protocol_id: vl_cache_native_v1
@@ -61,7 +63,7 @@ protocols:
     model: llava-hf/llava-v1.6-mistral-7b-hf
     model_revision: 2424fdd47412fccc66d91719126b420e9fbd7065
     retention_ratios: [1.0, 0.8, 0.6, 0.4, 0.2, 0.1, 0.05, 0.01]
-    execution_authorized: false
+    execution_authorized: true
     tasks:
       - name: coco_caption
         dataset: lmms-lab/COCO-Caption
@@ -95,29 +97,29 @@ protocols:
         status: local_reference
         repository_commit: null
       - name: streamingllm_reimpl
-        source: implementation not pinned in this repository
-        status: unsupported_unpinned
-        repository_commit: null
+        source: mosaickv.baselines.published_kv; audited against third_party/StreamingLLM
+        status: local_reimplementation
+        repository_commit: 2e5042606d69933d88fbf909bd77907456b9b4dd
       - name: h2o_reimpl
-        source: implementation not pinned in this repository
-        status: unsupported_unpinned
+        source: mosaickv.baselines.published_kv; paper-derived H2O policy
+        status: local_reimplementation
         repository_commit: null
       - name: pyramidkv_reimpl
-        source: implementation not pinned in this repository
-        status: unsupported_unpinned
-        repository_commit: null
+        source: mosaickv.baselines.published_kv; audited against third_party/PyramidKV
+        status: local_reimplementation
+        repository_commit: 1ca16d6ea0bc3e48fc4cc8623bc4901bc131d511
 
-  - protocol_id: lookm_native_v1
+  - protocol_id: lookm_hf_reimpl_native_metrics_v1
     paper: "LOOK-M: Look-Once Optimization in KV Cache for Efficient Multimodal Long-Context Inference"
     primary_source: https://aclanthology.org/2024.findings-emnlp.235/
-    model: liuhaotian/llava-v1.5-7b
-    model_revision: resolve_before_execution
+    model: llava-hf/llava-1.5-7b-hf
+    model_revision: b234b804b114d9e37bb655e11cbbb5f5e971b7a9
     retention_ratios: [1.0, 0.5, 0.35, 0.2, 0.05]
-    execution_authorized: false
+    execution_authorized: true
     tasks:
       - name: milebench
-        dataset: MileBench official benchmark
-        split: official evaluation tasks
+        dataset: MileBench/MileBench
+        split: official_evaluation
         sample_count: null
         metrics: [accuracy, rouge_l_f1]
         aggregation: dataset metric followed by equal-dataset subtask mean; no mixed-metric macro
@@ -126,6 +128,7 @@ protocols:
         source: third_party/LOOK-M
         status: official_pinned
         repository_commit: ecf0f51a9c416c2d85e47faf2638502f01a6d748
+        execution_enabled: false
       - name: lookm_reimpl
         source: mosaickv.baselines.lookm
         status: local_reimplementation
@@ -139,14 +142,14 @@ protocols:
         status: local_reference
         repository_commit: null
       - name: snapkv_reimpl
-        source: implementation not pinned in this repository
-        status: unsupported_unpinned
-        repository_commit: null
+        source: mosaickv.baselines.published_kv; audited against third_party/SnapKV
+        status: local_reimplementation
+        repository_commit: e216ddc84c5bd210378cbdbbba12ba02102aa640
       - name: roco_reimpl
-        source: implementation not pinned in this repository
-        status: unsupported_unpinned
+        source: mosaickv.baselines.published_kv; paper-derived RoCo policy
+        status: local_reimplementation
         repository_commit: null
       - name: h2o_reimpl
-        source: implementation not pinned in this repository
-        status: unsupported_unpinned
+        source: mosaickv.baselines.published_kv; paper-derived H2O policy
+        status: local_reimplementation
         repository_commit: null

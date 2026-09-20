@@ -6,8 +6,9 @@ import argparse
 import hashlib
 import json
 import os
+import subprocess
 import uuid
-from dataclasses import replace
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any, cast
 
@@ -28,6 +29,7 @@ from mosaickv.config import (
     ModelConfig,
     PrefixKVConfig,
     PrototypeConfig,
+    PublishedKVConfig,
     RepairConfig,
     ResidualConfig,
     RunConfig,
@@ -39,6 +41,14 @@ from mosaickv.config import (
 from mosaickv.evaluation.harness import EvaluationHarness
 from mosaickv.evaluation.lmms_adapter import run_lmms_development_evaluation
 from mosaickv.evaluation.messages import MediaItem
+from mosaickv.evaluation.paper_native_lanes import (
+    cache_operating_point,
+    load_paper_native_ledger,
+    resolve_protocol,
+    run_materialized_paper_native_evaluation,
+    validate_protocol_run,
+)
+from mosaickv.evaluation.published_protocols import load_published_protocols
 from mosaickv.evaluation.storage import JsonlResultStore, load_jsonl
 from mosaickv.evaluation.tasks import TaskSample, default_task_registry, load_synthetic_samples
 from mosaickv.manifest import (
@@ -198,6 +208,19 @@ def _direct_config(args: argparse.Namespace) -> RunConfig:
                 else None
             ),
         ),
+        published_kv=PublishedKVConfig(
+            enabled=method.is_published_eviction_reimplementation,
+            observation_window=int(args.published_kv_observation_window),
+            attention_pool_kernel=int(args.published_kv_pool_kernel),
+            attention_pooling=str(args.published_kv_pooling),
+            sink_tokens=int(args.published_kv_sink_tokens),
+            recent_fraction=float(args.published_kv_recent_fraction),
+            pyramid_beta=int(args.published_kv_pyramid_beta),
+            roco_protected_fraction=float(args.published_kv_roco_protected_fraction),
+            elastic_start_tokens=int(args.published_kv_elastic_start_tokens),
+            elastic_protect_tokens=int(args.published_kv_elastic_protect_tokens),
+            elastic_decode_offset=int(args.published_kv_elastic_decode_offset),
+        ),
     )
 
 
@@ -265,14 +288,20 @@ def _trace_sha(trace_root: Path, run_id: str, fallback: Path) -> str:
     return digest.hexdigest()
 
 
-def _input_provenance(config: RunConfig, task_name: str, raw_path: Path) -> InputProvenance:
+def _input_provenance(
+    config: RunConfig,
+    task_name: str,
+    raw_path: Path,
+    *,
+    input_binding: str | None = None,
+) -> InputProvenance:
     identities: list[tuple[str, str]] = []
     for row in load_jsonl(raw_path):
         identities.append((row.sample_id, row.reference or ""))
     canonical = json.dumps(sorted(identities), separators=(",", ":"), ensure_ascii=False)
     selection = (
         f"{config.dataset.id}\0{config.dataset.revision}\0{config.dataset.split}\0"
-        f"{config.execution.seed}\0{task_name}\0{canonical}"
+        f"{config.execution.seed}\0{task_name}\0{canonical}\0{input_binding or 'not_used'}"
     )
     return InputProvenance(
         prompt_set_sha=sha256_text(f"prompts\0{selection}"),
@@ -284,6 +313,21 @@ def _input_provenance(config: RunConfig, task_name: str, raw_path: Path) -> Inpu
             f"hf-auto-tokenizer\0{config.model.id}\0{config.model.revision}"
         ),
     )
+
+
+def _source_commit() -> str:
+    completed = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=Path(__file__).resolve().parent,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    commit = completed.stdout.strip()
+    if completed.returncode != 0 or len(commit) != 40:
+        raise RuntimeError("cannot resolve the evaluator git commit")
+    return commit
 
 
 def _load_sample_id_file(
@@ -367,6 +411,57 @@ def run_hf_evaluation(
             raise
         task_name = matches[0]
         task = registry.resolve(task_name)
+    protocol_path = cast("str | None", getattr(args, "published_protocol", None))
+    protocol_id = cast("str | None", getattr(args, "published_protocol_id", None))
+    if (protocol_path is None) != (protocol_id is None):
+        raise ValueError("--published-protocol and --published-protocol-id are required together")
+    protocol = None
+    if protocol_path is not None and protocol_id is not None:
+        protocol = resolve_protocol(load_published_protocols(protocol_path), protocol_id)
+        validate_protocol_run(
+            protocol,
+            task=task,
+            model_id=config.model.id,
+            model_revision=config.model.revision,
+            method=config.method.value,
+            retention_ratio=config.cache.retention_ratio,
+        )
+    ledger_path = cast("str | None", getattr(args, "paper_native_ledger", None))
+    ledger_sha = cast("str | None", getattr(args, "paper_native_ledger_sha", None))
+    if (ledger_path is None) != (ledger_sha is None):
+        raise ValueError(
+            "--paper-native-ledger and --paper-native-ledger-sha are required together"
+        )
+    is_materialized_native = task.scoring_owner in {
+        "paper_native_prefixkv",
+        "paper_native_milebench",
+    }
+    if is_materialized_native and (ledger_path is None or ledger_sha is None):
+        raise ValueError(f"task {task.name!r} requires a hash-bound --paper-native-ledger")
+    if not is_materialized_native and ledger_path is not None:
+        raise ValueError("--paper-native-ledger is only valid for PrefixKV/MileBench native routes")
+    metric_observations_output = cast(
+        "str | None", getattr(args, "metric_observations_parquet_output", None)
+    )
+    metric_aggregates_output = cast(
+        "str | None", getattr(args, "metric_aggregates_parquet_output", None)
+    )
+    metric_output = cast("str | None", getattr(args, "metric_output", None))
+    if is_materialized_native and (
+        metric_output is None
+        or metric_observations_output is None
+        or metric_aggregates_output is None
+    ):
+        raise ValueError(
+            "paper-native routes require --metric-output plus separate observation and "
+            "aggregate Parquet outputs"
+        )
+    if protocol is not None and (
+        metric_observations_output is None or metric_aggregates_output is None
+    ):
+        raise ValueError(
+            "published-protocol runs require separate metric observation and aggregate Parquet"
+        )
     run_id = str(args.run_id or uuid.uuid4().hex)
     output_root = Path(str(args.output_dir)).resolve()
     run_root = output_root / run_id
@@ -398,6 +493,8 @@ def run_hf_evaluation(
             "--sample-id-file cannot be combined with --full-dataset, --subset-size, "
             "or --sample-offset"
         )
+    if is_materialized_native and explicit_sample_ids is not None:
+        raise ValueError("paper-native ledgers cannot be combined with --sample-id-file")
     if sample_offset < 0:
         raise ValueError("--sample-offset must be >= 0")
     if manifest_path.exists():
@@ -449,8 +546,60 @@ def run_hf_evaluation(
             f"{loaded_model_id!r} != {config.model.id!r}"
         )
     runtime = HuggingFaceMosaicKVModel(selected_adapter, config, trace_directory=trace_root)
-    if task.local_scorer is not None:
-        summary: JsonObject = (
+    summary: JsonObject
+    if is_materialized_native:
+        native_subset_size = None if full_dataset else cast("int | None", args.subset_size)
+        ledger = load_paper_native_ledger(
+            cast("str", ledger_path),
+            expected_sha256=cast("str", ledger_sha),
+            task=task,
+            dataset_revision=config.dataset.revision,
+        )
+        if protocol is not None and full_dataset:
+            task_contract = next(item for item in protocol.tasks if item.name == task.name)
+            if (
+                task_contract.sample_count is not None
+                and len(ledger.samples) != task_contract.sample_count
+            ):
+                raise ValueError(
+                    f"full-dataset protocol requires {task_contract.sample_count} ledger "
+                    f"samples, observed {len(ledger.samples)}"
+                )
+        generation_sha = sha256_text(
+            json.dumps(
+                asdict(config.generation),
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            )
+        )
+        summary = run_materialized_paper_native_evaluation(
+            run_id=run_id,
+            task=task,
+            ledger=ledger,
+            model=runtime,
+            raw_output=raw_path,
+            parquet_output=parquet_path,
+            manifest_path=str(manifest_path),
+            metric_output=cast("str", metric_output),
+            metric_observations_parquet_output=cast("str", metric_observations_output),
+            metric_aggregates_parquet_output=cast("str", metric_aggregates_output),
+            seed=config.execution.seed,
+            subset_size=native_subset_size,
+            evaluator_commit=_source_commit(),
+            model_revision=config.model.revision,
+            tokenizer_revision=config.model.revision,
+            generation_config_sha256=generation_sha,
+            fullkv_reference_input=cast(
+                "str | None", getattr(args, "fullkv_reference_input", None)
+            ),
+            fullkv_reference_sha256=cast("str | None", getattr(args, "fullkv_reference_sha", None)),
+            fullkv_reference_output=cast(
+                "str | None", getattr(args, "fullkv_reference_output", None)
+            ),
+        )
+    elif task.local_scorer is not None:
+        summary = (
             EvaluationHarness(registry)
             .run(
                 run_id=run_id,
@@ -480,17 +629,17 @@ def run_hf_evaluation(
             sample_offset=sample_offset,
             explicit_sample_ids=explicit_sample_ids,
             parquet_output=parquet_path,
-            metric_output=cast("str | None", getattr(args, "metric_output", None)),
+            metric_output=metric_output,
             metric_parquet_output=cast("str | None", getattr(args, "metric_parquet_output", None)),
-            metric_observations_parquet_output=cast(
-                "str | None", getattr(args, "metric_observations_parquet_output", None)
-            ),
-            metric_aggregates_parquet_output=cast(
-                "str | None", getattr(args, "metric_aggregates_parquet_output", None)
-            ),
+            metric_observations_parquet_output=metric_observations_output,
+            metric_aggregates_parquet_output=metric_aggregates_output,
             registry=registry,
             dataset_revision=config.dataset.revision,
         )
+    if protocol is not None:
+        operating_point = cache_operating_point(JsonlResultStore(raw_path).results(run_id=run_id))
+        summary["cache_operating_point"] = operating_point.to_json_object()
+        summary["published_protocol_id"] = protocol.protocol_id
     artifacts = ArtifactProvenance(
         raw_output_sha=sha256_bytes(raw_path.read_bytes()),
         metrics_sha=sha256_bytes(parquet_path.read_bytes()),
@@ -518,7 +667,12 @@ def run_hf_evaluation(
             manifest_path,
             config,
             measurement,
-            _input_provenance(config, task_name, raw_path),
+            _input_provenance(
+                config,
+                task_name,
+                raw_path,
+                input_binding=ledger_sha,
+            ),
             artifacts,
             run_id=run_id,
         )

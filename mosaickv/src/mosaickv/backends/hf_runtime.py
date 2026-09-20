@@ -42,16 +42,19 @@ from mosaickv.baselines import (
     LookMCompressionPlan,
     PrefixKVCompressionPlan,
     PrefixKVOfflineProfile,
+    PublishedKVCompressionPlan,
     VLCacheCompressionPlan,
     assert_vl_cache_calibration_disjoint,
     build_exact_baseline_plan,
     build_lookm_reimpl_plan,
     build_prefixkv_reimpl_plan,
+    build_published_kv_reimpl_plan,
     build_vl_cache_reimpl_plan,
     coherent_layout_groups,
     load_prefixkv_profile,
     lookm_runtime_payloads,
     prefixkv_runtime_payloads,
+    published_kv_runtime_payloads,
     select_prompt_attention_topk_ids,
     select_prompt_attention_topk_ids_by_head,
     vl_cache_runtime_payloads,
@@ -3812,6 +3815,22 @@ def compare_runtime_retention_one(
             slot_records,
             packing_mode=config.cache.packing_mode,
         )
+    elif config.method.is_published_eviction_reimplementation:
+        published_plan = build_published_kv_reimpl_plan(
+            full_state,
+            prefill.attention_weights,
+            config.method,
+            config.published_kv,
+            config.cache,
+        )
+        payloads, slot_records = published_kv_runtime_payloads(published_plan)
+        packed = pack_runtime_payloads(
+            adapter,
+            full_state,
+            payloads,
+            slot_records,
+            packing_mode=config.cache.packing_mode,
+        )
     else:
         vl_cache_plan = build_vl_cache_reimpl_plan(
             full_state,
@@ -4988,6 +5007,172 @@ def maintain_prefixkv_decode_cache(
                 "logical_sequence_length": state.logical_sequence_length,
                 "target_active_positions": target,
                 "eviction_offset": layer_plan.eviction_offset,
+                "removed_physical_position": removed,
+                "active_positions_after": len(valid_physical),
+            }
+        )
+    if not any(event["removed_physical_position"] is not None for event in events):
+        return state, tuple(events)
+
+    capacity = max(len(positions) for positions in keep_by_layer)
+    layers: list[CacheLayerSnapshot] = []
+    masks: list[Any] = []
+    for layer_index, (source, positions) in enumerate(
+        zip(snapshot.layers, keep_by_layer, strict=True)
+    ):
+        storage = plan.full_state.layers[layer_index]
+        key_index = torch.tensor(positions, dtype=torch.long, device=source.key.device)
+        value_index = key_index.to(device=source.value.device)
+        key = torch.index_select(source.key, storage.key_sequence_dimension, key_index)
+        value = torch.index_select(source.value, storage.value_sequence_dimension, value_index)
+        padding = capacity - len(positions)
+        if padding:
+            key_shape = list(key.shape)
+            value_shape = list(value.shape)
+            key_shape[storage.key_sequence_dimension] = padding
+            value_shape[storage.value_sequence_dimension] = padding
+            key = torch.cat(
+                (key, torch.zeros(key_shape, dtype=key.dtype, device=key.device)),
+                dim=storage.key_sequence_dimension,
+            )
+            value = torch.cat(
+                (value, torch.zeros(value_shape, dtype=value.dtype, device=value.device)),
+                dim=storage.value_sequence_dimension,
+            )
+        layers.append(CacheLayerSnapshot(key, value, storage.key_sequence_dimension))
+        masks.append(
+            torch.tensor(
+                [True] * len(positions) + [False] * padding,
+                dtype=torch.bool,
+                device=key.device,
+            )
+            .unsqueeze(0)
+            .expand(storage.kv_heads, -1)
+            .clone()
+        )
+    compacted = CacheSnapshot(
+        tuple(layers),
+        snapshot.source_class,
+        snapshot.source_kind,
+        capacity,
+        snapshot.cached_key_state,
+    )
+    model_state = dict(state.model_state)
+    model_state["mosaickv_validity_masks"] = tuple(masks)
+    model_state["mosaickv_prompt_capacity"] = capacity
+    return (
+        DecodeState(
+            past_key_values=adapter.inject_past_key_values(compacted),
+            attention_mask=torch.ones(
+                (1, capacity),
+                dtype=state.attention_mask.dtype,
+                device=state.attention_mask.device,
+            ),
+            active_cache_length=capacity,
+            logical_sequence_length=state.logical_sequence_length,
+            next_decode_position=state.next_decode_position,
+            modality_map=state.modality_map,
+            model_state=model_state,
+        ),
+        tuple(events),
+    )
+
+
+def maintain_elastic_cache_decode_cache(
+    adapter: HuggingFaceMultimodalAdapter,
+    state: DecodeState,
+    plan: PublishedKVCompressionPlan,
+    *,
+    step_index: int,
+) -> tuple[DecodeState, tuple[JsonObject, ...]]:
+    """Apply Elastic Cache's fixed-point generation-stage elimination policy."""
+
+    if plan.method is not MosaicKVMethod.ELASTIC_CACHE_REIMPL:
+        raise HuggingFaceRuntimeError("Elastic decode maintenance requires elastic_cache_reimpl")
+    torch = _torch()
+    snapshot = adapter.extract_past_key_values(state.past_key_values)
+    layer_heads = tuple(
+        tuple(head for head in plan.heads if head.layer == layer)
+        for layer in range(len(plan.full_state.layers))
+    )
+    raw_masks = state.model_state.get("mosaickv_validity_masks")
+    if raw_masks is None and state.model_state.get("mosaickv_packed_all_valid") is True:
+        raw_masks = tuple(
+            torch.ones(
+                (
+                    storage.kv_heads,
+                    int(snapshot.layers[layer].key.shape[storage.key_sequence_dimension]),
+                ),
+                dtype=torch.bool,
+                device=snapshot.layers[layer].key.device,
+            )
+            for layer, storage in enumerate(plan.full_state.layers)
+        )
+    if not isinstance(raw_masks, tuple) or len(raw_masks) != len(layer_heads):
+        raise HuggingFaceRuntimeError("Elastic Cache decode validity metadata is incomplete")
+
+    keep_by_layer: list[tuple[int, ...]] = []
+    events: list[JsonObject] = []
+    for layer, (heads, validity) in enumerate(zip(layer_heads, raw_masks, strict=True)):
+        if not heads:
+            raise HuggingFaceRuntimeError("Elastic Cache plan is missing a decoder layer")
+        storage = plan.full_state.layers[layer]
+        if getattr(validity, "ndim", 0) != 2 or getattr(validity, "dtype", None) != torch.bool:
+            raise HuggingFaceRuntimeError(
+                "Elastic Cache validity masks must be rank-two bool tensors"
+            )
+        if int(validity.shape[0]) != storage.kv_heads:
+            raise HuggingFaceRuntimeError(
+                "Elastic Cache validity KV-head count changed during decode"
+            )
+        if not bool(torch.all(validity == validity[0:1])):
+            raise HuggingFaceRuntimeError(
+                "Elastic Cache requires shared physical positions for all KV heads in a layer"
+            )
+        if len({head.capacity for head in heads}) != 1:
+            raise HuggingFaceRuntimeError(
+                "Elastic Cache plan lost its shared layer-wise anchor capacity"
+            )
+        valid_physical = tuple(
+            int(value)
+            for value in torch.nonzero(validity[0], as_tuple=False)
+            .reshape(-1)
+            .detach()
+            .cpu()
+            .tolist()
+        )
+        source_positions = heads[0].source_positions
+        prompt_capacity = heads[0].capacity
+        effective_retention = prompt_capacity / source_positions
+        target = max(
+            prompt_capacity,
+            math.floor((source_positions + step_index) * effective_retention + 1e-12),
+        )
+        removed: int | None = None
+        fixed_rank: int | None = None
+        if len(valid_physical) > target:
+            minimum_rank = min(plan.config.elastic_start_tokens, len(valid_physical) - 1)
+            fixed_rank = max(
+                minimum_rank,
+                min(prompt_capacity + plan.config.elastic_decode_offset, len(valid_physical) - 1),
+            )
+            removed = valid_physical[fixed_rank]
+            valid_physical = tuple(
+                position
+                for index, position in enumerate(valid_physical)
+                if index != fixed_rank
+            )
+        keep_by_layer.append(valid_physical)
+        events.append(
+            {
+                "step": step_index,
+                "layer": layer,
+                "source_prompt_positions": source_positions,
+                "prompt_anchor_capacity": prompt_capacity,
+                "effective_retention_ratio": effective_retention,
+                "target_active_positions": target,
+                "configured_decode_offset": plan.config.elastic_decode_offset,
+                "fixed_truncation_rank": fixed_rank,
                 "removed_physical_position": removed,
                 "active_positions_after": len(valid_physical),
             }
@@ -8132,6 +8317,58 @@ def _vl_cache_plan_trace(plan: VLCacheCompressionPlan) -> JsonObject:
     }
 
 
+def _published_kv_plan_trace(plan: PublishedKVCompressionPlan) -> JsonObject:
+    """Normalize audited local paper policies into the shared trace vocabulary."""
+
+    uses_merging = plan.method is MosaicKVMethod.ELASTIC_CACHE_REIMPL
+    return {
+        "requested_method": plan.method.value,
+        "effective_method": plan.method.value,
+        "tier_mode": (
+            "published_layerwise_anchor_merge"
+            if uses_merging
+            else "published_exact_token_selection"
+        ),
+        "tier_reason": (
+            "Elastic Cache layer-wise anchors and FP32 bucket means through the shared packer"
+            if uses_merging
+            else "audited paper policy through the shared exact-cache packer"
+        ),
+        "selected_blocks": [
+            {
+                "layer": head.layer,
+                "kv_head": head.kv_head,
+                "positions": list(head.selected_physical_positions),
+                "protected_positions": list(head.protected_positions),
+            }
+            for head in plan.heads
+        ],
+        "prototypes": (
+            [
+                {
+                    "layer": head.layer,
+                    "kv_head": head.kv_head,
+                    "anchor": anchor,
+                    "source_membership": list(membership),
+                }
+                for head in plan.heads
+                for anchor, membership in zip(
+                    head.selected_physical_positions,
+                    head.merge_memberships,
+                    strict=True,
+                )
+            ]
+            if uses_merging
+            else []
+        ),
+        "graph_edges": [],
+        "graph_diagnostics": {"status": "not_used_by_published_kv_reimplementation"},
+        "forecast_statistics": {"status": "not_used_by_published_kv_reimplementation"},
+        "selection_provenance": plan.score_provenance,
+        "published_kv": plan.to_trace(),
+    }
+
+
 def _write_trace(path: Path, payload: JsonObject) -> None:
     if path.exists():
         raise FileExistsError(f"refusing to overwrite runtime trace: {path}")
@@ -8550,6 +8787,7 @@ class HuggingFaceMosaicKVModel:
             lookm_plan: LookMCompressionPlan | None = None
             prefixkv_plan: PrefixKVCompressionPlan | None = None
             vl_cache_plan: VLCacheCompressionPlan | None = None
+            published_kv_plan: PublishedKVCompressionPlan | None = None
             state = prefill.state
             if not is_full_cache and not retention_one_identity:
                 cache_state_started = time.perf_counter()
@@ -9206,6 +9444,23 @@ class HuggingFaceMosaicKVModel:
                     packed_state = None
                     prototype_records = ()
                     logical_prefill_active_kv_bytes = prefixkv_plan.retained_bytes
+                elif method.is_published_eviction_reimplementation:
+                    published_kv_plan, selection_seconds = _timed(
+                        prefill.logits,
+                        lambda: build_published_kv_reimpl_plan(
+                            full_state,
+                            prefill.attention_weights,
+                            method,
+                            self.config.published_kv,
+                            planning_config.cache,
+                            physical_prompt_capacity=(
+                                None if dense_budget is None else dense_budget.prompt_capacity
+                            ),
+                        ),
+                    )
+                    packed_state = None
+                    prototype_records = ()
+                    logical_prefill_active_kv_bytes = published_kv_plan.retained_bytes
                 else:  # pragma: no cover - strict method vocabulary guards this
                     raise HuggingFaceRuntimeError(f"unsupported runtime method: {method.value}")
                 if lookm_plan is not None:
@@ -9247,6 +9502,23 @@ class HuggingFaceMosaicKVModel:
                             full_state,
                             vl_cache_payloads,
                             vl_cache_slots,
+                            physical_prompt_capacity=(
+                                None if dense_budget is None else dense_budget.prompt_capacity
+                            ),
+                            packing_mode=self.config.cache.packing_mode,
+                        ),
+                    )
+                elif published_kv_plan is not None:
+                    published_payloads, published_slots = published_kv_runtime_payloads(
+                        published_kv_plan
+                    )
+                    packed, packing_seconds = _timed(
+                        prefill.logits,
+                        lambda: pack_runtime_payloads(
+                            self.adapter,
+                            full_state,
+                            published_payloads,
+                            published_slots,
                             physical_prompt_capacity=(
                                 None if dense_budget is None else dense_budget.prompt_capacity
                             ),
@@ -9332,6 +9604,8 @@ class HuggingFaceMosaicKVModel:
                         payload = _prefixkv_plan_trace(prefixkv_plan)
                     elif vl_cache_plan is not None:
                         payload = _vl_cache_plan_trace(vl_cache_plan)
+                    elif published_kv_plan is not None:
+                        payload = _published_kv_plan_trace(published_kv_plan)
                     else:  # pragma: no cover - compressed branch always has a plan
                         raise HuggingFaceRuntimeError("compressed trace is missing its plan")
                     payload["packed_slots"] = _trace_catalog(
@@ -9561,6 +9835,7 @@ class HuggingFaceMosaicKVModel:
             repair_events: list[RepairEvent] = []
             draft_repair_prefix_matches = True
             prefixkv_decode_events: list[JsonObject] = []
+            elastic_cache_decode_events: list[JsonObject] = []
             oracle_reference_state = (
                 _clone_decode_state(self.adapter, prefill.state)
                 if repair_state is not None and self.config.repair.policy is RepairPolicy.ORACLE
@@ -9642,6 +9917,30 @@ class HuggingFaceMosaicKVModel:
                         )
                         state, maintenance_events = maintained
                         prefixkv_decode_events.extend(maintenance_events)
+                        decode_seconds += maintenance_seconds
+                        per_token_decode_seconds[-1] += maintenance_seconds
+                    elif (
+                        published_kv_plan is not None
+                        and published_kv_plan.method is MosaicKVMethod.ELASTIC_CACHE_REIMPL
+                    ):
+
+                        def maintain_elastic(
+                            output: Any = provisional,
+                            current_step: int = step_index,
+                        ) -> tuple[DecodeState, tuple[JsonObject, ...]]:
+                            return maintain_elastic_cache_decode_cache(
+                                self.adapter,
+                                output.state,
+                                published_kv_plan,
+                                step_index=current_step,
+                            )
+
+                        maintained, maintenance_seconds = _timed(
+                            provisional.logits,
+                            maintain_elastic,
+                        )
+                        state, maintenance_events = maintained
+                        elastic_cache_decode_events.extend(maintenance_events)
                         decode_seconds += maintenance_seconds
                         per_token_decode_seconds[-1] += maintenance_seconds
                     else:
@@ -10045,6 +10344,9 @@ class HuggingFaceMosaicKVModel:
                         "final_prefix_match_state": draft_repair_prefix_matches,
                     },
                     "prefixkv_decode_events": cast("list[JsonValue]", prefixkv_decode_events),
+                    "elastic_cache_decode_events": cast(
+                        "list[JsonValue]", elastic_cache_decode_events
+                    ),
                     "short_horizon_logit_stability": (
                         {"status": "disabled"}
                         if logit_stability_decision is None

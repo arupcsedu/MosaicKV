@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import re
+import subprocess
+import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import cast
 
@@ -46,6 +50,7 @@ class PublishedMethodContract:
     source: str
     status: str
     repository_commit: str | None
+    execution_enabled: bool = True
 
     def __post_init__(self) -> None:
         if not self.name.strip() or not self.source.strip():
@@ -63,6 +68,8 @@ class PublishedMethodContract:
             raise ValueError("official_pinned methods require a 40-character commit SHA")
         if self.status == "local_reimplementation" and not self.name.endswith("_reimpl"):
             raise ValueError("local paper reimplementations must end in _reimpl")
+        if self.status == "unsupported_unpinned" and self.execution_enabled:
+            raise ValueError("unsupported_unpinned methods cannot be execution-enabled")
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,6 +92,8 @@ class PublishedBaselineProtocol:
                 raise ValueError(f"protocol {field_name} must be non-empty")
         if not self.model_revision.strip():
             raise ValueError("protocol model_revision must be non-empty")
+        if self.execution_authorized and _SHA.fullmatch(self.model_revision) is None:
+            raise ValueError("authorized protocols require an exact 40-character model SHA")
         if not self.retention_ratios or any(not 0 < ratio <= 1 for ratio in self.retention_ratios):
             raise ValueError("protocol retention ratios must lie in (0, 1]")
         if tuple(sorted(set(self.retention_ratios), reverse=True)) != self.retention_ratios:
@@ -93,6 +102,8 @@ class PublishedBaselineProtocol:
             raise ValueError("protocol tasks must be non-empty and unique")
         if not self.methods or len({method.name for method in self.methods}) != len(self.methods):
             raise ValueError("protocol methods must be non-empty and unique")
+        if not any(method.execution_enabled for method in self.methods):
+            raise ValueError("protocol must enable at least one method")
 
     def validate_metrics(self, registry: MetricRegistry | None = None) -> None:
         selected = registry or default_metric_registry()
@@ -161,11 +172,15 @@ def _parse_method(value: object, path: str) -> PublishedMethodContract:
     commit = data.get("repository_commit")
     if commit is not None and not isinstance(commit, str):
         raise ValueError(f"{path}.repository_commit must be a string or null")
+    execution_enabled = data.get("execution_enabled", True)
+    if not isinstance(execution_enabled, bool):
+        raise ValueError(f"{path}.execution_enabled must be boolean")
     return PublishedMethodContract(
         name=_required_string(data, "name", path),
         source=_required_string(data, "source", path),
         status=_required_string(data, "status", path),
         repository_commit=commit,
+        execution_enabled=execution_enabled,
     )
 
 
@@ -237,6 +252,12 @@ def protocol_summary(suite: PublishedProtocolSuite) -> JsonObject:
                     "metrics": sorted(
                         {metric for task in protocol.tasks for metric in task.metrics}
                     ),
+                    "enabled_methods": [
+                        method.name for method in protocol.methods if method.execution_enabled
+                    ],
+                    "excluded_methods": [
+                        method.name for method in protocol.methods if not method.execution_enabled
+                    ],
                     "execution_authorized": protocol.execution_authorized,
                 }
                 for protocol in suite.protocols
@@ -245,11 +266,94 @@ def protocol_summary(suite: PublishedProtocolSuite) -> JsonObject:
     )
 
 
+def metric_readiness_issues(suite: PublishedProtocolSuite) -> tuple[str, ...]:
+    """Return code/dependency blockers without weakening execution authorization."""
+
+    issues: list[str] = []
+    required_distributions = {
+        "Levenshtein": "0.27.5",
+        "lmms-eval": "0.7.2",
+        "pycocoevalcap": "1.2",
+        "rouge": "1.0.1",
+    }
+    for distribution, expected in required_distributions.items():
+        try:
+            installed = version(distribution)
+        except PackageNotFoundError:
+            issues.append(f"dependency {distribution} is not installed")
+            continue
+        if installed != expected:
+            issues.append(f"dependency {distribution}=={installed}, expected {expected}")
+
+    evaluator_imports = {
+        "ANLS": "lmms_eval.api.metrics",
+        "CIDEr": "lmms_eval.tasks.coco_cap.utils",
+        "ROUGE-L": "rouge",
+    }
+    for evaluator, module_name in evaluator_imports.items():
+        try:
+            __import__(module_name)
+        except Exception as error:
+            issues.append(f"{evaluator} evaluator import failed: {type(error).__name__}: {error}")
+    # lmms-eval constructs its MathVista judge at module import time.  The
+    # dummy provider exercises the exact extraction/scoring module without
+    # requiring credentials or changing the caller's eventual judge choice.
+    mathvista_environment = os.environ.copy()
+    mathvista_environment["API_TYPE"] = "dummy"
+    mathvista_import = subprocess.run(
+        [sys.executable, "-c", "import lmms_eval.tasks.mathvista.utils"],
+        env=mathvista_environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if mathvista_import.returncode != 0:
+        detail = mathvista_import.stderr.strip().splitlines()
+        message = detail[-1] if detail else "unknown import failure"
+        issues.append(f"MathVista evaluator import failed: {message}")
+
+    registry = default_metric_registry()
+    from mosaickv.evaluation.milebench import MILEBENCH_DATASET_TO_GROUP
+    from mosaickv.evaluation.tasks import default_task_registry
+
+    task_registry = default_task_registry()
+    for protocol in suite.protocols:
+        for task in protocol.tasks:
+            contract_metrics = {registry.canonical_name(name) for name in task.metrics}
+            if task.name in task_registry.names():
+                routed = task_registry.resolve(task.name)
+                routed_metrics = {registry.canonical_name(name) for name in routed.paper_metrics}
+                if not contract_metrics <= routed_metrics:
+                    missing = sorted(contract_metrics - routed_metrics)
+                    issues.append(
+                        f"{protocol.protocol_id}/{task.name}: task route lacks metrics {missing}"
+                    )
+                if (routed.dataset_id, routed.split) != (task.dataset, task.split):
+                    issues.append(
+                        f"{protocol.protocol_id}/{task.name}: task route dataset/split "
+                        "does not match protocol"
+                    )
+                if routed.lmms_task is None and not routed.scoring_owner.startswith(
+                    "paper_native_"
+                ):
+                    issues.append(
+                        f"{protocol.protocol_id}/{task.name}: route has no executable owner"
+                    )
+            else:
+                issues.append(f"{protocol.protocol_id}/{task.name}: no metric execution route")
+            if task.name == "milebench" and len(MILEBENCH_DATASET_TO_GROUP) != 29:
+                issues.append(
+                    f"{protocol.protocol_id}/milebench: incomplete official dataset routing"
+                )
+    return tuple(issues)
+
+
 __all__ = [
     "PublishedBaselineProtocol",
     "PublishedMethodContract",
     "PublishedProtocolSuite",
     "PublishedTaskContract",
     "load_published_protocols",
+    "metric_readiness_issues",
     "protocol_summary",
 ]

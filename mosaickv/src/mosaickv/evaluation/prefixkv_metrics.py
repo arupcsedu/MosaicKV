@@ -214,7 +214,7 @@ def prefixkv_metric_observations(
 
     registry = default_metric_registry()
     rouge_definition = registry.resolve("rouge_l_f1")
-    ppl_definition = registry.resolve("perplexity")
+    ppl_definition = registry.resolve("teacher_forced_ppl")
     if any(sample.numerator is None or sample.denominator is None for sample in perplexity):
         raise ValueError("perplexity samples require NLL numerator and token denominator")
     observations: list[MetricObservation] = []

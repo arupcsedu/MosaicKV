@@ -9,49 +9,24 @@ from collections.abc import Sequence
 from mosaickv.evaluation.metrics.types import MetricSample
 
 
-def _tokens(value: str) -> tuple[str, ...]:
-    return tuple(value.split())
-
-
-def _lcs_length(left: Sequence[str], right: Sequence[str]) -> int:
-    """Return LCS length with O(min(n,m)) auxiliary memory."""
-
-    if len(left) < len(right):
-        left, right = right, left
-    row = [0] * (len(right) + 1)
-    for left_token in left:
-        diagonal = 0
-        for index, right_token in enumerate(right, start=1):
-            previous = row[index]
-            if left_token == right_token:
-                row[index] = diagonal + 1
-            else:
-                row[index] = max(row[index], row[index - 1])
-            diagonal = previous
-    return row[-1]
-
-
 def rouge_l_f1(prediction: str, references: Sequence[str]) -> float:
-    """Return maximum whitespace-tokenized ROUGE-L F1 over references.
+    """Return PrefixKV/LOOK-M's pinned ``rouge==1.0.1`` ROUGE-L F1."""
 
-    This matches the LCS/F1 definition used by PrefixKV and LOOK-M.  The
-    implementation identity is recorded separately so it is never mislabeled
-    as an invocation of their third-party ``rouge`` package.
-    """
-
-    predicted = _tokens(prediction)
-    if not predicted:
+    if not references:
+        raise ValueError("ROUGE-L requires at least one reference")
+    if not prediction.strip():
         return 0.0
+    try:
+        from rouge import Rouge
+    except ImportError as error:  # pragma: no cover - pinned evaluation dependency.
+        raise RuntimeError("ROUGE-L requires pinned rouge==1.0.1") from error
+    scorer = Rouge(metrics=("rouge-l",), stats=("f",))
     best = 0.0
     for reference in references:
-        target = _tokens(reference)
-        if not target:
+        if not reference.strip():
             continue
-        overlap = _lcs_length(predicted, target)
-        precision = overlap / len(predicted)
-        recall = overlap / len(target)
-        if precision + recall:
-            best = max(best, 2.0 * precision * recall / (precision + recall))
+        result = scorer.get_scores(prediction, reference)
+        best = max(best, float(result[0]["rouge-l"]["f"]))
     return best
 
 
@@ -64,39 +39,19 @@ def exact_match_score(prediction: str, references: Sequence[str]) -> float:
     return float(any(normalized == _normalized_text(reference) for reference in references))
 
 
-def _levenshtein(left: str, right: str) -> int:
-    if len(left) < len(right):
-        left, right = right, left
-    row = list(range(len(right) + 1))
-    for left_index, left_char in enumerate(left, start=1):
-        following = [left_index]
-        for right_index, right_char in enumerate(right, start=1):
-            following.append(
-                min(
-                    following[-1] + 1,
-                    row[right_index] + 1,
-                    row[right_index - 1] + (left_char != right_char),
-                )
-            )
-        row = following
-    return row[-1]
-
-
 def anls_score(prediction: str, references: Sequence[str], *, threshold: float = 0.5) -> float:
-    """Compute DocVQA ANLS using the official 0.5 normalized-distance cutoff."""
+    """Compute ANLS through the pinned lmms-eval DocVQA implementation."""
 
     if not 0 <= threshold <= 1:
         raise ValueError("threshold must lie in [0, 1]")
-    candidate = prediction.casefold().strip()
-    best = 0.0
-    for reference in references:
-        target = reference.casefold().strip()
-        normalizer = max(len(candidate), len(target))
-        similarity = 1.0 if normalizer == 0 else 1.0 - _levenshtein(candidate, target) / normalizer
-        if similarity < threshold:
-            similarity = 0.0
-        best = max(best, similarity)
-    return best
+    if not references:
+        raise ValueError("ANLS requires at least one reference")
+    try:
+        from lmms_eval.api.metrics import anls
+    except ImportError as error:  # pragma: no cover - pinned evaluation dependency.
+        raise RuntimeError("ANLS requires pinned lmms-eval==0.7.2") from error
+    result = anls(list(references), [prediction], thresh_hold=threshold)
+    return float(result["anls"])
 
 
 def aggregate_mean(samples: Sequence[MetricSample]) -> float:
@@ -137,12 +92,28 @@ def aggregate_cider(samples: Sequence[MetricSample], *, scale: float = 100.0) ->
     if not samples:
         raise ValueError("cannot aggregate an empty metric sample set")
     try:
-        from pycocoevalcap.cider.cider import Cider  # type: ignore[import-untyped]
-    except ImportError as error:  # pragma: no cover - exercised by minimal installs.
-        raise RuntimeError("CIDEr requires the pinned pycocoevalcap package") from error
-    ground_truth = {sample.sample_id: list(sample.references) for sample in samples}
-    predictions = {sample.sample_id: [sample.prediction] for sample in samples}
-    score, _scores = Cider().compute_score(ground_truth, predictions)
+        from lmms_eval.tasks.coco_cap import utils as coco_utils
+    except ImportError as error:  # pragma: no cover - pinned evaluation dependency.
+        raise RuntimeError("CIDEr requires pinned lmms-eval==0.7.2") from error
+    # Bootstrap draws legitimately contain repeated source samples.  Give
+    # every occurrence a fresh evaluator-local identity so a repeated draw is
+    # counted repeatedly instead of being collapsed by the COCO dictionaries.
+    # Source-cohort uniqueness is checked before resampling by
+    # ``paired_bootstrap``.
+    ground_truth = {
+        str(index): [{"caption": reference} for reference in sample.references]
+        for index, sample in enumerate(samples)
+    }
+    predictions = {
+        str(index): [{"caption": sample.prediction}] for index, sample in enumerate(samples)
+    }
+    tokenizer = coco_utils.PTBTokenizer()
+    tokenized_ground_truth = tokenizer.tokenize(ground_truth)
+    tokenized_predictions = tokenizer.tokenize(predictions)
+    score, _scores = coco_utils.Cider().compute_score(
+        tokenized_ground_truth,
+        tokenized_predictions,
+    )
     return float(score) * scale
 
 

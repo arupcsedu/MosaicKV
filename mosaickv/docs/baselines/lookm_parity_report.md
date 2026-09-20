@@ -94,9 +94,12 @@ These cells are status labels, not numeric experimental observations.
 ## Current parity boundary
 
 Official LOOK-M requires a dependency stack that is incompatible with the
-single common environment. Official execution is therefore disabled and no
-official parity row can be produced under the current policy. The pinned
-source remains available for algorithm and license inspection only.
+common Torch 2.8 environment. The pinned source now has a fail-closed external
+launcher (`scripts/run_official_baseline.py lookm`) that requires and verifies
+the author's Torch 2.1.1/Transformers 4.37 stack. This removes the launcher
+gap without falsely treating a changed dependency stack as official. An
+official parity row still requires the original checkpoint and matched
+MileBench assets; none is fabricated here.
 
 `lookm_reimpl` may be evaluated through the common runtime when its model,
 prompt, media, tokenization, generation, budget, precision, backend, warmup,

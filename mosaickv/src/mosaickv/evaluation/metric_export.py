@@ -73,14 +73,7 @@ def _cider_observation(
         raise ValueError(
             "CIDEr cannot aggregate mixed run/task/model/backend/effective-method rows"
         )
-    samples = tuple(
-        MetricSample(
-            sample_id=row.sample_id,
-            prediction=str(row.answer),
-            references=_references(row.reference),
-        )
-        for row in completed
-    )
+    samples = cider_samples_from_results(completed)
     definition = default_metric_registry().resolve("cider")
     run_id, task, model, backend, method = next(iter(identities))
     return MetricObservation(
@@ -104,6 +97,28 @@ def _cider_observation(
         reference_artifact_sha="not_used",
         sample_count=len(samples),
     )
+
+
+def cider_samples_from_results(
+    rows: Sequence[EvaluationResult],
+) -> tuple[MetricSample, ...]:
+    """Build raw CIDEr contributions without copying captions into metric rows."""
+
+    if not rows:
+        raise ValueError("CIDEr requires at least one raw result")
+    if any(row.status is not ResultStatus.COMPLETED or row.answer is None for row in rows):
+        raise ValueError("CIDEr raw contributions require completed answers")
+    samples = tuple(
+        MetricSample(
+            sample_id=row.sample_id,
+            prediction=str(row.answer),
+            references=_references(row.reference),
+        )
+        for row in rows
+    )
+    if len({sample.sample_id for sample in samples}) != len(samples):
+        raise ValueError("CIDEr raw contributions require unique sample IDs")
+    return samples
 
 
 def export_task_metrics(
@@ -130,7 +145,7 @@ def export_task_metrics(
                 except (RuntimeError, ValueError) as error:
                     errors.append(f"{task}/cider: {type(error).__name__}: {error}")
                 continue
-            if metric_name in {"perplexity", "rouge_l_f1"}:
+            if metric_name in {"teacher_forced_ppl", "perplexity", "rouge_l_f1"}:
                 requirement = "requires the PrefixKV teacher-forcing/reference protocol"
                 errors.append(f"{task}/{metric_name}: {requirement}")
                 continue
@@ -147,4 +162,4 @@ def export_task_metrics(
     return tuple(observations), errors
 
 
-__all__ = ["export_task_metrics"]
+__all__ = ["cider_samples_from_results", "export_task_metrics"]

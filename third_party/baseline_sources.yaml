@@ -1,0 +1,52 @@
+schema_version: 1
+sources:
+  - method: elastic_cache_reimpl
+    paper: "Efficient Inference of Vision Instruction-Following Models with Elastic Cache"
+    paper_url: https://arxiv.org/abs/2407.18121
+    upstream_url: https://github.com/liuzuyan/ElasticCache
+    audited_revision: 3138e03fc8894231d98a2e5353f27a59af854cc3
+    vendored: true
+    path: third_party/ElasticCache
+    license: MIT
+  - method: h2o_reimpl
+    paper: "H2O: Heavy-Hitter Oracle for Efficient Generative Inference of Large Language Models"
+    paper_url: https://arxiv.org/abs/2306.14048
+    upstream_url: https://github.com/FMInference/H2O
+    audited_revision: ac75c2a8a9e76832b2a4139b9363373b56336bfb
+    vendored: false
+    audit_path: third_party/H2O
+    license: no-license-file-found-at-audited-revision
+    use: paper-derived local reimplementation; no upstream source redistributed
+  - method: streamingllm_reimpl
+    paper: "Efficient Streaming Language Models with Attention Sinks"
+    paper_url: https://arxiv.org/abs/2309.17453
+    upstream_url: https://github.com/mit-han-lab/streaming-llm
+    audited_revision: 2e5042606d69933d88fbf909bd77907456b9b4dd
+    vendored: true
+    path: third_party/StreamingLLM
+    license: MIT
+  - method: pyramidkv_reimpl
+    paper: "PyramidKV: Dynamic KV Cache Compression based on Pyramidal Information Funneling"
+    paper_url: https://arxiv.org/abs/2406.02069
+    upstream_url: https://github.com/IsaacRe/PyramidKV
+    audited_revision: 1ca16d6ea0bc3e48fc4cc8623bc4901bc131d511
+    vendored: true
+    path: third_party/PyramidKV
+    license: Apache-2.0
+  - method: snapkv_reimpl
+    paper: "SnapKV: LLM Knows What You are Looking for Before Generation"
+    paper_url: https://arxiv.org/abs/2404.14469
+    upstream_url: https://github.com/FasterDecoding/SnapKV
+    audited_revision: e216ddc84c5bd210378cbdbbba12ba02102aa640
+    vendored: true
+    path: third_party/SnapKV
+    license: Apache-2.0
+  - method: roco_reimpl
+    paper: "On the Efficacy of Eviction Policy for Key-Value Constrained Generative Language Model Inference"
+    paper_url: https://arxiv.org/abs/2402.06262
+    upstream_url: https://github.com/DRSY/EasyKV
+    audited_revision: a1d71cae3b562d9a709dda3741bd63e46a09ad31
+    vendored: false
+    audit_path: third_party/EasyKV
+    license: no-license-file-found-at-audited-revision
+    use: paper-derived local reimplementation; no upstream source redistributed

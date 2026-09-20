@@ -557,6 +557,17 @@ def test_load_vl_cache_yaml_example() -> None:
     assert config.vl_cache.sparsity_threshold == pytest.approx(0.01)
 
 
+def test_load_elastic_cache_yaml_example() -> None:
+    project_root = Path(__file__).resolve().parents[2]
+    config = load_config(project_root / "configs" / "hf_elastic_cache_reimpl.yaml")
+    assert config.method is MosaicKVMethod.ELASTIC_CACHE_REIMPL
+    assert config.cache.block_size == 1
+    assert config.published_kv.enabled
+    assert config.published_kv.elastic_start_tokens == 1
+    assert config.published_kv.elastic_protect_tokens == 1
+    assert config.published_kv.elastic_decode_offset == -25
+
+
 def test_vl_cache_calibration_provenance_is_strict() -> None:
     with pytest.raises(ConfigurationError, match="require dataset ID, revision, and split"):
         VLCacheConfig(enabled=True, calibration_sample_ids=("cal-0",))

@@ -41,8 +41,11 @@ class PairedMethodComparison:
     reference_value: float
     candidate_value: float
     candidate_minus_reference: float
+    relative_difference: float | None
     ci_low: float
     ci_high: float
+    relative_ci_low: float | None
+    relative_ci_high: float | None
     confidence: float
     bootstrap_resamples: int
     bootstrap_seed: int
@@ -71,6 +74,7 @@ def _sample_contributions(rows: Sequence[MetricObservation]) -> tuple[MetricSamp
 
 
 def _identity(rows: Sequence[MetricObservation]) -> tuple[str, str, str, str, float, str]:
+    registry = default_metric_registry()
     identities = {
         (
             row.task,
@@ -78,7 +82,7 @@ def _identity(rows: Sequence[MetricObservation]) -> tuple[str, str, str, str, fl
             row.backend,
             row.method,
             row.retention_ratio,
-            row.metric_name,
+            registry.canonical_name(row.metric_name),
         )
         for row in rows
     }
@@ -126,6 +130,8 @@ def compare_paired_methods(
     resamples: int = 10_000,
     seed: int = 2027,
     confidence: float = 0.95,
+    reference_samples: Sequence[MetricSample] | None = None,
+    candidate_samples: Sequence[MetricSample] | None = None,
 ) -> PairedMethodComparison:
     """Compute a paired interval without averaging incompatible metrics."""
 
@@ -145,15 +151,35 @@ def compare_paired_methods(
     )
     if comparable_reference != comparable_candidate:
         raise ValueError("paired metric cohorts differ in task, model, backend, or metric")
-    reference_samples = _sample_contributions(reference)
-    candidate_samples = _sample_contributions(candidate)
-    if not reference_samples or not candidate_samples:
+    selected_reference_samples = (
+        tuple(reference_samples)
+        if reference_samples is not None
+        else _sample_contributions(reference)
+    )
+    selected_candidate_samples = (
+        tuple(candidate_samples)
+        if candidate_samples is not None
+        else _sample_contributions(candidate)
+    )
+    if not selected_reference_samples or not selected_candidate_samples:
         raise ValueError("paired bootstrap requires sample-level sufficient statistics")
+    if len(selected_reference_samples) != reference_summary.sample_count:
+        raise ValueError("reference sample count disagrees with recorded metric cohort")
+    if len(selected_candidate_samples) != candidate_summary.sample_count:
+        raise ValueError("candidate sample count disagrees with recorded metric cohort")
     definition = default_metric_registry().resolve(reference_summary.metric_name)
+    if reference_samples is not None:
+        reduced = definition.aggregate(selected_reference_samples)
+        if abs(reduced - reference_summary.metric_value) > 1e-9:
+            raise ValueError("reference sample contributions disagree with corpus observation")
+    if candidate_samples is not None:
+        reduced = definition.aggregate(selected_candidate_samples)
+        if abs(reduced - candidate_summary.metric_value) > 1e-9:
+            raise ValueError("candidate sample contributions disagree with corpus observation")
     comparison = paired_bootstrap(
         definition,
-        reference_samples,
-        candidate_samples,
+        selected_reference_samples,
+        selected_candidate_samples,
         resamples=resamples,
         seed=seed,
         confidence=confidence,
@@ -170,8 +196,11 @@ def compare_paired_methods(
         reference_value=comparison.reference_value,
         candidate_value=comparison.candidate_value,
         candidate_minus_reference=comparison.candidate_minus_reference,
+        relative_difference=comparison.relative_difference,
         ci_low=comparison.ci_low,
         ci_high=comparison.ci_high,
+        relative_ci_low=comparison.relative_ci_low,
+        relative_ci_high=comparison.relative_ci_high,
         confidence=comparison.confidence,
         bootstrap_resamples=comparison.bootstrap_resamples,
         bootstrap_seed=comparison.bootstrap_seed,

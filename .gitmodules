@@ -4,3 +4,15 @@
 [submodule "third_party/PrefixKV"]
 	path = third_party/PrefixKV
 	url = https://github.com/THU-MIG/PrefixKV.git
+[submodule "third_party/StreamingLLM"]
+	path = third_party/StreamingLLM
+	url = https://github.com/mit-han-lab/streaming-llm.git
+[submodule "third_party/PyramidKV"]
+	path = third_party/PyramidKV
+	url = https://github.com/IsaacRe/PyramidKV.git
+[submodule "third_party/SnapKV"]
+	path = third_party/SnapKV
+	url = https://github.com/FasterDecoding/SnapKV.git
+[submodule "third_party/ElasticCache"]
+	path = third_party/ElasticCache
+	url = https://github.com/liuzuyan/ElasticCache.git
