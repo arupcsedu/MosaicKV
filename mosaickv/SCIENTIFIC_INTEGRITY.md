@@ -29,11 +29,61 @@ No synthetic number may be placed in a measured-results table. This prohibition 
 
 Every table-generation step must reject rows lacking the provenance required by `AGENTS.md` and `REPRODUCIBILITY.md`.
 
+## Result categories and published values
+
+Every raw result, metric observation, manifest, analysis artifact, table, and
+figure input must declare exactly one of these categories:
+
+- `paper_reproduction`: a local attempt to reproduce a paper under that
+  paper's checkpoint, dataset, metric, budget convention, and supported
+  environment. Measured rows use origin `locally_reproduced`.
+- `unified_comparison`: a controlled head-to-head run in MosaicKV's common
+  harness. Measured rows use origin `locally_measured`.
+
+The categories are scientifically different and must never be pooled into one
+comparison cohort. A paper-reproduction result does not become a unified
+comparison merely because it uses MosaicKV's runtime, and a common-runtime
+row does not become a paper reproduction merely because its method name cites
+a paper.
+
+A number transcribed from a publication uses origin `paper_reported`. It must
+be stored in the separate `PaperReportedResult` schema, with the source
+artifact hash and table/figure/page locator. It is forbidden in raw execution
+JSONL, metric-observation Parquet, and locally measured aggregate Parquet.
+When a published number is compared with a local reproduction, the output
+must contain three explicitly nested fields: `paper_reported`,
+`locally_reproduced`, and `reproduction_delta` (local minus paper). Never place
+a published value beside MosaicKV measurements under a shared “measured”
+heading or imply that both values came from the same execution.
+
+Every paper-reported value must preregister an absolute reproduction
+tolerance before the local result is read. The comparison writer records the
+tolerance and a machine-checked verdict and exits unsuccessfully when the
+operating point falls outside tolerance. Such a negative result remains a
+valid diagnostic artifact but cannot satisfy the baseline-reproduction gate.
+The locally reproduced record must state scored, failed, and attempted sample
+counts, and `attempted = scored + failed` is enforced.
+
 ## Fair comparisons
 
 Direct comparisons must use identical prompts, images/videos, tokenization, generation parameters, output lengths, cache budgets, model precision, and backend configuration. The invariant applies to MosaicKV, the full-cache reference, ablations, simple baselines, and published baselines.
 
 Before aggregation, a comparison validator must check stable identifiers or hashes for these fields. A display label or matching filename is not enough. If exact parity is impossible, report the run separately as non-comparable and state what differs; do not use it to support a head-to-head superiority claim.
+
+No new published-baseline comparison enters a paper table until (1) FullKV
+has passed the model-specific retention-1 token/logit tolerance, (2) the metric
+matches its pinned official evaluator fixtures, and (3) an official or pinned
+baseline has reproduced at least one preregistered paper operating point.
+Absence of qualifying execution evidence is an open scientific gate, never a
+reason to synthesize a pass.
+
+Unified comparisons additionally require the same model and processor
+revisions, chat/prompt and media hashes, preprocessing and tokenization hashes,
+generation configuration and output-length policy, precision, backend and
+attention implementation, deterministic settings, cache block/mandatory-token
+policy, environment lock, and measured active K/V bytes. The validator fails
+closed on a missing field. Nominal retention ratios never substitute for
+measured byte matching.
 
 Budget fairness requires a shared accounting convention. Include all cache payloads and algorithm-required cache metadata. Clearly state whether the budget is expressed in retained token slots, bytes, a ratio to the full cache, or another unit. Do not compare methods using different denominators under one retention-ratio label.
 

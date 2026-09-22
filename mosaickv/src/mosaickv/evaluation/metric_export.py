@@ -9,6 +9,7 @@ from mosaickv.evaluation.metrics.registry import default_metric_registry
 from mosaickv.evaluation.metrics.types import MetricObservation, MetricSample, MetricScope
 from mosaickv.evaluation.results import EvaluationResult, ResultStatus
 from mosaickv.evaluation.tasks import TaskSpec
+from mosaickv.types import ResultCategory, ResultOrigin
 
 _LMMS_EVALUATOR_ID = "lmms-eval==0.7.2"
 
@@ -30,6 +31,7 @@ def _sample_observation(
     *,
     metric_name: str,
     manifest_path: str,
+    result_category: ResultCategory,
 ) -> MetricObservation:
     if row.task_score is None:
         raise ValueError("sample metric requires task_score")
@@ -50,10 +52,20 @@ def _sample_observation(
         metric_implementation=definition.implementation,
         metric_version=definition.version,
         metric_unit=definition.unit,
-        measurement_type="paper_native_metric_measured",
+        measurement_type=(
+            "paper_reproduction_metric_measured"
+            if result_category is ResultCategory.PAPER_REPRODUCTION
+            else "unified_comparison_metric_measured"
+        ),
         manifest_path=manifest_path,
         evaluator_commit=_LMMS_EVALUATOR_ID,
         reference_artifact_sha="not_used",
+        result_category=result_category,
+        result_origin=(
+            ResultOrigin.LOCALLY_REPRODUCED
+            if result_category is ResultCategory.PAPER_REPRODUCTION
+            else ResultOrigin.LOCALLY_MEASURED
+        ),
     )
 
 
@@ -61,6 +73,7 @@ def _cider_observation(
     rows: Sequence[EvaluationResult],
     *,
     manifest_path: str,
+    result_category: ResultCategory,
 ) -> MetricObservation:
     completed = [
         row for row in rows if row.status is ResultStatus.COMPLETED and row.answer is not None
@@ -91,11 +104,21 @@ def _cider_observation(
         metric_implementation=definition.implementation,
         metric_version=definition.version,
         metric_unit=definition.unit,
-        measurement_type="paper_native_metric_measured",
+        measurement_type=(
+            "paper_reproduction_metric_measured"
+            if result_category is ResultCategory.PAPER_REPRODUCTION
+            else "unified_comparison_metric_measured"
+        ),
         manifest_path=manifest_path,
         evaluator_commit=_LMMS_EVALUATOR_ID,
         reference_artifact_sha="not_used",
         sample_count=len(samples),
+        result_category=result_category,
+        result_origin=(
+            ResultOrigin.LOCALLY_REPRODUCED
+            if result_category is ResultCategory.PAPER_REPRODUCTION
+            else ResultOrigin.LOCALLY_MEASURED
+        ),
     )
 
 
@@ -126,9 +149,25 @@ def export_task_metrics(
     *,
     specs: Sequence[TaskSpec],
     manifest_path: str,
+    result_category: ResultCategory = ResultCategory.UNIFIED_COMPARISON,
 ) -> tuple[tuple[MetricObservation, ...], list[str]]:
     """Export only metrics derivable without inventing missing observations."""
 
+    expected_origin = (
+        ResultOrigin.LOCALLY_REPRODUCED
+        if result_category is ResultCategory.PAPER_REPRODUCTION
+        else ResultOrigin.LOCALLY_MEASURED
+    )
+    invalid_rows = [
+        row.sample_id
+        for row in rows
+        if (row.result_category, row.result_origin) != (result_category, expected_origin)
+    ]
+    if invalid_rows:
+        raise ValueError(
+            "raw result category/origin does not match metric export request: "
+            + ", ".join(sorted(invalid_rows))
+        )
     spec_by_name = {spec.name: spec for spec in specs}
     rows_by_task: dict[str, list[EvaluationResult]] = {}
     for row in rows:
@@ -141,7 +180,13 @@ def export_task_metrics(
         for metric_name in spec.paper_metrics:
             if metric_name == "cider":
                 try:
-                    observations.append(_cider_observation(task_rows, manifest_path=manifest_path))
+                    observations.append(
+                        _cider_observation(
+                            task_rows,
+                            manifest_path=manifest_path,
+                            result_category=result_category,
+                        )
+                    )
                 except (RuntimeError, ValueError) as error:
                     errors.append(f"{task}/cider: {type(error).__name__}: {error}")
                 continue
@@ -157,6 +202,7 @@ def export_task_metrics(
                         row,
                         metric_name=metric_name,
                         manifest_path=manifest_path,
+                        result_category=result_category,
                     )
                 )
     return tuple(observations), errors

@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import pytest
 from PIL import Image
 
+from mosaickv.config import load_config
 from mosaickv.evaluation.model import (
     EvaluationRequest,
     GenerationMetrics,
@@ -25,6 +26,7 @@ from mosaickv.evaluation.prefixkv_metrics import TeacherForcedNll
 from mosaickv.evaluation.published_protocols import load_published_protocols
 from mosaickv.evaluation.results import EvaluationResult
 from mosaickv.evaluation.tasks import default_task_registry
+from mosaickv.types import ResultCategory, ResultOrigin
 
 
 @dataclass
@@ -235,6 +237,16 @@ def test_actual_active_bytes_are_required_and_byte_match_is_paired() -> None:
         validate_byte_matched_operating_points(
             left, (_result("other", "a", 80), _result("other", "b", 160))
         )
+    paper_right = tuple(
+        replace(
+            row,
+            result_category=ResultCategory.PAPER_REPRODUCTION,
+            result_origin=ResultOrigin.LOCALLY_REPRODUCED,
+        )
+        for row in right
+    )
+    with pytest.raises(ValueError, match="cannot mix result categories"):
+        validate_byte_matched_operating_points(left, paper_right)
 
 
 def test_protocol_guard_rejects_disabled_and_wrong_operating_points() -> None:
@@ -244,31 +256,66 @@ def test_protocol_guard_rejects_disabled_and_wrong_operating_points() -> None:
     )
     protocol = resolve_protocol(suite, "prefixkv_hf_reimpl_native_metrics_v1")
     task = default_task_registry().resolve("llava_description")
+    config = load_config(root / "configs/hf_prefixkv_reimpl.yaml")
+    config = replace(
+        config,
+        dataset=replace(
+            config.dataset,
+            id=task.dataset_id,
+            revision="a" * 40,
+            split=task.split,
+        ),
+    )
+    lock_sha = hashlib.sha256(
+        (root / "env/common/requirements.lock").read_bytes()
+    ).hexdigest()
     validate_protocol_run(
         protocol,
         task=task,
-        model_id=protocol.model,
-        model_revision=protocol.model_revision,
-        method="prefixkv_reimpl",
-        retention_ratio=0.5,
+        config=config,
+        environment_lock_sha256=lock_sha,
     )
     with pytest.raises(ValueError, match="disabled"):
         validate_protocol_run(
             protocol,
             task=task,
-            model_id=protocol.model,
-            model_revision=protocol.model_revision,
-            method="prefixkv_official",
-            retention_ratio=0.5,
+            config=config,
+            environment_lock_sha256=lock_sha,
+            method_label="prefixkv_official",
         )
     with pytest.raises(ValueError, match="retention ratio"):
         validate_protocol_run(
             protocol,
             task=task,
-            model_id=protocol.model,
-            model_revision=protocol.model_revision,
-            method="prefixkv_reimpl",
-            retention_ratio=0.55,
+            config=replace(
+                config,
+                cache=replace(config.cache, retention_ratio=0.55),
+            ),
+            environment_lock_sha256=lock_sha,
+        )
+    with pytest.raises(ValueError, match="dataset/split"):
+        validate_protocol_run(
+            protocol,
+            task=task,
+            config=replace(config, dataset=replace(config.dataset, id="wrong/dataset")),
+            environment_lock_sha256=lock_sha,
+        )
+    with pytest.raises(ValueError, match="supported backend/attention/precision/lock"):
+        validate_protocol_run(
+            protocol,
+            task=task,
+            config=config,
+            environment_lock_sha256="0" * 64,
+        )
+    with pytest.raises(ValueError, match="cache budget convention"):
+        validate_protocol_run(
+            protocol,
+            task=task,
+            config=replace(
+                config,
+                cache=replace(config.cache, accounting_spec_sha="0" * 64),
+            ),
+            environment_lock_sha256=lock_sha,
         )
 
 

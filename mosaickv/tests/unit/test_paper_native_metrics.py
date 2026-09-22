@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import copy
+import importlib.util
 import json
 import math
 from dataclasses import replace
@@ -63,6 +65,7 @@ from mosaickv.evaluation.published_protocols import (
     metric_readiness_issues,
 )
 from mosaickv.evaluation.results import EvaluationResult
+from mosaickv.types import ResultCategory
 
 
 def test_rouge_anls_and_exact_match_fixtures() -> None:
@@ -106,9 +109,7 @@ def test_cider_matches_lmms_eval_coco_tokenization_and_scorer() -> None:
         sample.sample_id: [{"caption": reference} for reference in sample.references]
         for sample in samples
     }
-    predictions = {
-        sample.sample_id: [{"caption": sample.prediction}] for sample in samples
-    }
+    predictions = {sample.sample_id: [{"caption": sample.prediction}] for sample in samples}
     tokenizer = coco_utils.PTBTokenizer()
     official, _ = coco_utils.Cider().compute_score(
         tokenizer.tokenize(ground_truth),
@@ -235,6 +236,23 @@ def test_perplexity_uses_token_weighted_corpus_nll() -> None:
     assert aggregate_perplexity(samples) == pytest.approx(math.exp(mean_nll))
 
 
+def test_perplexity_matches_pinned_prefixkv_official_reducer_fixture() -> None:
+    torch = pytest.importorskip("torch")
+    token_nlls = (math.log(2), math.log(4), math.log(8), math.log(16))
+    official = float(torch.exp(torch.stack([torch.tensor(value) for value in token_nlls]).mean()))
+    samples = tuple(
+        MetricSample(
+            sample_id=f"token-{index}",
+            prediction="",
+            references=("target",),
+            numerator=value,
+            denominator=1,
+        )
+        for index, value in enumerate(token_nlls)
+    )
+    assert aggregate_perplexity(samples) == pytest.approx(official)
+
+
 def test_metric_aware_bootstrap_recomputes_perplexity() -> None:
     registry = default_metric_registry()
     definition = registry.resolve("perplexity")
@@ -252,9 +270,7 @@ def test_metric_aware_bootstrap_recomputes_perplexity() -> None:
     assert result.sample_count == 2
     assert result.candidate_value > result.reference_value
     assert result.bootstrap_resamples == 100
-    expected_relative = (
-        result.candidate_value - result.reference_value
-    ) / result.reference_value
+    expected_relative = (result.candidate_value - result.reference_value) / result.reference_value
     assert result.relative_difference == pytest.approx(expected_relative)
     assert result.confidence == 0.95
 
@@ -501,6 +517,55 @@ def test_milebench_scoring_and_equal_dataset_aggregation() -> None:
     )
     assert aggregate["T-1/accuracy"] == 0.5
     assert aggregate["NH/accuracy"] == pytest.approx(0.3)
+
+
+def test_milebench_matches_pinned_lookm_official_fixture() -> None:
+    source = Path(__file__).resolve().parents[3] / "third_party/LOOK-M/evaluate.py"
+    spec = importlib.util.spec_from_file_location("lookm_official_evaluate_fixture", source)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    official = module.Eval()
+
+    sample = {
+        "sample_id": 1,
+        "gt_response": "Second!",
+        "pred_response": "B. second",
+        "choice_list": ["First", "Second!"],
+        "image": ["a.jpg"],
+    }
+    official_sample = copy.deepcopy(sample)
+    official.process_sample(official_sample)
+    official_accuracy, _ = official.judge_multi_choice(official_sample)
+    local_accuracy = milebench_multichoice_accuracy(
+        sample["pred_response"],
+        sample["gt_response"],
+        tuple(sample["choice_list"]),
+    )
+    assert local_accuracy == official_accuracy
+
+    prediction = "Red car, blue door!"
+    reference = "red truck blue door"
+    official_rouge = official.evaluate_rouge(
+        [
+            {
+                "sample_id": 1,
+                "gt_response": reference,
+                "pred_response": prediction,
+                "image": ["a.jpg"],
+            }
+        ],
+        {
+            "data": [
+                {
+                    "sample_id": 1,
+                    "image_quantity_level": "Few",
+                    "task_instance": {"images_path": ["a.jpg"]},
+                }
+            ]
+        },
+    )[0]["Rouge-L f"]
+    assert milebench_rouge_l(prediction, reference) == pytest.approx(official_rouge)
 
 
 def test_milebench_routes_every_official_dataset_and_keeps_metrics_separate() -> None:
@@ -760,7 +825,16 @@ def test_versioned_published_protocol_suite_is_valid() -> None:
         "vl_cache_native_v1",
     }
     assert all(protocol.execution_authorized for protocol in suite.protocols)
+    assert all(
+        protocol.result_category.value == "paper_reproduction" for protocol in suite.protocols
+    )
     assert all(len(protocol.model_revision) == 40 for protocol in suite.protocols)
+    assert all(
+        protocol.budget_convention.require_measured_active_bytes
+        and len(protocol.budget_convention.active_byte_accounting_sha256) == 64
+        and len(protocol.supported_environment.environment_lock_sha256) == 64
+        for protocol in suite.protocols
+    )
     excluded = {
         method.name
         for protocol in suite.protocols
@@ -787,6 +861,11 @@ def test_versioned_published_protocol_suite_is_valid() -> None:
     } <= enabled
     with pytest.raises(ValueError, match="exact 40-character model SHA"):
         replace(suite.protocols[0], model_revision="resolve_before_execution")
+    with pytest.raises(ValueError, match="paper_reproduction"):
+        replace(
+            suite.protocols[0],
+            result_category=ResultCategory.UNIFIED_COMPARISON,
+        )
     assert all(
         method.status != "unsupported_unpinned"
         for protocol in suite.protocols

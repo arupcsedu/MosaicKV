@@ -8,7 +8,7 @@ from enum import StrEnum
 from typing import cast
 
 from mosaickv.evaluation.model import GenerationMetrics
-from mosaickv.types import JsonObject
+from mosaickv.types import JsonObject, ResultCategory, ResultOrigin
 
 
 class ResultStatus(StrEnum):
@@ -56,6 +56,8 @@ class EvaluationResult:
     logit_kl: float | None
     attention_output_error: float | None
     manifest_path: str
+    result_category: ResultCategory = ResultCategory.UNIFIED_COMPARISON
+    result_origin: ResultOrigin = ResultOrigin.LOCALLY_MEASURED
     schema_version: int = 1
 
     def __post_init__(self) -> None:
@@ -64,6 +66,17 @@ class EvaluationResult:
                 raise ValueError(f"{name} must be non-empty")
         if not self.manifest_path.strip():
             raise ValueError("manifest_path must be non-empty")
+        if self.result_origin is ResultOrigin.PAPER_REPORTED:
+            raise ValueError("paper-reported numbers cannot be stored as execution results")
+        expected_origin = (
+            ResultOrigin.LOCALLY_REPRODUCED
+            if self.result_category is ResultCategory.PAPER_REPRODUCTION
+            else ResultOrigin.LOCALLY_MEASURED
+        )
+        if self.result_origin is not expected_origin:
+            raise ValueError(
+                f"{self.result_category.value} results require origin={expected_origin.value}"
+            )
         if not 0 < self.retention_ratio <= 1:
             raise ValueError("retention_ratio must be in the interval (0, 1]")
         if self.status == ResultStatus.COMPLETED:
@@ -119,6 +132,8 @@ class EvaluationResult:
         task_score: float | None,
         metrics: GenerationMetrics,
         manifest_path: str,
+        result_category: ResultCategory = ResultCategory.UNIFIED_COMPARISON,
+        result_origin: ResultOrigin = ResultOrigin.LOCALLY_MEASURED,
     ) -> EvaluationResult:
         """Build a completed row from a model generation."""
 
@@ -136,6 +151,8 @@ class EvaluationResult:
             reference=reference,
             task_score=task_score,
             manifest_path=manifest_path,
+            result_category=result_category,
+            result_origin=result_origin,
             **asdict(metrics),
         )
 
@@ -155,6 +172,8 @@ class EvaluationResult:
         manifest_path: str,
         metrics: GenerationMetrics | None = None,
         answer: str | None = None,
+        result_category: ResultCategory = ResultCategory.UNIFIED_COMPARISON,
+        result_origin: ResultOrigin = ResultOrigin.LOCALLY_MEASURED,
     ) -> EvaluationResult:
         """Build a failure row while preserving any measurements already made."""
 
@@ -172,6 +191,8 @@ class EvaluationResult:
             reference=reference,
             task_score=None,
             manifest_path=manifest_path,
+            result_category=result_category,
+            result_origin=result_origin,
             **asdict(metrics or GenerationMetrics()),
         )
 
@@ -180,6 +201,8 @@ class EvaluationResult:
 
         payload = asdict(self)
         payload["status"] = self.status.value
+        payload["result_category"] = self.result_category.value
+        payload["result_origin"] = self.result_origin.value
         return cast("JsonObject", payload)
 
     @classmethod
@@ -188,6 +211,22 @@ class EvaluationResult:
 
         data = dict(payload)
         data["status"] = ResultStatus(str(data["status"]))
+        category = ResultCategory(
+            str(data.get("result_category", ResultCategory.UNIFIED_COMPARISON.value))
+        )
+        data["result_category"] = category
+        data["result_origin"] = ResultOrigin(
+            str(
+                data.get(
+                    "result_origin",
+                    (
+                        ResultOrigin.LOCALLY_REPRODUCED.value
+                        if category is ResultCategory.PAPER_REPRODUCTION
+                        else ResultOrigin.LOCALLY_MEASURED.value
+                    ),
+                )
+            )
+        )
         return cls(**data)  # type: ignore[arg-type]
 
 

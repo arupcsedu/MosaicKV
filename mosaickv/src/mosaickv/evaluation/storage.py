@@ -173,6 +173,8 @@ def _parquet_schema(pa: Any) -> Any:
         "answer",
         "reference",
         "manifest_path",
+        "result_category",
+        "result_origin",
     }
     integers = {
         "generated_tokens",

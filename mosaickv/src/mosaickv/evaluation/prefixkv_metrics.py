@@ -21,7 +21,7 @@ from mosaickv.evaluation.metrics.types import (
 )
 from mosaickv.evaluation.model import EvaluationRequest, LocalEvaluationModel
 from mosaickv.evaluation.results import EvaluationResult, ResultStatus
-from mosaickv.types import JsonObject
+from mosaickv.types import JsonObject, ResultCategory, ResultOrigin
 
 
 @dataclass(frozen=True, slots=True)
@@ -241,6 +241,8 @@ def prefixkv_metric_observations(
                 manifest_path=manifest_path,
                 evaluator_commit=evaluator_commit,
                 reference_artifact_sha=reference_artifact_sha256,
+                result_category=ResultCategory.PAPER_REPRODUCTION,
+                result_origin=ResultOrigin.LOCALLY_REPRODUCED,
             )
         )
     ppl_sample_observations: list[MetricObservation] = []
@@ -274,6 +276,8 @@ def prefixkv_metric_observations(
                 evaluated_token_count=sample.denominator,
                 numerator=sample.numerator,
                 denominator=sample.denominator,
+                result_category=ResultCategory.PAPER_REPRODUCTION,
+                result_origin=ResultOrigin.LOCALLY_REPRODUCED,
             )
         )
     observations.extend(ppl_sample_observations)
@@ -302,6 +306,8 @@ def prefixkv_metric_observations(
             numerator=total_nll,
             denominator=total_tokens,
             sample_count=len(perplexity),
+            result_category=ResultCategory.PAPER_REPRODUCTION,
+            result_origin=ResultOrigin.LOCALLY_REPRODUCED,
         )
     )
     return tuple(observations)

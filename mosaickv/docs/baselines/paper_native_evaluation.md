@@ -39,6 +39,38 @@ Primary sources: [PrefixKV](https://arxiv.org/abs/2412.03409),
 details were checked against the pinned PrefixKV `eval_ppl.py` and
 `eval_rouge.py`, and LOOK-M `evaluate.py` and `score.py` files.
 
+## Two result categories
+
+MosaicKV now treats the following as separate artifact families:
+
+| Category | Measured origin | Purpose | Required controls |
+|---|---|---|---|
+| `paper_reproduction` | `locally_reproduced` | Reproduce a paper in its native regime | paper checkpoint, dataset/split, native metric, nominal budget convention, measured active bytes, processor and supported environment |
+| `unified_comparison` | `locally_measured` | Compare methods in one common runtime | identical weights, processor/chat/media/prompt/tokenization, generation/output length, precision, backend, block and mandatory-token policy, environment lock, samples, and active-byte budget |
+
+Raw execution rows, metric observations, manifests, and analyses carry both
+fields. The paired analyzer requires `--result-category`, rejects mixed
+cohorts, and always requires paired active-byte matching for a unified
+comparison. It also validates the controlling manifests before aggregation.
+
+The existing MMStar/TextVQA/DocVQA FullKV, Prompt Top-K, and MosaicKV cohort
+remains the primary unified-comparison table. Paper-native PrefixKV, LOOK-M,
+VL-Cache, and secondary-baseline runs extend the evidence in separate tables;
+they neither overwrite those raw artifacts nor enter the primary cohort.
+
+Published values use a third origin, `paper_reported`, but never enter the
+measured metric stream. They live in source-hashed JSON objects. The
+write-once comparison artifact nests `paper_reported`,
+`locally_reproduced`, and `reproduction_delta`, so a paper number cannot be
+mistaken for a MosaicKV execution. The delta is always local minus paper.
+
+The versioned protocol binds each paper lane to a budget convention and a
+supported environment, including exact model/processor revision, backend,
+attention implementation, precision, active-byte accounting SHA, cache block
+size, mandatory-token policy, and common environment-lock SHA. A run with a
+different dataset ID/split, mutable dataset revision, or incompatible control
+is rejected before model loading.
+
 ## Implemented metric path
 
 Paper-native metrics use a separate immutable schema. A metric row records the
@@ -270,6 +302,7 @@ python mosaickv/scripts/analyze_paper_native_metrics.py \
   --metrics /scratch/djy8hg/runs/mosaickv/RUN/metrics.jsonl \
   --output /scratch/djy8hg/runs/mosaickv/RUN/mosaickv-vs-full.json \
   --task docvqa --model MODEL --backend hf --metric anls \
+  --result-category paper_reproduction \
   --reference-method full_kv --candidate-method mosaickv_exact \
   --candidate-ratio 0.1
 ```
@@ -284,6 +317,7 @@ python mosaickv/scripts/analyze_paper_native_metrics.py \
   --raw-results /scratch/djy8hg/runs/mosaickv/RUN/raw-candidate.jsonl \
   --output /scratch/djy8hg/runs/mosaickv/RUN/cider-paired.json \
   --task coco_caption --model MODEL --backend hf --metric cider \
+  --result-category paper_reproduction \
   --reference-method full_kv --candidate-method vl_cache_reimpl \
   --candidate-ratio 0.1
 ```
@@ -318,6 +352,39 @@ Pass all paired raw result shards to `analyze_paper_native_metrics.py` to add
 the nominal ratios and measured active-byte operating points to its output.
 For an equal-budget claim, add `--require-byte-match` (default tolerance 1%).
 The analyzer rejects unmatched sample identities or missing byte accounting.
+For `--result-category unified_comparison`, active-byte matching is mandatory
+and cannot be disabled.
+
+To compare one source-hashed published value with one locally reproduced
+aggregate without contaminating measured tables:
+
+```bash
+python mosaickv/scripts/compare_paper_reproduction.py \
+  --paper-reported /scratch/djy8hg/runs/mosaickv/RUN/paper_reported.json \
+  --locally-reproduced /scratch/djy8hg/runs/mosaickv/RUN/locally_reproduced.json \
+  --output /scratch/djy8hg/runs/mosaickv/RUN/reproduction_comparison.json
+```
+
+The paper object must include its PDF or source-artifact SHA-256, exact
+table/figure/page locator, and a preregistered absolute tolerance. The local
+object must list the run IDs, manifest paths, manifest SHA-256 values, and the
+scored/failed/attempted denominators. The attempted count must equal scored
+plus failed. It must also provide the path and SHA-256 of the model-specific
+FullKV retention-1 parity artifact. That artifact must compare at least 16
+tokens for both ordinary generation and extraction/reinjection, achieve exact
+token agreement, and remain within its declared logit tolerance. Each
+referenced paper-lane manifest must contain evaluator
+name/version/commit, the FullKV reference-output hash, and the pinned upstream
+or local baseline commit. All model, dataset, metric, budget, and environment
+identity fields must match or comparison fails. The command returns exit code
+2 after writing a negative artifact when the absolute reproduction delta is
+outside the preregistered tolerance; such an artifact cannot satisfy the
+paper-reproduction acceptance gate.
+
+The repository implements and CPU-tests these gates but does not convert an
+unexecuted GPU reproduction into positive evidence. A paper table may add a
+new baseline only after the model-specific retention-1 parity run,
+official-metric fixtures, and at least one paper operating point all pass.
 
 The anomalously low legacy PrefixKV TextVQA/DocVQA rows are quarantined from
 primary paper tables and figures. They remain in raw diagnostic artifacts but

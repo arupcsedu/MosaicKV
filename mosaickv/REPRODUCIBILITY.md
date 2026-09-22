@@ -14,6 +14,8 @@ Every experimental run must emit a machine-readable manifest. Every reported row
 schema_version: 1
 run_id: <globally unique immutable ID>
 measurement_type: <controlled value from SCIENTIFIC_INTEGRITY.md>
+result_category: <paper_reproduction|unified_comparison>
+result_origin: <locally_reproduced|locally_measured>
 started_at_utc: <ISO-8601 timestamp>
 
 source:
@@ -21,6 +23,14 @@ source:
   git_dirty: false
   patch_sha: not_applicable
   config_sha: <SHA-256 of canonical resolved configuration>
+
+evaluation:
+  evaluator_name: <official/local evaluator identity>
+  evaluator_version: <immutable evaluator version>
+  evaluator_commit: <40/64-character source identity>
+  reference_output_sha256: <FullKV reference or reference-population hash>
+  baseline_name: <executed method label>
+  baseline_commit: <40-character upstream or local implementation commit>
 
 model:
   id: <registry or local model ID>
@@ -84,6 +94,15 @@ Canonicalize the fully resolved configuration with stable key ordering, normaliz
 
 ## Controlled-comparison record
 
+Controlled analyses are split into two non-interchangeable lanes. A
+`paper_reproduction` run is checked against its versioned protocol: exact
+paper model revision, named dataset and split plus immutable local dataset
+revision, native metric, nominal budget convention, local active-byte
+accounting, precision/backend/attention implementation, processor revision,
+and environment-lock hash. A `unified_comparison` run is checked against all
+other methods in its cohort using the common controls below. Analysis scripts
+reject mixed categories and origins.
+
 Rows may be grouped as a direct comparison only if the following manifest values match exactly:
 
 - prompt and media set hashes;
@@ -94,6 +113,25 @@ Rows may be grouped as a direct comparison only if the following manifest values
 - cache budget value, unit, and accounting-spec hash;
 - backend and attention implementation; and
 - relevant hardware and execution topology.
+
+The unified-comparison validator also checks the cache block size, physical
+budget block size, mandatory-token policy, deterministic setting, decode
+attention implementation, and engine-specific execution settings. It then
+uses paired raw rows to require identical sample IDs and byte-match measured
+`active_kv_bytes` within the preregistered tolerance. It does not accept
+matching nominal retention ratios as evidence of an equal budget.
+
+Published paper values are not manifests and are never inserted into measured
+JSONL or Parquet. Store them separately with a SHA-256 of the source artifact
+and a precise source locator. A reproduction comparison is a derived,
+write-once JSON artifact with nested `paper_reported` and
+`locally_reproduced` objects, an explicit local-minus-paper delta, a
+preregistered absolute tolerance, and a pass/fail verdict. The local object
+reports scored, failed, and attempted sample counts; the attempted count must
+equal scored plus failed, so failed rows cannot silently disappear from the
+denominator. It also names and hashes a model-matched FullKV parity artifact
+that compares at least 16 generated tokens against the ordinary generation
+path and after cache extraction/reinjection.
 
 For paired task-quality analyses, store an immutable example ID and output for every item so that methods are aligned on the same examples. For stochastic decoding, reuse the same declared seed schedule and sampling implementation. If output length is fixed, enforce the same number of generated tokens; if stopping is semantic, share the same stopping criteria and report realized lengths. Fixed-length systems timing and benchmark answer scoring are separate accounting boundaries: execute and retain the complete fixed-length token trajectory for latency, but decode the scored answer only through the first model EOS/end-of-turn token. Record the terminal-token IDs, first terminal index, scored token count, and timed token count. Never score post-EOS tokens.
 
@@ -212,6 +250,12 @@ diagnostic traces but must never be passed back to the online compressor.
 - [ ] Model and dataset IDs use immutable revisions.
 - [ ] All required CUDA, driver, framework, GPU, backend, attention, seed, and measurement-type fields are present.
 - [ ] Prompt, media, preprocessing, tokenization, generation, output-length, and cache-budget identities pass comparison validation.
+- [ ] Every artifact declares one result category and valid origin; no cohort mixes categories.
+- [ ] Published numbers are separate, source-hashed, and paired with local reproductions only through an explicit reproduction-delta artifact.
+- [ ] Paper-reproduction manifests record evaluator name/version/commit, reference-output SHA-256, and the executed baseline's immutable commit.
+- [ ] A published operating point is admitted only when its local reproduction passes the preregistered tolerance; failed attempts remain labeled negative reproduction evidence.
+- [ ] Scored, failed, and attempted denominators are explicit and arithmetically consistent.
+- [ ] The linked FullKV retention-1 parity artifact is hash-valid, model/source-matched, and passes token/logit tolerance for both ordinary generation and cache reinjection.
 - [ ] Retention ratio `1.0` passes token and numerical equivalence.
 - [ ] Raw artifacts are immutable and content-hashed.
 - [ ] Aggregates are generated by a versioned script from listed run IDs.

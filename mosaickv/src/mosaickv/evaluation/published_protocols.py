@@ -8,7 +8,7 @@ import re
 import subprocess
 import sys
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import cast
@@ -16,9 +16,68 @@ from typing import cast
 import yaml
 
 from mosaickv.evaluation.metrics.registry import MetricRegistry, default_metric_registry
-from mosaickv.types import JsonObject
+from mosaickv.types import JsonObject, ResultCategory
 
 _SHA = re.compile(r"[0-9a-f]{40}")
+_SHA256 = re.compile(r"[0-9a-f]{64}")
+
+
+@dataclass(frozen=True, slots=True)
+class PaperBudgetConvention:
+    """The paper's nominal budget semantics plus the local byte boundary."""
+
+    name: str
+    nominal_unit: str
+    denominator: str
+    mandatory_token_policy: str
+    runtime_mandatory_policy: str
+    active_byte_accounting_sha256: str
+    block_size: int
+    require_measured_active_bytes: bool
+
+    def __post_init__(self) -> None:
+        for field_name in (
+            "name",
+            "nominal_unit",
+            "denominator",
+            "mandatory_token_policy",
+            "runtime_mandatory_policy",
+        ):
+            if not getattr(self, field_name).strip():
+                raise ValueError(f"budget convention {field_name} must be non-empty")
+        if _SHA256.fullmatch(self.active_byte_accounting_sha256) is None:
+            raise ValueError("budget convention requires an accounting SHA-256")
+        if self.block_size < 1:
+            raise ValueError("budget convention block_size must be positive")
+        if not self.require_measured_active_bytes:
+            raise ValueError("paper reproduction must retain measured active K/V bytes")
+
+
+@dataclass(frozen=True, slots=True)
+class SupportedEnvironmentContract:
+    """Pinned local environment in which the paper protocol is supported."""
+
+    name: str
+    backend: str
+    attention_implementation: str
+    precision: str
+    processor_id: str
+    processor_revision: str
+    environment_lock_sha256: str
+
+    def __post_init__(self) -> None:
+        for field_name in (
+            "name",
+            "backend",
+            "attention_implementation",
+            "precision",
+            "processor_id",
+            "processor_revision",
+        ):
+            if not getattr(self, field_name).strip():
+                raise ValueError(f"supported environment {field_name} must be non-empty")
+        if _SHA256.fullmatch(self.environment_lock_sha256) is None:
+            raise ValueError("supported environment requires an exact lock SHA-256")
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,7 +143,10 @@ class PublishedBaselineProtocol:
     retention_ratios: tuple[float, ...]
     tasks: tuple[PublishedTaskContract, ...]
     methods: tuple[PublishedMethodContract, ...]
+    budget_convention: PaperBudgetConvention
+    supported_environment: SupportedEnvironmentContract
     execution_authorized: bool
+    result_category: ResultCategory = ResultCategory.PAPER_REPRODUCTION
 
     def __post_init__(self) -> None:
         for field_name in ("protocol_id", "paper", "primary_source", "model"):
@@ -104,6 +166,14 @@ class PublishedBaselineProtocol:
             raise ValueError("protocol methods must be non-empty and unique")
         if not any(method.execution_enabled for method in self.methods):
             raise ValueError("protocol must enable at least one method")
+        if self.result_category is not ResultCategory.PAPER_REPRODUCTION:
+            raise ValueError("published protocols must use result_category=paper_reproduction")
+        processor_identity = (
+            self.supported_environment.processor_id,
+            self.supported_environment.processor_revision,
+        )
+        if processor_identity != (self.model, self.model_revision):
+            raise ValueError("paper protocol processor must be pinned to its model revision")
 
     def validate_metrics(self, registry: MetricRegistry | None = None) -> None:
         selected = registry or default_metric_registry()
@@ -184,6 +254,41 @@ def _parse_method(value: object, path: str) -> PublishedMethodContract:
     )
 
 
+def _parse_budget(value: object, path: str) -> PaperBudgetConvention:
+    data = _mapping(value, path)
+    block_size = data.get("block_size")
+    require_bytes = data.get("require_measured_active_bytes")
+    if isinstance(block_size, bool) or not isinstance(block_size, int):
+        raise ValueError(f"{path}.block_size must be an integer")
+    if not isinstance(require_bytes, bool):
+        raise ValueError(f"{path}.require_measured_active_bytes must be boolean")
+    return PaperBudgetConvention(
+        name=_required_string(data, "name", path),
+        nominal_unit=_required_string(data, "nominal_unit", path),
+        denominator=_required_string(data, "denominator", path),
+        mandatory_token_policy=_required_string(data, "mandatory_token_policy", path),
+        runtime_mandatory_policy=_required_string(data, "runtime_mandatory_policy", path),
+        active_byte_accounting_sha256=_required_string(
+            data, "active_byte_accounting_sha256", path
+        ),
+        block_size=block_size,
+        require_measured_active_bytes=require_bytes,
+    )
+
+
+def _parse_environment(value: object, path: str) -> SupportedEnvironmentContract:
+    data = _mapping(value, path)
+    return SupportedEnvironmentContract(
+        name=_required_string(data, "name", path),
+        backend=_required_string(data, "backend", path),
+        attention_implementation=_required_string(data, "attention_implementation", path),
+        precision=_required_string(data, "precision", path),
+        processor_id=_required_string(data, "processor_id", path),
+        processor_revision=_required_string(data, "processor_revision", path),
+        environment_lock_sha256=_required_string(data, "environment_lock_sha256", path),
+    )
+
+
 def load_published_protocols(path: str | Path) -> PublishedProtocolSuite:
     source = Path(path)
     raw = source.read_bytes()
@@ -225,7 +330,17 @@ def load_published_protocols(path: str | Path) -> PublishedProtocolSuite:
                         _sequence(item.get("methods"), f"{path_prefix}.methods")
                     )
                 ),
+                budget_convention=_parse_budget(
+                    item.get("budget_convention"), f"{path_prefix}.budget_convention"
+                ),
+                supported_environment=_parse_environment(
+                    item.get("supported_environment"),
+                    f"{path_prefix}.supported_environment",
+                ),
                 execution_authorized=authorized,
+                result_category=ResultCategory(
+                    _required_string(item, "result_category", path_prefix)
+                ),
             )
         )
     return PublishedProtocolSuite(
@@ -259,6 +374,9 @@ def protocol_summary(suite: PublishedProtocolSuite) -> JsonObject:
                         method.name for method in protocol.methods if not method.execution_enabled
                     ],
                     "execution_authorized": protocol.execution_authorized,
+                    "result_category": protocol.result_category.value,
+                    "budget_convention": asdict(protocol.budget_convention),
+                    "supported_environment": asdict(protocol.supported_environment),
                 }
                 for protocol in suite.protocols
             ],
@@ -349,10 +467,12 @@ def metric_readiness_issues(suite: PublishedProtocolSuite) -> tuple[str, ...]:
 
 
 __all__ = [
+    "PaperBudgetConvention",
     "PublishedBaselineProtocol",
     "PublishedMethodContract",
     "PublishedProtocolSuite",
     "PublishedTaskContract",
+    "SupportedEnvironmentContract",
     "load_published_protocols",
     "metric_readiness_issues",
     "protocol_summary",

@@ -47,6 +47,21 @@ class MeasurementType(StrEnum):
     VALIDATION_SMOKE = "validation_smoke"
 
 
+class ResultCategory(StrEnum):
+    """Scientifically distinct result lanes that must never be co-aggregated."""
+
+    PAPER_REPRODUCTION = "paper_reproduction"
+    UNIFIED_COMPARISON = "unified_comparison"
+
+
+class ResultOrigin(StrEnum):
+    """Origin of a value within its result lane."""
+
+    PAPER_REPORTED = "paper_reported"
+    LOCALLY_REPRODUCED = "locally_reproduced"
+    LOCALLY_MEASURED = "locally_measured"
+
+
 class OutputLengthPolicy(StrEnum):
     """Generation output-length policies."""
 

@@ -57,6 +57,8 @@ def test_result_schema_contains_all_required_research_fields() -> None:
         "logit_kl",
         "attention_output_error",
         "manifest_path",
+        "result_category",
+        "result_origin",
     }
     assert required <= set(RESULT_COLUMNS)
 

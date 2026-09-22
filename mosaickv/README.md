@@ -175,7 +175,7 @@ semantics.
 - [PrefixKV specification](docs/baselines/prefixkv_spec.md) and [parity report](docs/baselines/prefixkv_parity_report.md) — adaptive layer profiles, ratio conventions, fixed-distance decoding, strict leakage checks, unified `prefixkv_reimpl`, and the completed non-canonical official LLaVA parity diagnostic.
 - [Published KV-policy specification](docs/baselines/published_kv_spec.md) — pinned source mapping, formulas, implementation choices, and fail-closed execution for `elastic_cache_reimpl`, `h2o_reimpl`, `streamingllm_reimpl`, `pyramidkv_reimpl`, `snapkv_reimpl`, and `roco_reimpl`.
 - [VL-Cache specification](docs/baselines/vl_cache_spec.md) — ICLR post-vision scoring and sparsity allocation equations, ambiguity decisions, leakage-safe calibration, sensitivity diagnostics, and explicit non-reproduction status for `vl_cache_reimpl`.
-- [Paper-native baseline evaluation](docs/baselines/paper_native_evaluation.md) — separate PrefixKV PPL/ROUGE, VL-Cache CIDEr/ANLS/MathVista, and LOOK-M MileBench reproduction tracks with fail-closed method provenance.
+- [Paper-native baseline evaluation](docs/baselines/paper_native_evaluation.md) — separate `paper_reproduction` and `unified_comparison` artifact lanes; PrefixKV PPL/ROUGE, VL-Cache CIDEr/ANLS/MathVista, and LOOK-M MileBench tracks; byte-matched controls; and source-hashed paper-versus-local reproduction deltas.
 
 ## License
 

@@ -9,7 +9,7 @@ from typing import cast
 from mosaickv.evaluation.metrics.registry import default_metric_registry
 from mosaickv.evaluation.metrics.statistics import paired_bootstrap
 from mosaickv.evaluation.metrics.types import MetricObservation, MetricSample, MetricScope
-from mosaickv.types import JsonObject
+from mosaickv.types import JsonObject, ResultCategory, ResultOrigin
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,6 +24,8 @@ class MethodMetricSummary:
     metric_name: str
     metric_value: float
     sample_count: int
+    result_category: ResultCategory
+    result_origin: ResultOrigin
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,9 +52,14 @@ class PairedMethodComparison:
     bootstrap_resamples: int
     bootstrap_seed: int
     sample_count: int
+    result_category: ResultCategory
+    result_origin: ResultOrigin
 
     def to_json_object(self) -> JsonObject:
-        return cast("JsonObject", asdict(self))
+        payload = asdict(self)
+        payload["result_category"] = self.result_category.value
+        payload["result_origin"] = self.result_origin.value
+        return cast("JsonObject", payload)
 
 
 def _sample_contributions(rows: Sequence[MetricObservation]) -> tuple[MetricSample, ...]:
@@ -73,7 +80,9 @@ def _sample_contributions(rows: Sequence[MetricObservation]) -> tuple[MetricSamp
     return tuple(contributions)
 
 
-def _identity(rows: Sequence[MetricObservation]) -> tuple[str, str, str, str, float, str]:
+def _identity(
+    rows: Sequence[MetricObservation],
+) -> tuple[str, str, str, str, float, str, ResultCategory, ResultOrigin]:
     registry = default_metric_registry()
     identities = {
         (
@@ -83,11 +92,15 @@ def _identity(rows: Sequence[MetricObservation]) -> tuple[str, str, str, str, fl
             row.method,
             row.retention_ratio,
             registry.canonical_name(row.metric_name),
+            row.result_category,
+            row.result_origin,
         )
         for row in rows
     }
     if len(identities) != 1:
-        raise ValueError("metric cohort must have one task/model/backend/method/ratio/metric")
+        raise ValueError(
+            "metric cohort must have one task/model/backend/method/ratio/metric/category/origin"
+        )
     return next(iter(identities))
 
 
@@ -96,7 +109,16 @@ def summarize_metric(rows: Sequence[MetricObservation]) -> MethodMetricSummary:
 
     if not rows:
         raise ValueError("metric cohort cannot be empty")
-    task, model, backend, method, retention_ratio, metric_name = _identity(rows)
+    (
+        task,
+        model,
+        backend,
+        method,
+        retention_ratio,
+        metric_name,
+        result_category,
+        result_origin,
+    ) = _identity(rows)
     definition = default_metric_registry().resolve(metric_name)
     samples = _sample_contributions(rows)
     corpus = [row for row in rows if row.metric_scope is MetricScope.CORPUS]
@@ -120,6 +142,8 @@ def summarize_metric(rows: Sequence[MetricObservation]) -> MethodMetricSummary:
         metric_name=metric_name,
         metric_value=value,
         sample_count=sample_count,
+        result_category=result_category,
+        result_origin=result_origin,
     )
 
 
@@ -142,15 +166,21 @@ def compare_paired_methods(
         reference_summary.model,
         reference_summary.backend,
         reference_summary.metric_name,
+        reference_summary.result_category,
+        reference_summary.result_origin,
     )
     comparable_candidate = (
         candidate_summary.task,
         candidate_summary.model,
         candidate_summary.backend,
         candidate_summary.metric_name,
+        candidate_summary.result_category,
+        candidate_summary.result_origin,
     )
     if comparable_reference != comparable_candidate:
-        raise ValueError("paired metric cohorts differ in task, model, backend, or metric")
+        raise ValueError(
+            "paired metric cohorts differ in task, model, backend, metric, category, or origin"
+        )
     selected_reference_samples = (
         tuple(reference_samples)
         if reference_samples is not None
@@ -205,6 +235,8 @@ def compare_paired_methods(
         bootstrap_resamples=comparison.bootstrap_resamples,
         bootstrap_seed=comparison.bootstrap_seed,
         sample_count=comparison.sample_count,
+        result_category=reference_summary.result_category,
+        result_origin=reference_summary.result_origin,
     )
 
 

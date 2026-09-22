@@ -11,7 +11,7 @@ from __future__ import annotations
 import hashlib
 import math
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 
@@ -172,12 +172,15 @@ def _group_attention(
         raise PublishedKVReimplementationError(
             f"layer {layer} query/KV head or sequence geometry is incompatible"
         )
-    return attention.reshape(
-        kv_heads,
-        query_heads // kv_heads,
-        query_length,
-        sequence_length,
-    ).mean(axis=1, dtype=np.float32)
+    return cast(
+        "np.ndarray[Any, np.dtype[np.float32]]",
+        attention.reshape(
+            kv_heads,
+            query_heads // kv_heads,
+            query_length,
+            sequence_length,
+        ).mean(axis=1, dtype=np.float32),
+    )
 
 
 def _pool_scores(
@@ -189,8 +192,14 @@ def _pool_scores(
     padded = np.pad(values, (radius, radius), mode="constant")
     windows = np.lib.stride_tricks.sliding_window_view(padded, kernel)
     if mode == "avgpool":
-        return windows.mean(axis=-1, dtype=np.float32)
-    return windows.max(axis=-1).astype(np.float32, copy=False)
+        return cast(
+            "np.ndarray[Any, np.dtype[np.float32]]",
+            windows.mean(axis=-1, dtype=np.float32),
+        )
+    return cast(
+        "np.ndarray[Any, np.dtype[np.float32]]",
+        windows.max(axis=-1).astype(np.float32, copy=False),
+    )
 
 
 def _sha_scores(values: np.ndarray[Any, np.dtype[np.float32]]) -> str:

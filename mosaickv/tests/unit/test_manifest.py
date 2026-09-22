@@ -10,12 +10,13 @@ import mosaickv.manifest as manifest_module
 from mosaickv.config import synthetic_smoke_config
 from mosaickv.manifest import (
     ArtifactProvenance,
+    EvaluationProvenance,
     InputProvenance,
     ManifestError,
     RunManifestWriter,
     sha256_text,
 )
-from mosaickv.types import Backend, JsonObject, MeasurementType
+from mosaickv.types import Backend, JsonObject, MeasurementType, ResultCategory
 
 
 def _inputs() -> InputProvenance:
@@ -27,6 +28,17 @@ def _artifacts() -> ArtifactProvenance:
         raw_output_sha=sha256_text("raw"),
         metrics_sha="not_applicable",
         log_sha=sha256_text("log"),
+    )
+
+
+def _paper_evaluation() -> EvaluationProvenance:
+    return EvaluationProvenance(
+        evaluator_name="fixture",
+        evaluator_version="1",
+        evaluator_commit="a" * 40,
+        reference_output_sha256="b" * 64,
+        baseline_name="fixture_reimpl",
+        baseline_commit="c" * 40,
     )
 
 
@@ -64,6 +76,57 @@ def test_manifest_contains_all_agent_required_provenance() -> None:
     assert execution["attention_implementation"] == "numpy"
     assert execution["seed"] == 0
     assert manifest["measurement_type"] == "validation_smoke"
+    assert manifest["result_category"] == "unified_comparison"
+    assert manifest["result_origin"] == "locally_measured"
+
+
+def test_manifest_explicitly_labels_paper_reproduction() -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    manifest = RunManifestWriter(repo_root).build(
+        synthetic_smoke_config(),
+        MeasurementType.METHOD,
+        _inputs(),
+        _artifacts(),
+        result_category=ResultCategory.PAPER_REPRODUCTION,
+        evaluation_provenance=_paper_evaluation(),
+    )
+    assert manifest["result_category"] == "paper_reproduction"
+    assert manifest["result_origin"] == "locally_reproduced"
+    assert manifest["evaluation"]["evaluator_version"] == "1"
+    assert manifest["evaluation"]["reference_output_sha256"] == "b" * 64
+    assert manifest["evaluation"]["baseline_commit"] == "c" * 40
+
+
+def test_paper_manifest_rejects_missing_baseline_commit() -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    with pytest.raises(ManifestError, match="immutable baseline commit"):
+        RunManifestWriter(repo_root).build(
+            synthetic_smoke_config(),
+            MeasurementType.METHOD,
+            _inputs(),
+            _artifacts(),
+            result_category=ResultCategory.PAPER_REPRODUCTION,
+            evaluation_provenance=EvaluationProvenance(
+                evaluator_name="fixture",
+                evaluator_version="1",
+                evaluator_commit="a" * 40,
+                reference_output_sha256="b" * 64,
+                baseline_name="fixture_reimpl",
+                baseline_commit="not_applicable",
+            ),
+        )
+
+
+def test_paper_manifest_rejects_missing_evaluation_provenance() -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    with pytest.raises(ManifestError, match="require evaluator"):
+        RunManifestWriter(repo_root).build(
+            synthetic_smoke_config(),
+            MeasurementType.METHOD,
+            _inputs(),
+            _artifacts(),
+            result_category=ResultCategory.PAPER_REPRODUCTION,
+        )
 
 
 def test_manifest_writer_is_atomic_and_refuses_overwrite(tmp_path: Path) -> None:

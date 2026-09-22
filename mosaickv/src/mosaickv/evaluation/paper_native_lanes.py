@@ -19,6 +19,7 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import cast
 
+from mosaickv.config import RunConfig
 from mosaickv.evaluation.messages import MediaItem, MediaKind, build_multimodal_messages
 from mosaickv.evaluation.metrics.registry import default_metric_registry
 from mosaickv.evaluation.metrics.storage import (
@@ -59,7 +60,7 @@ from mosaickv.evaluation.results import EvaluationResult, ResultStatus
 from mosaickv.evaluation.storage import JsonlResultStore, write_parquet_aggregate
 from mosaickv.evaluation.tasks import TaskSpec, deterministic_sample_ids
 from mosaickv.manifest import sha256_bytes
-from mosaickv.types import JsonObject
+from mosaickv.types import JsonObject, ResultCategory, ResultOrigin
 
 _PREFIXKV_TASKS = frozenset({"llava_description", "mmvet_prefixkv"})
 _PREFIXKV_METHODS = frozenset(
@@ -202,9 +203,14 @@ class CacheOperatingPoint:
     mean_active_kv_bytes: float
     minimum_active_kv_bytes: int
     maximum_active_kv_bytes: int
+    result_category: ResultCategory
+    result_origin: ResultOrigin
 
     def to_json_object(self) -> JsonObject:
-        return cast("JsonObject", asdict(self))
+        payload = asdict(self)
+        payload["result_category"] = self.result_category.value
+        payload["result_origin"] = self.result_origin.value
+        return cast("JsonObject", payload)
 
 
 def _required_string(value: object, field: str) -> str:
@@ -356,14 +362,17 @@ def cache_operating_point(rows: Sequence[EvaluationResult]) -> CacheOperatingPoi
     completed = [row for row in rows if row.status is ResultStatus.COMPLETED]
     if not completed:
         raise ValueError("cache operating point requires completed rows")
-    identities = {(row.method, row.retention_ratio) for row in completed}
+    identities = {
+        (row.method, row.retention_ratio, row.result_category, row.result_origin)
+        for row in completed
+    }
     if len(identities) != 1:
         raise ValueError("cache operating point cannot mix methods or nominal retention ratios")
     if any(row.active_kv_bytes is None for row in completed):
         missing = [row.sample_id for row in completed if row.active_kv_bytes is None]
         raise ValueError(f"paper-native rows lack measured active_kv_bytes: {missing[:5]!r}")
     active = [cast("int", row.active_kv_bytes) for row in completed]
-    method, ratio = next(iter(identities))
+    method, ratio, result_category, result_origin = next(iter(identities))
     return CacheOperatingPoint(
         method=method,
         nominal_retention_ratio=ratio,
@@ -371,6 +380,8 @@ def cache_operating_point(rows: Sequence[EvaluationResult]) -> CacheOperatingPoi
         mean_active_kv_bytes=math.fsum(active) / len(active),
         minimum_active_kv_bytes=min(active),
         maximum_active_kv_bytes=max(active),
+        result_category=result_category,
+        result_origin=result_origin,
     )
 
 
@@ -400,9 +411,14 @@ def validate_byte_matched_operating_points(
                 f"active-byte mismatch for {sample_id!r}: {left_bytes} versus {right_bytes} "
                 f"({difference:.3%} > {maximum_relative_difference:.3%})"
             )
-    return cache_operating_point(tuple(left_by_id.values())), cache_operating_point(
-        tuple(right_by_id.values())
-    )
+    left_point = cache_operating_point(tuple(left_by_id.values()))
+    right_point = cache_operating_point(tuple(right_by_id.values()))
+    if (left_point.result_category, left_point.result_origin) != (
+        right_point.result_category,
+        right_point.result_origin,
+    ):
+        raise ValueError("byte-matched comparison cannot mix result categories or origins")
+    return left_point, right_point
 
 
 def _milebench_observations(
@@ -449,6 +465,8 @@ def _milebench_observations(
                 metadata_json=metadata,
                 evaluator_commit=evaluator_commit,
                 reference_artifact_sha=ledger_sha,
+                result_category=ResultCategory.PAPER_REPRODUCTION,
+                result_origin=ResultOrigin.LOCALLY_REPRODUCED,
             )
         )
         scores.append(
@@ -492,6 +510,8 @@ def _milebench_observations(
                 evaluator_commit=evaluator_commit,
                 reference_artifact_sha=ledger_sha,
                 sample_count=len(scores),
+                result_category=ResultCategory.PAPER_REPRODUCTION,
+                result_origin=ResultOrigin.LOCALLY_REPRODUCED,
             )
         )
     return tuple(observations)
@@ -608,6 +628,8 @@ def run_materialized_paper_native_evaluation(
                 task_score=task_score,
                 metrics=metrics,
                 manifest_path=manifest_path,
+                result_category=ResultCategory.PAPER_REPRODUCTION,
+                result_origin=ResultOrigin.LOCALLY_REPRODUCED,
             )
         except Exception as error:
             row = EvaluationResult.failed(
@@ -622,12 +644,20 @@ def run_materialized_paper_native_evaluation(
                 error=f"{type(error).__name__}: {error}",
                 manifest_path=manifest_path,
                 metrics=GenerationMetrics(end_to_end_time=max(0.0, time.perf_counter() - started)),
+                result_category=ResultCategory.PAPER_REPRODUCTION,
+                result_origin=ResultOrigin.LOCALLY_REPRODUCED,
             )
         store.append(row)
 
     selected_rows = tuple(
         row for row in store.results(run_id=run_id) if row.sample_id in set(selected_ids)
     )
+    if any(
+        (row.result_category, row.result_origin)
+        != (ResultCategory.PAPER_REPRODUCTION, ResultOrigin.LOCALLY_REPRODUCED)
+        for row in selected_rows
+    ):
+        raise ValueError("paper reproduction resume contains another result category/origin")
     write_parquet_aggregate(selected_rows, parquet_output)
     failed = [row for row in selected_rows if row.status is ResultStatus.FAILED]
     reference_artifact_digest: str | None = None
@@ -717,6 +747,8 @@ def run_materialized_paper_native_evaluation(
         "JsonObject",
         {
             "run_id": run_id,
+            "result_category": ResultCategory.PAPER_REPRODUCTION.value,
+            "result_origin": ResultOrigin.LOCALLY_REPRODUCED.value,
             "tasks": [task.name],
             "selected_samples": len(selected_ids),
             "resumed_samples": len(set(selected_ids) & prior),
@@ -754,32 +786,73 @@ def validate_protocol_run(
     protocol: PublishedBaselineProtocol,
     *,
     task: TaskSpec,
-    model_id: str,
-    model_revision: str,
-    method: str,
-    retention_ratio: float,
+    config: RunConfig,
+    environment_lock_sha256: str,
+    method_label: str | None = None,
 ) -> None:
     """Validate one requested run against a versioned reproduction contract."""
 
     if not protocol.execution_authorized:
         raise ValueError(f"protocol {protocol.protocol_id!r} is not execution-authorized")
-    if (model_id, model_revision) != (protocol.model, protocol.model_revision):
+    if (config.model.id, config.model.revision) != (protocol.model, protocol.model_revision):
         raise ValueError("model ID/revision does not match the published protocol")
     task_contract = next((item for item in protocol.tasks if item.name == task.name), None)
     if task_contract is None:
         raise ValueError(f"task {task.name!r} is not part of protocol {protocol.protocol_id!r}")
     if (task.dataset_id, task.split) != (task_contract.dataset, task_contract.split):
         raise ValueError("task registry dataset/split does not match the published protocol")
-    method_contract = next((item for item in protocol.methods if item.name == method), None)
+    if (config.dataset.id, config.dataset.split) != (task_contract.dataset, task_contract.split):
+        raise ValueError("run dataset/split does not match the published protocol")
+    if re.fullmatch(r"[0-9a-f]{40,64}", config.dataset.revision) is None:
+        raise ValueError("paper reproduction requires an immutable dataset/artifact revision")
+    environment = protocol.supported_environment
+    observed_environment = (
+        config.execution.backend.value,
+        config.execution.attention_implementation,
+        config.model.precision.value,
+        environment_lock_sha256,
+    )
+    expected_environment = (
+        environment.backend,
+        environment.attention_implementation,
+        environment.precision,
+        environment.environment_lock_sha256,
+    )
+    if observed_environment != expected_environment:
+        raise ValueError(
+            "run does not match the paper protocol's supported backend/attention/precision/lock"
+        )
+    budget = protocol.budget_convention
+    observed_budget_policy = (
+        config.cache.accounting_spec_sha,
+        config.cache.block_size,
+        config.cache.physical_budget_mandatory_policy,
+    )
+    expected_budget_policy = (
+        budget.active_byte_accounting_sha256,
+        budget.block_size,
+        budget.runtime_mandatory_policy,
+    )
+    if observed_budget_policy != expected_budget_policy:
+        raise ValueError("run does not match the paper protocol's cache budget convention")
+    selected_method = method_label or config.method.value
+    method_contract = next(
+        (item for item in protocol.methods if item.name == selected_method), None
+    )
     if method_contract is None:
-        raise ValueError(f"method {method!r} is not declared by protocol {protocol.protocol_id!r}")
+        raise ValueError(
+            f"method {selected_method!r} is not declared by protocol "
+            f"{protocol.protocol_id!r}"
+        )
     if not method_contract.execution_enabled:
         raise ValueError(
-            f"method {method!r} is explicitly unsupported/disabled in {protocol.protocol_id!r}"
+            f"method {selected_method!r} is explicitly unsupported/disabled in "
+            f"{protocol.protocol_id!r}"
         )
-    if retention_ratio not in protocol.retention_ratios:
+    if config.cache.retention_ratio not in protocol.retention_ratios:
         raise ValueError(
-            f"retention ratio {retention_ratio} is not declared by {protocol.protocol_id!r}"
+            f"retention ratio {config.cache.retention_ratio} is not declared by "
+            f"{protocol.protocol_id!r}"
         )
 
 

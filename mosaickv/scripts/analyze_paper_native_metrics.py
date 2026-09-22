@@ -25,9 +25,13 @@ from mosaickv.evaluation.paper_native_lanes import (
     cache_operating_point,
     validate_byte_matched_operating_points,
 )
+from mosaickv.evaluation.result_categories import (
+    require_metric_category,
+    validate_unified_comparison_manifests,
+)
 from mosaickv.evaluation.results import EvaluationResult
 from mosaickv.evaluation.storage import load_jsonl
-from mosaickv.types import JsonValue
+from mosaickv.types import JsonValue, ResultCategory
 
 
 def _cohort(
@@ -39,6 +43,7 @@ def _cohort(
     method: str,
     metric: str,
     retention_ratio: float,
+    result_category: ResultCategory,
 ) -> tuple[MetricObservation, ...]:
     registry = default_metric_registry()
     canonical_metric = registry.canonical_name(metric)
@@ -51,6 +56,7 @@ def _cohort(
         and row.method == method
         and registry.canonical_name(row.metric_name) == canonical_metric
         and row.retention_ratio == retention_ratio
+        and row.result_category is result_category
     )
 
 
@@ -62,6 +68,7 @@ def _method_rows(
     backend: str,
     method: str,
     retention_ratio: float,
+    result_category: ResultCategory,
 ) -> tuple[MetricObservation, ...]:
     return tuple(
         row
@@ -73,6 +80,7 @@ def _method_rows(
         and row.retention_ratio == retention_ratio
         and row.metric_scope is MetricScope.SAMPLE
         and row.metric_name in {"accuracy", "rouge_l_f1"}
+        and row.result_category is result_category
     )
 
 
@@ -84,6 +92,7 @@ def _raw_cohort(
     backend: str,
     method: str,
     retention_ratio: float,
+    result_category: ResultCategory,
 ) -> tuple[EvaluationResult, ...]:
     return tuple(
         row
@@ -93,6 +102,7 @@ def _raw_cohort(
         and row.backend == backend
         and row.method == method
         and row.retention_ratio == retention_ratio
+        and row.result_category is result_category
     )
 
 
@@ -133,6 +143,7 @@ def _cache_payload(
     candidate_ratio: float,
     require_byte_match: bool,
     byte_match_tolerance: float,
+    result_category: ResultCategory,
 ) -> dict[str, object] | None:
     if not raw_rows:
         if require_byte_match:
@@ -145,6 +156,7 @@ def _cache_payload(
         backend=backend,
         method=reference_method,
         retention_ratio=reference_ratio,
+        result_category=result_category,
     )
     candidate_rows = _raw_cohort(
         raw_rows,
@@ -153,6 +165,7 @@ def _cache_payload(
         backend=backend,
         method=candidate_method,
         retention_ratio=candidate_ratio,
+        result_category=result_category,
     )
     if not reference_rows or not candidate_rows:
         raise ValueError(
@@ -194,6 +207,12 @@ def main() -> int:
     parser.add_argument("--model", required=True)
     parser.add_argument("--backend", required=True)
     parser.add_argument("--metric", required=True)
+    parser.add_argument(
+        "--result-category",
+        required=True,
+        choices=[category.value for category in ResultCategory],
+        help="paper_reproduction or unified_comparison; categories cannot be mixed",
+    )
     parser.add_argument("--reference-method", default="full_kv")
     parser.add_argument("--candidate-method", required=True)
     parser.add_argument("--reference-ratio", type=float, default=1.0)
@@ -208,6 +227,10 @@ def main() -> int:
     )
     parser.add_argument("--byte-match-tolerance", type=float, default=0.01)
     args = parser.parse_args()
+    result_category = ResultCategory(args.result_category)
+    require_byte_match = bool(args.require_byte_match) or (
+        result_category is ResultCategory.UNIFIED_COMPARISON
+    )
 
     rows = load_metric_jsonl(args.metrics)
     raw_rows = tuple(row for path in args.raw_results for row in load_jsonl(path))
@@ -220,8 +243,9 @@ def main() -> int:
         candidate_method=args.candidate_method,
         reference_ratio=args.reference_ratio,
         candidate_ratio=args.candidate_ratio,
-        require_byte_match=args.require_byte_match,
+        require_byte_match=require_byte_match,
         byte_match_tolerance=args.byte_match_tolerance,
+        result_category=result_category,
     )
     identity = {
         "task": args.task,
@@ -237,6 +261,7 @@ def main() -> int:
             backend=args.backend,
             method=args.reference_method,
             retention_ratio=args.reference_ratio,
+            result_category=result_category,
         )
         candidate_rows = _method_rows(
             rows,
@@ -245,7 +270,20 @@ def main() -> int:
             backend=args.backend,
             method=args.candidate_method,
             retention_ratio=args.candidate_ratio,
+            result_category=result_category,
         )
+        require_metric_category(reference_rows, result_category)
+        require_metric_category(candidate_rows, result_category)
+        manifest_validation = None
+        if result_category is ResultCategory.UNIFIED_COMPARISON:
+            manifest_validation = validate_unified_comparison_manifests(
+                sorted(
+                    {
+                        row.manifest_path
+                        for row in (*reference_rows, *candidate_rows)
+                    }
+                )
+            )
         comparisons = paired_milebench_bootstrap(
             milebench_samples_from_observations(reference_rows),
             milebench_samples_from_observations(candidate_rows),
@@ -263,6 +301,8 @@ def main() -> int:
             "comparisons": {key: asdict(comparison) for key, comparison in comparisons.items()},
             "input_metrics": str(args.metrics.resolve()),
             "cache_operating_points": cache_payload,
+            "result_category": result_category.value,
+            "manifest_control_validation": manifest_validation,
         }
         _write_once(args.output, payload)
         print(json.dumps(payload, sort_keys=True))
@@ -273,16 +313,25 @@ def main() -> int:
         **identity,
         method=args.reference_method,
         retention_ratio=args.reference_ratio,
+        result_category=result_category,
     )
     candidate = _cohort(
         rows,
         **identity,
         method=args.candidate_method,
         retention_ratio=args.candidate_ratio,
+        result_category=result_category,
     )
     if not reference or not candidate:
         raise ValueError(
             f"missing metric cohort: reference={len(reference)}, candidate={len(candidate)}"
+        )
+    require_metric_category(reference, result_category)
+    require_metric_category(candidate, result_category)
+    manifest_validation = None
+    if result_category is ResultCategory.UNIFIED_COMPARISON:
+        manifest_validation = validate_unified_comparison_manifests(
+            sorted({row.manifest_path for row in (*reference, *candidate)})
         )
     reference_samples = None
     candidate_samples = None
@@ -297,6 +346,7 @@ def main() -> int:
                 backend=args.backend,
                 method=args.reference_method,
                 retention_ratio=args.reference_ratio,
+                result_category=result_category,
             )
         )
         candidate_samples = cider_samples_from_results(
@@ -307,6 +357,7 @@ def main() -> int:
                 backend=args.backend,
                 method=args.candidate_method,
                 retention_ratio=args.candidate_ratio,
+                result_category=result_category,
             )
         )
     comparison = compare_paired_methods(
@@ -321,6 +372,8 @@ def main() -> int:
     payload = comparison.to_json_object()
     payload["input_metrics"] = str(args.metrics.resolve())
     payload["cache_operating_points"] = cast("JsonValue", cache_payload)
+    payload["result_category"] = result_category.value
+    payload["manifest_control_validation"] = cast("JsonValue", manifest_validation)
     _write_once(args.output, payload)
     print(json.dumps(payload, sort_keys=True))
     return 0

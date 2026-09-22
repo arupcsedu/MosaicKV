@@ -35,7 +35,7 @@ from mosaickv.evaluation.tasks import (
     default_task_registry,
     deterministic_sample_ids,
 )
-from mosaickv.types import JsonObject, JsonValue
+from mosaickv.types import JsonObject, JsonValue, ResultCategory, ResultOrigin
 
 
 class LmmsEvalUnavailable(RuntimeError):
@@ -611,6 +611,7 @@ def run_lmms_development_evaluation(
     metric_aggregates_parquet_output: str | Path | None = None,
     registry: TaskRegistry | None = None,
     dataset_revision: str | None = None,
+    result_category: ResultCategory = ResultCategory.UNIFIED_COMPARISON,
 ) -> JsonObject:
     """Run deterministic development subsets through lmms-eval scoring."""
 
@@ -722,6 +723,12 @@ def run_lmms_development_evaluation(
                         task_score=_extract_optional_score(sample, spec.sample_metric),
                         metrics=capture.generation.metrics,
                         manifest_path=manifest_path,
+                        result_category=result_category,
+                        result_origin=(
+                            ResultOrigin.LOCALLY_REPRODUCED
+                            if result_category is ResultCategory.PAPER_REPRODUCTION
+                            else ResultOrigin.LOCALLY_MEASURED
+                        ),
                     )
                 except Exception as error:  # Conversion failure becomes a recorded row.
                     row = EvaluationResult.failed(
@@ -754,6 +761,12 @@ def run_lmms_development_evaluation(
                             None
                             if capture is None or capture.generation is None
                             else capture.generation.metrics
+                        ),
+                        result_category=result_category,
+                        result_origin=(
+                            ResultOrigin.LOCALLY_REPRODUCED
+                            if result_category is ResultCategory.PAPER_REPRODUCTION
+                            else ResultOrigin.LOCALLY_MEASURED
                         ),
                     )
                 store.append(row)
@@ -796,10 +809,26 @@ def run_lmms_development_evaluation(
                     if capture is None or capture.generation is None
                     else capture.generation.metrics
                 ),
+                result_category=result_category,
+                result_origin=(
+                    ResultOrigin.LOCALLY_REPRODUCED
+                    if result_category is ResultCategory.PAPER_REPRODUCTION
+                    else ResultOrigin.LOCALLY_MEASURED
+                ),
             )
         )
 
     rows = store.results(run_id=run_id)
+    expected_origin = (
+        ResultOrigin.LOCALLY_REPRODUCED
+        if result_category is ResultCategory.PAPER_REPRODUCTION
+        else ResultOrigin.LOCALLY_MEASURED
+    )
+    if any(
+        (row.result_category, row.result_origin) != (result_category, expected_origin)
+        for row in rows
+    ):
+        raise ValueError("resumed run contains a different result category or origin")
     parquet_path = None
     if parquet_output is not None:
         parquet_path = str(write_parquet_aggregate(rows, parquet_output).resolve())
@@ -822,6 +851,7 @@ def run_lmms_development_evaluation(
             rows,
             specs=specs,
             manifest_path=manifest_path,
+            result_category=result_category,
         )
         from mosaickv.evaluation.metrics.storage import (
             JsonlMetricStore,
@@ -867,6 +897,7 @@ def run_lmms_development_evaluation(
             spec.dataset_id: dataset_revision for spec in specs if dataset_revision is not None
         },
         "lmms_error": lmms_error,
+        "result_category": result_category.value,
         "nondeterministic_scoring_tasks": [
             spec.name for spec in specs if not spec.scoring_deterministic
         ],

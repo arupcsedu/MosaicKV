@@ -13,7 +13,7 @@ from typing import Any, cast
 from mosaickv.evaluation.metrics.types import METRIC_COLUMNS, MetricObservation, MetricScope
 from mosaickv.types import JsonObject
 
-MetricKey = tuple[str, str, str, str, str, float, str, str, str]
+MetricKey = tuple[str, str, str, str, str, float, str, str, str, str, str]
 
 
 def metric_key(row: MetricObservation) -> MetricKey:
@@ -27,6 +27,8 @@ def metric_key(row: MetricObservation) -> MetricKey:
         row.metric_name,
         row.metric_scope.value,
         row.sample_id or "",
+        row.result_category.value,
+        row.result_origin.value,
     )
 
 
@@ -105,6 +107,8 @@ def _schema(pa: Any) -> Any:
         "metadata_json",
         "evaluator_commit",
         "reference_artifact_sha",
+        "result_category",
+        "result_origin",
     }
     integers = {
         "evaluated_token_count",

@@ -8,7 +8,7 @@ from dataclasses import asdict, dataclass
 from enum import StrEnum
 from typing import cast
 
-from mosaickv.types import JsonObject
+from mosaickv.types import JsonObject, ResultCategory, ResultOrigin
 
 
 class MetricDirection(StrEnum):
@@ -92,6 +92,8 @@ class MetricObservation:
     numerator: float | None = None
     denominator: int | None = None
     sample_count: int = 1
+    result_category: ResultCategory = ResultCategory.UNIFIED_COMPARISON
+    result_origin: ResultOrigin = ResultOrigin.LOCALLY_MEASURED
     schema_version: int = 1
 
     def __post_init__(self) -> None:
@@ -113,6 +115,19 @@ class MetricObservation:
         for name in required:
             if not getattr(self, name).strip():
                 raise ValueError(f"{name} must be non-empty")
+        if self.result_origin is ResultOrigin.PAPER_REPORTED:
+            raise ValueError(
+                "paper-reported values belong in PaperReportedResult, not MetricObservation"
+            )
+        expected_origin = (
+            ResultOrigin.LOCALLY_REPRODUCED
+            if self.result_category is ResultCategory.PAPER_REPRODUCTION
+            else ResultOrigin.LOCALLY_MEASURED
+        )
+        if self.result_origin is not expected_origin:
+            raise ValueError(
+                f"{self.result_category.value} metrics require origin={expected_origin.value}"
+            )
         if not 0 < self.retention_ratio <= 1:
             raise ValueError("retention_ratio must be in (0, 1]")
         for name in ("metric_value", "numerator"):
@@ -146,6 +161,8 @@ class MetricObservation:
         payload = asdict(self)
         payload["metric_direction"] = self.metric_direction.value
         payload["metric_scope"] = self.metric_scope.value
+        payload["result_category"] = self.result_category.value
+        payload["result_origin"] = self.result_origin.value
         return cast("JsonObject", payload)
 
     @classmethod
@@ -163,6 +180,26 @@ class MetricObservation:
             )
         if "evaluated_token_count" not in data and data.get("denominator") is not None:
             data["evaluated_token_count"] = data["denominator"]
+        measurement_type = str(data.get("measurement_type", ""))
+        inferred_category = (
+            ResultCategory.PAPER_REPRODUCTION
+            if "paper_native" in measurement_type or "paper_reproduction" in measurement_type
+            else ResultCategory.UNIFIED_COMPARISON
+        )
+        category = ResultCategory(str(data.get("result_category", inferred_category.value)))
+        data["result_category"] = category
+        data["result_origin"] = ResultOrigin(
+            str(
+                data.get(
+                    "result_origin",
+                    (
+                        ResultOrigin.LOCALLY_REPRODUCED.value
+                        if category is ResultCategory.PAPER_REPRODUCTION
+                        else ResultOrigin.LOCALLY_MEASURED.value
+                    ),
+                )
+            )
+        )
         data["metric_direction"] = MetricDirection(str(data["metric_direction"]))
         data["metric_scope"] = MetricScope(str(data["metric_scope"]))
         return cls(**data)  # type: ignore[arg-type]

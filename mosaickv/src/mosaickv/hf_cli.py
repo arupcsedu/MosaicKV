@@ -41,6 +41,7 @@ from mosaickv.config import (
 from mosaickv.evaluation.harness import EvaluationHarness
 from mosaickv.evaluation.lmms_adapter import run_lmms_development_evaluation
 from mosaickv.evaluation.messages import MediaItem
+from mosaickv.evaluation.metrics.registry import default_metric_registry
 from mosaickv.evaluation.paper_native_lanes import (
     cache_operating_point,
     load_paper_native_ledger,
@@ -48,11 +49,21 @@ from mosaickv.evaluation.paper_native_lanes import (
     run_materialized_paper_native_evaluation,
     validate_protocol_run,
 )
-from mosaickv.evaluation.published_protocols import load_published_protocols
+from mosaickv.evaluation.published_protocols import (
+    PublishedBaselineProtocol,
+    load_published_protocols,
+)
+from mosaickv.evaluation.results import EvaluationResult
 from mosaickv.evaluation.storage import JsonlResultStore, load_jsonl
-from mosaickv.evaluation.tasks import TaskSample, default_task_registry, load_synthetic_samples
+from mosaickv.evaluation.tasks import (
+    TaskSample,
+    TaskSpec,
+    default_task_registry,
+    load_synthetic_samples,
+)
 from mosaickv.manifest import (
     ArtifactProvenance,
+    EvaluationProvenance,
     InputProvenance,
     ManifestError,
     RunManifestWriter,
@@ -71,6 +82,7 @@ from mosaickv.types import (
     Precision,
     PrefixKVProfileMode,
     RepairPolicy,
+    ResultCategory,
 )
 
 
@@ -330,6 +342,52 @@ def _source_commit() -> str:
     return commit
 
 
+def _reference_output_sha256(rows: tuple[EvaluationResult, ...]) -> str:
+    """Hash the exact sample/reference population used by an evaluation."""
+
+    payload = [
+        {
+            "sample_id": row.sample_id,
+            "reference": row.reference,
+        }
+        for row in sorted(rows, key=lambda item: item.sample_id)
+    ]
+    return sha256_text(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+
+
+def _paper_evaluation_provenance(
+    protocol: PublishedBaselineProtocol,
+    task: TaskSpec,
+    method: str,
+    rows: tuple[EvaluationResult, ...],
+    summary: JsonObject,
+) -> EvaluationProvenance:
+    """Build required evaluator, reference, and baseline provenance."""
+
+    registry = default_metric_registry()
+    definitions = tuple(registry.resolve(name) for name in task.paper_metrics)
+    evaluator_name = "+".join(sorted({definition.evaluator_owner for definition in definitions}))
+    evaluator_version = "+".join(
+        f"{definition.name}:{definition.version}" for definition in definitions
+    )
+    method_contract = next(item for item in protocol.methods if item.name == method)
+    reference_sha = summary.get("fullkv_reference_artifact_sha256")
+    if not isinstance(reference_sha, str) or len(reference_sha) != 64:
+        reference_sha = _reference_output_sha256(rows)
+    source_commit = _source_commit()
+    return EvaluationProvenance(
+        evaluator_name=evaluator_name,
+        evaluator_version=evaluator_version,
+        evaluator_commit=source_commit,
+        reference_output_sha256=reference_sha,
+        baseline_name=method,
+        # Official/reimplementation contracts use the pinned upstream commit.
+        # Local FullKV/MosaicKV references are identified by this repository's
+        # immutable source commit rather than an ambiguous not-applicable marker.
+        baseline_commit=method_contract.repository_commit or source_commit,
+    )
+
+
 def _load_sample_id_file(
     path_value: str | None,
     expected_sha: str | None,
@@ -418,13 +476,12 @@ def run_hf_evaluation(
     protocol = None
     if protocol_path is not None and protocol_id is not None:
         protocol = resolve_protocol(load_published_protocols(protocol_path), protocol_id)
+        environment_lock = Path(__file__).resolve().parents[2] / "env/common/requirements.lock"
         validate_protocol_run(
             protocol,
             task=task,
-            model_id=config.model.id,
-            model_revision=config.model.revision,
-            method=config.method.value,
-            retention_ratio=config.cache.retention_ratio,
+            config=config,
+            environment_lock_sha256=sha256_bytes(environment_lock.read_bytes()),
         )
     ledger_path = cast("str | None", getattr(args, "paper_native_ledger", None))
     ledger_sha = cast("str | None", getattr(args, "paper_native_ledger_sha", None))
@@ -436,6 +493,10 @@ def run_hf_evaluation(
         "paper_native_prefixkv",
         "paper_native_milebench",
     }
+    if is_materialized_native and protocol is None:
+        raise ValueError(
+            f"task {task.name!r} is a paper reproduction and requires a published protocol"
+        )
     if is_materialized_native and (ledger_path is None or ledger_sha is None):
         raise ValueError(f"task {task.name!r} requires a hash-bound --paper-native-ledger")
     if not is_materialized_native and ledger_path is not None:
@@ -635,11 +696,17 @@ def run_hf_evaluation(
             metric_aggregates_parquet_output=metric_aggregates_output,
             registry=registry,
             dataset_revision=config.dataset.revision,
+            result_category=(
+                ResultCategory.PAPER_REPRODUCTION
+                if protocol is not None
+                else ResultCategory.UNIFIED_COMPARISON
+            ),
         )
     if protocol is not None:
         operating_point = cache_operating_point(JsonlResultStore(raw_path).results(run_id=run_id))
         summary["cache_operating_point"] = operating_point.to_json_object()
         summary["published_protocol_id"] = protocol.protocol_id
+    result_rows = JsonlResultStore(raw_path).results(run_id=run_id)
     artifacts = ArtifactProvenance(
         raw_output_sha=sha256_bytes(raw_path.read_bytes()),
         metrics_sha=sha256_bytes(parquet_path.read_bytes()),
@@ -675,8 +742,24 @@ def run_hf_evaluation(
             ),
             artifacts,
             run_id=run_id,
+            result_category=(
+                ResultCategory.PAPER_REPRODUCTION
+                if protocol is not None
+                else ResultCategory.UNIFIED_COMPARISON
+            ),
+            evaluation_provenance=(
+                _paper_evaluation_provenance(
+                    protocol,
+                    task,
+                    config.method.value,
+                    result_rows,
+                    summary,
+                )
+                if protocol is not None
+                else None
+            ),
         )
-    rows = JsonlResultStore(raw_path).results(run_id=run_id)
+    rows = result_rows
     failed = sum(row.status.value == "failed" for row in rows)
     summary.update(
         {

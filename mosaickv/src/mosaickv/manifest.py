@@ -17,7 +17,13 @@ from pathlib import Path
 from typing import cast
 
 from mosaickv.config import RunConfig, canonical_config, config_sha256
-from mosaickv.types import Backend, JsonObject, MeasurementType
+from mosaickv.types import (
+    Backend,
+    JsonObject,
+    MeasurementType,
+    ResultCategory,
+    ResultOrigin,
+)
 
 
 class ManifestError(RuntimeError):
@@ -70,6 +76,59 @@ class ArtifactProvenance:
         _validate_digest(self.raw_output_sha, "artifacts.raw_output_sha")
         _validate_digest(self.metrics_sha, "artifacts.metrics_sha", allow_not_applicable=True)
         _validate_digest(self.log_sha, "artifacts.log_sha")
+
+
+@dataclass(frozen=True, slots=True)
+class EvaluationProvenance:
+    """Evaluator, reference, and baseline identities required by paper tables."""
+
+    evaluator_name: str = "not_used"
+    evaluator_version: str = "not_used"
+    evaluator_commit: str = "not_used"
+    reference_output_sha256: str = "not_used"
+    baseline_name: str = "not_applicable"
+    baseline_commit: str = "not_applicable"
+
+    def __post_init__(self) -> None:
+        for name in ("evaluator_name", "evaluator_version", "baseline_name"):
+            if not getattr(self, name).strip():
+                raise ManifestError(f"evaluation.{name} must be non-empty")
+        if self.evaluator_commit not in {"not_used", "not_applicable"} and (
+            len(self.evaluator_commit) not in {40, 64}
+            or any(character not in "0123456789abcdef" for character in self.evaluator_commit)
+        ):
+            raise ManifestError(
+                "evaluation.evaluator_commit must be a 40/64-character lowercase digest "
+                "or an explicit not_used/not_applicable marker"
+            )
+        if self.reference_output_sha256 != "not_used":
+            _validate_digest(
+                self.reference_output_sha256,
+                "evaluation.reference_output_sha256",
+                allow_not_applicable=True,
+            )
+        if self.baseline_commit not in {"not_used", "not_applicable"} and (
+            len(self.baseline_commit) != 40
+            or any(character not in "0123456789abcdef" for character in self.baseline_commit)
+        ):
+            raise ManifestError(
+                "evaluation.baseline_commit must be a 40-character lowercase Git SHA "
+                "or an explicit not_used/not_applicable marker"
+            )
+
+    def validate_for_paper_reproduction(self) -> None:
+        """Reject ambiguous provenance before a paper-reproduction manifest is written."""
+
+        if self.evaluator_name == "not_used" or self.evaluator_version == "not_used":
+            raise ManifestError("paper reproductions require evaluator name and version")
+        if self.evaluator_commit in {"not_used", "not_applicable"}:
+            raise ManifestError("paper reproductions require an immutable evaluator commit")
+        if self.reference_output_sha256 in {"not_used", "not_applicable"}:
+            raise ManifestError("paper reproductions require a reference-output/artifact SHA-256")
+        if self.baseline_name in {"not_used", "not_applicable"}:
+            raise ManifestError("paper reproductions require an executed baseline name")
+        if self.baseline_commit in {"not_used", "not_applicable"}:
+            raise ManifestError("paper reproductions require an immutable baseline commit")
 
 
 def _run(command: list[str], cwd: Path, *, check: bool = True) -> str:
@@ -229,6 +288,8 @@ class RunManifestWriter:
         started_at_utc: str | None = None,
         execution_metadata: JsonObject | None = None,
         attention_implementation_override: str | None = None,
+        result_category: ResultCategory = ResultCategory.UNIFIED_COMPARISON,
+        evaluation_provenance: EvaluationProvenance | None = None,
     ) -> JsonObject:
         source = _source_provenance(self.repo_root)
         source["config_sha"] = config_sha256(config)
@@ -253,10 +314,19 @@ class RunManifestWriter:
             if key in execution:
                 raise ManifestError(f"execution metadata cannot replace required field: {key}")
             execution[key] = value
+        evaluation = evaluation_provenance or EvaluationProvenance()
+        if result_category is ResultCategory.PAPER_REPRODUCTION:
+            evaluation.validate_for_paper_reproduction()
         return {
             "schema_version": 1,
             "run_id": run_id or uuid.uuid4().hex,
             "measurement_type": measurement_type.value,
+            "result_category": result_category.value,
+            "result_origin": (
+                ResultOrigin.LOCALLY_REPRODUCED.value
+                if result_category is ResultCategory.PAPER_REPRODUCTION
+                else ResultOrigin.LOCALLY_MEASURED.value
+            ),
             "started_at_utc": started_at_utc or datetime.now(UTC).isoformat(),
             "source": source,
             "model": {
@@ -284,6 +354,7 @@ class RunManifestWriter:
                 "accounting_spec_sha": config.cache.accounting_spec_sha,
             },
             "artifacts": cast("JsonObject", asdict(artifacts)),
+            "evaluation": cast("JsonObject", asdict(evaluation)),
             "resolved_config": canonical_config(config),
             "environment": {
                 "name": "common",
@@ -313,6 +384,8 @@ class RunManifestWriter:
         started_at_utc: str | None = None,
         execution_metadata: JsonObject | None = None,
         attention_implementation_override: str | None = None,
+        result_category: ResultCategory = ResultCategory.UNIFIED_COMPARISON,
+        evaluation_provenance: EvaluationProvenance | None = None,
     ) -> Path:
         """Write a new manifest atomically and refuse to overwrite an artifact."""
 
@@ -329,6 +402,8 @@ class RunManifestWriter:
             started_at_utc=started_at_utc,
             execution_metadata=execution_metadata,
             attention_implementation_override=attention_implementation_override,
+            result_category=result_category,
+            evaluation_provenance=evaluation_provenance,
         )
         serialized = json.dumps(manifest, sort_keys=True, indent=2, ensure_ascii=False) + "\n"
         temporary_name: str | None = None
@@ -354,6 +429,7 @@ class RunManifestWriter:
 
 __all__ = [
     "ArtifactProvenance",
+    "EvaluationProvenance",
     "InputProvenance",
     "ManifestError",
     "RunManifestWriter",
