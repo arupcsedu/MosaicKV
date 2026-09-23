@@ -29,7 +29,7 @@ from mosaickv.evaluation.result_categories import (
     require_metric_category,
     validate_unified_comparison_manifests,
 )
-from mosaickv.evaluation.results import EvaluationResult
+from mosaickv.evaluation.results import EvaluationResult, canonical_backend_name
 from mosaickv.evaluation.storage import load_jsonl
 from mosaickv.types import JsonValue, ResultCategory
 
@@ -52,7 +52,7 @@ def _cohort(
         for row in rows
         if row.task == task
         and row.model == model
-        and row.backend == backend
+        and canonical_backend_name(row.backend) == canonical_backend_name(backend)
         and row.method == method
         and registry.canonical_name(row.metric_name) == canonical_metric
         and row.retention_ratio == retention_ratio
@@ -75,7 +75,7 @@ def _method_rows(
         for row in rows
         if row.task == task
         and row.model == model
-        and row.backend == backend
+        and canonical_backend_name(row.backend) == canonical_backend_name(backend)
         and row.method == method
         and row.retention_ratio == retention_ratio
         and row.metric_scope is MetricScope.SAMPLE
@@ -99,7 +99,7 @@ def _raw_cohort(
         for row in rows
         if row.task == task
         and row.model == model
-        and row.backend == backend
+        and canonical_backend_name(row.backend) == canonical_backend_name(backend)
         and row.method == method
         and row.retention_ratio == retention_ratio
         and row.result_category is result_category

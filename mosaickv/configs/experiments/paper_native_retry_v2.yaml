@@ -1,0 +1,67 @@
+schema_version: 1
+experiment_id: paper_native_retry_v2
+classification: preregistered_development_validation
+source_protocol: configs/experiments/published_paper_native_metrics_v1.yaml
+
+selection_policy:
+  prefixkv:
+    task: llava_description
+    source: /scratch/djy8hg/data/mosaickv/prefixkv/detail_1k.json
+    source_revision: 407c2d2f8fc13611d13f72a5e18b8c33bf9c44e6e05278bf0b4da41deeacbe6a
+    deterministic_rule: first_4_records_in_source_order
+    sample_count: 4
+  milebench:
+    task: milebench
+    dataset: ActionSequence
+    source_revision: 7f40a34031af3dc364330184a78b07ddf09b4f94d
+    deterministic_rule: first_20_records_in_source_order
+    sample_count: 20
+
+generation:
+  prefixkv_max_new_tokens: 144
+  milebench_max_new_tokens: 32
+  do_sample: false
+  temperature: 0.0
+
+methods:
+  prefixkv:
+    - {name: full_kv, retention_ratio: 1.0}
+    - {name: prefixkv_reimpl, retention_ratio: 0.2}
+    - {name: mosaickv_exact, retention_ratio: 0.2}
+  milebench:
+    - {name: full_kv, retention_ratio: 1.0}
+    - {name: lookm_reimpl, retention_ratio: 0.2}
+    - {name: mosaickv_exact, retention_ratio: 0.2}
+
+mosaickv_block_one_profile:
+  shared_nominal_retention_ratio: 0.2
+  maximum_shared_cap_utilization: 0.69
+  budget_unit: bytes
+  uniform_physical_capacity_per_layer_head: true
+  routed_head_fraction: 0.0625
+  graph_candidate_nonmandatory_fraction: 0.03
+  graph_mode: shortlist_rerank
+
+acceptance_gates:
+  actual_active_kv_bytes:
+    condition: mosaickv_mean_bytes <= 0.70 * nearest_compressed_baseline_mean_bytes
+    minimum_reduction_fraction: 0.30
+  prefixkv_quality:
+    rouge_l_f1: mosaickv >= prefixkv_reimpl
+    teacher_forced_ppl: mosaickv <= prefixkv_reimpl
+  milebench_quality:
+    accuracy: mosaickv >= lookm_reimpl
+    fullkv_accuracy_must_be_positive: true
+  physical_layout:
+    packed_padding_kv_bytes: 0
+    equal_active_positions_per_layer_head: true
+    maximum_planner_node_fraction: 0.10
+  completeness:
+    failed_samples: 0
+    require_manifests: true
+    require_traces: true
+
+reporting:
+  primary_memory_measure: measured_active_kv_bytes
+  forbid_nominal_ratio_substitution: true
+  result_status: development_only_not_paper_evidence

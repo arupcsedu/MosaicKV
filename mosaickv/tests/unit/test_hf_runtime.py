@@ -218,6 +218,7 @@ def test_routed_head_only_plan_bypasses_stable_graph_utility_and_selection() -> 
             minimum_stratum_fraction=0.0,
             coverage_correction_rounds=0,
             stable_head_prompt_routing=True,
+            stable_head_uniform_fill=True,
             routed_head_only_planning=True,
         ),
         prototypes=replace(
@@ -471,6 +472,9 @@ def test_dense_routed_plan_keeps_stable_exact_blocks_outside_objective() -> None
     assert plan.external_exact_capacity_records[0].shortfall_positions == 0
     assert all(full.blocks[node_id].kv_head == 1 for node_id in plan.external_exact_node_ids)
     assert len(plan.construction.exact_node_ids) == 12
+    assert {
+        layout.active_cache_length for layout in plan.construction.active_layouts
+    } == {6}
     assert set(plan.external_exact_node_ids) <= set(plan.construction.exact_node_ids)
     assert plan.construction.active_budget.value == 12
     assert plan.selection.budget.value == 6

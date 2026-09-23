@@ -236,6 +236,98 @@ def _direct_config(args: argparse.Namespace) -> RunConfig:
     )
 
 
+def _paper_native_runtime_profile(
+    config: RunConfig,
+    protocol: PublishedBaselineProtocol,
+) -> RunConfig:
+    """Apply the audited block-size-one paper-native execution profile.
+
+    Published reimplementations require token-sized blocks.  Applying the
+    ordinary full-graph MosaicKV defaults to that representation creates one
+    graph node per layer/head/token (hundreds of thousands for LLaVA) and a
+    cardinality budget permits uneven head lengths that are padded back to a
+    large dense tensor.  This profile changes neither the protocol block
+    granularity nor its shared nominal cache cap:
+
+    * byte budgeting gives every layer/head one physical position limit;
+    * stable heads use deterministic prompt-attention selection directly;
+    * only the highest-uncertainty 1/16 of routes enter the evidence graph;
+    * the graph reranks a bounded prompt shortlist; and
+    * MosaicKV deliberately uses at most 69% of the shared compressed cap,
+      which preregisters a >30% actual-byte target against a baseline that
+      consumes the cap.  Actual bytes, not nominal ratios, remain authoritative.
+
+    Prefix teacher forcing also needs a decode horizon covering the observed
+    136-token target.  A 144-token bound leaves a small, explicit margin and
+    never truncates a target.
+    """
+
+    profiled = config
+    if protocol.protocol_id == "prefixkv_hf_reimpl_native_metrics_v1":
+        profiled = replace(
+            profiled,
+            generation=replace(
+                profiled.generation,
+                max_new_tokens=max(144, profiled.generation.max_new_tokens),
+            ),
+        )
+    if (
+        not profiled.method.is_mosaickv
+        or profiled.cache.retention_ratio >= 1.0
+        or profiled.cache.block_size != 1
+    ):
+        return profiled
+    return replace(
+        profiled,
+        cache=replace(
+            profiled.cache,
+            budget_unit=BudgetUnit.BYTES,
+            exact_gather_mode="source_views",
+            packing_mode="preallocated_layer",
+        ),
+        forecasting=replace(
+            profiled.forecasting,
+            mode=ForecastMode.PROMPT_WINDOW,
+            prompt_window=max(16, profiled.forecasting.prompt_window),
+            draft_steps=0,
+            adaptive_head_routing=True,
+            shifted_head_prompt_weight=0.0,
+        ),
+        graph=replace(
+            profiled.graph,
+            max_neighbors=4,
+            attention_host_transfer_mode="deferred_layer_vectorized",
+            similarity_shortlist_multiplier=3.0,
+            similarity_shortlist_min_nodes=64,
+            candidate_descriptor_pooling=True,
+            candidate_graph_mode="shortlist_rerank",
+            candidate_neighbor_hops=1,
+            screening_group_blocks=4,
+            uncertain_head_only=True,
+            uncertain_head_fraction=0.0625,
+            uncertain_head_threshold=0.2,
+            candidate_nonmandatory_fraction=0.03,
+        ),
+        selection=replace(
+            profiled.selection,
+            algorithm="vectorized_coverage",
+            stop_on_nonpositive_gain=False,
+            minimum_stratum_fraction=0.1,
+            coverage_correction_rounds=1,
+            stable_head_prompt_routing=True,
+            stable_head_uniform_fill=True,
+            routed_head_only_planning=True,
+            physical_capacity_fraction=0.69,
+        ),
+        prototypes=replace(
+            profiled.prototypes,
+            uncertain_head_only=True,
+            uncertain_head_fraction=0.0625,
+            uncertain_head_threshold=0.2,
+        ),
+    )
+
+
 def resolve_hf_config(args: argparse.Namespace) -> RunConfig | None:
     """Resolve a YAML/TOML config or direct flags when HF execution was requested."""
 
@@ -476,6 +568,7 @@ def run_hf_evaluation(
     protocol = None
     if protocol_path is not None and protocol_id is not None:
         protocol = resolve_protocol(load_published_protocols(protocol_path), protocol_id)
+        config = _paper_native_runtime_profile(config, protocol)
         environment_lock = Path(__file__).resolve().parents[2] / "env/common/requirements.lock"
         validate_protocol_run(
             protocol,

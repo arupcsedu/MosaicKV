@@ -3077,7 +3077,6 @@ def build_compression_plan(
             can_externalize_stable = bool(
                 config.selection.stable_head_prompt_routing
                 and position_limits is not None
-                and not config.selection.stable_head_uniform_fill
             )
             if can_externalize_stable:
                 if position_limits is None:  # pragma: no cover - guarded above

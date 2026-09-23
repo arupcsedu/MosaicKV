@@ -64,7 +64,7 @@ from mosaickv.evaluation.published_protocols import (
     load_published_protocols,
     metric_readiness_issues,
 )
-from mosaickv.evaluation.results import EvaluationResult
+from mosaickv.evaluation.results import EvaluationResult, canonical_backend_name
 from mosaickv.types import ResultCategory
 
 
@@ -812,6 +812,12 @@ def test_paired_method_comparison_rejects_unpaired_or_mixed_metrics() -> None:
     mixed = (candidate[0], replace(candidate[1], metric_name="anls"))
     with pytest.raises(ValueError, match="one task/model/backend/method/ratio/metric"):
         compare_paired_methods(reference, mixed, resamples=10)
+
+
+def test_huggingface_backend_alias_is_canonicalized_for_analysis() -> None:
+    assert canonical_backend_name("hf") == "huggingface"
+    assert canonical_backend_name("huggingface") == "huggingface"
+    assert canonical_backend_name("vllm") == "vllm"
 
 
 def test_versioned_published_protocol_suite_is_valid() -> None:

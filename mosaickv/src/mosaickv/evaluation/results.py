@@ -18,6 +18,12 @@ class ResultStatus(StrEnum):
     FAILED = "failed"
 
 
+def canonical_backend_name(value: str) -> str:
+    """Return the storage spelling for a supported backend alias."""
+
+    return "huggingface" if value in {"hf", "huggingface"} else value
+
+
 def _validate_optional_nonnegative(value: float | int | None, name: str) -> None:
     if value is None:
         return
