@@ -613,6 +613,36 @@ class DensePhysicalCacheBudget:
         return max(0, target - (block_size - 1) * self.bytes_per_position)
 
 
+def _mosaickv_physical_prompt_capacity(
+    plan: MosaicKVCompressionPlan,
+    dense_budget: DensePhysicalCacheBudget,
+    *,
+    used_fullkv_fallback: bool,
+) -> int:
+    """Resolve the physical sequence extent from every active head layout.
+
+    Exact-only and three-tier plans share the same dense HF packer.  Restricting
+    capacity shrinking to three-tier mode leaves exact-only plans padded to the
+    comparison baseline's larger shared cap, erasing their measured memory
+    reduction.  The constructed layouts are authoritative for both modes.
+    """
+
+    active_lengths = {
+        layout.active_cache_length for layout in plan.construction.active_layouts
+    }
+    if not active_lengths:
+        raise HuggingFaceRuntimeError(
+            "MosaicKV construction has no active layer/head layouts"
+        )
+    measured_capacity = max(active_lengths)
+    if measured_capacity > dense_budget.prompt_capacity and not used_fullkv_fallback:
+        raise HuggingFaceRuntimeError(
+            "MosaicKV measured physical capacity exceeds its hard cap: "
+            f"active={measured_capacity}, cap={dense_budget.prompt_capacity}"
+        )
+    return measured_capacity
+
+
 @dataclass(frozen=True, slots=True)
 class ExactCacheStorageAccounting:
     """One exact-cache selection measured at every relevant byte boundary.
@@ -9323,32 +9353,16 @@ class HuggingFaceMosaicKVModel:
                         )
                         error.mosaickv_failure_trace_payload = failure_payload
                         raise error
-                    if (
-                        dense_budget is not None
-                        and plan.construction.mode is TierConstructionMode.THREE_TIER
-                    ):
-                        active_lengths = {
-                            layout.active_cache_length
-                            for layout in plan.construction.active_layouts
-                        }
-                        if not active_lengths:
-                            raise HuggingFaceRuntimeError(
-                                "three-tier construction has no active layer/head layouts"
-                            )
-                        measured_capacity = max(active_lengths)
+                    if dense_budget is not None:
                         hierarchical_fullkv_fallback = bool(
                             hierarchical_eviction_decision is not None
                             and hierarchical_eviction_decision.used_fullkv_fallback
                         )
-                        if (
-                            measured_capacity > dense_budget.prompt_capacity
-                            and not hierarchical_fullkv_fallback
-                        ):
-                            raise HuggingFaceRuntimeError(
-                                "three-tier measured physical capacity exceeds its hard cap: "
-                                f"active={measured_capacity}, "
-                                f"cap={dense_budget.prompt_capacity}"
-                            )
+                        measured_capacity = _mosaickv_physical_prompt_capacity(
+                            plan,
+                            dense_budget,
+                            used_fullkv_fallback=hierarchical_fullkv_fallback,
+                        )
                         # The common HF tensors use the largest logical head
                         # length as their physical sequence extent. Shorter
                         # routed heads are zero padded by the common packer and

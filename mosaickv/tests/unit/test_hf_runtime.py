@@ -475,6 +475,20 @@ def test_dense_routed_plan_keeps_stable_exact_blocks_outside_objective() -> None
     assert {
         layout.active_cache_length for layout in plan.construction.active_layouts
     } == {6}
+    dense_budget = hf_runtime.DensePhysicalCacheBudget(
+        source_bytes=full.active_bytes,
+        target_bytes=full.active_bytes,
+        prompt_capacity=sequence,
+        position_limits={(0, 0): sequence, (0, 1): sequence},
+    )
+    assert (
+        hf_runtime._mosaickv_physical_prompt_capacity(
+            plan,
+            dense_budget,
+            used_fullkv_fallback=False,
+        )
+        == 6
+    )
     assert set(plan.external_exact_node_ids) <= set(plan.construction.exact_node_ids)
     assert plan.construction.active_budget.value == 12
     assert plan.selection.budget.value == 6
