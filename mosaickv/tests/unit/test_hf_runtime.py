@@ -1515,6 +1515,16 @@ def test_dense_physical_byte_budget_supports_fixed_multitoken_blocks() -> None:
     assert dense.minimum_block_representable_fill(4) == (
         dense.target_bytes - 3 * dense.bytes_per_position
     )
+    effective_target = 5 * dense.bytes_per_position
+    assert dense.minimum_block_representable_fill(
+        1,
+        target_bytes=effective_target,
+    ) == effective_target
+    with pytest.raises(ValueError, match="within the dense hard cap"):
+        dense.minimum_block_representable_fill(
+            1,
+            target_bytes=dense.target_bytes + dense.bytes_per_position,
+        )
 
 
 def test_common_eight_token_blocks_reduce_dense_lattice_underfill() -> None:

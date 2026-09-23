@@ -589,12 +589,28 @@ class DensePhysicalCacheBudget:
             raise HuggingFaceRuntimeError("dense target bytes are not position-aligned")
         return self.target_bytes // self.prompt_capacity
 
-    def minimum_block_representable_fill(self, block_size: int) -> int:
-        """Lower bound after unavoidable fixed-block rounding in every identity."""
+    def minimum_block_representable_fill(
+        self,
+        block_size: int,
+        *,
+        target_bytes: int | None = None,
+    ) -> int:
+        """Lower bound after unavoidable fixed-block rounding in every identity.
+
+        ``target_bytes`` permits a method to consume less than the shared hard
+        cap while retaining the same physical layout.  Validation must compare
+        that method against its effective target, not against capacity that it
+        deliberately left available to the comparison baseline.
+        """
 
         if block_size < 1:
             raise ValueError("block_size must be positive")
-        return max(0, self.target_bytes - (block_size - 1) * self.bytes_per_position)
+        target = self.target_bytes if target_bytes is None else target_bytes
+        if target < 1 or target > self.target_bytes:
+            raise ValueError("effective target bytes must lie within the dense hard cap")
+        if target % self.bytes_per_position:
+            raise ValueError("effective target bytes must be dense-position aligned")
+        return max(0, target - (block_size - 1) * self.bytes_per_position)
 
 
 @dataclass(frozen=True, slots=True)
@@ -9346,23 +9362,28 @@ class HuggingFaceMosaicKVModel:
                     logical_prefill_active_kv_bytes = (
                         plan.construction.state.statistics.active_kv_bytes
                     )
+                    minimum_representable = (
+                        None
+                        if dense_budget is None
+                        else dense_budget.minimum_block_representable_fill(
+                            self.config.cache.block_size,
+                            target_bytes=plan.active_budget_value,
+                        )
+                    )
                     if (
                         method is MosaicKVMethod.MOSAICKV_EXACT
-                        and dense_budget is not None
+                        and minimum_representable is not None
                         and not self.config.selection.stop_on_nonpositive_gain
-                        and logical_prefill_active_kv_bytes
-                        < dense_budget.minimum_block_representable_fill(
-                            self.config.cache.block_size
-                        )
+                        and logical_prefill_active_kv_bytes < minimum_representable
                     ):
-                        minimum_representable = dense_budget.minimum_block_representable_fill(
-                            self.config.cache.block_size
-                        )
+                        if dense_budget is None:  # pragma: no cover - narrowed above
+                            raise AssertionError("dense underfill check requires a dense budget")
                         raise HuggingFaceRuntimeError(
                             "budget-filling MosaicKV selection underfilled the dense cache: "
                             f"selected={logical_prefill_active_kv_bytes}, "
                             f"minimum_representable={minimum_representable}, "
-                            f"target={dense_budget.target_bytes}"
+                            f"target={plan.active_budget_value}, "
+                            f"shared_hard_cap={dense_budget.target_bytes}"
                         )
                 elif method.is_compressed_baseline:
                     prompt_started = time.perf_counter()
