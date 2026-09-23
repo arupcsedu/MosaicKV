@@ -65,3 +65,46 @@ def test_retry_analyzer_rejects_nonuniform_physical_capacity() -> None:
     assert summary["maximum_packed_padding_kv_bytes"] == 128
     assert summary["uniform_active_positions_per_layer_head"] is False
     assert summary["maximum_planner_node_fraction"] == pytest.approx(1.0)
+
+
+def test_retry_analyzer_allows_metric_only_prefix_rows() -> None:
+    analyzer = _load_script("analyze_paper_native_retry_v2.py")
+    from mosaickv.evaluation.results import EvaluationResult
+
+    row = EvaluationResult.from_json_object(
+        {
+            "run_id": "prefix",
+            "sample_id": "sample-1",
+            "task": "llava_description",
+            "model": "llava-hf/llava-1.5-7b-hf",
+            "backend": "huggingface",
+            "method": "full_kv",
+            "retention_ratio": 1.0,
+            "answer": "description",
+            "reference": "reference",
+            "task_score": None,
+            "ttft": 1.0,
+            "prefill_time": 1.0,
+            "compression_time": 0.0,
+            "decode_time": 1.0,
+            "end_to_end_time": 2.0,
+            "generated_tokens": 1,
+            "active_kv_bytes": 1024,
+            "residual_kv_bytes": 0,
+            "peak_gpu_memory": 2048,
+            "repair_count": 0,
+            "repaired_bytes": 0,
+            "token_agreement": None,
+            "logit_kl": None,
+            "attention_output_error": None,
+            "manifest_path": "manifest.json",
+            "status": "completed",
+            "error": None,
+        }
+    )
+
+    summary = analyzer._completed_summary((row,))
+
+    assert summary["mean_task_score"] is None
+    with pytest.raises(ValueError, match="requires sample-level task scores"):
+        analyzer._required_task_score(summary, "PrefixKV")

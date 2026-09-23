@@ -24,7 +24,7 @@ class CompletedSummary(TypedDict):
     failed_samples: int
     mean_active_kv_bytes: float
     mean_end_to_end_seconds: float
-    mean_task_score: float
+    mean_task_score: float | None
 
 
 class LayoutSummary(TypedDict):
@@ -98,7 +98,7 @@ def _completed_summary(rows: tuple[EvaluationResult, ...]) -> CompletedSummary:
             float(value) for value in active_bytes if value is not None
         ),
         "mean_end_to_end_seconds": _mean(timing),
-        "mean_task_score": _mean(scores),
+        "mean_task_score": None if not scores else _mean(scores),
     }
 
 
@@ -119,6 +119,13 @@ def _sample_metric(rows: tuple[MetricObservation, ...], name: str) -> float:
         for row in rows
         if row.metric_scope is MetricScope.SAMPLE and row.metric_name == name
     )
+
+
+def _required_task_score(summary: CompletedSummary, label: str) -> float:
+    value = summary["mean_task_score"]
+    if value is None:
+        raise ValueError(f"{label} requires sample-level task scores")
+    return value
 
 
 def _trace_records(root: Path, lane: str) -> tuple[dict[str, Any], ...]:
@@ -210,11 +217,21 @@ def main() -> int:
         <= prefix_quality["prefixkv_reimpl"]["teacher_forced_ppl"]
     )
     gates["milebench_accuracy_noninferior"] = (
-        summaries["milebench"]["mosaickv_exact"]["mean_task_score"]
-        >= summaries["milebench"]["lookm_reimpl"]["mean_task_score"]
+        _required_task_score(
+            summaries["milebench"]["mosaickv_exact"],
+            "MileBench MosaicKV",
+        )
+        >= _required_task_score(
+            summaries["milebench"]["lookm_reimpl"],
+            "MileBench LOOK-M",
+        )
     )
     gates["milebench_fullkv_accuracy_measurable"] = (
-        summaries["milebench"]["full_kv"]["mean_task_score"] > 0
+        _required_task_score(
+            summaries["milebench"]["full_kv"],
+            "MileBench FullKV",
+        )
+        > 0
     )
     gates["no_failed_samples"] = all(
         summary["failed_samples"] == 0
