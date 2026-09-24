@@ -14,6 +14,7 @@ from typing import Any, TypedDict
 
 from mosaickv.evaluation.metrics.storage import load_metric_jsonl
 from mosaickv.evaluation.metrics.types import MetricObservation, MetricScope
+from mosaickv.evaluation.paper_native_latency import canonical_inference_traces
 from mosaickv.evaluation.results import EvaluationResult, ResultStatus
 from mosaickv.evaluation.storage import load_jsonl
 
@@ -83,20 +84,14 @@ def _completed_summary(rows: tuple[EvaluationResult, ...]) -> CompletedSummary:
     if not completed or any(value is None for value in active_bytes):
         raise ValueError("completed paper-native rows require measured active bytes")
     timing = tuple(
-        float(row.end_to_end_time)
-        for row in completed
-        if row.end_to_end_time is not None
+        float(row.end_to_end_time) for row in completed if row.end_to_end_time is not None
     )
-    scores = tuple(
-        float(row.task_score) for row in completed if row.task_score is not None
-    )
+    scores = tuple(float(row.task_score) for row in completed if row.task_score is not None)
     return {
         "sample_count": len(rows),
         "completed_samples": len(completed),
         "failed_samples": len(failed),
-        "mean_active_kv_bytes": _mean(
-            float(value) for value in active_bytes if value is not None
-        ),
+        "mean_active_kv_bytes": _mean(float(value) for value in active_bytes if value is not None),
         "mean_end_to_end_seconds": _mean(timing),
         "mean_task_score": None if not scores else _mean(scores),
     }
@@ -137,7 +132,7 @@ def _trace_records(
     paths = sorted(trace_root.glob("*.json"))
     if not paths:
         raise ValueError(f"MosaicKV trace directory is empty: {trace_root}")
-    return tuple(json.loads(path.read_text(encoding="utf-8")) for path in paths)
+    return canonical_inference_traces(tuple(paths))
 
 
 def _nested(record: Mapping[str, Any], *path: str) -> Any:
@@ -150,16 +145,12 @@ def _nested(record: Mapping[str, Any], *path: str) -> Any:
 
 
 def _layout_summary(traces: tuple[dict[str, Any], ...]) -> LayoutSummary:
-    padding = tuple(
-        int(_nested(trace, "packed_padding_kv_bytes")) for trace in traces
-    )
+    padding = tuple(int(_nested(trace, "packed_padding_kv_bytes")) for trace in traces)
     planner_nodes = tuple(
-        int(_nested(trace, "candidate_graph_routing", "planner_node_count"))
-        for trace in traces
+        int(_nested(trace, "candidate_graph_routing", "planner_node_count")) for trace in traces
     )
     source_nodes = tuple(
-        int(_nested(trace, "candidate_graph_routing", "source_node_count"))
-        for trace in traces
+        int(_nested(trace, "candidate_graph_routing", "source_node_count")) for trace in traces
     )
     if any(value <= 0 for value in source_nodes):
         raise ValueError("trace source_node_count must be positive")
@@ -200,9 +191,7 @@ def main() -> int:
         lane: {method: _completed_summary(_rows(root, lane, method)) for method in lane_methods}
         for lane, lane_methods in methods.items()
     }
-    prefix_metrics = {
-        method: _metrics(root, "prefixkv", method) for method in methods["prefixkv"]
-    }
+    prefix_metrics = {method: _metrics(root, "prefixkv", method) for method in methods["prefixkv"]}
     prefix_quality = {
         method: {
             "rouge_l_f1": _sample_metric(rows, "rouge_l_f1"),
@@ -220,9 +209,7 @@ def main() -> int:
         if args.experiment_id == "paper-native-latency-v3":
             mosaic_latency = summaries[lane]["mosaickv_exact"]["mean_end_to_end_seconds"]
             baseline_latency = summaries[lane][baseline]["mean_end_to_end_seconds"]
-            gates[f"{lane}_latency_within_5_percent"] = (
-                mosaic_latency <= 1.05 * baseline_latency
-            )
+            gates[f"{lane}_latency_within_5_percent"] = mosaic_latency <= 1.05 * baseline_latency
     gates["prefixkv_rouge_noninferior"] = (
         prefix_quality["mosaickv_exact"]["rouge_l_f1"]
         >= prefix_quality["prefixkv_reimpl"]["rouge_l_f1"]
@@ -231,15 +218,12 @@ def main() -> int:
         prefix_quality["mosaickv_exact"]["teacher_forced_ppl"]
         <= prefix_quality["prefixkv_reimpl"]["teacher_forced_ppl"]
     )
-    gates["milebench_accuracy_noninferior"] = (
-        _required_task_score(
-            summaries["milebench"]["mosaickv_exact"],
-            "MileBench MosaicKV",
-        )
-        >= _required_task_score(
-            summaries["milebench"]["lookm_reimpl"],
-            "MileBench LOOK-M",
-        )
+    gates["milebench_accuracy_noninferior"] = _required_task_score(
+        summaries["milebench"]["mosaickv_exact"],
+        "MileBench MosaicKV",
+    ) >= _required_task_score(
+        summaries["milebench"]["lookm_reimpl"],
+        "MileBench LOOK-M",
     )
     gates["milebench_fullkv_accuracy_measurable"] = (
         _required_task_score(
@@ -249,13 +233,10 @@ def main() -> int:
         > 0
     )
     gates["no_failed_samples"] = all(
-        summary["failed_samples"] == 0
-        for lane in summaries.values()
-        for summary in lane.values()
+        summary["failed_samples"] == 0 for lane in summaries.values() for summary in lane.values()
     )
     layouts: dict[str, LayoutSummary] = {
-        lane: _layout_summary(_trace_records(root, lane, args.experiment_id))
-        for lane in methods
+        lane: _layout_summary(_trace_records(root, lane, args.experiment_id)) for lane in methods
     }
     gates["zero_physical_padding"] = all(
         layout["maximum_packed_padding_kv_bytes"] == 0 for layout in layouts.values()
@@ -263,9 +244,7 @@ def main() -> int:
     gates["uniform_physical_capacity"] = all(
         bool(layout["uniform_active_positions_per_layer_head"]) for layout in layouts.values()
     )
-    maximum_planner_fraction = (
-        0.025 if args.experiment_id == "paper-native-latency-v3" else 0.10
-    )
+    maximum_planner_fraction = 0.025 if args.experiment_id == "paper-native-latency-v3" else 0.10
     gates["bounded_shortlist_planner"] = all(
         layout["maximum_planner_node_fraction"] <= maximum_planner_fraction
         for layout in layouts.values()

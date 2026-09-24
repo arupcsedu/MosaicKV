@@ -45,6 +45,19 @@ mosaickv_block_one_profile:
   graph_candidate_nonmandatory_fraction: 0.03
   graph_mode: shortlist_rerank
 
+timing_protocol:
+  lane: prefixkv
+  methods: [prefixkv_reimpl, mosaickv_exact]
+  sample_count: 4
+  warmups_per_method: 5
+  timed_repetitions_per_method: 20
+  trial_order: alternating_forward_reverse
+  persistent_model_process: true
+  synchronize_cuda_at_method_boundaries: true
+  primary_statistic: paired_median_repetition_mean_ratio
+  bootstrap_resamples: 10000
+  maximum_latency_ratio: 1.05
+
 acceptance_gates:
   actual_active_kv_bytes:
     condition: mosaickv_mean_bytes <= 0.70 * nearest_compressed_baseline_mean_bytes
@@ -62,6 +75,8 @@ acceptance_gates:
     packed_padding_kv_bytes: 0
     equal_active_positions_per_layer_head: true
     maximum_planner_node_fraction: 0.025
+    expected_prefixkv_mosaickv_mean_active_kv_bytes: 42860544
+    expected_mean_active_kv_byte_tolerance: 0
   completeness:
     failed_samples: 0
     require_manifests: true
