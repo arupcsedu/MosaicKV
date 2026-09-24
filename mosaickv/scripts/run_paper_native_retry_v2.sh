@@ -13,6 +13,11 @@ package="$repo/mosaickv"
 source "$package/scripts/cache_env.sh"
 source_sha="${MOSAICKV_SOURCE_SHA:?set MOSAICKV_SOURCE_SHA}"
 output_root="${MOSAICKV_OUTPUT_ROOT:?set MOSAICKV_OUTPUT_ROOT}"
+experiment_id="${MOSAICKV_EXPERIMENT_ID:-paper-native-retry-v2}"
+case "$experiment_id" in
+  paper-native-retry-v2|paper-native-latency-v3) ;;
+  *) echo "unsupported MOSAICKV_EXPERIMENT_ID: $experiment_id" >&2; exit 2 ;;
+esac
 
 cd "$repo"
 "$package/scripts/assert_clean_worktree.sh"
@@ -91,7 +96,7 @@ command=(
   --local-files-only
   --output-dir "$lane_root"
   --trace-directory "$lane_root/traces"
-  --run-id "paper-native-retry-v2-${lane}-${method}"
+  --run-id "${experiment_id}-${lane}-${method}"
   --raw-output "$lane_root/${method}-raw.jsonl"
   --parquet-output "$lane_root/${method}-results.parquet"
   --metric-output "$lane_root/${method}-metrics.jsonl"

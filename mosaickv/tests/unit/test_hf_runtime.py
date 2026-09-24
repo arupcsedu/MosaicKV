@@ -2357,6 +2357,10 @@ def test_prompt_query_attention_retains_window_positions_and_pools_to_blocks() -
         full,
         averaged,
     )
+    contiguous_scalar_blocks = hf_runtime._block_attention_values_from_token_attention(
+        full,
+        averaged,
+    )
 
     assert set(by_query) == {(0, 0), (0, 1)}
     assert all(values.shape == (2, 4) for values in by_query.values())
@@ -2365,3 +2369,4 @@ def test_prompt_query_attention_retains_window_positions_and_pools_to_blocks() -
     for node_id, values in by_block.items():
         assert values.shape == (2,)
         assert float(values.mean()) == pytest.approx(scalar_blocks[node_id])
+        assert contiguous_scalar_blocks[node_id] == pytest.approx(scalar_blocks[node_id])

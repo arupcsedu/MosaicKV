@@ -2975,6 +2975,9 @@ def select_prompt_attention_topk_ids_by_head(
     budget: SelectionBudget,
     *,
     prompt_attention_by_node: Mapping[int, float],
+    prompt_attention_scores: (
+        Sequence[float] | np.ndarray[Any, np.dtype[np.float64]] | None
+    ) = None,
     forecast_attention_by_node: Mapping[int, float] | None = None,
     head_routes: Sequence[tuple[int, int]],
     position_limits: Mapping[tuple[int, int], int],
@@ -3373,13 +3376,19 @@ def select_prompt_attention_topk_ids_by_head(
             f"stable Prompt Top-K routes lack position limits: {sorted(missing_limits)}"
         )
     node_count = len(full_state.blocks)
-    if set(prompt_attention_by_node) != set(range(node_count)):
+    if prompt_attention_scores is None and set(prompt_attention_by_node) != set(range(node_count)):
         raise ValueError("prompt_attention_topk scores must cover every source block exactly once")
-    score_array = np.fromiter(
-        (float(prompt_attention_by_node[node_id]) for node_id in range(node_count)),
-        dtype=np.float64,
-        count=node_count,
+    score_array = (
+        np.fromiter(
+            (float(prompt_attention_by_node[node_id]) for node_id in range(node_count)),
+            dtype=np.float64,
+            count=node_count,
+        )
+        if prompt_attention_scores is None
+        else np.asarray(prompt_attention_scores, dtype=np.float64)
     )
+    if score_array.shape != (node_count,):
+        raise ValueError("contiguous prompt attention scores must cover every source block")
     if not bool(np.all(np.isfinite(score_array))):
         raise ValueError("prompt_attention_topk scores must be finite")
     forecast_score_array: np.ndarray[Any, np.dtype[np.float64]] | None = None
@@ -3426,6 +3435,18 @@ def select_prompt_attention_topk_ids_by_head(
         node_ids_by_route[identity].append(node_id)
         if block.mandatory:
             mandatory_by_route[identity].append(node_id)
+
+    unit_block_fast_path = bool(
+        full_state.block_size == 1
+        and minimum_visual_fraction == 0.0
+        and not adaptive_visual_swaps
+        and not future_query_reranking
+        and not query_coverage_reranking
+        and not query_coverage_initial_selection
+        and not short_horizon_logit_stability
+        and not progressive_logit_safe_eviction
+        and not hierarchical_logit_safe_eviction
+    )
 
     cross_head_initial_by_route: dict[tuple[int, int], _QueryCoverageInitialSelectionResult] = {}
     scalar_reference: HeadLocalPromptSelection | None = None
@@ -3492,79 +3513,99 @@ def select_prompt_attention_topk_ids_by_head(
             if full_state.blocks[node_id].modality in {Modality.IMAGE, Modality.VIDEO}
         )
         remaining_capacity = limit - used_positions
-        candidates_by_size_and_modality: dict[tuple[int, bool], list[int]] = defaultdict(list)
-        for node_id in node_ids_by_route.get(identity, ()):
-            if node_id not in mandatory_set:
-                block = full_state.blocks[node_id]
-                candidates_by_size_and_modality[
-                    (
-                        block.position_count,
-                        block.modality in {Modality.IMAGE, Modality.VIDEO},
-                    )
-                ].append(node_id)
-
-        # Equal-size blocks are interchangeable for capacity.  Keeping only
-        # each score-sorted prefix reduces the exact knapsack from one state
-        # transition per source block to one per distinct block size/count.
-        # Dense storage pays for the full physical route capacity even when a
-        # score-optimal subset leaves holes.  Choose the largest attainable
-        # footprint first, then maximize prompt-attention score within that
-        # footprint; lower node IDs break exact ties.  This converts padding
-        # into exact evidence without changing the physical byte budget.
-        states: dict[tuple[int, int], tuple[float, tuple[int, ...]]] = {(0, 0): (0.0, ())}
-        for size, is_visual in sorted(candidates_by_size_and_modality):
-            ranked = tuple(
-                sorted(
-                    candidates_by_size_and_modality[(size, is_visual)],
-                    key=lambda node_id: (-score_array[node_id], node_id),
-                )
-            )
-            maximum_count = min(len(ranked), remaining_capacity // size)
-            prefix_scores = np.concatenate(
-                (
-                    np.zeros(1, dtype=np.float64),
-                    np.cumsum(score_array[np.asarray(ranked[:maximum_count], dtype=np.intp)]),
-                )
-            )
-            previous = states
-            updated: dict[tuple[int, int], tuple[float, tuple[int, ...]]] = {}
-            for (occupied, visual_positions), (prior_score, prior_nodes) in previous.items():
-                available_count = min(maximum_count, (remaining_capacity - occupied) // size)
-                for count in range(available_count + 1):
-                    next_occupied = occupied + count * size
-                    next_visual_positions = visual_positions + (count * size if is_visual else 0)
-                    next_score = prior_score + float(prefix_scores[count])
-                    next_nodes = tuple(sorted((*prior_nodes, *ranked[:count])))
-                    state_key = (next_occupied, next_visual_positions)
-                    incumbent = updated.get(state_key)
-                    if (
-                        incumbent is None
-                        or next_score > incumbent[0]
-                        or (next_score == incumbent[0] and next_nodes < incumbent[1])
-                    ):
-                        updated[state_key] = (next_score, next_nodes)
-            states = updated
-        best_occupied = max(occupied for occupied, _visual_positions in states)
-        capacity_states = [
-            (visual_positions, score, nodes)
-            for (occupied, visual_positions), (score, nodes) in states.items()
-            if occupied == best_occupied
-        ]
         target_visual_positions = math.ceil(limit * minimum_visual_fraction)
-        required_optional_visual = max(
-            0,
-            target_visual_positions - mandatory_visual_positions,
-        )
-        quota_states = [state for state in capacity_states if state[0] >= required_optional_visual]
-        choice_pool = quota_states or capacity_states
-        optional_visual_positions, _best_score, chosen = max(
-            choice_pool,
-            key=lambda item: (
-                item[1] if quota_states else item[0],
-                item[0] if quota_states else item[1],
-                tuple(-node for node in item[2]),
-            ),
-        )
+        if unit_block_fast_path:
+            ranked_unit_blocks = sorted(
+                (
+                    node_id
+                    for node_id in node_ids_by_route.get(identity, ())
+                    if node_id not in mandatory_set
+                ),
+                key=lambda node_id: (
+                    -score_array[node_id],
+                    0
+                    if full_state.blocks[node_id].modality in {Modality.IMAGE, Modality.VIDEO}
+                    else 1,
+                    node_id,
+                ),
+            )
+            chosen = tuple(sorted(ranked_unit_blocks[:remaining_capacity]))
+            best_occupied = len(chosen)
+        else:
+            candidates_by_size_and_modality: dict[tuple[int, bool], list[int]] = defaultdict(list)
+            for node_id in node_ids_by_route.get(identity, ()):
+                if node_id not in mandatory_set:
+                    block = full_state.blocks[node_id]
+                    candidates_by_size_and_modality[
+                        (
+                            block.position_count,
+                            block.modality in {Modality.IMAGE, Modality.VIDEO},
+                        )
+                    ].append(node_id)
+
+            # Equal-size blocks are interchangeable for capacity. Keeping only
+            # each score-sorted prefix reduces the exact knapsack from one state
+            # transition per source block to one per distinct block size/count.
+            states: dict[tuple[int, int], tuple[float, tuple[int, ...]]] = {(0, 0): (0.0, ())}
+            for size, is_visual in sorted(candidates_by_size_and_modality):
+                ranked = tuple(
+                    sorted(
+                        candidates_by_size_and_modality[(size, is_visual)],
+                        key=lambda node_id: (-score_array[node_id], node_id),
+                    )
+                )
+                maximum_count = min(len(ranked), remaining_capacity // size)
+                prefix_scores = np.concatenate(
+                    (
+                        np.zeros(1, dtype=np.float64),
+                        np.cumsum(score_array[np.asarray(ranked[:maximum_count], dtype=np.intp)]),
+                    )
+                )
+                previous = states
+                updated: dict[tuple[int, int], tuple[float, tuple[int, ...]]] = {}
+                for (occupied, visual_positions), (prior_score, prior_nodes) in previous.items():
+                    available_count = min(
+                        maximum_count,
+                        (remaining_capacity - occupied) // size,
+                    )
+                    for count in range(available_count + 1):
+                        next_occupied = occupied + count * size
+                        next_visual_positions = visual_positions + (
+                            count * size if is_visual else 0
+                        )
+                        next_score = prior_score + float(prefix_scores[count])
+                        next_nodes = tuple(sorted((*prior_nodes, *ranked[:count])))
+                        state_key = (next_occupied, next_visual_positions)
+                        incumbent = updated.get(state_key)
+                        if (
+                            incumbent is None
+                            or next_score > incumbent[0]
+                            or (next_score == incumbent[0] and next_nodes < incumbent[1])
+                        ):
+                            updated[state_key] = (next_score, next_nodes)
+                states = updated
+            best_occupied = max(occupied for occupied, _visual_positions in states)
+            capacity_states = [
+                (visual_positions, score, nodes)
+                for (occupied, visual_positions), (score, nodes) in states.items()
+                if occupied == best_occupied
+            ]
+            required_optional_visual = max(
+                0,
+                target_visual_positions - mandatory_visual_positions,
+            )
+            quota_states = [
+                state for state in capacity_states if state[0] >= required_optional_visual
+            ]
+            choice_pool = quota_states or capacity_states
+            _optional_visual_positions, _best_score, chosen = max(
+                choice_pool,
+                key=lambda item: (
+                    item[1] if quota_states else item[0],
+                    item[0] if quota_states else item[1],
+                    tuple(-node for node in item[2]),
+                ),
+            )
         if query_coverage_cross_head_allocation:
             initial_query_coverage = cross_head_initial_by_route[identity]
         elif query_coverage_initial_selection:

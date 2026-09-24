@@ -128,8 +128,12 @@ def _required_task_score(summary: CompletedSummary, label: str) -> float:
     return value
 
 
-def _trace_records(root: Path, lane: str) -> tuple[dict[str, Any], ...]:
-    trace_root = root / lane / "traces" / f"paper-native-retry-v2-{lane}-mosaickv_exact"
+def _trace_records(
+    root: Path,
+    lane: str,
+    experiment_id: str,
+) -> tuple[dict[str, Any], ...]:
+    trace_root = root / lane / "traces" / f"{experiment_id}-{lane}-mosaickv_exact"
     paths = sorted(trace_root.glob("*.json"))
     if not paths:
         raise ValueError(f"MosaicKV trace directory is empty: {trace_root}")
@@ -180,6 +184,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--experiment-id",
+        choices=("paper-native-retry-v2", "paper-native-latency-v3"),
+        default="paper-native-retry-v2",
+    )
     args = parser.parse_args()
     root = args.root.resolve()
 
@@ -208,6 +217,12 @@ def main() -> int:
         gates[f"{lane}_minimum_30_percent_memory_reduction"] = (
             1.0 - mosaic_bytes / baseline_bytes >= 0.30
         )
+        if args.experiment_id == "paper-native-latency-v3":
+            mosaic_latency = summaries[lane]["mosaickv_exact"]["mean_end_to_end_seconds"]
+            baseline_latency = summaries[lane][baseline]["mean_end_to_end_seconds"]
+            gates[f"{lane}_latency_within_5_percent"] = (
+                mosaic_latency <= 1.05 * baseline_latency
+            )
     gates["prefixkv_rouge_noninferior"] = (
         prefix_quality["mosaickv_exact"]["rouge_l_f1"]
         >= prefix_quality["prefixkv_reimpl"]["rouge_l_f1"]
@@ -239,7 +254,8 @@ def main() -> int:
         for summary in lane.values()
     )
     layouts: dict[str, LayoutSummary] = {
-        lane: _layout_summary(_trace_records(root, lane)) for lane in methods
+        lane: _layout_summary(_trace_records(root, lane, args.experiment_id))
+        for lane in methods
     }
     gates["zero_physical_padding"] = all(
         layout["maximum_packed_padding_kv_bytes"] == 0 for layout in layouts.values()
@@ -247,13 +263,16 @@ def main() -> int:
     gates["uniform_physical_capacity"] = all(
         bool(layout["uniform_active_positions_per_layer_head"]) for layout in layouts.values()
     )
+    maximum_planner_fraction = (
+        0.025 if args.experiment_id == "paper-native-latency-v3" else 0.10
+    )
     gates["bounded_shortlist_planner"] = all(
-        layout["maximum_planner_node_fraction"] <= 0.10
+        layout["maximum_planner_node_fraction"] <= maximum_planner_fraction
         for layout in layouts.values()
     )
     payload: dict[str, object] = {
         "schema_version": 1,
-        "experiment_id": "paper_native_retry_v2",
+        "experiment_id": args.experiment_id.replace("-", "_"),
         "classification": "preregistered_development_validation",
         "summaries": summaries,
         "prefixkv_quality": prefix_quality,

@@ -512,10 +512,19 @@ def test_vectorized_head_local_prompt_topk_matches_canonical_dense_selection() -
         head_routes=((0, 1),),
         position_limits=limits,
     )
+    contiguous = select_prompt_attention_topk_ids_by_head(
+        full,
+        budget,
+        prompt_attention_by_node={},
+        prompt_attention_scores=tuple(scores[index] for index in range(len(scores))),
+        head_routes=((0, 1),),
+        position_limits=limits,
+    )
 
     assert local.selected_node_ids == tuple(
         node_id for node_id in canonical if full.blocks[node_id].kv_head == 1
     )
+    assert contiguous == local
     assert local.total_shortfall_positions == 0
 
 

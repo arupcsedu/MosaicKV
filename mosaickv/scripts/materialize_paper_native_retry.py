@@ -179,6 +179,11 @@ def main() -> int:
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--source-git-sha", required=True)
     parser.add_argument(
+        "--experiment-id",
+        choices=("paper_native_retry_v2", "paper_native_latency_v3"),
+        default="paper_native_retry_v2",
+    )
+    parser.add_argument(
         "--prefix-source",
         type=Path,
         default=Path("/scratch/djy8hg/data/mosaickv/prefixkv/detail_1k.json"),
@@ -198,7 +203,7 @@ def main() -> int:
         raise ValueError("--source-git-sha must be an immutable 40-character commit")
     if args.prefix_count != 4 or args.milebench_count != 20:
         raise ValueError(
-            "paper_native_retry_v2 preregisters exactly 4 PrefixKV and 20 MileBench samples"
+            f"{args.experiment_id} preregisters exactly 4 PrefixKV and 20 MileBench samples"
         )
 
     root = _external_scratch(args.output_root, "output root")
@@ -231,7 +236,7 @@ def main() -> int:
     )
     manifest = {
         "schema_version": 1,
-        "experiment_id": "paper_native_retry_v2",
+        "experiment_id": args.experiment_id,
         "classification": "preregistered_development_validation",
         "source_git_sha": args.source_git_sha,
         "prefixkv": {

@@ -81,13 +81,14 @@ def test_block_one_mosaickv_profile_bounds_graph_and_dense_physical_capacity() -
     assert profiled.cache.budget_unit is BudgetUnit.BYTES
     assert profiled.graph.candidate_graph_mode == "shortlist_rerank"
     assert profiled.graph.candidate_descriptor_pooling
-    assert profiled.graph.uncertain_head_fraction == pytest.approx(0.0625)
+    assert profiled.graph.uncertain_head_fraction == pytest.approx(0.015625)
     assert profiled.graph.candidate_nonmandatory_fraction == pytest.approx(0.03)
     assert profiled.selection.routed_head_only_planning
     assert profiled.selection.stable_head_prompt_routing
     assert profiled.selection.stable_head_uniform_fill
     assert profiled.selection.physical_capacity_fraction == pytest.approx(0.69)
     assert profiled.prototypes.uncertain_head_only
+    assert profiled.prototypes.uncertain_head_fraction == pytest.approx(0.015625)
 
 
 def test_sample_id_file_requires_exact_content_and_sha(tmp_path: Path) -> None:

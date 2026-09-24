@@ -172,9 +172,7 @@ def _hard_budget_fallback_trace_payload(
     if fullkv_fallback_accounting.constructed_active_bytes != attempted_active_kv_bytes:
         raise ValueError("FullKV fallback accounting differs from the attempted active bytes")
     fallback_accounting = cast("JsonObject", asdict(fullkv_fallback_accounting))
-    rejected_accounting = cast(
-        "JsonObject", asdict(rejected_compressed_proposal_accounting)
-    )
+    rejected_accounting = cast("JsonObject", asdict(rejected_compressed_proposal_accounting))
     return {
         "failure_classification": "hard_budget_fullkv_fallback",
         "effective_method": "full_kv_fallback_rejected_before_packing",
@@ -192,14 +190,10 @@ def _hard_budget_fallback_trace_payload(
         "attempted_prompt_capacity": attempted_prompt_capacity,
         "hard_prompt_capacity": hard_prompt_capacity,
         "knapsack_bytes": fullkv_fallback_accounting.knapsack_bytes,
-        "unique_selected_source_bytes": (
-            fullkv_fallback_accounting.unique_selected_source_bytes
-        ),
+        "unique_selected_source_bytes": (fullkv_fallback_accounting.unique_selected_source_bytes),
         "planner_tier_bytes": fullkv_fallback_accounting.planner_tier_bytes,
         "external_exact_bytes": fullkv_fallback_accounting.external_exact_bytes,
-        "constructed_active_bytes": (
-            fullkv_fallback_accounting.constructed_active_bytes
-        ),
+        "constructed_active_bytes": (fullkv_fallback_accounting.constructed_active_bytes),
         "physical_padding_bytes": fullkv_fallback_accounting.physical_padding_bytes,
         "fullkv_fallback_accounting": fallback_accounting,
         "rejected_compressed_proposal_id": rejected_compressed_proposal_id,
@@ -229,9 +223,7 @@ def _hard_budget_fallback_trace_payload(
             ),
             "planner_tier_bytes": fullkv_fallback_accounting.planner_tier_bytes,
             "external_exact_bytes": fullkv_fallback_accounting.external_exact_bytes,
-            "constructed_active_bytes": (
-                fullkv_fallback_accounting.constructed_active_bytes
-            ),
+            "constructed_active_bytes": (fullkv_fallback_accounting.constructed_active_bytes),
             "physical_padding_bytes": fullkv_fallback_accounting.physical_padding_bytes,
             "fullkv_fallback_accounting": fallback_accounting,
             "rejected_compressed_proposal_id": rejected_compressed_proposal_id,
@@ -533,16 +525,14 @@ class MosaicKVCompressionPlan:
     external_exact_node_ids: tuple[int, ...]
     external_exact_capacity_records: tuple[HeadLocalCapacityRecord, ...]
     external_exact_logit_shortlist: tuple[HeadLocalPromptSelectionAlternative, ...]
-    prompt_attention_by_node: tuple[float, ...] | None
+    prompt_attention_by_node: Sequence[float] | np.ndarray[Any, np.dtype[np.float64]] | None
     stable_routing_seconds: float
     similarity_shortlist_seconds: float
     planner_mapping_seconds: float
     graph_head_routes: tuple[tuple[int, int], ...]
     graph_routing_provenance: str
     hierarchical_storage_accounting: ExactCacheStorageAccounting | None = None
-    hierarchical_rejected_proposal_storage_accounting: (
-        ExactCacheStorageAccounting | None
-    ) = None
+    hierarchical_rejected_proposal_storage_accounting: ExactCacheStorageAccounting | None = None
     hierarchical_rejected_proposal_id: str | None = None
 
     @property
@@ -627,13 +617,9 @@ def _mosaickv_physical_prompt_capacity(
     reduction.  The constructed layouts are authoritative for both modes.
     """
 
-    active_lengths = {
-        layout.active_cache_length for layout in plan.construction.active_layouts
-    }
+    active_lengths = {layout.active_cache_length for layout in plan.construction.active_layouts}
     if not active_lengths:
-        raise HuggingFaceRuntimeError(
-            "MosaicKV construction has no active layer/head layouts"
-        )
+        raise HuggingFaceRuntimeError("MosaicKV construction has no active layer/head layouts")
     measured_capacity = max(active_lengths)
     if measured_capacity > dense_budget.prompt_capacity and not used_fullkv_fallback:
         raise HuggingFaceRuntimeError(
@@ -1388,10 +1374,10 @@ def _uniform_token_attention_by_head(
     }
 
 
-def _block_attention_from_token_attention(
+def _block_attention_values_from_token_attention(
     full_state: FullKVState,
     by_head: Mapping[tuple[int, int], np.ndarray[Any, Any]],
-) -> dict[int, float]:
+) -> np.ndarray[Any, np.dtype[np.float64]]:
     # Cache blockization is normally contiguous. Pool every identity with one
     # prefix-sum pass instead of dispatching tens of thousands of tiny NumPy
     # reductions from Python. Retain an exact indexed fallback for deliberately
@@ -1399,7 +1385,7 @@ def _block_attention_from_token_attention(
     grouped: dict[tuple[int, int], list[tuple[int, KVBlockDescriptor]]] = defaultdict(list)
     for node_id, block in enumerate(full_state.blocks):
         grouped[(block.layer, block.kv_head)].append((node_id, block))
-    result: dict[int, float] = {}
+    result = np.empty(len(full_state.blocks), dtype=np.float64)
     for identity, entries in grouped.items():
         source = np.asarray(by_head[identity], dtype=np.float64)
         prefix = np.empty(source.size + 1, dtype=np.float64)
@@ -1425,19 +1411,27 @@ def _block_attention_from_token_attention(
                 count=len(contiguous),
             )
             masses = prefix[ends] - prefix[starts]
-            result.update(
-                (node_id, float(mass))
-                for (node_id, _start, _end), mass in zip(
-                    contiguous,
-                    masses,
-                    strict=True,
-                )
+            node_ids = np.fromiter(
+                (node_id for node_id, _start, _end in contiguous),
+                dtype=np.intp,
+                count=len(contiguous),
             )
+            result[node_ids] = masses
         for node_id, block in irregular:
             result[node_id] = float(
                 source[np.asarray(block.physical_cache_indices, dtype=np.intp)].sum()
             )
     return result
+
+
+def _block_attention_from_token_attention(
+    full_state: FullKVState,
+    by_head: Mapping[tuple[int, int], np.ndarray[Any, Any]],
+) -> dict[int, float]:
+    """Compatibility wrapper for callers that require keyed block scores."""
+
+    values = _block_attention_values_from_token_attention(full_state, by_head)
+    return {node_id: float(value) for node_id, value in enumerate(values)}
 
 
 def _block_query_attention_from_token_attention(
@@ -1593,7 +1587,9 @@ def _similarity_shortlist(
     *,
     source_budget: int,
     target_budget: int,
-    prompt_attention_by_node: Mapping[int, float] | None,
+    prompt_attention_by_node: (
+        Mapping[int, float] | Sequence[float] | np.ndarray[Any, np.dtype[np.float64]] | None
+    ),
     head_uncertainty: Mapping[tuple[int, int], float] | None = None,
     eligible_source_node_ids: Sequence[int] | None = None,
 ) -> tuple[int, ...] | None:
@@ -1607,8 +1603,9 @@ def _similarity_shortlist(
             "graph similarity shortlisting requires prompt-only block attention"
         )
     node_count = len(full_state.blocks)
-    if len(prompt_attention_by_node) != node_count or any(
-        node_id not in prompt_attention_by_node for node_id in range(node_count)
+    if len(prompt_attention_by_node) != node_count or (
+        isinstance(prompt_attention_by_node, Mapping)
+        and any(node_id not in prompt_attention_by_node for node_id in range(node_count))
     ):
         raise HuggingFaceRuntimeError(
             "graph similarity shortlist scores must cover every source block"
@@ -3058,7 +3055,9 @@ def build_compression_plan(
     attention_provenance: str = "eager_prompt_and_isolated_draft_attention_v1",
     key_transform: RotaryPrototypeKeyTransform | None = None,
     prompt_attentions: Sequence[Any] | None = None,
-    prompt_attention_by_node: Mapping[int, float] | None = None,
+    prompt_attention_by_node: (
+        Mapping[int, float] | Sequence[float] | np.ndarray[Any, np.dtype[np.float64]] | None
+    ) = None,
     prompt_query_attention_by_node: Mapping[int, Any] | None = None,
     prototype_token_weight_by_head: Mapping[tuple[int, int], Any] | None = None,
     graph_head_uncertainty: Mapping[tuple[int, int], float] | None = None,
@@ -3087,10 +3086,20 @@ def build_compression_plan(
     prompt_attention_values = (
         None
         if prompt_attention_by_node is None
-        else tuple(
-            float(prompt_attention_by_node[node_id]) for node_id in range(len(full_state.blocks))
+        else np.asarray(prompt_attention_by_node, dtype=np.float64)
+        if not isinstance(prompt_attention_by_node, Mapping)
+        else np.fromiter(
+            (float(prompt_attention_by_node[node_id]) for node_id in range(len(full_state.blocks))),
+            dtype=np.float64,
+            count=len(full_state.blocks),
         )
     )
+    if prompt_attention_values is not None and prompt_attention_values.shape != (
+        len(full_state.blocks),
+    ):
+        raise HuggingFaceRuntimeError(
+            "prompt attention scores must cover every source block exactly once"
+        )
     stable_routing_seconds = 0.0
     similarity_shortlist_seconds = 0.0
     planner_mapping_seconds = 0.0
@@ -3121,8 +3130,7 @@ def build_compression_plan(
                 if config.prototypes.requires_exact_head(block.layer, block.kv_head)
             }
             can_externalize_stable = bool(
-                config.selection.stable_head_prompt_routing
-                and position_limits is not None
+                config.selection.stable_head_prompt_routing and position_limits is not None
             )
             if can_externalize_stable:
                 if position_limits is None:  # pragma: no cover - guarded above
@@ -3135,8 +3143,18 @@ def build_compression_plan(
                 external_selection = select_prompt_attention_topk_ids_by_head(
                     full_state,
                     total_active_budget,
-                    prompt_attention_by_node=prompt_attention_by_node,
-                    forecast_attention_by_node=forecast_attention_by_node,
+                    prompt_attention_by_node=(
+                        prompt_attention_by_node
+                        if isinstance(prompt_attention_by_node, Mapping)
+                        else {}
+                    ),
+                    prompt_attention_scores=prompt_attention_values,
+                    forecast_attention_by_node=(
+                        forecast_attention_by_node
+                        if config.selection.stable_head_adaptive_visual_swaps
+                        or config.selection.stable_head_future_query_reranking
+                        else None
+                    ),
                     head_routes=stable_head_routes,
                     position_limits=position_limits,
                     minimum_visual_fraction=(config.selection.stable_head_visual_fraction),
@@ -3281,10 +3299,18 @@ def build_compression_plan(
                 )
             else:
                 if config.selection.stable_head_prompt_routing:
+                    prompt_attention_mapping = (
+                        prompt_attention_by_node
+                        if isinstance(prompt_attention_by_node, Mapping)
+                        else {
+                            node_id: float(prompt_attention_by_node[node_id])
+                            for node_id in range(len(full_state.blocks))
+                        }
+                    )
                     stable_prompt_reference_ids = select_prompt_attention_topk_ids(
                         full_state,
                         total_active_budget,
-                        prompt_attention_by_node=prompt_attention_by_node,
+                        prompt_attention_by_node=prompt_attention_mapping,
                         position_limits=position_limits,
                     )
                     stable_source_node_ids = set(stable_prompt_reference_ids)
@@ -3468,7 +3494,14 @@ def build_compression_plan(
             stable_prompt_reference_ids = select_prompt_attention_topk_ids(
                 full_state,
                 SelectionBudget(target, config.cache.budget_unit),
-                prompt_attention_by_node=prompt_attention_by_node,
+                prompt_attention_by_node=(
+                    prompt_attention_by_node
+                    if isinstance(prompt_attention_by_node, Mapping)
+                    else {
+                        node_id: float(prompt_attention_by_node[node_id])
+                        for node_id in range(len(full_state.blocks))
+                    }
+                ),
                 position_limits=reservation_position_limits,
             )
         else:
@@ -5203,9 +5236,7 @@ def maintain_elastic_cache_decode_cache(
             )
             removed = valid_physical[fixed_rank]
             valid_physical = tuple(
-                position
-                for index, position in enumerate(valid_physical)
-                if index != fixed_rank
+                position for index, position in enumerate(valid_physical) if index != fixed_rank
             )
         keep_by_layer.append(valid_physical)
         events.append(
@@ -6008,9 +6039,7 @@ def _hierarchical_effective_position_limits(
 ) -> dict[tuple[int, int], int]:
     """Intersect dense limits with already-attainable external-route limits."""
 
-    routes = {
-        (block.layer, block.kv_head) for block in plan.full_state.blocks
-    }
+    routes = {(block.layer, block.kv_head) for block in plan.full_state.blocks}
     if set(dense_position_limits) != routes:
         raise HuggingFaceRuntimeError(
             "hierarchical dense position limits must cover every FullKV route"
@@ -6035,9 +6064,7 @@ def _hierarchical_route_ladders(
     config: RunConfig,
     position_limits: Mapping[tuple[int, int], int],
     *,
-    feasible_baseline_node_ids_by_route: (
-        Mapping[tuple[int, int], frozenset[int]] | None
-    ) = None,
+    feasible_baseline_node_ids_by_route: (Mapping[tuple[int, int], frozenset[int]] | None) = None,
     refinement_positions: int = 0,
 ) -> tuple[RouteCapacityLadder, ...]:
     """Build FullKV or position-feasible label-blind route ladders.
@@ -6064,9 +6091,7 @@ def _hierarchical_route_ladders(
     # planner IDs and external-exact IDs cannot introduce a second boundary.
     source_storage_costs = tuple(block.byte_size for block in full_state.blocks)
     if sum(source_storage_costs) != full_state.active_bytes:
-        raise HuggingFaceRuntimeError(
-            "hierarchical source costs do not match FullKV exact storage"
-        )
+        raise HuggingFaceRuntimeError("hierarchical source costs do not match FullKV exact storage")
     risks = _progressive_eviction_risks(plan)
     reservation = _progressive_group_reservation(plan, config, position_limits, risks)
     group_by_node: dict[int, str] = {}
@@ -6107,9 +6132,7 @@ def _hierarchical_route_ladders(
             )
         candidate_by_id = {candidate.node_id: candidate for candidate in candidates}
         baseline_candidates: list[RouteBlockCandidate] = []
-        for route, baseline_node_ids in sorted(
-            feasible_baseline_node_ids_by_route.items()
-        ):
+        for route, baseline_node_ids in sorted(feasible_baseline_node_ids_by_route.items()):
             expected = set(route_blocks[route])
             if not baseline_node_ids or not set(baseline_node_ids) <= expected:
                 raise HuggingFaceRuntimeError(
@@ -6185,9 +6208,7 @@ def _attach_feasible_baseline_reallocation_levels(
     """
 
     ordered = tuple(sorted(ladders, key=lambda item: item.route))
-    source_by_route = {
-        ladder.route: ladder for ladder in position_limited_source_ladders
-    }
+    source_by_route = {ladder.route: ladder for ladder in position_limited_source_ladders}
     if set(source_by_route) != {ladder.route for ladder in ordered}:
         raise HuggingFaceRuntimeError(
             "baseline reallocation sources must cover every feasible route ladder"
@@ -6271,12 +6292,9 @@ def _run_hierarchical_logit_safe_eviction(
         raise HuggingFaceRuntimeError("hierarchical logit-safe eviction supports mosaickv_exact")
     selection_config = config.selection
     effective_position_limits = _hierarchical_effective_position_limits(plan, position_limits)
-    unrestricted_ladders = _hierarchical_route_ladders(
-        plan, config, effective_position_limits
-    )
+    unrestricted_ladders = _hierarchical_route_ladders(plan, config, effective_position_limits)
     position_count_by_node = {
-        node_id: block.position_count
-        for node_id, block in enumerate(plan.full_state.blocks)
+        node_id: block.position_count for node_id, block in enumerate(plan.full_state.blocks)
     }
     position_limited_ladders = restrict_route_capacity_ladders_to_position_limits(
         unrestricted_ladders,
@@ -6452,9 +6470,7 @@ def _run_hierarchical_logit_safe_eviction(
         reserved_reallocation_evaluations=(
             selection_config.stable_head_hierarchical_reserved_reallocation_evaluations
         ),
-        reallocation_beam_width=(
-            selection_config.stable_head_hierarchical_reallocation_beam_width
-        ),
+        reallocation_beam_width=(selection_config.stable_head_hierarchical_reallocation_beam_width),
         reallocation_maximum_combination_width=(
             selection_config.stable_head_hierarchical_reallocation_maximum_combination_width
         ),
@@ -6471,13 +6487,9 @@ def _run_hierarchical_logit_safe_eviction(
     selected_levels = tuple(
         (choice.route, choice.level_index) for choice in decision.selection.choices
     )
-    selected_artifact = (
-        None if decision.used_fullkv_fallback else artifacts.get(selected_levels)
-    )
+    selected_artifact = None if decision.used_fullkv_fallback else artifacts.get(selected_levels)
     if selected_artifact is None:
-        artifact_ladders = (
-            unrestricted_ladders if decision.used_fullkv_fallback else ladders
-        )
+        artifact_ladders = unrestricted_ladders if decision.used_fullkv_fallback else ladders
         retained_ids = frozenset(
             node_id
             for ladder in artifact_ladders
@@ -6562,8 +6574,7 @@ def _run_hierarchical_logit_safe_eviction(
     if not accounting.logical_boundaries_aligned:
         decision_record = cast("JsonObject", asdict(decision))
         error = HuggingFaceRuntimeError(
-            "hierarchical knapsack, source selection, and exact construction byte "
-            "counts differ"
+            "hierarchical knapsack, source selection, and exact construction byte counts differ"
         )
         error.mosaickv_failure_trace_payload = _hierarchical_accounting_failure_trace_payload(
             decision_record,
@@ -6597,9 +6608,7 @@ def _run_hierarchical_logit_safe_eviction(
         hierarchical_storage_accounting=accounting,
         hierarchical_rejected_proposal_storage_accounting=rejected_accounting,
         hierarchical_rejected_proposal_id=(
-            None
-            if rejected_evaluation is None
-            else rejected_evaluation.proposal.proposal_id
+            None if rejected_evaluation is None else rejected_evaluation.proposal.proposal_id
         ),
     )
     return selected_plan, decision
@@ -7715,7 +7724,9 @@ def _external_stable_capacity_trace(
 
 def _prompt_mass_audit(
     full_state: FullKVState,
-    prompt_attention_by_node: Mapping[int, float] | None,
+    prompt_attention_by_node: (
+        Mapping[int, float] | Sequence[float] | np.ndarray[Any, np.dtype[np.float64]] | None
+    ),
     *,
     exact_source_node_ids: Iterable[int],
     prototype_source_node_ids: Iterable[int] = (),
@@ -7725,7 +7736,9 @@ def _prompt_mass_audit(
     if prompt_attention_by_node is None:
         return {"status": "unavailable"}
     node_ids = set(range(len(full_state.blocks)))
-    if set(prompt_attention_by_node) != node_ids:
+    if len(prompt_attention_by_node) != len(node_ids) or (
+        isinstance(prompt_attention_by_node, Mapping) and set(prompt_attention_by_node) != node_ids
+    ):
         raise HuggingFaceRuntimeError("prompt-mass audit scores do not cover the source cache")
     scores = {node_id: float(prompt_attention_by_node[node_id]) for node_id in sorted(node_ids)}
     if any(not math.isfinite(value) or value < 0 for value in scores.values()):
@@ -7795,7 +7808,9 @@ def _plan_trace(
     *,
     compact_catalogs: bool = False,
     capture_selection_evidence: bool = False,
-    prompt_attention_by_node: Mapping[int, float] | None = None,
+    prompt_attention_by_node: (
+        Mapping[int, float] | Sequence[float] | np.ndarray[Any, np.dtype[np.float64]] | None
+    ) = None,
 ) -> JsonObject:
     selection = _source_selection_records(plan, include_cost_rate=False)
     prototypes = (
@@ -8024,9 +8039,7 @@ def _byte_budget_materialization_trace(
     )
     prototype_bytes = 0 if plan is None else plan.construction.state.statistics.prototype_kv_bytes
     selected_planner_bytes = None if plan is None else plan.selection.active_bytes
-    hierarchical_accounting = (
-        None if plan is None else plan.hierarchical_storage_accounting
-    )
+    hierarchical_accounting = None if plan is None else plan.hierarchical_storage_accounting
     return cast(
         "JsonObject",
         {
@@ -8065,9 +8078,7 @@ def _byte_budget_materialization_trace(
                 packed_prefill_active_kv_bytes - logical_prefill_active_kv_bytes
             ),
             "knapsack_bytes": (
-                None
-                if hierarchical_accounting is None
-                else hierarchical_accounting.knapsack_bytes
+                None if hierarchical_accounting is None else hierarchical_accounting.knapsack_bytes
             ),
             "unique_selected_source_bytes": (
                 None
@@ -8815,7 +8826,7 @@ class HuggingFaceMosaicKVModel:
             rollout: IsolatedQueryRollout | None = None
             predicted_token_attention: dict[tuple[int, int], np.ndarray[Any, Any]] | None = None
             prompt_token_attention: dict[tuple[int, int], np.ndarray[Any, Any]] | None = None
-            prompt_block_attention: dict[int, float] | None = None
+            prompt_block_attention: np.ndarray[Any, np.dtype[np.float64]] | None = None
             prompt_query_block_attention: dict[int, np.ndarray[Any, Any]] | None = None
             graph_head_uncertainty: dict[tuple[int, int], float] | None = None
             online_head_shifts: dict[tuple[int, int], float] = {}
@@ -9096,7 +9107,7 @@ class HuggingFaceMosaicKVModel:
                             raise HuggingFaceRuntimeError(
                                 "prompt token attention is unexpectedly absent"
                             )
-                        prompt_block_attention = _block_attention_from_token_attention(
+                        prompt_block_attention = _block_attention_values_from_token_attention(
                             full_state,
                             prompt_token_attention,
                         )
@@ -9323,9 +9334,7 @@ class HuggingFaceMosaicKVModel:
                             },
                         )
                         fallback_accounting = plan.hierarchical_storage_accounting
-                        rejected_accounting = (
-                            plan.hierarchical_rejected_proposal_storage_accounting
-                        )
+                        rejected_accounting = plan.hierarchical_rejected_proposal_storage_accounting
                         rejected_proposal_id = plan.hierarchical_rejected_proposal_id
                         if fallback_accounting is None:
                             raise HuggingFaceRuntimeError(
