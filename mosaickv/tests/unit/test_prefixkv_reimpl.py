@@ -169,6 +169,86 @@ def test_offline_profile_controls_adaptive_layer_sizes(tmp_path: Path) -> None:
         plan.profile.assert_evaluation_disjoint(("cal-1",))
 
 
+def test_offline_profile_shape_can_be_rescaled_only_under_a_declared_byte_cap(
+    tmp_path: Path,
+) -> None:
+    """A paper profile may guide layer allocation without defining the budget."""
+
+    profile = PrefixKVOfflineProfile(
+        model_id="llava-hf/llava-1.5-7b-hf",
+        model_revision="a" * 40,
+        target_retention_ratio=0.5,
+        layer_forget_ratios=(0.2, 0.8),
+        calibration_dataset_id="calibration",
+        calibration_dataset_revision="b" * 40,
+        calibration_split="train[:2]",
+        calibration_sample_ids=("cal-0", "cal-1"),
+        calibration_seed=7,
+        start_size=1,
+        protect_size=1,
+    )
+    path = profile.write(tmp_path / "profile.json")
+    state = _state()
+    target_bytes = state.active_bytes // 2
+    config = PrefixKVConfig(
+        enabled=True,
+        profile_path=str(path),
+        rescale_offline_profile_to_byte_budget=True,
+        profile_reference_retention_ratio=0.5,
+    )
+    plan = build_prefixkv_reimpl_plan(
+        state,
+        _attention(),
+        config,
+        # The nominal ratio is intentionally unrelated to the source profile;
+        # the physical cap is the sole comparison budget.
+        CacheConfig(target_bytes, BudgetUnit.BYTES, 0.99, 1),
+        model_id=profile.model_id,
+        model_revision=profile.model_revision,
+    )
+
+    assert plan.retained_bytes == target_bytes
+    assert plan.layer_cache_sizes == (4, 2)
+    trace = plan.trace()
+    assert trace["byte_budget_profile_rescaling"] is True
+    assert trace["profile_reference_retention_ratio"] == 0.5
+    assert trace["profile_native_retention_ratio"] == 0.5
+
+    with pytest.raises(PrefixKVReimplementationError, match=r"requires cache\.budget_unit"):
+        build_prefixkv_reimpl_plan(
+            state,
+            _attention(),
+            config,
+            CacheConfig(6, BudgetUnit.BLOCKS, 0.99, 1),
+            model_id=profile.model_id,
+            model_revision=profile.model_revision,
+        )
+
+
+def test_byte_rescaling_is_explicit_in_the_strict_config_schema() -> None:
+    config = PrefixKVConfig.from_mapping(
+        {
+            "enabled": True,
+            "profile_mode": "offline_profile",
+            "profile_path": "/scratch/profile.json",
+            "rescale_offline_profile_to_byte_budget": True,
+            "profile_reference_retention_ratio": 0.5,
+        }
+    )
+    assert config.rescale_offline_profile_to_byte_budget is True
+    assert config.profile_reference_retention_ratio == 0.5
+
+    with pytest.raises(ValueError, match="requires rescale_offline_profile"):
+        PrefixKVConfig.from_mapping(
+            {
+                "enabled": True,
+                "profile_mode": "offline_profile",
+                "profile_path": "/scratch/profile.json",
+                "profile_reference_retention_ratio": 0.5,
+            }
+        )
+
+
 def test_profile_generation_rejects_calibration_evaluation_leakage() -> None:
     observations = (
         PrefixKVCalibrationObservation("cal-0", ((9.0, 1.0, 1.0, 1.0),) * 2),

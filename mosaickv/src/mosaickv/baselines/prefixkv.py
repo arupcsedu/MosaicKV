@@ -276,7 +276,7 @@ def load_prefixkv_profile(
     *,
     model_id: str,
     model_revision: str,
-    target_retention_ratio: float,
+    target_retention_ratio: float | None,
     start_size: int,
     protect_size: int,
 ) -> PrefixKVOfflineProfile:
@@ -290,6 +290,11 @@ def load_prefixkv_profile(
             f"cannot load PrefixKV profile {source}: {error}"
         ) from error
     if isinstance(payload, list):
+        if target_retention_ratio is None:
+            raise PrefixKVReimplementationError(
+                "a raw PrefixKV profile requires profile_reference_retention_ratio "
+                "when rescaled to a byte budget"
+            )
         profile = PrefixKVOfflineProfile(
             model_id=model_id,
             model_revision=model_revision,
@@ -312,7 +317,7 @@ def load_prefixkv_profile(
         raise PrefixKVReimplementationError(
             "PrefixKV profile model identity does not match the configured model/revision"
         )
-    if not math.isclose(
+    if target_retention_ratio is not None and not math.isclose(
         profile.target_retention_ratio, target_retention_ratio, rel_tol=0, abs_tol=5e-3
     ):
         raise PrefixKVReimplementationError(
@@ -610,6 +615,15 @@ class PrefixKVCompressionPlan:
             "paper": "Wang et al., NeurIPS 2025, Equation 1 and Algorithm 1",
             "official_repository_sha": self.config.official_repository_sha,
             "profile_mode": self.config.profile_mode.value,
+            "byte_budget_profile_rescaling": self.config.rescale_offline_profile_to_byte_budget,
+            "profile_reference_retention_ratio": (
+                self.config.profile_reference_retention_ratio
+                if self.config.rescale_offline_profile_to_byte_budget
+                else None
+            ),
+            "profile_native_retention_ratio": (
+                self.profile.target_retention_ratio if self.profile is not None else None
+            ),
             "profile_sha256": self.profile.profile_sha256 if self.profile is not None else None,
             "profile_source_kind": self.profile.source_kind if self.profile is not None else None,
             "calibration_sample_ids_sha256": (
@@ -717,6 +731,13 @@ def build_prefixkv_reimpl_plan(
         raise PrefixKVReimplementationError("PrefixKV requires token-sized cache blocks")
     if cache_config.budget_unit not in {BudgetUnit.BLOCKS, BudgetUnit.BYTES}:
         raise PrefixKVReimplementationError("PrefixKV supports block or byte cache budgets")
+    if (
+        prefixkv_config.rescale_offline_profile_to_byte_budget
+        and cache_config.budget_unit is not BudgetUnit.BYTES
+    ):
+        raise PrefixKVReimplementationError(
+            "byte-capped offline-profile rescaling requires cache.budget_unit='bytes'"
+        )
     layer_count = len(full_state.layers)
     lengths = tuple(layer.sequence_length for layer in full_state.layers)
     kv_heads = tuple(layer.kv_heads for layer in full_state.layers)
@@ -749,9 +770,26 @@ def build_prefixkv_reimpl_plan(
                 prefixkv_config.profile_path,
                 model_id=model_id,
                 model_revision=model_revision,
-                target_retention_ratio=cache_config.retention_ratio,
+                target_retention_ratio=(
+                    prefixkv_config.profile_reference_retention_ratio
+                    if prefixkv_config.rescale_offline_profile_to_byte_budget
+                    else cache_config.retention_ratio
+                ),
                 start_size=prefixkv_config.start_size,
                 protect_size=prefixkv_config.protect_size,
+            )
+        if (
+            prefixkv_config.rescale_offline_profile_to_byte_budget
+            and prefixkv_config.profile_reference_retention_ratio is not None
+            and not math.isclose(
+                profile.target_retention_ratio,
+                prefixkv_config.profile_reference_retention_ratio,
+                rel_tol=0,
+                abs_tol=5e-3,
+            )
+        ):
+            raise PrefixKVReimplementationError(
+                "PrefixKV profile does not match profile_reference_retention_ratio"
             )
         if len(profile.layer_forget_ratios) != layer_count:
             raise PrefixKVReimplementationError(

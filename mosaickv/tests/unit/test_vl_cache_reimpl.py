@@ -132,6 +132,24 @@ def test_physical_byte_capacity_scales_layer_adaptation_without_overflow() -> No
     assert plan.layers[0].retained_positions_per_head >= plan.layers[1].retained_positions_per_head
 
 
+def test_byte_budget_is_a_hard_selection_target_not_only_a_posthoc_check() -> None:
+    state = _state(heads=2)
+    bytes_per_slot = state.blocks[0].byte_size
+    # 0.99 would retain almost the complete cache absent the physical cap.
+    # The byte cap must instead select exactly eight uniform K/V slots.
+    byte_cap = 8 * bytes_per_slot
+    plan = build_vl_cache_reimpl_plan(
+        state,
+        _attention(query_heads=4),
+        _config(sparsity_threshold=0.1),
+        CacheConfig(byte_cap, BudgetUnit.BYTES, 0.99, 1),
+    )
+
+    assert plan.active_slots == 8
+    assert plan.retained_bytes == byte_cap
+    assert plan.retained_bytes <= byte_cap
+
+
 def test_retention_one_is_an_exact_no_transformation_path() -> None:
     state = _state(heads=2)
     plan = build_vl_cache_reimpl_plan(

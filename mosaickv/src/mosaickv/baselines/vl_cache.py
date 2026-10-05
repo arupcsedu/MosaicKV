@@ -563,6 +563,18 @@ def build_vl_cache_reimpl_plan(
     target_slots = min(source_slots, ratio_target_slots)
     if cache_config.budget_unit is BudgetUnit.BLOCKS:
         target_slots = min(target_slots, cache_config.budget_value)
+    elif cache_config.budget_unit is BudgetUnit.BYTES:
+        # A unified comparison is controlled by physical K/V bytes, not the
+        # paper's nominal retention ratio.  All source blocks must cost the
+        # same amount for this token-granular method; otherwise silently
+        # translating bytes into a slot count would be unsound.
+        costs = {block.byte_size for block in full_state.blocks}
+        if len(costs) != 1:
+            raise VLCacheReimplementationError(
+                "VL-Cache byte-budget selection requires uniform per-token K/V storage"
+            )
+        (slot_bytes,) = tuple(costs)
+        target_slots = min(target_slots, cache_config.budget_value // slot_bytes)
     if cache_config.retention_ratio == 1.0:
         required_budget = (
             source_slots

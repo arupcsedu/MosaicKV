@@ -1,0 +1,96 @@
+schema_version: 1
+experiment_id: paper_native_byte_capped_lanes_v1
+classification: unified_comparison_physical_byte_curve
+# This protocol is intentionally inert until its immutable source SHA and
+# materialized ledgers are reviewed.  It must never reuse nominal-ratio rows.
+execution_authorized: false
+
+purpose:
+  claim_scope: byte_matched_quality_memory_and_informational_latency
+  supersedes_claims: [nominal_ratio_cross_method_comparisons]
+  selection_rule: largest_physically_feasible_cache_at_or_below_each_cap
+  no_score_interpolation: true
+  no_nominal_retention_comparison: true
+
+shared_controls:
+  precision: fp16
+  backend: huggingface
+  attention_backend: eager
+  decode_attention_backend: eager
+  deterministic_generation: true
+  output_length: 64
+  budget_unit: bytes
+  block_size: 1
+  physical_budget_block_size: 1
+  physical_budget_mandatory_policy: last_token
+  exact_gather_mode: source_views
+  packing_mode: per_head_reference
+  prototypes_enabled: false
+  residual_enabled: false
+  repair_enabled: false
+  require_same_prompts_media_processor_chat_template: true
+  require_same_model_revision_generation_and_seed: true
+  require_per_sample_exact_active_byte_match: true
+  fail_if_above_configured_byte_cap: true
+  report_actual_bytes_and_feasibility_tolerance: true
+
+lanes:
+  vl_cache_byte_capped:
+    model:
+      id: llava-hf/llava-v1.6-mistral-7b-hf
+      revision: 2424fdd47412fccc66d91719126b420e9fbd7065
+    tasks:
+      coco_caption:
+        dataset_id: lmms-lab/COCO-Caption
+        dataset_revision: pinned_in_materialized_ledger
+        split: validation
+        metric: cider
+      docvqa:
+        dataset_id: lmms-lab/DocVQA
+        dataset_revision: 539088ef8a8ada01ac8e2e6d4e372586748a265e
+        split: validation
+        metric: anls
+    methods: [full_kv, mosaickv_exact, vl_cache_reimpl]
+    budgets_mib: [10, 20, 40, 80, 120]
+    # The nominal ratio is a non-claiming upper bound.  VL-Cache must use the
+    # shared physical cap when deriving its integer per-layer allocation.
+    retention_ratio_upper_bound: 0.99
+    vl_cache_variant: paper_equations_with_common_physical_byte_cap
+
+  prefixkv_byte_capped:
+    model:
+      id: llava-hf/llava-1.5-7b-hf
+      revision: b234b804b114d9e37bb655e11cbbb5f5e971b7a9
+    tasks:
+      llava_description:
+        dataset_id: llava_description_materialized_ledger
+        dataset_revision: pinned_in_materialized_ledger
+        split: test
+        metric: rouge_l_f1
+      mmvet_prefixkv:
+        dataset_id: mmvet_prefixkv_materialized_ledger
+        dataset_revision: pinned_in_materialized_ledger
+        split: test
+        metric: rouge_l_f1
+    methods: [full_kv, mosaickv_exact, prefixkv_reimpl]
+    budgets_mib: [40, 80, 120, 160, 240]
+    retention_ratio_upper_bound: 0.99
+    prefixkv_variant: offline_profile_shape_rescaled_to_common_physical_byte_cap
+    prefixkv:
+      profile_mode: offline_profile
+      rescale_offline_profile_to_byte_budget: true
+      # Required when the official profile is a raw layer-forget-ratio array.
+      profile_reference_retention_ratio: must_be_recorded_in_immutable_job_spec
+
+statistics:
+  paired_bootstrap_resamples: 10000
+  paired_bootstrap_seed: 20271020
+  confidence: 0.95
+  report_per_task_only: true
+  macro_average_incompatible_metrics: false
+
+reporting:
+  table_labels: [full_kv, mosaickv_exact, prefixkv_reimpl, vl_cache_reimpl]
+  prohibit_official_label_for_local_reimplementation: true
+  prohibit_latency_claim_without_dedicated_matched_trials: true
+  preserve_nominal_ratio_campaign_as_separate_curve_data: true

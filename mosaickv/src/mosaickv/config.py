@@ -3068,6 +3068,16 @@ class PrefixKVConfig:
     start_size: int = 1
     protect_size: int = 1
     eviction_distance: int = -25
+    # A unified physical-byte comparison may reuse a frozen offline profile as
+    # a *layer-allocation shape* while the common runner supplies the actual
+    # byte cap.  This is deliberately opt-in: ordinary paper-native PrefixKV
+    # reproduction continues to require that the profile's nominal retention
+    # agrees with cache.retention_ratio.
+    rescale_offline_profile_to_byte_budget: bool = False
+    # Raw official JSON profiles contain only layer forget ratios, not the
+    # nominal point at which they were produced.  A byte-capped rescaling of
+    # such a file must declare that source operating point explicitly.
+    profile_reference_retention_ratio: float | None = None
     official_repository_sha: str = "597f1ab032704951550f93bcc8a23f1454b80aa4"
 
     def __post_init__(self) -> None:
@@ -3091,6 +3101,23 @@ class PrefixKVConfig:
             raise ConfigurationError(
                 "prefixkv.profile_path must be null for profile_mode='fixed_global'"
             )
+        if self.rescale_offline_profile_to_byte_budget and (
+            self.profile_mode is not PrefixKVProfileMode.OFFLINE_PROFILE
+            or self.profile_path is None
+        ):
+            raise ConfigurationError(
+                "prefixkv.rescale_offline_profile_to_byte_budget requires an offline profile"
+            )
+        if self.profile_reference_retention_ratio is not None:
+            if not self.rescale_offline_profile_to_byte_budget:
+                raise ConfigurationError(
+                    "prefixkv.profile_reference_retention_ratio requires "
+                    "rescale_offline_profile_to_byte_budget=true"
+                )
+            if not 0 < self.profile_reference_retention_ratio <= 1:
+                raise ConfigurationError(
+                    "prefixkv.profile_reference_retention_ratio must be in (0, 1] or null"
+                )
         if len(self.official_repository_sha) != 40 or any(
             character not in "0123456789abcdef" for character in self.official_repository_sha
         ):
@@ -3110,6 +3137,8 @@ class PrefixKVConfig:
                 "start_size",
                 "protect_size",
                 "eviction_distance",
+                "rescale_offline_profile_to_byte_budget",
+                "profile_reference_retention_ratio",
                 "official_repository_sha",
             },
             "prefixkv",
@@ -3128,6 +3157,14 @@ class PrefixKVConfig:
             start_size=_int(data, "start_size", 1, "prefixkv"),
             protect_size=_int(data, "protect_size", 1, "prefixkv"),
             eviction_distance=_int(data, "eviction_distance", -25, "prefixkv"),
+            rescale_offline_profile_to_byte_budget=_bool(
+                data, "rescale_offline_profile_to_byte_budget", False, "prefixkv"
+            ),
+            profile_reference_retention_ratio=(
+                None
+                if data.get("profile_reference_retention_ratio") is None
+                else _float(data, "profile_reference_retention_ratio", 0.0, "prefixkv")
+            ),
             official_repository_sha=_optional_str(
                 data,
                 "official_repository_sha",
