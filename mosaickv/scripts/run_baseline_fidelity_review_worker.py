@@ -19,11 +19,15 @@ from scripts.run_paper_candidate_v1_preflight_worker import _control_configs, _r
 from mosaickv.adapters.huggingface import load_hf_adapter
 from mosaickv.config import (
     CacheConfig,
+    ForecastingConfig,
+    GraphConfig,
     LookMConfig,
     ModelConfig,
     PrefixKVConfig,
+    PrototypeConfig,
     RepairConfig,
     ResidualConfig,
+    SelectionConfig,
     VLCacheConfig,
     load_config,
 )
@@ -31,6 +35,7 @@ from mosaickv.hf_cli import _model_kwargs
 from mosaickv.measurements.telemetry import capture_gpu_environment
 from mosaickv.types import (
     BudgetUnit,
+    ForecastMode,
     MosaicKVMethod,
     Precision,
     PrefixKVProfileMode,
@@ -159,6 +164,105 @@ def review_configs(
     if prompt.cache != method.cache:
         raise RuntimeError("paired baseline configurations changed the cache contract")
     return {"full_kv": full, "prompt_attention_topk": prompt, FAMILY_METHOD[family]: method}
+
+
+def byte_capped_configs(
+    template: Any,
+    *,
+    repository: Path,
+    family: str,
+    task: str,
+    model_id: str,
+    model_revision: str,
+    seed: int,
+    output_length: int,
+    byte_cap: int,
+    profile_forget_ratio: str | None = None,
+    profile_reference_retention_ratio: float | None = None,
+) -> dict[str, Any]:
+    """Build a physical-byte-matched FullKV/Top-K/baseline/MosaicKV set.
+
+    The profile ratio is only the source shape for PrefixKV.  It is never a
+    comparison budget: all compressed methods receive the same hard byte cap
+    and block/packing contract.
+    """
+
+    if byte_cap < 1:
+        raise ValueError("byte_cap must be positive")
+    controls = review_configs(
+        template,
+        repository=repository,
+        family=family,
+        task=task,
+        model_id=model_id,
+        model_revision=model_revision,
+        seed=seed,
+        output_length=output_length,
+        retention_ratio=0.99,
+        profile_forget_ratio=profile_forget_ratio,
+    )
+    baseline_name = FAMILY_METHOD[family]
+    byte_cache = replace(
+        controls["prompt_attention_topk"].cache,
+        budget_value=byte_cap,
+        budget_unit=BudgetUnit.BYTES,
+        retention_ratio=0.99,
+        block_size=1,
+        physical_budget_block_size=1,
+        physical_budget_mandatory_policy="last_token",
+        exact_gather_mode="source_views",
+        packing_mode="per_head_reference",
+        total_storage_budget_bytes=None,
+    )
+    prompt = replace(controls["prompt_attention_topk"], cache=byte_cache)
+    baseline = replace(controls[baseline_name], cache=byte_cache)
+    if family == "prefixkv":
+        if profile_reference_retention_ratio is None:
+            raise ValueError("byte-capped PrefixKV requires a profile reference retention ratio")
+        baseline = replace(
+            baseline,
+            prefixkv=replace(
+                baseline.prefixkv,
+                rescale_offline_profile_to_byte_budget=True,
+                profile_reference_retention_ratio=profile_reference_retention_ratio,
+            ),
+        )
+    mosaic = replace(
+        template,
+        model=prompt.model,
+        dataset=prompt.dataset,
+        execution=prompt.execution,
+        generation=prompt.generation,
+        cache=byte_cache,
+        method=MosaicKVMethod.MOSAICKV_EXACT,
+        forecasting=ForecastingConfig(
+            enabled=True,
+            mode=ForecastMode.PROMPT_WINDOW,
+            prompt_window=16,
+            draft_steps=0,
+        ),
+        graph=GraphConfig(enabled=True),
+        selection=SelectionConfig(enabled=True),
+        prototypes=PrototypeConfig(enabled=False),
+        residual=ResidualConfig(enabled=False),
+        repair=RepairConfig(enabled=False, policy=RepairPolicy.NONE, max_blocks_per_step=0),
+        lookm=LookMConfig(enabled=False),
+        prefixkv=PrefixKVConfig(enabled=False),
+        vl_cache=VLCacheConfig(enabled=False),
+    )
+    for config in (prompt, baseline, mosaic):
+        if config.cache != byte_cache:
+            raise RuntimeError("byte-matched configurations diverged in cache policy")
+        if config.model != prompt.model or config.dataset != prompt.dataset:
+            raise RuntimeError("byte-matched configurations diverged in model or dataset")
+        if config.execution != prompt.execution or config.generation != prompt.generation:
+            raise RuntimeError("byte-matched configurations diverged in execution controls")
+    return {
+        "full_kv": controls["full_kv"],
+        "prompt_attention_topk": prompt,
+        baseline_name: baseline,
+        "mosaickv_exact": mosaic,
+    }
 
 
 def main() -> int:
