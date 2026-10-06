@@ -3869,7 +3869,11 @@ def compare_runtime_retention_one(
                 config.prefixkv.profile_path,
                 model_id=config.model.id,
                 model_revision=config.model.revision,
-                target_retention_ratio=config.cache.retention_ratio,
+                target_retention_ratio=(
+                    config.prefixkv.profile_reference_retention_ratio
+                    if config.prefixkv.rescale_offline_profile_to_byte_budget
+                    else config.cache.retention_ratio
+                ),
                 start_size=config.prefixkv.start_size,
                 protect_size=config.prefixkv.protect_size,
             )
@@ -8544,7 +8548,11 @@ class HuggingFaceMosaicKVModel:
                 config.prefixkv.profile_path,
                 model_id=config.model.id,
                 model_revision=config.model.revision,
-                target_retention_ratio=config.cache.retention_ratio,
+                target_retention_ratio=(
+                    config.prefixkv.profile_reference_retention_ratio
+                    if config.prefixkv.rescale_offline_profile_to_byte_budget
+                    else config.cache.retention_ratio
+                ),
                 start_size=config.prefixkv.start_size,
                 protect_size=config.prefixkv.protect_size,
             )
