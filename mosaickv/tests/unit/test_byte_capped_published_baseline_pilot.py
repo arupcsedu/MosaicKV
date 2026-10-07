@@ -39,3 +39,19 @@ def test_vl_cache_byte_capped_configs_share_the_physical_contract() -> None:
     assert {config.cache for config in compressed} == {compressed[0].cache}
     assert compressed[0].cache.budget_value == 40 * 2**20
     assert compressed[0].cache.physical_budget_mandatory_policy == "last_token"
+
+    mosaic = configs["mosaickv_exact"]
+    # The latency-safe execution policy must not relax the physical-budget
+    # contract.  It merely leaves deterministic Prompt Top-K routing outside
+    # the graph for stable heads and bounds graph planning to uncertain heads.
+    assert mosaic.selection.routed_head_only_planning is True
+    assert mosaic.selection.stable_head_prompt_routing is True
+    assert mosaic.selection.algorithm == "vectorized_coverage"
+    assert mosaic.selection.physical_capacity_fraction == 1.0
+    assert mosaic.graph.candidate_graph_mode == "shortlist_rerank"
+    assert mosaic.graph.candidate_descriptor_pooling is True
+    assert mosaic.graph.uncertain_head_only is True
+    assert mosaic.graph.uncertain_head_fraction == 1.0 / 64.0
+    assert mosaic.prototypes.enabled is False
+    assert mosaic.prototypes.uncertain_head_only is True
+    assert mosaic.prototypes.uncertain_head_fraction == 1.0 / 64.0

@@ -185,6 +185,16 @@ def byte_capped_configs(
     The profile ratio is only the source shape for PrefixKV.  It is never a
     comparison budget: all compressed methods receive the same hard byte cap
     and block/packing contract.
+
+    ``mosaickv_exact`` deliberately uses a bounded routed planner here.  The
+    stable 63/64 of layer/head routes use the same deterministic prompt
+    attention ranking as the paired Prompt Top-K control; only the most
+    uncertain 1/64 are passed through MosaicKV's sparse evidence graph.  This
+    is an execution-policy optimization, not a budget exception: every
+    selected position still goes through the common source-view packing path
+    under ``byte_cache``.  Keeping the full graph over all roughly 620k
+    one-token blocks made the prior byte-matched lane measure planner work
+    rather than cache-compression latency.
     """
 
     if byte_cap < 1:
@@ -241,9 +251,37 @@ def byte_capped_configs(
             prompt_window=16,
             draft_steps=0,
         ),
-        graph=GraphConfig(enabled=True),
-        selection=SelectionConfig(enabled=True),
-        prototypes=PrototypeConfig(enabled=False),
+        graph=GraphConfig(
+            enabled=True,
+            max_neighbors=8,
+            similarity_chunk_size=256,
+            attention_host_transfer_mode="deferred_layer_vectorized",
+            edge_accumulation_mode="preselected",
+            similarity_shortlist_multiplier=3.0,
+            similarity_shortlist_min_nodes=64,
+            candidate_descriptor_pooling=True,
+            candidate_graph_mode="shortlist_rerank",
+            candidate_neighbor_hops=1,
+            screening_group_blocks=2,
+            uncertain_head_only=True,
+            uncertain_head_fraction=1.0 / 64.0,
+            uncertain_head_threshold=0.0,
+            candidate_nonmandatory_fraction=0.08,
+        ),
+        selection=SelectionConfig(
+            enabled=True,
+            algorithm="vectorized_coverage",
+            stop_on_nonpositive_gain=False,
+            stable_head_prompt_routing=True,
+            routed_head_only_planning=True,
+            physical_capacity_fraction=1.0,
+        ),
+        prototypes=PrototypeConfig(
+            enabled=False,
+            uncertain_head_only=True,
+            uncertain_head_fraction=1.0 / 64.0,
+            uncertain_head_threshold=0.0,
+        ),
         residual=ResidualConfig(enabled=False),
         repair=RepairConfig(enabled=False, policy=RepairPolicy.NONE, max_blocks_per_step=0),
         lookm=LookMConfig(enabled=False),
