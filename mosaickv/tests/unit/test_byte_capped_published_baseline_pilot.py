@@ -50,8 +50,9 @@ def test_vl_cache_byte_capped_configs_share_the_physical_contract() -> None:
     assert mosaic.selection.physical_capacity_fraction == 1.0
     assert mosaic.graph.candidate_graph_mode == "shortlist_rerank"
     assert mosaic.graph.candidate_descriptor_pooling is True
+    assert mosaic.graph.edge_accumulation_mode == "preselected"
     assert mosaic.graph.uncertain_head_only is True
-    assert mosaic.graph.uncertain_head_fraction == 1.0 / 64.0
+    assert mosaic.graph.uncertain_head_fraction == 1.0 / 256.0
     assert mosaic.prototypes.enabled is False
     assert mosaic.prototypes.uncertain_head_only is True
-    assert mosaic.prototypes.uncertain_head_fraction == 1.0 / 64.0
+    assert mosaic.prototypes.uncertain_head_fraction == 1.0 / 256.0

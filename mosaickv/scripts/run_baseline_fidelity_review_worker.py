@@ -187,9 +187,9 @@ def byte_capped_configs(
     and block/packing contract.
 
     ``mosaickv_exact`` deliberately uses a bounded routed planner here.  The
-    stable 63/64 of layer/head routes use the same deterministic prompt
+    stable 255/256 of layer/head routes use the same deterministic prompt
     attention ranking as the paired Prompt Top-K control; only the most
-    uncertain 1/64 are passed through MosaicKV's sparse evidence graph.  This
+    uncertain 1/256 are passed through MosaicKV's sparse evidence graph. This
     is an execution-policy optimization, not a budget exception: every
     selected position still goes through the common source-view packing path
     under ``byte_cache``.  Keeping the full graph over all roughly 620k
@@ -256,7 +256,10 @@ def byte_capped_configs(
             max_neighbors=8,
             similarity_chunk_size=256,
             attention_host_transfer_mode="deferred_layer_vectorized",
-            edge_accumulation_mode="segmented_tensor_topk",
+            # ``preselected`` is already a duplicate-free vectorized COO
+            # builder. The experimental segmented variant added conversions
+            # without reducing work on these routed tiles.
+            edge_accumulation_mode="preselected",
             similarity_shortlist_multiplier=3.0,
             similarity_shortlist_min_nodes=64,
             candidate_descriptor_pooling=True,
@@ -264,7 +267,7 @@ def byte_capped_configs(
             candidate_neighbor_hops=1,
             screening_group_blocks=2,
             uncertain_head_only=True,
-            uncertain_head_fraction=1.0 / 64.0,
+            uncertain_head_fraction=1.0 / 256.0,
             uncertain_head_threshold=0.0,
             candidate_nonmandatory_fraction=0.08,
         ),
@@ -279,7 +282,7 @@ def byte_capped_configs(
         prototypes=PrototypeConfig(
             enabled=False,
             uncertain_head_only=True,
-            uncertain_head_fraction=1.0 / 64.0,
+            uncertain_head_fraction=1.0 / 256.0,
             uncertain_head_threshold=0.0,
         ),
         residual=ResidualConfig(enabled=False),
