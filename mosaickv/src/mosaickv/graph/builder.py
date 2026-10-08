@@ -32,6 +32,53 @@ class _EdgeAccumulator:
         self._preselected_columns: list[int] = []
         self._preselected_types: list[EdgeType] = []
         self._preselected_weights: list[float] = []
+        # The routed fast path produces one already-ranked top-k segment per
+        # (source tile, edge type).  Keeping those segments as contiguous
+        # arrays avoids constructing one Python tuple/dictionary entry per
+        # candidate before the COO sort.  Scalar structural edge producers
+        # continue to use the small lists above.
+        self._segmented_preselected: list[
+            tuple[np.ndarray[Any, Any], np.ndarray[Any, Any], np.ndarray[Any, Any], EdgeType]
+        ] = []
+
+    @property
+    def _uses_segmented_topk(self) -> bool:
+        return self._config.edge_accumulation_mode == "segmented_tensor_topk"
+
+    def _add_preselected_array(
+        self,
+        sources: np.ndarray[Any, Any],
+        targets: np.ndarray[Any, Any],
+        edge_type: EdgeType,
+        scores: np.ndarray[Any, Any],
+        source_weight: float,
+    ) -> None:
+        """Store a vectorized, duplicate-free source/target edge segment."""
+
+        if source_weight == 0 or sources.size == 0:
+            return
+        if sources.shape != targets.shape or sources.shape != scores.shape:
+            raise ValueError("preselected edge batches must align")
+        source_array = np.asarray(sources, dtype=np.int64).reshape(-1)
+        target_array = np.asarray(targets, dtype=np.int64).reshape(-1)
+        score_array = np.asarray(scores, dtype=np.float64).reshape(-1)
+        if not bool(np.all(np.isfinite(score_array))):
+            raise ValueError(f"non-finite {edge_type.value} edge score")
+        if bool(np.any(source_array == target_array)):
+            raise ValueError("preselected edge batches cannot contain self edges")
+        weighted = np.clip(score_array, 0.0, 1.0) * source_weight
+        minimum_weight = float(max(self._config.min_edge_weight, np.finfo(np.float64).tiny))
+        retained = weighted >= minimum_weight
+        if not bool(np.any(retained)):
+            return
+        self._segmented_preselected.append(
+            (
+                source_array[retained],
+                target_array[retained],
+                weighted[retained],
+                edge_type,
+            )
+        )
 
     def add_preselected(
         self,
@@ -69,13 +116,22 @@ class _EdgeAccumulator:
             return
         if not (len(sources) == len(targets) == len(scores)):
             raise ValueError("preselected edge batches must align")
+        source_array = np.asarray(sources, dtype=np.int64)
+        target_array = np.asarray(targets, dtype=np.int64)
         score_array = np.asarray(scores, dtype=np.float64)
+        if self._uses_segmented_topk:
+            self._add_preselected_array(
+                source_array,
+                target_array,
+                edge_type,
+                score_array,
+                source_weight,
+            )
+            return
         if not bool(np.all(np.isfinite(score_array))):
             raise ValueError(f"non-finite {edge_type.value} edge score")
         weighted = np.clip(score_array, 0.0, 1.0) * source_weight
-        minimum_weight = float(
-            max(self._config.min_edge_weight, float(np.finfo(np.float64).tiny))
-        )
+        minimum_weight = float(max(self._config.min_edge_weight, np.finfo(np.float64).tiny))
         retained = weighted >= minimum_weight
         retained_sources = tuple(
             source for source, keep in zip(sources, retained, strict=True) if keep
@@ -128,28 +184,54 @@ class _EdgeAccumulator:
                 columns.append(target)
                 edge_types.append(edge_type)
                 weights.append(weight)
-        if not rows:
+        if not rows and not self._segmented_preselected:
             return (), (), (), ()
         type_codes = {
             edge_type: index
             for index, edge_type in enumerate(sorted(EdgeType, key=lambda item: item.value))
         }
+        row_segments: list[np.ndarray[Any, Any]] = [np.asarray(rows, dtype=np.int64)]
+        column_segments: list[np.ndarray[Any, Any]] = [np.asarray(columns, dtype=np.int64)]
+        weight_segments: list[np.ndarray[Any, Any]] = [np.asarray(weights, dtype=np.float64)]
+        type_segments: list[np.ndarray[Any, Any]] = [
+            np.fromiter(
+                (type_codes[edge_type] for edge_type in edge_types),
+                dtype=np.int16,
+                count=len(edge_types),
+            )
+        ]
+        for (
+            segment_rows,
+            segment_columns,
+            segment_weights,
+            edge_type,
+        ) in self._segmented_preselected:
+            row_segments.append(segment_rows)
+            column_segments.append(segment_columns)
+            weight_segments.append(segment_weights)
+            type_segments.append(
+                np.full(segment_rows.shape, type_codes[edge_type], dtype=np.int16)
+            )
+        row_array = np.concatenate(row_segments)
+        column_array = np.concatenate(column_segments)
+        weight_array = np.concatenate(weight_segments)
+        type_array = np.concatenate(type_segments)
         order = np.lexsort(
             (
-                np.fromiter(
-                    (type_codes[edge_type] for edge_type in edge_types),
-                    dtype=np.int16,
-                    count=len(edge_types),
-                ),
-                np.asarray(columns, dtype=np.int64),
-                np.asarray(rows, dtype=np.int64),
+                type_array,
+                column_array,
+                row_array,
             )
         )
+        ordered_types = tuple(
+            sorted(EdgeType, key=lambda item: item.value)[int(type_array[int(index)])]
+            for index in order
+        )
         return (
-            tuple(rows[int(index)] for index in order),
-            tuple(columns[int(index)] for index in order),
-            tuple(weights[int(index)] for index in order),
-            tuple(edge_types[int(index)] for index in order),
+            tuple(int(value) for value in row_array[order]),
+            tuple(int(value) for value in column_array[order]),
+            tuple(float(value) for value in weight_array[order]),
+            ordered_types,
         )
 
 
@@ -199,7 +281,10 @@ def _add_cosine_edges(
 ) -> None:
     if source_weight == 0 or not features:
         return
-    add_preselected = config.edge_accumulation_mode == "preselected"
+    add_preselected = config.edge_accumulation_mode in {
+        "preselected",
+        "segmented_tensor_topk",
+    }
     batch_sources: list[int] = []
     batch_targets: list[int] = []
     batch_scores: list[float] = []
@@ -251,12 +336,21 @@ def _add_cosine_edges(
                     retained = ranked_positive & retained_rank
                     row_indices, rank_indices = np.nonzero(retained)
                     columns = ranked[row_indices, rank_indices]
-                    batch_sources.extend(source_ids[int(row)] for row in row_indices)
-                    batch_targets.extend(node_ids[int(column)] for column in columns)
-                    batch_scores.extend(
-                        float(score_tile[row, column])
-                        for row, column in zip(row_indices, columns, strict=True)
-                    )
+                    if accumulator._uses_segmented_topk:
+                        accumulator._add_preselected_array(
+                            np.asarray(source_ids, dtype=np.int64)[row_indices],
+                            np.asarray(node_ids, dtype=np.int64)[columns],
+                            edge_type,
+                            score_tile[row_indices, columns],
+                            source_weight,
+                        )
+                    else:
+                        batch_sources.extend(source_ids[int(row)] for row in row_indices)
+                        batch_targets.extend(node_ids[int(column)] for column in columns)
+                        batch_scores.extend(
+                            float(score_tile[row, column])
+                            for row, column in zip(row_indices, columns, strict=True)
+                        )
                 else:
                     for row, source_id in enumerate(source_ids):
                         retained_count = 0
@@ -606,7 +700,7 @@ def _add_fallback_edges(
         return
     add_edge = (
         accumulator.add_preselected
-        if config.edge_accumulation_mode == "preselected"
+        if config.edge_accumulation_mode in {"preselected", "segmented_tensor_topk"}
         else accumulator.add
     )
     groups: dict[tuple[int, int], list[int]] = defaultdict(list)

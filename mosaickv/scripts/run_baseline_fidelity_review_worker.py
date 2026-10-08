@@ -256,7 +256,7 @@ def byte_capped_configs(
             max_neighbors=8,
             similarity_chunk_size=256,
             attention_host_transfer_mode="deferred_layer_vectorized",
-            edge_accumulation_mode="preselected",
+            edge_accumulation_mode="segmented_tensor_topk",
             similarity_shortlist_multiplier=3.0,
             similarity_shortlist_min_nodes=64,
             candidate_descriptor_pooling=True,

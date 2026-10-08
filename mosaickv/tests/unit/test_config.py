@@ -535,6 +535,9 @@ def test_residual_index_mode_is_strict() -> None:
 def test_graph_edge_accumulation_mode_is_strict() -> None:
     assert GraphConfig().edge_accumulation_mode == "preselected"
     assert GraphConfig(edge_accumulation_mode="dictionary").edge_accumulation_mode == ("dictionary")
+    assert GraphConfig(edge_accumulation_mode="segmented_tensor_topk").edge_accumulation_mode == (
+        "segmented_tensor_topk"
+    )
     with pytest.raises(ConfigurationError, match=r"graph\.edge_accumulation_mode"):
         GraphConfig(edge_accumulation_mode="unknown")
 

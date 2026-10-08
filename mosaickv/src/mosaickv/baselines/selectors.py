@@ -2970,6 +2970,74 @@ def _cross_head_capped_query_initial_selection(
     return results
 
 
+def _vectorized_unit_block_choices_by_route(
+    full_state: FullKVState,
+    *,
+    routes: Sequence[tuple[int, int]],
+    node_ids_by_route: Mapping[tuple[int, int], Sequence[int]],
+    mandatory_by_route: Mapping[tuple[int, int], Sequence[int]],
+    position_limits: Mapping[tuple[int, int], int],
+    score_array: np.ndarray[Any, np.dtype[np.float64]],
+) -> dict[tuple[int, int], tuple[int, ...]]:
+    """Return exact per-route Prompt Top-K choices without Python sorting.
+
+    The stable routed-head path has one-token blocks and no optional policy
+    modifications.  Routes with a common candidate count and capacity can be
+    ranked as one dense ``[routes, candidates]`` tensor.  This preserves the
+    reference order ``(-prompt_score, visual_tie_break, node_id)`` exactly,
+    while replacing thousands of small Python ``sorted`` calls.
+    """
+
+    modality_is_visual = np.fromiter(
+        (
+            block.modality in {Modality.IMAGE, Modality.VIDEO}
+            for block in full_state.blocks
+        ),
+        dtype=np.int8,
+        count=len(full_state.blocks),
+    )
+    groups: dict[tuple[int, int], list[tuple[tuple[int, int], tuple[int, ...]]]] = defaultdict(
+        list
+    )
+    for identity in sorted(routes):
+        mandatory = frozenset(mandatory_by_route.get(identity, ()))
+        optional = tuple(
+            node_id for node_id in node_ids_by_route.get(identity, ()) if node_id not in mandatory
+        )
+        needed = int(position_limits[identity]) - len(mandatory)
+        if needed < 0:
+            raise InfeasibleBaselineBudgetError(
+                "mandatory exact blocks exceed the dense cache capacity: "
+                f"layer={identity[0]}, kv_head={identity[1]}, "
+                f"required={len(mandatory)}, limit={position_limits[identity]}"
+            )
+        if len(optional) < needed:
+            raise InfeasibleBaselineBudgetError(
+                "stable Prompt Top-K candidates cannot fill dense cache capacity: "
+                f"layer={identity[0]}, kv_head={identity[1]}, available={len(optional)}, "
+                f"needed={needed}"
+            )
+        groups[(len(optional), needed)].append((identity, optional))
+
+    result: dict[tuple[int, int], tuple[int, ...]] = {}
+    for (_candidate_count, needed), members in groups.items():
+        if needed == 0:
+            result.update({identity: () for identity, _optional in members})
+            continue
+        node_matrix = np.asarray(
+            tuple(optional for _identity, optional in members), dtype=np.int64
+        )
+        scores = score_array[node_matrix]
+        # Visual blocks win only an exact score tie, matching the scalar
+        # reference's ``0 if visual else 1`` key component.
+        visual_tie_break = 1 - modality_is_visual[node_matrix]
+        ranked = np.lexsort((node_matrix, visual_tie_break, -scores), axis=1)
+        chosen = np.take_along_axis(node_matrix, ranked[:, :needed], axis=1)
+        for row, (identity, _optional) in enumerate(members):
+            result[identity] = tuple(sorted(int(node_id) for node_id in chosen[row]))
+    return result
+
+
 def select_prompt_attention_topk_ids_by_head(
     full_state: FullKVState,
     budget: SelectionBudget,
@@ -3447,6 +3515,18 @@ def select_prompt_attention_topk_ids_by_head(
         and not progressive_logit_safe_eviction
         and not hierarchical_logit_safe_eviction
     )
+    unit_block_choices = (
+        _vectorized_unit_block_choices_by_route(
+            full_state,
+            routes=tuple(sorted(routes)),
+            node_ids_by_route=node_ids_by_route,
+            mandatory_by_route=mandatory_by_route,
+            position_limits=position_limits,
+            score_array=score_array,
+        )
+        if unit_block_fast_path
+        else {}
+    )
 
     cross_head_initial_by_route: dict[tuple[int, int], _QueryCoverageInitialSelectionResult] = {}
     scalar_reference: HeadLocalPromptSelection | None = None
@@ -3515,21 +3595,7 @@ def select_prompt_attention_topk_ids_by_head(
         remaining_capacity = limit - used_positions
         target_visual_positions = math.ceil(limit * minimum_visual_fraction)
         if unit_block_fast_path:
-            ranked_unit_blocks = sorted(
-                (
-                    node_id
-                    for node_id in node_ids_by_route.get(identity, ())
-                    if node_id not in mandatory_set
-                ),
-                key=lambda node_id: (
-                    -score_array[node_id],
-                    0
-                    if full_state.blocks[node_id].modality in {Modality.IMAGE, Modality.VIDEO}
-                    else 1,
-                    node_id,
-                ),
-            )
-            chosen = tuple(sorted(ranked_unit_blocks[:remaining_capacity]))
+            chosen = unit_block_choices[identity]
             best_occupied = len(chosen)
         else:
             candidates_by_size_and_modality: dict[tuple[int, bool], list[int]] = defaultdict(list)

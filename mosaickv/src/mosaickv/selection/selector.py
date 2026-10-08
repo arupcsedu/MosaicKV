@@ -7,6 +7,8 @@ import math
 from collections import defaultdict
 from collections.abc import Iterable, Mapping
 
+import numpy as np
+
 from mosaickv.selection.objective import BudgetedObjective
 from mosaickv.selection.types import (
     SelectionBudget,
@@ -173,6 +175,113 @@ def select_exact_subset(
         heap_pops=0,
         marginal_recomputations=0,
     )
+
+
+def vectorized_unit_route_topk_select(
+    objective: BudgetedObjective,
+    budget: SelectionBudget,
+    *,
+    position_limits: Mapping[tuple[int, int], int],
+    optimization_node_ids: Iterable[int] | None = None,
+) -> SelectionResult:
+    """Fill one-token routed heads using deterministic vectorized top-k.
+
+    This is the exact-capacity fast path for ``mosaickv_exact`` after stable
+    heads have already been routed through the shared Prompt Top-K selector.
+    It intentionally does *not* approximate the physical transaction: every
+    routed layer/head receives exactly its declared position limit, mandatory
+    nodes are retained, and the selected set is checked against the same byte
+    budget.  The rank is the objective's initial sparse marginal gain, with
+    cost and node ID as deterministic tie breakers.  General lazy greedy
+    remains available for variable-size/prototype paths.
+    """
+
+    graph = objective.graph
+    eligible = (
+        frozenset(range(len(graph.nodes)))
+        if optimization_node_ids is None
+        else frozenset(int(node_id) for node_id in optimization_node_ids)
+    )
+    unknown = eligible - set(range(len(graph.nodes)))
+    if unknown:
+        raise ValueError(
+            "vectorized route selector IDs reference nodes outside the graph: "
+            f"{sorted(unknown)}"
+        )
+    by_route: defaultdict[tuple[int, int], list[int]] = defaultdict(list)
+    mandatory_by_route: defaultdict[tuple[int, int], list[int]] = defaultdict(list)
+    for node in graph.nodes:
+        identity = (node.block.layer, node.block.kv_head)
+        if node.node_id not in eligible and not node.block.mandatory:
+            continue
+        if node.block.position_count != 1:
+            raise ValueError("vectorized route selector requires one-token blocks")
+        if identity not in position_limits:
+            raise ValueError(f"vectorized route selector lacks position limit for {identity}")
+        by_route[identity].append(node.node_id)
+        if node.block.mandatory:
+            mandatory_by_route[identity].append(node.node_id)
+    unknown_limits = set(position_limits) - set(by_route)
+    if unknown_limits:
+        raise ValueError(
+            "position limits include routes outside vectorized planning: "
+            f"{sorted(unknown_limits)}"
+        )
+
+    initial = objective.incremental_state()
+    candidate_ids = tuple(
+        node_id
+        for identity in sorted(by_route)
+        for node_id in by_route[identity]
+        if node_id not in mandatory_by_route[identity]
+    )
+    initial_gains = dict(
+        zip(candidate_ids, initial.marginal_gains(candidate_ids), strict=True)
+    )
+    costs = tuple(budget.cost(node.block) for node in graph.nodes)
+    selected: list[int] = []
+    for identity in sorted(by_route):
+        limit = int(position_limits[identity])
+        mandatory = tuple(sorted(mandatory_by_route[identity]))
+        if len(mandatory) > limit:
+            raise InfeasibleSelectionBudgetError(
+                "mandatory exact blocks exceed the dense cache capacity: "
+                f"layer={identity[0]}, kv_head={identity[1]}, required={len(mandatory)}, "
+                f"limit={limit}"
+            )
+        optional = np.asarray(
+            tuple(node_id for node_id in by_route[identity] if node_id not in mandatory),
+            dtype=np.int64,
+        )
+        needed = limit - len(mandatory)
+        if optional.size < needed:
+            raise InfeasibleSelectionBudgetError(
+                "routed one-token candidates cannot fill the dense cache capacity: "
+                f"layer={identity[0]}, kv_head={identity[1]}, available={optional.size}, "
+                f"needed={needed}"
+            )
+        if needed:
+            gains = np.asarray(
+                tuple(initial_gains[int(node_id)] for node_id in optional), dtype=np.float64
+            )
+            route_costs = np.asarray(
+                tuple(costs[int(node_id)] for node_id in optional), dtype=np.int64
+            )
+            # ``lexsort``'s last key is primary.  This is exactly the
+            # documented density/gain/cost/node-ID ordering without a Python
+            # heap or dynamic-program state per candidate.
+            order = np.lexsort((optional, route_costs, -gains, -(gains / route_costs)))
+            optional = optional[order[:needed]]
+        selected.extend(mandatory)
+        selected.extend(int(node_id) for node_id in optional)
+    selected_ids = tuple(sorted(set(selected)))
+    spent = sum(costs[node_id] for node_id in selected_ids)
+    if spent > budget.value:
+        raise InfeasibleSelectionBudgetError(
+            "vectorized routed selection exceeds the configured byte budget: "
+            f"required={spent}, budget={budget.value}, unit={budget.unit.value}"
+        )
+    return select_exact_subset(objective, budget, selected_ids)
 
 
 def _entry(

@@ -745,9 +745,14 @@ class GraphConfig:
                 "graph.attention_host_transfer_mode must be 'deferred_layer', "
                 "'deferred_layer_vectorized', or 'per_group_reference'"
             )
-        if self.edge_accumulation_mode not in {"dictionary", "preselected"}:
+        if self.edge_accumulation_mode not in {
+            "dictionary",
+            "preselected",
+            "segmented_tensor_topk",
+        }:
             raise ConfigurationError(
                 "graph.edge_accumulation_mode must be 'dictionary' or 'preselected'"
+                " or 'segmented_tensor_topk'"
             )
         if (
             not math.isfinite(self.similarity_shortlist_multiplier)

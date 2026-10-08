@@ -207,7 +207,7 @@ def test_optimized_graph_pipeline_is_bitwise_reference_equivalent() -> None:
     optimized_config = replace(
         reference_config,
         attention_host_transfer_mode="deferred_layer_vectorized",
-        edge_accumulation_mode="preselected",
+        edge_accumulation_mode="segmented_tensor_topk",
     )
 
     reference = build_evidence_graph(

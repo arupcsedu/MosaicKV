@@ -50,6 +50,7 @@ from mosaickv.selection.selector import (
     lazy_greedy_select,
     select_all_exact,
     select_exact_subset,
+    vectorized_unit_route_topk_select,
 )
 from mosaickv.selection.types import (
     BlockUtility,
@@ -125,4 +126,5 @@ __all__ = [
     "select_verified_capacity_levels",
     "split_route_partition",
     "update_partition_screening",
+    "vectorized_unit_route_topk_select",
 ]

@@ -129,6 +129,7 @@ from mosaickv.selection import (
     select_all_exact,
     select_exact_subset,
     select_verified_capacity_levels,
+    vectorized_unit_route_topk_select,
 )
 from mosaickv.types import (
     AblationVariant,
@@ -1756,8 +1757,34 @@ def _selection(
     evidence_node_ids: Iterable[int] = (),
     optimization_node_ids: Iterable[int] | None = None,
 ) -> SelectionResult:
+    required_node_ids = tuple(required_node_ids)
+    prompt_anchor_node_ids = tuple(prompt_anchor_node_ids)
+    evidence_node_ids = tuple(evidence_node_ids)
     if retention_one:
         return select_all_exact(objective, SelectionBudget(value, unit))
+    # In the byte-matched exact-only routed path, every planner block is one
+    # token and each routed layer/head has an independently fixed dense
+    # capacity. A generic global byte/cardinality pass cannot exchange
+    # capacity across these routes, so it only adds heap/coverage-refresh
+    # overhead. Select the deterministic local top-k set directly, then use
+    # the common exact-subset recorder for auditable objective telemetry.
+    if (
+        objective.config.routed_head_only_planning
+        and objective.config.algorithm == "vectorized_coverage"
+        and position_limits is not None
+        and fill_position_limits
+        and position_fill_quantum == 1
+        and not required_node_ids
+        and not prompt_anchor_node_ids
+        and not evidence_node_ids
+        and all(node.block.position_count == 1 for node in objective.graph.nodes)
+    ):
+        return vectorized_unit_route_topk_select(
+            objective,
+            SelectionBudget(value, unit),
+            position_limits=position_limits,
+            optimization_node_ids=optimization_node_ids,
+        )
     return lazy_greedy_select(
         objective,
         SelectionBudget(value, unit),
