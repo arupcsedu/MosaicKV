@@ -10,6 +10,11 @@ from __future__ import annotations
 
 import argparse
 import gc
+
+# This worker is invoked directly by Slurm and can also be imported by tests.
+# Load only its sibling's baseline configuration helpers by file path; shared
+# HF execution helpers live in the installed package above.
+import importlib.util
 import json
 import os
 from dataclasses import asdict
@@ -17,19 +22,26 @@ from pathlib import Path
 from typing import Any, cast
 
 import torch
-from scripts.run_baseline_fidelity_review_worker import (
-    FAMILY_METHOD,
-    _load_json,
-    _sha,
-    _snapshot,
-    byte_capped_configs,
-)
-from scripts.run_paper_candidate_v1_preflight_worker import _record, _settle
 
 from mosaickv.adapters.huggingface import load_hf_adapter
 from mosaickv.config import load_config
+from mosaickv.evaluation.worker_support import record_hf_run, settle
 from mosaickv.hf_cli import _model_kwargs
 from mosaickv.measurements.telemetry import capture_gpu_environment
+
+_BASELINE_WORKER_PATH = Path(__file__).with_name("run_baseline_fidelity_review_worker.py")
+_BASELINE_WORKER_SPEC = importlib.util.spec_from_file_location(
+    "mosaickv_baseline_fidelity_worker", _BASELINE_WORKER_PATH
+)
+if _BASELINE_WORKER_SPEC is None or _BASELINE_WORKER_SPEC.loader is None:  # pragma: no cover
+    raise ImportError(f"cannot load baseline worker helpers from {_BASELINE_WORKER_PATH}")
+_BASELINE_WORKER = importlib.util.module_from_spec(_BASELINE_WORKER_SPEC)
+_BASELINE_WORKER_SPEC.loader.exec_module(_BASELINE_WORKER)
+FAMILY_METHOD = _BASELINE_WORKER.FAMILY_METHOD
+_load_json = _BASELINE_WORKER._load_json
+_sha = _BASELINE_WORKER._sha
+_snapshot = _BASELINE_WORKER._snapshot
+byte_capped_configs = _BASELINE_WORKER.byte_capped_configs
 
 CLASSIFICATION = "byte_capped_published_baseline_pilot"
 METHOD_ORDER = ("full_kv", "prompt_attention_topk", "baseline", "mosaickv_exact")
@@ -57,8 +69,10 @@ def _profile_path(repository: Path, family: str, profile_forget_ratio: str | Non
         return None
     if profile_forget_ratio is None:
         raise ValueError("PrefixKV pilot requires --profile-forget-ratio")
-    path = repository / "third_party/PrefixKV/confs" / (
-        f"prefixkv_llava-v1.5-7b_{profile_forget_ratio}.json"
+    path = (
+        repository
+        / "third_party/PrefixKV/confs"
+        / (f"prefixkv_llava-v1.5-7b_{profile_forget_ratio}.json")
     )
     if not path.is_file():
         raise FileNotFoundError(path)
@@ -141,7 +155,7 @@ def main() -> int:
     namespace = f"bytecap-{source_sha[:10]}-{args.family}-{args.task}-{args.byte_cap}"
     try:
         for order, method in enumerate(expected_methods):
-            record = _record(
+            record = record_hf_run(
                 configs[method],
                 adapter,
                 task=args.task,
@@ -162,7 +176,7 @@ def main() -> int:
                 }
             )
             records.append(record)
-            _settle(adapter)
+            settle(adapter)
     finally:
         after = asdict(capture_gpu_environment(torch))
         del adapter
@@ -179,8 +193,7 @@ def main() -> int:
     checks: list[dict[str, Any]] = []
     for sample_id in sample_ids:
         realized = {
-            method: int(completed[method][sample_id]["active_kv_bytes"])
-            for method in compressed
+            method: int(completed[method][sample_id]["active_kv_bytes"]) for method in compressed
         }
         check = {
             "sample_id": sample_id,

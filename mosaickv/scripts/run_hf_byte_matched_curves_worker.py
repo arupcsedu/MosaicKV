@@ -14,11 +14,6 @@ from pathlib import Path
 from typing import Any, cast
 
 import torch
-from scripts.run_paper_candidate_v1_preflight_worker import (
-    _control_configs,
-    _record,
-    _settle,
-)
 
 from mosaickv.adapters.huggingface import load_hf_adapter
 from mosaickv.config import (
@@ -28,6 +23,7 @@ from mosaickv.config import (
     load_config,
 )
 from mosaickv.evaluation.paper_candidate import PAPER_CANDIDATE_TASK_ROUTES
+from mosaickv.evaluation.worker_support import control_configs, record_hf_run, settle
 from mosaickv.hf_cli import _model_kwargs
 from mosaickv.measurements.telemetry import capture_gpu_environment
 from mosaickv.types import MosaicKVMethod, RepairPolicy
@@ -71,7 +67,7 @@ def curve_configs(
 ) -> dict[str, Any]:
     """Resolve method configs with one identical physical-cache contract."""
 
-    controls = _control_configs(template, task=task, seed=seed, output_length=output_length)
+    controls = control_configs(template, task=task, seed=seed, output_length=output_length)
     shared_cache = replace(
         template.cache,
         budget_value=budget_bytes,
@@ -195,7 +191,7 @@ def main() -> int:
             paired_rows: dict[str, dict[str, dict[str, Any]]] = {}
             for method in order:
                 run_id = f"{namespace}-b{budget_mib:03d}-{method}"
-                record = _record(
+                record = record_hf_run(
                     configs[method],
                     adapter,
                     task=task,
@@ -220,7 +216,7 @@ def main() -> int:
                     str(row["sample_id"]): row
                     for row in cast("list[dict[str, Any]]", record["rows"])
                 }
-                _settle(adapter)
+                settle(adapter)
             prompt_rows = paired_rows["prompt_attention_topk"]
             mosaic_rows = paired_rows["mosaickv_exact"]
             if set(prompt_rows) != set(sample_ids) or set(mosaic_rows) != set(sample_ids):

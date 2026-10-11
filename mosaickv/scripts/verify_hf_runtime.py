@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 import tempfile
@@ -13,12 +14,6 @@ from pathlib import Path
 from typing import Any
 
 import torch
-from scripts.verify_hf_adapters import (
-    REVISIONS,
-    checkpoint_messages,
-    provenance,
-    tiny_adapters,
-)
 
 from mosaickv.adapters.huggingface import load_hf_adapter
 from mosaickv.backends import HuggingFaceMosaicKVModel, compare_runtime_retention_one
@@ -41,6 +36,22 @@ from mosaickv.types import (
     MosaicKVMethod,
     Precision,
 )
+
+# Keep this executable as a standalone script.  Importing a sibling through
+# ``scripts.*`` depended on the caller's working directory and failed under
+# Slurm and direct ``python mosaickv/scripts/...`` invocation.
+_ADAPTER_HELPER_PATH = Path(__file__).with_name("verify_hf_adapters.py")
+_ADAPTER_HELPER_SPEC = importlib.util.spec_from_file_location(
+    "mosaickv_verify_hf_adapters", _ADAPTER_HELPER_PATH
+)
+if _ADAPTER_HELPER_SPEC is None or _ADAPTER_HELPER_SPEC.loader is None:  # pragma: no cover
+    raise ImportError(f"cannot load adapter verification helper: {_ADAPTER_HELPER_PATH}")
+_ADAPTER_HELPER = importlib.util.module_from_spec(_ADAPTER_HELPER_SPEC)
+_ADAPTER_HELPER_SPEC.loader.exec_module(_ADAPTER_HELPER)
+REVISIONS = _ADAPTER_HELPER.REVISIONS
+checkpoint_messages = _ADAPTER_HELPER.checkpoint_messages
+provenance = _ADAPTER_HELPER.provenance
+tiny_adapters = _ADAPTER_HELPER.tiny_adapters
 
 
 def _config(

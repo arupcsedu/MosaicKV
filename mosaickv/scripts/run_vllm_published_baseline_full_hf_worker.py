@@ -14,10 +14,10 @@ from pathlib import Path
 from typing import Any, cast
 
 import torch
-from scripts.run_paper_candidate_v1_preflight_worker import _control_configs, _record, _settle
 
 from mosaickv.adapters.huggingface import load_hf_adapter
 from mosaickv.config import LookMConfig, PrefixKVConfig, VLCacheConfig, load_config
+from mosaickv.evaluation.worker_support import control_configs, record_hf_run, settle
 from mosaickv.hf_cli import _model_kwargs
 from mosaickv.types import LookMMergeStrategy, MosaicKVMethod, PrefixKVProfileMode
 
@@ -47,7 +47,7 @@ def _source_snapshot(repository: Path) -> dict[str, Any]:
 
 
 def _configs(template: Any, *, task: str, seed: int, output_length: int) -> dict[str, Any]:
-    prompt = _control_configs(
+    prompt = control_configs(
         template,
         task=task,
         seed=seed,
@@ -158,7 +158,7 @@ def main() -> int:
     try:
         for order, method in enumerate(METHODS):
             records.append(
-                _record(
+                record_hf_run(
                     configs[method],
                     adapter,
                     task=task,
@@ -172,7 +172,7 @@ def main() -> int:
                     order=order,
                 )
             )
-            _settle(adapter)
+            settle(adapter)
     finally:
         del adapter
         gc.collect()

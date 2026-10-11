@@ -14,7 +14,6 @@ from pathlib import Path
 from typing import Any, cast
 
 import torch
-from scripts.run_paper_candidate_v1_preflight_worker import _control_configs, _record, _settle
 
 from mosaickv.adapters.huggingface import load_hf_adapter
 from mosaickv.config import (
@@ -31,6 +30,7 @@ from mosaickv.config import (
     VLCacheConfig,
     load_config,
 )
+from mosaickv.evaluation.worker_support import control_configs, record_hf_run, settle
 from mosaickv.hf_cli import _model_kwargs
 from mosaickv.measurements.telemetry import capture_gpu_environment
 from mosaickv.types import (
@@ -92,7 +92,7 @@ def review_configs(
 
     model = ModelConfig(model_id, model_revision, Precision.FP16)
     base = replace(template, model=model)
-    prompt = _control_configs(base, task=task, seed=seed, output_length=output_length)[
+    prompt = control_configs(base, task=task, seed=seed, output_length=output_length)[
         "prompt_attention_topk"
     ]
     cache = CacheConfig(
@@ -393,7 +393,7 @@ def main() -> int:
             ),
         )
         records.append(
-            _record(
+            record_hf_run(
                 full_configs["full_kv"],
                 adapter,
                 task=task,
@@ -407,7 +407,7 @@ def main() -> int:
                 order=0,
             )
         )
-        _settle(adapter)
+        settle(adapter)
         for ratio_index, raw_ratio in enumerate(cast("list[float]", job["retention_ratios"])):
             ratio = float(raw_ratio)
             configs = review_configs(
@@ -427,7 +427,7 @@ def main() -> int:
             if ratio_index % 2:
                 order = tuple(reversed(order))
             for method in order:
-                record = _record(
+                record = record_hf_run(
                     configs[method],
                     adapter,
                     task=task,
@@ -447,7 +447,7 @@ def main() -> int:
                     str(row["sample_id"]): row
                     for row in cast("list[dict[str, Any]]", record["rows"])
                 }
-                _settle(adapter)
+            settle(adapter)
             for sample_id in sample_ids:
                 prompt_bytes = int(paired["prompt_attention_topk"][sample_id]["active_kv_bytes"])
                 method_bytes = int(paired[method_name][sample_id]["active_kv_bytes"])
