@@ -18,7 +18,7 @@ from typing import Any, cast
 
 import pandas as pd  # type: ignore[import-untyped]
 import torch
-import yaml  # type: ignore[import-untyped]
+import yaml
 
 from mosaickv.config import (
     ForecastingConfig,

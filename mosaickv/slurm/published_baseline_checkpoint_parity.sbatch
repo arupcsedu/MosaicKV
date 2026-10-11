@@ -9,6 +9,8 @@
 #SBATCH --reservation=bi_fox_dgx
 #SBATCH --gres=gpu:a100:1
 #SBATCH --export=ALL
+#SBATCH --output=/scratch/djy8hg/runs/mosaickv/slurm/published-parity-%j.out
+#SBATCH --error=/scratch/djy8hg/runs/mosaickv/slurm/published-parity-%j.out
 
 set -euo pipefail
 

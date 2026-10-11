@@ -67,7 +67,7 @@ class _EdgeAccumulator:
         if bool(np.any(source_array == target_array)):
             raise ValueError("preselected edge batches cannot contain self edges")
         weighted = np.clip(score_array, 0.0, 1.0) * source_weight
-        minimum_weight = float(max(self._config.min_edge_weight, np.finfo(np.float64).tiny))
+        minimum_weight = max(float(self._config.min_edge_weight), float(np.finfo(np.float64).tiny))
         retained = weighted >= minimum_weight
         if not bool(np.any(retained)):
             return
@@ -131,7 +131,7 @@ class _EdgeAccumulator:
         if not bool(np.all(np.isfinite(score_array))):
             raise ValueError(f"non-finite {edge_type.value} edge score")
         weighted = np.clip(score_array, 0.0, 1.0) * source_weight
-        minimum_weight = float(max(self._config.min_edge_weight, np.finfo(np.float64).tiny))
+        minimum_weight = max(float(self._config.min_edge_weight), float(np.finfo(np.float64).tiny))
         retained = weighted >= minimum_weight
         retained_sources = tuple(
             source for source, keep in zip(sources, retained, strict=True) if keep
