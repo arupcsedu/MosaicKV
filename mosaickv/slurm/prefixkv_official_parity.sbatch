@@ -22,6 +22,8 @@ RUN_ID=${MOSAICKV_RUN_ID:-prefixkv-official-parity-${SLURM_JOB_ID}}
 CALIBRATION_INDICES=${MOSAICKV_PREFIXKV_CALIBRATION_INDICES:-1}
 EVALUATION_INDICES=${MOSAICKV_PREFIXKV_EVALUATION_INDICES:-0}
 PAPER_REPRODUCTION=${MOSAICKV_PREFIXKV_PAPER_REPRODUCTION:-0}
+OFFICIAL_PROFILE_REPRODUCTION=${MOSAICKV_PREFIXKV_OFFICIAL_PROFILE_REPRODUCTION:-0}
+OFFICIAL_PROFILE_SHARD=${MOSAICKV_PREFIXKV_OFFICIAL_PROFILE_SHARD:-0}
 PROJECT_ROOT=${REPOSITORY_ROOT}/mosaickv
 export MOSAICKV_CACHE_ROOT=${MOSAICKV_CACHE_ROOT:-/scratch/djy8hg/cache/mosaickv}
 # shellcheck source=../scripts/cache_env.sh
@@ -59,6 +61,20 @@ if [[ "${PAPER_REPRODUCTION}" == "1" ]]; then
     --calibration-dataset-id "${MOSAICKV_PREFIXKV_CALIBRATION_DATASET_ID}"
     --calibration-dataset-revision "${MOSAICKV_PREFIXKV_CALIBRATION_DATASET_REVISION}"
   )
+fi
+if [[ "${OFFICIAL_PROFILE_REPRODUCTION}" == "1" ]]; then
+  if [[ "${PAPER_REPRODUCTION}" == "1" ]]; then
+    printf 'paper-reproduction and official-profile-reproduction are mutually exclusive\n' >&2
+    exit 2
+  fi
+  OFFICIAL_PROFILE_PATH=${MOSAICKV_PREFIXKV_OFFICIAL_PROFILE_PATH:-${REPOSITORY_ROOT}/third_party/PrefixKV/confs/prefixkv_llava-v1.5-7b_0.5.json}
+  EXTRA_ARGS+=(
+    --official-profile-reproduction
+    --official-profile-path "${OFFICIAL_PROFILE_PATH}"
+  )
+  if [[ "${OFFICIAL_PROFILE_SHARD}" == "1" ]]; then
+    EXTRA_ARGS+=(--official-profile-shard)
+  fi
 fi
 srun "${PARITY_PYTHON}" mosaickv/scripts/run_prefixkv_llava_parity.py \
   --repository-root "${REPOSITORY_ROOT}" \

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import math
 from dataclasses import replace
 from pathlib import Path
@@ -22,6 +23,20 @@ def _runner_module() -> object:
     spec = importlib.util.spec_from_file_location("prefixkv_official_runner", path)
     if spec is None or spec.loader is None:  # pragma: no cover - import guard
         raise RuntimeError(f"cannot load PrefixKV runner: {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _official_profile_aggregator_module() -> object:
+    path = (
+        Path(__file__).resolve().parents[2]
+        / "scripts"
+        / "aggregate_prefixkv_official_profile.py"
+    )
+    spec = importlib.util.spec_from_file_location("prefixkv_official_aggregator", path)
+    if spec is None or spec.loader is None:  # pragma: no cover - import guard
+        raise RuntimeError(f"cannot load PrefixKV aggregator: {path}")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -182,3 +197,67 @@ def test_paper_parity_gate_rejects_a_token_or_ppl_regression() -> None:
     )
     assert rejected["passed"] is False
     assert "token_agreement:sample-0" in rejected["failures"]
+
+
+def test_official_profile_loader_preserves_and_validates_raw_forget_ratios(
+    tmp_path: Path,
+) -> None:
+    runner = _runner_module()
+    profile = tmp_path / "prefixkv_llava-v1.5-7b_0.5.json"
+    profile.write_text("[0.0, 0.25, 1.0]\n", encoding="utf-8")
+    assert runner._load_official_profile(profile, expected_layers=3) == (0.0, 0.25, 1.0)
+
+    profile.write_text("[0.0, 1.1]\n", encoding="utf-8")
+    with pytest.raises(ValueError, match=r"in \[0, 1\]"):
+        runner._load_official_profile(profile)
+
+
+def test_official_profile_aggregator_requires_complete_unique_shard_union(tmp_path: Path) -> None:
+    aggregate = _official_profile_aggregator_module()
+    aggregate.EXPECTED_SAMPLE_COUNT = 2
+    data_path = tmp_path / "detail_1k.json"
+    data_path.write_text('[{"id": "a"}, {"id": "b"}]', encoding="utf-8")
+    profile = tmp_path / "prefixkv_llava-v1.5-7b_0.5.json"
+    profile.write_text("[0.5]\n", encoding="utf-8")
+    profile_sha = aggregate._sha256_file(profile)
+    root = tmp_path / "shards"
+    for sample_id in ("a", "b"):
+        directory = root / f"worker-{sample_id}"
+        directory.mkdir(parents=True)
+        manifest = {
+            "run_id": f"worker-{sample_id}",
+            "git_dirty": False,
+            "protocol": {"official_profile_reproduction": True},
+            "dataset": {
+                "id": aggregate.DATASET_ID,
+                "revision": aggregate.DATASET_REVISION,
+                "evaluation_sample_ids": [sample_id],
+            },
+            "profile": {"source_sha256": profile_sha},
+            "paper_eligible": False,
+            "paper_ineligibility_reason": "incomplete_official_profile_shard",
+        }
+        artifact = {
+            "implementation": "official_prefixkv",
+            "samples": [
+                {
+                    "sample_id": sample_id,
+                    "nll_sum": 2.0,
+                    "evaluated_token_count": 2,
+                    "rouge_l_f1": 0.8,
+                }
+            ],
+        }
+        (directory / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+        (directory / "official.json").write_text(json.dumps(artifact), encoding="utf-8")
+
+    result = aggregate.aggregate_official_profile_shards(
+        shard_root=root,
+        data_path=data_path,
+        official_profile_path=profile,
+        published_ppl_target=math.e,
+        published_ppl_tolerance=0.01,
+    )
+    assert result["paper_eligible"] is True
+    assert result["metrics"]["teacher_forced_ppl"]["value"] == pytest.approx(math.e)
+    assert result["metrics"]["rouge_l_f1"]["value"] == pytest.approx(0.8)

@@ -257,3 +257,42 @@ reviewed, disjoint PrefixKV calibration source. Therefore this command is
 deliberately not submitted yet. The missing source is an execution-input
 blocker, not a reason to reuse evaluation examples or report the invalid common
 HF rows.
+
+### Upstream-profile reproduction lane
+
+The pinned PrefixKV repository separately ships raw per-layer profiles in
+`third_party/PrefixKV/confs/`, including
+`prefixkv_llava-v1.5-7b_0.5.json`. The authors do **not** release the
+calibration sample identities used to build these files. Consequently, the
+repository provides a deliberately separate
+`--official-profile-reproduction` mode. It runs only the unmodified official
+PrefixKV class with the upstream profile copied byte-for-byte into the
+official runtime's expected `confs/` path. It records the profile hash and
+sets calibration provenance to
+`unverifiable_upstream_profile_ids_not_released`.
+
+This is the appropriate route for completing the official-code PPL/ROUGE-L
+reproduction on the registered 1,000-example LLaVA-Description evaluation
+file. It is **not** evidence that `prefixkv_reimpl` matches the official
+profile and it must never be used as a disjoint-calibration claim. The latter
+continues to require the stricter `--paper-reproduction` contract above.
+
+For two-hour Slurm limits, official-profile workers may use
+`--official-profile-shard`; individual shards are explicitly marked
+`incomplete_official_profile_shard` and cannot be paper eligible. A later
+hash-bound reducer must verify an exact, duplicate-free union of all 1,000
+registered IDs before producing an eligible official-profile artifact.
+
+The reproducible two-hour execution plan is:
+
+```bash
+sbatch mosaickv/slurm/prefixkv_official_profile_array.sbatch
+# after every array task succeeds:
+sbatch mosaickv/slurm/prefixkv_official_profile_aggregate.sbatch
+```
+
+The array has 63 single-A100 workers, each processing at most 16 identities;
+the reducer rejects a missing or duplicate ID, a dirty worker, a changed
+upstream profile hash, absent NLL statistics, or a shard that was incorrectly
+marked eligible. It computes corpus PPL from summed NLL/token counts and mean
+ROUGE-L from all 1,000 frozen-FullKV paired generations.

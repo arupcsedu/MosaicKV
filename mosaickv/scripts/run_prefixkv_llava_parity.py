@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
-"""Run a controlled official PrefixKV versus ``prefixkv_reimpl`` experiment.
+"""Run a controlled PrefixKV reproduction or parity experiment.
 
 The runner imports the pinned upstream cache implementation without changing
 the submodule.  Both implementations share one legacy LLaVA checkpoint, one
 model instance, one generated offline profile, and the upstream explicit
-generation loop.  Outputs are non-canonical whenever the enclosing MosaicKV
+generation loop.  ``--official-profile-reproduction`` is deliberately a
+different lane: it executes an upstream-shipped profile byte-for-byte on the
+paper's 1,000-example evaluation file.  Upstream did not publish the sample
+identities used to make that profile, so that lane is an official-code
+reproduction, not evidence that a locally calibrated reimplementation is
+equivalent.  Outputs are non-canonical whenever the enclosing MosaicKV
 worktree is dirty; that status is recorded in the manifest.
 """
 
@@ -80,6 +85,33 @@ def _sha256_file(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _load_official_profile(path: Path, *, expected_layers: int | None = None) -> tuple[float, ...]:
+    """Load an unmodified upstream PrefixKV profile and reject ambiguous input.
+
+    The profile stores per-layer *forget* ratios.  It is intentionally not
+    converted to MosaicKV's native profile format: this preserves the exact
+    operating point distributed by the PrefixKV authors.
+    """
+
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f"cannot read official PrefixKV profile {path}: {error}") from error
+    if not isinstance(raw, list) or not raw:
+        raise ValueError("official PrefixKV profile must be a non-empty JSON list")
+    if any(not isinstance(value, (float, int)) or isinstance(value, bool) for value in raw):
+        raise ValueError("official PrefixKV profile must contain numeric forget ratios")
+    ratios = tuple(float(value) for value in raw)
+    if any(not 0.0 <= value <= 1.0 for value in ratios):
+        raise ValueError("official PrefixKV forget ratios must be in [0, 1]")
+    if expected_layers is not None and len(ratios) != expected_layers:
+        raise ValueError(
+            "official PrefixKV profile layer count does not match loaded model: "
+            f"{len(ratios)} != {expected_layers}"
+        )
+    return ratios
 
 
 def _git(root: Path, *arguments: str) -> str:
@@ -599,6 +631,31 @@ def main() -> int:
             "passing official-versus-reimplementation parity gate"
         ),
     )
+    parser.add_argument(
+        "--official-profile-reproduction",
+        action="store_true",
+        help=(
+            "execute only the unmodified official PrefixKV implementation with an "
+            "upstream-shipped profile on the registered 1,000-example evaluation "
+            "set. This is an official-code reproduction lane; it is not a local "
+            "reimplementation-parity claim because upstream profile calibration "
+            "identities were not released."
+        ),
+    )
+    parser.add_argument(
+        "--official-profile-path",
+        type=Path,
+        help="Pinned upstream raw per-layer forget-ratio JSON required by official-profile mode.",
+    )
+    parser.add_argument(
+        "--official-profile-shard",
+        action="store_true",
+        help=(
+            "allow a strict subset of the 1,000 official evaluation identities. A shard is "
+            "never paper eligible by itself and must be validated by a hash-bound union "
+            "aggregator before it can contribute to the official-profile reproduction."
+        ),
+    )
     parser.add_argument("--minimum-token-agreement", type=float, default=0.99)
     parser.add_argument("--maximum-relative-ppl-delta", type=float, default=0.05)
     parser.add_argument("--maximum-rouge-l-delta", type=float, default=0.05)
@@ -618,6 +675,14 @@ def main() -> int:
         raise ValueError("--maximum-retained-byte-delta must be nonnegative")
     if args.calibration_media_root is not None and args.calibration_data_path is None:
         raise ValueError("--calibration-media-root requires --calibration-data-path")
+    if args.paper_reproduction and args.official_profile_reproduction:
+        raise ValueError(
+            "--paper-reproduction and --official-profile-reproduction are mutually exclusive"
+        )
+    if args.official_profile_reproduction and args.official_profile_path is None:
+        raise ValueError("--official-profile-reproduction requires --official-profile-path")
+    if args.official_profile_shard and not args.official_profile_reproduction:
+        raise ValueError("--official-profile-shard requires --official-profile-reproduction")
     if args.paper_reproduction and (
         args.calibration_data_path is None
         or args.calibration_media_root is None
@@ -651,8 +716,38 @@ def main() -> int:
     (work_directory / "confs").mkdir(parents=True, exist_ok=True)
 
     records = _load_records(args.data_path, label="evaluation data-path")
-    calibration_source = args.calibration_data_path or args.data_path
-    calibration_records = _load_records(calibration_source, label="calibration data-path")
+    official_profile_source: Path | None = None
+    if args.official_profile_reproduction:
+        assert args.official_profile_path is not None
+        official_profile_source = args.official_profile_path.resolve()
+        allowed_profiles = (official_root / "confs").resolve()
+        try:
+            official_profile_source.relative_to(allowed_profiles)
+        except ValueError as error:
+            raise ValueError(
+                "--official-profile-path must be an unmodified file below "
+                "third_party/PrefixKV/confs"
+            ) from error
+        if not official_profile_source.is_file():
+            raise ValueError(f"official PrefixKV profile does not exist: {official_profile_source}")
+        expected_profile_name = (
+            f"prefixkv_llava-v1.5-7b_{1.0 - args.retention_ratio}.json"
+        )
+        if official_profile_source.name != expected_profile_name:
+            raise ValueError(
+                "official PrefixKV profile does not match requested retention ratio: "
+                f"expected {expected_profile_name}, got {official_profile_source.name}"
+            )
+        _load_official_profile(official_profile_source)
+
+    calibration_source = None if args.official_profile_reproduction else (
+        args.calibration_data_path or args.data_path
+    )
+    calibration_records = (
+        _load_records(calibration_source, label="calibration data-path")
+        if calibration_source is not None
+        else []
+    )
     calibration_media_root = args.calibration_media_root or args.media_root
     calibration_indices = (
         _parse_indices(args.calibration_indices, field="--calibration-indices")
@@ -664,16 +759,18 @@ def main() -> int:
         if args.evaluation_indices is not None
         else (args.evaluation_index,)
     )
-    same_calibration_source = calibration_source.resolve() == args.data_path.resolve()
+    same_calibration_source = (
+        calibration_source is not None and calibration_source.resolve() == args.data_path.resolve()
+    )
     if same_calibration_source and set(calibration_indices).intersection(evaluation_indices):
         raise ValueError("calibration and evaluation indices must be disjoint")
-    if any(index >= len(calibration_records) for index in calibration_indices):
+    if calibration_source is not None and any(
+        index >= len(calibration_records) for index in calibration_indices
+    ):
         raise IndexError("a calibration index is outside calibration data")
     if any(index >= len(records) for index in evaluation_indices):
         raise IndexError("an evaluation index is outside evaluation data")
-    calibration_items = tuple(
-        calibration_records[index] for index in calibration_indices
-    )
+    calibration_items = tuple(calibration_records[index] for index in calibration_indices)
     evaluation_items = tuple(records[index] for index in evaluation_indices)
     calibration_ids = tuple(str(item["id"]) for item in calibration_items)
     evaluation_ids = tuple(str(item["id"]) for item in evaluation_items)
@@ -685,8 +782,11 @@ def main() -> int:
             "LLaVA-Description file digest differs from the registered paper-native revision: "
             f"expected {DATASET_REVISION}, observed {observed_dataset_revision}"
         )
-    observed_calibration_revision = _sha256_file(calibration_source)
+    observed_calibration_revision = (
+        _sha256_file(calibration_source) if calibration_source is not None else None
+    )
     if args.paper_reproduction:
+        assert calibration_source is not None
         if calibration_source.resolve() == args.data_path.resolve():
             raise RuntimeError("paper reproduction requires a separate calibration source")
         if len(calibration_items) < 10:
@@ -697,6 +797,14 @@ def main() -> int:
             raise RuntimeError(
                 "calibration dataset revision must equal the SHA-256 of calibration data"
             )
+    if (
+        args.official_profile_reproduction
+        and not args.official_profile_shard
+        and len(evaluation_items) != 1000
+    ):
+        raise RuntimeError(
+            "official-profile reproduction requires exactly 1000 LLaVA-Description examples"
+        )
 
     patch_llama_attention_forward()
     tokenizer, model, image_processor, _ = load_pretrained_model(
@@ -708,61 +816,92 @@ def main() -> int:
     model.sample = types.MethodType(sample, model)
     layer_count = int(model.config.num_hidden_layers)
 
-    calibration_observations = []
     calibration_media_hashes: dict[str, str] = {}
-    for calibration_item in calibration_items:
-        calibration_id = str(calibration_item["id"])
-        _, calibration_input_ids, calibration_image, _ = _prepare_sample(
-            calibration_item,
-            tokenizer=tokenizer,
-            image_processor=image_processor,
-            media_root=calibration_media_root,
-            conv_templates=conv_templates,
-            tokenizer_image_token=tokenizer_image_token,
-            image_token_index=IMAGE_TOKEN_INDEX,
-            process_images=process_images,
-            model=model,
+    profile: Any | None = None
+    profile_path: Path | None = None
+    if args.official_profile_reproduction:
+        assert official_profile_source is not None
+        official_ratios = _load_official_profile(
+            official_profile_source, expected_layers=layer_count
         )
-        with torch.inference_mode():
-            calibration_output = model(
-                calibration_input_ids,
-                images=calibration_image,
-                use_cache=True,
-                output_attentions=True,
+        # The upstream class opens a fixed relative ``confs/`` file.  Preserve
+        # its bytes, rather than reserializing its ratios through local code.
+        forget_ratio = 1.0 - args.retention_ratio
+        official_profile_path = (
+            work_directory / "confs" / f"prefixkv_llava-v1.5-7b_{forget_ratio}.json"
+        )
+        official_profile_path.write_bytes(official_profile_source.read_bytes())
+        profile_sha256 = _sha256_file(official_profile_source)
+        profile_payload: dict[str, Any] = {
+            "kind": "official_upstream_raw_profile",
+            "source_path": str(official_profile_source),
+            "source_sha256": profile_sha256,
+            "layer_forget_ratios": list(official_ratios),
+            "calibration_provenance": "unverifiable_upstream_profile_ids_not_released",
+        }
+        execution_kinds = ("official",)
+    else:
+        calibration_observations = []
+        for calibration_item in calibration_items:
+            calibration_id = str(calibration_item["id"])
+            _, calibration_input_ids, calibration_image, _ = _prepare_sample(
+                calibration_item,
+                tokenizer=tokenizer,
+                image_processor=image_processor,
+                media_root=calibration_media_root,
+                conv_templates=conv_templates,
+                tokenizer_image_token=tokenizer_image_token,
+                image_token_index=IMAGE_TOKEN_INDEX,
+                process_images=process_images,
+                model=model,
             )
-        calibration_observations.append(
-            prefixkv_calibration_observation(calibration_id, tuple(calibration_output.attentions))
+            with torch.inference_mode():
+                calibration_output = model(
+                    calibration_input_ids,
+                    images=calibration_image,
+                    use_cache=True,
+                    output_attentions=True,
+                )
+            calibration_observations.append(
+                prefixkv_calibration_observation(
+                    calibration_id, tuple(calibration_output.attentions)
+                )
+            )
+            calibration_media_hashes[calibration_id] = _sha256_file(
+                calibration_media_root / str(calibration_item["image"])
+            )
+            del calibration_output, calibration_image, calibration_input_ids
+            gc.collect()
+            torch.cuda.empty_cache()
+        profile = generate_prefixkv_profile(
+            tuple(calibration_observations),
+            model_id=MODEL_ID,
+            model_revision=MODEL_REPOSITORY_SHA,
+            dataset_id=(args.calibration_dataset_id or DATASET_ID),
+            dataset_revision=(args.calibration_dataset_revision or observed_calibration_revision),
+            calibration_split="detail_1k_calibration",
+            evaluation_sample_ids=evaluation_ids,
+            retention_ratio=args.retention_ratio,
+            seed=args.seed,
+            start_size=1,
+            protect_size=1,
         )
-        calibration_media_hashes[calibration_id] = _sha256_file(
-            calibration_media_root / str(calibration_item["image"])
+        profile.assert_evaluation_disjoint(evaluation_ids)
+        profile_path = profile.write(args.output_directory / "profile.json")
+        forget_ratio = 1.0 - args.retention_ratio
+        official_profile_path = (
+            work_directory / "confs" / f"prefixkv_llava-v1.5-7b_{forget_ratio}.json"
         )
-        del calibration_output, calibration_image, calibration_input_ids
-        gc.collect()
-        torch.cuda.empty_cache()
-    profile = generate_prefixkv_profile(
-        tuple(calibration_observations),
-        model_id=MODEL_ID,
-        model_revision=MODEL_REPOSITORY_SHA,
-        dataset_id=(args.calibration_dataset_id or DATASET_ID),
-        dataset_revision=(args.calibration_dataset_revision or observed_calibration_revision),
-        calibration_split="detail_1k_calibration",
-        evaluation_sample_ids=evaluation_ids,
-        retention_ratio=args.retention_ratio,
-        seed=args.seed,
-        start_size=1,
-        protect_size=1,
-    )
-    profile.assert_evaluation_disjoint(evaluation_ids)
-    profile_path = profile.write(args.output_directory / "profile.json")
-    forget_ratio = 1.0 - args.retention_ratio
-    official_profile_path = work_directory / "confs" / f"prefixkv_llava-v1.5-7b_{forget_ratio}.json"
-    official_profile_path.write_text(
-        json.dumps(list(profile.layer_forget_ratios)) + "\n", encoding="utf-8"
-    )
-    observations: dict[str, list[dict[str, Any]]] = {"official": [], "reimplementation": []}
+        official_profile_path.write_text(
+            json.dumps(list(profile.layer_forget_ratios)) + "\n", encoding="utf-8"
+        )
+        profile_sha256 = profile.profile_sha256
+        profile_payload = profile.to_json_object()
+        execution_kinds = ("official", "reimplementation")
+
+    observations: dict[str, list[dict[str, Any]]] = {kind: [] for kind in execution_kinds}
     selected_positions: dict[str, dict[str, list[list[int]]]] = {
-        "official": {},
-        "reimplementation": {},
+        kind: {} for kind in execution_kinds
     }
     reference_rows: list[dict[str, Any]] = []
     prompt_payloads: list[dict[str, Any]] = []
@@ -811,7 +950,7 @@ def main() -> int:
         evaluation_media_hashes[evaluation_id] = _sha256_file(
             args.media_root / str(evaluation_item["image"])
         )
-        for kind in ("official", "reimplementation"):
+        for kind in execution_kinds:
             generation_criterion = _new_criterion(
                 kind,
                 official_class=OfficialPrefixKV,
@@ -819,7 +958,7 @@ def main() -> int:
                 forget_ratio=forget_ratio,
                 retention_ratio=args.retention_ratio,
                 layer_count=layer_count,
-                profile_path=profile_path,
+                profile_path=profile_path or official_profile_path,
                 profile=profile,
             )
             tokens, answer, latency = _timed_generate(
@@ -837,7 +976,7 @@ def main() -> int:
                 forget_ratio=forget_ratio,
                 retention_ratio=args.retention_ratio,
                 layer_count=layer_count,
-                profile_path=profile_path,
+                profile_path=profile_path or official_profile_path,
                 profile=profile,
             )
             perplexity, nll_sum, token_count = _teacher_forced_ppl(
@@ -900,6 +1039,8 @@ def main() -> int:
     protocol_payload = {
         "runner": "run_prefixkv_llava_parity.py",
         "paper_reproduction": bool(args.paper_reproduction),
+        "official_profile_reproduction": bool(args.official_profile_reproduction),
+        "official_profile_shard": bool(args.official_profile_shard),
         "upstream_attention_patch_sha256": _sha256_file(
             official_root / "patch_attention_forward.py"
         ),
@@ -913,13 +1054,21 @@ def main() -> int:
         "ppl_tokens": args.ppl_tokens,
         "timing": "torch.cuda.Event with synchronize before and after",
         "cublas_workspace_config": os.environ.get("CUBLAS_WORKSPACE_CONFIG", "unset"),
-        "calibration_source": {
-            "path": str(calibration_source.resolve()),
-            "sha256": observed_calibration_revision,
-            "dataset_id": args.calibration_dataset_id or DATASET_ID,
-            "dataset_revision": args.calibration_dataset_revision
-            or observed_calibration_revision,
-        },
+        "calibration_source": (
+            {
+                "path": str(calibration_source.resolve()),
+                "sha256": observed_calibration_revision,
+                "dataset_id": args.calibration_dataset_id or DATASET_ID,
+                "dataset_revision": args.calibration_dataset_revision
+                or observed_calibration_revision,
+            }
+            if calibration_source is not None
+            else {
+                "status": "unverifiable_upstream_profile_ids_not_released",
+                "source_profile_path": str(official_profile_source),
+                "source_profile_sha256": profile_sha256,
+            }
+        ),
         "calibration_indices": list(calibration_indices),
         "evaluation_indices": list(evaluation_indices),
         "parity_thresholds": {
@@ -932,7 +1081,7 @@ def main() -> int:
     # The cache sizes vary with prompt/image length.  This common control is
     # only an identifier for a matched parity set; per-sample physical bytes
     # remain in the observations and must be used for any budget comparison.
-    source_length = observations["reimplementation"][0]["per_layer_cache_sizes"]
+    source_length = observations[execution_kinds[0]][0]["per_layer_cache_sizes"]
     target_slots = sum(int(value) for value in source_length) * int(
         model.config.num_attention_heads
     )
@@ -946,7 +1095,7 @@ def main() -> int:
         evaluation_sample_set_sha256=_sha256_json(list(evaluation_ids)),
         prompt_payload_sha256=_sha256_json(prompt_payloads),
         media_payload_sha256=_sha256_json(evaluation_media_hashes),
-        profile_sha256=profile.profile_sha256,
+        profile_sha256=profile_sha256,
         environment_sha256=_sha256_bytes(environment_freeze.encode("utf-8")),
         hardware_sha256=_sha256_json(hardware_payload),
         measurement_protocol_sha256=_sha256_json(protocol_payload),
@@ -972,7 +1121,7 @@ def main() -> int:
     dirty = bool(_git(root, "status", "--porcelain"))
     config_payload = {
         "controls": asdict(controls),
-        "profile": profile.to_json_object(),
+        "profile": profile_payload,
         "protocol": protocol_payload,
     }
     config_sha = _sha256_json(config_payload)
@@ -1002,11 +1151,27 @@ def main() -> int:
             "revision": DATASET_REVISION,
             "file_sha256": observed_dataset_revision,
             "calibration": {
-                "id": args.calibration_dataset_id or DATASET_ID,
-                "revision": args.calibration_dataset_revision
-                or observed_calibration_revision,
+                "id": (
+                    args.calibration_dataset_id or DATASET_ID
+                    if calibration_source is not None
+                    else None
+                ),
+                "revision": (
+                    args.calibration_dataset_revision or observed_calibration_revision
+                    if calibration_source is not None
+                    else None
+                ),
                 "file_sha256": observed_calibration_revision,
-                "separate_source": calibration_source.resolve() != args.data_path.resolve(),
+                "separate_source": (
+                    calibration_source.resolve() != args.data_path.resolve()
+                    if calibration_source is not None
+                    else None
+                ),
+                "provenance_status": (
+                    "recorded_disjoint_source"
+                    if calibration_source is not None
+                    else "unverifiable_upstream_profile_ids_not_released"
+                ),
             },
             "calibration_sample_ids": list(calibration_ids),
             "evaluation_sample_ids": list(evaluation_ids),
@@ -1017,10 +1182,12 @@ def main() -> int:
             "evaluation_sha256": evaluation_media_hashes,
         },
         "profile": {
-            "native_path": str(profile_path),
-            "native_sha256": profile.profile_sha256,
+            "native_path": str(profile_path) if profile_path is not None else None,
+            "native_sha256": profile.profile_sha256 if profile is not None else None,
             "official_raw_path": str(official_profile_path),
             "official_raw_file_sha256": _sha256_file(official_profile_path),
+            "source_path": str(official_profile_source) if official_profile_source else None,
+            "source_sha256": profile_sha256 if official_profile_source else None,
         },
         "software": _software_versions(),
         "cuda": {
@@ -1034,10 +1201,11 @@ def main() -> int:
         "backend": "hf_legacy_llava_transformers_4.31",
         "attention_implementation": "official_eager_patch",
         "seed": args.seed,
-        "measurement_types": [
-            "baseline_official_measured",
-            "baseline_reimpl_measured",
-        ],
+        "measurement_types": (
+            ["baseline_official_measured"]
+            if args.official_profile_reproduction
+            else ["baseline_official_measured", "baseline_reimpl_measured"]
+        ),
         "protocol": protocol_payload,
         "reference": {
             "samples": reference_rows,
@@ -1048,10 +1216,12 @@ def main() -> int:
     }
 
     artifacts: dict[str, PrefixKVParityArtifact] = {}
-    for kind, implementation, executable_sha, measurement_type in (
-        ("official", "official_prefixkv", OFFICIAL_SHA, "baseline_official_measured"),
-        ("reimplementation", "prefixkv_reimpl", root_sha, "baseline_reimpl_measured"),
-    ):
+    artifact_specs = [("official", "official_prefixkv", OFFICIAL_SHA, "baseline_official_measured")]
+    if not args.official_profile_reproduction:
+        artifact_specs.append(
+            ("reimplementation", "prefixkv_reimpl", root_sha, "baseline_reimpl_measured")
+        )
+    for kind, implementation, executable_sha, measurement_type in artifact_specs:
         samples = []
         for observation in sorted(observations[kind], key=lambda item: str(item["sample_id"])):
             row = dict(observation)
@@ -1072,14 +1242,30 @@ def main() -> int:
         (args.output_directory / f"{kind}.json").write_text(
             json.dumps(artifact.to_json_object(), indent=2, sort_keys=True) + "\n"
         )
-    comparison = compare_prefixkv_artifacts(artifacts["official"], artifacts["reimplementation"])
-    parity_gate = _parity_gate(
-        cast("dict[str, Any]", comparison),
-        minimum_token_agreement=args.minimum_token_agreement,
-        maximum_relative_ppl_delta=args.maximum_relative_ppl_delta,
-        maximum_rouge_l_delta=args.maximum_rouge_l_delta,
-        maximum_retained_byte_delta=args.maximum_retained_byte_delta,
-    )
+    if args.official_profile_reproduction:
+        comparison: dict[str, Any] = {
+            "status": "not_applicable",
+            "reason": (
+                "official-profile reproduction executes the pinned official implementation only; "
+                "local reimplementation parity requires a separately recorded calibration source"
+            ),
+        }
+        parity_gate: dict[str, Any] = {
+            "passed": None,
+            "status": "not_applicable",
+            "reason": comparison["reason"],
+        }
+    else:
+        comparison = compare_prefixkv_artifacts(
+            artifacts["official"], artifacts["reimplementation"]
+        )
+        parity_gate = _parity_gate(
+            cast("dict[str, Any]", comparison),
+            minimum_token_agreement=args.minimum_token_agreement,
+            maximum_relative_ppl_delta=args.maximum_relative_ppl_delta,
+            maximum_rouge_l_delta=args.maximum_rouge_l_delta,
+            maximum_retained_byte_delta=args.maximum_retained_byte_delta,
+        )
     (args.output_directory / "comparison.json").write_text(
         json.dumps(comparison, indent=2, sort_keys=True) + "\n"
     )
@@ -1089,9 +1275,11 @@ def main() -> int:
     ineligibility: list[str] = []
     if dirty:
         ineligibility.append("dirty_worktree")
-    if not args.paper_reproduction:
+    if not (args.paper_reproduction or args.official_profile_reproduction):
         ineligibility.append("diagnostic_mode")
-    if not bool(parity_gate["passed"]):
+    if args.official_profile_reproduction and len(evaluation_items) != 1000:
+        ineligibility.append("incomplete_official_profile_shard")
+    if not args.official_profile_reproduction and not bool(parity_gate["passed"]):
         ineligibility.append("official_reimplementation_parity_gate_failed")
     manifest["paper_eligible"] = not ineligibility
     manifest["paper_ineligibility_reason"] = ";".join(ineligibility) if ineligibility else None
