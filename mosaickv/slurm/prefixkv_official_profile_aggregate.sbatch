@@ -10,6 +10,8 @@
 #SBATCH --time=00:15:00
 #SBATCH --partition=bii
 #SBATCH --export=ALL
+#SBATCH --output=/scratch/djy8hg/runs/mosaickv/slurm/%x-%j.out
+#SBATCH --error=/scratch/djy8hg/runs/mosaickv/slurm/%x-%j.err
 
 set -euo pipefail
 
