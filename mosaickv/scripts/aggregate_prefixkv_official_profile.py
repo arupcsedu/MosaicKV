@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any
 
 DATASET_ID = "PrefixKV/LLaVA-Description"
-DATASET_REVISION = "google-drive-1_I2sokdpv8hLzLUe8UUmFvihbh6Kmytv"
+DATASET_REVISION = "407c2d2f8fc13611d13f72a5e18b8c33bf9c44e6e05278bf0b4da41deeacbe6a"
 EXPECTED_SAMPLE_COUNT = 1000
 DEFAULT_PPL_TARGET = 3.41
 DEFAULT_PPL_TOLERANCE = 0.25

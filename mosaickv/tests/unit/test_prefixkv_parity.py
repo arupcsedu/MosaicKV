@@ -219,6 +219,13 @@ def test_official_profile_mode_never_selects_the_diagnostic_calibration_index() 
         runner._select_calibration_items([], (1,), enabled=True)
 
 
+def test_registered_prefixkv_dataset_revision_is_a_content_hash() -> None:
+    runner = _runner_module()
+    assert runner.DATASET_REVISION == (
+        "407c2d2f8fc13611d13f72a5e18b8c33bf9c44e6e05278bf0b4da41deeacbe6a"
+    )
+
+
 def test_official_profile_aggregator_requires_complete_unique_shard_union(tmp_path: Path) -> None:
     aggregate = _official_profile_aggregator_module()
     aggregate.EXPECTED_SAMPLE_COUNT = 2

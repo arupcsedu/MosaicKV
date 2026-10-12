@@ -54,7 +54,11 @@ OFFICIAL_SHA = "597f1ab032704951550f93bcc8a23f1454b80aa4"
 MODEL_REPOSITORY_SHA = "833edbdc7512240f2a3aa49feeb9468e2297bdbc"
 MODEL_ID = "Zuyan/ElasticCache/llava-v1.5-7b"
 DATASET_ID = "PrefixKV/LLaVA-Description"
-DATASET_REVISION = "google-drive-1_I2sokdpv8hLzLUe8UUmFvihbh6Kmytv"
+# A paper-reproduction manifest must bind the local execution to immutable
+# bytes.  The upstream Google Drive identifier is retained separately because
+# it is provenance metadata, not a content revision.
+DATASET_REVISION = "407c2d2f8fc13611d13f72a5e18b8c33bf9c44e6e05278bf0b4da41deeacbe6a"
+DATASET_SOURCE_ID = "google-drive-1_I2sokdpv8hLzLUe8UUmFvihbh6Kmytv"
 
 
 class CacheCriterion(Protocol):
@@ -1065,6 +1069,7 @@ def main() -> int:
         "paper_reproduction": bool(args.paper_reproduction),
         "official_profile_reproduction": bool(args.official_profile_reproduction),
         "official_profile_shard": bool(args.official_profile_shard),
+        "evaluation_dataset_source_id": DATASET_SOURCE_ID,
         "upstream_attention_patch_sha256": _sha256_file(
             official_root / "patch_attention_forward.py"
         ),
@@ -1173,6 +1178,7 @@ def main() -> int:
         "dataset": {
             "id": DATASET_ID,
             "revision": DATASET_REVISION,
+            "source_identifier": DATASET_SOURCE_ID,
             "file_sha256": observed_dataset_revision,
             "calibration": {
                 "id": (
