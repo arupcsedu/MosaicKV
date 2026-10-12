@@ -206,8 +206,16 @@ def _run_once(
         ledger_sha,
     ]
     if method == "full_kv":
-        if write_fullkv_reference:
-            argv.extend(("--fullkv-reference-output", str(fullkv_reference)))
+        # The paper-native lane requires every FullKV invocation to emit a
+        # reference artifact.  The initial reference is shared by compressed
+        # runs; repeated FullKV timing trials use a private write-once output
+        # so they cannot overwrite that immutable comparison reference.
+        reference_output = (
+            fullkv_reference
+            if write_fullkv_reference
+            else run_root / "fullkv-reference-output.json"
+        )
+        argv.extend(("--fullkv-reference-output", str(reference_output)))
     else:
         if fullkv_reference_sha is None:
             raise ValueError("compressed timing trials require a FullKV reference SHA")

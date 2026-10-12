@@ -85,6 +85,21 @@ def test_persistent_worker_parses_explicit_nonpaper_fullkv_mosaickv_verification
         worker._paired_method_order(("full_kv", "full_kv"), 0)
 
 
+def test_repeated_fullkv_timing_uses_a_private_reference_output(tmp_path: Path) -> None:
+    worker = _script("run_paper_native_latency_v3.py")
+
+    initial = tmp_path / "shared-fullkv-reference.json"
+    timing_root = tmp_path / "runs" / "timing-fullkv"
+    expected = timing_root / "fullkv-reference-output.json"
+
+    # This mirrors the runner's write-once policy: the shared initial
+    # reference belongs only to the compressed comparison, while timed FullKV
+    # repetitions must have a distinct destination.
+    assert initial != expected
+    assert expected.parent.name == "timing-fullkv"
+    assert worker._paired_method_order(("full_kv", "mosaickv_exact"), 2)[0] == "full_kv"
+
+
 def test_paper_native_latency_protocol_rejects_weakened_repetitions(tmp_path: Path) -> None:
     payload = yaml.safe_load(_protocol_path().read_text(encoding="utf-8"))
     payload["timing_protocol"]["timed_repetitions_per_method"] = 19
