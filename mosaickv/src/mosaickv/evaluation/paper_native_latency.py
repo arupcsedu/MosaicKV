@@ -114,11 +114,11 @@ def load_paper_native_latency_protocol(path: str | Path) -> PaperNativeLatencyPr
     if (
         profile.get("stable_head_selector") != "vectorized_unit_block_topk"
         or profile.get("contiguous_prompt_score_reuse") is not True
-        or float(profile.get("routed_head_fraction", -1.0)) != 1.0 / 64.0
+        or float(profile.get("routed_head_fraction", -1.0)) != 1.0 / 256.0
         or profile.get("uniform_physical_capacity_per_layer_head") is not True
     ):
         raise PaperNativeLatencyProtocolError(
-            "MosaicKV latency profile must retain the audited vectorized 1/64-head path"
+            "MosaicKV latency profile must retain the audited vectorized 1/256-head path"
         )
 
     timing = _mapping(payload["timing_protocol"], "timing_protocol")

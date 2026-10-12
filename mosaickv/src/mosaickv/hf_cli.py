@@ -251,7 +251,7 @@ def _paper_native_runtime_profile(
 
     * byte budgeting gives every layer/head one physical position limit;
     * stable heads use deterministic prompt-attention selection directly;
-    * only the highest-uncertainty 1/64 of routes enter the evidence graph;
+    * only the highest-uncertainty 1/256 of routes enter the evidence graph;
     * the graph reranks a bounded prompt shortlist; and
     * MosaicKV deliberately uses at most 69% of the shared compressed cap,
       which preregisters a >30% actual-byte target against a baseline that
@@ -304,7 +304,12 @@ def _paper_native_runtime_profile(
             candidate_neighbor_hops=1,
             screening_group_blocks=4,
             uncertain_head_only=True,
-            uncertain_head_fraction=0.015625,
+            # LLaVA-1.5 has 512 layer/KV-head routes.  Routing 1/256 keeps
+            # two high-entropy routes in the evidence graph while the other
+            # 510 routes use the exact, vectorized Prompt Top-K transaction.
+            # This is intentionally a latency profile, not a budget change:
+            # all routes still share the same dense physical capacity plan.
+            uncertain_head_fraction=1.0 / 256.0,
             uncertain_head_threshold=0.2,
             candidate_nonmandatory_fraction=0.03,
         ),
@@ -322,7 +327,7 @@ def _paper_native_runtime_profile(
         prototypes=replace(
             profiled.prototypes,
             uncertain_head_only=True,
-            uncertain_head_fraction=0.015625,
+            uncertain_head_fraction=1.0 / 256.0,
             uncertain_head_threshold=0.2,
         ),
     )

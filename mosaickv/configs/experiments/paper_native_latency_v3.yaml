@@ -41,7 +41,7 @@ mosaickv_block_one_profile:
   uniform_physical_capacity_per_layer_head: true
   stable_head_selector: vectorized_unit_block_topk
   contiguous_prompt_score_reuse: true
-  routed_head_fraction: 0.015625
+  routed_head_fraction: 0.00390625
   graph_candidate_nonmandatory_fraction: 0.03
   graph_mode: shortlist_rerank
 
