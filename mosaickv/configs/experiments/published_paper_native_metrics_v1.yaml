@@ -34,12 +34,16 @@ protocols:
     tasks:
       - name: llava_description
         dataset: PrefixKV/LLaVA-Description
+        dataset_revision: 407c2d2f8fc13611d13f72a5e18b8c33bf9c44e6e05278bf0b4da41deeacbe6a
         split: official_1000
         sample_count: 1000
         metrics: [teacher_forced_ppl, rouge_l_f1]
         aggregation: token-weighted corpus PPL and mean per-sample ROUGE-L F1
       - name: mmvet_prefixkv
         dataset: PrefixKV/MM-Vet
+        # No immutable source revision has been audited for this paper-specific
+        # materialized route. The protocol loader deliberately blocks execution.
+        dataset_revision: null
         split: official_218
         sample_count: 218
         metrics: [teacher_forced_ppl, rouge_l_f1]
@@ -103,18 +107,21 @@ protocols:
     tasks:
       - name: coco_caption
         dataset: lmms-lab/COCO-Caption
+        dataset_revision: c3213b54e173ae86517d481de17f31439d6f8c72
         split: val
         sample_count: null
         metrics: [cider]
         aggregation: pycocoevalcap corpus CIDEr multiplied by 100
       - name: docvqa
         dataset: lmms-lab/DocVQA
+        dataset_revision: 539088ef8a8ada01ac8e2e6d4e372586748a265e
         split: validation
         sample_count: null
         metrics: [anls]
         aggregation: official mean ANLS
       - name: mathvista
         dataset: AI4Math/MathVista
+        dataset_revision: 2b6ad69445fbb5695c9b165475e8decdbeb97747
         split: testmini
         sample_count: null
         metrics: [mathvista_accuracy]
@@ -173,6 +180,7 @@ protocols:
     tasks:
       - name: milebench
         dataset: MileBench/MileBench
+        dataset_revision: 53c7a58051ef88bacf76541d91f03f5ba2d71e7d
         split: official_evaluation
         sample_count: null
         metrics: [accuracy, rouge_l_f1]

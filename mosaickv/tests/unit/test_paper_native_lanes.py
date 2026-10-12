@@ -256,13 +256,17 @@ def test_protocol_guard_rejects_disabled_and_wrong_operating_points() -> None:
     )
     protocol = resolve_protocol(suite, "prefixkv_hf_reimpl_native_metrics_v1")
     task = default_task_registry().resolve("llava_description")
+    task_revision = next(
+        item.dataset_revision for item in protocol.tasks if item.name == task.name
+    )
+    assert task_revision is not None
     config = load_config(root / "configs/hf_prefixkv_reimpl.yaml")
     config = replace(
         config,
         dataset=replace(
             config.dataset,
             id=task.dataset_id,
-            revision="a" * 40,
+            revision=task_revision,
             split=task.split,
         ),
     )
@@ -298,6 +302,13 @@ def test_protocol_guard_rejects_disabled_and_wrong_operating_points() -> None:
             protocol,
             task=task,
             config=replace(config, dataset=replace(config.dataset, id="wrong/dataset")),
+            environment_lock_sha256=lock_sha,
+        )
+    with pytest.raises(ValueError, match="dataset revision"):
+        validate_protocol_run(
+            protocol,
+            task=task,
+            config=replace(config, dataset=replace(config.dataset, revision="a" * 40)),
             environment_lock_sha256=lock_sha,
         )
     with pytest.raises(ValueError, match="supported backend/attention/precision/lock"):

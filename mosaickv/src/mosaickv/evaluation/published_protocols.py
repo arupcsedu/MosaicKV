@@ -3,10 +3,7 @@
 from __future__ import annotations
 
 import hashlib
-import os
 import re
-import subprocess
-import sys
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from importlib.metadata import PackageNotFoundError, version
@@ -86,6 +83,7 @@ class PublishedTaskContract:
 
     name: str
     dataset: str
+    dataset_revision: str | None
     split: str
     sample_count: int | None
     metrics: tuple[str, ...]
@@ -99,6 +97,13 @@ class PublishedTaskContract:
             raise ValueError("task contract sample_count must be positive")
         if not self.metrics or len(set(self.metrics)) != len(self.metrics):
             raise ValueError("task contract metrics must be non-empty and unique")
+        if self.dataset_revision is not None and re.fullmatch(
+            r"[0-9a-f]{40}(?:[0-9a-f]{24})?", self.dataset_revision
+        ) is None:
+            raise ValueError(
+                "task contract dataset_revision must be a 40- or 64-character "
+                "immutable digest or null"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -227,9 +232,13 @@ def _parse_task(value: object, path: str) -> PublishedTaskContract:
     count = data.get("sample_count")
     if count is not None and (isinstance(count, bool) or not isinstance(count, int)):
         raise ValueError(f"{path}.sample_count must be an integer or null")
+    revision = data.get("dataset_revision")
+    if revision is not None and not isinstance(revision, str):
+        raise ValueError(f"{path}.dataset_revision must be a string or null")
     return PublishedTaskContract(
         name=_required_string(data, "name", path),
         dataset=_required_string(data, "dataset", path),
+        dataset_revision=revision,
         split=_required_string(data, "split", path),
         sample_count=count,
         metrics=tuple(cast("list[str]", metrics)),
@@ -364,6 +373,9 @@ def protocol_summary(suite: PublishedProtocolSuite) -> JsonObject:
                     "paper": protocol.paper,
                     "model": protocol.model,
                     "tasks": [task.name for task in protocol.tasks],
+                    "task_revisions": {
+                        task.name: task.dataset_revision for task in protocol.tasks
+                    },
                     "metrics": sorted(
                         {metric for task in protocol.tasks for metric in task.metrics}
                     ),
@@ -403,32 +415,11 @@ def metric_readiness_issues(suite: PublishedProtocolSuite) -> tuple[str, ...]:
         if installed != expected:
             issues.append(f"dependency {distribution}=={installed}, expected {expected}")
 
-    evaluator_imports = {
-        "ANLS": "lmms_eval.api.metrics",
-        "CIDEr": "lmms_eval.tasks.coco_cap.utils",
-        "ROUGE-L": "rouge",
-    }
-    for evaluator, module_name in evaluator_imports.items():
-        try:
-            __import__(module_name)
-        except Exception as error:
-            issues.append(f"{evaluator} evaluator import failed: {type(error).__name__}: {error}")
-    # lmms-eval constructs its MathVista judge at module import time.  The
-    # dummy provider exercises the exact extraction/scoring module without
-    # requiring credentials or changing the caller's eventual judge choice.
-    mathvista_environment = os.environ.copy()
-    mathvista_environment["API_TYPE"] = "dummy"
-    mathvista_import = subprocess.run(
-        [sys.executable, "-c", "import lmms_eval.tasks.mathvista.utils"],
-        env=mathvista_environment,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if mathvista_import.returncode != 0:
-        detail = mathvista_import.stderr.strip().splitlines()
-        message = detail[-1] if detail else "unknown import failure"
-        issues.append(f"MathVista evaluator import failed: {message}")
+    # Do not import lmms-eval task packages here. Some modules initialize an
+    # optional remote judge at import time, so a generic readiness command can
+    # hang even though the pinned local scorer is installed. The exact
+    # deterministic evaluator imports/formulas are covered by metric fixtures;
+    # a concrete task run validates its own evaluator and records its version.
 
     registry = default_metric_registry()
     from mosaickv.evaluation.milebench import MILEBENCH_DATASET_TO_GROUP
@@ -437,6 +428,10 @@ def metric_readiness_issues(suite: PublishedProtocolSuite) -> tuple[str, ...]:
     task_registry = default_task_registry()
     for protocol in suite.protocols:
         for task in protocol.tasks:
+            if task.dataset_revision is None:
+                issues.append(
+                    f"{protocol.protocol_id}/{task.name}: no immutable dataset revision is declared"
+                )
             contract_metrics = {registry.canonical_name(name) for name in task.metrics}
             if task.name in task_registry.names():
                 routed = task_registry.resolve(task.name)

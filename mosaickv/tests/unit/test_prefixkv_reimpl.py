@@ -14,6 +14,8 @@ from mosaickv.adapters.huggingface import (
     DecodeState,
 )
 from mosaickv.backends.hf_runtime import (
+    HuggingFaceRuntimeError,
+    _assert_prefixkv_common_hf_representable,
     _prefixkv_request_wide_projection,
     maintain_prefixkv_decode_cache,
 )
@@ -162,9 +164,12 @@ def test_offline_profile_controls_adaptive_layer_sizes(tmp_path: Path) -> None:
 
     assert sum(plan.layer_cache_sizes) == 6
     assert plan.layer_cache_sizes == (4, 2)
+    assert plan.has_uniform_layer_capacity is False
     assert plan.profile is not None
     assert plan.profile.profile_sha256 == profile.profile_sha256
     plan.profile.assert_evaluation_disjoint(("eval-0",))
+    with pytest.raises(HuggingFaceRuntimeError, match="variable per-layer capacities"):
+        _assert_prefixkv_common_hf_representable(plan)
     with pytest.raises(PrefixKVReimplementationError, match="overlap"):
         plan.profile.assert_evaluation_disjoint(("cal-1",))
 
@@ -329,6 +334,8 @@ def test_retention_one_is_exact_and_does_not_need_attention() -> None:
     )
     assert plan.layer_cache_sizes == (6, 6)
     assert plan.retained_bytes == state.active_bytes
+    assert plan.has_uniform_layer_capacity is True
+    _assert_prefixkv_common_hf_representable(plan)
     assert plan.implementation_label == "generalized_prefixkv_reimpl"
 
 

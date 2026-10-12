@@ -112,6 +112,11 @@ class PrefixKVSampleObservation:
     latency_seconds: float
     perplexity: float | None = None
     rouge_l_f1: float | None = None
+    # These optional sufficient statistics keep schema-v1 artifacts readable
+    # while allowing a later multi-sample runner to report corpus PPL rather
+    # than the mathematically incorrect mean of per-sample perplexities.
+    nll_sum: float | None = None
+    evaluated_token_count: int | None = None
 
     def __post_init__(self) -> None:
         if not self.sample_id.strip() or not self.per_layer_cache_sizes:
@@ -128,10 +133,25 @@ class PrefixKVSampleObservation:
             raise PrefixKVParityError("generated token IDs must be non-empty and nonnegative")
         if not math.isfinite(self.latency_seconds) or self.latency_seconds < 0:
             raise PrefixKVParityError("latency_seconds must be finite and nonnegative")
-        for name in ("perplexity", "rouge_l_f1"):
+        for name in ("perplexity", "rouge_l_f1", "nll_sum"):
             value = getattr(self, name)
             if value is not None and (not math.isfinite(value) or value < 0):
                 raise PrefixKVParityError(f"{name} must be finite and nonnegative or null")
+        if self.evaluated_token_count is not None and self.evaluated_token_count < 1:
+            raise PrefixKVParityError("evaluated_token_count must be positive or null")
+        if (self.nll_sum is None) != (self.evaluated_token_count is None):
+            raise PrefixKVParityError(
+                "nll_sum and evaluated_token_count must either both be present or both be null"
+            )
+        if self.nll_sum is not None:
+            assert self.evaluated_token_count is not None
+            expected_ppl = math.exp(self.nll_sum / self.evaluated_token_count)
+            if self.perplexity is None or not math.isclose(
+                self.perplexity, expected_ppl, rel_tol=1e-5, abs_tol=1e-6
+            ):
+                raise PrefixKVParityError(
+                    "perplexity must equal exp(nll_sum / evaluated_token_count)"
+                )
 
     @classmethod
     def from_json_object(cls, payload: JsonObject) -> PrefixKVSampleObservation:
@@ -146,6 +166,12 @@ class PrefixKVSampleObservation:
             latency_seconds=float(data["latency_seconds"]),
             perplexity=(None if data.get("perplexity") is None else float(data["perplexity"])),
             rouge_l_f1=(None if data.get("rouge_l_f1") is None else float(data["rouge_l_f1"])),
+            nll_sum=(None if data.get("nll_sum") is None else float(data["nll_sum"])),
+            evaluated_token_count=(
+                None
+                if data.get("evaluated_token_count") is None
+                else int(data["evaluated_token_count"])
+            ),
         )
 
 
@@ -291,6 +317,21 @@ def compare_prefixkv_artifacts(
                 "latency_delta_seconds": second.latency_seconds - first.latency_seconds,
             }
         )
+    def _corpus_ppl(samples: tuple[PrefixKVSampleObservation, ...]) -> float | None:
+        if any(
+            sample.nll_sum is None or sample.evaluated_token_count is None for sample in samples
+        ):
+            return None
+        total_nll = sum(float(sample.nll_sum) for sample in samples if sample.nll_sum is not None)
+        total_tokens = sum(
+            int(sample.evaluated_token_count)
+            for sample in samples
+            if sample.evaluated_token_count is not None
+        )
+        return math.exp(total_nll / total_tokens)
+
+    official_corpus_ppl = _corpus_ppl(official.samples)
+    reimplementation_corpus_ppl = _corpus_ppl(reimplementation.samples)
     return cast(
         "JsonObject",
         {
@@ -298,6 +339,27 @@ def compare_prefixkv_artifacts(
             "control_mismatches": [],
             "official_repository_sha": official.official_repository_sha,
             "samples": rows,
+            "corpus": {
+                "sample_count": len(rows),
+                "official_teacher_forced_ppl": official_corpus_ppl,
+                "reimpl_teacher_forced_ppl": reimplementation_corpus_ppl,
+                "teacher_forced_ppl_delta": (
+                    None
+                    if official_corpus_ppl is None or reimplementation_corpus_ppl is None
+                    else reimplementation_corpus_ppl - official_corpus_ppl
+                ),
+                "official_mean_rouge_l_f1": (
+                    None
+                    if any(sample.rouge_l_f1 is None for sample in official.samples)
+                    else sum(float(sample.rouge_l_f1) for sample in official.samples) / len(rows)
+                ),
+                "reimpl_mean_rouge_l_f1": (
+                    None
+                    if any(sample.rouge_l_f1 is None for sample in reimplementation.samples)
+                    else sum(float(sample.rouge_l_f1) for sample in reimplementation.samples)
+                    / len(rows)
+                ),
+            },
         },
     )
 

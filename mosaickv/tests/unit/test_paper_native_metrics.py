@@ -878,4 +878,14 @@ def test_versioned_published_protocol_suite_is_valid() -> None:
         for method in protocol.methods
     )
     assert len(suite.sha256) == 64
-    assert metric_readiness_issues(suite) == ()
+    # MM-Vet remains deliberately fail-closed until its paper-specific
+    # materialized source revision is audited. This must be visible rather
+    # than silently accepting an arbitrary user-supplied dataset revision.
+    issues = metric_readiness_issues(suite)
+    assert (
+        "prefixkv_hf_reimpl_native_metrics_v1/mmvet_prefixkv: "
+        "no immutable dataset revision is declared"
+    ) in issues
+    # Module discovery is deliberately side-effect free: optional lmms-eval
+    # judge imports are validated only by their specific fixture/task lane.
+    assert len(issues) == 1

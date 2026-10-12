@@ -805,6 +805,15 @@ def validate_protocol_run(
         raise ValueError("run dataset/split does not match the published protocol")
     if re.fullmatch(r"[0-9a-f]{40,64}", config.dataset.revision) is None:
         raise ValueError("paper reproduction requires an immutable dataset/artifact revision")
+    if task_contract.dataset_revision is None:
+        raise ValueError(
+            f"task {task.name!r} has no reviewed immutable dataset revision; "
+            "paper-reproduction execution is blocked"
+        )
+    if config.dataset.revision != task_contract.dataset_revision:
+        raise ValueError(
+            "run dataset revision does not match the published protocol task contract"
+        )
     environment = protocol.supported_environment
     observed_environment = (
         config.execution.backend.value,

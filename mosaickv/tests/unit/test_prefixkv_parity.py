@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import math
 from dataclasses import replace
 from typing import cast
+
+import pytest
 
 from mosaickv.baselines import (
     PrefixKVParityArtifact,
@@ -96,3 +99,41 @@ def test_parity_report_refuses_different_controls() -> None:
     report = compare_prefixkv_artifacts(official, reimplementation)
     assert report["status"] == "not_comparable"
     assert report["control_mismatches"] == ["seed"]
+
+
+def test_parity_report_aggregates_nll_before_exponentiating() -> None:
+    first = PrefixKVSampleObservation(
+        sample_id="sample-0",
+        per_layer_cache_sizes=(20,),
+        total_retained_bytes=4096,
+        actual_active_kv_bytes=4096,
+        generated_answer="first",
+        generated_token_ids=(1,),
+        latency_seconds=0.1,
+        perplexity=2.0,
+        nll_sum=2.0 * math.log(2.0),
+        evaluated_token_count=2,
+        rouge_l_f1=0.5,
+    )
+    second = PrefixKVSampleObservation(
+        sample_id="sample-1",
+        per_layer_cache_sizes=(20,),
+        total_retained_bytes=4096,
+        actual_active_kv_bytes=4096,
+        generated_answer="second",
+        generated_token_ids=(2,),
+        latency_seconds=0.1,
+        perplexity=4.0,
+        nll_sum=4.0 * math.log(4.0),
+        evaluated_token_count=4,
+        rouge_l_f1=1.0,
+    )
+    official = replace(_artifact("official_prefixkv"), samples=(first, second))
+    reimplementation = replace(_artifact("prefixkv_reimpl"), samples=(first, second))
+
+    report = compare_prefixkv_artifacts(official, reimplementation)
+    corpus = cast(JsonObject, report["corpus"])
+    assert corpus["sample_count"] == 2
+    # exp((2 log 2 + 4 log 4) / 6), not mean(2, 4).
+    assert float(corpus["official_teacher_forced_ppl"]) == pytest.approx(3.1748021)
+    assert float(corpus["official_mean_rouge_l_f1"]) == 0.75

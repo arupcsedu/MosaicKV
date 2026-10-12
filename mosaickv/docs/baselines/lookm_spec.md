@@ -195,5 +195,7 @@ This command validates only `lookm_reimpl`. It must not populate an
 
 The checkpoint/backend row prevents an official-vs-reimplementation result
 from being called directly comparable today. See
-[`lookm_parity_report.md`](lookm_parity_report.md). No numerical parity value
-may be filled until the comparison validator reports `status: comparable`.
+[`lookm_parity_report.md`](lookm_parity_report.md) and the exact
+[`official execution blocker`](lookm_official_execution_blocker.md). No
+numerical parity value may be filled until the comparison validator reports
+`status: comparable`.

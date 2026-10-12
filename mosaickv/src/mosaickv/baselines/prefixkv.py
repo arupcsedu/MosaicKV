@@ -607,6 +607,19 @@ class PrefixKVCompressionPlan:
     def layer_cache_sizes(self) -> tuple[int, ...]:
         return tuple(layer.retained_positions for layer in self.layers)
 
+    @property
+    def has_uniform_layer_capacity(self) -> bool:
+        """Whether common-length HF cache transport can represent this plan exactly.
+
+        Upstream PrefixKV allows a different retained prefix length for every
+        decoder layer. MosaicKV's shared HF transport uses one physical prompt
+        length and attention-mask extent across layers. Padding this plan to
+        that common extent changes its measured active storage, so such a
+        padded execution is not paper-faithful PrefixKV.
+        """
+
+        return len(set(self.layer_cache_sizes)) == 1
+
     def trace(self) -> JsonObject:
         return {
             "implementation": "prefixkv_reimpl",

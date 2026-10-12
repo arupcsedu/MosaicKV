@@ -363,7 +363,7 @@ def _teacher_forced_ppl(
     *,
     criterion: CacheCriterion,
     token_limit: int,
-) -> float:
+) -> tuple[float, float, int]:
     answer_ids = tokenizer.encode(answer, return_tensors="pt").to(model.device)[:, 1:]
     answer_ids = answer_ids[:, :token_limit]
     if answer_ids.shape[-1] == 0:
@@ -394,7 +394,31 @@ def _teacher_forced_ppl(
             label = answer_ids[:, index : index + 1].reshape(-1)
             losses.append(loss_fn(logits[-1:].float(), label))
             cache = criterion(output.past_key_values, logical_length, output.attentions)
-    return float(torch.exp(torch.stack(losses).mean()).detach().cpu().item())
+    nll_sum = float(torch.stack(losses).sum().detach().cpu().item())
+    token_count = len(losses)
+    return math.exp(nll_sum / token_count), nll_sum, token_count
+
+
+def _parse_indices(value: str, *, field: str) -> tuple[int, ...]:
+    """Parse a deterministic, explicit comma-separated index set."""
+
+    parsed: list[int] = []
+    for raw in value.split(","):
+        item = raw.strip()
+        if not item:
+            continue
+        try:
+            index = int(item)
+        except ValueError as error:
+            raise ValueError(f"{field} must contain comma-separated integers") from error
+        if index < 0:
+            raise ValueError(f"{field} cannot contain negative indices")
+        parsed.append(index)
+    if not parsed:
+        raise ValueError(f"{field} cannot be empty")
+    if len(parsed) != len(set(parsed)):
+        raise ValueError(f"{field} contains duplicate indices")
+    return tuple(sorted(parsed))
 
 
 def _new_criterion(
@@ -446,19 +470,32 @@ def main() -> int:
     parser.add_argument("--data-path", type=Path, required=True)
     parser.add_argument("--media-root", type=Path, required=True)
     parser.add_argument("--output-directory", type=Path, required=True)
+    parser.add_argument(
+        "--calibration-indices",
+        help="Comma-separated calibration indices. Overrides --calibration-index.",
+    )
+    parser.add_argument(
+        "--evaluation-indices",
+        help="Comma-separated evaluation indices. Overrides --evaluation-index.",
+    )
     parser.add_argument("--calibration-index", type=int, default=1)
     parser.add_argument("--evaluation-index", type=int, default=0)
     parser.add_argument("--retention-ratio", type=float, default=0.5)
     parser.add_argument("--max-new-tokens", type=int, default=16)
-    parser.add_argument("--ppl-tokens", type=int, default=16)
+    parser.add_argument(
+        "--ppl-tokens",
+        type=int,
+        default=136,
+        help="Maximum teacher-forced continuation tokens (paper-native default: 136).",
+    )
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
     if not torch.cuda.is_available():
         raise RuntimeError("official PrefixKV parity requires CUDA")
-    if args.calibration_index == args.evaluation_index:
-        raise ValueError("calibration and evaluation indices must differ")
     if not 0 < args.retention_ratio <= 1:
         raise ValueError("retention ratio must be in (0, 1]")
+    if args.ppl_tokens < 1:
+        raise ValueError("--ppl-tokens must be positive")
 
     root = args.repository_root.resolve()
     official_root = root / "third_party" / "PrefixKV"
@@ -482,12 +519,38 @@ def main() -> int:
     (work_directory / "confs").mkdir(parents=True, exist_ok=True)
 
     records = json.loads(args.data_path.read_text(encoding="utf-8"))
-    calibration_item = cast("dict[str, Any]", records[args.calibration_index])
-    evaluation_item = cast("dict[str, Any]", records[args.evaluation_index])
-    calibration_id = str(calibration_item["id"])
-    evaluation_id = str(evaluation_item["id"])
-    if calibration_id == evaluation_id:
-        raise RuntimeError("calibration/evaluation sample ID overlap")
+    if not isinstance(records, list) or not records:
+        raise ValueError("data-path must contain a non-empty JSON array")
+    calibration_indices = (
+        _parse_indices(args.calibration_indices, field="--calibration-indices")
+        if args.calibration_indices is not None
+        else (args.calibration_index,)
+    )
+    evaluation_indices = (
+        _parse_indices(args.evaluation_indices, field="--evaluation-indices")
+        if args.evaluation_indices is not None
+        else (args.evaluation_index,)
+    )
+    if set(calibration_indices).intersection(evaluation_indices):
+        raise ValueError("calibration and evaluation indices must be disjoint")
+    if any(index >= len(records) for index in (*calibration_indices, *evaluation_indices)):
+        raise IndexError("calibration or evaluation index is outside the dataset")
+    calibration_items = tuple(
+        cast("dict[str, Any]", records[index]) for index in calibration_indices
+    )
+    evaluation_items = tuple(
+        cast("dict[str, Any]", records[index]) for index in evaluation_indices
+    )
+    calibration_ids = tuple(str(item["id"]) for item in calibration_items)
+    evaluation_ids = tuple(str(item["id"]) for item in evaluation_items)
+    if len(set((*calibration_ids, *evaluation_ids))) != len(calibration_ids) + len(evaluation_ids):
+        raise RuntimeError("calibration/evaluation sample IDs overlap or are not unique")
+    observed_dataset_revision = _sha256_file(args.data_path)
+    if observed_dataset_revision != DATASET_REVISION:
+        raise RuntimeError(
+            "LLaVA-Description file digest differs from the registered paper-native revision: "
+            f"expected {DATASET_REVISION}, observed {observed_dataset_revision}"
+        )
 
     patch_llama_attention_forward()
     tokenizer, model, image_processor, _ = load_pretrained_model(
@@ -499,130 +562,173 @@ def main() -> int:
     model.sample = types.MethodType(sample, model)
     layer_count = int(model.config.num_hidden_layers)
 
-    _, calibration_ids, calibration_image, _ = _prepare_sample(
-        calibration_item,
-        tokenizer=tokenizer,
-        image_processor=image_processor,
-        media_root=args.media_root,
-        conv_templates=conv_templates,
-        tokenizer_image_token=tokenizer_image_token,
-        image_token_index=IMAGE_TOKEN_INDEX,
-        process_images=process_images,
-        model=model,
-    )
-    with torch.inference_mode():
-        calibration_output = model(
-            calibration_ids,
-            images=calibration_image,
-            use_cache=True,
-            output_attentions=True,
+    calibration_observations = []
+    calibration_media_hashes: dict[str, str] = {}
+    for calibration_item in calibration_items:
+        calibration_id = str(calibration_item["id"])
+        _, calibration_input_ids, calibration_image, _ = _prepare_sample(
+            calibration_item,
+            tokenizer=tokenizer,
+            image_processor=image_processor,
+            media_root=args.media_root,
+            conv_templates=conv_templates,
+            tokenizer_image_token=tokenizer_image_token,
+            image_token_index=IMAGE_TOKEN_INDEX,
+            process_images=process_images,
+            model=model,
         )
-    observation = prefixkv_calibration_observation(
-        calibration_id, tuple(calibration_output.attentions)
-    )
+        with torch.inference_mode():
+            calibration_output = model(
+                calibration_input_ids,
+                images=calibration_image,
+                use_cache=True,
+                output_attentions=True,
+            )
+        calibration_observations.append(
+            prefixkv_calibration_observation(calibration_id, tuple(calibration_output.attentions))
+        )
+        calibration_media_hashes[calibration_id] = _sha256_file(
+            args.media_root / str(calibration_item["image"])
+        )
+        del calibration_output, calibration_image, calibration_input_ids
+        gc.collect()
+        torch.cuda.empty_cache()
     profile = generate_prefixkv_profile(
-        (observation,),
+        tuple(calibration_observations),
         model_id=MODEL_ID,
         model_revision=MODEL_REPOSITORY_SHA,
         dataset_id=DATASET_ID,
         dataset_revision=DATASET_REVISION,
         calibration_split="detail_1k_calibration",
-        evaluation_sample_ids=(evaluation_id,),
+        evaluation_sample_ids=evaluation_ids,
         retention_ratio=args.retention_ratio,
         seed=args.seed,
         start_size=1,
         protect_size=1,
     )
-    profile.assert_evaluation_disjoint((evaluation_id,))
+    profile.assert_evaluation_disjoint(evaluation_ids)
     profile_path = profile.write(args.output_directory / "profile.json")
     forget_ratio = 1.0 - args.retention_ratio
     official_profile_path = work_directory / "confs" / f"prefixkv_llava-v1.5-7b_{forget_ratio}.json"
     official_profile_path.write_text(
         json.dumps(list(profile.layer_forget_ratios)) + "\n", encoding="utf-8"
     )
-    del calibration_output, calibration_image, calibration_ids
-    gc.collect()
-    torch.cuda.empty_cache()
-
-    evaluation_prompt, evaluation_ids, evaluation_image, reference_answer = _prepare_sample(
-        evaluation_item,
-        tokenizer=tokenizer,
-        image_processor=image_processor,
-        media_root=args.media_root,
-        conv_templates=conv_templates,
-        tokenizer_image_token=tokenizer_image_token,
-        image_token_index=IMAGE_TOKEN_INDEX,
-        process_images=process_images,
-        model=model,
-    )
-
-    full_tokens, full_answer, full_latency = _timed_generate(
-        model,
-        tokenizer,
-        evaluation_ids,
-        evaluation_image,
-        criterion=None,
-        max_new_tokens=args.max_new_tokens,
-    )
-    observations: dict[str, dict[str, Any]] = {}
-    selected_positions: dict[str, list[list[int]]] = {}
-    for kind in ("official", "reimplementation"):
-        generation_criterion = _new_criterion(
-            kind,
-            official_class=OfficialPrefixKV,
-            work_directory=work_directory,
-            forget_ratio=forget_ratio,
-            retention_ratio=args.retention_ratio,
-            layer_count=layer_count,
-            profile_path=profile_path,
-            profile=profile,
-        )
-        tokens, answer, latency = _timed_generate(
-            model,
-            tokenizer,
-            evaluation_ids,
-            evaluation_image,
-            criterion=generation_criterion,
-            max_new_tokens=args.max_new_tokens,
-        )
-        ppl_criterion = _new_criterion(
-            kind,
-            official_class=OfficialPrefixKV,
-            work_directory=work_directory,
-            forget_ratio=forget_ratio,
-            retention_ratio=args.retention_ratio,
-            layer_count=layer_count,
-            profile_path=profile_path,
-            profile=profile,
-        )
-        perplexity = _teacher_forced_ppl(
-            model,
-            tokenizer,
-            evaluation_ids,
+    observations: dict[str, list[dict[str, Any]]] = {"official": [], "reimplementation": []}
+    selected_positions: dict[str, dict[str, list[list[int]]]] = {
+        "official": {},
+        "reimplementation": {},
+    }
+    reference_rows: list[dict[str, Any]] = []
+    prompt_payloads: list[dict[str, Any]] = []
+    evaluation_media_hashes: dict[str, str] = {}
+    for evaluation_item in evaluation_items:
+        evaluation_id = str(evaluation_item["id"])
+        (
+            evaluation_prompt,
+            evaluation_input_ids,
             evaluation_image,
             reference_answer,
-            criterion=ppl_criterion,
-            token_limit=args.ppl_tokens,
+        ) = _prepare_sample(
+            evaluation_item,
+            tokenizer=tokenizer,
+            image_processor=image_processor,
+            media_root=args.media_root,
+            conv_templates=conv_templates,
+            tokenizer_image_token=tokenizer_image_token,
+            image_token_index=IMAGE_TOKEN_INDEX,
+            process_images=process_images,
+            model=model,
         )
-        rouge_l = Rouge().get_scores(answer, full_answer)[0]["rouge-l"]["f"]
-        observations[kind] = {
-            "sample_id": evaluation_id,
-            "per_layer_cache_sizes": generation_criterion.initial_layer_sizes,
-            "total_retained_bytes": generation_criterion.initial_active_bytes,
-            "actual_active_kv_bytes": generation_criterion.initial_active_bytes,
-            "generated_answer": answer,
-            "generated_token_ids": tokens,
-            "latency_seconds": latency,
-            "perplexity": perplexity,
-            "rouge_l_f1": float(rouge_l),
-            "final_active_kv_bytes": generation_criterion.final_active_bytes,
-            "rouge_l_f1_human_reference": float(
-                Rouge().get_scores(answer, reference_answer)[0]["rouge-l"]["f"]
-            ),
-        }
-        selected_positions[kind] = [
-            list(layer) for layer in generation_criterion.selected_positions
-        ]
+        full_tokens, full_answer, full_latency = _timed_generate(
+            model,
+            tokenizer,
+            evaluation_input_ids,
+            evaluation_image,
+            criterion=None,
+            max_new_tokens=args.max_new_tokens,
+        )
+        reference_rows.append(
+            {
+                "sample_id": evaluation_id,
+                "generated_token_ids": full_tokens,
+                "generated_answer": full_answer,
+                "latency_seconds": full_latency,
+            }
+        )
+        prompt_payloads.append(
+            {
+                "sample_id": evaluation_id,
+                "prompt": evaluation_prompt,
+                "input_ids": evaluation_input_ids.detach().cpu().tolist(),
+            }
+        )
+        evaluation_media_hashes[evaluation_id] = _sha256_file(
+            args.media_root / str(evaluation_item["image"])
+        )
+        for kind in ("official", "reimplementation"):
+            generation_criterion = _new_criterion(
+                kind,
+                official_class=OfficialPrefixKV,
+                work_directory=work_directory,
+                forget_ratio=forget_ratio,
+                retention_ratio=args.retention_ratio,
+                layer_count=layer_count,
+                profile_path=profile_path,
+                profile=profile,
+            )
+            tokens, answer, latency = _timed_generate(
+                model,
+                tokenizer,
+                evaluation_input_ids,
+                evaluation_image,
+                criterion=generation_criterion,
+                max_new_tokens=args.max_new_tokens,
+            )
+            ppl_criterion = _new_criterion(
+                kind,
+                official_class=OfficialPrefixKV,
+                work_directory=work_directory,
+                forget_ratio=forget_ratio,
+                retention_ratio=args.retention_ratio,
+                layer_count=layer_count,
+                profile_path=profile_path,
+                profile=profile,
+            )
+            perplexity, nll_sum, token_count = _teacher_forced_ppl(
+                model,
+                tokenizer,
+                evaluation_input_ids,
+                evaluation_image,
+                reference_answer,
+                criterion=ppl_criterion,
+                token_limit=args.ppl_tokens,
+            )
+            rouge_l = Rouge().get_scores(answer, full_answer)[0]["rouge-l"]["f"]
+            observations[kind].append(
+                {
+                    "sample_id": evaluation_id,
+                    "per_layer_cache_sizes": generation_criterion.initial_layer_sizes,
+                    "total_retained_bytes": generation_criterion.initial_active_bytes,
+                    "actual_active_kv_bytes": generation_criterion.initial_active_bytes,
+                    "generated_answer": answer,
+                    "generated_token_ids": tokens,
+                    "latency_seconds": latency,
+                    "perplexity": perplexity,
+                    "nll_sum": nll_sum,
+                    "evaluated_token_count": token_count,
+                    "rouge_l_f1": float(rouge_l),
+                    "final_active_kv_bytes": generation_criterion.final_active_bytes,
+                    "rouge_l_f1_human_reference": float(
+                        Rouge().get_scores(answer, reference_answer)[0]["rouge-l"]["f"]
+                    ),
+                }
+            )
+            selected_positions[kind][evaluation_id] = [
+                list(layer) for layer in generation_criterion.selected_positions
+            ]
+            gc.collect()
+            torch.cuda.empty_cache()
+        del evaluation_image, evaluation_input_ids
         gc.collect()
         torch.cuda.empty_cache()
 
@@ -660,10 +766,13 @@ def main() -> int:
         "ppl_tokens": args.ppl_tokens,
         "timing": "torch.cuda.Event with synchronize before and after",
         "cublas_workspace_config": os.environ.get("CUBLAS_WORKSPACE_CONFIG", "unset"),
-        "calibration_index": args.calibration_index,
-        "evaluation_index": args.evaluation_index,
+        "calibration_indices": list(calibration_indices),
+        "evaluation_indices": list(evaluation_indices),
     }
-    source_length = observations["reimplementation"]["per_layer_cache_sizes"]
+    # The cache sizes vary with prompt/image length.  This common control is
+    # only an identifier for a matched parity set; per-sample physical bytes
+    # remain in the observations and must be used for any budget comparison.
+    source_length = observations["reimplementation"][0]["per_layer_cache_sizes"]
     target_slots = sum(int(value) for value in source_length) * int(
         model.config.num_attention_heads
     )
@@ -673,15 +782,10 @@ def main() -> int:
         tokenizer_revision=MODEL_REPOSITORY_SHA,
         dataset_id=DATASET_ID,
         dataset_revision=DATASET_REVISION,
-        calibration_sample_set_sha256=_sha256_json([calibration_id]),
-        evaluation_sample_set_sha256=_sha256_json([evaluation_id]),
-        prompt_payload_sha256=_sha256_json(
-            {
-                "prompt": evaluation_prompt,
-                "input_ids": evaluation_ids.detach().cpu().tolist(),
-            }
-        ),
-        media_payload_sha256=_sha256_file(args.media_root / str(evaluation_item["image"])),
+        calibration_sample_set_sha256=_sha256_json(list(calibration_ids)),
+        evaluation_sample_set_sha256=_sha256_json(list(evaluation_ids)),
+        prompt_payload_sha256=_sha256_json(prompt_payloads),
+        media_payload_sha256=_sha256_json(evaluation_media_hashes),
         profile_sha256=profile.profile_sha256,
         environment_sha256=_sha256_bytes(environment_freeze.encode("utf-8")),
         hardware_sha256=_sha256_json(hardware_payload),
@@ -735,14 +839,14 @@ def main() -> int:
         "dataset": {
             "id": DATASET_ID,
             "revision": DATASET_REVISION,
-            "file_sha256": _sha256_file(args.data_path),
-            "calibration_sample_ids": [calibration_id],
-            "evaluation_sample_ids": [evaluation_id],
+            "file_sha256": observed_dataset_revision,
+            "calibration_sample_ids": list(calibration_ids),
+            "evaluation_sample_ids": list(evaluation_ids),
             "intersection": [],
         },
         "media": {
-            "calibration_sha256": _sha256_file(args.media_root / str(calibration_item["image"])),
-            "evaluation_sha256": _sha256_file(args.media_root / str(evaluation_item["image"])),
+            "calibration_sha256": calibration_media_hashes,
+            "evaluation_sha256": evaluation_media_hashes,
         },
         "profile": {
             "native_path": str(profile_path),
@@ -768,9 +872,7 @@ def main() -> int:
         ],
         "protocol": protocol_payload,
         "reference": {
-            "generated_token_ids": full_tokens,
-            "generated_answer": full_answer,
-            "latency_seconds": full_latency,
+            "samples": reference_rows,
         },
         "selected_positions": selected_positions,
         "extended_observations": observations,
@@ -783,9 +885,12 @@ def main() -> int:
         ("official", "official_prefixkv", OFFICIAL_SHA, "baseline_official_measured"),
         ("reimplementation", "prefixkv_reimpl", root_sha, "baseline_reimpl_measured"),
     ):
-        row = dict(observations[kind])
-        row.pop("final_active_kv_bytes")
-        row.pop("rouge_l_f1_human_reference")
+        samples = []
+        for observation in sorted(observations[kind], key=lambda item: str(item["sample_id"])):
+            row = dict(observation)
+            row.pop("final_active_kv_bytes")
+            row.pop("rouge_l_f1_human_reference")
+            samples.append(PrefixKVSampleObservation(**row))
         artifact = PrefixKVParityArtifact(
             implementation=implementation,
             official_repository_sha=OFFICIAL_SHA,
@@ -794,7 +899,7 @@ def main() -> int:
             manifest_path=str(manifest_path),
             measurement_type=measurement_type,
             controls=controls,
-            samples=(PrefixKVSampleObservation(**row),),
+            samples=tuple(samples),
         )
         artifacts[kind] = artifact
         (args.output_directory / f"{kind}.json").write_text(

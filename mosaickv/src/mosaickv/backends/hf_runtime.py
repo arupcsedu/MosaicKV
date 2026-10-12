@@ -148,6 +148,20 @@ class HuggingFaceRuntimeError(RuntimeError):
     mosaickv_failure_trace_payload: JsonObject | None = None
 
 
+def _assert_prefixkv_common_hf_representable(plan: PrefixKVCompressionPlan) -> None:
+    """Reject variable-layer PrefixKV before the common packer adds padding."""
+
+    if plan.has_uniform_layer_capacity:
+        return
+    capacities = plan.layer_cache_sizes
+    raise HuggingFaceRuntimeError(
+        "the common HF cache transport cannot faithfully materialize PrefixKV's "
+        "variable per-layer capacities without physical padding; use the isolated "
+        "official PrefixKV runner for this paper-native profile "
+        f"(min_capacity={min(capacities)}, max_capacity={max(capacities)})"
+    )
+
+
 def _hard_budget_fallback_trace_payload(
     decision_record: JsonObject,
     *,
@@ -9519,6 +9533,7 @@ class HuggingFaceMosaicKVModel:
                             ),
                         ),
                     )
+                    _assert_prefixkv_common_hf_representable(prefixkv_plan)
                     packed_state = None
                     prototype_records = ()
                     logical_prefill_active_kv_bytes = prefixkv_plan.retained_bytes
