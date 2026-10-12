@@ -6,7 +6,10 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=12
-#SBATCH --mem=0
+# 96 GiB is the conservative request validated by prior PrefixKV jobs.  Do
+# not use --mem=0: on this partition it expands each one-GPU worker to a
+# 375-GiB allocation and prevents efficient packing on the shared 2-TiB node.
+#SBATCH --mem=96G
 #SBATCH --time=02:00:00
 #SBATCH --partition=bii-gpu
 #SBATCH --reservation=bi_fox_dgx
