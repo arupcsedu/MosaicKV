@@ -1,4 +1,8 @@
 schema_version: 1
+# Planning-schema fixture only.  The generic HF runtime intentionally rejects
+# compressed PrefixKV because it cannot express the method's per-layer
+# decode-time cache lengths.  Use slurm/prefixkv_official_parity.sbatch and
+# scripts/run_prefixkv_llava_parity.py for the isolated pinned implementation.
 method: prefixkv_reimpl
 
 model:

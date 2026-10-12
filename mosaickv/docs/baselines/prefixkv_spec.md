@@ -135,10 +135,21 @@ prefixkv:
 still ranks positions with PrefixKV attention. It is an explicit equal-layer
 control, not the adaptive paper result.
 
-The implementation enters the same explicit HF prefill/decode loop, cache
-packer, timing code, result schema, and manifest writer as MosaicKV. It emits
-per-layer sizes, selected physical/logical positions, attention-score digests,
-retained bytes, fixed offsets, and decode evictions in the debug trace.
+The selection plan is shared with MosaicKV, but compressed PrefixKV does
+**not** enter the generic Hugging Face cache packer. PrefixKV needs independent
+per-layer cache lengths at prefill and after each decode eviction, whereas the
+generic adapter owns one request-wide cache/mask extent. Padding a variable
+PrefixKV plan, or treating an initially uniform plan as permanently uniform,
+changes the physical cache and can create invalid decode states. The common
+HF runtime therefore fails closed for every compressed `prefixkv_reimpl` run.
+
+Paper-native PrefixKV runs use the isolated, pinned upstream LLaVA transport
+through `scripts/run_prefixkv_llava_parity.py`. It executes the unmodified
+official class and the local selection implementation against the same legacy
+model instance, profile, prompts, media, and decode callback. The runner emits
+per-layer sizes, selected positions, retained bytes, fixed-offset evictions,
+teacher-forced NLL sufficient statistics, ROUGE-L against a frozen FullKV
+reference answer, and complete provenance.
 
 ## Supported model assumptions and labels
 
@@ -162,9 +173,9 @@ generalized artifact official PrefixKV.
   independently rounds per-layer profile ratios and can miss it slightly.
 - Calibration/evaluation separation is enforced. The upstream driver shuffles
   a caller-provided prefix of one data file and does not enforce a disjoint set.
-- The shared HF runtime may physically pad layers to support distinct lengths
-  while using stock model classes. Logical retained bytes and actual packed
-  tensor bytes are both recorded; only the latter is a systems measurement.
+- The generic HF cache transport is deliberately rejected for compressed
+  PrefixKV. Earlier padded/common-HF rows, including their OCR scores and
+  latency, are debugging artifacts and are excluded from all paper tables.
 - HF-converted `llava-hf/llava-1.5-7b-hf` is not interchangeable with the
   legacy checkpoint required by the official repository. A cross-check using
   different checkpoints or library stacks is `not_comparable`, not parity.
@@ -200,3 +211,49 @@ The job uses `run_prefixkv_llava_parity.py` to generate a profile from a
 recorded calibration sample, reject evaluation overlap, and run the pinned
 official class and `prefixkv_reimpl` against the same legacy checkpoint and
 model instance. No patch is applied to the official submodule.
+
+## Paper-reproduction gate
+
+The diagnostic command above is not a paper table. A canonical PrefixKV
+reproduction must invoke the runner with `--paper-reproduction`. That mode
+fails closed unless all of the following are true:
+
+- the worktree is clean;
+- calibration comes from a separately supplied, hash-recorded source and
+  shares no sample IDs with evaluation;
+- there are at least ten calibration examples and exactly 1,000 evaluation
+  examples, matching the registered LLaVA-Description protocol;
+- the supplied calibration revision equals the SHA-256 of its JSON source;
+- both the unmodified official code and `prefixkv_reimpl` finish every sample;
+  and
+- their predeclared parity gate passes: token agreement at least 0.99,
+  corpus teacher-forced PPL relative difference at most 5%, ROUGE-L difference
+  at most 0.05 per example, and retained-byte difference at most 16,384 bytes
+  per example.
+
+For example, paths and cache roots must stay under `/scratch/djy8hg`:
+
+```bash
+source mosaickv/scripts/cache_env.sh
+/scratch/djy8hg/env/mosaickv_prefixkv_parity/bin/python \
+  mosaickv/scripts/run_prefixkv_llava_parity.py \
+  --repository-root /scratch/djy8hg/workdir/MosaicKV \
+  --model-path /scratch/djy8hg/models/mosaickv/prefixkv/Zuyan-ElasticCache/llava-v1.5-7b \
+  --data-path /scratch/djy8hg/data/mosaickv/prefixkv/detail_1k.json \
+  --media-root /scratch/djy8hg/data/mosaickv/prefixkv \
+  --calibration-data-path /scratch/djy8hg/data/mosaickv/prefixkv/CALIBRATION.json \
+  --calibration-media-root /scratch/djy8hg/data/mosaickv/prefixkv/CALIBRATION_MEDIA \
+  --calibration-dataset-id PREFIXKV_CALIBRATION_DATASET \
+  --calibration-dataset-revision CALIBRATION_JSON_SHA256 \
+  --calibration-indices 0,1,2,3,4,5,6,7,8,9 \
+  --evaluation-indices 0,1,...,999 \
+  --retention-ratio 0.5 --max-new-tokens 16 --ppl-tokens 136 \
+  --paper-reproduction \
+  --output-directory /scratch/djy8hg/runs/mosaickv/prefixkv/paper-native-r050
+```
+
+The repository currently contains the 1,000-example evaluation JSON but not a
+reviewed, disjoint PrefixKV calibration source. Therefore this command is
+deliberately not submitted yet. The missing source is an execution-input
+blocker, not a reason to reuse evaluation examples or report the invalid common
+HF rows.

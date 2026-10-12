@@ -12,6 +12,10 @@
 
 set -euo pipefail
 
+echo "prefixkv_reimpl common-HF smoke is retired: compressed PrefixKV requires the isolated pinned PrefixKV transport." >&2
+echo "Use mosaickv/slurm/prefixkv_official_parity.sbatch for the diagnostic parity lane." >&2
+exit 2
+
 PROJECT_ROOT=/scratch/djy8hg/workdir/MosaicKV/mosaickv
 HF_PYTHON=${MOSAICKV_HF_PYTHON:-/scratch/djy8hg/env/mosaickv/bin/python}
 CACHE_ROOT=${MOSAICKV_CACHE_ROOT:-/scratch/djy8hg/cache/mosaickv}

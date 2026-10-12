@@ -12,6 +12,10 @@
 
 set -euo pipefail
 
+echo "prefixkv_fix_smoke_v1 is retired: its common-HF execution path can pad or invalidate PrefixKV's layerwise cache." >&2
+echo "Use mosaickv/slurm/prefixkv_official_parity.sbatch for the isolated pinned diagnostic." >&2
+exit 2
+
 PROJECT_ROOT=/scratch/djy8hg/workdir/MosaicKV/mosaickv
 PYTHON=/scratch/djy8hg/env/mosaickv/bin/python
 CLI=/scratch/djy8hg/env/mosaickv/bin/mosaickv

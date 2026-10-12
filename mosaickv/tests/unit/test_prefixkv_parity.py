@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import importlib.util
 import math
 from dataclasses import replace
+from pathlib import Path
 from typing import cast
 
 import pytest
@@ -13,6 +15,16 @@ from mosaickv.baselines import (
     compare_prefixkv_artifacts,
 )
 from mosaickv.types import JsonObject
+
+
+def _runner_module() -> object:
+    path = Path(__file__).resolve().parents[2] / "scripts" / "run_prefixkv_llava_parity.py"
+    spec = importlib.util.spec_from_file_location("prefixkv_official_runner", path)
+    if spec is None or spec.loader is None:  # pragma: no cover - import guard
+        raise RuntimeError(f"cannot load PrefixKV runner: {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def _controls() -> PrefixKVParityControls:
@@ -137,3 +149,36 @@ def test_parity_report_aggregates_nll_before_exponentiating() -> None:
     # exp((2 log 2 + 4 log 4) / 6), not mean(2, 4).
     assert float(corpus["official_teacher_forced_ppl"]) == pytest.approx(3.1748021)
     assert float(corpus["official_mean_rouge_l_f1"]) == 0.75
+
+
+def test_paper_parity_gate_rejects_a_token_or_ppl_regression() -> None:
+    runner = _runner_module()
+    observed = replace(
+        _artifact("official_prefixkv").samples[0],
+        nll_sum=3.0 * math.log(3.5),
+        evaluated_token_count=3,
+    )
+    comparable = compare_prefixkv_artifacts(
+        replace(_artifact("official_prefixkv"), samples=(observed,)),
+        replace(_artifact("prefixkv_reimpl"), samples=(observed,)),
+    )
+    passed = runner._parity_gate(
+        comparable,
+        minimum_token_agreement=0.99,
+        maximum_relative_ppl_delta=0.05,
+        maximum_rouge_l_delta=0.05,
+        maximum_retained_byte_delta=16_384,
+    )
+    assert passed["passed"] is True
+
+    failed = dict(comparable)
+    failed["samples"] = [dict(comparable["samples"][0], token_agreement=0.5)]
+    rejected = runner._parity_gate(
+        failed,
+        minimum_token_agreement=0.99,
+        maximum_relative_ppl_delta=0.05,
+        maximum_rouge_l_delta=0.05,
+        maximum_retained_byte_delta=16_384,
+    )
+    assert rejected["passed"] is False
+    assert "token_agreement:sample-0" in rejected["failures"]

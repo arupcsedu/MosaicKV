@@ -149,16 +149,31 @@ class HuggingFaceRuntimeError(RuntimeError):
 
 
 def _assert_prefixkv_common_hf_representable(plan: PrefixKVCompressionPlan) -> None:
-    """Reject variable-layer PrefixKV before the common packer adds padding."""
+    """Fail closed for compressed PrefixKV in the common HF transport.
 
-    if plan.has_uniform_layer_capacity:
+    PrefixKV's published LLaVA implementation owns a per-layer cache
+    transaction: it gathers a different number of positions in each layer and
+    updates those lengths during decoding.  The generic Transformers adapter
+    has one request-level attention-mask/cache extent.  A superficially
+    uniform initial plan does not fix that mismatch: PrefixKV's independent
+    decode evictions immediately make the layer lengths diverge again.
+
+    Earlier common-runtime runs therefore produced padded or numerically
+    invalid states (including NaN logits).  The uncompressed identity path is
+    safe; every compressed paper-native PrefixKV run must use the isolated
+    pinned upstream transport in ``run_prefixkv_llava_parity.py``.
+    """
+
+    if math.isclose(plan.target_retention_ratio, 1.0, rel_tol=0.0, abs_tol=1e-12):
         return
     capacities = plan.layer_cache_sizes
     raise HuggingFaceRuntimeError(
-        "the common HF cache transport cannot faithfully materialize PrefixKV's "
-        "variable per-layer capacities without physical padding; use the isolated "
-        "official PrefixKV runner for this paper-native profile "
-        f"(min_capacity={min(capacities)}, max_capacity={max(capacities)})"
+        "compressed PrefixKV is unsupported in the common Hugging Face cache "
+        "transport: PrefixKV requires independent per-layer cache lengths and "
+        "decode-time eviction. Use mosaickv/scripts/run_prefixkv_llava_parity.py "
+        "with the pinned PrefixKV environment instead; do not use padded common-HF "
+        f"execution as PrefixKV evidence (min_capacity={min(capacities)}, "
+        f"max_capacity={max(capacities)})."
     )
 
 

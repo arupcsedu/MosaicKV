@@ -168,7 +168,7 @@ def test_offline_profile_controls_adaptive_layer_sizes(tmp_path: Path) -> None:
     assert plan.profile is not None
     assert plan.profile.profile_sha256 == profile.profile_sha256
     plan.profile.assert_evaluation_disjoint(("eval-0",))
-    with pytest.raises(HuggingFaceRuntimeError, match="variable per-layer capacities"):
+    with pytest.raises(HuggingFaceRuntimeError, match="independent per-layer cache lengths"):
         _assert_prefixkv_common_hf_representable(plan)
     with pytest.raises(PrefixKVReimplementationError, match="overlap"):
         plan.profile.assert_evaluation_disjoint(("cal-1",))
@@ -337,6 +337,23 @@ def test_retention_one_is_exact_and_does_not_need_attention() -> None:
     assert plan.has_uniform_layer_capacity is True
     _assert_prefixkv_common_hf_representable(plan)
     assert plan.implementation_label == "generalized_prefixkv_reimpl"
+
+
+def test_common_hf_rejects_even_uniform_compressed_prefixkv() -> None:
+    """An initially uniform plan still diverges through PrefixKV eviction."""
+
+    plan = build_prefixkv_reimpl_plan(
+        _state(),
+        _attention(),
+        PrefixKVConfig(enabled=True, profile_mode=PrefixKVProfileMode.FIXED_GLOBAL),
+        CacheConfig(6, BudgetUnit.BLOCKS, 0.5, 1),
+        model_id="llava-hf/llava-1.5-7b-hf",
+        model_revision="a" * 40,
+    )
+
+    assert plan.has_uniform_layer_capacity is True
+    with pytest.raises(HuggingFaceRuntimeError, match="pinned PrefixKV environment"):
+        _assert_prefixkv_common_hf_representable(plan)
 
 
 @pytest.mark.parametrize("dense_all_valid", [False, True])

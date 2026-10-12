@@ -21,6 +21,7 @@ OUTPUT_ROOT=${MOSAICKV_PREFIXKV_PARITY_OUTPUT:-/scratch/djy8hg/runs/mosaickv/pre
 RUN_ID=${MOSAICKV_RUN_ID:-prefixkv-official-parity-${SLURM_JOB_ID}}
 CALIBRATION_INDICES=${MOSAICKV_PREFIXKV_CALIBRATION_INDICES:-1}
 EVALUATION_INDICES=${MOSAICKV_PREFIXKV_EVALUATION_INDICES:-0}
+PAPER_REPRODUCTION=${MOSAICKV_PREFIXKV_PAPER_REPRODUCTION:-0}
 PROJECT_ROOT=${REPOSITORY_ROOT}/mosaickv
 export MOSAICKV_CACHE_ROOT=${MOSAICKV_CACHE_ROOT:-/scratch/djy8hg/cache/mosaickv}
 # shellcheck source=../scripts/cache_env.sh
@@ -45,6 +46,20 @@ export PYTHONPATH=${REPOSITORY_ROOT}/mosaickv/src${PYTHONPATH:+:${PYTHONPATH}}
 mkdir -p "${XDG_CACHE_HOME}/torch/kernels"
 
 cd "${REPOSITORY_ROOT}"
+EXTRA_ARGS=()
+if [[ "${PAPER_REPRODUCTION}" == "1" ]]; then
+  : "${MOSAICKV_PREFIXKV_CALIBRATION_DATA_PATH:?paper reproduction requires MOSAICKV_PREFIXKV_CALIBRATION_DATA_PATH}"
+  : "${MOSAICKV_PREFIXKV_CALIBRATION_MEDIA_ROOT:?paper reproduction requires MOSAICKV_PREFIXKV_CALIBRATION_MEDIA_ROOT}"
+  : "${MOSAICKV_PREFIXKV_CALIBRATION_DATASET_ID:?paper reproduction requires MOSAICKV_PREFIXKV_CALIBRATION_DATASET_ID}"
+  : "${MOSAICKV_PREFIXKV_CALIBRATION_DATASET_REVISION:?paper reproduction requires MOSAICKV_PREFIXKV_CALIBRATION_DATASET_REVISION}"
+  EXTRA_ARGS=(
+    --paper-reproduction
+    --calibration-data-path "${MOSAICKV_PREFIXKV_CALIBRATION_DATA_PATH}"
+    --calibration-media-root "${MOSAICKV_PREFIXKV_CALIBRATION_MEDIA_ROOT}"
+    --calibration-dataset-id "${MOSAICKV_PREFIXKV_CALIBRATION_DATASET_ID}"
+    --calibration-dataset-revision "${MOSAICKV_PREFIXKV_CALIBRATION_DATASET_REVISION}"
+  )
+fi
 srun "${PARITY_PYTHON}" mosaickv/scripts/run_prefixkv_llava_parity.py \
   --repository-root "${REPOSITORY_ROOT}" \
   --model-path "${MODEL_PATH}" \
@@ -56,4 +71,5 @@ srun "${PARITY_PYTHON}" mosaickv/scripts/run_prefixkv_llava_parity.py \
   --retention-ratio 0.5 \
   --max-new-tokens 16 \
   --ppl-tokens 136 \
-  --seed 0
+  --seed 0 \
+  "${EXTRA_ARGS[@]}"

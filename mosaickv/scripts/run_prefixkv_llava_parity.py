@@ -421,6 +421,89 @@ def _parse_indices(value: str, *, field: str) -> tuple[int, ...]:
     return tuple(sorted(parsed))
 
 
+def _load_records(path: Path, *, label: str) -> list[dict[str, Any]]:
+    """Load one explicit LLaVA-Description JSON source without implicit splits."""
+
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f"cannot read {label}: {error}") from error
+    if not isinstance(payload, list) or not payload:
+        raise ValueError(f"{label} must contain a non-empty JSON array")
+    records = [cast("dict[str, Any]", item) for item in payload]
+    if any(not isinstance(item, dict) for item in payload):
+        raise ValueError(f"{label} contains a non-object record")
+    for item in records:
+        if not isinstance(item.get("id"), (str, int)) or not item.get("image"):
+            raise ValueError(f"{label} record lacks an id or image")
+        conversations = item.get("conversations")
+        if not isinstance(conversations, list) or len(conversations) < 2:
+            raise ValueError(f"{label} record lacks the required two-turn conversation")
+    return records
+
+
+def _parity_gate(
+    comparison: dict[str, Any],
+    *,
+    minimum_token_agreement: float,
+    maximum_relative_ppl_delta: float,
+    maximum_rouge_l_delta: float,
+    maximum_retained_byte_delta: int,
+) -> dict[str, Any]:
+    """Evaluate preregistered official-versus-reimplementation parity limits.
+
+    The checks use only generated tokens, cache bytes, and frozen-reference
+    metrics.  They never inspect benchmark labels or select a subset after
+    observing outcomes.
+    """
+
+    failures: list[str] = []
+    if comparison.get("status") != "comparable":
+        failures.append("controls_or_sample_ids_not_comparable")
+        return {"passed": False, "failures": failures, "checked_samples": 0}
+    rows = comparison.get("samples")
+    if not isinstance(rows, list) or not rows:
+        failures.append("no_comparable_samples")
+        return {"passed": False, "failures": failures, "checked_samples": 0}
+    for row in rows:
+        if not isinstance(row, dict):
+            failures.append("malformed_parity_row")
+            continue
+        sample_id = str(row.get("sample_id", "unknown"))
+        if float(row.get("token_agreement", -1.0)) < minimum_token_agreement:
+            failures.append(f"token_agreement:{sample_id}")
+        if abs(int(row.get("retained_byte_delta", 0))) > maximum_retained_byte_delta:
+            failures.append(f"retained_bytes:{sample_id}")
+        rouge_delta = row.get("rouge_l_f1_delta")
+        if rouge_delta is None or abs(float(rouge_delta)) > maximum_rouge_l_delta:
+            failures.append(f"rouge_l:{sample_id}")
+    corpus = comparison.get("corpus")
+    if not isinstance(corpus, dict):
+        failures.append("missing_corpus_metrics")
+    else:
+        official_ppl = corpus.get("official_teacher_forced_ppl")
+        reimpl_ppl = corpus.get("reimpl_teacher_forced_ppl")
+        if (
+            official_ppl is None
+            or reimpl_ppl is None
+            or float(official_ppl) <= 0
+            or abs(float(reimpl_ppl) - float(official_ppl)) / float(official_ppl)
+            > maximum_relative_ppl_delta
+        ):
+            failures.append("corpus_teacher_forced_ppl")
+    return {
+        "passed": not failures,
+        "failures": failures,
+        "checked_samples": len(rows),
+        "thresholds": {
+            "minimum_token_agreement": minimum_token_agreement,
+            "maximum_relative_ppl_delta": maximum_relative_ppl_delta,
+            "maximum_rouge_l_delta": maximum_rouge_l_delta,
+            "maximum_retained_byte_delta": maximum_retained_byte_delta,
+        },
+    }
+
+
 def _new_criterion(
     kind: str,
     *,
@@ -469,6 +552,24 @@ def main() -> int:
     parser.add_argument("--model-path", type=Path, required=True)
     parser.add_argument("--data-path", type=Path, required=True)
     parser.add_argument("--media-root", type=Path, required=True)
+    parser.add_argument(
+        "--calibration-data-path",
+        type=Path,
+        help="Separate, immutable calibration JSON. Required in --paper-reproduction mode.",
+    )
+    parser.add_argument(
+        "--calibration-media-root",
+        type=Path,
+        help="Media root for --calibration-data-path; defaults to --media-root outside paper mode.",
+    )
+    parser.add_argument(
+        "--calibration-dataset-id",
+        help="Recorded calibration dataset ID; required in --paper-reproduction mode.",
+    )
+    parser.add_argument(
+        "--calibration-dataset-revision",
+        help="SHA-256 of --calibration-data-path; required in --paper-reproduction mode.",
+    )
     parser.add_argument("--output-directory", type=Path, required=True)
     parser.add_argument(
         "--calibration-indices",
@@ -489,6 +590,19 @@ def main() -> int:
         help="Maximum teacher-forced continuation tokens (paper-native default: 136).",
     )
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--paper-reproduction",
+        action="store_true",
+        help=(
+            "require the registered PrefixKV reproduction contract: a separate calibration "
+            "source, >=10 calibration samples, exactly 1000 evaluation samples, and a "
+            "passing official-versus-reimplementation parity gate"
+        ),
+    )
+    parser.add_argument("--minimum-token-agreement", type=float, default=0.99)
+    parser.add_argument("--maximum-relative-ppl-delta", type=float, default=0.05)
+    parser.add_argument("--maximum-rouge-l-delta", type=float, default=0.05)
+    parser.add_argument("--maximum-retained-byte-delta", type=int, default=16_384)
     args = parser.parse_args()
     if not torch.cuda.is_available():
         raise RuntimeError("official PrefixKV parity requires CUDA")
@@ -496,6 +610,24 @@ def main() -> int:
         raise ValueError("retention ratio must be in (0, 1]")
     if args.ppl_tokens < 1:
         raise ValueError("--ppl-tokens must be positive")
+    if not 0 <= args.minimum_token_agreement <= 1:
+        raise ValueError("--minimum-token-agreement must be in [0, 1]")
+    if args.maximum_relative_ppl_delta < 0 or args.maximum_rouge_l_delta < 0:
+        raise ValueError("PrefixKV parity tolerances must be nonnegative")
+    if args.maximum_retained_byte_delta < 0:
+        raise ValueError("--maximum-retained-byte-delta must be nonnegative")
+    if args.calibration_media_root is not None and args.calibration_data_path is None:
+        raise ValueError("--calibration-media-root requires --calibration-data-path")
+    if args.paper_reproduction and (
+        args.calibration_data_path is None
+        or args.calibration_media_root is None
+        or not args.calibration_dataset_id
+        or not args.calibration_dataset_revision
+    ):
+        raise ValueError(
+            "--paper-reproduction requires calibration data/media paths and calibration "
+            "dataset ID/revision"
+        )
 
     root = args.repository_root.resolve()
     official_root = root / "third_party" / "PrefixKV"
@@ -518,9 +650,10 @@ def main() -> int:
     work_directory = args.output_directory / "official_workspace"
     (work_directory / "confs").mkdir(parents=True, exist_ok=True)
 
-    records = json.loads(args.data_path.read_text(encoding="utf-8"))
-    if not isinstance(records, list) or not records:
-        raise ValueError("data-path must contain a non-empty JSON array")
+    records = _load_records(args.data_path, label="evaluation data-path")
+    calibration_source = args.calibration_data_path or args.data_path
+    calibration_records = _load_records(calibration_source, label="calibration data-path")
+    calibration_media_root = args.calibration_media_root or args.media_root
     calibration_indices = (
         _parse_indices(args.calibration_indices, field="--calibration-indices")
         if args.calibration_indices is not None
@@ -531,16 +664,17 @@ def main() -> int:
         if args.evaluation_indices is not None
         else (args.evaluation_index,)
     )
-    if set(calibration_indices).intersection(evaluation_indices):
+    same_calibration_source = calibration_source.resolve() == args.data_path.resolve()
+    if same_calibration_source and set(calibration_indices).intersection(evaluation_indices):
         raise ValueError("calibration and evaluation indices must be disjoint")
-    if any(index >= len(records) for index in (*calibration_indices, *evaluation_indices)):
-        raise IndexError("calibration or evaluation index is outside the dataset")
+    if any(index >= len(calibration_records) for index in calibration_indices):
+        raise IndexError("a calibration index is outside calibration data")
+    if any(index >= len(records) for index in evaluation_indices):
+        raise IndexError("an evaluation index is outside evaluation data")
     calibration_items = tuple(
-        cast("dict[str, Any]", records[index]) for index in calibration_indices
+        calibration_records[index] for index in calibration_indices
     )
-    evaluation_items = tuple(
-        cast("dict[str, Any]", records[index]) for index in evaluation_indices
-    )
+    evaluation_items = tuple(records[index] for index in evaluation_indices)
     calibration_ids = tuple(str(item["id"]) for item in calibration_items)
     evaluation_ids = tuple(str(item["id"]) for item in evaluation_items)
     if len(set((*calibration_ids, *evaluation_ids))) != len(calibration_ids) + len(evaluation_ids):
@@ -551,6 +685,18 @@ def main() -> int:
             "LLaVA-Description file digest differs from the registered paper-native revision: "
             f"expected {DATASET_REVISION}, observed {observed_dataset_revision}"
         )
+    observed_calibration_revision = _sha256_file(calibration_source)
+    if args.paper_reproduction:
+        if calibration_source.resolve() == args.data_path.resolve():
+            raise RuntimeError("paper reproduction requires a separate calibration source")
+        if len(calibration_items) < 10:
+            raise RuntimeError("paper reproduction requires at least 10 calibration samples")
+        if len(evaluation_items) != 1000:
+            raise RuntimeError("paper reproduction requires exactly 1000 evaluation samples")
+        if args.calibration_dataset_revision != observed_calibration_revision:
+            raise RuntimeError(
+                "calibration dataset revision must equal the SHA-256 of calibration data"
+            )
 
     patch_llama_attention_forward()
     tokenizer, model, image_processor, _ = load_pretrained_model(
@@ -570,7 +716,7 @@ def main() -> int:
             calibration_item,
             tokenizer=tokenizer,
             image_processor=image_processor,
-            media_root=args.media_root,
+            media_root=calibration_media_root,
             conv_templates=conv_templates,
             tokenizer_image_token=tokenizer_image_token,
             image_token_index=IMAGE_TOKEN_INDEX,
@@ -588,7 +734,7 @@ def main() -> int:
             prefixkv_calibration_observation(calibration_id, tuple(calibration_output.attentions))
         )
         calibration_media_hashes[calibration_id] = _sha256_file(
-            args.media_root / str(calibration_item["image"])
+            calibration_media_root / str(calibration_item["image"])
         )
         del calibration_output, calibration_image, calibration_input_ids
         gc.collect()
@@ -597,8 +743,8 @@ def main() -> int:
         tuple(calibration_observations),
         model_id=MODEL_ID,
         model_revision=MODEL_REPOSITORY_SHA,
-        dataset_id=DATASET_ID,
-        dataset_revision=DATASET_REVISION,
+        dataset_id=(args.calibration_dataset_id or DATASET_ID),
+        dataset_revision=(args.calibration_dataset_revision or observed_calibration_revision),
         calibration_split="detail_1k_calibration",
         evaluation_sample_ids=evaluation_ids,
         retention_ratio=args.retention_ratio,
@@ -753,6 +899,7 @@ def main() -> int:
     hardware_payload = {"gpu_query": gpu_query, "visible_devices": torch.cuda.device_count()}
     protocol_payload = {
         "runner": "run_prefixkv_llava_parity.py",
+        "paper_reproduction": bool(args.paper_reproduction),
         "upstream_attention_patch_sha256": _sha256_file(
             official_root / "patch_attention_forward.py"
         ),
@@ -766,8 +913,21 @@ def main() -> int:
         "ppl_tokens": args.ppl_tokens,
         "timing": "torch.cuda.Event with synchronize before and after",
         "cublas_workspace_config": os.environ.get("CUBLAS_WORKSPACE_CONFIG", "unset"),
+        "calibration_source": {
+            "path": str(calibration_source.resolve()),
+            "sha256": observed_calibration_revision,
+            "dataset_id": args.calibration_dataset_id or DATASET_ID,
+            "dataset_revision": args.calibration_dataset_revision
+            or observed_calibration_revision,
+        },
         "calibration_indices": list(calibration_indices),
         "evaluation_indices": list(evaluation_indices),
+        "parity_thresholds": {
+            "minimum_token_agreement": args.minimum_token_agreement,
+            "maximum_relative_ppl_delta": args.maximum_relative_ppl_delta,
+            "maximum_rouge_l_delta": args.maximum_rouge_l_delta,
+            "maximum_retained_byte_delta": args.maximum_retained_byte_delta,
+        },
     }
     # The cache sizes vary with prompt/image length.  This common control is
     # only an identifier for a matched parity set; per-sample physical bytes
@@ -820,8 +980,9 @@ def main() -> int:
     manifest = {
         "schema_version": 1,
         "run_id": args.output_directory.name,
-        "paper_eligible": not dirty,
-        "paper_ineligibility_reason": "dirty_worktree" if dirty else None,
+        # Final eligibility is resolved only after the parity gate below.
+        "paper_eligible": False,
+        "paper_ineligibility_reason": "pending_parity_gate",
         "git_sha": root_sha,
         "git_dirty": dirty,
         "config_sha256": config_sha,
@@ -840,6 +1001,13 @@ def main() -> int:
             "id": DATASET_ID,
             "revision": DATASET_REVISION,
             "file_sha256": observed_dataset_revision,
+            "calibration": {
+                "id": args.calibration_dataset_id or DATASET_ID,
+                "revision": args.calibration_dataset_revision
+                or observed_calibration_revision,
+                "file_sha256": observed_calibration_revision,
+                "separate_source": calibration_source.resolve() != args.data_path.resolve(),
+            },
             "calibration_sample_ids": list(calibration_ids),
             "evaluation_sample_ids": list(evaluation_ids),
             "intersection": [],
@@ -878,7 +1046,6 @@ def main() -> int:
         "extended_observations": observations,
         "created_unix_seconds": time.time(),
     }
-    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
 
     artifacts: dict[str, PrefixKVParityArtifact] = {}
     for kind, implementation, executable_sha, measurement_type in (
@@ -906,9 +1073,30 @@ def main() -> int:
             json.dumps(artifact.to_json_object(), indent=2, sort_keys=True) + "\n"
         )
     comparison = compare_prefixkv_artifacts(artifacts["official"], artifacts["reimplementation"])
+    parity_gate = _parity_gate(
+        cast("dict[str, Any]", comparison),
+        minimum_token_agreement=args.minimum_token_agreement,
+        maximum_relative_ppl_delta=args.maximum_relative_ppl_delta,
+        maximum_rouge_l_delta=args.maximum_rouge_l_delta,
+        maximum_retained_byte_delta=args.maximum_retained_byte_delta,
+    )
     (args.output_directory / "comparison.json").write_text(
         json.dumps(comparison, indent=2, sort_keys=True) + "\n"
     )
+    (args.output_directory / "parity-gate.json").write_text(
+        json.dumps(parity_gate, indent=2, sort_keys=True) + "\n"
+    )
+    ineligibility: list[str] = []
+    if dirty:
+        ineligibility.append("dirty_worktree")
+    if not args.paper_reproduction:
+        ineligibility.append("diagnostic_mode")
+    if not bool(parity_gate["passed"]):
+        ineligibility.append("official_reimplementation_parity_gate_failed")
+    manifest["paper_eligible"] = not ineligibility
+    manifest["paper_ineligibility_reason"] = ";".join(ineligibility) if ineligibility else None
+    manifest["parity_gate"] = parity_gate
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
     print(json.dumps(comparison, indent=2, sort_keys=True))
     return 0
 
