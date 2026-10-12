@@ -21,7 +21,6 @@ from mosaickv.adapters.huggingface import load_hf_adapter
 from mosaickv.cli import build_parser
 from mosaickv.evaluation.paper_native_latency import (
     load_paper_native_latency_protocol,
-    paired_method_order,
 )
 from mosaickv.hf_cli import _model_kwargs, resolve_hf_config, run_hf_evaluation
 from mosaickv.measurements.telemetry import capture_gpu_environment
@@ -150,6 +149,18 @@ def _base_cli(method: str) -> list[str]:
     ]
 
 
+def _paired_method_order(
+    methods: tuple[str, str], repetition: int
+) -> tuple[str, str]:
+    """Alternate a two-method trial order without changing either method."""
+
+    if len(methods) != 2 or len(set(methods)) != 2:
+        raise ValueError("latency verification requires exactly two distinct methods")
+    if repetition < 0:
+        raise ValueError("repetition must be nonnegative")
+    return methods if repetition % 2 == 0 else tuple(reversed(methods))
+
+
 def _run_once(
     *,
     method: str,
@@ -161,6 +172,7 @@ def _run_once(
     published_protocol: Path,
     fullkv_reference: Path,
     fullkv_reference_sha: str | None,
+    write_fullkv_reference: bool = False,
 ) -> dict[str, Any]:
     run_root = output_root / "runs" / run_id
     trace_root = output_root / "traces"
@@ -194,7 +206,8 @@ def _run_once(
         ledger_sha,
     ]
     if method == "full_kv":
-        argv.extend(("--fullkv-reference-output", str(fullkv_reference)))
+        if write_fullkv_reference:
+            argv.extend(("--fullkv-reference-output", str(fullkv_reference)))
     else:
         if fullkv_reference_sha is None:
             raise ValueError("compressed timing trials require a FullKV reference SHA")
@@ -250,7 +263,21 @@ def main() -> int:
     parser.add_argument("--ledger-sha", required=True)
     parser.add_argument("--output-root", required=True, type=Path)
     parser.add_argument("--source-git-sha", required=True)
+    parser.add_argument(
+        "--verification-fullkv-mosaickv-only",
+        action="store_true",
+        help=(
+            "run a non-paper FullKV-versus-MosaicKV latency verification; "
+            "this deliberately excludes PrefixKV when its variable layer capacities "
+            "are not representable by the common HF cache transport"
+        ),
+    )
+    parser.add_argument("--verification-warmups", type=int, default=2)
+    parser.add_argument("--verification-repetitions", type=int, default=3)
     args = parser.parse_args()
+
+    if args.verification_warmups < 1 or args.verification_repetitions < 1:
+        raise ValueError("verification warmups and repetitions must be positive")
 
     project_root = Path(__file__).resolve().parents[2]
     observed_sha = _git_sha(project_root)
@@ -290,13 +317,35 @@ def main() -> int:
         published_protocol=published_protocol,
         fullkv_reference=fullkv_reference,
         fullkv_reference_sha=None,
+        write_fullkv_reference=True,
     )
     fullkv_reference_sha = _sha256(fullkv_reference)
     _settle(adapter)
+    verification_only = bool(args.verification_fullkv_mosaickv_only)
+    methods = (
+        ("full_kv", "mosaickv_exact") if verification_only else protocol.timing.methods
+    )
+    warmup_count = (
+        args.verification_warmups
+        if verification_only
+        else protocol.timing.warmups_per_method
+    )
+    repetition_count = (
+        args.verification_repetitions
+        if verification_only
+        else protocol.timing.timed_repetitions_per_method
+    )
     telemetry: dict[str, Any] = {
         "schema_version": 1,
         "experiment_id": protocol.experiment_id,
-        "classification": protocol.classification,
+        "classification": (
+            "preflight_fullkv_mosaickv_latency_verification"
+            if verification_only
+            else protocol.classification
+        ),
+        "paper_measurement_eligible": not verification_only,
+        "verification_only": verification_only,
+        "methods": list(methods),
         "source_git_sha": observed_sha,
         "source_git_dirty": False,
         "protocol_path": str(protocol_path),
@@ -308,8 +357,8 @@ def main() -> int:
         "fullkv_reference_path": str(fullkv_reference),
         "fullkv_reference_sha256": fullkv_reference_sha,
         "fullkv_reference_run": reference_run,
-        "warmups_per_method": protocol.timing.warmups_per_method,
-        "timed_repetitions_per_method": protocol.timing.timed_repetitions_per_method,
+        "warmups_per_method": warmup_count,
+        "timed_repetitions_per_method": repetition_count,
         "trial_order": protocol.timing.trial_order,
         "persistent_model_process": True,
         "before_measurement": None,
@@ -324,8 +373,9 @@ def main() -> int:
     }
     telemetry_path = output_root / "telemetry.json"
     try:
-        for repetition in range(protocol.timing.warmups_per_method):
-            for order, method in enumerate(paired_method_order(protocol.timing, repetition)):
+        for repetition in range(warmup_count):
+            ordered_methods = _paired_method_order(methods, repetition)
+            for order, method in enumerate(ordered_methods):
                 record = _run_once(
                     method=method,
                     adapter=adapter,
@@ -341,8 +391,9 @@ def main() -> int:
                 cast("list[dict[str, Any]]", telemetry["warmups"]).append(record)
                 _settle(adapter)
         telemetry["before_measurement"] = asdict(capture_gpu_environment(torch))
-        for repetition in range(protocol.timing.timed_repetitions_per_method):
-            for order, method in enumerate(paired_method_order(protocol.timing, repetition)):
+        for repetition in range(repetition_count):
+            ordered_methods = _paired_method_order(methods, repetition)
+            for order, method in enumerate(ordered_methods):
                 if _git_sha(project_root) != observed_sha:
                     raise RuntimeError("repository changed during persistent latency trial")
                 record = _run_once(

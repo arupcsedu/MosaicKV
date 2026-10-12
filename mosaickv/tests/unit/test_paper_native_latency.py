@@ -75,6 +75,16 @@ def test_persistent_worker_accepts_resolved_scratch_alias_only() -> None:
         worker._validated_output_root(Path("/tmp/mosaickv-paper-latency-test"))
 
 
+def test_persistent_worker_parses_explicit_nonpaper_fullkv_mosaickv_verification() -> None:
+    worker = _script("run_paper_native_latency_v3.py")
+    methods = ("full_kv", "mosaickv_exact")
+
+    assert worker._paired_method_order(methods, 0) == methods
+    assert worker._paired_method_order(methods, 1) == tuple(reversed(methods))
+    with pytest.raises(ValueError, match="exactly two"):
+        worker._paired_method_order(("full_kv", "full_kv"), 0)
+
+
 def test_paper_native_latency_protocol_rejects_weakened_repetitions(tmp_path: Path) -> None:
     payload = yaml.safe_load(_protocol_path().read_text(encoding="utf-8"))
     payload["timing_protocol"]["timed_repetitions_per_method"] = 19
