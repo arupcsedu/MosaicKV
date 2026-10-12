@@ -212,6 +212,13 @@ def test_official_profile_loader_preserves_and_validates_raw_forget_ratios(
         runner._load_official_profile(profile)
 
 
+def test_official_profile_mode_never_selects_the_diagnostic_calibration_index() -> None:
+    runner = _runner_module()
+    assert runner._select_calibration_items([], (1,), enabled=False) == ()
+    with pytest.raises(IndexError, match="outside calibration"):
+        runner._select_calibration_items([], (1,), enabled=True)
+
+
 def test_official_profile_aggregator_requires_complete_unique_shard_union(tmp_path: Path) -> None:
     aggregate = _official_profile_aggregator_module()
     aggregate.EXPECTED_SAMPLE_COUNT = 2

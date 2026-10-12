@@ -474,6 +474,26 @@ def _load_records(path: Path, *, label: str) -> list[dict[str, Any]]:
     return records
 
 
+def _select_calibration_items(
+    records: list[dict[str, Any]],
+    indices: tuple[int, ...],
+    *,
+    enabled: bool,
+) -> tuple[dict[str, Any], ...]:
+    """Select calibration rows only in a mode that has a calibration source.
+
+    Official-profile reproduction deliberately has no recoverable calibration
+    identities.  Its diagnostic default index must not be interpreted as an
+    index into an empty synthetic calibration collection.
+    """
+
+    if not enabled:
+        return ()
+    if any(index >= len(records) for index in indices):
+        raise IndexError("a calibration index is outside calibration data")
+    return tuple(records[index] for index in indices)
+
+
 def _parity_gate(
     comparison: dict[str, Any],
     *,
@@ -750,9 +770,13 @@ def main() -> int:
     )
     calibration_media_root = args.calibration_media_root or args.media_root
     calibration_indices = (
-        _parse_indices(args.calibration_indices, field="--calibration-indices")
-        if args.calibration_indices is not None
-        else (args.calibration_index,)
+        ()
+        if calibration_source is None
+        else (
+            _parse_indices(args.calibration_indices, field="--calibration-indices")
+            if args.calibration_indices is not None
+            else (args.calibration_index,)
+        )
     )
     evaluation_indices = (
         _parse_indices(args.evaluation_indices, field="--evaluation-indices")
@@ -764,13 +788,13 @@ def main() -> int:
     )
     if same_calibration_source and set(calibration_indices).intersection(evaluation_indices):
         raise ValueError("calibration and evaluation indices must be disjoint")
-    if calibration_source is not None and any(
-        index >= len(calibration_records) for index in calibration_indices
-    ):
-        raise IndexError("a calibration index is outside calibration data")
     if any(index >= len(records) for index in evaluation_indices):
         raise IndexError("an evaluation index is outside evaluation data")
-    calibration_items = tuple(calibration_records[index] for index in calibration_indices)
+    calibration_items = _select_calibration_items(
+        calibration_records,
+        calibration_indices,
+        enabled=calibration_source is not None,
+    )
     evaluation_items = tuple(records[index] for index in evaluation_indices)
     calibration_ids = tuple(str(item["id"]) for item in calibration_items)
     evaluation_ids = tuple(str(item["id"]) for item in evaluation_items)
