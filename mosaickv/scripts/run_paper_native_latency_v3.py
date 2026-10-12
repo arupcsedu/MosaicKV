@@ -77,6 +77,25 @@ def _git_sha(project_root: Path) -> str:
     return observed
 
 
+def _validated_output_root(path: Path) -> Path:
+    """Resolve an output path while accepting the cluster's scratch alias.
+
+    On this cluster ``/scratch`` is a symlink to the mounted
+    ``/sfs/weka/scratch`` filesystem.  Comparing a resolved candidate with
+    the unresolved spelling of ``/scratch/djy8hg`` rejects a valid artifact
+    directory before any model work begins.  Resolve both boundaries, then
+    retain the strict ancestry check.
+    """
+
+    output_root = path.resolve()
+    scratch_root = Path("/scratch/djy8hg").resolve()
+    try:
+        output_root.relative_to(scratch_root)
+    except ValueError as error:
+        raise ValueError("paper latency output must be under /scratch/djy8hg") from error
+    return output_root
+
+
 def _warmup_ledger(source: Path, destination: Path) -> str:
     payload = json.loads(source.read_text(encoding="utf-8"))
     samples = payload.get("samples")
@@ -243,9 +262,7 @@ def main() -> int:
     ledger = args.ledger.resolve(strict=True)
     if _sha256(ledger) != args.ledger_sha:
         raise RuntimeError("PrefixKV ledger hash mismatch")
-    output_root = args.output_root.resolve()
-    if not str(output_root).startswith("/scratch/djy8hg/"):
-        raise ValueError("paper latency output must be under /scratch/djy8hg")
+    output_root = _validated_output_root(args.output_root)
     if output_root.exists() and any(output_root.iterdir()):
         raise FileExistsError(f"latency output root is not empty: {output_root}")
     output_root.mkdir(parents=True, exist_ok=True)

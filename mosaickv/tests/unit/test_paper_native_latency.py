@@ -63,6 +63,18 @@ def test_persistent_worker_builds_matched_prefix_lane_configs(method: str) -> No
     assert config.generation.max_new_tokens == 144
 
 
+def test_persistent_worker_accepts_resolved_scratch_alias_only() -> None:
+    worker = _script("run_paper_native_latency_v3.py")
+
+    output = worker._validated_output_root(
+        Path("/scratch/djy8hg/runs/mosaickv/paper-native-latency-test")
+    )
+
+    assert output.is_relative_to(Path("/scratch/djy8hg").resolve())
+    with pytest.raises(ValueError, match="must be under /scratch/djy8hg"):
+        worker._validated_output_root(Path("/tmp/mosaickv-paper-latency-test"))
+
+
 def test_paper_native_latency_protocol_rejects_weakened_repetitions(tmp_path: Path) -> None:
     payload = yaml.safe_load(_protocol_path().read_text(encoding="utf-8"))
     payload["timing_protocol"]["timed_repetitions_per_method"] = 19
