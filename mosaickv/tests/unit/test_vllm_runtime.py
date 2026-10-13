@@ -22,11 +22,45 @@ from mosaickv.backends.vllm_runtime import (
     _resolve_model_source,
     native_integration_capability,
     prepare_vllm_prompt,
+    require_native_cuda_support,
     require_native_mosaickv_support,
 )
 from mosaickv.evaluation.messages import MediaItem, MediaKind, build_multimodal_messages
 from mosaickv.evaluation.model import EvaluationRequest
 from mosaickv.types import JsonObject
+
+
+@pytest.mark.parametrize("capabilities", [[], [(7, 0)], [(7, 5)], [(8, 0), (7, 0)]])
+def test_native_cuda_rejects_missing_or_pre_ampere_devices(
+    capabilities: list[tuple[int, int]],
+) -> None:
+    with pytest.raises(NativeMosaicKVUnsupported, match=r"CUDA GPU|compute capability"):
+        require_native_cuda_support(capabilities, attention_backend="FLASH_ATTN")
+
+
+@pytest.mark.parametrize("backend", ["FLEX_ATTENTION", "XFORMERS", "TRITON_ATTN_VLLM_V1"])
+def test_native_cuda_rejects_unaudited_attention_metadata(backend: str) -> None:
+    with pytest.raises(NativeMosaicKVUnsupported, match="cache-metadata"):
+        require_native_cuda_support([(8, 0)], attention_backend=backend)
+
+
+def test_native_cuda_accepts_a100_hardware_requirement() -> None:
+    require_native_cuda_support([(8, 0)], attention_backend="FLASH_ATTN")
+
+
+def test_native_v100_rejection_precedes_engine_import(monkeypatch: pytest.MonkeyPatch) -> None:
+    import torch
+
+    from mosaickv.backends.vllm_runtime import AsyncVLLMTrialRunner
+
+    # No model/config/engine exists: rejection must precede all such accesses.
+    runner = object.__new__(AsyncVLLMTrialRunner)
+    runner.options = VLLMRuntimeOptions(enable_mosaickv=True)
+    monkeypatch.setenv("VLLM_ATTENTION_BACKEND", "FLASH_ATTN")
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 1)
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda _index: (7, 0))
+    with pytest.raises(NativeMosaicKVUnsupported, match="V100"):
+        runner._build_engine()
 
 
 class _Processor:
@@ -289,6 +323,8 @@ def test_fullkv_wrapper_writes_raw_trials_and_uses_first_measurement(tmp_path: P
         "physical_prefill_positions": 16,
         "logical_prefill_kv_bytes": 8 * 2 * 2 * 2 * 4 * 2,
         "active_kv_bytes": 16 * 2 * 2 * 2 * 4 * 2,
+        "configured_physical_byte_cap": None,
+        "selector_cost_scope": "vllm_only",
         "packed_padding_kv_bytes": 8 * 2 * 2 * 2 * 4 * 2,
         "final_active_kv_bytes": 16 * 2 * 2 * 2 * 4 * 2,
         "geometry": {"layers": 2, "kv_heads": 2, "head_dim": 4, "dtype_bytes": 2},

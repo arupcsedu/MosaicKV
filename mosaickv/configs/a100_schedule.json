@@ -1,0 +1,11 @@
+{
+  "timezone": "America/New_York",
+  "window": "all_times",
+  "maximum_a100s": 4,
+  "maximum_worker_minutes": 120,
+  "arrays": [21292854, 21314743],
+  "adopt_existing_holds": [21292854, 21314743],
+  "blocked_arrays": {},
+  "policy_scope": "aggregate across registered MosaicKV arrays; availability controlled by Slurm",
+  "never_cancel_or_suspend_running_jobs": true
+}

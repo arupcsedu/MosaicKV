@@ -1,0 +1,82 @@
+schema_version: 1
+experiment_id: vllm_byte_capped_hf_mirror_v1
+classification: unified_vllm_requestwide_projection
+preflight_execution_authorized: true
+campaign_requires_passed_canonical_preflight: true
+campaign_requires_clean_immutable_source: true
+reuse_only_hash_verified_complete_hf_shards: true
+preserve_hf_inputs_outputs_and_environment: true
+
+environment:
+  path: /scratch/djy8hg/env/mosaickv
+  vllm: 0.10.2
+  torch: 2.8.0
+  transformers: 4.55.2
+  cache_root: /scratch/djy8hg/cache/mosaickv
+  install_or_upgrade_shared_packages: false
+
+serving_controls:
+  block_size: 16
+  mandatory_policy: first_and_last_whole_block
+  byte_boundary: packed_prefill_active_kv_tensor_storage
+  selection_target: largest_physically_feasible_at_or_below_shared_cap
+  require_exact_per_sample_byte_equality_within_vllm_lane: true
+  max_num_seqs: 1
+  tensor_parallel_size: 1
+  enforce_eager: true
+  decoder_attention: FLASH_ATTN
+  chunked_prefill: false
+  cascade_attention: false
+  prefix_caching: false
+  cuda_graphs: false
+  generation_seed_precision: copy_from_hf_manifest
+  warmups_repetitions: copy_hf_protocol_or_preregister_dedicated_timing_trials
+  fullkv_latency_excluded: true
+  identical_hf_vllm_selection_policy_claim: false
+  prototypes_and_repair: unsupported
+  source_selector_cost: offline_replay_not_online_native_planning
+
+lanes:
+  hf_selector_curves:
+    model: llava-hf/llava-1.5-7b-hf
+    revision: b234b804b114d9e37bb655e11cbbb5f5e971b7a9
+    tasks: [mmstar, textvqa, docvqa]
+    source_hf_root: /scratch/djy8hg/runs/mosaickv/hf-byte-matched-2c7a266-256-v1
+    caps_mib: [16, 22, 30, 40, 60]
+    methods: [prompt_attention_topk, mosaickv_exact]
+    planned_samples_per_task: 256
+  prefixkv_shared_cap:
+    model: llava-hf/llava-1.5-7b-hf
+    revision: b234b804b114d9e37bb655e11cbbb5f5e971b7a9
+    tasks: [textvqa, docvqa]
+    caps_mib: [10, 20, 40, 80]
+    mark_infeasible_do_not_raise_cap: true
+    methods: [prompt_attention_topk, prefixkv_reimpl, mosaickv_exact]
+    planned_samples_per_task: 256
+  vl_cache_shared_cap:
+    model: llava-hf/llava-v1.6-mistral-7b-hf
+    revision: 2424fdd47412fccc66d91719126b420e9fbd7065
+    tasks: [textvqa, docvqa]
+    caps_mib: [10, 20, 40, 80]
+    methods: [prompt_attention_topk, vl_cache_reimpl, mosaickv_exact]
+    planned_samples_per_task: 256
+
+preflight:
+  samples_per_shard: 2
+  cap_mib: 40
+  identity_reference: ordinary_vllm_fullkv_vs_native_retention_1
+  checks: [token_parity, request_isolation, exact_bytes, complete_rows,
+           finite_metrics, matching_prompt_media, fixed_output_length]
+  held_out_claim: false
+  development_snapshot_cannot_authorize_campaign: true
+
+resources:
+  a100s_per_shard: 1
+  cpus_per_shard: 12
+  memory: 96G
+  wall_time: "02:00:00"
+  partition: bii-gpu
+  reservation: bi_fox_dgx
+  admission: aggregate_controller_shared_with_hf
+  timezone: America/New_York
+  maximum_a100s_all_times: 4

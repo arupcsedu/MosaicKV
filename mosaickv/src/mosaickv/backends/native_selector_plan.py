@@ -14,7 +14,7 @@ import json
 import math
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import cast
 
@@ -397,6 +397,48 @@ def retarget_request_wide_projection(
     )
 
 
+def fit_projection_to_byte_cap(
+    projection: RequestWideSelectorProjection,
+    *,
+    target_block_size: int,
+    physical_byte_cap: int,
+    bytes_per_position: int,
+) -> RequestWideSelectorProjection:
+    """Fill the largest attainable whole-block storage at a hard prefill byte cap.
+
+    Uses the same vote/score ordering as the existing serving projection.
+    Padding in the final block is charged; no nominal-ratio rounding is used.
+    This is a serving projection, not a per-head HF selection reproduction.
+    """
+    for name, value in (("physical_byte_cap", physical_byte_cap),
+                        ("bytes_per_position", bytes_per_position)):
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise NativeSelectorPlanError(f"{name} must be a positive integer")
+    coarse = retarget_request_wide_projection(
+        projection, target_block_size=target_block_size, target_retention_ratio=1.0
+    )
+    count = min(coarse.selection.source_blocks,
+                physical_byte_cap // (target_block_size * bytes_per_position))
+    if count < len(coarse.mandatory_blocks):
+        raise NativeSelectorPlanError(
+            "physical byte cap cannot hold mandatory serving blocks: "
+            f"cap={physical_byte_cap}, minimum="
+            f"{len(coarse.mandatory_blocks) * target_block_size * bytes_per_position}"
+        )
+    chosen = set(coarse.mandatory_blocks)
+    ranked = sorted(
+        (index for index in range(coarse.selection.source_blocks) if index not in chosen),
+        key=lambda index: (-coarse.selected_position_votes[index],
+                           -coarse.selected_score_sums[index], index),
+    )
+    chosen.update(ranked[:count - len(chosen)])
+    return replace(
+        coarse, selected_blocks=tuple(sorted(chosen)),
+        retention_ratio=count / coarse.selection.source_blocks,
+        policy="common_selector_shared_physical_byte_cap_v1",
+    )
+
+
 def fit_projection_to_competitor_budget(
     projection: RequestWideSelectorProjection,
     competitor: RequestWideSelectorProjection,
@@ -634,6 +676,8 @@ class NativeSelectorPlanEntry:
     selector_planning_seconds: float
     source_trace: str
     source_trace_sha256: str
+    physical_byte_cap: int | None = None
+    bytes_per_position: int | None = None
 
     def __post_init__(self) -> None:
         if not self.sample_id or not math.isfinite(self.selector_planning_seconds):
@@ -642,6 +686,17 @@ class NativeSelectorPlanEntry:
             raise NativeSelectorPlanError("selector planning time must be nonnegative")
         if len(self.source_trace_sha256) != 64:
             raise NativeSelectorPlanError("source trace SHA-256 is invalid")
+        if (self.physical_byte_cap is None) != (self.bytes_per_position is None):
+            raise NativeSelectorPlanError("byte-capped entries require cap and KV geometry")
+        if self.physical_byte_cap is not None:
+            for value in (self.physical_byte_cap, self.bytes_per_position):
+                if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                    raise NativeSelectorPlanError("cap and KV geometry must be positive integers")
+            block_bytes = self.projection.block_size * cast("int", self.bytes_per_position)
+            expected = min(self.projection.selection.source_blocks,
+                           self.physical_byte_cap // block_bytes)
+            if len(self.projection.selected_blocks) != expected:
+                raise NativeSelectorPlanError("byte-capped plan is over budget or underfilled")
 
     def to_json_object(self) -> JsonObject:
         return {
@@ -650,6 +705,8 @@ class NativeSelectorPlanEntry:
             "selector_planning_seconds": self.selector_planning_seconds,
             "source_trace": self.source_trace,
             "source_trace_sha256": self.source_trace_sha256,
+            "physical_byte_cap": self.physical_byte_cap,
+            "bytes_per_position": self.bytes_per_position,
         }
 
 
@@ -781,6 +838,8 @@ def load_native_selector_plan_catalog(
                 selector_planning_seconds=float(raw_entry.get("selector_planning_seconds", -1)),
                 source_trace=str(raw_entry.get("source_trace", "")),
                 source_trace_sha256=str(raw_entry.get("source_trace_sha256", "")),
+                physical_byte_cap=raw_entry.get("physical_byte_cap"),
+                bytes_per_position=raw_entry.get("bytes_per_position"),
             )
         )
     identities = tuple(entry.sample_id for entry in entries)

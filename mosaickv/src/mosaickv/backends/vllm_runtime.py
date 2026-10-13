@@ -44,6 +44,7 @@ _SUPPORTED_MODELS: dict[str, bool] = {
     "Qwen/Qwen2.5-VL-3B-Instruct": True,
     "Qwen/Qwen2.5-VL-7B-Instruct": True,
     "llava-hf/llava-1.5-7b-hf": False,
+    "llava-hf/llava-v1.6-mistral-7b-hf": False,
     "llava-hf/llava-onevision-qwen2-0.5b-ov-hf": True,
 }
 
@@ -118,6 +119,33 @@ def require_native_mosaickv_support(
             "native MosaicKV is unsupported for vLLM "
             f"{vllm_version}: {capability.reason_code}; see {capability.blocker_document}. "
             "No simulated MosaicKV row was emitted."
+        )
+
+
+def require_native_cuda_support(
+    device_capabilities: Sequence[tuple[int, int]], *, attention_backend: str
+) -> None:
+    """Reject incompatible hardware/kernels before a native engine loads weights.
+
+    SM 8.0 is a necessary FlashAttention-2 condition, not a claim that every
+    newer GPU has passed this repository's model/parity checks. In particular,
+    vLLM's FlexAttention fallback for older GPUs is NOT supported by our
+    FlashAttentionMetadata-only cache transaction.
+    """
+
+    if not device_capabilities:
+        raise NativeMosaicKVUnsupported("native vLLM requires a visible CUDA GPU")
+    if any(capability < (8, 0) for capability in device_capabilities):
+        raise NativeMosaicKVUnsupported(
+            "native MosaicKV requires FlashAttention-2 and compute capability >= 8.0; "
+            f"visible capabilities: {list(device_capabilities)}. V100 (SM 7.0) is unsupported. "
+            "Do not substitute FlexAttention/XFormers without a separately validated "
+            "cache-metadata integration. No model weights were loaded."
+        )
+    if attention_backend != "FLASH_ATTN":
+        raise NativeMosaicKVUnsupported(
+            "native MosaicKV requires VLLM_ATTENTION_BACKEND=FLASH_ATTN; "
+            f"{attention_backend!r} has no audited cache-metadata transaction"
         )
 
 
@@ -327,7 +355,8 @@ def prepare_vllm_prompt(
     """Use the same chat-template inputs and raw media as the HF harness."""
 
     chat, media = _normalize_messages(messages)
-    renderer = getattr(processor, "apply_chat_template", None)
+    renderer = (getattr(processor, "apply_chat_template", None)
+                if getattr(processor, "chat_template", None) else None)
     if not getattr(processor, "chat_template", None):
         tokenizer = getattr(processor, "tokenizer", None)
         tokenizer_renderer = getattr(tokenizer, "apply_chat_template", None)
@@ -337,6 +366,16 @@ def prepare_vllm_prompt(
         rendered = renderer(chat, tokenize=False, add_generation_prompt=True)
     elif model_id == "llava-hf/llava-1.5-7b-hf":
         rendered = _llava15_fallback_prompt(chat)
+    elif model_id == "llava-hf/llava-v1.6-mistral-7b-hf":
+        if len(chat) != 1 or chat[0]["role"] != "user":
+            raise VLLMRuntimeError("the audited LLaVA-v1.6 path requires one user message")
+        if len(media) != 1 or media[0][0] != "image":
+            raise VLLMRuntimeError("the audited LLaVA-v1.6 path requires exactly one image")
+        content = "".join(
+            "<image>\n" if part["type"] == "image" else str(part["text"])
+            for part in chat[0]["content"]
+        )
+        rendered = f"[INST] {content} [/INST]"
     else:
         raise VLLMRuntimeError("processor and tokenizer expose no chat template")
     if not isinstance(rendered, str) or not rendered:
@@ -767,6 +806,14 @@ class AsyncVLLMTrialRunner:
         self._loop.run_forever()
 
     def _build_engine(self) -> Any:
+        if self.options.enable_mosaickv:
+            import torch
+
+            native_attention = os.environ.setdefault("VLLM_ATTENTION_BACKEND", "FLASH_ATTN")
+            require_native_cuda_support(
+                [torch.cuda.get_device_capability(i) for i in range(torch.cuda.device_count())],
+                attention_backend=native_attention,
+            )
         # V1 is required: vLLM 0.10.2 disables multimodal prefix caching in
         # V0.  Set this before importing vLLM so the selected engine and the
         # recorded metadata cannot diverge.
@@ -777,7 +824,9 @@ class AsyncVLLMTrialRunner:
         # will never be used. Select vLLM's native sampler explicitly; parity
         # tests below remain the authority for output equivalence.
         os.environ["VLLM_USE_FLASHINFER_SAMPLER"] = "0"
-        use_vit_sdpa = self.config.model.id == "llava-hf/llava-1.5-7b-hf"
+        use_vit_sdpa = self.config.model.id in {
+            "llava-hf/llava-1.5-7b-hf", "llava-hf/llava-v1.6-mistral-7b-hf"
+        }
         if self.options.enable_mosaickv:
             if self.options.enable_prefix_caching:
                 raise VLLMRuntimeError("native MosaicKV requires vLLM prefix caching disabled")
@@ -861,6 +910,12 @@ class AsyncVLLMTrialRunner:
             # parity by enabling prefix caching in a reference row.
             "enable_prefix_caching": self.options.enable_prefix_caching,
             "enforce_eager": True,
+            # These experiments issue one isolated request at a time. Bound
+            # vision profiling memory and keep the native transaction after
+            # a complete prefill; do not rely on changing engine defaults.
+            "max_num_seqs": 1,
+            "enable_chunked_prefill": False,
+            "disable_cascade_attn": True,
             "disable_log_stats": True,
             "enable_log_requests": False,
         }
@@ -889,6 +944,9 @@ class AsyncVLLMTrialRunner:
         self.engine_metadata = {
             "vllm_version": self.vllm_version,
             "execution_mode": "v1_eager",
+            "max_num_seqs": 1,
+            "chunked_prefill": False,
+            "cascade_attention": False,
             "cuda_graph": False,
             "attention_backend": os.environ.get("VLLM_ATTENTION_BACKEND", "auto"),
             "sampling_backend": "vllm_native_greedy",
@@ -943,6 +1001,11 @@ class AsyncVLLMTrialRunner:
                         "scope": "request_wide_token_blocks",
                         **(
                             {
+                                # The resolved config can retain the HF ratio
+                                # placeholder. A byte-capped catalog is the
+                                # authority for this request's actual plan.
+                                "retention_ratio": generation["native_retention_ratio"],
+                                "block_size": generation["native_block_size"],
                                 "selected_blocks": generation["native_selected_blocks"],
                                 "mandatory_blocks": generation["native_mandatory_blocks"],
                                 "selected_block_count": len(
@@ -1333,6 +1396,14 @@ class VLLMFullKVModel:
                     raise VLLMRuntimeError(
                         "selector-plan block size differs from resolved run config"
                     )
+                if entry.physical_byte_cap is not None and (
+                    entry.bytes_per_position != geometry.bytes_per_position
+                    or config.cache.budget_unit.value != "bytes"
+                    or config.cache.budget_value != entry.physical_byte_cap
+                ):
+                    raise VLLMRuntimeError(
+                        "selector-plan physical cap/KV geometry differs from model/config"
+                    )
         runner = AsyncVLLMTrialRunner(
             config,
             options,
@@ -1378,6 +1449,11 @@ class VLLMFullKVModel:
         if selector_entry is not None:
             assert selector_catalog is not None
             projection = selector_entry.projection
+            if selector_entry.physical_byte_cap is not None and (
+                self.cache_geometry is None
+                or selector_entry.bytes_per_position != self.cache_geometry.bytes_per_position
+            ):
+                raise VLLMRuntimeError("byte-capped selector geometry differs from loaded model")
             generation.update(
                 {
                     "native_selected_blocks": list(projection.selected_blocks),
@@ -1464,6 +1540,12 @@ class VLLMFullKVModel:
             logical_prefill_positions = raw_selected
             physical_prefill_positions = len(raw_selected_blocks) * self.block_size
             active_kv_bytes = self.cache_geometry.active_bytes(physical_prefill_positions)
+            if selector_entry is not None:
+                if tuple(raw_selected_blocks) != selector_entry.projection.selected_blocks:
+                    raise VLLMRuntimeError("committed native block IDs differ from selector plan")
+                cap = selector_entry.physical_byte_cap
+                if cap is not None and active_kv_bytes > cap:
+                    raise VLLMRuntimeError("committed native cache exceeded physical byte cap")
             compression_seconds = float(raw_compression) + (
                 0.0 if selector_entry is None else selector_entry.selector_planning_seconds
             )
@@ -1544,6 +1626,11 @@ class VLLMFullKVModel:
                 "physical_prefill_positions": physical_prefill_positions,
                 "logical_prefill_kv_bytes": logical_prefill_kv_bytes,
                 "active_kv_bytes": active_kv_bytes,
+                "configured_physical_byte_cap": (
+                    None if selector_entry is None else selector_entry.physical_byte_cap
+                ),
+                "selector_cost_scope": "offline_hf_selector_plus_vllm_decode"
+                if selector_entry is not None else "vllm_only",
                 "packed_padding_kv_bytes": packed_padding_kv_bytes,
                 "final_active_kv_bytes": final_active_kv_bytes,
                 "geometry": (

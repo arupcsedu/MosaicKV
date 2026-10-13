@@ -16,6 +16,7 @@ from mosaickv.backends.native_selector_plan import (
     NativeSelectorPlanEntry,
     RequestWideSelectorProjection,
     catalog_payload,
+    fit_projection_to_byte_cap,
     fit_projection_to_competitor_budget,
     load_native_selector_plan_catalog,
     retarget_request_wide_projection,
@@ -63,7 +64,11 @@ def _projection(value: object) -> RequestWideSelectorProjection:
     )
 
 
-def _planning_seconds(trace: Mapping[str, object]) -> float:
+def _planning_seconds(trace: Mapping[str, object], *, identity: bool = False) -> float:
+    if identity:
+        # Retention-1 replay keeps every block without running the compressed
+        # source selector. Do not charge its unrelated offline planning time.
+        return 0.0
     timing = _object(trace.get("timing_breakdown"), "timing_breakdown")
     keys = ("forecast", "graph", "utility_and_selection")
     values = tuple(float(timing.get(key, 0.0)) for key in keys)
@@ -85,7 +90,15 @@ def build_catalog(
     minimum_competitor_anchor_blocks: int = 0,
     competitor_tail_dominance_threshold: float = 0.0,
     coherent_evidence_minimum_route_ratio: float = 0.0,
+    physical_byte_cap: int | None = None,
+    bytes_per_position: int | None = None,
 ) -> JsonObject:
+    if (physical_byte_cap is None) != (bytes_per_position is None):
+        raise ValueError("physical byte cap and bytes per position must be supplied together")
+    if physical_byte_cap is not None and (
+        target_retention_ratio is not None or competitor_catalog is not None
+    ):
+        raise ValueError("shared byte cap cannot be mixed with ratio/competitor budget modes")
     manifest = _object(json.loads(manifest_path.read_text(encoding="utf-8")), "manifest")
     model = _object(manifest.get("model"), "manifest.model")
     dataset = _object(manifest.get("dataset"), "manifest.dataset")
@@ -106,7 +119,13 @@ def build_catalog(
         projection = _projection(trace.get("request_wide_native_projection"))
         if projection.method != method:
             raise ValueError("projection method differs from its trace")
-        if target_block_size is not None or target_retention_ratio is not None:
+        if physical_byte_cap is not None:
+            projection = fit_projection_to_byte_cap(
+                projection, target_block_size=target_block_size or projection.block_size,
+                physical_byte_cap=physical_byte_cap,
+                bytes_per_position=cast("int", bytes_per_position),
+            )
+        elif target_block_size is not None or target_retention_ratio is not None:
             projection = retarget_request_wide_projection(
                 projection,
                 target_block_size=(
@@ -124,9 +143,13 @@ def build_catalog(
             NativeSelectorPlanEntry(
                 sample_id=str(trace["sample_id"]),
                 projection=projection,
-                selector_planning_seconds=_planning_seconds(trace),
+                selector_planning_seconds=_planning_seconds(
+                    trace, identity=target_retention_ratio == 1.0
+                ),
                 source_trace=str(path.resolve()),
                 source_trace_sha256=hashlib.sha256(payload_bytes).hexdigest(),
+                physical_byte_cap=physical_byte_cap,
+                bytes_per_position=bytes_per_position,
             )
         )
     if any(
@@ -212,6 +235,8 @@ def main() -> int:
     parser.add_argument("--task", required=True)
     parser.add_argument("--target-block-size", type=int)
     parser.add_argument("--target-retention-ratio", type=float)
+    parser.add_argument("--physical-byte-cap", type=int)
+    parser.add_argument("--bytes-per-position", type=int)
     parser.add_argument("--competitor-catalog", type=Path)
     parser.add_argument("--competitor-catalog-sha256")
     parser.add_argument("--minimum-reduction-fraction", type=float)
@@ -230,6 +255,8 @@ def main() -> int:
             task=args.task,
             target_block_size=args.target_block_size,
             target_retention_ratio=args.target_retention_ratio,
+            physical_byte_cap=args.physical_byte_cap,
+            bytes_per_position=args.bytes_per_position,
             competitor_catalog=(
                 None
                 if args.competitor_catalog is None
