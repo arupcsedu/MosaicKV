@@ -441,6 +441,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="protocol_id selected from --published-protocol",
     )
     evaluate_parser.add_argument(
+        "--unified-milebench",
+        action="store_true",
+        help="use MileBench scorers in a unified comparison, not paper reproduction",
+    )
+    evaluate_parser.add_argument(
         "--paper-native-ledger",
         help="materialized PrefixKV/MileBench sample ledger (JSON)",
     )

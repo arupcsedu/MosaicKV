@@ -1088,7 +1088,8 @@ class PrefixKVCompressionPlan:
         if self.config.decode_policy == "append_only":
             labels |= {
                 name.removesuffix("_reimpl") + "_selection_only_reimpl"
-                for name in labels if "selection_only" not in name
+                for name in labels
+                if "selection_only" not in name
             }
         if self.implementation_label not in labels:
             raise PrefixKVReimplementationError("PrefixKV implementation label is invalid")
@@ -1450,12 +1451,10 @@ def build_prefixkv_reimpl_plan(
             not ragged
             or not prefixkv_config.rescale_offline_profile_to_byte_budget
             or prefixkv_config.allocation_policy != "global_apportion"
-            or prefixkv_config.decode_policy
-            not in (
-                {"effective_profile_ratio", "append_only"}
-                if profile.evidence_variant
-                else {"effective_profile_ratio"}
-            )
+            # Decode growth is independent of the profile's scoring variant.
+            # Both the unmodified calibration control and question-scored arm
+            # must support the explicitly labeled selection-only ablation.
+            or prefixkv_config.decode_policy not in {"effective_profile_ratio", "append_only"}
             or cache_config.budget_unit is not BudgetUnit.BYTES
             or cache_config.budget_value != profile.calibration_byte_cap
             or any(
@@ -1465,7 +1464,8 @@ def build_prefixkv_reimpl_plan(
         ):
             raise PrefixKVReimplementationError(
                 "byte-calibrated profile requires its recorded physical cap/width, ragged "
-                "global_apportion and effective_profile_ratio; it is not a native ratio point"
+                "global_apportion and effective_profile_ratio or append_only; "
+                "it is not a native ratio point"
             )
         desired = profile.calibration_mean_layer_positions
     if ragged:

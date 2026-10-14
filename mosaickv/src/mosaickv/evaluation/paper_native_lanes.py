@@ -347,8 +347,14 @@ def _media_payload(item: MaterializedMedia) -> object:
         return image.convert("RGB").copy()
 
 
-def _validate_method(task: str, method: str) -> None:
+def _validate_method(
+    task: str,
+    method: str,
+    result_category: ResultCategory = ResultCategory.PAPER_REPRODUCTION,
+) -> None:
     allowed = _PREFIXKV_METHODS if task in _PREFIXKV_TASKS else _MILEBENCH_METHODS
+    if task == "milebench" and result_category is ResultCategory.UNIFIED_COMPARISON:
+        allowed = allowed | {"prompt_attention_topk"}
     if method not in allowed:
         raise ValueError(
             f"method {method!r} is not enabled for paper-native task {task!r}; "
@@ -460,13 +466,17 @@ def _milebench_observations(
                 metric_implementation="lookm_official_score.py@ecf0f51",
                 metric_version="milebench-2024-pinned-v1",
                 metric_unit=definition.unit,
-                measurement_type="baseline_paper_native_measured",
+                measurement_type=(
+                    "baseline_paper_native_measured"
+                    if row.result_category is ResultCategory.PAPER_REPRODUCTION
+                    else "derived"
+                ),
                 manifest_path=manifest_path,
                 metadata_json=metadata,
                 evaluator_commit=evaluator_commit,
                 reference_artifact_sha=ledger_sha,
-                result_category=ResultCategory.PAPER_REPRODUCTION,
-                result_origin=ResultOrigin.LOCALLY_REPRODUCED,
+                result_category=row.result_category,
+                result_origin=row.result_origin,
             )
         )
         scores.append(
@@ -500,7 +510,11 @@ def _milebench_observations(
                 metric_implementation="lookm_official_equal_dataset_hierarchy@ecf0f51",
                 metric_version="milebench-2024-pinned-v1",
                 metric_unit=default_metric_registry().resolve(metric.value).unit,
-                measurement_type="baseline_paper_native_measured",
+                measurement_type=(
+                    "baseline_paper_native_measured"
+                    if first.result_category is ResultCategory.PAPER_REPRODUCTION
+                    else "derived"
+                ),
                 manifest_path=manifest_path,
                 metadata_json=json.dumps(
                     {"hierarchy_key": hierarchy_key, "base_metric": metric.value},
@@ -510,8 +524,8 @@ def _milebench_observations(
                 evaluator_commit=evaluator_commit,
                 reference_artifact_sha=ledger_sha,
                 sample_count=len(scores),
-                result_category=ResultCategory.PAPER_REPRODUCTION,
-                result_origin=ResultOrigin.LOCALLY_REPRODUCED,
+                result_category=first.result_category,
+                result_origin=first.result_origin,
             )
         )
     return tuple(observations)
@@ -560,12 +574,20 @@ def run_materialized_paper_native_evaluation(
     fullkv_reference_input: str | Path | None = None,
     fullkv_reference_sha256: str | None = None,
     fullkv_reference_output: str | Path | None = None,
+    result_category: ResultCategory = ResultCategory.PAPER_REPRODUCTION,
 ) -> JsonObject:
     """Run PrefixKV/MileBench native metrics and preserve all failed samples."""
 
     if ledger.task != task.name:
         raise ValueError("ledger/task mismatch")
-    _validate_method(task.name, model.method)
+    if result_category is ResultCategory.UNIFIED_COMPARISON and task.name != "milebench":
+        raise ValueError("unified materialized scoring is enabled only for MileBench")
+    result_origin = (
+        ResultOrigin.LOCALLY_REPRODUCED
+        if result_category is ResultCategory.PAPER_REPRODUCTION
+        else ResultOrigin.LOCALLY_MEASURED
+    )
+    _validate_method(task.name, model.method, result_category)
     selected_ids = deterministic_sample_ids(
         tuple(sample.sample_id for sample in ledger.samples),
         seed=seed,
@@ -628,8 +650,8 @@ def run_materialized_paper_native_evaluation(
                 task_score=task_score,
                 metrics=metrics,
                 manifest_path=manifest_path,
-                result_category=ResultCategory.PAPER_REPRODUCTION,
-                result_origin=ResultOrigin.LOCALLY_REPRODUCED,
+                result_category=result_category,
+                result_origin=result_origin,
             )
         except Exception as error:
             row = EvaluationResult.failed(
@@ -644,8 +666,8 @@ def run_materialized_paper_native_evaluation(
                 error=f"{type(error).__name__}: {error}",
                 manifest_path=manifest_path,
                 metrics=GenerationMetrics(end_to_end_time=max(0.0, time.perf_counter() - started)),
-                result_category=ResultCategory.PAPER_REPRODUCTION,
-                result_origin=ResultOrigin.LOCALLY_REPRODUCED,
+                result_category=result_category,
+                result_origin=result_origin,
             )
         store.append(row)
 
@@ -653,8 +675,7 @@ def run_materialized_paper_native_evaluation(
         row for row in store.results(run_id=run_id) if row.sample_id in set(selected_ids)
     )
     if any(
-        (row.result_category, row.result_origin)
-        != (ResultCategory.PAPER_REPRODUCTION, ResultOrigin.LOCALLY_REPRODUCED)
+        (row.result_category, row.result_origin) != (result_category, result_origin)
         for row in selected_rows
     ):
         raise ValueError("paper reproduction resume contains another result category/origin")
@@ -747,8 +768,8 @@ def run_materialized_paper_native_evaluation(
         "JsonObject",
         {
             "run_id": run_id,
-            "result_category": ResultCategory.PAPER_REPRODUCTION.value,
-            "result_origin": ResultOrigin.LOCALLY_REPRODUCED.value,
+            "result_category": result_category.value,
+            "result_origin": result_origin.value,
             "tasks": [task.name],
             "selected_samples": len(selected_ids),
             "resumed_samples": len(set(selected_ids) & prior),
@@ -811,9 +832,7 @@ def validate_protocol_run(
             "paper-reproduction execution is blocked"
         )
     if config.dataset.revision != task_contract.dataset_revision:
-        raise ValueError(
-            "run dataset revision does not match the published protocol task contract"
-        )
+        raise ValueError("run dataset revision does not match the published protocol task contract")
     environment = protocol.supported_environment
     observed_environment = (
         config.execution.backend.value,
@@ -850,8 +869,7 @@ def validate_protocol_run(
     )
     if method_contract is None:
         raise ValueError(
-            f"method {selected_method!r} is not declared by protocol "
-            f"{protocol.protocol_id!r}"
+            f"method {selected_method!r} is not declared by protocol {protocol.protocol_id!r}"
         )
     if not method_contract.execution_enabled:
         raise ValueError(

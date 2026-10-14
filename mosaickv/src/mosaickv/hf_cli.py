@@ -591,7 +591,10 @@ def run_hf_evaluation(
         "paper_native_prefixkv",
         "paper_native_milebench",
     }
-    if is_materialized_native and protocol is None:
+    unified_milebench = bool(getattr(args, "unified_milebench", False))
+    if unified_milebench and (task.name != "milebench" or protocol is not None):
+        raise ValueError("--unified-milebench requires MileBench without a published protocol")
+    if is_materialized_native and protocol is None and not unified_milebench:
         raise ValueError(
             f"task {task.name!r} is a paper reproduction and requires a published protocol"
         )
@@ -755,6 +758,11 @@ def run_hf_evaluation(
             fullkv_reference_sha256=cast("str | None", getattr(args, "fullkv_reference_sha", None)),
             fullkv_reference_output=cast(
                 "str | None", getattr(args, "fullkv_reference_output", None)
+            ),
+            result_category=(
+                ResultCategory.UNIFIED_COMPARISON
+                if unified_milebench
+                else ResultCategory.PAPER_REPRODUCTION
             ),
         )
     elif task.local_scorer is not None:

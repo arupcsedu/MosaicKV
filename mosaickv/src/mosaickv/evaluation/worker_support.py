@@ -21,6 +21,7 @@ import torch
 import yaml
 
 from mosaickv.config import (
+    DatasetConfig,
     ForecastingConfig,
     GraphConfig,
     PrototypeConfig,
@@ -43,7 +44,14 @@ def settle(adapter: Any) -> None:
         torch.cuda.synchronize(adapter.device)
 
 
-def control_configs(template: Any, *, task: str, seed: int, output_length: int) -> dict[str, Any]:
+def control_configs(
+    template: Any,
+    *,
+    task: str,
+    seed: int,
+    output_length: int,
+    dataset: DatasetConfig | None = None,
+) -> dict[str, Any]:
     """Construct FullKV and Prompt Top-K controls with identical inputs.
 
     This deliberately turns off MosaicKV-only components.  Derived baseline
@@ -51,7 +59,15 @@ def control_configs(template: Any, *, task: str, seed: int, output_length: int) 
     from this single controlled input/generation configuration.
     """
 
-    route = PAPER_CANDIDATE_TASK_ROUTES[task]
+    if dataset is None:
+        route = PAPER_CANDIDATE_TASK_ROUTES[task]
+    else:
+        from mosaickv.evaluation.tasks import default_task_registry
+
+        spec = default_task_registry().resolve(task)
+        if (dataset.id, dataset.split) != (spec.dataset_id, spec.split):
+            raise ValueError("explicit dataset identity does not match the task registry")
+        route = dataset
     common: dict[str, Any] = {
         "dataset": route,
         "execution": replace(template.execution, seed=seed),
@@ -118,11 +134,15 @@ def record_hf_run(
     phase: str,
     repetition: int,
     order: int,
+    export_metrics: bool = False,
+    materialized_milebench: bool = False,
 ) -> dict[str, Any]:
     """Run and validate one immutable, fully paired HF measurement arm."""
 
     if config.diagnostics.enabled:
         raise RuntimeError("canonical workers require online-only diagnostics")
+    if materialized_milebench and (task != "milebench" or not export_metrics):
+        raise ValueError("materialized MileBench requires its task and metric exports")
     config_path = output_root / "configs" / f"{run_id}-{config_sha256(config)}.yaml"
     _write_config(config, config_path)
     arguments = argparse.Namespace(
@@ -140,9 +160,19 @@ def record_hf_run(
         sample_id_file_sha=ledger_sha,
         local_files_only=True,
     )
+    if export_metrics:
+        metric_root = output_root / run_id
+        arguments.metric_output = str(metric_root / "metrics.jsonl")
+        arguments.metric_observations_parquet_output = str(metric_root / "observations.parquet")
+        arguments.metric_aggregates_parquet_output = str(metric_root / "metrics.parquet")
+    if materialized_milebench:
+        arguments.sample_id_file = arguments.sample_id_file_sha = None
+        arguments.paper_native_ledger = str(ledger_path)
+        arguments.paper_native_ledger_sha = ledger_sha
+        arguments.unified_milebench = True
     status, summary = run_hf_evaluation(arguments, config, adapter=adapter)
     failed_samples = summary.get("failed_samples", 0)
-    if status or failed_samples:
+    if status or failed_samples or summary.get("metric_error") or summary.get("metric_errors"):
         raise RuntimeError(f"run failed or contains failed samples: {run_id}: {summary}")
     frame = pd.read_parquet(cast("str", summary["parquet_output"]))
     if (
@@ -156,7 +186,8 @@ def record_hf_run(
             "sample_id": str(row.sample_id),
             "answer": str(row.answer),
             "reference": str(row.reference),
-            "task_score": float(row.task_score),
+            # Corpus CIDEr has no independently averaged per-sample task_score.
+            "task_score": None if pd.isna(row.task_score) else float(row.task_score),
             "active_kv_bytes": int(row.active_kv_bytes),
             "residual_kv_bytes": int(row.residual_kv_bytes),
             "compression_time": float(row.compression_time),
@@ -177,4 +208,6 @@ def record_hf_run(
         "method": config.method.value,
         "run_id": run_id,
         "rows": rows,
+        "metric_observations_parquet_output": summary.get("metric_observations_parquet_output"),
+        "metric_aggregates_parquet_output": summary.get("metric_aggregates_parquet_output"),
     }

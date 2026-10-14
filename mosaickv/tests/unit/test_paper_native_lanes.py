@@ -228,6 +228,79 @@ def _result(method: str, sample_id: str, active_bytes: int) -> EvaluationResult:
     )
 
 
+@pytest.mark.parametrize("method", ["prompt_attention_topk", "lookm_reimpl", "mosaickv_exact"])
+def test_unified_milebench_keeps_all_result_and_metric_categories(tmp_path, method):
+    task = default_task_registry().resolve("milebench")
+    path, digest = _materialized_ledger(
+        tmp_path, task=task.name, dataset_id=task.dataset_id, split=task.split, prefixkv=False
+    )
+    ledger = load_paper_native_ledger(
+        path, expected_sha256=digest, task=task, dataset_revision="a" * 40
+    )
+    kwargs = dict(
+        run_id="unified",
+        task=task,
+        ledger=ledger,
+        model=_FakeNativeModel(method=method, retention_ratio=0.5),
+        manifest_path=str(tmp_path / "manifest.json"),
+        seed=5,
+        subset_size=None,
+        evaluator_commit="e" * 40,
+        model_revision="c" * 40,
+        tokenizer_revision="c" * 40,
+        generation_config_sha256="d" * 64,
+        **_run_paths(tmp_path, "unified"),
+    )
+    summary = run_materialized_paper_native_evaluation(
+        **kwargs, result_category=ResultCategory.UNIFIED_COMPARISON
+    )
+    assert summary["failed_samples"] == 0
+    assert summary["result_category"] == "unified_comparison"
+    assert summary["cache_operating_point"]["result_category"] == "unified_comparison"
+    for name in ("unified.jsonl", "unified-metrics.jsonl"):
+        rows = [json.loads(line) for line in (tmp_path / name).read_text().splitlines()]
+        assert rows
+        assert {r["result_category"] for r in rows} == {"unified_comparison"}
+        assert {r["result_origin"] for r in rows} == {"locally_measured"}
+    # Neither a completed result nor its metric can silently become a reproduction.
+    with pytest.raises(ValueError, match=r"another result category|not enabled"):
+        run_materialized_paper_native_evaluation(**kwargs)
+
+
+def test_unified_milebench_failure_preserves_category_and_denominator(tmp_path):
+    class Broken(_FakeNativeModel):
+        def generate(self, request):
+            raise RuntimeError("synthetic model failure")
+
+    task = default_task_registry().resolve("milebench")
+    path, digest = _materialized_ledger(
+        tmp_path, task=task.name, dataset_id=task.dataset_id, split=task.split, prefixkv=False
+    )
+    ledger = load_paper_native_ledger(
+        path, expected_sha256=digest, task=task, dataset_revision="a" * 40
+    )
+    summary = run_materialized_paper_native_evaluation(
+        run_id="broken",
+        task=task,
+        ledger=ledger,
+        model=Broken(),
+        manifest_path=str(tmp_path / "manifest.json"),
+        seed=5,
+        subset_size=None,
+        evaluator_commit="e" * 40,
+        model_revision="c" * 40,
+        tokenizer_revision="c" * 40,
+        generation_config_sha256="d" * 64,
+        result_category=ResultCategory.UNIFIED_COMPARISON,
+        **_run_paths(tmp_path, "broken"),
+    )
+    assert summary["selected_samples"] == summary["failed_samples"] == 1
+    assert summary["metric_output"] is None
+    row = json.loads((tmp_path / "broken.jsonl").read_text())
+    assert row["result_category"] == "unified_comparison"
+    assert row["status"] == "failed" and "synthetic model failure" in row["error"]
+
+
 def test_actual_active_bytes_are_required_and_byte_match_is_paired() -> None:
     left = (_result("mosaickv_exact", "a", 100), _result("mosaickv_exact", "b", 200))
     right = (_result("prompt_attention_topk", "a", 100), _result("prompt_attention_topk", "b", 201))
@@ -256,9 +329,7 @@ def test_protocol_guard_rejects_disabled_and_wrong_operating_points() -> None:
     )
     protocol = resolve_protocol(suite, "prefixkv_hf_reimpl_native_metrics_v1")
     task = default_task_registry().resolve("llava_description")
-    task_revision = next(
-        item.dataset_revision for item in protocol.tasks if item.name == task.name
-    )
+    task_revision = next(item.dataset_revision for item in protocol.tasks if item.name == task.name)
     assert task_revision is not None
     config = load_config(root / "configs/hf_prefixkv_reimpl.yaml")
     config = replace(
@@ -270,9 +341,7 @@ def test_protocol_guard_rejects_disabled_and_wrong_operating_points() -> None:
             split=task.split,
         ),
     )
-    lock_sha = hashlib.sha256(
-        (root / "env/common/requirements.lock").read_bytes()
-    ).hexdigest()
+    lock_sha = hashlib.sha256((root / "env/common/requirements.lock").read_bytes()).hexdigest()
     validate_protocol_run(
         protocol,
         task=task,

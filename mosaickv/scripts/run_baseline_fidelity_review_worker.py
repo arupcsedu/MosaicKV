@@ -87,14 +87,15 @@ def review_configs(
     output_length: int,
     retention_ratio: float,
     profile_forget_ratio: str | None = None,
+    dataset: Any = None,
 ) -> dict[str, Any]:
     """Build exact paired controls for one model, task, and retention ratio."""
 
     model = ModelConfig(model_id, model_revision, Precision.FP16)
     base = replace(template, model=model)
-    prompt = control_configs(base, task=task, seed=seed, output_length=output_length)[
-        "prompt_attention_topk"
-    ]
+    prompt = control_configs(
+        base, task=task, seed=seed, output_length=output_length, dataset=dataset
+    )["prompt_attention_topk"]
     cache = CacheConfig(
         budget_value=2**63 - 1,
         budget_unit=BudgetUnit.BYTES,
@@ -181,6 +182,7 @@ def byte_capped_configs(
     profile_reference_retention_ratio: float | None = None,
     prefixkv_transport: str = "common_guarded",
     mandatory_policy: str = "last_token",
+    dataset: Any = None,
 ) -> dict[str, Any]:
     """Build a physical-byte-matched FullKV/Top-K/baseline/MosaicKV set.
 
@@ -216,6 +218,7 @@ def byte_capped_configs(
         output_length=output_length,
         retention_ratio=0.99,
         profile_forget_ratio=profile_forget_ratio,
+        dataset=dataset,
     )
     baseline_name = FAMILY_METHOD[family]
     byte_cache = replace(

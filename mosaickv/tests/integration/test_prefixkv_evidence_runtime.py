@@ -251,6 +251,92 @@ def test_question_scored_append_only_64_steps_preserve_growth_and_label(fixture)
             token = out.next_token_id
 
 
+@pytest.mark.parametrize("alpha", [0.0, 0.5])
+def test_matched_control_and_c_only_append_without_eviction(fixture, tmp_path, alpha):
+    """Exercise the actual first/last C-only validation contract, not ABC."""
+    adapter, request, prepared, prefill, mapping, _, cfg = fixture
+    observation = prefixkv_calibration_observation(
+        "independent-calibration",
+        prefill.attention_weights,
+        question_positions=mapping.positions,
+        question_mapping_sha256=mapping.trace()["mapping_sha256"],
+    )
+    profile = generate_prefixkv_byte_profile(
+        (observation,),
+        byte_cap=1024,
+        bytes_per_layer_position=64,
+        model_id=cfg.model.id,
+        model_revision=cfg.model.revision,
+        dataset_id="synthetic",
+        dataset_revision="b" * 40,
+        calibration_split="train",
+        evaluation_sample_ids=(request.sample_id,),
+        seed=71,
+        question_score_weight=alpha,
+    )
+    config = replace(
+        cfg,
+        cache=replace(cfg.cache, physical_budget_mandatory_policy="first_and_last"),
+        prefixkv=PrefixKVConfig(
+            enabled=True,
+            profile_path=str(profile.write(tmp_path / f"matched-{alpha}.json")),
+            rescale_offline_profile_to_byte_budget=True,
+            profile_reference_retention_ratio=profile.target_retention_ratio,
+            hf_cache_transport="ragged_llama_eager_v1",
+            decode_boundary_policy="protected",
+            decode_policy="append_only",
+            question_score_weight=alpha,
+        ),
+    )
+    snapshot = adapter.extract_past_key_values(prefill.state.past_key_values)
+    originals = tuple((x.key.clone(), x.value.clone()) for x in snapshot.layers)
+    full = FullKVState.from_cache_snapshot(
+        snapshot,
+        block_size=1,
+        mandatory_logical_positions=(0, prepared.logical_sequence_length - 1),
+        modality_spans=prepared.modality_map,
+        token_ids=prepared.model_inputs["input_ids"],
+    )
+    plan = build_prefixkv_reimpl_plan(
+        full,
+        prefill.attention_weights,
+        config.prefixkv,
+        config.cache,
+        model_id=config.model.id,
+        model_revision=config.model.revision,
+        profile=profile,
+        question_positions=mapping.positions if alpha else (),
+        physical_prompt_capacity=8,
+    )
+    label = "question_scored" if alpha else "byte_calibrated"
+    assert plan.implementation_label == f"prefixkv_{label}_selection_only_reimpl"
+    assert plan.retained_bytes == 1024
+    packed = _pack_prefixkv_ragged(adapter, plan, prefill.state.past_key_values)
+    state = _state_from_packed(adapter, prefill.state, packed)
+    width = sum(
+        2 * x.key.shape[0] * x.key.shape[1] * x.key.shape[3] * x.key.element_size()
+        for x in snapshot.layers
+    )
+    token = prefill.next_token_id
+    with torch.inference_mode():
+        for step in range(1, 65):
+            out = adapter.decode_one_token(token, state, capture_queries=False)
+            state, events = maintain_prefixkv_decode_cache(
+                adapter, out.state, plan, step_index=step
+            )
+            assert not any(e.get("removed_logical_position") is not None for e in events)
+            current = adapter.extract_past_key_values(state.past_key_values)
+            assert (
+                sum(t.untyped_storage().nbytes() for x in current.layers for t in (x.key, x.value))
+                == 1024 + step * width
+            )
+            assert state.next_decode_position == prepared.logical_sequence_length + step
+            assert torch.isfinite(out.logits).all()
+            token = out.next_token_id
+    for layer, (k, v) in zip(snapshot.layers, originals, strict=True):
+        assert torch.equal(layer.key, k) and torch.equal(layer.value, v)
+
+
 @pytest.mark.parametrize(
     "method", [MosaicKVMethod.PROMPT_ATTENTION_TOPK, MosaicKVMethod.MOSAICKV_EXACT]
 )
