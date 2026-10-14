@@ -228,6 +228,130 @@ def test_ragged_config_roundtrip_and_invalid_transport():
         PrefixKVConfig(hf_cache_transport="silently_pad")
 
 
+@pytest.mark.parametrize("policy", ["profile_ratio", "effective_profile_ratio"])
+def test_actual_upstream_selector_and_evictor_64_steps(policy):
+    from mosaickv.evaluation.prefixkv_differential import compare_upstream_decode
+
+    torch.manual_seed(177)
+    adapter = _llava()
+    prepared = adapter.prepare_inputs([{"role": "user", "content": "test"}])
+    # A longer random tiny-model prompt exposes fractional rounding schedules.
+    prepared = replace(
+        prepared,
+        model_inputs={
+            "input_ids": torch.arange(3, 44).reshape(1, -1),
+            "attention_mask": torch.ones((1, 41), dtype=torch.long),
+        },
+        logical_sequence_length=41,
+    )
+    prefill = adapter.prefill(prepared, capture_attentions=True)
+    full = FullKVState.from_cache_snapshot(
+        adapter.extract_past_key_values(prefill.state.past_key_values),
+        block_size=1,
+        mandatory_logical_positions=(0, 40),
+        modality_spans=(),
+        token_ids=prepared.model_inputs["input_ids"],
+    )
+    profile = PrefixKVOfflineProfile(
+        model_id="llava-hf/llava-1.5-7b-hf",
+        model_revision="a" * 40,
+        target_retention_ratio=0.5,
+        layer_forget_ratios=(0.411, 0.589),
+        calibration_dataset_id="synthetic",
+        calibration_dataset_revision="b" * 40,
+        calibration_split="train",
+        calibration_sample_ids=("cal",),
+        calibration_seed=0,
+        start_size=1,
+        protect_size=1,
+    )
+    config = PrefixKVConfig(
+        enabled=True,
+        profile_path="unused.json",
+        hf_cache_transport="ragged_llama_eager_v1",
+        decode_boundary_policy="protected",
+        decode_policy=policy,
+        allocation_policy="upstream_round" if policy == "profile_ratio" else "global_apportion",
+    )
+    plan = build_prefixkv_reimpl_plan(
+        full,
+        prefill.attention_weights,
+        config,
+        CacheConfig(full.active_bytes, BudgetUnit.BYTES, 0.5, 1),
+        model_id=profile.model_id,
+        model_revision=profile.model_revision,
+        profile=profile,
+    )
+    result = compare_upstream_decode(
+        adapter, prefill, plan, Path(__file__).resolve().parents[3], steps=64, atol=1e-6
+    )
+    assert result["passed"] and result["source_isolated"]
+    assert len(result["steps"]) == 64
+    assert result["token_agreement"] == 1
+
+
+def test_append_only_never_evicts_and_is_labeled_in_raw_runtime(tmp_path):
+    torch.manual_seed(83)
+    adapter = _llava()
+    config = replace(
+        _baseline_runtime_config(MosaicKVMethod.FULL_KV, 1.0),
+        method=MosaicKVMethod.PREFIXKV_REIMPL,
+        generation=GenerationConfig(max_new_tokens=16),
+        cache=CacheConfig(256, BudgetUnit.BYTES, 0.5, 1),
+        prefixkv=PrefixKVConfig(
+            enabled=True,
+            profile_mode=PrefixKVProfileMode.FIXED_GLOBAL,
+            hf_cache_transport="ragged_llama_eager_v1",
+            decode_policy="append_only",
+        ),
+    )
+    runtime = HuggingFaceMosaicKVModel(adapter, config, trace_directory=tmp_path)
+    output = runtime.generate(_runtime_request("append-only"))
+    assert output.effective_method == "prefixkv_selection_only_reimpl"
+    trace = json.loads(next((tmp_path / "append-only").glob("*.json")).read_text())
+    events = trace["prefixkv_decode_events"]
+    assert len(events) == 30
+    assert all(event["removed_physical_position"] is None for event in events)
+    assert all(event["decode_policy"] == "append_only" for event in events)
+    assert trace["final_active_kv_bytes"] == 256 + 15 * 128
+
+
+def test_native_round_schedule_works_through_complete_runtime(tmp_path):
+    torch.manual_seed(85)
+    adapter = _llava()
+
+    class LongerProcessor(type(adapter.processor)):
+        def __call__(self, **kwargs):
+            return {
+                "input_ids": torch.arange(3, 44).reshape(1, -1),
+                "attention_mask": torch.ones((1, 41), dtype=torch.long),
+            }
+
+    adapter.processor = LongerProcessor()
+    path = tmp_path / "native_profile.json"
+    path.write_text(json.dumps([0.411, 0.589]))
+    config = replace(
+        _baseline_runtime_config(MosaicKVMethod.FULL_KV, 1.0),
+        method=MosaicKVMethod.PREFIXKV_REIMPL,
+        generation=GenerationConfig(max_new_tokens=16),
+        cache=CacheConfig(2**63 - 1, BudgetUnit.BLOCKS, 0.5, 1),
+        prefixkv=PrefixKVConfig(
+            enabled=True,
+            profile_path=str(path),
+            hf_cache_transport="ragged_llama_eager_v1",
+            decode_boundary_policy="protected",
+            allocation_policy="upstream_round",
+            decode_policy="profile_ratio",
+        ),
+    )
+    runtime = HuggingFaceMosaicKVModel(adapter, config, trace_directory=tmp_path)
+    runtime.generate(_runtime_request("native-schedule"))
+    trace = json.loads(next((tmp_path / "native-schedule").glob("*.json")).read_text())
+    assert trace["status"] == "completed"
+    assert trace["prefixkv"]["allocation_policy"] == "upstream_round"
+    assert len(trace["prefixkv_decode_events"]) == 30
+
+
 def test_ragged_rejects_future_position_before_forward():
     adapter = _llava()
     _prefill, _plan, _packed, state, _oracle = _compressed(adapter)

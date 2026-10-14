@@ -546,8 +546,11 @@ class PrefixKVLayerState:
     bytes_per_position: int
     retained_bytes: int
     eviction_offset: int
+    decode_forget_ratio: float | None = None
 
     def __post_init__(self) -> None:
+        if self.decode_forget_ratio is not None and not 0 <= self.decode_forget_ratio <= 1:
+            raise PrefixKVReimplementationError("PrefixKV decode forget ratio must be in [0, 1]")
         if self.layer < 0 or self.source_positions < 1:
             raise PrefixKVReimplementationError("PrefixKV layer identity/length is invalid")
         if self.retained_positions != len(self.selected_physical_positions):
@@ -568,6 +571,15 @@ class PrefixKVLayerState:
     @property
     def retention_ratio(self) -> float:
         return self.retained_positions / self.source_positions
+
+    @property
+    def decode_retention_ratio(self) -> float:
+        # Preserve upstream's exact floating arithmetic, not rounded count/N.
+        return (
+            self.retention_ratio
+            if self.decode_forget_ratio is None
+            else 1.0 - self.decode_forget_ratio
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -600,7 +612,11 @@ class PrefixKVCompressionPlan:
             raise PrefixKVReimplementationError("PrefixKV byte accounting is inconsistent")
         if self.source_bytes != self.full_state.active_bytes:
             raise PrefixKVReimplementationError("PrefixKV source byte accounting is inconsistent")
-        if self.implementation_label not in {"prefixkv_reimpl", "generalized_prefixkv_reimpl"}:
+        if self.implementation_label not in {
+            "prefixkv_reimpl",
+            "generalized_prefixkv_reimpl",
+            "prefixkv_selection_only_reimpl",
+        }:
             raise PrefixKVReimplementationError("PrefixKV implementation label is invalid")
 
     @property
@@ -657,6 +673,9 @@ class PrefixKVCompressionPlan:
             "eviction_distance": self.config.eviction_distance,
             "hf_cache_transport": self.config.hf_cache_transport,
             "decode_boundary_policy": self.config.decode_boundary_policy,
+            "decode_policy": self.config.decode_policy,
+            "allocation_policy": self.config.allocation_policy,
+            "paper_native_algorithm": self.config.allocation_policy == "upstream_round",
             "minimum_decode_capacity": (
                 max(3, self.config.start_size + self.config.protect_size + 1)
                 if self.config.decode_boundary_policy == "protected"
@@ -668,6 +687,8 @@ class PrefixKVCompressionPlan:
                     "source_positions": layer.source_positions,
                     "retained_positions": layer.retained_positions,
                     "retention_ratio": layer.retention_ratio,
+                    "decode_retention_ratio": layer.decode_retention_ratio,
+                    "decode_forget_ratio": layer.decode_forget_ratio,
                     "selected_physical_positions": list(layer.selected_physical_positions),
                     "selected_logical_positions": list(layer.selected_logical_positions),
                     "protected_positions": list(layer.protected_positions),
@@ -886,7 +907,37 @@ def build_prefixkv_reimpl_plan(
             target_positions = min(
                 target_positions, cache_config.budget_value // bytes_per_position[0]
             )
-    retained = list(_bounded_apportion(desired, lower, upper, target_positions))
+    upstream_round = prefixkv_config.allocation_policy == "upstream_round"
+    if upstream_round and cache_config.retention_ratio < 1.0:
+        assert profile is not None
+        # Upstream rounds *forgotten* positions independently (numpy ties-to-even).
+        # Do not globally apportion or silently repair native layer capacities.
+        retained = [
+            length - int(np.rint(forget * length))
+            for length, forget in zip(lengths, profile.layer_forget_ratios, strict=True)
+        ]
+        if any(
+            not low <= count <= high
+            for count, low, high in zip(retained, lower, upper, strict=True)
+        ):
+            raise PrefixKVReimplementationError(
+                "upstream rounded profile violates mandatory bounds"
+            )
+        if (
+            physical_prompt_capacity is not None
+            and sum(retained) > physical_prompt_capacity * layer_count
+        ):
+            raise PrefixKVReimplementationError(
+                "upstream rounded profile exceeds physical byte cap"
+            )
+        if (
+            cache_config.budget_unit is BudgetUnit.BYTES
+            and sum(count * size for count, size in zip(retained, bytes_per_position, strict=True))
+            > cache_config.budget_value
+        ):
+            raise PrefixKVReimplementationError("upstream rounded profile exceeds byte budget")
+    else:
+        retained = list(_bounded_apportion(desired, lower, upper, target_positions))
     if cache_config.budget_unit is BudgetUnit.BYTES:
         while (
             sum(count * size for count, size in zip(retained, bytes_per_position, strict=True))
@@ -943,6 +994,13 @@ def build_prefixkv_reimpl_plan(
                 attention_score_sum=sum(layer_scores),
                 bytes_per_position=position_bytes,
                 retained_bytes=count * position_bytes,
+                decode_forget_ratio=(
+                    profile.layer_forget_ratios[layer_index]
+                    if upstream_round and profile is not None and cache_config.retention_ratio < 1.0
+                    else 1.0 - count / lengths[layer_index]
+                    if prefixkv_config.decode_policy == "effective_profile_ratio"
+                    else None
+                ),
                 eviction_offset=_eviction_offset(
                     count,
                     prefixkv_config.eviction_distance,
@@ -976,7 +1034,11 @@ def build_prefixkv_reimpl_plan(
         retained_bytes=retained_bytes,
         target_retention_ratio=cache_config.retention_ratio,
         implementation_label=(
-            "prefixkv_reimpl" if official_family else "generalized_prefixkv_reimpl"
+            "prefixkv_selection_only_reimpl"
+            if prefixkv_config.decode_policy == "append_only"
+            else "prefixkv_reimpl"
+            if official_family
+            else "generalized_prefixkv_reimpl"
         ),
     )
 

@@ -1,5 +1,63 @@
 # PrefixKV independent-layer HF repair (2026-10-13)
 
+## Decode-policy audit and correction (2026-10-14)
+
+The official 1,000-example Description reproduction at 50% retention passed
+its registered PPL tolerance (3.40117 versus 3.41 ± 0.25) and measured ROUGE-L
+0.82835. It used the legacy checkpoint, BF16, Transformers 4.31.0, 16 output
+tokens and approximately 157 MiB. Its manifest explicitly did **not** certify
+the local common-HF implementation. It cannot certify 40 MiB OCR inference
+with HF-converted weights, FP16, Transformers 4.55.2 and 64 output tokens.
+Evidence: `prefixkv/official-profile-r050-2c7a266/official_profile_reproduction_gate.json`
+under `/scratch/djy8hg/runs/mosaickv`.
+
+Transport parity previously compared against a manual oracle that reused the
+local eviction formula. It therefore missed a real algorithmic difference:
+upstream `third_party/PrefixKV/prefixkv.py` rounds forgotten positions at
+prefill but keeps the **original floating forget ratios** during decode.
+The local implementation instead used rounded retained positions divided by
+prompt length. Those schedules can evict on different steps. Fixing that
+discrepancy does not guarantee a quality improvement or explain every OCR failure.
+
+Explicit, backward-compatible policies now distinguish:
+
+- `allocation_policy: upstream_round`, `decode_policy: profile_ratio`: use
+  original independent numpy rounding and original profile floats. Infeasible
+  mandatory bounds or hard caps fail, rather than altering the native profile.
+- `global_apportion` + `effective_profile_ratio`: fill the shared physical-byte
+  budget, derive a new per-layer forget profile from achieved counts and use
+  the upstream floating decode arithmetic with that **adapted** profile.
+  This is a byte-rescaled `prefixkv_reimpl`, not an official operating point.
+- `global_apportion` + `append_only`: preserve the identical prefill selection
+  and append generated KV without further eviction. Raw results and traces
+  carry **`prefixkv_selection_only_reimpl`** as the effective method. This is
+  an ablation, not paper-native PrefixKV. Its storage growth matches other
+  append-only methods at the same initial bytes, unlike native eviction.
+- `realized_ratio` remains the default solely for configuration/artifact
+  compatibility. No old results are overwritten or relabeled as repaired.
+
+`evaluation/prefixkv_differential.py` invokes the pinned upstream class directly
+on identical HF prefill caches. Its only adapter redirects the upstream
+profile read to an in-memory, hash-recorded profile; upstream source, selection
+and eviction code remain unmodified. Marker tensors independently check exact
+selected and evicted logical positions, alongside per-layer K/V, 64-step
+greedy logits/tokens, exact storage and source isolation. This is **algorithm
+parity on common HF**, not reproduction of the legacy model checkpoint.
+
+The GPU gate runs retention-1 parity, native-profile 50% differential parity,
+then the 40 MiB adapted-profile differential. Quality workers proceed only
+after these pass. The development cohort has eight IDs per task, selected
+by parent-ledger order `[24:32]`, excluding earlier calibration/debug `[0:24]`.
+This is retrospective development, not untouched paper evidence. All matched
+arms share first/last mandatory tokens, block size one, FP16/eager, processor,
+media, prompts, output length 64, seed and 40 MiB prefill cap. The native 50%
+diagnostic remains separate. FullKV is a quality reference only. Zero warmups
+and one trial make timing informational; no latency claim follows.
+
+The frozen retry does not tune profiles or relax quality gates. A larger
+preregistered paired quality evaluation and proper repeated latency trials
+are still required; code/transport parity alone never releases the full sweep.
+
 ## What failed
 
 The original `21292854` PrefixKV workers deliberately rejected compressed

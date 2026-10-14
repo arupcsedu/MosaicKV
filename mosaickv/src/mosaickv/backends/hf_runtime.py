@@ -5137,6 +5137,9 @@ def maintain_prefixkv_decode_cache(
 
         return evict_ragged_prefixkv(adapter, state, plan, step_index=step_index)
 
+    if plan.config.decode_policy != "realized_ratio":
+        raise HuggingFaceRuntimeError("new PrefixKV decode policies require a ragged cache state")
+
     torch = _torch()
     snapshot = adapter.extract_past_key_values(state.past_key_values)
     raw_masks = state.model_state.get("mosaickv_validity_masks")

@@ -125,10 +125,18 @@ def evict_ragged_prefixkv(
     for (key, value), logical, layer in zip(legacy, all_positions, plan.layers, strict=True):
         if key.shape[-2] != len(logical):
             raise RuntimeError("ragged PrefixKV eviction position metadata mismatch")
-        target = state.logical_sequence_length * layer.retention_ratio
+        target = (
+            layer.retained_positions + state.logical_sequence_length - layer.source_positions
+            if plan.config.decode_policy == "append_only"
+            else state.logical_sequence_length * layer.decode_retention_ratio
+        )
         offset = None
         removed_logical = None
-        if math.trunc(len(logical) - target) > 0 and len(logical) > 1:
+        if (
+            plan.config.decode_policy != "append_only"
+            and math.trunc(len(logical) - target) > 0
+            and len(logical) > 1
+        ):
             offset = min(layer.eviction_offset, len(logical) - 1)
             removed_logical = logical[offset]
             if plan.config.decode_boundary_policy == "protected" and (
@@ -161,6 +169,7 @@ def evict_ragged_prefixkv(
                 "physical_bytes_after": key.untyped_storage().nbytes()
                 + value.untyped_storage().nbytes(),
                 "decode_boundary_policy": plan.config.decode_boundary_policy,
+                "decode_policy": plan.config.decode_policy,
                 "protected_start_present": all(
                     position in logical
                     for position in layer.selected_logical_positions[: plan.config.start_size]

@@ -3089,8 +3089,38 @@ class PrefixKVConfig:
     # Preserve the old behavior only for reading/reproducing historical diagnostics.
     # New quality retries use protected boundaries and reserve an eviction interior.
     decode_boundary_policy: str = "legacy_clamped"
+    # Legacy defaults preserve historical artifacts. Native auditing uses the
+    # upstream floating profile and independent rounding; append_only is an
+    # explicitly labeled selection-only ablation, not paper-native PrefixKV.
+    allocation_policy: str = "global_apportion"
+    decode_policy: str = "realized_ratio"
 
     def __post_init__(self) -> None:
+        if self.allocation_policy not in {"global_apportion", "upstream_round"}:
+            raise ConfigurationError("prefixkv.allocation_policy is not supported")
+        if self.decode_policy not in {
+            "realized_ratio",
+            "profile_ratio",
+            "effective_profile_ratio",
+            "append_only",
+        }:
+            raise ConfigurationError("prefixkv.decode_policy is not supported")
+        if self.decode_policy == "profile_ratio" and self.allocation_policy != "upstream_round":
+            raise ConfigurationError("profile_ratio requires upstream_round allocation")
+        if self.allocation_policy == "upstream_round" and (
+            self.profile_mode is not PrefixKVProfileMode.OFFLINE_PROFILE
+            or self.rescale_offline_profile_to_byte_budget
+            or self.decode_policy != "profile_ratio"
+            or self.protect_size != 1
+        ):
+            raise ConfigurationError(
+                "upstream_round requires an unscaled offline profile, profile_ratio decode "
+                "and protect_size=1; it is not an exact-byte allocation policy"
+            )
+        if (
+            self.allocation_policy != "global_apportion" or self.decode_policy != "realized_ratio"
+        ) and (self.hf_cache_transport != "ragged_llama_eager_v1"):
+            raise ConfigurationError("new PrefixKV policies require ragged_llama_eager_v1")
         if self.decode_boundary_policy not in {"legacy_clamped", "protected"}:
             raise ConfigurationError("prefixkv.decode_boundary_policy is not supported")
         if self.decode_boundary_policy == "protected" and self.start_size < 1:
@@ -3158,6 +3188,8 @@ class PrefixKVConfig:
                 "official_repository_sha",
                 "hf_cache_transport",
                 "decode_boundary_policy",
+                "allocation_policy",
+                "decode_policy",
             },
             "prefixkv",
         )
@@ -3195,6 +3227,10 @@ class PrefixKVConfig:
             decode_boundary_policy=_optional_str(
                 data, "decode_boundary_policy", "legacy_clamped", "prefixkv"
             ),
+            allocation_policy=_optional_str(
+                data, "allocation_policy", "global_apportion", "prefixkv"
+            ),
+            decode_policy=_optional_str(data, "decode_policy", "realized_ratio", "prefixkv"),
         )
 
 
@@ -3767,6 +3803,11 @@ class RunConfig:
         elif self.lookm.enabled:
             raise ConfigurationError("lookm.enabled=true is reserved for method='lookm_reimpl'")
         if self.method.is_prefixkv_reimplementation:
+            if (
+                self.prefixkv.decode_policy != "realized_ratio"
+                and self.execution.backend is not Backend.HUGGINGFACE
+            ):
+                raise ConfigurationError("new PrefixKV decode policies are HF-only")
             if not self.prefixkv.enabled:
                 raise ConfigurationError("method='prefixkv_reimpl' requires prefixkv.enabled=true")
             if self.cache.block_size != 1 and self.execution.backend is not Backend.VLLM:
