@@ -12,6 +12,7 @@ from mosaickv.baselines import (
     PrefixKVCalibrationObservation,
     generate_prefixkv_profile,
 )
+from mosaickv.baselines.prefixkv import generate_prefixkv_byte_profile
 
 
 def _ids(path: Path) -> tuple[str, ...]:
@@ -54,24 +55,49 @@ def main() -> int:
     parser.add_argument("--dataset", required=True)
     parser.add_argument("--dataset-revision", required=True)
     parser.add_argument("--calibration-split", required=True)
-    parser.add_argument("--retention-ratio", type=float, required=True)
+    budget = parser.add_mutually_exclusive_group(required=True)
+    budget.add_argument("--retention-ratio", type=float)
+    budget.add_argument("--byte-cap", type=int)
+    parser.add_argument("--bytes-per-layer-position", type=int)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--start-size", type=int, default=1)
     parser.add_argument("--protect-size", type=int, default=1)
+    parser.add_argument(
+        "--search-policy", choices=("legacy_cdf", "upstream_protected_cdf"), default=None
+    )
     args = parser.parse_args()
-    profile = generate_prefixkv_profile(
-        _observations(args.attention_jsonl),
+    if (args.byte_cap is None) != (args.bytes_per_layer_position is None):
+        parser.error("--byte-cap and --bytes-per-layer-position must be supplied together")
+    if args.byte_cap is not None and args.search_policy not in (None, "upstream_protected_cdf"):
+        parser.error("byte calibration requires upstream_protected_cdf search")
+    if args.output.exists():
+        raise FileExistsError("refusing to overwrite a frozen profile: " + str(args.output))
+    common = dict(
         model_id=args.model,
         model_revision=args.model_revision,
         dataset_id=args.dataset,
         dataset_revision=args.dataset_revision,
         calibration_split=args.calibration_split,
         evaluation_sample_ids=_ids(args.evaluation_sample_ids),
-        retention_ratio=args.retention_ratio,
         seed=args.seed,
         start_size=args.start_size,
         protect_size=args.protect_size,
     )
+    observations = _observations(args.attention_jsonl)
+    if args.byte_cap is not None:
+        profile = generate_prefixkv_byte_profile(
+            observations,
+            byte_cap=args.byte_cap,
+            bytes_per_layer_position=args.bytes_per_layer_position,
+            **common,
+        )
+    else:
+        profile = generate_prefixkv_profile(
+            observations,
+            retention_ratio=args.retention_ratio,
+            search_policy=args.search_policy or "legacy_cdf",
+            **common,
+        )
     path = profile.write(args.output)
     print(
         json.dumps(

@@ -18,7 +18,7 @@ from pathlib import Path
 from run_byte_capped_published_baseline_pilot import _require_clean_source, byte_capped_configs
 
 from mosaickv.config import PrefixKVConfig, load_config
-from mosaickv.types import BudgetUnit
+from mosaickv.types import BudgetUnit, PrefixKVProfileMode
 
 MODEL = "llava-hf/llava-1.5-7b-hf"
 REVISION = "b234b804b114d9e37bb655e11cbbb5f5e971b7a9"
@@ -92,6 +92,70 @@ def derived_ids(parent_ids):
     if len(parent_ids) < 32 or len(set(parent_ids)) != len(parent_ids):
         raise ValueError("need at least 32 distinct parent identities")
     return tuple(parent_ids[24:32])
+
+
+def allocation_configs(root, task, profile_path, profile):
+    """Fixed, label-blind allocation ablations; does not change the old retry.
+
+    Freeze one exact-40-MiB profile on disjoint calibration IDs first. Callers
+    must use new evaluation IDs and record all arms, including failures. This
+    helper neither materializes samples nor authorizes/submits a GPU campaign.
+    """
+    if (
+        profile.calibration_byte_cap != CAP
+        or profile.calibration_bytes_per_layer_position != 16384
+        or profile.model_id != MODEL
+        or profile.model_revision != REVISION
+        or profile.start_size != 1
+        or profile.protect_size != 1
+        or profile.search_policy != "upstream_protected_cdf"
+    ):
+        raise ValueError("allocation preflight requires the protected exact-40-MiB LLaVA profile")
+    from mosaickv.baselines.prefixkv import PrefixKVOfflineProfile
+
+    if (
+        PrefixKVOfflineProfile.from_json_object(json.loads(Path(profile_path).read_text()))
+        != profile
+    ):
+        raise ValueError("frozen allocation profile differs from supplied profile")
+    base = configs(root, task)
+    upstream = base["byte_rescaled_prefixkv_reimpl"]
+    calibrated = replace(
+        upstream,
+        prefixkv=replace(
+            upstream.prefixkv,
+            profile_path=str(profile_path),
+            profile_reference_retention_ratio=profile.target_retention_ratio,
+        ),
+    )
+    uniform = replace(
+        upstream,
+        prefixkv=replace(
+            upstream.prefixkv,
+            profile_mode=PrefixKVProfileMode.FIXED_GLOBAL,
+            profile_path=None,
+            rescale_offline_profile_to_byte_budget=False,
+            profile_reference_retention_ratio=None,
+        ),
+    )
+    arms = {
+        "full_kv": base["full_kv"],
+        "prompt_attention_topk": base["prompt_attention_topk"],
+        "prefixkv_upstream_shape_reimpl": upstream,
+        "prefixkv_byte_calibrated_reimpl": calibrated,
+        "prefixkv_capacity_floor_reimpl": replace(
+            calibrated,
+            prefixkv=replace(calibrated.prefixkv, layer_budget_floor_fraction=0.5),
+        ),
+        "prefixkv_uniform_layer_reimpl": uniform,
+        "mosaickv_exact": base["mosaickv_exact"],
+    }
+    for name, config in arms.items():
+        if name != "full_kv":
+            for field in ("cache", "execution", "generation", "model", "dataset"):
+                if getattr(config, field) != getattr(upstream, field):
+                    raise ValueError(f"allocation preflight changed shared {field}: {name}")
+    return arms
 
 
 def check_plan(root, expected_hash):

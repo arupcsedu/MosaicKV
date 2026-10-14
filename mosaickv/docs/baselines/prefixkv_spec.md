@@ -5,6 +5,11 @@ never official PrefixKV code. The official source is pinned as a read-only
 submodule at commit `597f1ab032704951550f93bcc8a23f1454b80aa4` under
 `third_party/PrefixKV`; its `LICENSE` is MIT, copyright 2024 Zuyan Liu.
 
+For the current 40 MiB OCR quality failure and opt-in protected-CDF,
+byte-calibration, capacity-floor and equal-layer diagnostics, see
+[the allocation-first recovery note](prefixkv_quality_recovery.md). These
+options do not establish recovered answer quality or change old profiles.
+
 The optional common-environment transport `ragged_llama_eager_v1` is documented
 in [the layerwise transport specification](prefixkv_ragged_transport.md).
 Its shared-byte profile rescaling and last-token-only prefill policy are an
@@ -145,8 +150,11 @@ The selection plan is shared with MosaicKV, but compressed PrefixKV does
 per-layer cache lengths at prefill and after each decode eviction, whereas the
 generic adapter owns one request-wide cache/mask extent. Padding a variable
 PrefixKV plan, or treating an initially uniform plan as permanently uniform,
-changes the physical cache and can create invalid decode states. The common
-HF runtime therefore fails closed for every compressed `prefixkv_reimpl` run.
+changes the physical cache and can create invalid decode states. The default
+`common_guarded` transport therefore fails closed for compressed runs. The
+opt-in `ragged_llama_eager_v1` transport supports independent layer lengths
+under the narrow version/model contract documented above; its algorithm
+parity and OCR quality are separate gates.
 
 Paper-native PrefixKV runs use the isolated, pinned upstream LLaVA transport
 through `scripts/run_prefixkv_llava_parity.py`. It executes the unmodified

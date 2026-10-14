@@ -228,8 +228,14 @@ def test_ragged_config_roundtrip_and_invalid_transport():
         PrefixKVConfig(hf_cache_transport="silently_pad")
 
 
-@pytest.mark.parametrize("policy", ["profile_ratio", "effective_profile_ratio"])
+@pytest.mark.parametrize(
+    "policy", ["profile_ratio", "effective_profile_ratio", "byte_calibrated", "capacity_floor"]
+)
 def test_actual_upstream_selector_and_evictor_64_steps(policy):
+    from mosaickv.baselines.prefixkv import (
+        generate_prefixkv_byte_profile,
+        prefixkv_calibration_observation,
+    )
     from mosaickv.evaluation.prefixkv_differential import compare_upstream_decode
 
     torch.manual_seed(177)
@@ -270,14 +276,36 @@ def test_actual_upstream_selector_and_evictor_64_steps(policy):
         profile_path="unused.json",
         hf_cache_transport="ragged_llama_eager_v1",
         decode_boundary_policy="protected",
-        decode_policy=policy,
+        decode_policy=policy if policy == "profile_ratio" else "effective_profile_ratio",
         allocation_policy="upstream_round" if policy == "profile_ratio" else "global_apportion",
     )
+    cache = CacheConfig(full.active_bytes, BudgetUnit.BYTES, 0.5, 1)
+    if policy in {"byte_calibrated", "capacity_floor"}:
+        width = full.active_bytes // (2 * 41)
+        profile = generate_prefixkv_byte_profile(
+            (prefixkv_calibration_observation("cal-fixture", prefill.attention_weights),),
+            byte_cap=28 * width,
+            bytes_per_layer_position=width,
+            model_id=profile.model_id,
+            model_revision=profile.model_revision,
+            dataset_id="synthetic",
+            dataset_revision="b" * 40,
+            calibration_split="train",
+            evaluation_sample_ids=("eval-fixture",),
+            seed=0,
+        )
+        config = replace(
+            config,
+            rescale_offline_profile_to_byte_budget=True,
+            profile_reference_retention_ratio=profile.target_retention_ratio,
+            layer_budget_floor_fraction=0.5 if policy == "capacity_floor" else 0,
+        )
+        cache = CacheConfig(28 * width, BudgetUnit.BYTES, 0.99, 1)
     plan = build_prefixkv_reimpl_plan(
         full,
         prefill.attention_weights,
         config,
-        CacheConfig(full.active_bytes, BudgetUnit.BYTES, 0.5, 1),
+        cache,
         model_id=profile.model_id,
         model_revision=profile.model_revision,
         profile=profile,

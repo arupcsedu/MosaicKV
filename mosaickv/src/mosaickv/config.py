@@ -3094,8 +3094,30 @@ class PrefixKVConfig:
     # explicitly labeled selection-only ablation, not paper-native PrefixKV.
     allocation_policy: str = "global_apportion"
     decode_policy: str = "realized_ratio"
+    # Explicit local ablation: reserve this fraction of uniform capacity in
+    # every layer BEFORE allocating the remaining shared-byte budget. Zero
+    # preserves historical and upstream-profile behavior.
+    layer_budget_floor_fraction: float = 0.0
 
     def __post_init__(self) -> None:
+        if (
+            isinstance(self.layer_budget_floor_fraction, bool)
+            or not math.isfinite(self.layer_budget_floor_fraction)
+            or not 0 <= self.layer_budget_floor_fraction <= 1
+        ):
+            raise ConfigurationError("prefixkv.layer_budget_floor_fraction must be in [0, 1]")
+        if self.layer_budget_floor_fraction > 0 and (
+            self.allocation_policy != "global_apportion"
+            or self.decode_policy != "effective_profile_ratio"
+            or self.decode_boundary_policy != "protected"
+            or self.hf_cache_transport != "ragged_llama_eager_v1"
+            or not self.rescale_offline_profile_to_byte_budget
+        ):
+            raise ConfigurationError(
+                "PrefixKV capacity-floor ablation requires global_apportion, "
+                "effective_profile_ratio, protected boundaries, ragged_llama_eager_v1 "
+                "and byte-rescaled offline profile"
+            )
         if self.allocation_policy not in {"global_apportion", "upstream_round"}:
             raise ConfigurationError("prefixkv.allocation_policy is not supported")
         if self.decode_policy not in {
@@ -3190,6 +3212,7 @@ class PrefixKVConfig:
                 "decode_boundary_policy",
                 "allocation_policy",
                 "decode_policy",
+                "layer_budget_floor_fraction",
             },
             "prefixkv",
         )
@@ -3231,6 +3254,9 @@ class PrefixKVConfig:
                 data, "allocation_policy", "global_apportion", "prefixkv"
             ),
             decode_policy=_optional_str(data, "decode_policy", "realized_ratio", "prefixkv"),
+            layer_budget_floor_fraction=_float(
+                data, "layer_budget_floor_fraction", 0.0, "prefixkv"
+            ),
         )
 
 

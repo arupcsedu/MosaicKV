@@ -13,7 +13,7 @@ import math
 import os
 import tempfile
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, cast
 
@@ -86,6 +86,13 @@ class PrefixKVOfflineProfile:
     official_repository_sha: str = "597f1ab032704951550f93bcc8a23f1454b80aa4"
     source_kind: str = "calibration_generated"
     schema_version: int = 1
+    # Absent in historical JSON/hashes. New profiling must explicitly identify
+    # the pinned upstream protected-count convention rather than relabel old
+    # local profiles as upstream-compatible.
+    search_policy: str = "legacy_cdf"
+    calibration_byte_cap: int | None = None
+    calibration_bytes_per_layer_position: int | None = None
+    calibration_mean_layer_positions: tuple[float, ...] = ()
 
     def __post_init__(self) -> None:
         for name in ("model_id", "model_revision", "source_kind"):
@@ -106,6 +113,37 @@ class PrefixKVOfflineProfile:
             )
         if self.schema_version != 1:
             raise PrefixKVReimplementationError("profile.schema_version must equal 1")
+        if self.search_policy not in {"legacy_cdf", "upstream_protected_cdf"}:
+            raise PrefixKVReimplementationError("unsupported PrefixKV calibration search policy")
+        if self.calibration_byte_cap is not None:
+            width = self.calibration_bytes_per_layer_position
+            if (
+                type(self.calibration_byte_cap) is not int
+                or self.calibration_byte_cap <= 0
+                or type(width) is not int
+                or width <= 0
+                or self.source_kind != "calibration_generated"
+                or len(self.calibration_mean_layer_positions) != len(self.layer_forget_ratios)
+                or any(
+                    not math.isfinite(value) or value <= 0
+                    for value in self.calibration_mean_layer_positions
+                )
+            ):
+                raise PrefixKVReimplementationError("invalid byte-target calibration metadata")
+            if not math.isclose(
+                sum(self.calibration_mean_layer_positions),
+                self.calibration_byte_cap // width,
+                rel_tol=0,
+                abs_tol=1e-8,
+            ):
+                raise PrefixKVReimplementationError(
+                    "calibration positions do not fill the byte cap"
+                )
+        elif (
+            self.calibration_bytes_per_layer_position is not None
+            or self.calibration_mean_layer_positions
+        ):
+            raise PrefixKVReimplementationError("byte-target calibration metadata requires a cap")
         if self.source_kind == "calibration_generated":
             for name in (
                 "calibration_dataset_id",
@@ -175,6 +213,15 @@ class PrefixKVOfflineProfile:
         }
         if include_digest:
             payload["profile_sha256"] = self.profile_sha256
+        if self.search_policy != "legacy_cdf":
+            payload["search_policy"] = self.search_policy
+        if self.calibration_byte_cap is not None:
+            payload["byte_calibration"] = {
+                "cap": self.calibration_byte_cap,
+                "bytes_per_layer_position": self.calibration_bytes_per_layer_position,
+                "mean_layer_positions": list(self.calibration_mean_layer_positions),
+                "sample_aggregation": "mean_retained_positions_at_identical_byte_cap",
+            }
         return payload
 
     def write(self, path: str | Path) -> Path:
@@ -213,6 +260,8 @@ class PrefixKVOfflineProfile:
             "calibration",
             "search",
             "profile_sha256",
+            "search_policy",
+            "byte_calibration",
         }
         unknown = set(payload) - expected
         if unknown:
@@ -226,6 +275,18 @@ class PrefixKVOfflineProfile:
         model = cast("dict[str, object]", payload.get("model"))
         calibration = cast("dict[str, object]", payload.get("calibration"))
         search = cast("dict[str, object]", payload.get("search"))
+        byte = payload.get("byte_calibration")
+        if byte is not None and (
+            not isinstance(byte, dict)
+            or set(byte)
+            != {"cap", "bytes_per_layer_position", "mean_layer_positions", "sample_aggregation"}
+            or byte.get("sample_aggregation") != "mean_retained_positions_at_identical_byte_cap"
+            or type(byte.get("cap")) is not int
+            or type(byte.get("bytes_per_layer_position")) is not int
+            or not isinstance(byte.get("mean_layer_positions"), list)
+        ):
+            raise PrefixKVReimplementationError("invalid byte-target calibration metadata")
+        byte_fields = cast("dict[str, Any]", byte) if byte is not None else {}
         profile = cls(
             model_id=str(model["id"]),
             model_revision=str(model["revision"]),
@@ -245,6 +306,10 @@ class PrefixKVOfflineProfile:
             official_repository_sha=str(payload["official_repository_sha"]),
             source_kind=str(payload["source_kind"]),
             schema_version=int(cast("int", payload["schema_version"])),
+            search_policy=str(payload.get("search_policy", "legacy_cdf")),
+            calibration_byte_cap=byte_fields.get("cap"),
+            calibration_bytes_per_layer_position=byte_fields.get("bytes_per_layer_position"),
+            calibration_mean_layer_positions=tuple(byte_fields.get("mean_layer_positions", ())),
         )
         declared = payload.get("profile_sha256")
         if declared is not None and declared != profile.profile_sha256:
@@ -429,17 +494,39 @@ def search_prefixkv_layer_sizes(
     retention_ratio: float,
     start_size: int,
     protect_size: int,
+    search_policy: str = "legacy_cdf",
+    target_positions: int | None = None,
 ) -> tuple[int, ...]:
-    """Binary-search the shared cumulative-priority threshold from Equation (1)."""
+    """Search a shared priority threshold, with explicitly versioned protection.
+
+    ``upstream_protected_cdf`` follows obtain_cdf_num's kept-count convention
+    (CDF prefix PLUS protected allowance). Exact integer apportionment remains
+    a local adaptation; this is not a bitwise clone of upstream's <5 tolerance,
+    forgotten-count rescaling and truncation. ``target_positions`` permits
+    exact per-sample byte-derived calibration rather than a mean-length ratio.
+    """
 
     if not 0 < retention_ratio <= 1:
         raise PrefixKVReimplementationError("retention_ratio must be in (0, 1]")
     if not layer_scores:
         raise PrefixKVReimplementationError("PrefixKV search requires at least one layer")
+    if search_policy not in {"legacy_cdf", "upstream_protected_cdf"}:
+        raise PrefixKVReimplementationError("unsupported PrefixKV calibration search policy")
+    if start_size < 0 or protect_size < 1:
+        raise PrefixKVReimplementationError("invalid protected boundary sizes")
+    if any(
+        not scores or any(not math.isfinite(value) or value < 0 for value in scores)
+        for scores in layer_scores
+    ):
+        raise PrefixKVReimplementationError("layer scores must be nonempty, finite and nonnegative")
     lengths = tuple(len(scores) for scores in layer_scores)
     lower = tuple(min(length, start_size + protect_size) for length in lengths)
     target = max(sum(lower), math.floor(sum(lengths) * retention_ratio + 1e-12))
     target = min(target, sum(lengths))
+    if target_positions is not None:
+        if type(target_positions) is not int or not sum(lower) <= target_positions <= sum(lengths):
+            raise PrefixKVReimplementationError("target_positions is outside mandatory bounds")
+        target = target_positions
     cumulative: list[np.ndarray[Any, Any]] = []
     for scores in layer_scores:
         ranked = np.sort(np.asarray(scores, dtype=np.float64))[::-1]
@@ -448,8 +535,12 @@ def search_prefixkv_layer_sizes(
         cumulative.append(np.cumsum(normalized))
 
     def sizes(threshold: float) -> tuple[int, ...]:
+        allowance = start_size + protect_size if search_policy == "upstream_protected_cdf" else 0
         return tuple(
-            max(low, min(length, int(np.searchsorted(cdf, threshold, side="left")) + 1))
+            max(
+                low,
+                min(length, int(np.searchsorted(cdf, threshold, side="left")) + 1 + allowance),
+            )
             for cdf, low, length in zip(cumulative, lower, lengths, strict=True)
         )
 
@@ -482,6 +573,7 @@ def generate_prefixkv_profile(
     seed: int,
     start_size: int = 1,
     protect_size: int = 1,
+    search_policy: str = "legacy_cdf",
 ) -> PrefixKVOfflineProfile:
     """Estimate and aggregate per-sample global prefix configurations offline."""
 
@@ -505,6 +597,7 @@ def generate_prefixkv_profile(
             retention_ratio=retention_ratio,
             start_size=start_size,
             protect_size=protect_size,
+            search_policy=search_policy,
         )
         sample_forget_ratios.append(
             tuple(
@@ -528,6 +621,90 @@ def generate_prefixkv_profile(
         calibration_seed=seed,
         start_size=start_size,
         protect_size=protect_size,
+        search_policy=search_policy,
+    )
+
+
+def generate_prefixkv_byte_profile(
+    observations: tuple[PrefixKVCalibrationObservation, ...],
+    *,
+    byte_cap: int,
+    bytes_per_layer_position: int,
+    model_id: str,
+    model_revision: str,
+    dataset_id: str,
+    dataset_revision: str,
+    calibration_split: str,
+    evaluation_sample_ids: tuple[str, ...],
+    seed: int,
+    start_size: int = 1,
+    protect_size: int = 1,
+) -> PrefixKVOfflineProfile:
+    """Label-blind local profile at the ACTUAL shared cap for every observation.
+
+    Unlike averaging cap/full-size ratios and profiling at that one ratio,
+    every sample has the same integer retained-position target. Freeze mean
+    retained counts (not length-dependent forget ratios) for later inference.
+    Full-cache/too-short observations fail rather than changing the objective.
+    """
+    if (
+        type(byte_cap) is not int
+        or byte_cap <= 0
+        or type(bytes_per_layer_position) is not int
+        or bytes_per_layer_position <= 0
+        or not observations
+    ):
+        raise PrefixKVReimplementationError("byte calibration needs positive integer cap/width")
+    lengths = [
+        sum(len(scores) for scores in observation.layer_scores) for observation in observations
+    ]
+    target = byte_cap // bytes_per_layer_position
+    if any(target >= length for length in lengths):
+        raise PrefixKVReimplementationError("byte calibration must compress every observation")
+    # Reuse identity, provenance and disjointness validation. The ratio is
+    # descriptive only; the explicit byte-derived counts below are authoritative.
+    ratio = sum(target / length for length in lengths) / len(lengths)
+    base = generate_prefixkv_profile(
+        observations,
+        model_id=model_id,
+        model_revision=model_revision,
+        dataset_id=dataset_id,
+        dataset_revision=dataset_revision,
+        calibration_split=calibration_split,
+        evaluation_sample_ids=evaluation_sample_ids,
+        retention_ratio=ratio,
+        seed=seed,
+        start_size=start_size,
+        protect_size=protect_size,
+        search_policy="upstream_protected_cdf",
+    )
+    counts = [
+        search_prefixkv_layer_sizes(
+            observation.layer_scores,
+            retention_ratio=ratio,
+            start_size=start_size,
+            protect_size=protect_size,
+            search_policy="upstream_protected_cdf",
+            target_positions=target,
+        )
+        for observation in observations
+    ]
+    layer_count = len(base.layer_forget_ratios)
+    return replace(
+        base,
+        layer_forget_ratios=tuple(
+            sum(
+                1.0 - count[layer] / len(observation.layer_scores[layer])
+                for observation, count in zip(observations, counts, strict=True)
+            )
+            / len(observations)
+            for layer in range(layer_count)
+        ),
+        calibration_byte_cap=byte_cap,
+        calibration_bytes_per_layer_position=bytes_per_layer_position,
+        calibration_mean_layer_positions=tuple(
+            sum(count[layer] for count in counts) / len(counts) for layer in range(layer_count)
+        ),
     )
 
 
@@ -616,6 +793,9 @@ class PrefixKVCompressionPlan:
             "prefixkv_reimpl",
             "generalized_prefixkv_reimpl",
             "prefixkv_selection_only_reimpl",
+            "prefixkv_capacity_floor_reimpl",
+            "prefixkv_byte_calibrated_reimpl",
+            "prefixkv_uniform_layer_reimpl",
         }:
             raise PrefixKVReimplementationError("PrefixKV implementation label is invalid")
 
@@ -655,6 +835,12 @@ class PrefixKVCompressionPlan:
             ),
             "profile_sha256": self.profile.profile_sha256 if self.profile is not None else None,
             "profile_source_kind": self.profile.source_kind if self.profile is not None else None,
+            "calibration_search_policy": (
+                self.profile.search_policy if self.profile is not None else None
+            ),
+            "calibration_byte_cap": (
+                self.profile.calibration_byte_cap if self.profile is not None else None
+            ),
             "calibration_sample_ids_sha256": (
                 self.profile.calibration_sample_ids_sha256 if self.profile is not None else None
             ),
@@ -675,6 +861,17 @@ class PrefixKVCompressionPlan:
             "decode_boundary_policy": self.config.decode_boundary_policy,
             "decode_policy": self.config.decode_policy,
             "allocation_policy": self.config.allocation_policy,
+            "layer_budget_floor_fraction": self.config.layer_budget_floor_fraction,
+            # Small summaries survive light traces, unlike the selected-position lists.
+            "layer_capacity_summary": {
+                "positions": list(self.layer_cache_sizes),
+                "minimum": min(self.layer_cache_sizes),
+                "maximum": max(self.layer_cache_sizes),
+                "total": sum(self.layer_cache_sizes),
+                "layers_below_eviction_distance": sum(
+                    count < abs(self.config.eviction_distance) for count in self.layer_cache_sizes
+                ),
+            },
             "paper_native_algorithm": self.config.allocation_policy == "upstream_round",
             "minimum_decode_capacity": (
                 max(3, self.config.start_size + self.config.protect_size + 1)
@@ -858,6 +1055,13 @@ def build_prefixkv_reimpl_plan(
             raise PrefixKVReimplementationError(
                 "PrefixKV profile layer count does not match the decoder"
             )
+        if profile.model_id != model_id or profile.model_revision != model_revision:
+            raise PrefixKVReimplementationError("PrefixKV profile model identity mismatch")
+        if (profile.start_size, profile.protect_size) != (
+            prefixkv_config.start_size,
+            prefixkv_config.protect_size,
+        ):
+            raise PrefixKVReimplementationError("PrefixKV profile protected-boundary mismatch")
         desired = tuple(
             length * (1.0 - forget)
             for length, forget in zip(lengths, profile.layer_forget_ratios, strict=True)
@@ -894,6 +1098,24 @@ def build_prefixkv_reimpl_plan(
     bytes_per_position = tuple(
         _layer_bytes_per_position(full_state, layer) for layer in range(layer_count)
     )
+    if profile is not None and profile.calibration_byte_cap is not None:
+        if (
+            not ragged
+            or not prefixkv_config.rescale_offline_profile_to_byte_budget
+            or prefixkv_config.allocation_policy != "global_apportion"
+            or prefixkv_config.decode_policy != "effective_profile_ratio"
+            or cache_config.budget_unit is not BudgetUnit.BYTES
+            or cache_config.budget_value != profile.calibration_byte_cap
+            or any(
+                width != profile.calibration_bytes_per_layer_position
+                for width in bytes_per_position
+            )
+        ):
+            raise PrefixKVReimplementationError(
+                "byte-calibrated profile requires its recorded physical cap/width, ragged "
+                "global_apportion and effective_profile_ratio; it is not a native ratio point"
+            )
+        desired = profile.calibration_mean_layer_positions
     if ragged:
         # A dense cap is a *total* shared-byte target, not an upper bound on
         # each layer. Capping each layer destroys the offline profile shape.
@@ -908,6 +1130,13 @@ def build_prefixkv_reimpl_plan(
                 target_positions, cache_config.budget_value // bytes_per_position[0]
             )
     upstream_round = prefixkv_config.allocation_policy == "upstream_round"
+    if prefixkv_config.layer_budget_floor_fraction > 0:
+        floor = math.floor(
+            prefixkv_config.layer_budget_floor_fraction * target_positions / layer_count
+        )
+        lower = tuple(max(low, min(high, floor)) for low, high in zip(lower, upper, strict=True))
+        if sum(lower) > target_positions:
+            raise PrefixKVReimplementationError("capacity floor exceeds the shared byte budget")
     if upstream_round and cache_config.retention_ratio < 1.0:
         assert profile is not None
         # Upstream rounds *forgotten* positions independently (numpy ties-to-even).
@@ -1034,8 +1263,15 @@ def build_prefixkv_reimpl_plan(
         retained_bytes=retained_bytes,
         target_retention_ratio=cache_config.retention_ratio,
         implementation_label=(
-            "prefixkv_selection_only_reimpl"
+            "prefixkv_capacity_floor_reimpl"
+            if prefixkv_config.layer_budget_floor_fraction > 0
+            else "prefixkv_byte_calibrated_reimpl"
+            if profile is not None and profile.calibration_byte_cap is not None
+            else "prefixkv_selection_only_reimpl"
             if prefixkv_config.decode_policy == "append_only"
+            else "prefixkv_uniform_layer_reimpl"
+            if prefixkv_config.profile_mode is PrefixKVProfileMode.FIXED_GLOBAL
+            and prefixkv_config.decode_policy == "effective_profile_ratio"
             else "prefixkv_reimpl"
             if official_family
             else "generalized_prefixkv_reimpl"

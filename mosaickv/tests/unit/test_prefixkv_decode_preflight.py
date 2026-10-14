@@ -54,3 +54,40 @@ def test_new_development_ids_do_not_overlap_prior_debug_or_calibration(worker):
         worker.derived_ids(ids[:31])
     with pytest.raises(ValueError):
         worker.derived_ids([*ids[:-1], ids[0]])
+
+
+@pytest.mark.parametrize("task", ["textvqa", "docvqa"])
+def test_allocation_ablations_preserve_shared_controls_and_frozen_profile(worker, tmp_path, task):
+    import json
+
+    from mosaickv.baselines.prefixkv import (
+        PrefixKVCalibrationObservation,
+        generate_prefixkv_byte_profile,
+    )
+    from mosaickv.config import RunConfig, canonical_config_json
+
+    profile = generate_prefixkv_byte_profile(
+        (PrefixKVCalibrationObservation("cal-only", ((1.0,) * 128,) * 32),),
+        byte_cap=40 * 2**20,
+        bytes_per_layer_position=16384,
+        model_id=worker.MODEL,
+        model_revision=worker.REVISION,
+        dataset_id="synthetic",
+        dataset_revision="b" * 40,
+        calibration_split="train",
+        evaluation_sample_ids=("eval-only",),
+        seed=7,
+    )
+    path = profile.write(tmp_path / "frozen.json")
+    arms = worker.allocation_configs(Path(__file__).resolve().parents[3], task, path, profile)
+    assert len(arms) == 7
+    for name, config in arms.items():
+        if name != "full_kv":
+            for field in ("cache", "execution", "generation", "model", "dataset"):
+                assert getattr(config, field) == getattr(arms["prompt_attention_topk"], field)
+        assert RunConfig.from_mapping(json.loads(canonical_config_json(config))) == config
+    assert arms["prefixkv_capacity_floor_reimpl"].prefixkv.layer_budget_floor_fraction == 0.5
+    assert arms["prefixkv_uniform_layer_reimpl"].prefixkv.profile_path is None
+    bad = replace(profile, model_revision="c" * 40)
+    with pytest.raises(ValueError, match="LLaVA profile"):
+        worker.allocation_configs(Path(__file__).resolve().parents[3], task, path, bad)
