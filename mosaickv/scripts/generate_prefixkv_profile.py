@@ -40,6 +40,12 @@ def _observations(path: Path) -> tuple[PrefixKVCalibrationObservation, ...]:
                 layer_scores=tuple(
                     tuple(float(score) for score in layer) for layer in payload["layer_scores"]
                 ),
+                question_positions=tuple(payload.get("question_positions", ())),
+                question_layer_scores=tuple(
+                    tuple(float(x) for x in layer)
+                    for layer in payload.get("question_layer_scores", ())
+                ),
+                question_mapping_sha256=payload.get("question_mapping_sha256"),
             )
         )
     return tuple(result)
@@ -62,10 +68,23 @@ def main() -> int:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--start-size", type=int, default=1)
     parser.add_argument("--protect-size", type=int, default=1)
+    parser.add_argument("--exclude-protected-from-calibration", action="store_true")
+    parser.add_argument(
+        "--prompt-reservation-policy",
+        choices=("boundaries", "question_and_boundaries"),
+        default="boundaries",
+    )
+    parser.add_argument("--question-score-weight", type=float, default=0.0)
     parser.add_argument(
         "--search-policy", choices=("legacy_cdf", "upstream_protected_cdf"), default=None
     )
     args = parser.parse_args()
+    if args.byte_cap is None and (
+        args.exclude_protected_from_calibration
+        or args.prompt_reservation_policy != "boundaries"
+        or args.question_score_weight != 0
+    ):
+        parser.error("evidence ablations require --byte-cap; they are not native ratio profiles")
     if (args.byte_cap is None) != (args.bytes_per_layer_position is None):
         parser.error("--byte-cap and --bytes-per-layer-position must be supplied together")
     if args.byte_cap is not None and args.search_policy not in (None, "upstream_protected_cdf"):
@@ -89,6 +108,9 @@ def main() -> int:
             observations,
             byte_cap=args.byte_cap,
             bytes_per_layer_position=args.bytes_per_layer_position,
+            exclude_protected_from_calibration=args.exclude_protected_from_calibration,
+            prompt_reservation_policy=args.prompt_reservation_policy,
+            question_score_weight=args.question_score_weight,
             **common,
         )
     else:

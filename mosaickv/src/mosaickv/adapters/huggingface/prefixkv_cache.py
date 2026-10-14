@@ -114,7 +114,7 @@ def evict_ragged_prefixkv(
     *,
     step_index: int,
 ) -> tuple[DecodeState, tuple[JsonObject, ...]]:
-    """Official at-most-one fixed-offset eviction, independently in each layer."""
+    """At-most-one eviction per layer; question protection is an explicit variant."""
     import torch
 
     legacy, _ = adapter._legacy_layers(state.past_key_values)
@@ -138,6 +138,28 @@ def evict_ragged_prefixkv(
             and len(logical) > 1
         ):
             offset = min(layer.eviction_offset, len(logical) - 1)
+            if plan.prompt_reservation_policy == "question_and_boundaries":
+                protected = {
+                    logical_id
+                    for physical_id, logical_id in zip(
+                        layer.selected_physical_positions,
+                        layer.selected_logical_positions,
+                        strict=True,
+                    )
+                    if physical_id in layer.protected_positions
+                }
+                if not protected <= set(logical):
+                    raise RuntimeError("PrefixKV lost protected question evidence before eviction")
+                eligible = [
+                    i
+                    for i, p in enumerate(logical)
+                    if p not in protected and i < len(logical) - plan.config.protect_size
+                ]
+                if not eligible:
+                    raise RuntimeError("PrefixKV has no unprotected eviction candidate")
+                # Explicit variant: nearest eligible offset, deterministic lower-index tie break.
+                requested_offset = offset
+                offset = min(eligible, key=lambda i: (abs(i - requested_offset), i))
             removed_logical = logical[offset]
             if plan.config.decode_boundary_policy == "protected" and (
                 offset < plan.config.start_size
@@ -170,6 +192,7 @@ def evict_ragged_prefixkv(
                 + value.untyped_storage().nbytes(),
                 "decode_boundary_policy": plan.config.decode_boundary_policy,
                 "decode_policy": plan.config.decode_policy,
+                "prompt_reservation_policy": plan.prompt_reservation_policy,
                 "protected_start_present": all(
                     position in logical
                     for position in layer.selected_logical_positions[: plan.config.start_size]

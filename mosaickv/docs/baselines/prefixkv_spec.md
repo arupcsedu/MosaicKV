@@ -309,3 +309,11 @@ the reducer rejects a missing or duplicate ID, a dirty worker, a changed
 upstream profile hash, absent NLL statistics, or a shard that was incorrectly
 marked eligible. It computes corpus PPL from summed NLL/token counts and mean
 ROUGE-L from all 1,000 frozen-FullKV paired generations.
+
+### Separate evidence-preservation variants
+
+The opt-in sink-neutral calibration, shared question reservation, and normalized
+question-query ranking paths are documented in
+[prefixkv_evidence_ablations.md](prefixkv_evidence_ablations.md). They are explicit
+local ablations, not official or paper-native PrefixKV. Historical defaults and
+profiles remain unchanged; no new GPU quality claim follows from their CPU tests.

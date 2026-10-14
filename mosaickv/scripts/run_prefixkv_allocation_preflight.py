@@ -126,7 +126,7 @@ def prepare(root, sha, parent_root):
     print(digest(root / "plan.json"))
 
 
-def collect(adapter, ledger, output):
+def collect(adapter, ledger, output, *, capture_question_evidence=False):
     import torch
 
     from mosaickv.baselines.prefixkv import prefixkv_calibration_observation
@@ -165,9 +165,21 @@ def collect(adapter, ledger, output):
         visuals = _flatten_visuals(to_visual(doc))
         media = tuple(MediaItem(_media_kind(v), v) for v in visuals)
         prepared = adapter.prepare_inputs(build_multimodal_messages(context, media))
+        evidence = None
+        if capture_question_evidence:
+            from mosaickv.adapters.huggingface.prompt_evidence import map_prompt_evidence
+
+            evidence = map_prompt_evidence(
+                adapter, prepared, build_multimodal_messages(context, media)
+            )
         with torch.inference_mode():
             prefill = adapter.prefill(prepared, capture_queries=False, capture_attentions=True)
-            observation = prefixkv_calibration_observation(sid, prefill.attention_weights)
+            observation = prefixkv_calibration_observation(
+                sid,
+                prefill.attention_weights,
+                question_positions=evidence.positions if evidence else (),
+                question_mapping_sha256=evidence.trace()["mapping_sha256"] if evidence else None,
+            )
             snapshot = adapter.extract_past_key_values(prefill.state.past_key_values)
         widths = [
             (
@@ -188,6 +200,16 @@ def collect(adapter, ledger, output):
                 layer_scores=observation.layer_scores,
                 bytes_per_layer_position=16384,
                 prompt_tokens=prepared.logical_sequence_length,
+                **(
+                    {
+                        "question_positions": list(observation.question_positions),
+                        "question_layer_scores": observation.question_layer_scores,
+                        "question_mapping_sha256": observation.question_mapping_sha256,
+                        "question_mapping": evidence.trace(),
+                    }
+                    if evidence
+                    else {}
+                ),
             ),
         )
         files[sid] = {"path": str(path), "sha256": digest(path)}

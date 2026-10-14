@@ -13,7 +13,7 @@ import math
 import os
 import tempfile
 from contextlib import suppress
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, cast
 
@@ -50,6 +50,9 @@ class PrefixKVCalibrationObservation:
 
     sample_id: str
     layer_scores: tuple[tuple[float, ...], ...]
+    question_positions: tuple[int, ...] = ()
+    question_layer_scores: tuple[tuple[float, ...], ...] = ()
+    question_mapping_sha256: str | None = None
 
     def __post_init__(self) -> None:
         if not self.sample_id.strip():
@@ -66,6 +69,15 @@ class PrefixKVCalibrationObservation:
             raise PrefixKVReimplementationError(
                 "calibration attention scores must be finite and nonnegative"
             )
+        if self.question_positions or self.question_layer_scores or self.question_mapping_sha256:
+            _validate_question_positions(self.question_positions, min(map(len, self.layer_scores)))
+            if not self.question_mapping_sha256 or not _valid_sha(self.question_mapping_sha256, 64):
+                raise PrefixKVReimplementationError("question calibration requires a mapping hash")
+            if len(self.question_layer_scores) != len(self.layer_scores) or any(
+                len(a) != len(b) or any(not math.isfinite(x) or x < 0 for x in b)
+                for a, b in zip(self.layer_scores, self.question_layer_scores, strict=True)
+            ):
+                raise PrefixKVReimplementationError("invalid question calibration score shapes")
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,6 +105,9 @@ class PrefixKVOfflineProfile:
     calibration_byte_cap: int | None = None
     calibration_bytes_per_layer_position: int | None = None
     calibration_mean_layer_positions: tuple[float, ...] = ()
+    prompt_reservation_policy: str = "boundaries"
+    question_score_weight: float = 0.0
+    calibration_evidence_sha256: str | None = None
 
     def __post_init__(self) -> None:
         for name in ("model_id", "model_revision", "source_kind"):
@@ -113,8 +128,27 @@ class PrefixKVOfflineProfile:
             )
         if self.schema_version != 1:
             raise PrefixKVReimplementationError("profile.schema_version must equal 1")
-        if self.search_policy not in {"legacy_cdf", "upstream_protected_cdf"}:
+        if self.search_policy not in {"legacy_cdf", "upstream_protected_cdf", "optional_cdf"}:
             raise PrefixKVReimplementationError("unsupported PrefixKV calibration search policy")
+        if self.prompt_reservation_policy not in {"boundaries", "question_and_boundaries"}:
+            raise PrefixKVReimplementationError("invalid profile prompt reservation policy")
+        if (
+            isinstance(self.question_score_weight, bool)
+            or not isinstance(self.question_score_weight, (int, float))
+            or not math.isfinite(self.question_score_weight)
+            or not 0 <= self.question_score_weight <= 1
+        ):
+            raise PrefixKVReimplementationError("invalid profile question score weight")
+        if self.evidence_variant and (
+            self.calibration_byte_cap is None
+            or self.calibration_evidence_sha256 is None
+            or not _valid_sha(self.calibration_evidence_sha256, 64)
+        ):
+            raise PrefixKVReimplementationError(
+                "evidence profile requires byte cap and capture hash"
+            )
+        if not self.evidence_variant and self.calibration_evidence_sha256 is not None:
+            raise PrefixKVReimplementationError("unexpected evidence hash on legacy profile")
         if self.calibration_byte_cap is not None:
             width = self.calibration_bytes_per_layer_position
             if (
@@ -160,6 +194,14 @@ class PrefixKVOfflineProfile:
             raise PrefixKVReimplementationError(
                 "profile calibration sample IDs must be sorted and unique"
             )
+
+    @property
+    def evidence_variant(self) -> bool:
+        return (
+            self.search_policy == "optional_cdf"
+            or self.prompt_reservation_policy != "boundaries"
+            or self.question_score_weight > 0
+        )
 
     @property
     def profile_sha256(self) -> str:
@@ -222,6 +264,13 @@ class PrefixKVOfflineProfile:
                 "mean_layer_positions": list(self.calibration_mean_layer_positions),
                 "sample_aggregation": "mean_retained_positions_at_identical_byte_cap",
             }
+        if self.evidence_variant:
+            payload["evidence_policy"] = {
+                "prompt_reservation": self.prompt_reservation_policy,
+                "question_score_weight": self.question_score_weight,
+                "calibration_evidence_sha256": self.calibration_evidence_sha256,
+                "scoring": "optional_normalized_original_question_mixture_v1",
+            }
         return payload
 
     def write(self, path: str | Path) -> Path:
@@ -262,6 +311,7 @@ class PrefixKVOfflineProfile:
             "profile_sha256",
             "search_policy",
             "byte_calibration",
+            "evidence_policy",
         }
         unknown = set(payload) - expected
         if unknown:
@@ -287,6 +337,21 @@ class PrefixKVOfflineProfile:
         ):
             raise PrefixKVReimplementationError("invalid byte-target calibration metadata")
         byte_fields = cast("dict[str, Any]", byte) if byte is not None else {}
+        evidence = payload.get("evidence_policy", {})
+        if not isinstance(evidence, dict) or (
+            evidence
+            and (
+                set(evidence)
+                != {
+                    "prompt_reservation",
+                    "question_score_weight",
+                    "calibration_evidence_sha256",
+                    "scoring",
+                }
+                or evidence.get("scoring") != "optional_normalized_original_question_mixture_v1"
+            )
+        ):
+            raise PrefixKVReimplementationError("invalid profile evidence policy")
         profile = cls(
             model_id=str(model["id"]),
             model_revision=str(model["revision"]),
@@ -310,6 +375,11 @@ class PrefixKVOfflineProfile:
             calibration_byte_cap=byte_fields.get("cap"),
             calibration_bytes_per_layer_position=byte_fields.get("bytes_per_layer_position"),
             calibration_mean_layer_positions=tuple(byte_fields.get("mean_layer_positions", ())),
+            prompt_reservation_policy=str(evidence.get("prompt_reservation", "boundaries")),
+            question_score_weight=cast("float", evidence.get("question_score_weight", 0.0)),
+            calibration_evidence_sha256=cast(
+                "str | None", evidence.get("calibration_evidence_sha256")
+            ),
         )
         declared = payload.get("profile_sha256")
         if declared is not None and declared != profile.profile_sha256:
@@ -431,13 +501,128 @@ def prefixkv_attention_scores(attention_weights: tuple[Any, ...]) -> tuple[tuple
 
 
 def prefixkv_calibration_observation(
-    sample_id: str, attention_weights: tuple[Any, ...]
+    sample_id: str,
+    attention_weights: tuple[Any, ...],
+    *,
+    question_positions: tuple[int, ...] = (),
+    question_mapping_sha256: str | None = None,
 ) -> PrefixKVCalibrationObservation:
     """Create one serializable calibration row from an eager HF prefill."""
 
     return PrefixKVCalibrationObservation(
         sample_id=sample_id,
         layer_scores=prefixkv_attention_scores(attention_weights),
+        question_positions=question_positions,
+        question_layer_scores=(
+            prefixkv_question_scores(attention_weights, question_positions)
+            if question_positions
+            else ()
+        ),
+        question_mapping_sha256=question_mapping_sha256,
+    )
+
+
+def _validate_question_positions(positions: tuple[int, ...], length: int) -> None:
+    if (
+        not positions
+        or any(type(p) is not int or not 0 <= p < length for p in positions)
+        or positions != tuple(sorted(set(positions)))
+    ):
+        raise PrefixKVReimplementationError(
+            "question positions must be nonempty, sorted, unique and in range"
+        )
+
+
+def prefixkv_question_scores(
+    attention_weights: tuple[Any, ...], question_positions: tuple[int, ...]
+) -> tuple[tuple[float, ...], ...]:
+    """Same head reduction, but only actual mapped user-instruction query rows."""
+    scores = []
+    for attention in attention_weights:
+        if (
+            len(attention.shape) != 4
+            or attention.shape[0] != 1
+            or attention.shape[-2] != attention.shape[-1]
+        ):
+            raise PrefixKVReimplementationError(
+                "question scoring requires complete square prefill attentions"
+            )
+        _validate_question_positions(question_positions, int(attention.shape[-1]))
+        if hasattr(attention, "detach"):
+            pooled = (
+                attention.detach()[:, :, list(question_positions), :]
+                .mean(dim=1)
+                .float()
+                .sum(dim=-2)[0]
+                .cpu()
+                .numpy()
+            )
+        else:
+            pooled = (
+                np.asarray(attention)[:, :, list(question_positions), :]
+                .mean(axis=1)
+                .astype(np.float32)
+                .sum(axis=-2)[0]
+            )
+        if not np.isfinite(pooled).all() or (pooled < 0).any():
+            raise PrefixKVReimplementationError("invalid question attention scores")
+        scores.append(tuple(float(x) for x in pooled))
+    if not scores:
+        raise PrefixKVReimplementationError("question scoring requires prefill attention")
+    return tuple(scores)
+
+
+def mix_prefixkv_scores(
+    original: tuple[tuple[float, ...], ...],
+    question: tuple[tuple[float, ...], ...],
+    protected: tuple[tuple[int, ...], ...],
+    weight: float,
+) -> tuple[tuple[float, ...], ...]:
+    """Normalize each source over OPTIONAL positions, then mix; uniform on zero mass."""
+    if (
+        isinstance(weight, bool)
+        or not isinstance(weight, (int, float))
+        or not math.isfinite(weight)
+        or not 0 <= weight <= 1
+    ):
+        raise PrefixKVReimplementationError("question mixture weight must be in [0, 1]")
+    if len(original) != len(question) or len(original) != len(protected):
+        raise PrefixKVReimplementationError("question mixture layer count mismatch")
+    result = []
+    for a, q, fixed in zip(original, question, protected, strict=True):
+        if len(a) != len(q):
+            raise PrefixKVReimplementationError("question mixture score length mismatch")
+        if any(type(p) is not int or not 0 <= p < len(a) for p in fixed) or fixed != tuple(
+            sorted(set(fixed))
+        ):
+            raise PrefixKVReimplementationError("invalid protected mixture positions")
+        eligible = np.ones(len(a), dtype=bool)
+        eligible[list(fixed)] = False
+        distributions = []
+        for values in (a, q):
+            array = np.asarray(values, dtype=np.float64).copy()
+            if not np.isfinite(array).all() or (array < 0).any():
+                raise PrefixKVReimplementationError(
+                    "question mixture scores must be finite and nonnegative"
+                )
+            array[~eligible] = 0
+            total = float(array.sum())
+            distributions.append(
+                array / total if total > 0 else eligible.astype(float) / max(1, int(eligible.sum()))
+            )
+        result.append(
+            tuple(float(x) for x in ((1 - weight) * distributions[0] + weight * distributions[1]))
+        )
+    return tuple(result)
+
+
+def _protected_positions(
+    length: int, start: int, tail: int, extra: tuple[int, ...] = ()
+) -> tuple[int, ...]:
+    return tuple(
+        sorted(
+            set(range(min(start, length))) | set(range(max(0, length - tail), length)) | set(extra)
+        )
     )
 
 
@@ -496,6 +681,7 @@ def search_prefixkv_layer_sizes(
     protect_size: int,
     search_policy: str = "legacy_cdf",
     target_positions: int | None = None,
+    protected_positions: tuple[tuple[int, ...], ...] | None = None,
 ) -> tuple[int, ...]:
     """Search a shared priority threshold, with explicitly versioned protection.
 
@@ -510,7 +696,7 @@ def search_prefixkv_layer_sizes(
         raise PrefixKVReimplementationError("retention_ratio must be in (0, 1]")
     if not layer_scores:
         raise PrefixKVReimplementationError("PrefixKV search requires at least one layer")
-    if search_policy not in {"legacy_cdf", "upstream_protected_cdf"}:
+    if search_policy not in {"legacy_cdf", "upstream_protected_cdf", "optional_cdf"}:
         raise PrefixKVReimplementationError("unsupported PrefixKV calibration search policy")
     if start_size < 0 or protect_size < 1:
         raise PrefixKVReimplementationError("invalid protected boundary sizes")
@@ -521,6 +707,16 @@ def search_prefixkv_layer_sizes(
         raise PrefixKVReimplementationError("layer scores must be nonempty, finite and nonnegative")
     lengths = tuple(len(scores) for scores in layer_scores)
     lower = tuple(min(length, start_size + protect_size) for length in lengths)
+    fixed = protected_positions or tuple(
+        _protected_positions(n, start_size, protect_size) for n in lengths
+    )
+    if len(fixed) != len(lengths) or any(
+        p != tuple(sorted(set(p))) or any(type(i) is not int or not 0 <= i < n for i in p)
+        for p, n in zip(fixed, lengths, strict=True)
+    ):
+        raise PrefixKVReimplementationError("invalid protected positions for calibration")
+    if protected_positions is not None or search_policy == "optional_cdf":
+        lower = tuple(min(n, len(p) + 1) for p, n in zip(fixed, lengths, strict=True))
     target = max(sum(lower), math.floor(sum(lengths) * retention_ratio + 1e-12))
     target = min(target, sum(lengths))
     if target_positions is not None:
@@ -528,20 +724,29 @@ def search_prefixkv_layer_sizes(
             raise PrefixKVReimplementationError("target_positions is outside mandatory bounds")
         target = target_positions
     cumulative: list[np.ndarray[Any, Any]] = []
-    for scores in layer_scores:
-        ranked = np.sort(np.asarray(scores, dtype=np.float64))[::-1]
+    for scores, protected in zip(layer_scores, fixed, strict=True):
+        values = np.asarray(scores, dtype=np.float64)
+        if search_policy == "optional_cdf":
+            values = np.delete(values, protected)
+        ranked = np.sort(values)[::-1]
         total = float(ranked.sum())
-        normalized = np.full_like(ranked, 1.0 / len(ranked)) if total <= 0 else ranked / total
+        normalized = (
+            np.full_like(ranked, 1.0 / max(1, len(ranked))) if total <= 0 else ranked / total
+        )
         cumulative.append(np.cumsum(normalized))
 
     def sizes(threshold: float) -> tuple[int, ...]:
-        allowance = start_size + protect_size if search_policy == "upstream_protected_cdf" else 0
         return tuple(
             max(
                 low,
-                min(length, int(np.searchsorted(cdf, threshold, side="left")) + 1 + allowance),
+                min(
+                    length,
+                    int(np.searchsorted(cdf, threshold, side="left"))
+                    + 1
+                    + (len(protected) if search_policy != "legacy_cdf" else 0),
+                ),
             )
-            for cdf, low, length in zip(cumulative, lower, lengths, strict=True)
+            for cdf, low, length, protected in zip(cumulative, lower, lengths, fixed, strict=True)
         )
 
     left, right = 0.0, 1.0
@@ -639,6 +844,9 @@ def generate_prefixkv_byte_profile(
     seed: int,
     start_size: int = 1,
     protect_size: int = 1,
+    exclude_protected_from_calibration: bool = False,
+    prompt_reservation_policy: str = "boundaries",
+    question_score_weight: float = 0.0,
 ) -> PrefixKVOfflineProfile:
     """Label-blind local profile at the ACTUAL shared cap for every observation.
 
@@ -655,6 +863,31 @@ def generate_prefixkv_byte_profile(
         or not observations
     ):
         raise PrefixKVReimplementationError("byte calibration needs positive integer cap/width")
+    if type(exclude_protected_from_calibration) is not bool:
+        raise PrefixKVReimplementationError("exclude_protected_from_calibration must be boolean")
+    if prompt_reservation_policy not in {"boundaries", "question_and_boundaries"}:
+        raise PrefixKVReimplementationError("invalid prompt reservation policy")
+    if (
+        isinstance(question_score_weight, bool)
+        or not isinstance(question_score_weight, (int, float))
+        or not math.isfinite(question_score_weight)
+        or not 0 <= question_score_weight <= 1
+    ):
+        raise PrefixKVReimplementationError("question_score_weight must be finite in [0, 1]")
+    evidence = (
+        exclude_protected_from_calibration
+        or question_score_weight > 0
+        or prompt_reservation_policy != "boundaries"
+    )
+    needs_question = (
+        question_score_weight > 0 or prompt_reservation_policy == "question_and_boundaries"
+    )
+    if needs_question and any(
+        not o.question_positions or not o.question_mapping_sha256 for o in observations
+    ):
+        raise PrefixKVReimplementationError(
+            "evidence calibration requires mapped question captures"
+        )
     lengths = [
         sum(len(scores) for scores in observation.layer_scores) for observation in observations
     ]
@@ -678,17 +911,43 @@ def generate_prefixkv_byte_profile(
         protect_size=protect_size,
         search_policy="upstream_protected_cdf",
     )
-    counts = [
-        search_prefixkv_layer_sizes(
-            observation.layer_scores,
-            retention_ratio=ratio,
-            start_size=start_size,
-            protect_size=protect_size,
-            search_policy="upstream_protected_cdf",
-            target_positions=target,
+    counts = []
+    search_policy = (
+        "optional_cdf" if exclude_protected_from_calibration else "upstream_protected_cdf"
+    )
+    for observation in observations:
+        fixed = tuple(
+            _protected_positions(
+                len(scores),
+                start_size,
+                protect_size,
+                observation.question_positions
+                if prompt_reservation_policy == "question_and_boundaries"
+                else (),
+            )
+            for scores in observation.layer_scores
         )
-        for observation in observations
-    ]
+        scores = (
+            mix_prefixkv_scores(
+                observation.layer_scores,
+                observation.question_layer_scores,
+                fixed,
+                question_score_weight,
+            )
+            if question_score_weight > 0
+            else observation.layer_scores
+        )
+        counts.append(
+            search_prefixkv_layer_sizes(
+                scores,
+                retention_ratio=ratio,
+                start_size=start_size,
+                protect_size=protect_size,
+                search_policy=search_policy,
+                target_positions=target,
+                protected_positions=fixed if evidence else None,
+            )
+        )
     layer_count = len(base.layer_forget_ratios)
     return replace(
         base,
@@ -705,6 +964,12 @@ def generate_prefixkv_byte_profile(
         calibration_mean_layer_positions=tuple(
             sum(count[layer] for count in counts) / len(counts) for layer in range(layer_count)
         ),
+        search_policy=search_policy,
+        prompt_reservation_policy=prompt_reservation_policy,
+        question_score_weight=question_score_weight,
+        calibration_evidence_sha256=_sha256_json([asdict(o) for o in observations])
+        if evidence
+        else None,
     )
 
 
@@ -759,6 +1024,21 @@ class PrefixKVLayerState:
         )
 
 
+def prefixkv_evidence_label(
+    sink_neutral: bool, question_protected: bool, question_scored: bool
+) -> str:
+    parts = [
+        name
+        for enabled, name in (
+            (sink_neutral, "sink_neutral"),
+            (question_protected, "question_protected"),
+            (question_scored, "question_scored"),
+        )
+        if enabled
+    ]
+    return "prefixkv_" + "_".join(parts) + "_reimpl"
+
+
 @dataclass(frozen=True, slots=True)
 class PrefixKVCompressionPlan:
     """Paper algorithm output consumed by MosaicKV's common cache packer."""
@@ -773,6 +1053,8 @@ class PrefixKVCompressionPlan:
     retained_bytes: int
     target_retention_ratio: float
     implementation_label: str
+    question_positions: tuple[int, ...] = ()
+    prompt_reservation_policy: str = "boundaries"
 
     def __post_init__(self) -> None:
         if len(self.layers) != len(self.full_state.layers):
@@ -789,14 +1071,26 @@ class PrefixKVCompressionPlan:
             raise PrefixKVReimplementationError("PrefixKV byte accounting is inconsistent")
         if self.source_bytes != self.full_state.active_bytes:
             raise PrefixKVReimplementationError("PrefixKV source byte accounting is inconsistent")
-        if self.implementation_label not in {
+        labels = {
             "prefixkv_reimpl",
             "generalized_prefixkv_reimpl",
             "prefixkv_selection_only_reimpl",
             "prefixkv_capacity_floor_reimpl",
             "prefixkv_byte_calibrated_reimpl",
             "prefixkv_uniform_layer_reimpl",
-        }:
+        } | {
+            prefixkv_evidence_label(a, b, c)
+            for a in (False, True)
+            for b in (False, True)
+            for c in (False, True)
+            if a or b or c
+        }
+        if self.config.decode_policy == "append_only":
+            labels |= {
+                name.removesuffix("_reimpl") + "_selection_only_reimpl"
+                for name in labels if "selection_only" not in name
+            }
+        if self.implementation_label not in labels:
             raise PrefixKVReimplementationError("PrefixKV implementation label is invalid")
 
     @property
@@ -862,6 +1156,18 @@ class PrefixKVCompressionPlan:
             "decode_policy": self.config.decode_policy,
             "allocation_policy": self.config.allocation_policy,
             "layer_budget_floor_fraction": self.config.layer_budget_floor_fraction,
+            "evidence_ablation": {
+                "exclude_protected_from_calibration": (
+                    self.config.exclude_protected_from_calibration
+                ),
+                "prompt_reservation_policy": self.prompt_reservation_policy,
+                "question_score_weight": self.config.question_score_weight,
+                "question_positions": list(self.question_positions),
+                "calibration_evidence_sha256": self.profile.calibration_evidence_sha256
+                if self.profile
+                else None,
+                "protected_counts": [len(layer.protected_positions) for layer in self.layers],
+            },
             # Small summaries survive light traces, unlike the selected-position lists.
             "layer_capacity_summary": {
                 "positions": list(self.layer_cache_sizes),
@@ -874,7 +1180,12 @@ class PrefixKVCompressionPlan:
             },
             "paper_native_algorithm": self.config.allocation_policy == "upstream_round",
             "minimum_decode_capacity": (
-                max(3, self.config.start_size + self.config.protect_size + 1)
+                max(
+                    min(layer.source_positions, len(layer.protected_positions) + 1)
+                    for layer in self.layers
+                )
+                if self.prompt_reservation_policy == "question_and_boundaries"
+                else max(3, self.config.start_size + self.config.protect_size + 1)
                 if self.config.decode_boundary_policy == "protected"
                 else None
             ),
@@ -924,14 +1235,14 @@ def _layer_bytes_per_position(full_state: FullKVState, layer_index: int) -> int:
 
 
 def _select_positions(
-    scores: tuple[float, ...], retained: int, start_size: int, protect_size: int
+    scores: tuple[float, ...],
+    retained: int,
+    start_size: int,
+    protect_size: int,
+    extra_protected: tuple[int, ...] = (),
 ) -> tuple[tuple[int, ...], tuple[int, ...]]:
     length = len(scores)
-    protected = tuple(
-        sorted(
-            set(range(min(start_size, length))) | set(range(max(0, length - protect_size), length))
-        )
-    )
+    protected = _protected_positions(length, start_size, protect_size, extra_protected)
     remaining = retained - len(protected)
     if remaining < 0:
         raise PrefixKVReimplementationError("layer budget cannot retain protected PrefixKV tokens")
@@ -968,6 +1279,7 @@ def build_prefixkv_reimpl_plan(
     model_revision: str,
     profile: PrefixKVOfflineProfile | None = None,
     physical_prompt_capacity: int | None = None,
+    question_positions: tuple[int, ...] = (),
 ) -> PrefixKVCompressionPlan:
     """Select per-layer top-importance positions under one exact global budget."""
 
@@ -992,6 +1304,38 @@ def build_prefixkv_reimpl_plan(
             "generalized PrefixKV currently requires the same KV-head count in every layer"
         )
     head_count = kv_heads[0]
+    preserve_question = cache_config.physical_budget_mandatory_policy == "question_and_boundaries"
+    evidence_variant = (
+        preserve_question
+        or prefixkv_config.exclude_protected_from_calibration
+        or prefixkv_config.question_score_weight > 0
+    )
+    if evidence_variant and (
+        prefixkv_config.hf_cache_transport != "ragged_llama_eager_v1"
+        or prefixkv_config.allocation_policy != "global_apportion"
+        or prefixkv_config.decode_boundary_policy != "protected"
+        or not prefixkv_config.rescale_offline_profile_to_byte_budget
+    ):
+        raise PrefixKVReimplementationError(
+            "evidence ablations require protected byte-rescaled ragged PrefixKV"
+        )
+    if (
+        preserve_question or prefixkv_config.question_score_weight > 0
+    ) and cache_config.retention_ratio < 1:
+        _validate_question_positions(question_positions, min(lengths))
+    extra = question_positions if preserve_question else ()
+    if extra and full_state.logical_positions.physical_to_logical != tuple(range(lengths[0])):
+        raise PrefixKVReimplementationError(
+            "question mapping requires the original contiguous prefill cache"
+        )
+    fixed_positions = tuple(
+        _protected_positions(n, prefixkv_config.start_size, prefixkv_config.protect_size, extra)
+        for n in lengths
+    )
+    if preserve_question and set(full_state.mandatory_logical_positions) != set(fixed_positions[0]):
+        raise PrefixKVReimplementationError(
+            "shared question mandatory policy differs from source blocks"
+        )
     guarded = prefixkv_config.decode_boundary_policy == "protected"
     if cache_config.physical_budget_mandatory_policy == "first_and_last" and (
         prefixkv_config.start_size != 1 or prefixkv_config.protect_size != 1 or not guarded
@@ -999,19 +1343,14 @@ def build_prefixkv_reimpl_plan(
         raise PrefixKVReimplementationError(
             "shared first_and_last requires protected PrefixKV with start_size=protect_size=1"
         )
-    lower = tuple(
-        len(
-            set(range(min(prefixkv_config.start_size, length)))
-            | set(range(max(0, length - prefixkv_config.protect_size), length))
-        )
-        for length in lengths
-    )
+    lower = tuple(len(p) for p in fixed_positions)
     if guarded:
         # Upstream's short-cache midpoint fallback needs an interior position.
         # Reallocate within the SAME global byte budget, never add extra bytes.
         minimum = max(3, prefixkv_config.start_size + prefixkv_config.protect_size + 1)
         lower = tuple(
-            min(length, max(low, minimum)) for length, low in zip(lengths, lower, strict=True)
+            min(length, max(low + int(preserve_question), minimum))
+            for length, low in zip(lengths, lower, strict=True)
         )
     source_slots = len(full_state.blocks)
     target_slots = math.floor(source_slots * cache_config.retention_ratio + 1e-12)
@@ -1062,6 +1401,14 @@ def build_prefixkv_reimpl_plan(
             prefixkv_config.protect_size,
         ):
             raise PrefixKVReimplementationError("PrefixKV profile protected-boundary mismatch")
+        if (
+            (profile.search_policy == "optional_cdf")
+            != prefixkv_config.exclude_protected_from_calibration
+            or profile.question_score_weight != prefixkv_config.question_score_weight
+            or profile.prompt_reservation_policy
+            != ("question_and_boundaries" if preserve_question else "boundaries")
+        ):
+            raise PrefixKVReimplementationError("PrefixKV evidence profile/configuration mismatch")
         desired = tuple(
             length * (1.0 - forget)
             for length, forget in zip(lengths, profile.layer_forget_ratios, strict=True)
@@ -1103,7 +1450,12 @@ def build_prefixkv_reimpl_plan(
             not ragged
             or not prefixkv_config.rescale_offline_profile_to_byte_budget
             or prefixkv_config.allocation_policy != "global_apportion"
-            or prefixkv_config.decode_policy != "effective_profile_ratio"
+            or prefixkv_config.decode_policy
+            not in (
+                {"effective_profile_ratio", "append_only"}
+                if profile.evidence_variant
+                else {"effective_profile_ratio"}
+            )
             or cache_config.budget_unit is not BudgetUnit.BYTES
             or cache_config.budget_value != profile.calibration_byte_cap
             or any(
@@ -1191,6 +1543,13 @@ def build_prefixkv_reimpl_plan(
         if cache_config.retention_ratio < 1.0
         else tuple(tuple(0.0 for _ in range(length)) for length in lengths)
     )
+    if prefixkv_config.question_score_weight > 0 and cache_config.retention_ratio < 1:
+        scores = mix_prefixkv_scores(
+            scores,
+            prefixkv_question_scores(attention_weights, question_positions),
+            fixed_positions,
+            prefixkv_config.question_score_weight,
+        )
     if len(scores) != layer_count or any(
         len(layer_scores) != length for layer_scores, length in zip(scores, lengths, strict=True)
     ):
@@ -1204,6 +1563,7 @@ def build_prefixkv_reimpl_plan(
             count,
             prefixkv_config.start_size,
             prefixkv_config.protect_size,
+            extra,
         )
         logical = tuple(
             full_state.logical_positions.logical_for_physical(position) for position in selected
@@ -1252,6 +1612,33 @@ def build_prefixkv_reimpl_plan(
     if cache_config.budget_unit is BudgetUnit.BYTES and retained_bytes > cache_config.budget_value:
         raise PrefixKVReimplementationError("PrefixKV retained bytes exceed cache.budget_value")
     official_family = "llava" in model_id.lower() and "1.5" in model_id.lower()
+    implementation_label = (
+        prefixkv_evidence_label(
+            prefixkv_config.exclude_protected_from_calibration,
+            preserve_question,
+            prefixkv_config.question_score_weight > 0,
+        )
+        if evidence_variant
+        else "prefixkv_capacity_floor_reimpl"
+        if prefixkv_config.layer_budget_floor_fraction > 0
+        else "prefixkv_byte_calibrated_reimpl"
+        if profile is not None and profile.calibration_byte_cap is not None
+        else "prefixkv_selection_only_reimpl"
+        if prefixkv_config.decode_policy == "append_only"
+        else "prefixkv_uniform_layer_reimpl"
+        if prefixkv_config.profile_mode is PrefixKVProfileMode.FIXED_GLOBAL
+        and prefixkv_config.decode_policy == "effective_profile_ratio"
+        else "prefixkv_reimpl"
+        if official_family
+        else "generalized_prefixkv_reimpl"
+    )
+    if (
+        prefixkv_config.decode_policy == "append_only"
+        and "selection_only" not in implementation_label
+    ):
+        implementation_label = (
+            implementation_label.removesuffix("_reimpl") + "_selection_only_reimpl"
+        )
     return PrefixKVCompressionPlan(
         full_state=full_state,
         config=prefixkv_config,
@@ -1262,20 +1649,9 @@ def build_prefixkv_reimpl_plan(
         source_bytes=full_state.active_bytes,
         retained_bytes=retained_bytes,
         target_retention_ratio=cache_config.retention_ratio,
-        implementation_label=(
-            "prefixkv_capacity_floor_reimpl"
-            if prefixkv_config.layer_budget_floor_fraction > 0
-            else "prefixkv_byte_calibrated_reimpl"
-            if profile is not None and profile.calibration_byte_cap is not None
-            else "prefixkv_selection_only_reimpl"
-            if prefixkv_config.decode_policy == "append_only"
-            else "prefixkv_uniform_layer_reimpl"
-            if prefixkv_config.profile_mode is PrefixKVProfileMode.FIXED_GLOBAL
-            and prefixkv_config.decode_policy == "effective_profile_ratio"
-            else "prefixkv_reimpl"
-            if official_family
-            else "generalized_prefixkv_reimpl"
-        ),
+        implementation_label=implementation_label,
+        question_positions=question_positions,
+        prompt_reservation_policy="question_and_boundaries" if preserve_question else "boundaries",
     )
 
 

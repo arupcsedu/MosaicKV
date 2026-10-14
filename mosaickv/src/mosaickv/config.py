@@ -404,9 +404,15 @@ class CacheConfig:
             raise ConfigurationError("cache.block_size must be >= 1")
         if self.physical_budget_block_size is not None and self.physical_budget_block_size < 1:
             raise ConfigurationError("cache.physical_budget_block_size must be >= 1 or null")
-        if self.physical_budget_mandatory_policy not in {"method", "last_token", "first_and_last"}:
+        if self.physical_budget_mandatory_policy not in {
+            "method",
+            "last_token",
+            "first_and_last",
+            "question_and_boundaries",
+        }:
             raise ConfigurationError(
                 "cache.physical_budget_mandatory_policy must be 'method', 'last_token', "
+                "'question_and_boundaries', "
                 "or 'first_and_last'"
             )
         if self.exact_gather_mode not in {
@@ -3098,8 +3104,30 @@ class PrefixKVConfig:
     # every layer BEFORE allocating the remaining shared-byte budget. Zero
     # preserves historical and upstream-profile behavior.
     layer_budget_floor_fraction: float = 0.0
+    exclude_protected_from_calibration: bool = False
+    question_score_weight: float = 0.0
 
     def __post_init__(self) -> None:
+        if type(self.exclude_protected_from_calibration) is not bool:
+            raise ConfigurationError("prefixkv.exclude_protected_from_calibration must be boolean")
+        if (
+            isinstance(self.question_score_weight, bool)
+            or not isinstance(self.question_score_weight, (int, float))
+            or not math.isfinite(self.question_score_weight)
+            or not 0 <= self.question_score_weight <= 1
+        ):
+            raise ConfigurationError("prefixkv.question_score_weight must be finite in [0, 1]")
+        if (self.exclude_protected_from_calibration or self.question_score_weight > 0) and (
+            self.allocation_policy != "global_apportion"
+            or self.hf_cache_transport != "ragged_llama_eager_v1"
+            or self.decode_boundary_policy != "protected"
+            or self.decode_policy not in {"effective_profile_ratio", "append_only"}
+            or not self.rescale_offline_profile_to_byte_budget
+        ):
+            raise ConfigurationError(
+                "PrefixKV evidence ablations require a byte-rescaled "
+                "profile, protected ragged transport and explicit decode policy"
+            )
         if (
             isinstance(self.layer_budget_floor_fraction, bool)
             or not math.isfinite(self.layer_budget_floor_fraction)
@@ -3213,6 +3241,8 @@ class PrefixKVConfig:
                 "allocation_policy",
                 "decode_policy",
                 "layer_budget_floor_fraction",
+                "exclude_protected_from_calibration",
+                "question_score_weight",
             },
             "prefixkv",
         )
@@ -3257,6 +3287,10 @@ class PrefixKVConfig:
             layer_budget_floor_fraction=_float(
                 data, "layer_budget_floor_fraction", 0.0, "prefixkv"
             ),
+            exclude_protected_from_calibration=_bool(
+                data, "exclude_protected_from_calibration", False, "prefixkv"
+            ),
+            question_score_weight=_float(data, "question_score_weight", 0.0, "prefixkv"),
         )
 
 
@@ -3598,6 +3632,47 @@ class RunConfig:
     def __post_init__(self) -> None:
         if self.schema_version != 1:
             raise ConfigurationError("schema_version must equal 1")
+        question_policy = self.cache.physical_budget_mandatory_policy == "question_and_boundaries"
+        prefix_evidence = (
+            self.prefixkv.exclude_protected_from_calibration
+            or self.prefixkv.question_score_weight > 0
+        )
+        if question_policy or prefix_evidence:  # noqa: SIM102 - keep scope gate readable
+            if (
+                self.execution.backend is not Backend.HUGGINGFACE
+                or self.execution.attention_implementation != "eager"
+                or self.model.id != "llava-hf/llava-1.5-7b-hf"
+                or self.cache.block_size != 1
+                or self.cache.physical_budget_block_size not in (None, 1)
+                or self.cache.budget_unit is not BudgetUnit.BYTES
+                or self.method
+                not in {
+                    MosaicKVMethod.FULL_KV,
+                    MosaicKVMethod.PROMPT_ATTENTION_TOPK,
+                    MosaicKVMethod.MOSAICKV_EXACT,
+                    MosaicKVMethod.PREFIXKV_REIMPL,
+                }
+            ):
+                raise ConfigurationError(
+                    "question/evidence ablations require HF eager LLaVA-1.5-7B, "
+                    "token blocks, a byte cap, and audited exact methods"
+                )
+        if (
+            question_policy
+            and self.method.is_prefixkv_reimplementation
+            and (
+                self.prefixkv.start_size != 1
+                or self.prefixkv.protect_size != 1
+                or self.prefixkv.hf_cache_transport != "ragged_llama_eager_v1"
+                or self.prefixkv.decode_boundary_policy != "protected"
+                or self.prefixkv.allocation_policy != "global_apportion"
+                or self.prefixkv.decode_policy not in {"effective_profile_ratio", "append_only"}
+                or not self.prefixkv.rescale_offline_profile_to_byte_budget
+            )
+        ):
+            raise ConfigurationError(
+                "shared question policy requires protected byte-profile PrefixKV"
+            )
         if self.ablation.variant is not AblationVariant.NONE and not self.method.is_mosaickv:
             raise ConfigurationError("component ablations require a MosaicKV method")
         if (

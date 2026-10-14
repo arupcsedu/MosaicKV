@@ -754,7 +754,7 @@ def _dense_physical_cache_budget(
         )
         reference_mandatory = (
             tuple(full_state.mandatory_logical_positions)
-            if accounting_policy == "method"
+            if accounting_policy in {"method", "question_and_boundaries"}
             else tuple(sorted({0, full_state.original_logical_sequence_length - 1}))
             if accounting_policy == "first_and_last"
             else (full_state.original_logical_sequence_length - 1,)
@@ -8436,14 +8436,21 @@ def _lookm_plan_trace(plan: LookMCompressionPlan) -> JsonObject:
 def _prefixkv_plan_trace(plan: PrefixKVCompressionPlan) -> JsonObject:
     """Normalize PrefixKV paper provenance into the shared trace vocabulary."""
 
+    evidence_variant = plan.profile is not None and plan.profile.evidence_variant
     return {
         "requested_method": MosaicKVMethod.PREFIXKV_REIMPL.value,
         "effective_method": plan.implementation_label,
         "tier_mode": "prefixkv_layerwise_exact_selection",
-        "tier_reason": "paper layer profile and prompt-attention prefix selection",
+        "tier_reason": (
+            "local evidence ablation; not paper-native PrefixKV"
+            if evidence_variant
+            else "paper layer profile and prompt-attention prefix selection"
+        ),
         "request_wide_native_projection": _prefixkv_request_wide_projection(plan),
         "native_projection_semantics": (
-            "paper-selected layer positions projected to vLLM request-wide whole blocks"
+            "HF-only evidence variant; native projection unsupported"
+            if evidence_variant
+            else "paper-selected layer positions projected to vLLM request-wide whole blocks"
         ),
         "selected_blocks": [
             {
@@ -8457,7 +8464,11 @@ def _prefixkv_plan_trace(plan: PrefixKVCompressionPlan) -> JsonObject:
         "graph_edges": [],
         "graph_diagnostics": {"status": "not_used_by_prefixkv_reimpl"},
         "forecast_statistics": {"status": "not_used_by_prefixkv_reimpl"},
-        "selection_provenance": "prefixkv_reimpl_paper_attention_and_layer_profile",
+        "selection_provenance": (
+            "prefixkv_evidence_ablation_v1"
+            if evidence_variant
+            else "prefixkv_reimpl_paper_attention_and_layer_profile"
+        ),
         "prefixkv": plan.trace(),
     }
 
@@ -8835,6 +8846,14 @@ class HuggingFaceMosaicKVModel:
                 or method.is_published_reimplementation
             )
             prepared = self.adapter.prepare_inputs(request.messages)
+            prompt_evidence = None
+            if (
+                self.config.cache.physical_budget_mandatory_policy == "question_and_boundaries"
+                or self.config.prefixkv.question_score_weight > 0
+            ):
+                from mosaickv.adapters.huggingface.prompt_evidence import map_prompt_evidence
+
+                prompt_evidence = map_prompt_evidence(self.adapter, prepared, request.messages)
 
             def run_prefill() -> Any:
                 return self.adapter.prefill(
@@ -8978,7 +8997,18 @@ class HuggingFaceMosaicKVModel:
                     else 1
                 )
                 mandatory_positions: tuple[int, ...]
-                if self.config.cache.physical_budget_mandatory_policy == "first_and_last":
+                if self.config.cache.physical_budget_mandatory_policy == "question_and_boundaries":
+                    assert prompt_evidence is not None
+                    mandatory_positions = tuple(
+                        sorted(
+                            {
+                                0,
+                                prefill.state.logical_sequence_length - 1,
+                                *prompt_evidence.positions,
+                            }
+                        )
+                    )
+                elif self.config.cache.physical_budget_mandatory_policy == "first_and_last":
                     mandatory_positions = tuple(
                         sorted({0, int(prefill.state.logical_sequence_length) - 1})
                     )
@@ -9606,6 +9636,7 @@ class HuggingFaceMosaicKVModel:
                             model_id=self.config.model.id,
                             model_revision=self.config.model.revision,
                             profile=self._prefixkv_profile,
+                            question_positions=prompt_evidence.positions if prompt_evidence else (),
                             physical_prompt_capacity=(
                                 None if dense_budget is None else dense_budget.prompt_capacity
                             ),
@@ -10487,6 +10518,7 @@ class HuggingFaceMosaicKVModel:
                         **quality.to_record(),
                         "configured_terminal_token_ids": list(self._terminal_token_ids),
                     },
+                    "prompt_evidence": prompt_evidence.trace() if prompt_evidence else None,
                     "repair_events": cast("list[JsonValue]", repair_event_records),
                     "residual_configuration": residual_configuration,
                     "oracle_repair_diagnostic": {
