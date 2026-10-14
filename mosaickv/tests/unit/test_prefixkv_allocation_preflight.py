@@ -41,6 +41,22 @@ def test_id_only_split_excludes_all_prior_debug_and_has_no_leakage(worker):
         worker.validate_ledgers(cal, dict(ev, dataset_revision="b" * 40), consumed)
 
 
+def test_capture_requests_executable_tasks_not_id_only_catalog(worker, monkeypatch, tmp_path):
+    from mosaickv.evaluation import lmms_adapter
+
+    cal, _, _ = ledgers(worker)
+
+    def capture(*args, **kwargs):
+        assert kwargs["prepare_samples"] is True
+        assert kwargs["explicit_sample_ids"] == tuple(cal["sample_ids"])
+        assert kwargs["dataset_revisions"] == {cal["dataset_id"]: cal["dataset_revision"]}
+        raise RuntimeError("verified executable task request")
+
+    monkeypatch.setattr(lmms_adapter, "prepare_seeded_lmms_tasks", capture)
+    with pytest.raises(RuntimeError, match="verified executable task request"):
+        worker.collect(None, cal, tmp_path)
+
+
 def test_summary_never_hides_missing_failed_or_duplicate_samples(worker):
     ids = [str(i) for i in range(8)]
     rows = [

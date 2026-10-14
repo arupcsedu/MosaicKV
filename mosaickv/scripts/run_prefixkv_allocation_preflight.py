@@ -146,7 +146,9 @@ def collect(adapter, ledger, output):
         explicit_sample_ids=tuple(ledger["sample_ids"]),
         model_name=MODEL,
         dataset_revisions={ledger["dataset_id"]: ledger["dataset_revision"]},
-        prepare_samples=False,
+        # False is an ID-catalog-only API: it returns no executable task objects.
+        # Prepared reference metadata is discarded and never enters calibration.
+        prepare_samples=True,
     )
     if set(selected) != set(ledger["sample_ids"]) or len(tasks) != 1:
         raise RuntimeError("calibration task routing changed")
