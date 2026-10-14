@@ -655,6 +655,7 @@ class PrefixKVCompressionPlan:
             "start_size": self.config.start_size,
             "protect_size": self.config.protect_size,
             "eviction_distance": self.config.eviction_distance,
+            "hf_cache_transport": self.config.hf_cache_transport,
             "layers": [
                 {
                     "layer": layer.layer,
@@ -817,7 +818,8 @@ def build_prefixkv_reimpl_plan(
             raise PrefixKVReimplementationError("fixed-global PrefixKV cannot consume a profile")
         desired = tuple(length * cache_config.retention_ratio for length in lengths)
     upper = lengths
-    if physical_prompt_capacity is not None:
+    ragged = prefixkv_config.hf_cache_transport == "ragged_llama_eager_v1"
+    if physical_prompt_capacity is not None and not ragged:
         if physical_prompt_capacity < 1:
             raise PrefixKVReimplementationError("physical_prompt_capacity must be positive")
         upper = tuple(min(length, physical_prompt_capacity) for length in lengths)
@@ -840,10 +842,23 @@ def build_prefixkv_reimpl_plan(
                 math.floor(sum(desired) + 1e-12),
             ),
         )
-    retained = list(_bounded_apportion(desired, lower, upper, target_positions))
     bytes_per_position = tuple(
         _layer_bytes_per_position(full_state, layer) for layer in range(layer_count)
     )
+    if ragged:
+        # A dense cap is a *total* shared-byte target, not an upper bound on
+        # each layer. Capping each layer destroys the offline profile shape.
+        if len(set(bytes_per_position)) != 1:
+            raise PrefixKVReimplementationError("ragged PrefixKV requires equal layer byte widths")
+        if physical_prompt_capacity is not None:
+            if physical_prompt_capacity < 1:
+                raise PrefixKVReimplementationError("physical_prompt_capacity must be positive")
+            target_positions = min(target_positions, physical_prompt_capacity * layer_count)
+        if cache_config.budget_unit is BudgetUnit.BYTES:
+            target_positions = min(
+                target_positions, cache_config.budget_value // bytes_per_position[0]
+            )
+    retained = list(_bounded_apportion(desired, lower, upper, target_positions))
     if cache_config.budget_unit is BudgetUnit.BYTES:
         while (
             sum(count * size for count, size in zip(retained, bytes_per_position, strict=True))

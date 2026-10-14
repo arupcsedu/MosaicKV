@@ -56,3 +56,29 @@ def test_vl_cache_byte_capped_configs_share_the_physical_contract() -> None:
     assert mosaic.prototypes.enabled is False
     assert mosaic.prototypes.uncertain_head_only is True
     assert mosaic.prototypes.uncertain_head_fraction == 1.0 / 256.0
+
+
+def test_ragged_prefixkv_is_opt_in_and_shares_mandatory_policy() -> None:
+    root = Path(__file__).parents[2]
+    configs = _module().byte_capped_configs(
+        load_config(root / "configs/paper_candidate_llava_v1.yaml"),
+        repository=root.parent,
+        family="prefixkv",
+        task="textvqa",
+        model_id="llava-hf/llava-1.5-7b-hf",
+        model_revision="b234b804b114d9e37bb655e11cbbb5f5e971b7a9",
+        seed=7,
+        output_length=64,
+        byte_cap=40 * 2**20,
+        profile_forget_ratio="0.5",
+        profile_reference_retention_ratio=0.5,
+        prefixkv_transport="ragged_llama_eager_v1",
+    )
+    prefix = configs["prefixkv_reimpl"]
+    assert prefix.prefixkv.hf_cache_transport == "ragged_llama_eager_v1"
+    assert prefix.prefixkv.start_size == 0
+    assert prefix.prefixkv.protect_size == 1
+    for name in ("prompt_attention_topk", "mosaickv_exact"):
+        assert configs[name].cache == prefix.cache
+        assert configs[name].execution == prefix.execution
+        assert configs[name].generation == prefix.generation

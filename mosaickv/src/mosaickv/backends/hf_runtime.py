@@ -148,7 +148,9 @@ class HuggingFaceRuntimeError(RuntimeError):
     mosaickv_failure_trace_payload: JsonObject | None = None
 
 
-def _assert_prefixkv_common_hf_representable(plan: PrefixKVCompressionPlan) -> None:
+def _assert_prefixkv_common_hf_representable(
+    plan: PrefixKVCompressionPlan, adapter: HuggingFaceMultimodalAdapter | None = None
+) -> None:
     """Fail closed for compressed PrefixKV in the common HF transport.
 
     PrefixKV's published LLaVA implementation owns a per-layer cache
@@ -160,11 +162,17 @@ def _assert_prefixkv_common_hf_representable(plan: PrefixKVCompressionPlan) -> N
 
     Earlier common-runtime runs therefore produced padded or numerically
     invalid states (including NaN logits).  The uncompressed identity path is
-    safe; every compressed paper-native PrefixKV run must use the isolated
-    pinned upstream transport in ``run_prefixkv_llava_parity.py``.
+    safe. The explicit ragged LLaVA/eager opt-in below admits local byte-matched
+    reimplementation runs; paper-native official reproduction still requires
+    the isolated upstream transport in ``run_prefixkv_llava_parity.py``.
     """
 
     if math.isclose(plan.target_retention_ratio, 1.0, rel_tol=0.0, abs_tol=1e-12):
+        return
+    if plan.config.hf_cache_transport == "ragged_llama_eager_v1" and adapter is not None:
+        from mosaickv.adapters.huggingface.prefixkv_cache import assert_ragged_support
+
+        assert_ragged_support(adapter)
         return
     capacities = plan.layer_cache_sizes
     raise HuggingFaceRuntimeError(
@@ -590,6 +598,7 @@ class PackedRuntimeCache:
     prototype_slots: tuple[tuple[int, int, int, int], ...]
     prototype_attention_biases: tuple[tuple[int, int, int, int, float], ...]
     slot_records: tuple[JsonObject, ...]
+    layerwise_logical_positions: tuple[tuple[int, ...], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -5004,6 +5013,38 @@ def pack_runtime_cache(
     )
 
 
+def _pack_prefixkv_ragged(
+    adapter: HuggingFaceMultimodalAdapter,
+    plan: PrefixKVCompressionPlan,
+    original_cache: Any,
+) -> PackedRuntimeCache:
+    from mosaickv.adapters.huggingface.prefixkv_cache import build_ragged_snapshot
+
+    snapshot = build_ragged_snapshot(adapter, plan, original_cache)
+    return PackedRuntimeCache(
+        snapshot=snapshot,
+        validity_masks=(),
+        prompt_capacity=max(plan.layer_cache_sizes),
+        all_slots_valid=True,
+        prototype_slots=(),
+        prototype_attention_biases=(),
+        slot_records=tuple(
+            {
+                "layer": layer.layer,
+                "selected_logical_positions": list(layer.selected_logical_positions),
+                "retained_positions": layer.retained_positions,
+                "retained_bytes": layer.retained_bytes,
+                "shared_across_kv_heads": True,
+                "padding_bytes": 0,
+            }
+            for layer in plan.layers
+        ),
+        layerwise_logical_positions=tuple(
+            layer.selected_logical_positions for layer in plan.layers
+        ),
+    )
+
+
 def _state_from_packed(
     adapter: HuggingFaceMultimodalAdapter,
     original: DecodeState,
@@ -5048,6 +5089,9 @@ def _packed_model_state(original: DecodeState, packed: PackedRuntimeCache) -> di
         model_state["mosaickv_validity_masks"] = packed.validity_masks
     else:
         model_state.pop("mosaickv_validity_masks", None)
+    if packed.layerwise_logical_positions:
+        model_state["prefixkv_ragged"] = True
+        model_state["prefixkv_logical_positions"] = packed.layerwise_logical_positions
     return model_state
 
 
@@ -5085,6 +5129,11 @@ def maintain_prefixkv_decode_cache(
     step_index: int,
 ) -> tuple[DecodeState, tuple[JsonObject, ...]]:
     """Apply PrefixKV's at-most-one fixed-offset eviction per layer after a decode."""
+
+    if state.model_state.get("prefixkv_ragged") is True:
+        from mosaickv.adapters.huggingface.prefixkv_cache import evict_ragged_prefixkv
+
+        return evict_ragged_prefixkv(adapter, state, plan, step_index=step_index)
 
     torch = _torch()
     snapshot = adapter.extract_past_key_values(state.past_key_values)
@@ -6958,6 +7007,7 @@ def _run_fidelity_diagnostic(
     candidate_state: DecodeState,
     *,
     max_new_tokens: int,
+    prefixkv_plan: PrefixKVCompressionPlan | None = None,
 ) -> FidelityDiagnostic:
     """Decode isolated greedy FullKV/candidate trajectories without a second prefill."""
 
@@ -7007,6 +7057,10 @@ def _run_fidelity_diagnostic(
             attention_errors_by_head.setdefault((layer, kv_head), []).append(error)
         reference_state = reference_output.state
         compressed_state = candidate_output.state
+        if prefixkv_plan is not None:
+            compressed_state, _ = maintain_prefixkv_decode_cache(
+                adapter, compressed_state, prefixkv_plan, step_index=_step
+            )
         reference_token = reference_output.next_token_id
         candidate_token = candidate_output.next_token_id
         reference_tokens.append(reference_token)
@@ -9548,7 +9602,7 @@ class HuggingFaceMosaicKVModel:
                             ),
                         ),
                     )
-                    _assert_prefixkv_common_hf_representable(prefixkv_plan)
+                    _assert_prefixkv_common_hf_representable(prefixkv_plan, self.adapter)
                     packed_state = None
                     prototype_records = ()
                     logical_prefill_active_kv_bytes = prefixkv_plan.retained_bytes
@@ -9587,18 +9641,12 @@ class HuggingFaceMosaicKVModel:
                         ),
                     )
                 elif prefixkv_plan is not None:
-                    prefixkv_payloads, prefixkv_slots = prefixkv_runtime_payloads(prefixkv_plan)
                     packed, packing_seconds = _timed(
                         prefill.logits,
-                        lambda: pack_runtime_payloads(
+                        lambda: _pack_prefixkv_ragged(
                             self.adapter,
-                            full_state,
-                            prefixkv_payloads,
-                            prefixkv_slots,
-                            physical_prompt_capacity=(
-                                None if dense_budget is None else dense_budget.prompt_capacity
-                            ),
-                            packing_mode=self.config.cache.packing_mode,
+                            prefixkv_plan,
+                            prefill.state.past_key_values,
                         ),
                     )
                 elif vl_cache_plan is not None:
@@ -9850,6 +9898,7 @@ class HuggingFaceMosaicKVModel:
                         prefill,
                         state,
                         max_new_tokens=self.config.generation.max_new_tokens,
+                        prefixkv_plan=prefixkv_plan,
                     ),
                 )
                 if (

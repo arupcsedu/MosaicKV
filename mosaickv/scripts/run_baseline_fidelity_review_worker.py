@@ -179,6 +179,7 @@ def byte_capped_configs(
     byte_cap: int,
     profile_forget_ratio: str | None = None,
     profile_reference_retention_ratio: float | None = None,
+    prefixkv_transport: str = "common_guarded",
 ) -> dict[str, Any]:
     """Build a physical-byte-matched FullKV/Top-K/baseline/MosaicKV set.
 
@@ -235,6 +236,10 @@ def byte_capped_configs(
                 baseline.prefixkv,
                 rescale_offline_profile_to_byte_budget=True,
                 profile_reference_retention_ratio=profile_reference_retention_ratio,
+                hf_cache_transport=prefixkv_transport,
+                # This byte-matched variant uses the same last-token-only
+                # mandatory policy as Top-K/MosaicKV, not the paper's BOS rule.
+                start_size=(0 if prefixkv_transport == "ragged_llama_eager_v1" else 1),
             ),
         )
     mosaic = replace(

@@ -81,13 +81,18 @@ class CacheLayerSnapshot:
 
 @dataclass(frozen=True, slots=True)
 class CacheSnapshot:
-    """A cache copy plus enough type information for faithful reinjection."""
+    """Cache copy and type metadata for reinjection.
+
+    In the explicit independent-layer transport, active_sequence_length is
+    the maximum layer length; the individual tensor shapes remain authoritative.
+    """
 
     layers: tuple[CacheLayerSnapshot, ...]
     source_class: type[Any]
     source_kind: str
     active_sequence_length: int
     cached_key_state: CachedKeyState
+    independent_layer_lengths: bool = False
 
     def __post_init__(self) -> None:
         if not self.layers:

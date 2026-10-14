@@ -5,6 +5,11 @@ never official PrefixKV code. The official source is pinned as a read-only
 submodule at commit `597f1ab032704951550f93bcc8a23f1454b80aa4` under
 `third_party/PrefixKV`; its `LICENSE` is MIT, copyright 2024 Zuyan Liu.
 
+The optional common-environment transport `ragged_llama_eager_v1` is documented
+in [the layerwise transport specification](prefixkv_ragged_transport.md).
+Its shared-byte profile rescaling and last-token-only prefill policy are an
+explicit unified-comparison variant, not a paper-native operating point.
+
 Primary sources are the [NeurIPS 2025 paper](https://proceedings.neurips.cc/paper_files/paper/2025/file/93672c60c11d74434f1918aef8a36ab1-Paper-Conference.pdf),
 the pinned [`prefixkv.py`](../../../third_party/PrefixKV/prefixkv.py), the
 patched [`LlamaAttention.forward`](../../../third_party/PrefixKV/patch_attention_forward.py),

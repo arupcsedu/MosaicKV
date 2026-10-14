@@ -93,6 +93,11 @@ def main() -> int:
     parser.add_argument("--output-length", type=int, default=64)
     parser.add_argument("--profile-forget-ratio")
     parser.add_argument("--profile-reference-retention-ratio", type=float)
+    parser.add_argument(
+        "--prefixkv-transport",
+        default="common_guarded",
+        choices=("common_guarded", "ragged_llama_eager_v1"),
+    )
     parser.add_argument("--expected-git-sha", required=True)
     args = parser.parse_args()
 
@@ -133,6 +138,7 @@ def main() -> int:
         byte_cap=args.byte_cap,
         profile_forget_ratio=args.profile_forget_ratio,
         profile_reference_retention_ratio=args.profile_reference_retention_ratio,
+        prefixkv_transport=args.prefixkv_transport,
     )
     baseline_name = FAMILY_METHOD[args.family]
     expected_methods = (

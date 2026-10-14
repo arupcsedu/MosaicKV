@@ -861,6 +861,7 @@ class HuggingFaceMultimodalAdapter(ABC):
 
         packed_validity = state.model_state.get("mosaickv_validity_masks")
         packed_all_valid = state.model_state.get("mosaickv_packed_all_valid") is True
+        ragged = state.model_state.get("prefixkv_ragged") is True
         if (
             state.active_cache_length != state.logical_sequence_length
             and packed_validity is None
@@ -884,6 +885,10 @@ class HuggingFaceMultimodalAdapter(ABC):
         layer_masks = (
             self._packed_decode_masks(state, token_id) if packed_validity is not None else ()
         )
+        if ragged:
+            from mosaickv.adapters.huggingface.prefixkv_cache import ragged_decode_masks
+
+            layer_masks = ragged_decode_masks(self, state)
         query_capture = None
         attention_capture = None
         if not capture_queries and not capture_attentions and not layer_masks:
@@ -930,6 +935,11 @@ class HuggingFaceMultimodalAdapter(ABC):
         if active_length != expected_active:
             raise RuntimeError(f"decode cache grew to {active_length}; expected {expected_active}")
         model_state = state.model_state
+        if ragged:
+            model_state["prefixkv_logical_positions"] = tuple(
+                (*positions, state.next_decode_position)
+                for positions in model_state["prefixkv_logical_positions"]
+            )
         model_state.update(self._capture_decode_model_state(output))
         if packed_validity is not None:
             buffers = model_state.get("mosaickv_validity_buffers")
@@ -1157,6 +1167,7 @@ class HuggingFaceMultimodalAdapter(ABC):
                 raise RuntimeError("forward output did not contain past_key_values")
             return cache
         legacy, source_kind = self._legacy_layers(cache)
+        independent = getattr(cache, "_mosaickv_independent_layer_lengths", False) is True
         layers: list[CacheLayerSnapshot] = []
         active_length: int | None = None
         for index, (key, item_value) in enumerate(legacy):
@@ -1172,8 +1183,9 @@ class HuggingFaceMultimodalAdapter(ABC):
                 raise RuntimeError(f"cache layer {index} has different K and V lengths")
             if active_length is None:
                 active_length = key_length
-            elif key_length != active_length:
+            elif key_length != active_length and not independent:
                 raise RuntimeError("cache layers have inconsistent active lengths")
+            active_length = max(active_length, key_length)
             layers.append(
                 CacheLayerSnapshot(
                     key.detach().clone(), item_value.detach().clone(), sequence_dimension
@@ -1187,6 +1199,7 @@ class HuggingFaceMultimodalAdapter(ABC):
             source_kind,
             active_length,
             self.capabilities.cached_key_state,
+            independent_layer_lengths=independent,
         )
 
     @staticmethod
@@ -1216,7 +1229,10 @@ class HuggingFaceMultimodalAdapter(ABC):
         factory = getattr(snapshot.source_class, "from_legacy_cache", None)
         if factory is not None:
             try:
-                return factory(legacy)
+                cache = factory(legacy)
+                if snapshot.independent_layer_lengths:
+                    cache._mosaickv_independent_layer_lengths = True
+                return cache
             except (TypeError, ValueError) as exc:
                 raise RuntimeError(
                     f"{snapshot.source_class.__qualname__}.from_legacy_cache rejected snapshot"
@@ -1297,9 +1313,11 @@ class HuggingFaceMultimodalAdapter(ABC):
         if isinstance(cache, CacheSnapshot):
             legacy = tuple((layer.key, layer.value) for layer in cache.layers)
             cache_class = cache.source_class
+            independent = cache.independent_layer_lengths
         else:
             legacy, _source_kind = self._legacy_layers(cache)
             cache_class = type(cache)
+            independent = getattr(cache, "_mosaickv_independent_layer_lengths", False) is True
         layouts: list[CacheLayerLayout] = []
         active_length: int | None = None
         for index, (key, value) in enumerate(legacy):
@@ -1308,8 +1326,9 @@ class HuggingFaceMultimodalAdapter(ABC):
                 raise RuntimeError(f"cache layer {index} uses different K and V sequence axes")
             length = int(key.shape[sequence_dimension])
             active_length = length if active_length is None else active_length
-            if length != active_length:
+            if length != active_length and not independent:
                 raise RuntimeError("cache layers have inconsistent active lengths")
+            active_length = max(active_length, length)
             layouts.append(
                 CacheLayerLayout(
                     layer=index,
@@ -1332,6 +1351,9 @@ class HuggingFaceMultimodalAdapter(ABC):
         )
 
     def _cache_length(self, cache: Any) -> int:
+        if getattr(cache, "_mosaickv_independent_layer_lengths", False) is True:
+            legacy, _ = self._legacy_layers(cache)
+            return max(int(key.shape[-2]) for key, _value in legacy)
         getter = getattr(cache, "get_seq_length", None)
         if getter is not None:
             return int(getter())

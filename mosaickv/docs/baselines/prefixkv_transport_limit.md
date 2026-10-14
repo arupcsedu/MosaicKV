@@ -1,5 +1,11 @@
 # PrefixKV common-HF transport limit
 
+2026-10-13 update: this limitation still applies to `common_guarded` and all
+historical padded runs. A separate opt-in `ragged_llama_eager_v1` transport
+now implements independent layer lengths for LLaVA-1.5/eager only. See
+[the repair and validation boundary](prefixkv_ragged_transport.md). Its GPU
+preflight is a prerequisite, not an assumed pass or an official reproduction.
+
 ## Finding
 
 The shared MosaicKV Hugging Face cache transport has one physical prompt
