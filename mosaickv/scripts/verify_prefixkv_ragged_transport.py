@@ -48,6 +48,8 @@ def validate(args):
         "byte_cap": 40 * 2**20,
         "attention_implementation": "eager",
         "precision": "fp16",
+        "mandatory_policy": "first_and_last",
+        "decode_boundary_policy": "protected",
     }
     report = {
         "status": "running",
@@ -94,6 +96,7 @@ def validate(args):
             profile_forget_ratio="0.8",
             profile_reference_retention_ratio=0.2,
             prefixkv_transport="ragged_llama_eager_v1",
+            mandatory_policy="first_and_last",
         )["prefixkv_reimpl"]
         prefill = adapter.prefill(prepared, capture_queries=False, capture_attentions=True)
         full = FullKVState.from_cache_snapshot(
@@ -101,7 +104,7 @@ def validate(args):
             modality_spans=prepared.modality_map,
             token_ids=prepared.model_inputs["input_ids"],
             block_size=1,
-            mandatory_logical_positions=(prepared.logical_sequence_length - 1,),
+            mandatory_logical_positions=(0, prepared.logical_sequence_length - 1),
         )
         dense_width = full.active_bytes // prepared.logical_sequence_length
         target = cfg["byte_cap"] // dense_width * dense_width
@@ -149,6 +152,8 @@ def validate(args):
             state, events = maintain_prefixkv_decode_cache(
                 adapter, actual.state, plan, step_index=step
             )
+            if not all(event["protected_start_present"] for event in events):
+                raise RuntimeError("protected PrefixKV lost a start token")
             oracle_layers = []
             for (key, value), layer in zip(oracle.to_legacy_cache(), plan.layers, strict=True):
                 if (

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
 
@@ -56,6 +57,106 @@ def _attention() -> tuple[np.ndarray, ...]:
         np.asarray([[[[1.0, 9.0, 2.0, 3.0, 4.0, 1.0]]]], dtype=np.float32),
         np.asarray([[[[1.0, 2.0, 3.0, 4.0, 9.0, 1.0]]]], dtype=np.float32),
     )
+
+
+def test_protected_profile_reallocates_sink_layers_inside_unchanged_byte_cap():
+    state = _state(layers=4, sequence=20)
+    profile = PrefixKVOfflineProfile(
+        model_id="llava-hf/llava-1.5-7b-hf",
+        model_revision="a" * 40,
+        target_retention_ratio=0.3,
+        layer_forget_ratios=(0.0, 0.99, 0.99, 0.99),
+        calibration_dataset_id="synthetic",
+        calibration_dataset_revision="b" * 40,
+        calibration_split="train",
+        calibration_sample_ids=("cal-only",),
+        calibration_seed=7,
+        start_size=1,
+        protect_size=1,
+    )
+    config = PrefixKVConfig(
+        enabled=True,
+        profile_path="unused.json",
+        hf_cache_transport="ragged_llama_eager_v1",
+        decode_boundary_policy="protected",
+        rescale_offline_profile_to_byte_budget=True,
+        profile_reference_retention_ratio=0.3,
+    )
+    cache = CacheConfig(
+        24 * 16,
+        BudgetUnit.BYTES,
+        0.99,
+        1,
+        physical_budget_mandatory_policy="first_and_last",
+    )
+    attention = tuple(np.ones((1, 1, 1, 20), dtype=np.float32) for _ in range(4))
+
+    def build(cfg=config, budget=cache):
+        return build_prefixkv_reimpl_plan(
+            state,
+            attention,
+            cfg,
+            budget,
+            model_id=profile.model_id,
+            model_revision=profile.model_revision,
+            profile=profile,
+            physical_prompt_capacity=6,
+        )
+
+    plan = build()
+    assert plan.layer_cache_sizes == (15, 3, 3, 3)
+    assert plan.retained_bytes == cache.budget_value
+    assert plan.layers == build().layers
+    assert plan.trace()["minimum_decode_capacity"] == 3
+    assert all(layer.selected_physical_positions[0] == 0 for layer in plan.layers)
+    assert all(layer.selected_physical_positions[-1] == 19 for layer in plan.layers)
+    assert all(1 <= layer.eviction_offset < layer.retained_positions - 1 for layer in plan.layers)
+    with pytest.raises(PrefixKVReimplementationError, match="mandatory bounds"):
+        build(budget=replace(cache, budget_value=11 * 16))
+    with pytest.raises(PrefixKVReimplementationError, match="protected boundary"):
+        build(cfg=replace(config, eviction_distance=1_000))
+    with pytest.raises(PrefixKVReimplementationError, match="first_and_last"):
+        build(cfg=replace(config, decode_boundary_policy="legacy_clamped"))
+
+
+def test_protected_boundary_config_roundtrip_and_validation():
+    from dataclasses import asdict
+
+    cfg = PrefixKVConfig(decode_boundary_policy="protected")
+    assert PrefixKVConfig.from_mapping(asdict(cfg)) == cfg
+    with pytest.raises(ValueError, match="start_size"):
+        PrefixKVConfig(decode_boundary_policy="protected", start_size=0)
+    with pytest.raises(ValueError, match="decode_boundary_policy"):
+        PrefixKVConfig(decode_boundary_policy="invented")
+    cache = CacheConfig(
+        1024, BudgetUnit.BYTES, 0.5, 1, physical_budget_mandatory_policy="first_and_last"
+    )
+    assert CacheConfig.from_mapping(asdict(cache)) == cache
+
+
+@pytest.mark.parametrize("length", [1, 2, 6])
+def test_protected_identity_does_not_require_extra_capacity(length):
+    state = _state(sequence=length)
+    plan = build_prefixkv_reimpl_plan(
+        state,
+        (),
+        PrefixKVConfig(
+            enabled=True,
+            profile_mode=PrefixKVProfileMode.FIXED_GLOBAL,
+            decode_boundary_policy="protected",
+        ),
+        CacheConfig(
+            state.active_bytes,
+            BudgetUnit.BYTES,
+            1.0,
+            1,
+            physical_budget_mandatory_policy="first_and_last",
+        ),
+        model_id="llava-hf/llava-1.5-7b-hf",
+        model_revision="a" * 40,
+    )
+    assert plan.retained_bytes == state.active_bytes
+    assert plan.layer_cache_sizes == (length, length)
 
 
 def test_fixed_global_budget_sums_exactly_and_selection_is_deterministic() -> None:

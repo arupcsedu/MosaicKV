@@ -404,9 +404,10 @@ class CacheConfig:
             raise ConfigurationError("cache.block_size must be >= 1")
         if self.physical_budget_block_size is not None and self.physical_budget_block_size < 1:
             raise ConfigurationError("cache.physical_budget_block_size must be >= 1 or null")
-        if self.physical_budget_mandatory_policy not in {"method", "last_token"}:
+        if self.physical_budget_mandatory_policy not in {"method", "last_token", "first_and_last"}:
             raise ConfigurationError(
-                "cache.physical_budget_mandatory_policy must be 'method' or 'last_token'"
+                "cache.physical_budget_mandatory_policy must be 'method', 'last_token', "
+                "or 'first_and_last'"
             )
         if self.exact_gather_mode not in {
             "per_head_reference",
@@ -3085,8 +3086,15 @@ class PrefixKVConfig:
     profile_reference_retention_ratio: float | None = None
     official_repository_sha: str = "597f1ab032704951550f93bcc8a23f1454b80aa4"
     hf_cache_transport: str = "common_guarded"
+    # Preserve the old behavior only for reading/reproducing historical diagnostics.
+    # New quality retries use protected boundaries and reserve an eviction interior.
+    decode_boundary_policy: str = "legacy_clamped"
 
     def __post_init__(self) -> None:
+        if self.decode_boundary_policy not in {"legacy_clamped", "protected"}:
+            raise ConfigurationError("prefixkv.decode_boundary_policy is not supported")
+        if self.decode_boundary_policy == "protected" and self.start_size < 1:
+            raise ConfigurationError("protected PrefixKV requires start_size >= 1")
         if self.hf_cache_transport not in {"common_guarded", "ragged_llama_eager_v1"}:
             raise ConfigurationError("prefixkv.hf_cache_transport is not a supported transport")
         if self.start_size < 0:
@@ -3149,6 +3157,7 @@ class PrefixKVConfig:
                 "profile_reference_retention_ratio",
                 "official_repository_sha",
                 "hf_cache_transport",
+                "decode_boundary_policy",
             },
             "prefixkv",
         )
@@ -3182,6 +3191,9 @@ class PrefixKVConfig:
             ),
             hf_cache_transport=_optional_str(
                 data, "hf_cache_transport", "common_guarded", "prefixkv"
+            ),
+            decode_boundary_policy=_optional_str(
+                data, "decode_boundary_policy", "legacy_clamped", "prefixkv"
             ),
         )
 

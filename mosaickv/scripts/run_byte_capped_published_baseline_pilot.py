@@ -99,6 +99,9 @@ def main() -> int:
         choices=("common_guarded", "ragged_llama_eager_v1"),
     )
     parser.add_argument("--expected-git-sha", required=True)
+    parser.add_argument(
+        "--mandatory-policy", choices=("last_token", "first_and_last"), default="last_token"
+    )
     args = parser.parse_args()
 
     repository = Path(__file__).resolve().parents[2]
@@ -139,6 +142,7 @@ def main() -> int:
         profile_forget_ratio=args.profile_forget_ratio,
         profile_reference_retention_ratio=args.profile_reference_retention_ratio,
         prefixkv_transport=args.prefixkv_transport,
+        mandatory_policy=args.mandatory_policy,
     )
     baseline_name = FAMILY_METHOD[args.family]
     expected_methods = (

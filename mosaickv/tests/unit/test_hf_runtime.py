@@ -1414,6 +1414,23 @@ def test_dense_physical_byte_budget_quantizes_and_constrains_selection() -> None
     assert plan.selection.active_bytes == dense.target_bytes
 
 
+def test_shared_first_last_budget_counts_both_boundaries():
+    full = _full()
+    width = full.active_bytes // full.original_logical_sequence_length
+    config = replace(
+        _config(MosaicKVMethod.MOSAICKV_EXACT, 0.25),
+        cache=CacheConfig(
+            width * 2, BudgetUnit.BYTES, 0.99, 1, physical_budget_mandatory_policy="first_and_last"
+        ),
+    )
+    budget = _dense_physical_cache_budget(full, config)
+    assert budget is not None and budget.target_bytes == 2 * width
+    with pytest.raises(hf_runtime.HuggingFaceRuntimeError, match="mandatory block subset"):
+        _dense_physical_cache_budget(
+            full, replace(config, cache=replace(config.cache, budget_value=width))
+        )
+
+
 def test_byte_budget_materialization_trace_separates_cap_lattice_and_padding() -> None:
     full = _full()
     cap = full.active_bytes // 2 + 1

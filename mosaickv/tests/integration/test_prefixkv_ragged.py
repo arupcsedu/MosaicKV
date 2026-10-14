@@ -234,3 +234,70 @@ def test_ragged_rejects_future_position_before_forward():
     state.model_state["prefixkv_logical_positions"] = ((0, 1, 2, 99), (0, 1))
     with pytest.raises(RuntimeError, match="future token"):
         adapter.decode_one_token(torch.tensor([[3]]), state, capture_queries=False)
+
+
+def test_protected_three_position_layer_preserves_bos_through_decode():
+    torch.manual_seed(31)
+    adapter = _llava()
+    prepared = adapter.prepare_inputs([{"role": "user", "content": "test"}])
+    prefill = adapter.prefill(prepared, capture_attentions=True)
+    full = FullKVState.from_cache_snapshot(
+        adapter.extract_past_key_values(prefill.state.past_key_values),
+        block_size=1,
+        mandatory_logical_positions=(0, 3),
+        modality_spans=prepared.modality_map,
+        token_ids=prepared.model_inputs["input_ids"],
+    )
+    plan = build_prefixkv_reimpl_plan(
+        full,
+        prefill.attention_weights,
+        PrefixKVConfig(
+            enabled=True,
+            profile_mode=PrefixKVProfileMode.FIXED_GLOBAL,
+            hf_cache_transport="ragged_llama_eager_v1",
+            decode_boundary_policy="protected",
+        ),
+        CacheConfig(
+            full.active_bytes * 3 // 4,
+            BudgetUnit.BYTES,
+            0.75,
+            1,
+            physical_budget_mandatory_policy="first_and_last",
+        ),
+        model_id="llava-hf/llava-1.5-7b-hf",
+        model_revision="a" * 40,
+    )
+    assert plan.layer_cache_sizes == (3, 3)
+    packed = _pack_prefixkv_ragged(adapter, plan, prefill.state.past_key_values)
+    state = _state_from_packed(adapter, prefill.state, packed)
+    token = prefill.next_token_id
+    evicted = 0
+    for step in range(16):
+        output = adapter.decode_one_token(token, state, capture_queries=False)
+        state, events = maintain_prefixkv_decode_cache(adapter, output.state, plan, step_index=step)
+        assert all(event["protected_start_present"] for event in events)
+        assert all(event["removed_logical_position"] != 0 for event in events)
+        assert all(p[0] == 0 for p in state.model_state["prefixkv_logical_positions"])
+        evicted += sum(e["removed_logical_position"] is not None for e in events)
+        token = output.next_token_id
+    assert evicted > 0
+
+
+def test_protected_decode_rejects_tampered_eviction_offset_before_deleting_bos():
+    adapter = _llava()
+    _prefill, plan, _packed, state, _oracle = _compressed(adapter)
+    plan = replace(
+        plan,
+        config=replace(plan.config, start_size=1, decode_boundary_policy="protected"),
+        layers=tuple(replace(layer, eviction_offset=0) for layer in plan.layers),
+    )
+    output = adapter.decode_one_token(torch.tensor([[3]]), state, capture_queries=False)
+    # Fractional excess truncates to zero on step one; step two must evict.
+    output = adapter.decode_one_token(output.next_token_id, output.state, capture_queries=False)
+    saved = tuple(adapter._legacy_layers(output.state.past_key_values)[0])
+    with pytest.raises(RuntimeError, match="protected start/tail"):
+        maintain_prefixkv_decode_cache(adapter, output.state, plan, step_index=0)
+    for (key, value), (old_key, old_value) in zip(
+        adapter._legacy_layers(output.state.past_key_values)[0], saved, strict=True
+    ):
+        assert torch.equal(key, old_key) and torch.equal(value, old_value)

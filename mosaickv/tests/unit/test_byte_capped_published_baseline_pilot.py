@@ -82,3 +82,32 @@ def test_ragged_prefixkv_is_opt_in_and_shares_mandatory_policy() -> None:
         assert configs[name].cache == prefix.cache
         assert configs[name].execution == prefix.execution
         assert configs[name].generation == prefix.generation
+
+
+def test_boundary_repair_changes_mandatory_policy_for_every_comparator():
+    root = Path(__file__).parents[2]
+    configs = _module().byte_capped_configs(
+        load_config(root / "configs/paper_candidate_llava_v1.yaml"),
+        repository=root.parent,
+        family="prefixkv",
+        task="textvqa",
+        model_id="llava-hf/llava-1.5-7b-hf",
+        model_revision="b234b804b114d9e37bb655e11cbbb5f5e971b7a9",
+        seed=7,
+        output_length=64,
+        byte_cap=40 * 2**20,
+        profile_forget_ratio="0.8",
+        profile_reference_retention_ratio=0.2,
+        prefixkv_transport="ragged_llama_eager_v1",
+        mandatory_policy="first_and_last",
+    )
+    prefix = configs["prefixkv_reimpl"]
+    assert prefix.prefixkv.start_size == prefix.prefixkv.protect_size == 1
+    assert prefix.prefixkv.decode_boundary_policy == "protected"
+    for name in ("prompt_attention_topk", "mosaickv_exact"):
+        assert configs[name].cache == prefix.cache
+        assert configs[name].cache.physical_budget_mandatory_policy == "first_and_last"
+        assert configs[name].model == prefix.model
+        assert configs[name].dataset == prefix.dataset
+        assert configs[name].generation == prefix.generation
+        assert configs[name].execution == prefix.execution

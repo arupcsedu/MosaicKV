@@ -180,6 +180,7 @@ def byte_capped_configs(
     profile_forget_ratio: str | None = None,
     profile_reference_retention_ratio: float | None = None,
     prefixkv_transport: str = "common_guarded",
+    mandatory_policy: str = "last_token",
 ) -> dict[str, Any]:
     """Build a physical-byte-matched FullKV/Top-K/baseline/MosaicKV set.
 
@@ -200,6 +201,10 @@ def byte_capped_configs(
 
     if byte_cap < 1:
         raise ValueError("byte_cap must be positive")
+    if mandatory_policy not in {"last_token", "first_and_last"}:
+        raise ValueError("byte-capped mandatory_policy must be last_token or first_and_last")
+    if mandatory_policy == "first_and_last" and family != "prefixkv":
+        raise ValueError("first_and_last is audited only for the PrefixKV comparison lane")
     controls = review_configs(
         template,
         repository=repository,
@@ -220,7 +225,7 @@ def byte_capped_configs(
         retention_ratio=0.99,
         block_size=1,
         physical_budget_block_size=1,
-        physical_budget_mandatory_policy="last_token",
+        physical_budget_mandatory_policy=mandatory_policy,
         exact_gather_mode="source_views",
         packing_mode="per_head_reference",
         total_storage_budget_bytes=None,
@@ -239,7 +244,15 @@ def byte_capped_configs(
                 hf_cache_transport=prefixkv_transport,
                 # This byte-matched variant uses the same last-token-only
                 # mandatory policy as Top-K/MosaicKV, not the paper's BOS rule.
-                start_size=(0 if prefixkv_transport == "ragged_llama_eager_v1" else 1),
+                start_size=(
+                    0
+                    if prefixkv_transport == "ragged_llama_eager_v1"
+                    and mandatory_policy == "last_token"
+                    else 1
+                ),
+                decode_boundary_policy=(
+                    "protected" if mandatory_policy == "first_and_last" else "legacy_clamped"
+                ),
             ),
         )
     mosaic = replace(

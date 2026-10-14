@@ -755,6 +755,8 @@ def _dense_physical_cache_budget(
         reference_mandatory = (
             tuple(full_state.mandatory_logical_positions)
             if accounting_policy == "method"
+            else tuple(sorted({0, full_state.original_logical_sequence_length - 1}))
+            if accounting_policy == "first_and_last"
             else (full_state.original_logical_sequence_length - 1,)
         )
         accounting_state = FullKVState.from_tensors(
@@ -8973,7 +8975,11 @@ class HuggingFaceMosaicKVModel:
                     else 1
                 )
                 mandatory_positions: tuple[int, ...]
-                if self.config.cache.physical_budget_mandatory_policy == "last_token":
+                if self.config.cache.physical_budget_mandatory_policy == "first_and_last":
+                    mandatory_positions = tuple(
+                        sorted({0, int(prefill.state.logical_sequence_length) - 1})
+                    )
+                elif self.config.cache.physical_budget_mandatory_policy == "last_token":
                     mandatory_positions = (int(prefill.state.logical_sequence_length) - 1,)
                 elif method.is_lookm_reimplementation:
                     mandatory_positions = tuple(

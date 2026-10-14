@@ -52,7 +52,7 @@ integer apportionment fills the largest representable target. Equal per-layer
 byte widths are required. Gathering verifies physical storage equals planned
 bytes. No zero padding is used to manufacture byte matching.
 
-The opt-in unified worker uses the common last-prompt-token mandatory rule
+The historical opt-in unified worker used the common last-prompt-token mandatory rule
 (`start_size=0`, `protect_size=1`); this differs explicitly from upstream's
 BOS-plus-tail prefill rule. Original profile shape, source SHA and transport
 choice are recorded. This is a **byte-matched local variant**, not an official
@@ -65,6 +65,36 @@ other methods may append without eviction. Final bytes and eviction events
 must therefore be reported separately. Equal prefill bytes do not imply equal
 bytes at every decode step or prove paper-native fidelity. FullKV is a
 correctness/quality reference, not a latency competitor.
+
+## Quality correction: protected-boundary byte variant
+
+The negative eight-example-per-task development run at source `9add825`
+is preserved at `/scratch/djy8hg/runs/mosaickv/prefixkv-quality-9add825-20261013-v1`.
+It did not pass the Prompt Top-K quality gate. A label-blind allocation audit
+found that the recalibrated profile creates one- and two-position layers,
+omits BOS, and can evict BOS through the legacy clamped offset. This is a
+concrete defect in that variant; it does **not** explain all failures of the
+older upstream-profile variant, which already retained BOS in that audit.
+
+New retries explicitly set `cache.physical_budget_mandatory_policy:
+first_and_last` for **all compressed methods**, and
+`prefixkv.decode_boundary_policy: protected`. The latter reserves at least
+`max(3, start_size + protect_size + 1)` positions per layer (or the entire
+source for shorter original prompts). Deterministic global apportionment
+redistributes the unchanged byte budget; infeasible caps are rejected. A
+fixed eviction offset must lie between the protected boundaries. The decode
+path rejects boundary eviction before deleting any key/value position and
+records `protected_start_present` for each layer/step. Retention 1 remains
+identity. `legacy_clamped` exists only for backward-compatible historical
+diagnostics and is not the corrected quality candidate.
+
+The three-position lower bound follows the pinned implementation's midpoint
+assertion, while enforcing it during global byte allocation is an explicit
+local byte-matched adaptation. This is still `prefixkv_reimpl`, not official
+PrefixKV. CPU regressions and transport parity establish safety, **not answer
+quality**. Both tasks must still pass the unchanged measured quality gate;
+no full campaign is authorized by this code correction. Historical
+last-token-only Top-K/MosaicKV rows cannot be reused in the new paired cohort.
 
 ## Validation and rerun policy
 

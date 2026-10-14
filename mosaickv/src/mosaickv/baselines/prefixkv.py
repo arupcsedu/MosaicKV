@@ -656,6 +656,12 @@ class PrefixKVCompressionPlan:
             "protect_size": self.config.protect_size,
             "eviction_distance": self.config.eviction_distance,
             "hf_cache_transport": self.config.hf_cache_transport,
+            "decode_boundary_policy": self.config.decode_boundary_policy,
+            "minimum_decode_capacity": (
+                max(3, self.config.start_size + self.config.protect_size + 1)
+                if self.config.decode_boundary_policy == "protected"
+                else None
+            ),
             "layers": [
                 {
                     "layer": layer.layer,
@@ -717,13 +723,21 @@ def _select_positions(
     return selected, protected
 
 
-def _eviction_offset(retained: int, distance: int) -> int:
+def _eviction_offset(
+    retained: int, distance: int, *, start_size: int = 0, protect_size: int = 0
+) -> int:
     if retained < 1:
         raise PrefixKVReimplementationError("PrefixKV cannot schedule an empty cache")
     offset = distance if distance > 0 else retained + distance
     if offset < 1 and retained >= 3:
         offset = retained // 2
-    return max(0, min(retained - 1, offset))
+    offset = max(0, min(retained - 1, offset))
+    if not start_size <= offset < retained - protect_size:
+        raise PrefixKVReimplementationError(
+            "PrefixKV fixed eviction offset would remove a protected boundary; "
+            "increase feasible layer capacity or use a supported eviction distance"
+        )
+    return offset
 
 
 def build_prefixkv_reimpl_plan(
@@ -760,6 +774,13 @@ def build_prefixkv_reimpl_plan(
             "generalized PrefixKV currently requires the same KV-head count in every layer"
         )
     head_count = kv_heads[0]
+    guarded = prefixkv_config.decode_boundary_policy == "protected"
+    if cache_config.physical_budget_mandatory_policy == "first_and_last" and (
+        prefixkv_config.start_size != 1 or prefixkv_config.protect_size != 1 or not guarded
+    ):
+        raise PrefixKVReimplementationError(
+            "shared first_and_last requires protected PrefixKV with start_size=protect_size=1"
+        )
     lower = tuple(
         len(
             set(range(min(prefixkv_config.start_size, length)))
@@ -767,6 +788,13 @@ def build_prefixkv_reimpl_plan(
         )
         for length in lengths
     )
+    if guarded:
+        # Upstream's short-cache midpoint fallback needs an interior position.
+        # Reallocate within the SAME global byte budget, never add extra bytes.
+        minimum = max(3, prefixkv_config.start_size + prefixkv_config.protect_size + 1)
+        lower = tuple(
+            min(length, max(low, minimum)) for length, low in zip(lengths, lower, strict=True)
+        )
     source_slots = len(full_state.blocks)
     target_slots = math.floor(source_slots * cache_config.retention_ratio + 1e-12)
     if cache_config.budget_unit is BudgetUnit.BLOCKS:
@@ -915,7 +943,17 @@ def build_prefixkv_reimpl_plan(
                 attention_score_sum=sum(layer_scores),
                 bytes_per_position=position_bytes,
                 retained_bytes=count * position_bytes,
-                eviction_offset=_eviction_offset(count, prefixkv_config.eviction_distance),
+                eviction_offset=_eviction_offset(
+                    count,
+                    prefixkv_config.eviction_distance,
+                    # Identity layers never evict; short original prompts remain valid.
+                    start_size=prefixkv_config.start_size
+                    if guarded and count < lengths[layer_index]
+                    else 0,
+                    protect_size=prefixkv_config.protect_size
+                    if guarded and count < lengths[layer_index]
+                    else 0,
+                ),
             )
         )
     active_slots = sum(

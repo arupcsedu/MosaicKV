@@ -131,6 +131,12 @@ def evict_ragged_prefixkv(
         if math.trunc(len(logical) - target) > 0 and len(logical) > 1:
             offset = min(layer.eviction_offset, len(logical) - 1)
             removed_logical = logical[offset]
+            if plan.config.decode_boundary_policy == "protected" and (
+                offset < plan.config.start_size
+                or offset >= len(logical) - plan.config.protect_size
+                or removed_logical in layer.selected_logical_positions[: plan.config.start_size]
+            ):
+                raise RuntimeError("PrefixKV decode would evict a protected start/tail boundary")
             keep = torch.cat(
                 (
                     torch.arange(offset, device=key.device),
@@ -154,6 +160,11 @@ def evict_ragged_prefixkv(
                 "active_positions_after": len(logical),
                 "physical_bytes_after": key.untyped_storage().nbytes()
                 + value.untyped_storage().nbytes(),
+                "decode_boundary_policy": plan.config.decode_boundary_policy,
+                "protected_start_present": all(
+                    position in logical
+                    for position in layer.selected_logical_positions[: plan.config.start_size]
+                ),
             }
         )
     # Rebuild the lightweight cache container; unmodified layers alias their
