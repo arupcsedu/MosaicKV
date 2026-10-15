@@ -179,6 +179,9 @@ def _parquet_schema(pa: Any) -> Any:
     integers = {
         "generated_tokens",
         "active_kv_bytes",
+        "initial_active_kv_storage_bytes",
+        "final_active_kv_storage_bytes",
+        "peak_active_kv_storage_bytes",
         "residual_kv_bytes",
         "peak_gpu_memory",
         "repair_count",

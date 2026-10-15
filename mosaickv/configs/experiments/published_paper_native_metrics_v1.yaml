@@ -41,9 +41,9 @@ protocols:
         aggregation: token-weighted corpus PPL and mean per-sample ROUGE-L F1
       - name: mmvet_prefixkv
         dataset: PrefixKV/MM-Vet
-        # No immutable source revision has been audited for this paper-specific
-        # materialized route. The protocol loader deliberately blocks execution.
-        dataset_revision: null
+        # Reconciled with the existing official_218 materialized artifact;
+        # this is not the ordinary judge-scored lmms-lab/MMVet route.
+        dataset_revision: 8ce15108c0b55c67200eb96601ba2bb98183ff65
         split: official_218
         sample_count: 218
         metrics: [teacher_forced_ppl, rouge_l_f1]

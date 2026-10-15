@@ -65,6 +65,9 @@ class EvaluationResult:
     result_category: ResultCategory = ResultCategory.UNIFIED_COMPARISON
     result_origin: ResultOrigin = ResultOrigin.LOCALLY_MEASURED
     schema_version: int = 1
+    initial_active_kv_storage_bytes: int | None = None
+    final_active_kv_storage_bytes: int | None = None
+    peak_active_kv_storage_bytes: int | None = None
 
     def __post_init__(self) -> None:
         for name in ("run_id", "sample_id", "task", "model", "backend", "method"):
@@ -99,6 +102,9 @@ class EvaluationResult:
         for name in (
             "generated_tokens",
             "active_kv_bytes",
+            "initial_active_kv_storage_bytes",
+            "final_active_kv_storage_bytes",
+            "peak_active_kv_storage_bytes",
             "residual_kv_bytes",
             "peak_gpu_memory",
             "repair_count",
@@ -107,6 +113,8 @@ class EvaluationResult:
             value = getattr(self, name)
             if value is not None and (isinstance(value, bool) or not isinstance(value, int)):
                 raise ValueError(f"{name} must be an integer when present")
+            if name.endswith("kv_storage_bytes") and value is not None and value < 0:
+                raise ValueError(f"{name} cannot be negative")
         for name in (
             "ttft",
             "prefill_time",

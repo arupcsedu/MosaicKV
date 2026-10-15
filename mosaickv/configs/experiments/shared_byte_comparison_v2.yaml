@@ -1,0 +1,144 @@
+schema_version: 2
+experiment_id: shared_byte_comparison_v2
+classification: unified_comparison
+execution_authorized: false
+fullkv_latency_comparison: false
+supersedes_for_new_comparisons: paper_native_byte_capped_lanes_v1
+
+candidate:
+  name: mosaickv_exact
+  base_commit: 968b5fe4d7169b8c5c84f40f69c4933821432d4e
+  change_scope: measurement_native_metric_and_baseline_fidelity_only_no_mosaickv_selection_retuning
+  content_sha256: 346037c1ca34048b981cff2ea61cfaef538c1b7b3b15e859997c671766ae3154
+  policy_sha256: fc8f9efc3b1bafd5278811022d00a2a5546f48eec7fe0174471c02d21a64096f
+  description: prompt_window_16_stable_head_topk_routed_graph_1_over_256
+  prototype_merging: false
+  residual_storage: false
+  repair: false
+  require_clean_execution_commit: true
+  require_content_fingerprint_match: true
+  require_retention_one_parity_after_instrumentation: true
+
+resources:
+  max_global_a100s: 4
+  gpus_per_worker: 1
+  cpus_per_worker: 12
+  time_limit_seconds: 7200
+
+comparison:
+  budget_boundary: initial_live_cache_unique_backing_storage_after_compression_before_decode_reserve
+  target_units: MiB_1048576_bytes
+  choose_largest_feasible_allocation_below_cap: true
+  cross_method_realized_byte_tolerance: 0
+  target_shortfall: record_bytes_and_independent_layout_feasibility_certificate
+  unequal_feasible_allocations: unsupported_at_this_cap_not_same_budget
+  required_storage_measurements: [initial, final, peak]
+  additional_measurements: [physical_slot_payload, prefill_source_bytes, peak_gpu_allocated, peak_gpu_reserved]
+  decode_growth: append_only_no_eviction
+  peak_boundary: live_decode_cache_including_preallocation_and_padding_not_process_peak
+  precision: fp16
+  backend: huggingface
+  attention: eager
+  block_size: 1
+  physical_budget_block_size: 1
+  output_policy: fixed_max_new_tokens
+  generation: {do_sample: false, temperature: 0.0, top_p: 1.0}
+  quality_repetitions: 1
+  warmups_per_method: 5
+  dedicated_latency_repetitions: 20
+  seed: 20271014
+  fullkv_role: quality_reference_only
+  baseline_origin: reimpl
+  paper_reproduction: separate_environment_budget_and_table_not_a_unified_row
+
+lanes:
+  prefixkv:
+    model_id: llava-hf/llava-1.5-7b-hf
+    model_revision: b234b804b114d9e37bb655e11cbbb5f5e971b7a9
+    methods: [full_kv, prompt_attention_topk, prefixkv_reimpl, mosaickv_exact]
+    mandatory_policy: first_and_last
+    caps_mib: [40, 80, 120, 160, 240]
+    baseline_variant: offline_profile_shape_rescaled_to_physical_byte_cap_append_only_reimpl
+    baseline_commit: 597f1ab032704951550f93bcc8a23f1454b80aa4
+    profile_requirement: bind_profile_hash_and_native_fidelity_evidence_before_submission
+    c_only_ocr_variant: separate_ablation_not_paper_native_prefixkv
+    tasks:
+      llava_description:
+        dataset_id: PrefixKV/LLaVA-Description
+        dataset_revision: 407c2d2f8fc13611d13f72a5e18b8c33bf9c44e6e05278bf0b4da41deeacbe6a
+        split: official_1000
+        output_tokens: 1024
+        metrics: [teacher_forced_ppl, rouge_l_f1]
+        parent_ledger: /scratch/djy8hg/runs/mosaickv/paper-native-full-v1-61e5a68-setup/ledgers/prefixkv/llava_description/full-ledger.json
+        parent_ledger_sha256: affc346693db8c8301e821ff3972bb13641cca33cd63c9c1d0f5b3b633781982
+      mmvet_prefixkv:
+        dataset_id: PrefixKV/MM-Vet
+        dataset_revision: 8ce15108c0b55c67200eb96601ba2bb98183ff65
+        split: official_218
+        output_tokens: 1024
+        metrics: [teacher_forced_ppl, rouge_l_f1]
+        parent_ledger: /scratch/djy8hg/runs/mosaickv/paper-native-full-v1-61e5a68-setup/ledgers/prefixkv/mmvet_prefixkv/full-ledger.json
+        parent_ledger_sha256: 98be86931284edede09f782a0737d515afbc9664e8f3750db1665676ad663e24
+  vl_cache:
+    model_id: llava-hf/llava-v1.6-mistral-7b-hf
+    model_revision: 2424fdd47412fccc66d91719126b420e9fbd7065
+    methods: [full_kv, prompt_attention_topk, vl_cache_reimpl, mosaickv_exact]
+    mandatory_policy: last_token
+    caps_mib: [10, 20, 40, 80, 120]
+    baseline_variant: paper_equations_with_physical_byte_cap_reimpl
+    tasks:
+      coco_caption:
+        dataset_id: lmms-lab/COCO-Caption
+        dataset_revision: c3213b54e173ae86517d481de17f31439d6f8c72
+        split: val
+        output_tokens: 64
+        metrics: [cider]
+        ledger_status: require_hash_bound_sample_id_ledger_before_submission
+      docvqa:
+        dataset_id: lmms-lab/DocVQA
+        dataset_revision: 539088ef8a8ada01ac8e2e6d4e372586748a265e
+        split: validation
+        output_tokens: 64
+        metrics: [anls]
+        ledger_status: reuse_only_exactly_compatible_reviewed_cohort
+  lookm:
+    model_id: llava-hf/llava-1.5-7b-hf
+    model_revision: b234b804b114d9e37bb655e11cbbb5f5e971b7a9
+    methods: [full_kv, prompt_attention_topk, lookm_reimpl, mosaickv_exact]
+    mandatory_policy: first_and_last
+    caps_mib: [10, 20, 40, 80]
+    baseline_variant: lookm_reimpl_shared_physical_cap
+    baseline_commit: ecf0f51a9c416c2d85e47faf2638502f01a6d748
+    official_execution: unsupported_pinned_upstream_missing_class
+    tasks:
+      milebench:
+        dataset_id: MileBench/MileBench
+        # No single revision honestly describes the mixed annotation/media
+        # sources. A reviewed composite ledger must bind each dependency.
+        dataset_revision: null
+        split: official_evaluation
+        output_tokens: 64
+        metrics: [accuracy, rouge_l_f1, milebench]
+        subtasks: [ActionSequence, CLEVR-Change, Spot-the-Diff, TextNeedleInAHaystack]
+        ledger_status: blocked_until_representative_media_complete_and_composite_revision_bound
+
+statistics:
+  separate_tasks_and_metrics: true
+  paired_bootstrap_replicates: 10000
+  confidence_level: 0.95
+  ppl: exp_sum_nll_over_sum_tokens_never_mean_sample_ppl
+  cider: rerun_corpus_reducer_each_replicate
+  milebench: recompute_official_hierarchy_each_replicate_separate_accuracy_and_rouge
+  rouge_reference: freeze_hash_bound_fullkv_outputs_identical_controls
+  teacher_forcing: identical_complete_annotation_targets_no_silent_truncation
+  smaller_at_equal_quality: isoquality_curves_not_same_byte_points_or_interpolated_measurements
+  unsupported_or_failed_rows: retain_raw_errors_and_report_denominators
+
+reuse:
+  historical_nominal_ratio_root: /scratch/djy8hg/runs/mosaickv/paper-native-7day-v1-61e5a68
+  historical_policy: preserve_read_only_separate_curves_no_direct_same_budget_latency_claim
+  original_campaign_rerun: forbidden
+  matching: sample_ids_all_controls_candidate_baseline_revision_and_realized_storage
+  missing_peak_storage: audit_existing_traces_or_mark_unverified_never_invent_peak
+  retry: only_missing_or_failed_shards_of_an_identical_immutable_plan
+  scheduler: global_shared_controller_not_four_gpus_per_array

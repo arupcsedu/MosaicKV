@@ -441,6 +441,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="protocol_id selected from --published-protocol",
     )
     evaluate_parser.add_argument(
+        "--unified-coco",
+        action="store_true",
+        help="evaluate a hash-bound COCO ledger with corpus CIDEr in a unified comparison",
+    )
+    evaluate_parser.add_argument(
+        "--unified-prefixkv",
+        action="store_true",
+        help="use materialized PrefixKV PPL/ROUGE as unified metrics, not paper reproduction",
+    )
+    evaluate_parser.add_argument(
         "--unified-milebench",
         action="store_true",
         help="use MileBench scorers in a unified comparison, not paper reproduction",

@@ -30,9 +30,7 @@ def _runner_module() -> object:
 
 def _official_profile_aggregator_module() -> object:
     path = (
-        Path(__file__).resolve().parents[2]
-        / "scripts"
-        / "aggregate_prefixkv_official_profile.py"
+        Path(__file__).resolve().parents[2] / "scripts" / "aggregate_prefixkv_official_profile.py"
     )
     spec = importlib.util.spec_from_file_location("prefixkv_official_aggregator", path)
     if spec is None or spec.loader is None:  # pragma: no cover - import guard
@@ -40,6 +38,71 @@ def _official_profile_aggregator_module() -> object:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def test_legacy_callback_uses_upstream_rounding_and_float_decode_profile(tmp_path):
+    import torch
+
+    from mosaickv.baselines.prefixkv import PrefixKVOfflineProfile
+    from mosaickv.evaluation.prefixkv_differential import upstream_oracle
+
+    runner = _runner_module()
+    ratios = (0.411, 0.589)
+    profile = PrefixKVOfflineProfile(
+        model_id=runner.MODEL_ID,
+        model_revision=runner.MODEL_REPOSITORY_SHA,
+        target_retention_ratio=0.5,
+        layer_forget_ratios=ratios,
+        calibration_dataset_id="synthetic",
+        calibration_dataset_revision="a" * 40,
+        calibration_split="train",
+        calibration_sample_ids=("cal",),
+        calibration_seed=0,
+        start_size=1,
+        protect_size=1,
+    )
+    local = runner.ReimplementationCriterion(
+        profile_path=tmp_path / "unused.json",
+        profile=profile,
+        retention_ratio=0.5,
+        layer_count=2,
+    )
+    official, _ = upstream_oracle(Path(__file__).resolve().parents[3], ratios)
+    generator = torch.Generator().manual_seed(37)
+    original = tuple(
+        (
+            torch.randn(1, 2, 41, 4, generator=generator),
+            torch.randn(1, 2, 41, 4, generator=generator),
+        )
+        for _ in ratios
+    )
+    attention = tuple(torch.rand(1, 2, 41, 41, generator=generator) for _ in ratios)
+    expected = official(original, 41, attention)
+    actual = local(original, 41, attention)
+    for step in range(65):
+        for pair, reference in zip(actual, expected, strict=True):
+            for tensor, ref in zip(pair, reference, strict=True):
+                torch.testing.assert_close(tensor, ref, rtol=0, atol=0)
+        if step == 64:
+            break
+        additions = tuple(
+            (
+                torch.randn(1, 2, 1, 4, generator=generator),
+                torch.randn(1, 2, 1, 4, generator=generator),
+            )
+            for _ in ratios
+        )
+        actual = tuple(
+            tuple(torch.cat((a, b), -2) for a, b in zip(pair, new, strict=True))
+            for pair, new in zip(actual, additions, strict=True)
+        )
+        expected = tuple(
+            tuple(torch.cat((a, b), -2) for a, b in zip(pair, new, strict=True))
+            for pair, new in zip(expected, additions, strict=True)
+        )
+        attention = tuple(torch.zeros(1, 2, 1, k.shape[-2]) for k, _ in actual)
+        actual = local(actual, 42 + step, attention)
+        expected = official(expected, 42 + step, attention)
 
 
 def _controls() -> PrefixKVParityControls:

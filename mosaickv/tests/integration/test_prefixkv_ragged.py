@@ -231,7 +231,8 @@ def test_ragged_config_roundtrip_and_invalid_transport():
 @pytest.mark.parametrize(
     "policy", ["profile_ratio", "effective_profile_ratio", "byte_calibrated", "capacity_floor"]
 )
-def test_actual_upstream_selector_and_evictor_64_steps(policy):
+@pytest.mark.parametrize("teacher_forced", [False, True])
+def test_actual_upstream_selector_and_evictor_64_steps(policy, teacher_forced):
     from mosaickv.baselines.prefixkv import (
         generate_prefixkv_byte_profile,
         prefixkv_calibration_observation,
@@ -311,11 +312,38 @@ def test_actual_upstream_selector_and_evictor_64_steps(policy):
         profile=profile,
     )
     result = compare_upstream_decode(
-        adapter, prefill, plan, Path(__file__).resolve().parents[3], steps=64, atol=1e-6
+        adapter,
+        prefill,
+        plan,
+        Path(__file__).resolve().parents[3],
+        steps=64,
+        atol=1e-6,
+        teacher_forced_ids=tuple(3 + i % 40 for i in range(65)) if teacher_forced else None,
+        fullkv_reference_answer=None if teacher_forced else "3 4 5",
     )
     assert result["passed"] and result["source_isolated"]
     assert len(result["steps"]) == 64
     assert result["token_agreement"] == 1
+    assert all(len(row["per_layer_cache_sizes"]) == 2 for row in result["steps"])
+    if teacher_forced:
+        loss = result["teacher_forced"]
+        assert loss["evaluated_token_count"] == 65
+        assert loss["prompt_tokens_scored"] == 0
+        assert loss["official_nll_sum"] > 0
+        assert loss["local_nll_sum"] == pytest.approx(loss["official_nll_sum"], abs=1e-5)
+        assert result["generated_token_ids"] is None
+    else:
+        assert result["generated_token_ids"] == result["official_generated_token_ids"]
+        rouge = result["frozen_reference_rouge_l_f1"]
+        assert rouge["local"] == rouge["official"]
+
+
+@pytest.mark.parametrize("targets", [(), (1,), (-1, 2), (True, 3)])
+def test_differential_rejects_invalid_target_mask_before_forward(targets):
+    from mosaickv.evaluation.prefixkv_differential import compare_upstream_decode
+
+    with pytest.raises(ValueError, match="steps\\+1 nonnegative token IDs"):
+        compare_upstream_decode(None, None, None, Path("."), steps=1, teacher_forced_ids=targets)
 
 
 def test_append_only_never_evicts_and_is_labeled_in_raw_runtime(tmp_path):
@@ -342,6 +370,10 @@ def test_append_only_never_evicts_and_is_labeled_in_raw_runtime(tmp_path):
     assert all(event["removed_physical_position"] is None for event in events)
     assert all(event["decode_policy"] == "append_only" for event in events)
     assert trace["final_active_kv_bytes"] == 256 + 15 * 128
+    lifecycle = trace["cache_lifecycle"]
+    assert lifecycle["initial_active_kv_storage_bytes"] == 256
+    assert lifecycle["final_active_kv_storage_bytes"] == 256 + 15 * 128
+    assert lifecycle["peak_active_kv_storage_bytes"] == lifecycle["final_active_kv_storage_bytes"]
 
 
 def test_native_round_schedule_works_through_complete_runtime(tmp_path):

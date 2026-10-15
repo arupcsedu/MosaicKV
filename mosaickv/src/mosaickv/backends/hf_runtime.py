@@ -87,6 +87,7 @@ from mosaickv.forecasting.huggingface import (
 )
 from mosaickv.generation import decode_quality_output, terminal_token_ids
 from mosaickv.graph import SparseEvidenceGraph, build_evidence_graph
+from mosaickv.measurements.cache_lifecycle import CacheLifecycle
 from mosaickv.measurements.timing import ModuleCudaTimer, SynchronizationAudit
 from mosaickv.prototypes import (
     PrototypeAssignmentPlan,
@@ -8804,6 +8805,7 @@ class HuggingFaceMosaicKVModel:
         teacher_forced_nll_sum = 0.0
         trace_instrumentation_seconds = 0.0
         deferred_trace_builder: Callable[[], JsonObject] | None = None
+        cache_lifecycle: CacheLifecycle | None = None
         try:
             if self._prefixkv_profile is not None:
                 self._prefixkv_profile.assert_evaluation_disjoint((request.sample_id,))
@@ -8940,6 +8942,17 @@ class HuggingFaceMosaicKVModel:
                 self.adapter,
                 prefill.state.past_key_values,
             )
+            # Original geometry, before selection: independently certifies the
+            # largest feasible dense byte allocation in shared-cap analysis.
+            trace["source_kv_layout"] = [
+                {
+                    "key_shape": list(key.shape),
+                    "value_shape": list(value.shape),
+                    "key_element_size": key.element_size(),
+                    "value_element_size": value.element_size(),
+                }
+                for key, value in self.adapter._legacy_layers(prefill.state.past_key_values)[0]
+            ]
             logical_prefill_active_kv_bytes = source_prefill_kv_bytes
             packed_prefill_active_kv_bytes = source_prefill_kv_bytes
             packed_prompt_capacity = prefill.state.active_cache_length
@@ -9970,12 +9983,23 @@ class HuggingFaceMosaicKVModel:
             else:
                 trace["fidelity_diagnostic"] = {"status": "disabled"}
 
+            # Observe before preallocation so unused backing capacity is not
+            # confused with the post-compression byte target. All methods use
+            # the same metadata-only instrumentation (no device copies/sync).
+            cache_accounting_started = time.perf_counter()
+            cache_lifecycle = CacheLifecycle.start(
+                self.adapter._legacy_layers(state.past_key_values)[0]
+            )
+            trace_instrumentation_seconds += time.perf_counter() - cache_accounting_started
             preallocated_decode_cache = False
             if prefixkv_plan is None:
                 preallocated_decode_cache = self.adapter.preallocate_decode_cache(
                     state,
                     self.config.generation.max_new_tokens - 1,
                 )
+            cache_accounting_started = time.perf_counter()
+            cache_lifecycle.observe(self.adapter._legacy_layers(state.past_key_values)[0])
+            trace_instrumentation_seconds += time.perf_counter() - cache_accounting_started
             decode_runtime_policy["kv_growth"] = (
                 "preallocated_append_only_views"
                 if preallocated_decode_cache
@@ -10089,6 +10113,11 @@ class HuggingFaceMosaicKVModel:
                 )
                 decode_seconds += step_seconds
                 per_token_decode_seconds.append(step_seconds)
+                cache_accounting_started = time.perf_counter()
+                cache_lifecycle.observe(
+                    self.adapter._legacy_layers(provisional.state.past_key_values)[0]
+                )
+                trace_instrumentation_seconds += time.perf_counter() - cache_accounting_started
                 # Queue device-side validation and reduce once after the
                 # sequence.  Converting every scalar flag to bool here forced
                 # a second CUDA synchronization on every token in addition to
@@ -10142,6 +10171,9 @@ class HuggingFaceMosaicKVModel:
                         per_token_decode_seconds[-1] += maintenance_seconds
                     else:
                         state = provisional.state
+                    cache_accounting_started = time.perf_counter()
+                    cache_lifecycle.observe(self.adapter._legacy_layers(state.past_key_values)[0])
+                    trace_instrumentation_seconds += time.perf_counter() - cache_accounting_started
                     if teacher_forced_ids:
                         target_id = teacher_forced_ids[step_index]
                         vocabulary = int(provisional.logits.shape[-1])
@@ -10309,6 +10341,9 @@ class HuggingFaceMosaicKVModel:
                     state = provisional.state
                     token = provisional.next_token_id
                     scoring_logits = provisional.logits
+                cache_accounting_started = time.perf_counter()
+                cache_lifecycle.observe(self.adapter._legacy_layers(state.past_key_values)[0])
+                trace_instrumentation_seconds += time.perf_counter() - cache_accounting_started
                 if teacher_forced_ids:
                     target_id = teacher_forced_ids[step_index]
                     vocabulary = int(scoring_logits.shape[-1])
@@ -10898,6 +10933,7 @@ class HuggingFaceMosaicKVModel:
                     ),
                     "active_kv_bytes": packed_prefill_active_kv_bytes,
                     "final_active_kv_bytes": active_bytes,
+                    "cache_lifecycle": cache_lifecycle.record(),
                     "residual_kv_bytes": residual_bytes,
                     "gpu_rescue_kv_bytes": (
                         0 if repair_state is None else repair_state.gpu_rescue_bytes
@@ -10963,6 +10999,9 @@ class HuggingFaceMosaicKVModel:
                     end_to_end_time=total_seconds,
                     generated_tokens=int(token_ids.numel()),
                     active_kv_bytes=packed_prefill_active_kv_bytes,
+                    initial_active_kv_storage_bytes=cache_lifecycle.initial_storage_bytes,
+                    final_active_kv_storage_bytes=cache_lifecycle.final_storage_bytes,
+                    peak_active_kv_storage_bytes=cache_lifecycle.peak_storage_bytes,
                     residual_kv_bytes=residual_bytes,
                     peak_gpu_memory=peak_memory,
                     repair_count=sum(event.triggered for event in repair_events),
@@ -10976,6 +11015,12 @@ class HuggingFaceMosaicKVModel:
                 effective_method=effective_method,
             )
         except Exception as error:
+            if cache_lifecycle is not None:
+                trace["partial_cache_lifecycle"] = {
+                    **cache_lifecycle.record(),
+                    "complete": False,
+                    "final_scope": "last_observed_state_before_failure_not_completed_decode",
+                }
             structured_failure = getattr(error, "mosaickv_failure_trace_payload", None)
             if isinstance(structured_failure, dict):
                 trace.update(cast("JsonObject", structured_failure))

@@ -262,7 +262,9 @@ class ReimplementationCriterion:
         )
         source_slots = len(full_state.blocks)
         cache_config = CacheConfig(
-            budget_value=math.floor(source_slots * self._retention_ratio),
+            # This is nominal-profile fidelity, not the byte-capped lane.
+            # Independent upstream rounding may differ from a global floor.
+            budget_value=source_slots,
             budget_unit=BudgetUnit.BLOCKS,
             retention_ratio=self._retention_ratio,
             block_size=1,
@@ -275,6 +277,9 @@ class ReimplementationCriterion:
             protect_size=1,
             eviction_distance=-25,
             official_repository_sha=OFFICIAL_SHA,
+            allocation_policy="upstream_round",
+            decode_policy="profile_ratio",
+            hf_cache_transport="ragged_llama_eager_v1",
         )
         self._plan = build_prefixkv_reimpl_plan(
             full_state,
@@ -302,7 +307,7 @@ class ReimplementationCriterion:
         result: list[tuple[Any, Any]] = []
         for layer, layer_plan in zip(cache, self._plan.layers, strict=True):
             length = int(layer[0].shape[-2])
-            target = logical_length * layer_plan.retention_ratio
+            target = logical_length * layer_plan.decode_retention_ratio
             should_evict = math.trunc(length - target) > 0
             if should_evict and length > 1:
                 offset = min(layer_plan.eviction_offset, length - 1)

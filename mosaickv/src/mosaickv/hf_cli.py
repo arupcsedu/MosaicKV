@@ -453,7 +453,7 @@ def _reference_output_sha256(rows: tuple[EvaluationResult, ...]) -> str:
 
 
 def _paper_evaluation_provenance(
-    protocol: PublishedBaselineProtocol,
+    protocol: PublishedBaselineProtocol | None,
     task: TaskSpec,
     method: str,
     rows: tuple[EvaluationResult, ...],
@@ -467,8 +467,14 @@ def _paper_evaluation_provenance(
     evaluator_version = "+".join(
         f"{definition.name}:{definition.version}" for definition in definitions
     )
-    method_contract = next(item for item in protocol.methods if item.name == method)
+    method_contract = (
+        next(item for item in protocol.methods if item.name == method)
+        if protocol is not None
+        else None
+    )
     reference_sha = summary.get("fullkv_reference_artifact_sha256")
+    if task.name == "coco_caption" and summary.get("paper_native_ledger_sha256"):
+        reference_sha = summary["paper_native_ledger_sha256"]
     if not isinstance(reference_sha, str) or len(reference_sha) != 64:
         reference_sha = _reference_output_sha256(rows)
     source_commit = _source_commit()
@@ -481,7 +487,15 @@ def _paper_evaluation_provenance(
         # Official/reimplementation contracts use the pinned upstream commit.
         # Local FullKV/MosaicKV references are identified by this repository's
         # immutable source commit rather than an ambiguous not-applicable marker.
-        baseline_commit=method_contract.repository_commit or source_commit,
+        baseline_commit=(
+            method_contract.repository_commit or source_commit
+            if method_contract is not None
+            else (
+                "597f1ab032704951550f93bcc8a23f1454b80aa4"
+                if method == "prefixkv_reimpl"
+                else source_commit
+            )
+        ),
     )
 
 
@@ -592,9 +606,44 @@ def run_hf_evaluation(
         "paper_native_milebench",
     }
     unified_milebench = bool(getattr(args, "unified_milebench", False))
+    unified_prefixkv = bool(getattr(args, "unified_prefixkv", False))
+    unified_coco = bool(getattr(args, "unified_coco", False))
+    if unified_coco:
+        if (
+            task.name != "coco_caption"
+            or protocol is not None
+            or unified_prefixkv
+            or unified_milebench
+        ):
+            raise ValueError("--unified-coco requires COCO without another protocol/route")
+        is_materialized_native = True
+    if unified_prefixkv and (
+        task.name not in {"llava_description", "mmvet_prefixkv"}
+        or protocol is not None
+        or unified_milebench
+    ):
+        raise ValueError("--unified-prefixkv requires a PrefixKV task without a published protocol")
+    if (
+        unified_prefixkv
+        and config.method is MosaicKVMethod.PREFIXKV_REIMPL
+        and (
+            config.prefixkv.decode_policy != "append_only"
+            or not config.prefixkv.rescale_offline_profile_to_byte_budget
+            or config.prefixkv.question_score_weight != 0
+            or config.prefixkv.exclude_protected_from_calibration
+            or config.prefixkv.layer_budget_floor_fraction != 0
+        )
+    ):
+        raise ValueError(
+            "unified PrefixKV requires upstream scoring and append-only byte rescaling"
+        )
     if unified_milebench and (task.name != "milebench" or protocol is not None):
         raise ValueError("--unified-milebench requires MileBench without a published protocol")
-    if is_materialized_native and protocol is None and not unified_milebench:
+    if (
+        is_materialized_native
+        and protocol is None
+        and not (unified_milebench or unified_prefixkv or unified_coco)
+    ):
         raise ValueError(
             f"task {task.name!r} is a paper reproduction and requires a published protocol"
         )
@@ -735,6 +784,49 @@ def run_hf_evaluation(
                 default=str,
             )
         )
+        comparison_controls_sha = None
+        if unified_prefixkv:
+            processor = selected_adapter.processor
+            tokenizer = getattr(processor, "tokenizer", processor)
+            comparison_controls_sha = sha256_text(
+                json.dumps(
+                    {
+                        "model": asdict(config.model),
+                        "dataset": asdict(config.dataset),
+                        "execution": asdict(config.execution),
+                        "generation": asdict(config.generation),
+                        "ledger_sha256": ledger.sha256,
+                        "processor_class": type(processor).__qualname__,
+                        "chat_template": getattr(processor, "chat_template", None),
+                        "tokenizer_chat_template": getattr(tokenizer, "chat_template", None),
+                        "special_tokens_map": getattr(tokenizer, "special_tokens_map", {}),
+                        "processor_configuration": (
+                            processor.to_dict()
+                            if callable(getattr(processor, "to_dict", None))
+                            else None
+                        ),
+                        "image_preprocessor": (
+                            processor.image_processor.to_dict()
+                            if hasattr(processor, "image_processor")
+                            else None
+                        ),
+                        "block_policy": {
+                            "block_size": config.cache.block_size,
+                            "physical_budget_block_size": config.cache.physical_budget_block_size,
+                            "mandatory": config.cache.physical_budget_mandatory_policy,
+                            "decode_growth": "append_only",
+                        },
+                        "environment_lock_sha256": sha256_bytes(
+                            (
+                                Path(__file__).resolve().parents[2] / "env/common/requirements.lock"
+                            ).read_bytes()
+                        ),
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    default=str,
+                )
+            )
         summary = run_materialized_paper_native_evaluation(
             run_id=run_id,
             task=task,
@@ -761,9 +853,10 @@ def run_hf_evaluation(
             ),
             result_category=(
                 ResultCategory.UNIFIED_COMPARISON
-                if unified_milebench
+                if unified_milebench or unified_prefixkv or unified_coco
                 else ResultCategory.PAPER_REPRODUCTION
             ),
+            comparison_controls_sha256=comparison_controls_sha,
         )
     elif task.local_scorer is not None:
         summary = (
@@ -861,7 +954,7 @@ def run_hf_evaluation(
                     result_rows,
                     summary,
                 )
-                if protocol is not None
+                if protocol is not None or unified_prefixkv or unified_coco
                 else None
             ),
         )

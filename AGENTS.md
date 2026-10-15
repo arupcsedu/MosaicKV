@@ -38,6 +38,18 @@ Pair runs at the example level whenever possible. Cache budgets must use the sam
 
 If a system cannot satisfy one of these controls, do not put its result in a directly comparable row. Report it separately and disclose the incompatibility.
 
+New PrefixKV, VL-Cache, and LOOK-M unified comparisons must follow
+`mosaickv/configs/experiments/shared_byte_comparison_v2.yaml` and
+`mosaickv/docs/shared_byte_comparison_v2.md`. Do not mutate historical
+nominal-ratio results or rerun that entire campaign. Check the frozen candidate
+content and resolved policy fingerprints before preparing a new lane. Bind
+actual dataset routes and immutable sample ledgers; unresolved routes block
+submission. Require equal measured initial, final, and peak live-cache backing
+storage across compressed methods, including padding and preallocation, not
+just equal configured caps or tensor-view sizes. FullKV is a quality reference
+and is excluded from compressed-method latency comparisons. Preserve failed
+rows and retry only missing/failed shards of a compatible immutable plan.
+
 ## Full-cache equivalence gate
 
 At retention ratio `1.0`, MosaicKV must reproduce the full-cache reference within an explicitly documented numerical tolerance. The tolerance, compared tensors or outputs, precision, backend, attention implementation, determinism settings, and test procedure must be recorded before accepting results.

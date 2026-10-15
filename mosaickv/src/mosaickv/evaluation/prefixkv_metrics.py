@@ -60,6 +60,7 @@ class FullKVReferenceArtifact:
     generation_config_sha256: str
     sample_answers: dict[str, str]
     schema_version: int = 1
+    comparison_controls_sha256: str | None = None
 
     def __post_init__(self) -> None:
         for name in (
@@ -78,9 +79,18 @@ class FullKVReferenceArtifact:
             raise ValueError("sample_answers must contain non-empty IDs and answers")
         if self.schema_version != 1:
             raise ValueError("schema_version must be 1")
+        if self.comparison_controls_sha256 is not None and (
+            len(self.comparison_controls_sha256) != 64
+            or any(c not in "0123456789abcdef" for c in self.comparison_controls_sha256)
+        ):
+            raise ValueError("comparison_controls_sha256 must be a lowercase SHA-256")
 
     def to_json_object(self) -> JsonObject:
-        return cast("JsonObject", asdict(self))
+        payload = asdict(self)
+        # Preserve canonical hashes of historical schema-v1 references.
+        if self.comparison_controls_sha256 is None:
+            payload.pop("comparison_controls_sha256")
+        return cast("JsonObject", payload)
 
 
 def _canonical_bytes(payload: JsonObject) -> bytes:
@@ -106,6 +116,7 @@ def build_fullkv_reference_artifact(
     model_revision: str,
     tokenizer_revision: str,
     generation_config_sha256: str,
+    comparison_controls_sha256: str | None = None,
 ) -> FullKVReferenceArtifact:
     if not rows:
         raise ValueError("reference artifact requires at least one FullKV row")
@@ -129,6 +140,7 @@ def build_fullkv_reference_artifact(
         tokenizer_revision=tokenizer_revision,
         generation_config_sha256=generation_config_sha256,
         sample_answers=dict(sorted(answers.items())),
+        comparison_controls_sha256=comparison_controls_sha256,
     )
 
 
@@ -209,12 +221,23 @@ def prefixkv_metric_observations(
     reference_artifact_sha256: str,
     target_artifact_sha256: str,
     evaluator_commit: str,
+    result_category: ResultCategory = ResultCategory.PAPER_REPRODUCTION,
 ) -> tuple[MetricObservation, ...]:
     """Materialize sample ROUGE and corpus PPL without conflating them."""
 
     registry = default_metric_registry()
     rouge_definition = registry.resolve("rouge_l_f1")
     ppl_definition = registry.resolve("teacher_forced_ppl")
+    result_origin = (
+        ResultOrigin.LOCALLY_REPRODUCED
+        if result_category is ResultCategory.PAPER_REPRODUCTION
+        else ResultOrigin.LOCALLY_MEASURED
+    )
+    measurement_prefix = (
+        "baseline_paper_native"
+        if result_category is ResultCategory.PAPER_REPRODUCTION
+        else "unified_native_metric"
+    )
     if any(sample.numerator is None or sample.denominator is None for sample in perplexity):
         raise ValueError("perplexity samples require NLL numerator and token denominator")
     observations: list[MetricObservation] = []
@@ -237,12 +260,12 @@ def prefixkv_metric_observations(
                 metric_implementation=rouge_definition.implementation,
                 metric_version=rouge_definition.version,
                 metric_unit=rouge_definition.unit,
-                measurement_type="baseline_paper_native_measured",
+                measurement_type=f"{measurement_prefix}_measured",
                 manifest_path=manifest_path,
                 evaluator_commit=evaluator_commit,
                 reference_artifact_sha=reference_artifact_sha256,
-                result_category=ResultCategory.PAPER_REPRODUCTION,
-                result_origin=ResultOrigin.LOCALLY_REPRODUCED,
+                result_category=result_category,
+                result_origin=result_origin,
             )
         )
     ppl_sample_observations: list[MetricObservation] = []
@@ -269,15 +292,15 @@ def prefixkv_metric_observations(
                 metric_implementation=ppl_definition.implementation,
                 metric_version=ppl_definition.version,
                 metric_unit=ppl_definition.unit,
-                measurement_type="baseline_paper_native_sufficient_statistic",
+                measurement_type=f"{measurement_prefix}_sufficient_statistic",
                 manifest_path=manifest_path,
                 evaluator_commit=evaluator_commit,
                 reference_artifact_sha=target_artifact_sha256,
                 evaluated_token_count=sample.denominator,
                 numerator=sample.numerator,
                 denominator=sample.denominator,
-                result_category=ResultCategory.PAPER_REPRODUCTION,
-                result_origin=ResultOrigin.LOCALLY_REPRODUCED,
+                result_category=result_category,
+                result_origin=result_origin,
             )
         )
     observations.extend(ppl_sample_observations)
@@ -298,7 +321,7 @@ def prefixkv_metric_observations(
             metric_implementation=ppl_definition.implementation,
             metric_version=ppl_definition.version,
             metric_unit=ppl_definition.unit,
-            measurement_type="baseline_paper_native_measured",
+            measurement_type=f"{measurement_prefix}_measured",
             manifest_path=manifest_path,
             evaluator_commit=evaluator_commit,
             reference_artifact_sha=target_artifact_sha256,
@@ -306,8 +329,8 @@ def prefixkv_metric_observations(
             numerator=total_nll,
             denominator=total_tokens,
             sample_count=len(perplexity),
-            result_category=ResultCategory.PAPER_REPRODUCTION,
-            result_origin=ResultOrigin.LOCALLY_REPRODUCED,
+            result_category=result_category,
+            result_origin=result_origin,
         )
     )
     return tuple(observations)
@@ -348,8 +371,20 @@ def evaluate_prefixkv_native_metrics(
     }
     if len(identities) != 1:
         raise ValueError("generated rows must share one run/task/model/backend/method/ratio")
+    categories = {row.result_category for row in generated_rows}
+    if len(categories) != 1:
+        raise ValueError("cannot mix paper reproduction and unified rows")
     run_id, task, model_id, backend, method, retention_ratio = next(iter(identities))
-    if model_id != model.model_id or backend != model.backend or method != model.method:
+    selection_variant = (
+        categories == {ResultCategory.UNIFIED_COMPARISON}
+        and model.method == "prefixkv_reimpl"
+        and method == "prefixkv_selection_only_reimpl"
+    )
+    if (
+        model_id != model.model_id
+        or backend != model.backend
+        or (method != model.method and not selection_variant)
+    ):
         raise ValueError("generated rows do not match the teacher-forced model identity")
     ppl_samples = tuple(
         perplexity_sample(
@@ -372,6 +407,7 @@ def evaluate_prefixkv_native_metrics(
         reference_artifact_sha256=artifact_sha256(fullkv_reference),
         target_artifact_sha256=target_artifact_sha256(targets),
         evaluator_commit=evaluator_commit,
+        result_category=next(iter(categories)),
     )
 
 

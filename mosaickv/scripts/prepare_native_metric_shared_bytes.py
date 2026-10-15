@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 from dataclasses import replace
 from pathlib import Path
 
@@ -20,6 +21,12 @@ from run_prefixkv_decode_preflight import digest, write_once
 from mosaickv.config import DatasetConfig, canonical_config, config_sha256, load_config
 from mosaickv.evaluation.hf_matched_validation import matched_configs
 from mosaickv.evaluation.paper_native_lanes import load_paper_native_ledger
+from mosaickv.evaluation.shared_byte_contract import (
+    candidate_content_digest,
+    load_contract,
+    validate_configuration,
+    validate_ledger,
+)
 from mosaickv.evaluation.tasks import default_task_registry
 
 CAPS = (10, 20, 40, 80)
@@ -78,6 +85,27 @@ def configurations(source, task, dataset, cap_mib):
         output_length=64,
         byte_cap=cap_mib * 2**20,
     )
+    # This is a byte-only lane. The historical 0.99 sentinel otherwise prunes
+    # one percent even when an input's full cache is already below the cap.
+    # Stay below exactly 1 (the identity fast path) while ceil(source_bytes*r)
+    # remains source_bytes for every supported cache smaller than 2**52 bytes.
+    for method, cfg in cfgs.items():
+        if task == "coco_caption" and method != "full_kv":
+            cfgs[method] = replace(
+                cfg, cache=replace(cfg.cache, retention_ratio=math.nextafter(1.0, 0.0))
+            )
+    # FullKV keeps every token and has no finite cap, but declare the lane's
+    # cache policy consistently in its reference manifest. No pruning or
+    # packing is invoked on its retention-one path.
+    shared_cache = cfgs["prompt_attention_topk"].cache
+    cfgs["full_kv"] = replace(
+        cfgs["full_kv"],
+        cache=replace(
+            cfgs["full_kv"].cache,
+            physical_budget_mandatory_policy=shared_cache.physical_budget_mandatory_policy,
+            packing_mode=shared_cache.packing_mode,
+        ),
+    )
     if task == "milebench":
         controls = {
             name: replace(
@@ -98,6 +126,10 @@ def configurations(source, task, dataset, cap_mib):
 def prepare(args):
     source = Path(__file__).resolve().parents[2]
     _require_clean_source(source, args.source_sha)
+    contract_path = source / "mosaickv/configs/experiments/shared_byte_comparison_v2.yaml"
+    contract = load_contract(contract_path)
+    if candidate_content_digest(source) != contract["candidate"]["content_sha256"]:
+        raise ValueError("frozen candidate content changed; register a new version")
     root = args.root.resolve()
     scratch = Path("/scratch/djy8hg").resolve()
     if scratch not in root.parents or source == root or source in root.parents:
@@ -114,7 +146,20 @@ def prepare(args):
     if (meta["dataset_id"], meta["split"]) != (task.dataset_id, task.split):
         raise ValueError("input ledger route differs from registry")
     dataset = DatasetConfig(meta["dataset_id"], meta["dataset_revision"], meta["split"])
+    lane = "lookm" if task.name == "milebench" else "vl_cache"
+    # Resolve every planned configuration before writing any output. In
+    # particular, an unresolved composite MileBench revision fails closed.
+    for cap in CAPS:
+        for cfg in configurations(source, task.name, dataset, cap).values():
+            validate_configuration(contract, lane, task.name, cfg)
+    for path in args.ledger:
+        validate_ledger(path, digest(path), contract["lanes"][lane]["tasks"][task.name], task.name)
     bound = {str(path.resolve()): digest(path) for path in args.ledger}
+    bound[str(contract_path)] = digest(contract_path)
+    if task.name == "coco_caption" and any(
+        p.get("processor_signature") != inputs[0].get("processor_signature") for p in inputs
+    ):
+        raise ValueError("COCO parent ledgers disagree on processor controls")
     excluded = []
     for path in args.exclude_ledger:
         payload = json.loads(path.read_text())
@@ -147,21 +192,60 @@ def prepare(args):
     else:
         if dataset.revision != "c3213b54e173ae86517d481de17f31439d6f8c72":
             raise ValueError("COCO requires the pinned caption dataset revision")
-        groups = {task.name: [sid for p in inputs for sid in p["sample_ids"]]}
+        for path, payload in zip(args.ledger, inputs, strict=True):
+            checked = load_paper_native_ledger(
+                path, expected_sha256=digest(path), task=task, dataset_revision=dataset.revision
+            )
+            if (
+                not payload.get("bound_files")
+                or not payload.get("historical_prior_use_disclosure")
+                or not payload.get("processor_signature")
+            ):
+                raise ValueError(
+                    "COCO requires frozen preprocessing assets and prior-use disclosure"
+                )
+            for name, sha in payload["bound_files"].items():
+                if digest(Path(name)) != sha:
+                    raise ValueError("materialized COCO dependency changed")
+                bound[name] = sha
+            for sample, validated in zip(payload["samples"], checked.samples, strict=True):
+                sample = dict(sample)
+                sample["media"] = [
+                    dict(kind=m.kind.value, path=str(m.path), sha256=m.sha256)
+                    for m in validated.media
+                ]
+                if sample["sample_id"] in materialized:
+                    raise ValueError("duplicate materialized COCO identity")
+                materialized[sample["sample_id"]] = sample
+        groups = {task.name: list(materialized)}
         stages = select_stages(
             groups, excluded=excluded, validation_per_group=32, larger_per_group=256
         )
     plan = dict(
         schema_version=1,
         source_sha=args.source_sha,
+        comparison_contract=str(contract_path),
+        comparison_contract_sha256=digest(contract_path),
+        candidate_content_sha256=contract["candidate"]["content_sha256"],
         source_root=str(source),
         classification="unified_shared_byte_native_metric_validation",
         task=task.name,
+        model_id=MODELS[task.name][0],
+        model_revision=MODELS[task.name][1],
+        dataset_id=dataset.id,
+        dataset_revision=dataset.revision,
         result_category="unified_comparison",
         heldout_claim=False,
         historical_nominal_ratio_rerun=False,
         paper_claim_authorized=False,
         larger_execution_authorized=False,
+        final_execution_authorized=False,
+        prior_use_disclosures=[
+            p.get("historical_prior_use_disclosure", "ledger-defined") for p in inputs
+        ],
+        full_pool_size=len(materialized),
+        processor_signature=inputs[0].get("processor_signature"),
+        validation_execution_authorized=True,
         bound_files=bound,
         jobs=[],
         max_global_a100s=4,
@@ -176,9 +260,11 @@ def prepare(args):
         fullkv_latency_comparison=False,
         caps_mib=list(CAPS),
         comparison_boundary="initial physical KV cap plus equal append-only decode growth",
+        require_equal_measured_initial_final_peak_storage=True,
+        require_independent_largest_feasible_capacity_certificate=True,
         parity_tokens=16,
         parity_atol=1e-4,
-        bootstrap_resamples=2000,
+        bootstrap_resamples=contract["statistics"]["paired_bootstrap_replicates"],
         bootstrap_seed=SEED,
         required_gate=(
             "complete canonical rows; same controls/IDs and initial/final bytes; finite metrics"
@@ -196,7 +282,7 @@ def prepare(args):
             payload = dict(schema_version=1, **meta)
             payload.update(
                 {"samples": [materialized[sid] for sid in shard_ids]}
-                if task.name == "milebench"
+                if materialized
                 else {"sample_ids": shard_ids}
             )
             ledger = root / "ledgers" / stage / f"{shard:03d}.json"

@@ -31,6 +31,9 @@ class GenerationMetrics:
     token_agreement: float | None = None
     logit_kl: float | None = None
     attention_output_error: float | None = None
+    initial_active_kv_storage_bytes: int | None = None
+    final_active_kv_storage_bytes: int | None = None
+    peak_active_kv_storage_bytes: int | None = None
 
 
 @dataclass(frozen=True, slots=True)

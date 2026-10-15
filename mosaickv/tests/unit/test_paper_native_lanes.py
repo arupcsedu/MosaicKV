@@ -167,6 +167,74 @@ def test_prefixkv_materialized_lane_freezes_and_consumes_reference(tmp_path: Pat
     assert any(row["metric_scope"] == "corpus" for row in metrics)
 
 
+@pytest.mark.parametrize("task_name", ["llava_description", "mmvet_prefixkv"])
+@pytest.mark.parametrize("method", ["prompt_attention_topk", "prefixkv_reimpl", "mosaickv_exact"])
+def test_unified_native_metrics_bind_reference_and_keep_categories(tmp_path, task_name, method):
+    task = default_task_registry().resolve(task_name)
+    path, sha = _materialized_ledger(
+        tmp_path, task=task.name, dataset_id=task.dataset_id, split=task.split, prefixkv=True
+    )
+    ledger = load_paper_native_ledger(
+        path, expected_sha256=sha, task=task, dataset_revision="a" * 40
+    )
+    reference = tmp_path / "full-reference.json"
+    common = dict(
+        task=task,
+        ledger=ledger,
+        seed=3,
+        subset_size=None,
+        evaluator_commit="b" * 40,
+        model_revision="c" * 40,
+        tokenizer_revision="c" * 40,
+        generation_config_sha256="d" * 64,
+        result_category=ResultCategory.UNIFIED_COMPARISON,
+        comparison_controls_sha256="e" * 64,
+    )
+    run_materialized_paper_native_evaluation(
+        **common,
+        run_id="full",
+        model=_FakeNativeModel(),
+        manifest_path="full-manifest.json",
+        fullkv_reference_output=reference,
+        **_run_paths(tmp_path, "full"),
+    )
+    assert json.loads(reference.read_text())["comparison_controls_sha256"] == "e" * 64
+
+    class Candidate(_FakeNativeModel):
+        def generate(self, request):
+            result = super().generate(request)
+            if method == "prefixkv_reimpl":
+                return replace(result, effective_method="prefixkv_selection_only_reimpl")
+            return result
+
+    candidate = Candidate(method=method, retention_ratio=0.5)
+    options = dict(
+        run_id="candidate",
+        model=candidate,
+        manifest_path="candidate-manifest.json",
+        fullkv_reference_input=reference,
+        fullkv_reference_sha256=hashlib.sha256(reference.read_bytes()).hexdigest(),
+        **_run_paths(tmp_path, "candidate"),
+    )
+    # A changed processor/precision/dataset/prompt binding must fail before inference.
+    with pytest.raises(ValueError, match="identity/controls/cohort mismatch"):
+        run_materialized_paper_native_evaluation(
+            **dict(common, comparison_controls_sha256="f" * 64), **options
+        )
+    assert not (tmp_path / "candidate.jsonl").exists()
+    summary = run_materialized_paper_native_evaluation(**common, **options)
+    assert summary["failed_samples"] == 0
+    observations = [
+        json.loads(s) for s in (tmp_path / "candidate-metrics.jsonl").read_text().splitlines()
+    ]
+    assert {r["metric_name"] for r in observations} == {"rouge_l_f1", "teacher_forced_ppl"}
+    assert {r["result_category"] for r in observations} == {"unified_comparison"}
+    assert {r["result_origin"] for r in observations} == {"locally_measured"}
+    assert all(r["reference_artifact_sha"] for r in observations)
+    if method == "prefixkv_reimpl":
+        assert {r["method"] for r in observations} == {"prefixkv_selection_only_reimpl"}
+
+
 def test_milebench_materialized_lane_emits_samples_and_hierarchy(tmp_path: Path) -> None:
     task = default_task_registry().resolve("milebench")
     ledger_path, ledger_sha = _materialized_ledger(

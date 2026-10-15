@@ -618,6 +618,20 @@ def test_unified_runtime_methods_decode_and_write_complete_traces(
     trace = json.loads(trace_path.read_text(encoding="utf-8"))
     assert trace["status"] == "completed"
     assert trace["selected_blocks"]
+    lifecycle = trace["cache_lifecycle"]
+    assert lifecycle["initial_active_kv_bytes"] == trace["active_kv_bytes"]
+    assert lifecycle["final_active_kv_bytes"] == trace["final_active_kv_bytes"]
+    assert lifecycle["peak_active_kv_storage_bytes"] >= lifecycle["final_active_kv_storage_bytes"]
+    assert lifecycle["observations"] >= 5
+    assert generated.metrics.initial_active_kv_storage_bytes == (
+        lifecycle["initial_active_kv_storage_bytes"]
+    )
+    assert generated.metrics.final_active_kv_storage_bytes == (
+        lifecycle["final_active_kv_storage_bytes"]
+    )
+    assert generated.metrics.peak_active_kv_storage_bytes == (
+        lifecycle["peak_active_kv_storage_bytes"]
+    )
     assert "prototypes" in trace
     assert "graph_edges" in trace
     assert "forecast_statistics" in trace

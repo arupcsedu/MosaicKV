@@ -69,6 +69,8 @@ def compare_upstream_decode(
     *,
     steps: int = 64,
     atol: float = 1e-4,
+    teacher_forced_ids: tuple[int, ...] | None = None,
+    fullkv_reference_answer: str | None = None,
 ) -> dict[str, Any]:
     """Compare actual selections, KV values, logits and evictions for every step.
 
@@ -79,10 +81,24 @@ def compare_upstream_decode(
     from transformers.cache_utils import DynamicCache
 
     from mosaickv.backends.hf_runtime import (
+        _decode_text,
         _pack_prefixkv_ragged,
         _state_from_packed,
         maintain_prefixkv_decode_cache,
     )
+    from mosaickv.evaluation.metrics.scorers import rouge_l_f1
+
+    if steps < 0 or (steps == 0 and teacher_forced_ids is None) or not 0 <= atol < float("inf"):
+        raise ValueError(
+            "positive generation steps or nonempty targets and finite tolerance required"
+        )
+    if teacher_forced_ids is not None:
+        if len(teacher_forced_ids) != steps + 1 or any(
+            type(token_id) is not int or token_id < 0 for token_id in teacher_forced_ids
+        ):
+            raise ValueError("teacher-forced targets must contain steps+1 nonnegative token IDs")
+        if fullkv_reference_answer is not None:
+            raise ValueError("ROUGE is for greedy generation, not teacher-forced targets")
 
     if plan.config.decode_policy not in {"profile_ratio", "effective_profile_ratio"}:
         raise ValueError("differential gate requires an explicit upstream-compatible schedule")
@@ -138,6 +154,17 @@ def compare_upstream_decode(
     )
     language = adapter.model.model.language_model
     token = prefill.next_token_id
+    official_nll = local_nll = 0.0
+    generated = [int(token.item())]
+    official_generated = [int(token.item())]
+    if teacher_forced_ids is not None:
+        token = torch.full_like(token, teacher_forced_ids[0])
+        initial_nll = float(
+            torch.nn.functional.cross_entropy(
+                prefill.logits.reshape(1, -1).float(), token.reshape(-1), reduction="sum"
+            ).item()
+        )
+        official_nll = local_nll = initial_nll
     checks: list[dict[str, Any]] = []
     for step in range(1, steps + 1):
         logical = state.next_decode_position
@@ -156,6 +183,8 @@ def compare_upstream_decode(
                 )
             expected = adapter.model.lm_head(language.norm(hidden))[:, -1, :]
         actual = adapter.decode_one_token(token, state, capture_queries=False)
+        if not bool(torch.isfinite(expected).all() and torch.isfinite(actual.logits).all()):
+            raise RuntimeError("nonfinite official/local logits")
         torch.testing.assert_close(actual.logits, expected, rtol=0, atol=atol)
         if not torch.equal(actual.next_token_id, expected.argmax(-1, keepdim=True)):
             raise RuntimeError("upstream/local greedy token differs")
@@ -198,21 +227,76 @@ def compare_upstream_decode(
                 "active_bytes": actual_bytes,
                 "events": events,
                 "selected_positions_and_cache_match": True,
+                "per_layer_cache_sizes": [int(k.shape[-2]) for k, _ in expected_layers],
+                "logical_positions_sha256": hashlib.sha256(
+                    json.dumps(logical_ids).encode()
+                ).hexdigest(),
             }
         )
-        token = actual.next_token_id
+        generated.append(int(actual.next_token_id.item()))
+        official_generated.append(int(expected.argmax(-1).item()))
+        if teacher_forced_ids is not None:
+            token = torch.full_like(actual.next_token_id, teacher_forced_ids[step])
+            official_nll += float(
+                torch.nn.functional.cross_entropy(
+                    expected.reshape(1, -1).float(), token.reshape(-1), reduction="sum"
+                ).item()
+            )
+            local_nll += float(
+                torch.nn.functional.cross_entropy(
+                    actual.logits.reshape(1, -1).float(), token.reshape(-1), reduction="sum"
+                ).item()
+            )
+        else:
+            token = actual.next_token_id
     for (k, v), (saved_k, saved_v) in zip(legacy, source_copies, strict=True):
         if not torch.equal(k, saved_k) or not torch.equal(v, saved_v):
             raise RuntimeError("prefill source was mutated")
+    # Cross-entropy is 2-Lipschitz in the infinity norm of the logits.
+    # The fixed rounding allowance covers FP32 loss accumulation only.
+    nll_tolerance = (2 * atol + 1e-6) * len(teacher_forced_ids or ())
+    if teacher_forced_ids is not None and abs(official_nll - local_nll) > nll_tolerance:
+        raise RuntimeError("upstream/local target-only NLL exceeds the logit-derived tolerance")
     return {
         **provenance,
         "passed": True,
         "steps": checks,
         "token_agreement": 1.0,
-        "maximum_logit_difference": max(row["maximum_logit_difference"] for row in checks),
+        "maximum_logit_difference": max(
+            (row["maximum_logit_difference"] for row in checks), default=0.0
+        ),
         "initial_active_bytes": plan.retained_bytes,
         "layer_cache_sizes": plan.layer_cache_sizes,
         "source_isolated": True,
+        "trajectory": "teacher_forced_target_only" if teacher_forced_ids else "greedy",
+        "generated_token_ids": generated if teacher_forced_ids is None else None,
+        "official_generated_token_ids": official_generated if teacher_forced_ids is None else None,
+        "teacher_forced": None
+        if teacher_forced_ids is None
+        else {
+            "official_nll_sum": official_nll,
+            "local_nll_sum": local_nll,
+            "nll_absolute_difference": abs(official_nll - local_nll),
+            "nll_absolute_tolerance": nll_tolerance,
+            "evaluated_token_count": len(teacher_forced_ids),
+            "prompt_tokens_scored": 0,
+            "target_token_ids_sha256": hashlib.sha256(
+                json.dumps(teacher_forced_ids).encode()
+            ).hexdigest(),
+        },
+        "frozen_reference_rouge_l_f1": None
+        if fullkv_reference_answer is None
+        else {
+            "official": rouge_l_f1(
+                _decode_text(adapter.processor, torch.tensor([official_generated])),
+                (fullkv_reference_answer,),
+            ),
+            "local": rouge_l_f1(
+                _decode_text(adapter.processor, torch.tensor([generated])),
+                (fullkv_reference_answer,),
+            ),
+            "reference_text_sha256": hashlib.sha256(fullkv_reference_answer.encode()).hexdigest(),
+        },
         "plan": plan.trace(),
         "claim_scope": "upstream algorithm on common HF cache, not legacy-checkpoint reproduction",
     }

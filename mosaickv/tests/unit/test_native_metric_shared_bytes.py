@@ -45,9 +45,53 @@ def test_selection_rejects_missing_coverage_and_duplicate_ids():
         worker.select_stages({"a": ["1"], "b": ["1"]})
 
 
+def test_frozen_contract_accepts_exact_coco_policy_and_rejects_retuning():
+    from dataclasses import replace
+
+    from mosaickv.evaluation.shared_byte_contract import (
+        candidate_content_digest,
+        load_contract,
+        validate_configuration,
+    )
+
+    source = SCRIPTS.parents[1]
+    contract = load_contract(source / "mosaickv/configs/experiments/shared_byte_comparison_v2.yaml")
+    assert candidate_content_digest(source) == contract["candidate"]["content_sha256"]
+    route = contract["lanes"]["vl_cache"]["tasks"]["coco_caption"]
+    dataset = DatasetConfig(route["dataset_id"], route["dataset_revision"], route["split"])
+    for cap in worker.CAPS:
+        cfgs = worker.configurations(source, "coco_caption", dataset, cap)
+        for cfg in cfgs.values():
+            validate_configuration(contract, "vl_cache", "coco_caption", cfg)
+    cfg = cfgs["mosaickv_exact"]
+    retuned = replace(cfg, graph=replace(cfg.graph, uncertain_head_fraction=1 / 64))
+    with pytest.raises(ValueError, match="policy changed"):
+        validate_configuration(contract, "vl_cache", "coco_caption", retuned)
+    changed_generation = replace(cfg, generation=replace(cfg.generation, max_new_tokens=32))
+    with pytest.raises(ValueError, match="controls mismatch"):
+        validate_configuration(contract, "vl_cache", "coco_caption", changed_generation)
+
+
+def test_unresolved_milebench_composite_revision_blocks_new_preparation():
+    from mosaickv.evaluation.shared_byte_contract import load_contract, validate_configuration
+
+    source = SCRIPTS.parents[1]
+    contract = load_contract(source / "mosaickv/configs/experiments/shared_byte_comparison_v2.yaml")
+    cfg = worker.configurations(
+        source,
+        "milebench",
+        DatasetConfig("MileBench/MileBench", "a" * 40, "official_evaluation"),
+        40,
+    )["mosaickv_exact"]
+    with pytest.raises(ValueError, match="revision unresolved"):
+        validate_configuration(contract, "lookm", "milebench", cfg)
+
+
 @pytest.mark.parametrize("task", ["coco_caption", "milebench"])
 @pytest.mark.parametrize("cap", [10, 20, 40, 80])
 def test_shared_byte_configurations_hold_all_controls(task, cap):
+    import math
+
     from mosaickv.evaluation.tasks import default_task_registry
 
     route = default_task_registry().resolve(task)
@@ -62,6 +106,10 @@ def test_shared_byte_configurations_hold_all_controls(task, cap):
         if method != "full_kv":
             assert cfg.cache == prompt.cache
             assert cfg.cache.budget_value == cap * 2**20
+            if task == "coco_caption":
+                for source_bytes in (8192, 70 * 2**20, 100 * 2**30):
+                    assert math.ceil(source_bytes * cfg.cache.retention_ratio) == source_bytes
+            assert cfg.cache.retention_ratio < 1.0  # Do not take the identity fast path.
         assert cfg.cache.block_size == 1
         assert not cfg.residual.enabled and not cfg.repair.enabled
         assert cfg.generation.max_new_tokens == 64 and not cfg.generation.do_sample

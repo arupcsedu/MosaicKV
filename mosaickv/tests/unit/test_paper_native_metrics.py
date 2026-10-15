@@ -878,14 +878,12 @@ def test_versioned_published_protocol_suite_is_valid() -> None:
         for method in protocol.methods
     )
     assert len(suite.sha256) == 64
-    # MM-Vet remains deliberately fail-closed until its paper-specific
-    # materialized source revision is audited. This must be visible rather
-    # than silently accepting an arbitrary user-supplied dataset revision.
+    # Reconciled with the reviewed official_218 materialized parent ledger;
+    # this is not the unrelated lmms-eval MM-Vet route.
     issues = metric_readiness_issues(suite)
-    assert (
-        "prefixkv_hf_reimpl_native_metrics_v1/mmvet_prefixkv: "
-        "no immutable dataset revision is declared"
-    ) in issues
+    prefix = next(p for p in suite.protocols if p.protocol_id.startswith("prefixkv_"))
+    mmvet = next(t for t in prefix.tasks if t.name == "mmvet_prefixkv")
+    assert mmvet.dataset_revision == "8ce15108c0b55c67200eb96601ba2bb98183ff65"
     # Module discovery is deliberately side-effect free: optional lmms-eval
     # judge imports are validated only by their specific fixture/task lane.
-    assert len(issues) == 1
+    assert issues == ()

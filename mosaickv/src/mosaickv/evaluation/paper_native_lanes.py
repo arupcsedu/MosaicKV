@@ -21,6 +21,7 @@ from typing import cast
 
 from mosaickv.config import RunConfig
 from mosaickv.evaluation.messages import MediaItem, MediaKind, build_multimodal_messages
+from mosaickv.evaluation.metric_export import export_task_metrics
 from mosaickv.evaluation.metrics.registry import default_metric_registry
 from mosaickv.evaluation.metrics.storage import (
     JsonlMetricStore,
@@ -331,6 +332,16 @@ def load_paper_native_ledger(
             raise ValueError("MileBench ledgers require exactly one official reference per sample")
         if any(sample.teacher_forcing_target is not None for sample in ledger.samples):
             raise ValueError("MileBench ledgers cannot contain teacher-forcing targets")
+    elif task.name == "coco_caption":
+        for sample in ledger.samples:
+            if (
+                len(sample.media) != 1
+                or sample.media[0].kind is not MediaKind.IMAGE
+                or len(sample.references) != 5
+                or sample.teacher_forcing_target is not None
+                or sample.milebench_dataset is not None
+            ):
+                raise ValueError("COCO requires one image and all five caption references")
     else:
         raise ValueError(f"task {task.name!r} is not a materialized paper-native route")
     return ledger
@@ -353,7 +364,13 @@ def _validate_method(
     result_category: ResultCategory = ResultCategory.PAPER_REPRODUCTION,
 ) -> None:
     allowed = _PREFIXKV_METHODS if task in _PREFIXKV_TASKS else _MILEBENCH_METHODS
-    if task == "milebench" and result_category is ResultCategory.UNIFIED_COMPARISON:
+    if task == "coco_caption":
+        if result_category is not ResultCategory.UNIFIED_COMPARISON:
+            raise ValueError("materialized COCO is a unified comparison, not paper reproduction")
+        allowed = frozenset(
+            {"full_kv", "prompt_attention_topk", "vl_cache_reimpl", "mosaickv_exact"}
+        )
+    if result_category is ResultCategory.UNIFIED_COMPARISON:
         allowed = allowed | {"prompt_attention_topk"}
     if method not in allowed:
         raise ValueError(
@@ -575,13 +592,22 @@ def run_materialized_paper_native_evaluation(
     fullkv_reference_sha256: str | None = None,
     fullkv_reference_output: str | Path | None = None,
     result_category: ResultCategory = ResultCategory.PAPER_REPRODUCTION,
+    comparison_controls_sha256: str | None = None,
 ) -> JsonObject:
     """Run PrefixKV/MileBench native metrics and preserve all failed samples."""
 
     if ledger.task != task.name:
         raise ValueError("ledger/task mismatch")
-    if result_category is ResultCategory.UNIFIED_COMPARISON and task.name != "milebench":
-        raise ValueError("unified materialized scoring is enabled only for MileBench")
+    if (
+        result_category is ResultCategory.UNIFIED_COMPARISON
+        and task.name in _PREFIXKV_TASKS
+        and (
+            comparison_controls_sha256 is None
+            or len(comparison_controls_sha256) != 64
+            or any(c not in "0123456789abcdef" for c in comparison_controls_sha256)
+        )
+    ):
+        raise ValueError("unified PrefixKV requires a complete comparison-controls hash")
     result_origin = (
         ResultOrigin.LOCALLY_REPRODUCED
         if result_category is ResultCategory.PAPER_REPRODUCTION
@@ -593,6 +619,24 @@ def run_materialized_paper_native_evaluation(
         seed=seed,
         subset_size=subset_size,
     )
+    # Reject stale/wrong references before any GPU inference. Binding model
+    # identity alone is insufficient: precision, prompts/media, processor and
+    # dataset provenance live in the unified comparison-controls digest.
+    if task.name in _PREFIXKV_TASKS and model.method != "full_kv":
+        if fullkv_reference_input is None or fullkv_reference_sha256 is None:
+            raise ValueError("compressed PrefixKV requires a hash-bound FullKV reference")
+        if sha256_bytes(Path(fullkv_reference_input).read_bytes()) != fullkv_reference_sha256:
+            raise ValueError("FullKV reference file SHA mismatch")
+        checked_reference = load_fullkv_reference_artifact(fullkv_reference_input)
+        if (
+            checked_reference.model_id != model.model_id
+            or checked_reference.model_revision != model_revision
+            or checked_reference.tokenizer_revision != tokenizer_revision
+            or checked_reference.generation_config_sha256 != generation_config_sha256
+            or checked_reference.comparison_controls_sha256 != comparison_controls_sha256
+            or not set(selected_ids) <= set(checked_reference.sample_answers)
+        ):
+            raise ValueError("FullKV reference identity/controls/cohort mismatch")
     sample_by_id = {sample.sample_id: sample for sample in ledger.samples}
     store = JsonlResultStore(raw_output)
     prior = store.completed_sample_ids(run_id)
@@ -687,7 +731,13 @@ def run_materialized_paper_native_evaluation(
         operating_point = None
         metric_error = f"{len(failed)} sample(s) failed; native metrics were not aggregated"
     else:
-        if {row.method for row in selected_rows} != {model.method}:
+        effective_methods = {row.method for row in selected_rows}
+        allowed_selection_variant = (
+            result_category is ResultCategory.UNIFIED_COMPARISON
+            and model.method == "prefixkv_reimpl"
+            and effective_methods == {"prefixkv_selection_only_reimpl"}
+        )
+        if effective_methods != {model.method} and not allowed_selection_variant:
             raise ValueError("paper-native run changed effective method or used a fallback")
         operating_point = cache_operating_point(selected_rows)
         if task.name in _PREFIXKV_TASKS:
@@ -704,6 +754,7 @@ def run_materialized_paper_native_evaluation(
                     model_revision=model_revision,
                     tokenizer_revision=tokenizer_revision,
                     generation_config_sha256=generation_config_sha256,
+                    comparison_controls_sha256=comparison_controls_sha256,
                 )
                 write_fullkv_reference_artifact(reference, fullkv_reference_output)
             else:
@@ -718,6 +769,8 @@ def run_materialized_paper_native_evaluation(
                         f"expected {fullkv_reference_sha256}, observed {observed_reference_sha}"
                     )
                 reference = load_fullkv_reference_artifact(fullkv_reference_input)
+                if reference.comparison_controls_sha256 != comparison_controls_sha256:
+                    raise ValueError("FullKV reference comparison controls mismatch")
                 expected_reference_identity = (
                     model.model_id,
                     model_revision,
@@ -749,6 +802,20 @@ def run_materialized_paper_native_evaluation(
                 evaluator_commit=evaluator_commit,
             )
             reference_artifact_digest = artifact_sha256(reference)
+        elif task.name == "coco_caption":
+            metric_rows, errors = export_task_metrics(
+                selected_rows,
+                specs=(task,),
+                manifest_path=manifest_path,
+                result_category=result_category,
+            )
+            if errors:
+                raise ValueError("; ".join(errors))
+            # Shard CIDEr is diagnostic only. The campaign analyzer re-scores
+            # the complete corpus; references are bound before generation.
+            metric_rows = tuple(
+                replace(row, reference_artifact_sha=ledger.sha256) for row in metric_rows
+            )
         else:
             metric_rows = _milebench_observations(
                 selected_rows,

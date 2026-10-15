@@ -136,13 +136,31 @@ def record_hf_run(
     order: int,
     export_metrics: bool = False,
     materialized_milebench: bool = False,
+    materialized_prefixkv: bool = False,
+    materialized_coco: bool = False,
+    fullkv_reference_input: str | Path | None = None,
+    fullkv_reference_sha256: str | None = None,
+    fullkv_reference_output: str | Path | None = None,
 ) -> dict[str, Any]:
     """Run and validate one immutable, fully paired HF measurement arm."""
 
     if config.diagnostics.enabled:
         raise RuntimeError("canonical workers require online-only diagnostics")
+    if materialized_coco and (
+        task != "coco_caption"
+        or not export_metrics
+        or materialized_prefixkv
+        or materialized_milebench
+    ):
+        raise ValueError("materialized COCO requires its task and metric exports")
     if materialized_milebench and (task != "milebench" or not export_metrics):
         raise ValueError("materialized MileBench requires its task and metric exports")
+    if materialized_prefixkv and (
+        task not in {"llava_description", "mmvet_prefixkv"}
+        or not export_metrics
+        or materialized_milebench
+    ):
+        raise ValueError("materialized PrefixKV requires its native task and metric exports")
     config_path = output_root / "configs" / f"{run_id}-{config_sha256(config)}.yaml"
     _write_config(config, config_path)
     arguments = argparse.Namespace(
@@ -165,11 +183,16 @@ def record_hf_run(
         arguments.metric_output = str(metric_root / "metrics.jsonl")
         arguments.metric_observations_parquet_output = str(metric_root / "observations.parquet")
         arguments.metric_aggregates_parquet_output = str(metric_root / "metrics.parquet")
-    if materialized_milebench:
+    if materialized_milebench or materialized_prefixkv or materialized_coco:
         arguments.sample_id_file = arguments.sample_id_file_sha = None
         arguments.paper_native_ledger = str(ledger_path)
         arguments.paper_native_ledger_sha = ledger_sha
-        arguments.unified_milebench = True
+        arguments.unified_milebench = materialized_milebench
+        arguments.unified_prefixkv = materialized_prefixkv
+        arguments.unified_coco = materialized_coco
+        arguments.fullkv_reference_input = fullkv_reference_input
+        arguments.fullkv_reference_sha = fullkv_reference_sha256
+        arguments.fullkv_reference_output = fullkv_reference_output
     status, summary = run_hf_evaluation(arguments, config, adapter=adapter)
     failed_samples = summary.get("failed_samples", 0)
     if status or failed_samples or summary.get("metric_error") or summary.get("metric_errors"):
@@ -189,8 +212,20 @@ def record_hf_run(
             # Corpus CIDEr has no independently averaged per-sample task_score.
             "task_score": None if pd.isna(row.task_score) else float(row.task_score),
             "active_kv_bytes": int(row.active_kv_bytes),
+            **{
+                field: None if pd.isna(getattr(row, field, None)) else int(getattr(row, field))
+                for field in (
+                    "initial_active_kv_storage_bytes",
+                    "final_active_kv_storage_bytes",
+                    "peak_active_kv_storage_bytes",
+                )
+            },
             "residual_kv_bytes": int(row.residual_kv_bytes),
             "compression_time": float(row.compression_time),
+            **{
+                field: None if pd.isna(getattr(row, field, None)) else float(getattr(row, field))
+                for field in ("prefill_time", "ttft")
+            },
             "decode_time": float(row.decode_time),
             "end_to_end_time": float(row.end_to_end_time),
             "generated_tokens": int(row.generated_tokens),
