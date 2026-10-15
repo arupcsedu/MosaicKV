@@ -14,6 +14,7 @@ from mosaickv.config import synthetic_smoke_config
 from mosaickv.evaluation.coco_shared_bytes import (
     STORAGE_FIELDS,
     TokenizedCider,
+    bootstrap_cider_curve,
     control_hashes,
     dense_capacity_certificate,
     sample_size_recommendation,
@@ -138,6 +139,30 @@ def test_bootstrap_recomputes_corpus_for_every_occurrence(monkeypatch):
     assert result == paired_bootstrap(definition, samples, candidate, resamples=7, seed=4)
     with pytest.raises(ValueError, match="identical"):
         paired_bootstrap(definition, samples[:-1], candidate, resamples=1)
+
+
+@pytest.mark.parametrize("workers", [1, 2])
+def test_shared_draw_curve_bootstrap_matches_pairwise_cider(workers):
+    reference = caption_samples()
+    candidate = [replace(sample, prediction="a " + sample.prediction) for sample in reference]
+    groups = {("reference", 40.0): reference, ("candidate", 25.5): candidate}
+    comparison = (("reference", 40.0), ("candidate", 25.5))
+    actual = bootstrap_cider_curve(
+        groups,
+        [comparison, comparison],
+        resamples=7,
+        seed=4,
+        workers=workers,
+    )
+    scorer = TokenizedCider(reference + candidate)
+    expected = paired_bootstrap(
+        replace(default_metric_registry().resolve("cider"), reducer=scorer),
+        reference,
+        candidate,
+        resamples=7,
+        seed=4,
+    )
+    assert actual == {comparison: expected}
 
 
 @pytest.mark.parametrize("cap", [10, 20, 40, 80])

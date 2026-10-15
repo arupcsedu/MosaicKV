@@ -1,0 +1,50 @@
+# Development configuration only; not a frozen campaign replacement or GPU authorization.
+schema_version: 1
+model:
+  id: llava-hf/llava-v1.6-mistral-7b-hf
+  revision: 2424fdd47412fccc66d91719126b420e9fbd7065
+  precision: fp16
+dataset:
+  id: lmms-lab/COCO-Caption
+  revision: c3213b54e173ae86517d481de17f31439d6f8c72
+  split: val
+execution:
+  backend: huggingface
+  attention_implementation: eager
+  seed: 20271014
+  deterministic_algorithms: true
+generation:
+  max_new_tokens: 64
+  do_sample: false
+  temperature: 0.0
+  top_p: 1.0
+  output_length_policy: fixed_max_new_tokens
+method: mosaickv_exact
+cache:
+  budget_value: 41943040
+  budget_unit: bytes
+  retention_ratio: 0.9999999999999999 # Enter compression without a nominal-ratio sub-cap.
+  block_size: 1
+  physical_budget_block_size: 1
+  physical_budget_mandatory_policy: last_token
+  exact_gather_mode: source_views
+  packing_mode: per_head_reference
+forecasting:
+  enabled: true
+  mode: prompt_window
+  prompt_window: 16
+  draft_steps: 0
+graph: {enabled: false}
+selection: {enabled: true}
+prototypes: {enabled: false}
+residual: {enabled: false}
+repair: {enabled: false, policy: none, max_blocks_per_step: 0}
+output_preserving:
+  query_evidence: individual
+  max_routed_heads: 16
+  max_swaps_per_head: 2
+  shortlist_size: 16
+  pair_chunk_size: 64
+  minimum_error: 0.0
+  minimum_improvement: 0.0000001
+  minimum_query_mass: 0.00000001

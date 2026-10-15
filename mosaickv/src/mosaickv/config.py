@@ -3605,6 +3605,85 @@ class RepairConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class OutputPreservingConfig:
+    """Opt-in, prompt-only exact-subset research variant (not the frozen policy)."""
+
+    query_evidence: str = "individual"
+    max_routed_heads: int = 16
+    max_swaps_per_head: int = 2
+    shortlist_size: int = 16
+    pair_chunk_size: int = 64
+    minimum_error: float = 0.0
+    minimum_improvement: float = 1e-7
+    minimum_query_mass: float = 1e-8
+    draft_validation: bool = False
+
+    @property
+    def effective_method(self) -> str:
+        if self.max_swaps_per_head == 0:
+            suffix = "__anchor"
+        elif self.query_evidence == "pooled":
+            suffix = "__pooled_swaps"
+        elif self.draft_validation:
+            suffix = "__draft_gate"
+        elif self.max_swaps_per_head == 2:
+            # Preserve the registered name of the first individual-query
+            # candidate so existing artifacts remain readable.
+            suffix = ""
+        else:
+            suffix = f"__swaps{self.max_swaps_per_head}"
+        return f"mosaickv_exact__output_preserving_v1{suffix}"
+
+    def __post_init__(self) -> None:
+        if self.query_evidence not in {"individual", "pooled"}:
+            raise ConfigurationError(
+                "output_preserving.query_evidence must be individual or pooled"
+            )
+        if self.draft_validation and self.query_evidence != "individual":
+            raise ConfigurationError(
+                "output_preserving.draft_validation requires individual query evidence"
+            )
+        for name, low, high in (
+            ("max_routed_heads", 0, 4096),
+            ("max_swaps_per_head", 0, 16),
+            ("shortlist_size", 1, 64),
+            ("pair_chunk_size", 1, 4096),
+        ):
+            value = getattr(self, name)
+            if type(value) is not int or not low <= value <= high:
+                raise ConfigurationError(
+                    f"output_preserving.{name} must be an integer in [{low}, {high}]"
+                )
+        for name in ("minimum_error", "minimum_improvement", "minimum_query_mass"):
+            value = getattr(self, name)
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (float, int))
+                or not math.isfinite(value)
+                or value < 0
+            ):
+                raise ConfigurationError(f"output_preserving.{name} must be finite and nonnegative")
+        if not 0 < self.minimum_query_mass < 1:
+            raise ConfigurationError("output_preserving.minimum_query_mass must be in (0, 1)")
+
+    @classmethod
+    def from_mapping(cls, value: object) -> OutputPreservingConfig:
+        data = _mapping(value, "output_preserving")
+        _reject_unknown(data, set(cls.__dataclass_fields__), "output_preserving")
+        return cls(
+            query_evidence=_optional_str(data, "query_evidence", "individual", "output_preserving"),
+            max_routed_heads=_int(data, "max_routed_heads", 16, "output_preserving"),
+            max_swaps_per_head=_int(data, "max_swaps_per_head", 2, "output_preserving"),
+            shortlist_size=_int(data, "shortlist_size", 16, "output_preserving"),
+            pair_chunk_size=_int(data, "pair_chunk_size", 64, "output_preserving"),
+            minimum_error=_float(data, "minimum_error", 0.0, "output_preserving"),
+            minimum_improvement=_float(data, "minimum_improvement", 1e-7, "output_preserving"),
+            minimum_query_mass=_float(data, "minimum_query_mass", 1e-8, "output_preserving"),
+            draft_validation=_bool(data, "draft_validation", False, "output_preserving"),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class RunConfig:
     """Fully resolved MosaicKV run configuration."""
 
@@ -3628,10 +3707,60 @@ class RunConfig:
     vl_cache: VLCacheConfig = field(default_factory=VLCacheConfig)
     published_kv: PublishedKVConfig = field(default_factory=PublishedKVConfig)
     schema_version: int = 1
+    output_preserving: OutputPreservingConfig | None = None
 
     def __post_init__(self) -> None:
         if self.schema_version != 1:
             raise ConfigurationError("schema_version must equal 1")
+        if self.output_preserving is not None:
+            if not isinstance(self.output_preserving, OutputPreservingConfig):
+                raise ConfigurationError("output_preserving must be a validated configuration")
+            if (
+                self.method is not MosaicKVMethod.MOSAICKV_EXACT
+                or self.execution.backend is not Backend.HUGGINGFACE
+                or self.execution.attention_implementation != "eager"
+                or self.execution.decode_attention_implementation not in (None, "eager")
+                or not self.execution.deterministic_algorithms
+                or self.cache.block_size != 1
+                or self.cache.physical_budget_block_size != 1
+                or self.cache.budget_unit is not BudgetUnit.BYTES
+                or self.cache.packing_mode != "per_head_reference"
+                or self.cache.physical_budget_mandatory_policy
+                not in {"last_token", "first_and_last"}
+                or self.selection.physical_capacity_fraction != 1.0
+                or self.selection != SelectionConfig(enabled=True)
+                or self.forecasting.prompt_window < 1
+                or (
+                    not self.output_preserving.draft_validation
+                    and (
+                        self.forecasting.mode is not ForecastMode.PROMPT_WINDOW
+                        or self.forecasting.draft_steps != 0
+                    )
+                )
+                or (
+                    self.output_preserving.draft_validation
+                    and (
+                        self.forecasting.mode is not ForecastMode.HYBRID
+                        or self.forecasting.draft_steps < 1
+                    )
+                )
+                or self.graph.enabled
+                or self.prototypes.enabled
+                or self.residual.enabled
+                or self.repair.enabled
+                or self.repair.policy is not RepairPolicy.NONE
+                or self.ablation.variant is not AblationVariant.NONE
+                or self.generation.do_sample
+                or self.generation.temperature != 0
+            ):
+                raise ConfigurationError(
+                    "output_preserving requires HF eager mosaickv_exact, one-token physical byte "
+                    "budgets, per_head_reference packing, common boundary mandatory policy, "
+                    "prompt_window with no draft or an explicitly draft-gated hybrid, "
+                    "deterministic execution/decoding, "
+                    "default selector settings, "
+                    "and disabled graph/prototype/residual/repair/other ablations"
+                )
         question_policy = self.cache.physical_budget_mandatory_policy == "question_and_boundaries"
         prefix_evidence = (
             self.prefixkv.exclude_protected_from_calibration
@@ -4034,6 +4163,7 @@ class RunConfig:
             "prefixkv",
             "vl_cache",
             "published_kv",
+            "output_preserving",
         }
         _reject_unknown(data, allowed, "config")
         required = {"model", "dataset", "execution", "generation", "cache"}
@@ -4064,6 +4194,11 @@ class RunConfig:
             prefixkv=PrefixKVConfig.from_mapping(data.get("prefixkv", {})),
             vl_cache=VLCacheConfig.from_mapping(data.get("vl_cache", {})),
             published_kv=PublishedKVConfig.from_mapping(data.get("published_kv", {})),
+            output_preserving=(
+                None
+                if data.get("output_preserving") is None
+                else OutputPreservingConfig.from_mapping(data["output_preserving"])
+            ),
             schema_version=_int(data, "schema_version", 1, "config"),
         )
 
@@ -4109,6 +4244,9 @@ def canonical_config(config: RunConfig) -> JsonObject:
     # enters provenance only when an ablation is actually requested.
     if config.ablation.variant is AblationVariant.NONE:
         payload.pop("ablation", None)
+    # Adding the opt-in candidate must not change historical config identities.
+    if config.output_preserving is None:
+        payload.pop("output_preserving", None)
     return payload
 
 

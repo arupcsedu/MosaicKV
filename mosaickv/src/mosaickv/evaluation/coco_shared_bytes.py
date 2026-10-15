@@ -8,16 +8,21 @@ No shard scores or cached per-image CIDEr contributions are averaged.
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
+import random
+from collections.abc import Mapping, Sequence
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import asdict
-from typing import Any
+from typing import Any, TypeAlias
 
+from mosaickv.evaluation.metrics.statistics import PairedMetricComparison, percentile
 from mosaickv.evaluation.metrics.types import MetricSample
 
 COCO_REVISION = "c3213b54e173ae86517d481de17f31439d6f8c72"
 COCO_PROMPT = "Provide a one-sentence caption for the provided image."
 METHODS = ("full_kv", "prompt_attention_topk", "vl_cache_reimpl", "mosaickv_exact")
 STORAGE_FIELDS = tuple(f"{phase}_active_kv_storage_bytes" for phase in ("initial", "final", "peak"))
+Point: TypeAlias = tuple[str, float]
+Comparison: TypeAlias = tuple[Point, Point]
 
 
 def processor_signature(processor: Any) -> dict[str, Any]:
@@ -100,6 +105,122 @@ class TokenizedCider:
         if not math.isfinite(value):
             raise ValueError("non-finite CIDEr")
         return value
+
+
+def _score_cider_draw_chunk(
+    payload: tuple[
+        tuple[tuple[MetricSample, ...], ...],
+        tuple[tuple[int, ...], ...],
+    ],
+) -> list[tuple[float, ...]]:
+    """Recompute every corpus point for shared bootstrap draws in one process."""
+
+    points, draws = payload
+    scorer = TokenizedCider([sample for point in points for sample in point])
+    return [
+        tuple(scorer([point[index] for index in draw]) for point in points)
+        for draw in draws
+    ]
+
+
+def bootstrap_cider_curve(
+    groups: Mapping[Point, Sequence[MetricSample]],
+    comparisons: Sequence[Comparison],
+    *,
+    resamples: int,
+    seed: int,
+    workers: int,
+    confidence: float = 0.95,
+) -> dict[Comparison, PairedMetricComparison]:
+    """Score shared CIDEr draws once per curve point, then derive paired CIs.
+
+    This is mathematically equivalent to invoking ``paired_bootstrap`` for
+    every requested pair with the same seed. It avoids recomputing each point
+    once for every comparison in which that point appears.
+    """
+
+    if resamples < 1 or workers < 1:
+        raise ValueError("resamples and workers must be positive")
+    if seed < 0 or not 0 < confidence < 1:
+        raise ValueError("invalid bootstrap seed or confidence")
+    if not groups or not comparisons:
+        raise ValueError("curve bootstrap requires groups and comparisons")
+    point_keys = tuple(sorted(groups, key=str))
+    point_index = {point: index for index, point in enumerate(point_keys)}
+    if any(
+        reference not in point_index or candidate not in point_index
+        for reference, candidate in comparisons
+    ):
+        raise ValueError("comparison names an unknown curve point")
+
+    identifiers: tuple[str, ...] | None = None
+    ordered_points: list[tuple[MetricSample, ...]] = []
+    for key in point_keys:
+        by_id = {sample.sample_id: sample for sample in groups[key]}
+        if len(by_id) != len(groups[key]):
+            raise ValueError("curve bootstrap sample IDs must be unique")
+        observed = tuple(sorted(by_id))
+        if identifiers is None:
+            identifiers = observed
+        elif observed != identifiers:
+            raise ValueError("curve points must contain identical sample IDs")
+        ordered_points.append(tuple(by_id[sample_id] for sample_id in observed))
+    assert identifiers is not None
+    if len(identifiers) < 2:
+        raise ValueError("curve bootstrap requires at least two samples")
+
+    scorer = TokenizedCider([sample for point in ordered_points for sample in point])
+    point_values = tuple(scorer(point) for point in ordered_points)
+    generator = random.Random(seed)
+    draws = tuple(
+        tuple(generator.randrange(len(identifiers)) for _sample in identifiers)
+        for _replicate in range(resamples)
+    )
+    active_workers = min(workers, resamples)
+    chunks = tuple(tuple(draws[index::active_workers]) for index in range(active_workers))
+    payloads = tuple((tuple(ordered_points), chunk) for chunk in chunks if chunk)
+    if active_workers == 1:
+        score_rows = _score_cider_draw_chunk(payloads[0])
+    else:
+        with ProcessPoolExecutor(max_workers=active_workers) as executor:
+            score_rows = [
+                row
+                for rows in executor.map(_score_cider_draw_chunk, payloads)
+                for row in rows
+            ]
+    if len(score_rows) != resamples:
+        raise RuntimeError("bootstrap worker result count mismatch")
+
+    tail = (1.0 - confidence) / 2.0
+    results: dict[Comparison, PairedMetricComparison] = {}
+    for reference, candidate in dict.fromkeys(comparisons):
+        reference_index, candidate_index = point_index[reference], point_index[candidate]
+        differences = sorted(
+            row[candidate_index] - row[reference_index] for row in score_rows
+        )
+        reference_value, candidate_value = (
+            point_values[reference_index],
+            point_values[candidate_index],
+        )
+        difference = candidate_value - reference_value
+        denominator = abs(reference_value)
+        low, high = percentile(differences, tail), percentile(differences, 1.0 - tail)
+        results[reference, candidate] = PairedMetricComparison(
+            metric_name="cider",
+            reference_value=reference_value,
+            candidate_value=candidate_value,
+            candidate_minus_reference=difference,
+            relative_difference=None if denominator == 0 else difference / denominator,
+            ci_low=low,
+            ci_high=high,
+            relative_ci_low=None if denominator == 0 else low / denominator,
+            relative_ci_high=None if denominator == 0 else high / denominator,
+            confidence=confidence,
+            bootstrap_resamples=resamples,
+            bootstrap_seed=seed,
+            sample_count=len(identifiers),
+        )
+    return results
 
 
 def dense_capacity_certificate(

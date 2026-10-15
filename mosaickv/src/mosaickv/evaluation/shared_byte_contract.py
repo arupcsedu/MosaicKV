@@ -107,6 +107,8 @@ def validate_configuration(
     task: str,
     config: RunConfig,
 ) -> None:
+    if config.output_preserving is not None:
+        raise ValueError("output-preserving development candidate is not the frozen lane policy")
     rule = contract["lanes"][lane]
     route = rule["tasks"][task]
     if route["dataset_revision"] is None:

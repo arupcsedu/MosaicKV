@@ -1,0 +1,65 @@
+schema_version: 1
+experiment_id: output_preserving_exact_v1_development
+classification: development_only_not_paper_evidence
+execution_authorized: false
+materialization_authorized: false
+development_runner_status: registration_required_before_submission_not_a_frozen_lane_launcher
+candidate_source_sha: null # Bind after implementation review; no invented SHA.
+sample_ledger_sha256: null
+sample_count: 16
+seed: 20271014
+cohort_requirement: disjoint_from_explicit_tuning_and_inspected_development_ledgers
+if_disjoint_pool_unavailable: stop_do_not_label_reused_examples_fresh
+candidate_config: mosaickv/configs/development/output_preserving_exact_v1.yaml
+frozen_comparator:
+  source_commit: edb6edfaf50f4539c9c1969371fefecf0eabccbf
+  policy: shared_byte_comparison_v2_prompt_window_16_graph_1_over_256
+  execution: separate_immutable_worktree_with_original_content_guard
+  alter_frozen_configuration: false
+  new_budget_grid: separately_registered_development_grid_not_the_original_campaign
+methods_at_every_cap:
+  - prompt_attention_topk
+  - vl_cache_reimpl
+  - frozen_mosaickv_exact
+  - mosaickv_exact__output_preserving_v1__anchor
+  - mosaickv_exact__output_preserving_v1__pooled_swaps
+  - mosaickv_exact__output_preserving_v1
+quality_reference: full_kv # Once per exact cohort/controls, outside latency comparisons.
+ablations:
+  anchor: {query_evidence: individual, max_swaps_per_head: 0}
+  pooled_swaps: {query_evidence: pooled, max_swaps_per_head: 2}
+  individual_swaps: {query_evidence: individual, max_swaps_per_head: 2}
+caps_mib: [20, 25.5, 28, 40]
+controls:
+  source: shared_byte_comparison_v2_vl_cache_coco_caption_lane
+  require_identical_inputs_model_revision_processor_media_generation_precision: true
+  require_identical_block_size_mandatory_policy_backend_warmups_repetitions: true
+  largest_feasible_below_cap: true
+  realized_initial_final_peak_byte_tolerance: 0
+  mismatched_physical_allocation: unsupported_not_a_direct_comparison
+  preserve_all_caption_references: true
+  cublas_workspace_config_before_python: ':4096:8'
+statistics:
+  metric: cider
+  reducer: full_cohort_and_each_paired_bootstrap_replicate_never_mean_shard_scores
+  bootstrap_replicates: 10000
+  confidence_level: 0.95
+  memory_boundaries: [initial, final, peak]
+  equal_quality_noninferiority_margin: 0.0
+  minimum_memory_reduction: 0.30
+  competitor: smallest_measured_quality_eligible_baseline_point_not_automatically_40_mib
+  latency: report_including_all_selection_and_packing_no_claim_from_surrogate_error
+  development_pass_not_a_paper_claim: true
+resources:
+  max_global_a100s: 4
+  gpus_per_worker: 1
+  cpus_per_worker: 12
+  time_limit_seconds: 7200
+required_preflight:
+  - clean_source_and_bound_ledger_with_no_overlap
+  - real_checkpoint_retention_one_token_and_logit_parity
+  - anchor_ablation_matches_prompt_topk_positions_and_generated_tokens
+  - actual_initial_final_peak_bytes_and_zero_residuals
+  - no_missing_failure_rows_or_nonfinite_timings
+preserve_paper_native_lanes: [prefixkv, vl_cache, lookm]
+change_paper_native_checkpoints_datasets_metrics_or_nominal_ratios: false

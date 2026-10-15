@@ -3867,7 +3867,16 @@ def compare_runtime_retention_one(
             else (prefill.state.logical_sequence_length - 1,)
         ),
     )
-    if config.method.is_mosaickv:
+    if config.output_preserving is not None:
+        packed = pack_runtime_cache(
+            adapter,
+            full_state,
+            MosaicKVState.retention_one(full_state),
+            (),
+            (),
+            packing_mode=config.cache.packing_mode,
+        )
+    elif config.method.is_mosaickv:
         forecast, rollout = forecast_with_rollout(
             adapter,
             prefill,
@@ -8784,6 +8793,12 @@ class HuggingFaceMosaicKVModel:
             "ablation_variant": self.config.ablation.variant.value,
             "ablation_evaluation_only": self.config.ablation.evaluation_only,
         }
+        if self.config.output_preserving is not None:
+            trace["effective_method"] = self.config.output_preserving.effective_method
+            trace["output_preserving_config"] = cast(
+                "JsonObject",
+                asdict(self.config.output_preserving),
+            )
         started = time.perf_counter()
         raw_teacher_ids = request.generation_kwargs.get("_mosaickv_teacher_forced_token_ids")
         if raw_teacher_ids is None:
@@ -8864,6 +8879,7 @@ class HuggingFaceMosaicKVModel:
                         method.is_mosaickv
                         and not retention_one_identity
                         and not no_forecast_ablation
+                        and self.config.output_preserving is None
                     ),
                     capture_attentions=needs_prompt_attention,
                     attention_query_window=(
@@ -8876,7 +8892,8 @@ class HuggingFaceMosaicKVModel:
                         )
                     ),
                     reduce_attention_to_kv_heads=(
-                        method.is_mosaickv or method is MosaicKVMethod.PROMPT_ATTENTION_TOPK
+                        (method.is_mosaickv or method is MosaicKVMethod.PROMPT_ATTENTION_TOPK)
+                        and self.config.output_preserving is None
                     ),
                 )
 
@@ -8995,6 +9012,8 @@ class HuggingFaceMosaicKVModel:
             plan: MosaicKVCompressionPlan | None = None
             key_transform: RotaryPrototypeKeyTransform | None = None
             baseline_plan: BaselineCompressionPlan | None = None
+            output_preserving_plan = None
+            prototype_records: tuple[PrototypeRecord, ...] = ()
             lookm_plan: LookMCompressionPlan | None = None
             prefixkv_plan: PrefixKVCompressionPlan | None = None
             vl_cache_plan: VLCacheCompressionPlan | None = None
@@ -9074,7 +9093,70 @@ class HuggingFaceMosaicKVModel:
                         ),
                     )
                 )
-                if method.is_mosaickv:
+                if self.config.output_preserving is not None:
+                    from mosaickv.backends.output_preserving import (
+                        select_output_preserving,
+                        topk_anchor_capture,
+                    )
+
+                    if dense_budget is None:
+                        raise HuggingFaceRuntimeError(
+                            "output-preserving selection needs a dense cap"
+                        )
+
+                    if self.config.output_preserving.draft_validation:
+                        rollout = run_isolated_greedy_query_rollout(
+                            self.adapter,
+                            prefill,
+                            steps=self.config.forecasting.draft_steps,
+                            capture_attentions=True,
+                            capture_distributions=False,
+                        )
+                        forecast_seconds = (
+                            rollout.cache_clone_seconds + rollout.draft_decode_seconds
+                        )
+
+                    def select_output_preserving_plan() -> Any:
+                        prompt_scores = _block_attention_values_from_token_attention(
+                            full_state,
+                            _prompt_token_attention_by_head(
+                                full_state,
+                                replace(
+                                    prefill,
+                                    attention_weights=topk_anchor_capture(
+                                        full_state,
+                                        prefill.attention_weights,
+                                    ),
+                                ),
+                                prompt_window=self.config.forecasting.prompt_window,
+                            ),
+                        )
+                        return select_output_preserving(
+                            full_state,
+                            prefill.attention_weights,
+                            self.config,
+                            position_limits=dense_budget.position_limits,
+                            target_bytes=dense_budget.target_bytes,
+                            prompt_attention_scores=prompt_scores,
+                            draft_attention_steps=(
+                                () if rollout is None else rollout.attention_steps
+                            ),
+                            draft_cache_isolated=(
+                                True if rollout is None else rollout.original_cache_unchanged
+                            ),
+                        )
+
+                    output_preserving_plan, selection_seconds = _timed(
+                        prefill.logits,
+                        select_output_preserving_plan,
+                    )
+                    packed_state, tier_seconds = _timed(
+                        prefill.logits,
+                        lambda: output_preserving_plan.construct(full_state),
+                    )
+                    prototype_records = ()
+                    logical_prefill_active_kv_bytes = packed_state.statistics.active_kv_bytes
+                elif method.is_mosaickv:
                     planner_wall_started = time.perf_counter()
                     key_transform_seconds = 0.0
                     if method in {
@@ -9793,7 +9875,14 @@ class HuggingFaceMosaicKVModel:
 
                 def build_deferred_cache_trace() -> JsonObject:
                     payload: JsonObject
-                    if plan is not None:
+                    if output_preserving_plan is not None:
+                        payload = cast("JsonObject", output_preserving_plan.trace())
+                        for key in ("selected_blocks", "anchor_selected_blocks"):
+                            payload[key] = _trace_catalog(
+                                cast("list[JsonObject]", payload[key]),
+                                compact=not full_debug_trace,
+                            )
+                    elif plan is not None:
                         payload = _plan_trace(
                             plan,
                             compact_catalogs=not full_debug_trace,
@@ -9829,7 +9918,11 @@ class HuggingFaceMosaicKVModel:
                 trace.update(
                     {
                         "requested_method": method.value,
-                        "effective_method": f"{method.value}__retention_one_exact",
+                        "effective_method": (
+                            f"{self.config.output_preserving.effective_method}__retention_one_exact"
+                            if self.config.output_preserving is not None
+                            else f"{method.value}__retention_one_exact"
+                        ),
                         "tier_mode": "retention_one",
                         "tier_reason": (
                             "retention 1.0 reuses the untouched FullKV state; no "
