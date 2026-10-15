@@ -19,7 +19,7 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import cast
 
-from mosaickv.config import RunConfig
+from mosaickv.config import OutputPreservingConfig, RunConfig
 from mosaickv.evaluation.messages import MediaItem, MediaKind, build_multimodal_messages
 from mosaickv.evaluation.metric_export import export_task_metrics
 from mosaickv.evaluation.metrics.registry import default_metric_registry
@@ -739,7 +739,20 @@ def run_materialized_paper_native_evaluation(
             and model.method == "prefixkv_reimpl"
             and effective_methods == {"prefixkv_selection_only_reimpl"}
         )
-        if effective_methods != {model.method} and not allowed_selection_variant:
+        configured_output_preserving = getattr(
+            getattr(model, "config", None), "output_preserving", None
+        )
+        allowed_output_preserving_variant = (
+            result_category is ResultCategory.UNIFIED_COMPARISON
+            and model.method == "mosaickv_exact"
+            and isinstance(configured_output_preserving, OutputPreservingConfig)
+            and effective_methods == {configured_output_preserving.effective_method}
+        )
+        if (
+            effective_methods != {model.method}
+            and not allowed_selection_variant
+            and not allowed_output_preserving_variant
+        ):
             raise ValueError("paper-native run changed effective method or used a fallback")
         operating_point = cache_operating_point(selected_rows)
         if task.name in _PREFIXKV_TASKS:

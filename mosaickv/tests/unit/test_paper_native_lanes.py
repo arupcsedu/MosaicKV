@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
-from mosaickv.config import load_config
+from mosaickv.config import OutputPreservingConfig, load_config
 from mosaickv.evaluation.model import (
     EvaluationRequest,
     GenerationMetrics,
@@ -277,6 +277,73 @@ def test_milebench_materialized_lane_emits_samples_and_hierarchy(tmp_path: Path)
         and row["metric_name"] == "milebench/Realistic Temporal/accuracy"
         for row in metrics
     )
+
+
+@pytest.mark.parametrize(
+    ("effective_method", "accepted"),
+    [
+        ("mosaickv_exact__output_preserving_v1", True),
+        ("mosaickv_exact__unregistered_fallback", False),
+    ],
+)
+def test_unified_lane_allows_only_configured_output_preserving_method(
+    tmp_path: Path, effective_method: str, accepted: bool
+) -> None:
+    task = default_task_registry().resolve("milebench")
+    ledger_path, ledger_sha = _materialized_ledger(
+        tmp_path,
+        task=task.name,
+        dataset_id=task.dataset_id,
+        split=task.split,
+        prefixkv=False,
+    )
+    ledger = load_paper_native_ledger(
+        ledger_path,
+        expected_sha256=ledger_sha,
+        task=task,
+        dataset_revision="a" * 40,
+    )
+
+    class Candidate(_FakeNativeModel):
+        def __init__(self) -> None:
+            super().__init__(method="mosaickv_exact", retention_ratio=0.5)
+            self.config = type(
+                "ConfiguredCandidate",
+                (),
+                {"output_preserving": OutputPreservingConfig()},
+            )()
+
+        def generate(self, request: EvaluationRequest) -> ModelGeneration:
+            return replace(super().generate(request), effective_method=effective_method)
+
+    def call():
+        return run_materialized_paper_native_evaluation(
+            run_id="candidate",
+            task=task,
+            ledger=ledger,
+            model=Candidate(),
+            manifest_path=str(tmp_path / "manifest.json"),
+            seed=5,
+            subset_size=None,
+            evaluator_commit="e" * 40,
+            model_revision="c" * 40,
+            tokenizer_revision="c" * 40,
+            generation_config_sha256="d" * 64,
+            result_category=ResultCategory.UNIFIED_COMPARISON,
+            **_run_paths(tmp_path, "candidate"),
+        )
+
+    if accepted:
+        summary = call()
+        assert summary["failed_samples"] == 0
+        observations = [
+            json.loads(line)
+            for line in (tmp_path / "candidate-metrics.jsonl").read_text().splitlines()
+        ]
+        assert {row["method"] for row in observations} == {effective_method}
+    else:
+        with pytest.raises(ValueError, match="changed effective method or used a fallback"):
+            call()
 
 
 def _result(method: str, sample_id: str, active_bytes: int) -> EvaluationResult:
