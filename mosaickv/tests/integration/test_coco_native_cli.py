@@ -16,7 +16,8 @@ from mosaickv.evaluation.worker_support import record_hf_run
 from mosaickv.types import MosaicKVMethod
 
 
-def test_materialized_coco_cli_metrics_references_and_storage(tmp_path):
+@pytest.mark.parametrize("reference_count", [5, 6, 7])
+def test_materialized_coco_cli_metrics_references_and_storage(tmp_path, reference_count):
     torch.manual_seed(19)
     adapter = _llava()
     spec = default_task_registry().resolve("coco_caption")
@@ -25,7 +26,7 @@ def test_materialized_coco_cli_metrics_references_and_storage(tmp_path):
     sample = dict(
         sample_id="one",
         prompt="Describe this image.",
-        references=["a cat"] * 5,
+        references=[f"a cat, annotation {index}" for index in range(reference_count)],
         media=[
             dict(kind="image", path=str(path), sha256=hashlib.sha256(path.read_bytes()).hexdigest())
         ],

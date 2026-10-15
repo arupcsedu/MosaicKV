@@ -337,11 +337,13 @@ def load_paper_native_ledger(
             if (
                 len(sample.media) != 1
                 or sample.media[0].kind is not MediaKind.IMAGE
-                or len(sample.references) != 5
+                or len(sample.references) < 5
                 or sample.teacher_forcing_target is not None
                 or sample.milebench_dataset is not None
             ):
-                raise ValueError("COCO requires one image and all five caption references")
+                raise ValueError(
+                    "COCO requires one image and all supplied caption references (at least five)"
+                )
     else:
         raise ValueError(f"task {task.name!r} is not a materialized paper-native route")
     return ledger

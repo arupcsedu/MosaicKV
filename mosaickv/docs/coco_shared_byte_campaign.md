@@ -19,7 +19,7 @@ not selection-policy tuning.
 | Dataset revision | `c3213b54e173ae86517d481de17f31439d6f8c72` |
 | Backend | HF eager, FP16, deterministic greedy, 64 timed tokens |
 | Prompt | Installed lmms-eval COCO one-sentence-caption prompt |
-| Inputs | One RGB image; all five annotation captions; hashes frozen before inference |
+| Inputs | One RGB image; all supplied annotation captions (at least five, not exactly five); hashes frozen before inference |
 | Blocks / mandatory | One token; protect last prompt position for every method |
 | Methods | FullKV reference, Prompt Top-K, `vl_cache_reimpl`, `mosaickv_exact` |
 | Statistics | CIDEr ×100 score points, 10,000 paired bootstrap draws, seed 20271014 |
@@ -51,7 +51,7 @@ cohort explicitly reuses compatible 32/256-example pilot completions.
 ## Stages and admission gates
 
 1. Materialize the historical ID pool using only the fourteen original cached
-   validation Arrow shards. Freeze lossless PNGs, five references, processor
+   validation Arrow shards. Freeze lossless PNGs, all supplied references, processor
    signature, tokenizer vocabulary/chat templates and source asset hashes.
    There are no downloads or unrequested split preparations.
 2. **32 distinct examples, 40 MiB**: eight method-specific shards, sixteen
@@ -152,3 +152,21 @@ mean reduction; GPU runtime estimates do not include CPU queue/analysis time.
 Actual large-run completion, measured variance/runtime, numerical parity and
 quality/latency findings remain pending. Do not describe this setup document or
 its CPU synthetic tests as paper-ready empirical evidence.
+
+## Caption-count preparation correction
+
+Preparation job `21374942` failed before a completed ledger or GPU submission
+because the materializer incorrectly required exactly five captions. Its
+dependent launcher `21374944` consequently could not run. A read-only audit of
+the pinned 4,096-ID pool found 4,084 images with five captions and 12 with six;
+the complete pinned validation split also contains seven-caption records.
+No empty or malformed reference list was found in the selected pool.
+
+The corrected materializer and ledger loader accept five or more nonempty
+caption strings and preserve every annotation in original order, including
+duplicates and whitespace. Do not truncate captions, replace IDs, or drop the
+affected samples. Regression fixtures cover five, six and seven references,
+malformed/incomplete records, end-to-end reference serialization and corpus
+CIDEr parity. Keep the failed preparation's 602 PNGs and logs untouched; retries
+use new immutable pool, execution and operational-wrapper paths. Model, sample
+IDs, selection policy, byte budget and evaluation controls remain unchanged.

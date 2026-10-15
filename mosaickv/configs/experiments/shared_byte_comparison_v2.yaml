@@ -9,7 +9,7 @@ candidate:
   name: mosaickv_exact
   base_commit: 968b5fe4d7169b8c5c84f40f69c4933821432d4e
   change_scope: measurement_native_metric_and_baseline_fidelity_only_no_mosaickv_selection_retuning
-  content_sha256: 346037c1ca34048b981cff2ea61cfaef538c1b7b3b15e859997c671766ae3154
+  content_sha256: ea2d21fb305cf0ebeb20af0c4212c13c2242af3edd6474ffae7ad0401fcf5c4e
   policy_sha256: fc8f9efc3b1bafd5278811022d00a2a5546f48eec7fe0174471c02d21a64096f
   description: prompt_window_16_stable_head_topk_routed_graph_1_over_256
   prototype_merging: false

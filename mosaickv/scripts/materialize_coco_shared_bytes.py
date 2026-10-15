@@ -32,12 +32,18 @@ def freeze_sample(doc, sid, root):
     from lmms_eval.tasks.coco_cap.utils import coco_doc_to_text, coco_doc_to_visual
 
     references = doc["answer"]
+    # The pinned COCO split includes images with six or seven annotations.
+    # Preserve every annotation in source order, including repeated captions;
+    # exactly five is not an evaluator requirement. Fewer than five indicates
+    # an incomplete record for this route and must still fail closed.
     if (
         not isinstance(references, list)
-        or len(references) != 5
+        or len(references) < 5
         or any(not isinstance(r, str) or not r.strip() for r in references)
     ):
-        raise ValueError("COCO needs all five nonempty captions")
+        raise ValueError(
+            "COCO needs all supplied caption references (at least five nonempty strings)"
+        )
     prompt = coco_doc_to_text(doc)
     if prompt != COCO_PROMPT:
         raise ValueError("installed COCO prompt differs from frozen route")

@@ -50,6 +50,62 @@ def caption_samples():
     ]
 
 
+@pytest.mark.parametrize("reference_count", [5, 6, 7])
+def test_freeze_sample_preserves_every_coco_reference(tmp_path, reference_count):
+    from PIL import Image
+
+    materializer = script("materialize_coco_shared_bytes")
+    # Retain annotation order, whitespace and duplicate strings, not just count.
+    references = ["  two cats near a window  ", "a cat", "a cat"] + [
+        f"caption {index}" for index in range(reference_count - 3)
+    ]
+    original = references.copy()
+    doc = dict(answer=references, image=Image.new("RGB", (2, 2)))
+    sample = materializer.freeze_sample(doc, "synthetic-coco-image", tmp_path)
+    assert sample["sample_id"] == "synthetic-coco-image"
+    assert references == original
+    assert sample["references"] == original
+    assert len(sample["references"]) == reference_count
+    assert json.loads(json.dumps(sample))["references"] == original
+    path = Path(sample["media"][0]["path"])
+    assert path.is_file()
+    assert sample["media"][0]["sha256"] == materializer.sha(path)
+
+
+@pytest.mark.parametrize(
+    "references",
+    [
+        None,
+        "not a caption list",
+        (),
+        [],
+        ["caption"] * 4,
+        ["caption"] * 4 + [""],
+        ["caption"] * 4 + ["   "],
+        ["caption"] * 4 + [None],
+    ],
+)
+def test_freeze_sample_rejects_incomplete_or_malformed_references(tmp_path, references):
+    materializer = script("materialize_coco_shared_bytes")
+    # Validation must reject before touching media or producing a partial sample.
+    with pytest.raises(ValueError, match="at least five nonempty strings"):
+        materializer.freeze_sample(dict(answer=references), "invalid", tmp_path)
+    assert not (tmp_path / "media").exists()
+
+
+def test_cider_preserves_mixed_five_six_seven_caption_annotations():
+    samples = caption_samples()
+    samples[1] = replace(samples[1], references=(*samples[1].references, "birds in the sky"))
+    samples[2] = replace(
+        samples[2], references=(*samples[2].references, "a sleeping cat", "a sleeping cat")
+    )
+    assert [len(sample.references) for sample in samples] == [5, 6, 7, 5]
+    scorer = TokenizedCider(samples)
+    assert scorer(samples) == pytest.approx(aggregate_cider(samples), abs=1e-10)
+    draw = [samples[1], samples[2], samples[2], samples[0]]
+    assert scorer(draw) == pytest.approx(aggregate_cider(draw), abs=1e-10)
+
+
 def test_cached_tokens_preserve_official_cider_and_duplicate_draws():
     samples = caption_samples()
     scorer = TokenizedCider(samples)
