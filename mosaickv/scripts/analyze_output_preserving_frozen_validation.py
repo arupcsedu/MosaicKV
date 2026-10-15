@@ -11,7 +11,7 @@ import statistics
 from dataclasses import asdict, replace
 from pathlib import Path
 
-from analyze_output_preserving_capacity_sweep import _parquet_comparison_rows, worker
+from analyze_output_preserving_capacity_sweep import worker
 from run_prefixkv_decode_preflight import digest, write_once
 
 from mosaickv.evaluation.coco_shared_bytes import TokenizedCider, bootstrap_cider_curve
@@ -257,7 +257,11 @@ def analyze(args: argparse.Namespace) -> int:
 
         pd.DataFrame(rows.values()).to_parquet(output / "paired_samples.parquet", index=False)
         pd.DataFrame(aggregates).to_parquet(output / "aggregates.parquet", index=False)
-        pd.DataFrame(_parquet_comparison_rows(comparison_rows)).to_parquet(
+        # Unlike the capacity-sweep analyzer, this validation uses scalar
+        # analysis labels rather than ``(method, cap)`` curve-point tuples.
+        # Keeping those strings directly also makes the Parquet schema match
+        # the JSON report without an invalid two-value unpack.
+        pd.DataFrame(comparison_rows).to_parquet(
             output / "quality_comparisons.parquet", index=False
         )
         pd.DataFrame(byte_records).to_parquet(output / "byte_gates.parquet", index=False)
