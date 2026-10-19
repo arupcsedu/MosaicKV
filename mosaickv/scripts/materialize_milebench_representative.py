@@ -23,9 +23,9 @@ SOURCE_REVISION = "53c7a58051ef88bacf76541d91f03f5ba2d71e7d"
 SEED = 20271014
 TASKS: dict[str, str] = {
     "ActionSequence": "multi-choice",
+    "ActionPrediction": "multi-choice",
     "CLEVR-Change": "open-ended",
     "Spot-the-Diff": "open-ended",
-    "TextNeedleInAHaystack": "open-ended",
 }
 _IMAGE_MARKER = re.compile(r"\{image#\d+\}")
 
@@ -266,7 +266,7 @@ def materialize(
         "total_samples": count_per_task * len(TASKS),
         "metrics": {
             "ActionSequence": "accuracy",
-            "TextNeedleInAHaystack": "accuracy",
+            "ActionPrediction": "accuracy",
             "CLEVR-Change": "rouge_l_f1",
             "Spot-the-Diff": "rouge_l_f1",
         },

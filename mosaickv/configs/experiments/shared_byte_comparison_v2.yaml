@@ -120,7 +120,7 @@ lanes:
         split: official_evaluation
         output_tokens: 64
         metrics: [accuracy, rouge_l_f1, milebench]
-        subtasks: [ActionSequence, CLEVR-Change, Spot-the-Diff, TextNeedleInAHaystack]
+        subtasks: [ActionPrediction, ActionSequence, CLEVR-Change, Spot-the-Diff]
         ledger_status: require_hash_bound_representative_combined_image_ledger
 
 statistics:

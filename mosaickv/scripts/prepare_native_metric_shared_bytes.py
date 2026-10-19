@@ -30,7 +30,7 @@ from mosaickv.evaluation.shared_byte_contract import (
 from mosaickv.evaluation.tasks import default_task_registry
 
 CAPS = (10, 20, 40, 80)
-MILEBENCH_SUBTASKS = ("ActionSequence", "CLEVR-Change", "Spot-the-Diff", "TextNeedleInAHaystack")
+MILEBENCH_SUBTASKS = ("ActionPrediction", "ActionSequence", "CLEVR-Change", "Spot-the-Diff")
 MODELS = {
     "coco_caption": (
         "llava-hf/llava-v1.6-mistral-7b-hf",
