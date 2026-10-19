@@ -24,12 +24,19 @@ def _inputs(root: Path, plan_sha: str, group_index: int):
         raise ValueError("PrefixKV byte-validation plan changed")
     plan = json.loads(plan_path.read_text(encoding="utf-8"))
     _require_clean_source(source, plan["source_sha"])
-    fidelity_path = Path(plan["fidelity_report"])
+    parity_gate = Path(plan["parity_gate"])
+    parity_comparison = Path(plan["parity_comparison"])
+    gate = json.loads(parity_gate.read_text())
+    comparison = json.loads(parity_comparison.read_text())
     if (
         not plan.get("byte_validation_authorized")
         or plan.get("full_campaign_authorized")
-        or digest(fidelity_path) != plan.get("fidelity_report_sha256")
-        or json.loads(fidelity_path.read_text()).get("status") != "passed"
+        or digest(parity_gate) != plan.get("parity_gate_sha256")
+        or digest(parity_comparison) != plan.get("parity_comparison_sha256")
+        or gate.get("passed") is not True
+        or gate.get("checked_samples") != 4
+        or gate.get("failures")
+        or comparison.get("status") != "comparable"
     ):
         raise ValueError("PrefixKV byte validation lacks a passed immutable fidelity gate")
     if (plan["max_global_a100s"], plan["gpus_per_worker"], plan["cpus_per_worker"]) != (

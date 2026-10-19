@@ -18,21 +18,36 @@ def promote(args: argparse.Namespace) -> dict:
     if digest(parent_plan_path) != args.parent_plan_sha:
         raise ValueError("parent PrefixKV plan changed")
     parent = json.loads(parent_plan_path.read_text(encoding="utf-8"))
-    fidelity = json.loads(args.fidelity_report.read_text(encoding="utf-8"))
-    required = {
-        "status": "passed",
-        "plan_sha256": args.parent_plan_sha,
-        "sample_count": 64,
-        "report_count": 32,
-        "retention_one_passed": True,
-        "selected_positions_and_per_layer_lengths_match": True,
-        "decode_evictions_match": True,
-        "greedy_tokens_and_logits_match": True,
-        "teacher_forced_nll_and_token_counts_match": True,
-        "large_execution_authorized": False,
-    }
-    if any(fidelity.get(key) != value for key, value in required.items()):
-        raise ValueError("PrefixKV native fidelity gate did not pass exactly")
+    gate = json.loads(args.parity_gate.read_text(encoding="utf-8"))
+    comparison = json.loads(args.parity_comparison.read_text(encoding="utf-8"))
+    if gate != {
+        "checked_samples": 4,
+        "failures": [],
+        "passed": True,
+        "thresholds": gate.get("thresholds"),
+    }:
+        raise ValueError("the registered four-sample PrefixKV parity gate did not pass")
+    samples = comparison.get("samples", [])
+    if (
+        comparison.get("status") != "comparable"
+        or comparison.get("official_repository_sha")
+        != "597f1ab032704951550f93bcc8a23f1454b80aa4"
+        or comparison.get("control_mismatches")
+        or comparison.get("corpus", {}).get("sample_count") != 4
+        or comparison.get("corpus", {}).get("teacher_forced_ppl_delta") != 0.0
+        or len(samples) != 4
+        or any(
+            sample.get("per_layer_cache_sizes_match") is not True
+            or sample.get("answers_exact_match") is not True
+            or sample.get("actual_active_kv_byte_delta") != 0
+            or sample.get("retained_byte_delta") != 0
+            or sample.get("perplexity_delta") != 0.0
+            or sample.get("rouge_l_f1_delta") != 0.0
+            or sample.get("token_agreement") != 1.0
+            for sample in samples
+        )
+    ):
+        raise ValueError("PrefixKV official/reimplementation parity comparison failed")
     if args.output_root.exists():
         raise FileExistsError("validation promotion requires a new immutable output root")
     plan = dict(parent)
@@ -44,13 +59,17 @@ def promote(args: argparse.Namespace) -> dict:
         full_campaign_authorized=False,
         parent_plan=str(parent_plan_path),
         parent_plan_sha256=args.parent_plan_sha,
-        fidelity_report=str(args.fidelity_report),
-        fidelity_report_sha256=digest(args.fidelity_report),
+        parity_gate=str(args.parity_gate),
+        parity_gate_sha256=digest(args.parity_gate),
+        parity_comparison=str(args.parity_comparison),
+        parity_comparison_sha256=digest(args.parity_comparison),
     )
     contract = source / "mosaickv/configs/experiments/shared_byte_comparison_v2.yaml"
     bound_files = dict(plan["bound_files"])
     bound_files.pop(str(parent["comparison_contract"]), None)
     bound_files[str(contract)] = digest(contract)
+    bound_files[str(args.parity_gate)] = digest(args.parity_gate)
+    bound_files[str(args.parity_comparison)] = digest(args.parity_comparison)
     plan["bound_files"] = bound_files
     plan["comparison_contract"] = str(contract)
     plan["comparison_contract_sha256"] = digest(contract)
@@ -81,6 +100,7 @@ if __name__ == "__main__":
     parser.add_argument("--source-sha", required=True)
     parser.add_argument("--parent-root", type=Path, required=True)
     parser.add_argument("--parent-plan-sha", required=True)
-    parser.add_argument("--fidelity-report", type=Path, required=True)
+    parser.add_argument("--parity-gate", type=Path, required=True)
+    parser.add_argument("--parity-comparison", type=Path, required=True)
     parser.add_argument("--output-root", type=Path, required=True)
     promote(parser.parse_args())
