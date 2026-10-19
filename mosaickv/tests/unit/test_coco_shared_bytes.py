@@ -312,6 +312,36 @@ def test_pilot_precision_is_estimate_not_claim():
     assert not huge["target_precision_feasible_estimate"]
 
 
+def test_analyzer_scope_accepts_only_registered_method_and_cap_subsets():
+    analyzer = script("analyze_coco_shared_bytes")
+    plan = {
+        "methods": ["full_kv", "prompt_attention_topk", "vl_cache_reimpl", "mosaickv_exact"],
+        "caps_mib": [10, 20, 40, 80],
+    }
+    methods, caps = analyzer.comparison_scope(
+        plan,
+        "larger",
+        requested_methods=["full_kv", "vl_cache_reimpl", "mosaickv_exact"],
+        requested_caps=[40],
+    )
+    assert methods == ("full_kv", "vl_cache_reimpl", "mosaickv_exact")
+    assert caps == (40,)
+    with pytest.raises(ValueError, match="registered subset"):
+        analyzer.comparison_scope(
+            plan,
+            "larger",
+            requested_methods=["full_kv", "unknown", "mosaickv_exact"],
+            requested_caps=[40],
+        )
+    with pytest.raises(ValueError, match="registered subset"):
+        analyzer.comparison_scope(
+            plan,
+            "larger",
+            requested_methods=["full_kv", "mosaickv_exact"],
+            requested_caps=[30],
+        )
+
+
 def test_worker_script_resources_and_no_blind_submission():
     text = (SCRIPTS.parent / "slurm/coco_shared_bytes.sbatch").read_text()
     for control in (
@@ -507,7 +537,9 @@ def test_complete_analyzer_reduces_captions_and_gates_exact_bytes(tmp_path, monk
     )
     path = tmp_path / "plan.json"
     analyzer.write_once(path, plan)
-    monkeypatch.setattr(analyzer, "collect", lambda *args: (rows, traces, samples, []))
+    monkeypatch.setattr(
+        analyzer, "collect", lambda *args, **kwargs: (rows, traces, samples, [])
+    )
     monkeypatch.setattr(analyzer, "TokenizedCider", lambda samples: lambda draw: float(len(draw)))
     args = Namespace(root=tmp_path, stage="validation", plan_sha=analyzer.digest(path), output=None)
     assert analyzer.analyze(args) == int(underfill)

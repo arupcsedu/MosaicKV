@@ -104,11 +104,37 @@ def plot_curves(aggregates, output):
             stream.write("\n".join(svg))
 
 
-def collect(plan, plan_sha, stage):
+def comparison_scope(plan, stage, *, requested_methods=None, requested_caps=None):
+    """Resolve an explicitly registered subset without inventing missing arms."""
+
+    registered_methods = tuple(plan.get("methods", METHODS))
+    methods = tuple(requested_methods or registered_methods)
+    if (
+        len(methods) != len(set(methods))
+        or any(method not in registered_methods for method in methods)
+        or "full_kv" not in methods
+        or "mosaickv_exact" not in methods
+    ):
+        raise ValueError("analysis methods must be a registered subset containing FullKV/MosaicKV")
+    registered_caps = tuple(plan.get("caps_mib", (40,)))
+    caps = (40,) if stage == "validation" else tuple(requested_caps or registered_caps)
+    if (
+        len(caps) != len(set(caps))
+        or any(cap not in registered_caps for cap in caps)
+    ):
+        raise ValueError("analysis caps must be a distinct registered subset")
+    return methods, caps
+
+
+def collect(plan, plan_sha, stage, *, methods, caps):
     plan = dict(plan, _plan_sha=plan_sha)
     rows, traces, samples, missing = {}, {}, {}, []
     for index, job in enumerate(plan["jobs"]):
         if job["stage"] != stage:
+            continue
+        if job["method"] not in methods:
+            continue
+        if job["method"] != "full_kv" and job["cap_mib"] not in caps:
             continue
         if digest(Path(job["ledger"])) != job["ledger_sha"]:
             raise ValueError("input ledger changed")
@@ -219,7 +245,17 @@ def analyze(args):
         gates=[],
     )
     try:
-        rows, traces, samples, missing = collect(plan, args.plan_sha, args.stage)
+        methods, caps = comparison_scope(
+            plan,
+            args.stage,
+            requested_methods=getattr(args, "methods", None),
+            requested_caps=getattr(args, "caps", None),
+        )
+        report["methods"] = list(methods)
+        report["caps_mib"] = list(caps)
+        rows, traces, samples, missing = collect(
+            plan, args.plan_sha, args.stage, methods=methods, caps=caps
+        )
         report.update(
             planned_samples=len(samples),
             completed_rows=len(rows),
@@ -236,12 +272,11 @@ def analyze(args):
         )
         if len(ids) != denominator:
             raise ValueError("wrong preregistered stage denominator")
-        caps = [40] if args.stage == "validation" else plan["caps_mib"]
         full = [rows["full_kv", None, sid] for sid in ids]
         expected_controls = {sid: rows["full_kv", None, sid]["control_hashes"] for sid in ids}
         for cap in caps:
             group, certificates = list(full), {}
-            for method in METHODS[1:]:
+            for method in (name for name in methods if name != "full_kv"):
                 for sid in ids:
                     key = method, cap, sid
                     source_layout = traces["full_kv", None, sid]["source_kv_layout"]
@@ -263,7 +298,7 @@ def analyze(args):
                     **validate_group(
                         group,
                         sample_ids=ids,
-                        methods=METHODS,
+                        methods=methods,
                         cap_bytes=cap * 2**20,
                         metric="cider",
                         expected_controls=expected_controls,
@@ -337,7 +372,7 @@ def analyze(args):
                 )
             )
         for cap in caps:
-            for reference in METHODS[:3]:
+            for reference in (name for name in methods if name != "mosaickv_exact"):
                 refcap = None if reference == "full_kv" else cap
                 result = paired_bootstrap(
                     definition,
@@ -432,6 +467,8 @@ if __name__ == "__main__":
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--plan-sha", required=True)
     parser.add_argument("--stage", choices=("validation", "larger", "final"), required=True)
+    parser.add_argument("--methods", nargs="+", help="registered method subset to analyze")
+    parser.add_argument("--caps", type=int, nargs="+", help="registered cap subset to analyze")
     parser.add_argument(
         "--output", type=Path, help="new output path for an incomplete diagnostic only"
     )
