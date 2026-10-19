@@ -73,6 +73,14 @@ def promote(args: argparse.Namespace) -> dict:
     plan["bound_files"] = bound_files
     plan["comparison_contract"] = str(contract)
     plan["comparison_contract_sha256"] = digest(contract)
+    # The prerequisite is one small native-metric gate, not a five-cap paper
+    # curve.  Keep only the registered 40 MiB point plus one FullKV reference.
+    plan["caps_mib"] = [40]
+    plan["jobs"] = [
+        job
+        for job in plan["jobs"]
+        if job["method"] == "full_kv" or int(job["cap_mib"]) == 40
+    ]
     for job in plan["jobs"]:
         task = str(job["task"])
         shard = int(job["shard"])

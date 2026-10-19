@@ -53,8 +53,13 @@ def _inputs(root: Path, plan_sha: str, group_index: int):
         raise ValueError("invalid PrefixKV shard-group index")
     task, shard = groups[group_index]
     jobs = [job for job in plan["jobs"] if (job["task"], job["shard"]) == (task, shard)]
-    if len(jobs) != 16 or sum(job["method"] == "full_kv" for job in jobs) != 1:
-        raise ValueError("PrefixKV native shard must contain one FullKV and 15 compressed arms")
+    if (
+        len(jobs) != 4
+        or sum(job["method"] == "full_kv" for job in jobs) != 1
+        or {job["method"] for job in jobs}
+        != {"full_kv", "prompt_attention_topk", "prefixkv_reimpl", "mosaickv_exact"}
+    ):
+        raise ValueError("PrefixKV native shard must contain the four registered 40 MiB arms")
     return source, plan, task, shard, jobs
 
 

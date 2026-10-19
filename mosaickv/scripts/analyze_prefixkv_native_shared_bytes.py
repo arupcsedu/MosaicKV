@@ -44,7 +44,7 @@ def analyze(args: argparse.Namespace) -> dict:
             worker.get("status") != "passed"
             or worker.get("plan_sha256") != args.plan_sha
             or (worker.get("task"), worker.get("shard")) != (task, shard)
-            or len(worker.get("records", [])) != 16
+            or len(worker.get("records", [])) != 4
         ):
             raise ValueError(f"failed or malformed PrefixKV worker: {path}")
         records.extend(worker["records"])
