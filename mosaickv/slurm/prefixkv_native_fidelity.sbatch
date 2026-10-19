@@ -19,6 +19,7 @@ source mosaickv/scripts/cache_env.sh
 bash mosaickv/scripts/assert_clean_worktree.sh
 export PYTHONDONTWRITEBYTECODE=1
 export OMP_NUM_THREADS=12 MKL_NUM_THREADS=12 OPENBLAS_NUM_THREADS=12
+export CUBLAS_WORKSPACE_CONFIG=:4096:8
 export PYTHONPATH="$source_root/mosaickv/src${PYTHONPATH:+:$PYTHONPATH}"
 exec /scratch/djy8hg/env/mosaickv/bin/python \
   mosaickv/scripts/verify_prefixkv_native_fidelity.py \

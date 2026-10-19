@@ -72,3 +72,10 @@ def test_worker_import_and_disabled_scope_fail_before_gpu(monkeypatch, tmp_path)
     assert checked == ["a" * 40]
     with pytest.raises(ValueError, match="plan hash"):
         module.check_inputs(tmp_path, "b" * 64, 0)
+
+
+def test_native_fidelity_slurm_sets_deterministic_cublas_before_python():
+    text = (ROOT / "mosaickv/slurm/prefixkv_native_fidelity.sbatch").read_text()
+    export = text.index("CUBLAS_WORKSPACE_CONFIG=:4096:8")
+    launch = text.index("verify_prefixkv_native_fidelity.py")
+    assert export < launch
