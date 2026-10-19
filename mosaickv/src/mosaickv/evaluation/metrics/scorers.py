@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import re
+import sys
 from collections.abc import Sequence
 
 from mosaickv.evaluation.metrics.types import MetricSample
@@ -25,7 +26,24 @@ def rouge_l_f1(prediction: str, references: Sequence[str]) -> float:
     for reference in references:
         if not reference.strip():
             continue
-        result = scorer.get_scores(prediction, reference)
+        # ``rouge==1.0.1`` reconstructs the LCS recursively.  Its score is
+        # correct for long PrefixKV descriptions, but Python's default depth
+        # (normally 1,000) is smaller than valid 1,024-token generations.
+        # Raising the limit changes no tokenization or scoring operation; it
+        # only permits the pinned implementation to finish.  Always restore
+        # the process setting so one metric call cannot affect later work.
+        previous_limit = sys.getrecursionlimit()
+        required_limit = max(
+            previous_limit,
+            4 * (len(prediction.split()) + len(reference.split()) + 1),
+        )
+        try:
+            if required_limit != previous_limit:
+                sys.setrecursionlimit(required_limit)
+            result = scorer.get_scores(prediction, reference)
+        finally:
+            if sys.getrecursionlimit() != previous_limit:
+                sys.setrecursionlimit(previous_limit)
         best = max(best, float(result[0]["rouge-l"]["f"]))
     return best
 

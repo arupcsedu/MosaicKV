@@ -4,6 +4,7 @@ import copy
 import importlib.util
 import json
 import math
+import sys
 from dataclasses import replace
 from pathlib import Path
 
@@ -94,6 +95,14 @@ def test_rouge_matches_pinned_prefixkv_and_lookm_dependency() -> None:
     official = float(Rouge().get_scores(prediction, reference)[0]["rouge-l"]["f"])
 
     assert rouge_l_f1(prediction, (reference,)) == official
+
+
+def test_rouge_long_sequence_preserves_pinned_score_and_restores_recursion_limit() -> None:
+    previous_limit = sys.getrecursionlimit()
+    prediction = " ".join(f"token-{index}" for index in range(previous_limit + 32))
+
+    assert rouge_l_f1(prediction, (prediction,)) == pytest.approx(1.0)
+    assert sys.getrecursionlimit() == previous_limit
 
 
 def test_cider_matches_lmms_eval_coco_tokenization_and_scorer() -> None:
