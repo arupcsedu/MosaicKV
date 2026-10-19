@@ -9,7 +9,7 @@ candidate:
   name: mosaickv_exact
   base_commit: 968b5fe4d7169b8c5c84f40f69c4933821432d4e
   change_scope: frozen_policy_unchanged_plus_native_metric_materialization_and_execution_only
-  content_sha256: 62d1a62e21f6dd05910f5da56f124ec3d3d3a1686a54c1891a547a9c8543b599
+  content_sha256: 0327dbc97a26d4fa00b8d3b4f752727353f07e3302b19d4b89cd54e5242c8963
   policy_sha256: fc8f9efc3b1bafd5278811022d00a2a5546f48eec7fe0174471c02d21a64096f
   description: prompt_window_16_stable_head_topk_routed_graph_1_over_256
   prototype_merging: false
