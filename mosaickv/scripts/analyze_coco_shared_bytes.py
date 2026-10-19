@@ -23,6 +23,7 @@ from mosaickv.evaluation.coco_shared_bytes import (
     METHODS,
     STORAGE_FIELDS,
     TokenizedCider,
+    bootstrap_cider_curve,
     control_hashes,
     dense_capacity_certificate,
     validate_caption_rows,
@@ -371,16 +372,28 @@ def analyze(args):
                     else statistics.mean(r["decode_time"] for r in measured),
                 )
             )
+        cider_pairs = [
+            (
+                (reference, None if reference == "full_kv" else cap),
+                ("mosaickv_exact", cap),
+            )
+            for cap in caps
+            for reference in methods
+            if reference != "mosaickv_exact"
+        ]
+        cider_comparisons = bootstrap_cider_curve(
+            metric_samples,
+            cider_pairs,
+            resamples=plan["bootstrap_resamples"],
+            seed=plan["bootstrap_seed"],
+            workers=getattr(args, "bootstrap_workers", 1),
+        )
         for cap in caps:
             for reference in (name for name in methods if name != "mosaickv_exact"):
                 refcap = None if reference == "full_kv" else cap
-                result = paired_bootstrap(
-                    definition,
-                    metric_samples[reference, refcap],
-                    metric_samples["mosaickv_exact", cap],
-                    resamples=plan["bootstrap_resamples"],
-                    seed=plan["bootstrap_seed"],
-                )
+                result = cider_comparisons[
+                    (reference, refcap), ("mosaickv_exact", cap)
+                ]
                 report["comparisons"].append(
                     dict(
                         cap_mib=cap,
@@ -468,6 +481,12 @@ if __name__ == "__main__":
     parser.add_argument("--plan-sha", required=True)
     parser.add_argument("--stage", choices=("validation", "larger", "final"), required=True)
     parser.add_argument("--methods", nargs="+", help="registered method subset to analyze")
+    parser.add_argument(
+        "--bootstrap-workers",
+        type=int,
+        default=1,
+        help="processes used by the exact whole-corpus CIDEr bootstrap",
+    )
     parser.add_argument("--caps", type=int, nargs="+", help="registered cap subset to analyze")
     parser.add_argument(
         "--output", type=Path, help="new output path for an incomplete diagnostic only"
