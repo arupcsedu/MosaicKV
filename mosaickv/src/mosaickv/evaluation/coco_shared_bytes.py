@@ -38,7 +38,12 @@ def processor_signature(processor: Any) -> dict[str, Any]:
 
 
 def control_hashes(
-    config: Any, sample: dict[str, Any], processor: dict[str, Any], gpu: dict[str, Any]
+    config: Any,
+    sample: dict[str, Any],
+    processor: dict[str, Any],
+    gpu: dict[str, Any],
+    *,
+    evaluator: str = "lmms_eval.coco_cap.PTBTokenizer+Cider_x100@0.7.2; pycocoevalcap==1.2",
 ) -> dict[str, str]:
     from mosaickv.evaluation.shared_byte_contract import CONTROL_FIELDS, digest
 
@@ -65,7 +70,7 @@ def control_hashes(
         gpu_controls=gpu,
         dataset=asdict(config.dataset),
         references=sample["references"],
-        evaluator="lmms_eval.coco_cap.PTBTokenizer+Cider_x100@0.7.2; pycocoevalcap==1.2",
+        evaluator=evaluator,
     )
     if set(values) != set(CONTROL_FIELDS):
         raise ValueError("missing comparison controls")

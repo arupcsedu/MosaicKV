@@ -137,6 +137,41 @@ def prepare(args):
     if root.exists():
         raise FileExistsError("new immutable root required")
     task = default_task_registry().resolve(args.task)
+    available_methods = tuple(configurations(
+        source,
+        task.name,
+        DatasetConfig(
+            contract["lanes"]["lookm" if task.name == "milebench" else "vl_cache"]["tasks"][
+                task.name
+            ]["dataset_id"],
+            contract["lanes"]["lookm" if task.name == "milebench" else "vl_cache"]["tasks"][
+                task.name
+            ]["dataset_revision"],
+            contract["lanes"]["lookm" if task.name == "milebench" else "vl_cache"]["tasks"][
+                task.name
+            ]["split"],
+        ),
+        40,
+    ))
+    requested_methods = tuple(getattr(args, "methods", None) or available_methods)
+    if (
+        len(requested_methods) != len(set(requested_methods))
+        or any(method not in available_methods for method in requested_methods)
+        or "full_kv" not in requested_methods
+        or "mosaickv_exact" not in requested_methods
+    ):
+        raise ValueError(
+            "methods must be distinct registered methods including FullKV and MosaicKV"
+        )
+    baseline = "lookm_reimpl" if task.name == "milebench" else "vl_cache_reimpl"
+    if baseline not in requested_methods:
+        raise ValueError(f"minimum lane requires {baseline}")
+    larger_caps = tuple(getattr(args, "larger_caps", None) or CAPS)
+    if (
+        len(larger_caps) != len(set(larger_caps))
+        or any(cap not in CAPS for cap in larger_caps)
+    ):
+        raise ValueError("larger caps must be distinct registered byte caps")
     inputs = [json.loads(path.read_text()) for path in args.ledger]
     meta = {k: inputs[0][k] for k in ("task", "dataset_id", "dataset_revision", "split")}
     if meta["task"] != task.name or any(
@@ -248,6 +283,7 @@ def prepare(args):
         validation_execution_authorized=True,
         bound_files=bound,
         jobs=[],
+        methods=list(requested_methods),
         max_global_a100s=4,
         a100s_per_worker=1,
         cpus_per_worker=12,
@@ -258,7 +294,7 @@ def prepare(args):
         timed_quality_trials=1,
         output_tokens=64,
         fullkv_latency_comparison=False,
-        caps_mib=list(CAPS),
+        caps_mib=list(larger_caps),
         comparison_boundary="initial physical KV cap plus equal append-only decode growth",
         require_equal_measured_initial_final_peak_storage=True,
         require_independent_largest_feasible_capacity_certificate=True,
@@ -288,10 +324,12 @@ def prepare(args):
             ledger = root / "ledgers" / stage / f"{shard:03d}.json"
             write_once(ledger, payload)
             bound[str(ledger)] = digest(ledger)
-            for cap in (40,) if stage == "validation" else CAPS:
+            for cap in (40,) if stage == "validation" else larger_caps:
                 for method, cfg in configurations(source, task.name, dataset, cap).items():
+                    if method not in requested_methods:
+                        continue
                     # Same FullKV controls at every cap: measure it once per shard.
-                    if method == "full_kv" and stage == "larger" and cap != CAPS[0]:
+                    if method == "full_kv" and stage == "larger" and cap != larger_caps[0]:
                         continue
                     config_path = root / "configs" / stage / f"{method}-{cap}.json"
                     if not config_path.exists():
@@ -331,6 +369,17 @@ def main():
     parser.add_argument("--task", choices=tuple(MODELS), required=True)
     parser.add_argument("--ledger", type=Path, action="append", required=True)
     parser.add_argument("--exclude-ledger", type=Path, action="append", default=[])
+    parser.add_argument(
+        "--methods",
+        nargs="+",
+        help="registered methods to plan; defaults to the complete shared-byte lane",
+    )
+    parser.add_argument(
+        "--larger-caps",
+        type=int,
+        nargs="+",
+        help="registered MiB caps for the larger stage; defaults to 10/20/40/80",
+    )
     prepare(parser.parse_args())
 
 

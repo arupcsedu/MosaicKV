@@ -37,7 +37,9 @@ def test_routes_caps_resources_and_separate_metrics():
     assert prefix["mmvet_prefixkv"]["split"] == "official_218"
     assert prefix["llava_description"]["metrics"] == ["teacher_forced_ppl", "rouge_l_f1"]
     assert c["lanes"]["vl_cache"]["tasks"]["coco_caption"]["split"] == "val"
-    assert c["lanes"]["lookm"]["tasks"]["milebench"]["dataset_revision"] is None
+    assert c["lanes"]["lookm"]["tasks"]["milebench"]["dataset_revision"] == (
+        "53c7a58051ef88bacf76541d91f03f5ba2d71e7d"
+    )
 
 
 def test_backing_storage_counts_preallocated_views_and_deduplicates_aliases():

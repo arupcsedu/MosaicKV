@@ -7,6 +7,7 @@ import json
 import sys
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -275,6 +276,29 @@ def test_resume_rejects_corruption_and_duplicate_success(tmp_path):
         worker.verified_success(tmp_path, "plan", "cfg")
 
 
+def test_native_worker_preserves_milebench_routing_fields(tmp_path):
+    worker = script("run_coco_shared_bytes")
+    media = tmp_path / "combined.jpg"
+    media.write_bytes(b"fixture")
+    sample = SimpleNamespace(
+        sample_id="ActionSequence-0001",
+        prompt="Choose.",
+        references=("second",),
+        media=(
+            SimpleNamespace(kind=SimpleNamespace(value="image"), path=media, sha256="a" * 64),
+        ),
+        milebench_dataset="ActionSequence",
+        milebench_question_type=SimpleNamespace(value="multi-choice"),
+        choices=("first", "second"),
+    )
+    payload = worker.selected_sample_payload(sample, "milebench")
+    assert payload["milebench_dataset"] == "ActionSequence"
+    assert payload["milebench_question_type"] == "multi-choice"
+    assert payload["choices"] == ["first", "second"]
+    with pytest.raises(ValueError, match="unsupported"):
+        worker.selected_sample_payload(sample, "not-a-task")
+
+
 def test_pilot_precision_is_estimate_not_claim():
     value = sample_size_recommendation(
         pilot_n=256, ci_low=-4, ci_high=4, target_half_width=2, seconds_per_example=10
@@ -358,6 +382,23 @@ def test_real_plan_shape_and_single_fullkv_per_shard(tmp_path, monkeypatch):
     assert not plan["larger_execution_authorized"] and not plan["final_execution_authorized"]
     assert plan["bootstrap_resamples"] == 10000
     assert all("samples" in json.loads(Path(j["ledger"]).read_text()) for j in small + large)
+    minimum_root = tmp_path / "minimum-plan"
+    prepare.prepare(
+        Namespace(
+            source_sha="a" * 40,
+            root=minimum_root,
+            task="coco_caption",
+            ledger=[pool],
+            exclude_ledger=[],
+            methods=["full_kv", "vl_cache_reimpl", "mosaickv_exact"],
+            larger_caps=[40],
+        )
+    )
+    minimum = json.loads((minimum_root / "plan.json").read_text())
+    assert minimum["methods"] == ["full_kv", "vl_cache_reimpl", "mosaickv_exact"]
+    assert minimum["caps_mib"] == [40]
+    assert len([job for job in minimum["jobs"] if job["stage"] == "validation"]) == 6
+    assert len([job for job in minimum["jobs"] if job["stage"] == "larger"]) == 48
     final = script("prepare_coco_final_curve")
     monkeypatch.setattr(final, "_require_clean_source", lambda *args: "fixture")
     parent_sha = prepare.digest(root / "plan.json")

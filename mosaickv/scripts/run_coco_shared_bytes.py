@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""One method per immutable shard; resume only verified successful samples.
+"""Run one native-metric method per immutable COCO or MileBench shard.
 
 All artifacts (including failures and warmups) remain append-only. Per-sample
 CIDEr artifacts are diagnostics, NOT the campaign's corpus score.
@@ -39,7 +39,8 @@ def verify_plan(root, plan_sha, index):
     plan = json.loads((root / "plan.json").read_text())
     source = Path(__file__).resolve().parents[2]
     _require_clean_source(source, plan["source_sha"])
-    if plan["source_root"] != str(source) or plan["task"] != "coco_caption":
+    task_name = plan["task"]
+    if plan["source_root"] != str(source) or task_name not in {"coco_caption", "milebench"}:
         raise ValueError("wrong source or task route")
     if not 0 <= index < len(plan["jobs"]):
         raise ValueError("unregistered job index")
@@ -83,11 +84,12 @@ def verify_plan(root, plan_sha, index):
     cfg = load_config(job["config"])
     if config_sha256(cfg) != job["config_sha"] or cfg.method.value != job["method"]:
         raise ValueError("configuration changed")
-    validate_configuration(contract, "vl_cache", "coco_caption", cfg)
+    lane = "vl_cache" if task_name == "coco_caption" else "lookm"
+    validate_configuration(contract, lane, task_name, cfg)
     ledger = load_paper_native_ledger(
         job["ledger"],
         expected_sha256=job["ledger_sha"],
-        task=default_task_registry().resolve("coco_caption"),
+        task=default_task_registry().resolve(task_name),
         dataset_revision=cfg.dataset.revision,
     )
     if tuple(s.sample_id for s in ledger.samples) != tuple(job["sample_ids"]):
@@ -148,6 +150,29 @@ def gpu_snapshot(torch):
     return snapshot
 
 
+def selected_sample_payload(sample, task_name):
+    """Preserve every scorer field when reducing a shard to one sample."""
+
+    payload = dict(
+        sample_id=sample.sample_id,
+        prompt=sample.prompt,
+        references=list(sample.references),
+        media=[
+            dict(kind=media.kind.value, path=str(media.path), sha256=media.sha256)
+            for media in sample.media
+        ],
+    )
+    if task_name == "milebench":
+        payload.update(
+            milebench_dataset=sample.milebench_dataset,
+            milebench_question_type=sample.milebench_question_type.value,
+            choices=list(sample.choices),
+        )
+    elif task_name != "coco_caption":
+        raise ValueError(f"unsupported native-metric task: {task_name}")
+    return payload
+
+
 def run(args):
     import torch
 
@@ -200,7 +225,11 @@ def run(args):
             model_kwargs=_model_kwargs(cfg, local_files_only=True),
             processor_kwargs={"local_files_only": True},
         )
-        if processor_signature(adapter.processor) != plan["processor_signature"]:
+        observed_processor = processor_signature(adapter.processor)
+        if (
+            plan.get("processor_signature") is not None
+            and observed_processor != plan["processor_signature"]
+        ):
             raise ValueError("loaded processor differs from frozen preprocessing/tokenization")
         summary["gpu_before"] = gpu_snapshot(torch)
         first = pending[0][0]
@@ -226,7 +255,7 @@ def run(args):
                 EvaluationRequest(
                     run_id=f"warmup-{warmup}",
                     sample_id=first.sample_id,
-                    task="coco_caption",
+                    task=plan["task"],
                     messages=messages,
                     generation_kwargs={},
                 )
@@ -245,23 +274,14 @@ def run(args):
                 # entire shard on timeout. Never initiate work past 115 min.
                 if time.monotonic() - started > 6900:
                     raise RuntimeError("shard deadline: retry remaining samples only")
+                selected_sample = selected_sample_payload(sample, plan["task"])
                 selected = dict(
                     schema_version=1,
                     task=ledger.task,
                     dataset_id=ledger.dataset_id,
                     dataset_revision=ledger.dataset_revision,
                     split=ledger.split,
-                    samples=[
-                        dict(
-                            sample_id=sample.sample_id,
-                            prompt=sample.prompt,
-                            references=list(sample.references),
-                            media=[
-                                dict(kind=m.kind.value, path=str(m.path), sha256=m.sha256)
-                                for m in sample.media
-                            ],
-                        )
-                    ],
+                    samples=[selected_sample],
                 )
                 sample_ledger = sample_attempt / "input.json"
                 write_once(sample_ledger, selected)
@@ -281,7 +301,7 @@ def run(args):
                 record = record_hf_run(
                     cfg,
                     adapter,
-                    task="coco_caption",
+                    task=plan["task"],
                     run_id="quality",
                     output_root=sample_attempt,
                     ledger_path=sample_ledger,
@@ -291,10 +311,23 @@ def run(args):
                     repetition=0,
                     order=args.index,
                     export_metrics=True,
-                    materialized_coco=True,
+                    materialized_coco=plan["task"] == "coco_caption",
+                    materialized_milebench=plan["task"] == "milebench",
                 )
                 after = gpu_snapshot(torch)
-                validate_caption_rows(record["rows"], selected["samples"], plan["output_tokens"])
+                if plan["task"] == "coco_caption":
+                    validate_caption_rows(
+                        record["rows"], selected["samples"], plan["output_tokens"]
+                    )
+                elif (
+                    len(record["rows"]) != 1
+                    or record["rows"][0]["sample_id"] != sample.sample_id
+                    or record["rows"][0]["status"] != "completed"
+                    or record["rows"][0]["error"] is not None
+                    or record["rows"][0]["generated_tokens"] > plan["output_tokens"]
+                    or record["rows"][0]["task_score"] is None
+                ):
+                    raise ValueError("invalid or incomplete MileBench result row")
                 trace_files = list((sample_attempt / "traces" / "quality").glob("*.json"))
                 if len(trace_files) != 1:
                     raise ValueError("missing/ambiguous trace")
@@ -314,7 +347,16 @@ def run(args):
                     warmups=plan["warmups"],
                     gpu_controls=gpu_controls,
                     control_hashes=control_hashes(
-                        cfg, selected["samples"][0], plan["processor_signature"], gpu_controls
+                        cfg,
+                        selected["samples"][0],
+                        observed_processor,
+                        gpu_controls,
+                        evaluator=(
+                            "lookm_official_score.py@ecf0f51+official_equal_dataset_hierarchy"
+                            if plan["task"] == "milebench"
+                            else "lmms_eval.coco_cap.PTBTokenizer+Cider_x100@0.7.2; "
+                            "pycocoevalcap==1.2"
+                        ),
                     ),
                     sample_wall_seconds=time.monotonic() - sample_started,
                 )

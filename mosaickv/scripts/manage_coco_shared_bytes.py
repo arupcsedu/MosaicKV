@@ -63,6 +63,8 @@ def main(args):
         )
         return
     if args.action == "register-final":
+        if plan["task"] != "coco_caption":
+            raise ValueError("final sample-size registration is defined only for COCO/CIDEr")
         path, report = passed_report(root, "larger", args.plan_sha)
         comparisons = [
             r
@@ -124,6 +126,11 @@ def main(args):
         return
     verify_plan(root, args.plan_sha, indices[0])
     log_root = root / "slurm"
+    batch_script = (
+        "native_metric_shared_bytes.sbatch"
+        if plan["task"] == "milebench"
+        else "coco_shared_bytes.sbatch"
+    )
     command = [
         "sbatch",
         "--parsable",
@@ -131,7 +138,7 @@ def main(args):
         f"--array={','.join(map(str, indices))}%4",
         f"--output={log_root}/%A_%a.out",
         f"--error={log_root}/%A_%a.err",
-        str(source / "mosaickv/slurm/coco_shared_bytes.sbatch"),
+        str(source / "mosaickv/slurm" / batch_script),
         str(source),
         str(root),
         args.plan_sha,

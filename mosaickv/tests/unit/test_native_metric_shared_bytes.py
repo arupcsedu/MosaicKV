@@ -45,6 +45,18 @@ def test_selection_rejects_missing_coverage_and_duplicate_ids():
         worker.select_stages({"a": ["1"], "b": ["1"]})
 
 
+def test_native_metric_worker_resources_and_deterministic_cublas_launch():
+    text = (SCRIPTS.parent / "slurm/native_metric_shared_bytes.sbatch").read_text()
+    for control in (
+        "--cpus-per-task=12",
+        "--gres=gpu:a100:1",
+        "--time=02:00:00",
+        "--reservation=bi_fox_dgx",
+        "CUBLAS_WORKSPACE_CONFIG=:4096:8",
+    ):
+        assert control in text
+
+
 def test_frozen_contract_accepts_exact_coco_policy_and_rejects_retuning():
     from dataclasses import replace
 
@@ -72,7 +84,9 @@ def test_frozen_contract_accepts_exact_coco_policy_and_rejects_retuning():
         validate_configuration(contract, "vl_cache", "coco_caption", changed_generation)
 
 
-def test_unresolved_milebench_composite_revision_blocks_new_preparation():
+def test_milebench_revision_is_pinned_and_rejects_another_revision():
+    from dataclasses import replace
+
     from mosaickv.evaluation.shared_byte_contract import load_contract, validate_configuration
 
     source = SCRIPTS.parents[1]
@@ -80,11 +94,17 @@ def test_unresolved_milebench_composite_revision_blocks_new_preparation():
     cfg = worker.configurations(
         source,
         "milebench",
-        DatasetConfig("MileBench/MileBench", "a" * 40, "official_evaluation"),
+        DatasetConfig(
+            "MileBench/MileBench",
+            "53c7a58051ef88bacf76541d91f03f5ba2d71e7d",
+            "official_evaluation",
+        ),
         40,
     )["mosaickv_exact"]
-    with pytest.raises(ValueError, match="revision unresolved"):
-        validate_configuration(contract, "lookm", "milebench", cfg)
+    validate_configuration(contract, "lookm", "milebench", cfg)
+    changed = replace(cfg, dataset=replace(cfg.dataset, revision="a" * 40))
+    with pytest.raises(ValueError, match="dataset route mismatch"):
+        validate_configuration(contract, "lookm", "milebench", changed)
 
 
 @pytest.mark.parametrize("task", ["coco_caption", "milebench"])
