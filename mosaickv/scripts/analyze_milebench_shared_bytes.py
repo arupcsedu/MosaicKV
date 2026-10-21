@@ -10,6 +10,11 @@ import statistics
 from dataclasses import asdict
 from pathlib import Path
 
+from isoquality_gate import (
+    QualityDirection,
+    choose_candidate_cap_without_quality,
+    evaluate_isoquality_pair,
+)
 from run_coco_shared_bytes import completed_sample
 from run_prefixkv_decode_preflight import digest, write_once
 
@@ -153,6 +158,7 @@ def analyze(args) -> None:
         "methods": plan["methods"],
         "gates": [],
         "comparisons": [],
+        "isoquality_tests": [],
     }
     try:
         rows, traces, samples, missing = _collect(plan, args.plan_sha, args.stage)
@@ -161,10 +167,16 @@ def analyze(args) -> None:
         if missing:
             raise ValueError("incomplete paired cohort; metrics intentionally withheld")
         ids = sorted(samples)
-        expected_count = 32 if args.stage == "validation" else 256
+        expected_count = plan.get("stage_sample_counts", {}).get(
+            args.stage, 32 if args.stage == "validation" else 256
+        )
         if len(ids) != expected_count:
             raise ValueError("wrong preregistered stage denominator")
-        caps = [40] if args.stage == "validation" else plan["caps_mib"]
+        caps = (
+            plan.get("validation_caps_mib", [40])
+            if args.stage == "validation"
+            else plan["caps_mib"]
+        )
         methods = tuple(plan["methods"])
         full = [rows["full_kv", None, sample_id] for sample_id in ids]
         expected_controls = {
@@ -262,11 +274,86 @@ def analyze(args) -> None:
                         }
                         for key, value in comparisons.items()
                     )
+        isoquality_pairs = []
+        if len(caps) > 1:
+            for baseline in (
+                method
+                for method in methods
+                if method not in {"full_kv", "mosaickv_exact"}
+            ):
+                for baseline_cap in caps:
+                    candidate_cap = choose_candidate_cap_without_quality(
+                        baseline_rows=[
+                            rows[baseline, baseline_cap, sample_id] for sample_id in ids
+                        ],
+                        candidates={
+                            cap: [
+                                rows["mosaickv_exact", cap, sample_id] for sample_id in ids
+                            ]
+                            for cap in caps
+                            if cap < baseline_cap
+                        },
+                        baseline_cap_mib=baseline_cap,
+                        minimum_memory_reduction=plan.get(
+                            "isoquality_minimum_memory_reduction", 0.30
+                        ),
+                    )
+                    if candidate_cap is None:
+                        report["isoquality_tests"].append(
+                            {
+                                "baseline": baseline,
+                                "baseline_cap_mib": baseline_cap,
+                                "candidate": "mosaickv_exact",
+                                "candidate_cap_mib": None,
+                                "status": "physically_infeasible_on_registered_grid",
+                                "joint_pass": False,
+                            }
+                        )
+                    else:
+                        isoquality_pairs.append((baseline, baseline_cap, candidate_cap))
+        family_confidence = 1.0 - 0.05 / max(1, len(isoquality_pairs))
+        for baseline, baseline_cap, candidate_cap in isoquality_pairs:
+            comparisons = paired_milebench_bootstrap(
+                _score(rows, samples, baseline, baseline_cap, ids),
+                _score(rows, samples, "mosaickv_exact", candidate_cap, ids),
+                resamples=plan["bootstrap_resamples"],
+                seed=plan["bootstrap_seed"],
+                confidence=family_confidence,
+            )
+            for hierarchy_key, comparison in comparisons.items():
+                gate = evaluate_isoquality_pair(
+                    baseline_method=baseline,
+                    baseline_cap_mib=baseline_cap,
+                    baseline_rows=[rows[baseline, baseline_cap, sample_id] for sample_id in ids],
+                    candidate_method="mosaickv_exact",
+                    candidate_cap_mib=candidate_cap,
+                    candidate_rows=[
+                        rows["mosaickv_exact", candidate_cap, sample_id] for sample_id in ids
+                    ],
+                    comparison=comparison,
+                    direction=QualityDirection.HIGHER,
+                    quality_margin=plan.get("isoquality_quality_margin", 0.0),
+                    minimum_memory_reduction=plan.get(
+                        "isoquality_minimum_memory_reduction", 0.30
+                    ),
+                )
+                report["isoquality_tests"].append(
+                    {
+                        **gate.to_dict(),
+                        "hierarchy_key": hierarchy_key,
+                        "status": "passed" if gate.joint_pass else "failed",
+                        "quality_comparison": asdict(comparison),
+                        "familywise_confidence": family_confidence,
+                    }
+                )
         output.mkdir(parents=True)
         aggregate_path = output / "aggregates.parquet"
         row_path = output / "derived_rows.parquet"
+        isoquality_path = output / "isoquality_tests.parquet"
         pd.DataFrame(aggregates).to_parquet(aggregate_path, index=False)
         pd.DataFrame(rows.values()).to_parquet(row_path, index=False)
+        if report["isoquality_tests"]:
+            pd.DataFrame(report["isoquality_tests"]).to_parquet(isoquality_path, index=False)
         report.update(
             status="passed",
             sample_count=len(ids),
@@ -276,7 +363,15 @@ def analyze(args) -> None:
             derived_artifact_hashes={
                 str(aggregate_path): digest(aggregate_path),
                 str(row_path): digest(row_path),
+                **(
+                    {str(isoquality_path): digest(isoquality_path)}
+                    if isoquality_path.exists()
+                    else {}
+                ),
             },
+            lower_memory_equal_quality_demonstrated=any(
+                item.get("joint_pass") for item in report["isoquality_tests"]
+            ),
         )
     except Exception as error:
         report["error"] = f"{type(error).__name__}: {error}"

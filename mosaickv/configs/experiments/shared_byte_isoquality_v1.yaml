@@ -1,0 +1,107 @@
+schema_version: 2
+experiment_id: shared_byte_isoquality_v1
+classification: preregistered_unified_comparison
+execution_authorized: false
+fullkv_latency_comparison: false
+
+candidate:
+  name: mosaickv_exact
+  base_commit: null
+  change_scope: frozen_exact_selection_policy_no_prototype_residual_or_repair
+  content_sha256: null
+  policy_sha256: fc8f9efc3b1bafd5278811022d00a2a5546f48eec7fe0174471c02d21a64096f
+  description: prompt_window_16_stable_head_topk_routed_graph_1_over_256
+  prototype_merging: false
+  residual_storage: false
+  repair: false
+  require_clean_execution_commit: true
+  require_content_fingerprint_match: true
+  require_retention_one_parity_after_instrumentation: true
+
+resources:
+  max_global_a100s: 4
+  gpus_per_worker: 1
+  cpus_per_worker: 12
+  time_limit_seconds: 7200
+
+comparison:
+  budget_boundary: initial_live_cache_unique_backing_storage_after_compression_before_decode_reserve
+  target_units: MiB_1048576_bytes
+  choose_largest_feasible_allocation_below_cap: true
+  cross_method_realized_byte_tolerance: 0
+  target_shortfall: record_bytes_and_independent_layout_feasibility_certificate
+  unequal_feasible_allocations: unsupported_at_this_cap_not_same_budget
+  required_storage_measurements: [initial, final, peak]
+  additional_measurements: [physical_slot_payload, prefill_source_bytes, peak_gpu_allocated, peak_gpu_reserved]
+  decode_growth: append_only_no_eviction
+  peak_boundary: live_decode_cache_including_preallocation_and_padding_not_process_peak
+  precision: fp16
+  backend: huggingface
+  attention: eager
+  block_size: 1
+  physical_budget_block_size: 1
+  output_policy: fixed_max_new_tokens
+  generation: {do_sample: false, temperature: 0.0, top_p: 1.0}
+  quality_repetitions: 1
+  warmups_per_method: 5
+  dedicated_latency_repetitions: 20
+  seed: 20271014
+  fullkv_role: quality_reference_only
+  baseline_origin: reimpl
+  paper_reproduction: separate_environment_budget_and_table_not_a_unified_row
+
+lanes:
+  vl_cache:
+    model_id: llava-hf/llava-v1.6-mistral-7b-hf
+    model_revision: 2424fdd47412fccc66d91719126b420e9fbd7065
+    methods: [full_kv, prompt_attention_topk, vl_cache_reimpl, mosaickv_exact]
+    mandatory_policy: last_token
+    caps_mib: [10, 20, 25, 40, 80]
+    baseline_variant: paper_equations_with_physical_byte_cap_reimpl
+    tasks:
+      coco_caption:
+        dataset_id: lmms-lab/COCO-Caption
+        dataset_revision: c3213b54e173ae86517d481de17f31439d6f8c72
+        split: val
+        output_tokens: 64
+        metrics: [cider]
+        validation_sample_count: 32
+        sample_count: 512
+  lookm:
+    model_id: llava-hf/llava-1.5-7b-hf
+    model_revision: b234b804b114d9e37bb655e11cbbb5f5e971b7a9
+    methods: [full_kv, prompt_attention_topk, lookm_reimpl, mosaickv_exact]
+    mandatory_policy: first_and_last
+    caps_mib: [16, 20, 28, 40, 80]
+    baseline_variant: lookm_reimpl_shared_physical_cap
+    baseline_commit: ecf0f51a9c416c2d85e47faf2638502f01a6d748
+    official_execution: unsupported_pinned_upstream_missing_class
+    tasks:
+      milebench:
+        dataset_id: MileBench/MileBench
+        dataset_revision: 53c7a58051ef88bacf76541d91f03f5ba2d71e7d
+        split: official_evaluation
+        output_tokens: 64
+        metrics: [accuracy, rouge_l_f1, milebench]
+        validation_sample_count: 16
+        sample_count: 192
+        subtasks: [ActionPrediction, ActionSequence, CLEVR-Change, Spot-the-Diff]
+
+statistics:
+  separate_tasks_and_metrics: true
+  paired_bootstrap_replicates: 10000
+  confidence_level: 0.95
+  familywise_control: bonferroni_within_baseline_metric_family
+  cider: rerun_corpus_reducer_each_replicate
+  milebench: recompute_official_hierarchy_each_replicate_separate_accuracy_and_rouge
+  smaller_at_equal_quality: measured_cross_budget_pairs_only
+  minimum_memory_reduction: 0.30
+  quality_noninferiority_margin: 0.0
+  candidate_point_selection: storage_only_largest_eligible_mosaickv_cap
+  unsupported_or_failed_rows: retain_raw_errors_and_report_denominators
+
+reuse:
+  completed_equal_byte_results: supporting_evidence_only
+  primary_cross_budget_campaign: one_clean_source_snapshot_all_points
+  historical_nominal_ratio_results: separate_diagnostic_curves_only
+  retry: only_missing_or_failed_shards_of_identical_immutable_plan

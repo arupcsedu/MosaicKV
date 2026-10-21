@@ -1,0 +1,157 @@
+schema_version: 1
+experiment_id: lower_memory_equal_quality_v1
+classification: preregistered_unified_comparison
+
+# Planning is complete, but canonical execution needs a reviewed clean source
+# SHA and immutable sample ledgers. This file never authorizes submission.
+execution_authorized: false
+source_sha: null
+candidate: mosaickv_exact
+prototype_merging: false
+residual_storage: false
+repair: false
+
+claim:
+  text: MosaicKV uses at least 30 percent less physical active KV storage than a named compressed baseline at statistically non-inferior quality.
+  minimum_reduction: 0.30
+  required_boundaries: [initial, final, peak]
+  require_threshold_on_every_paired_sample: true
+  require_threshold_on_aggregate: true
+  quality_noninferiority_margin: 0.0
+  confidence_level: 0.95
+  paired_bootstrap_replicates: 10000
+  no_interpolation: true
+  no_nominal_retention_comparison: true
+  no_fullkv_latency_comparison: true
+  candidate_point_selection: largest_measured_mosaickv_cap_satisfying_all_memory_boundaries_before_quality_is_read
+  competitor_selection: smallest_measured_baseline_point_for_which_the_preregistered_candidate_pair_passes_quality
+  multiplicity: report_every_registered_pair_and_apply_bonferroni_within_each_baseline_metric_family
+  failure_policy: retain_and_report_every_failed_or_physically_infeasible_pair
+
+controls:
+  inherit: shared_byte_comparison_v2
+  identical_within_lane:
+    - model_checkpoint_and_revision
+    - processor_and_chat_template
+    - prompt_and_media
+    - preprocessing_and_tokenization
+    - deterministic_generation_and_output_limit
+    - precision_backend_and_attention
+    - block_size_and_mandatory_policy
+    - warmups_repetitions_and_gpu_controls
+    - sample_ids_and_metric_references
+  budget_boundary: unique_live_physical_kv_backing_storage
+  largest_feasible_allocation_at_or_below_cap: true
+  required_storage_measurements: [initial, final, peak]
+  cache_block_size: 1
+  model_precision: fp16
+  backend: huggingface
+  attention_implementation: eager
+  generation: {do_sample: false, temperature: 0.0, top_p: 1.0}
+  seed: 20271014
+
+resources:
+  max_global_a100s: 4
+  gpus_per_worker: 1
+  cpus_per_worker: 12
+  time_limit_seconds: 7200
+  shard_size: 16
+  immutable_write_once_outputs: true
+  resume_only_missing_or_failed_samples: true
+
+lanes:
+  vl_cache_coco:
+    model_id: llava-hf/llava-v1.6-mistral-7b-hf
+    model_revision: 2424fdd47412fccc66d91719126b420e9fbd7065
+    task: coco_caption
+    dataset_id: lmms-lab/COCO-Caption
+    dataset_revision: c3213b54e173ae86517d481de17f31439d6f8c72
+    split: val
+    validation_sample_count: 32
+    sample_count: 512
+    output_tokens: 64
+    methods: [full_kv, prompt_attention_topk, vl_cache_reimpl, mosaickv_exact]
+    compressed_caps_mib: [10, 20, 25, 40, 80]
+    named_baselines: [prompt_attention_topk, vl_cache_reimpl]
+    metrics:
+      - name: cider
+        direction: higher
+        scope: corpus
+        implementation: lmms_eval_coco_official_compatible
+        bootstrap: rerun_complete_corpus_reducer_in_every_replicate
+    primary_registered_pairs:
+      - {baseline_cap_mib: 20, candidate_cap_mib: 10}
+      - {baseline_cap_mib: 40, candidate_cap_mib: 25}
+      - {baseline_cap_mib: 80, candidate_cap_mib: 40}
+    completed_256_sample_40_mib_rows:
+      status: preserve_as_supporting_equal_byte_evidence
+      reuse_in_primary_claim: false
+      reason: new_cross_budget_campaign_requires_one_clean_source_snapshot_for_every_curve_point
+
+  lookm_milebench:
+    model_id: llava-hf/llava-1.5-7b-hf
+    model_revision: b234b804b114d9e37bb655e11cbbb5f5e971b7a9
+    task: milebench
+    dataset_id: MileBench/MileBench
+    dataset_revision: 53c7a58051ef88bacf76541d91f03f5ba2d71e7d
+    split: official_evaluation
+    # The previous 288-example development pool and its earlier 288-example
+    # exclusion pool consumed 144 identities per subtask.  Exactly 56 remain
+    # in each of the four registered 200-example subtasks.  Reserve four per
+    # subtask for the execution gate and 48 per subtask for the paper cohort;
+    # leave four per subtask unused rather than recycling inspected examples.
+    validation_sample_count: 16
+    sample_count: 192
+    output_tokens: 64
+    subtasks: [ActionPrediction, ActionSequence, CLEVR-Change, Spot-the-Diff]
+    methods: [full_kv, prompt_attention_topk, lookm_reimpl, mosaickv_exact]
+    compressed_caps_mib: [16, 20, 28, 40, 80]
+    named_baselines: [prompt_attention_topk, lookm_reimpl]
+    metrics:
+      - {name: accuracy, direction: higher, scope: official_hierarchy}
+      - {name: rouge_l_f1, direction: higher, scope: official_hierarchy}
+    primary_registered_pairs:
+      - {baseline_cap_mib: 40, candidate_cap_mib: 16}
+      - {baseline_cap_mib: 80, candidate_cap_mib: 40}
+    joint_metric_rule: accuracy_and_rouge_l_must_both_pass_for_a_lane_wide_claim
+    completed_256_sample_curves:
+      status: preserve_as_supporting_evidence
+      reuse_in_primary_claim: false
+      reason: inspected identities are excluded from the new prospective claim
+    official_lookm_execution: false
+    baseline_label: lookm_reimpl
+
+  prefixkv_native:
+    status: wait_for_active_prefixkv_campaign_then_plan_storage_only_pairs
+    model_id: llava-hf/llava-1.5-7b-hf
+    model_revision: b234b804b114d9e37bb655e11cbbb5f5e971b7a9
+    tasks:
+      llava_description: {sample_count: 1000, metrics: [teacher_forced_ppl, rouge_l_f1]}
+      mmvet_prefixkv: {sample_count: 218, metrics: [teacher_forced_ppl, rouge_l_f1]}
+    methods: [full_kv, prompt_attention_topk, prefixkv_reimpl, mosaickv_exact]
+    compressed_caps_mib: [40, 80, 120, 160, 240]
+    named_baselines: [prompt_attention_topk, prefixkv_reimpl]
+    pair_selection_after_campaign:
+      reads_only: [initial_active_kv_storage_bytes, final_active_kv_storage_bytes, peak_active_kv_storage_bytes]
+      forbidden_during_pair_selection: [answers, references, nll, ppl, rouge_l_f1]
+      rule: largest_candidate_cap_with_at_least_30_percent_reduction_at_all_boundaries
+    joint_metric_rule: ppl_and_rouge_l_must_both_pass
+    note: long_decode_growth_may_make_30_percent_final_or_peak_reduction_physically_infeasible_and_must_be_reported_as_such
+
+outputs:
+  raw_predictions: results/lower_memory_equal_quality/raw.jsonl
+  paired_samples: results/lower_memory_equal_quality/paired_samples.parquet
+  curve_metrics: results/lower_memory_equal_quality/curve_metrics.parquet
+  registered_pair_tests: results/lower_memory_equal_quality/registered_pair_tests.parquet
+  report: analysis/lower_memory_equal_quality.md
+  figure: figures/lower_memory_equal_quality.pdf
+
+paper_gate:
+  all_rows_complete_or_explicit_failures_preserved: true
+  provenance_manifest_complete: true
+  retention_one_fullkv_parity: true
+  same_sample_ids: true
+  exact_measured_storage: true
+  metric_specific_paired_intervals: true
+  every_named_baseline_reported_even_when_gate_fails: true
+  headline_requires_at_least_one_positive_lane_and_no_wording_that_generalizes_to_failed_lanes: true
