@@ -786,6 +786,22 @@ def run_hf_evaluation(
         )
         comparison_controls_sha = None
         if unified_prefixkv:
+            decode_policy = getattr(args, "comparison_decode_policy", None)
+            if decode_policy is not None:  # noqa: SIM102 - keep validation grouped
+                if (
+                    not isinstance(decode_policy, dict)
+                    or set(decode_policy) != {"name", "generated_capacity", "sink_tokens"}
+                    or decode_policy["name"] != "common_bounded_history_v1_fullkv_reference_exempt"
+                    or (
+                        not config.method.is_full_cache
+                        and (
+                            config.bounded_decode is None
+                            or asdict(config.bounded_decode)
+                            != {k: decode_policy[k] for k in ("generated_capacity", "sink_tokens")}
+                        )
+                    )
+                ):
+                    raise ValueError("shared bounded-history reference policy mismatch")
             processor = selected_adapter.processor
             tokenizer = getattr(processor, "tokenizer", processor)
             comparison_controls_sha = sha256_text(
@@ -814,7 +830,7 @@ def run_hf_evaluation(
                             "block_size": config.cache.block_size,
                             "physical_budget_block_size": config.cache.physical_budget_block_size,
                             "mandatory": config.cache.physical_budget_mandatory_policy,
-                            "decode_growth": "append_only",
+                            "decode_growth": decode_policy or "append_only",
                         },
                         "environment_lock_sha256": sha256_bytes(
                             (

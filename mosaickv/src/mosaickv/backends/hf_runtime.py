@@ -8799,6 +8799,9 @@ class HuggingFaceMosaicKVModel:
                 "JsonObject",
                 asdict(self.config.output_preserving),
             )
+        if self.config.bounded_decode is not None:
+            trace["bounded_decode_config"] = cast("JsonObject", asdict(self.config.bounded_decode))
+            trace["bounded_decode"] = {"status": "not_yet_constructed"}
         started = time.perf_counter()
         raw_teacher_ids = request.generation_kwargs.get("_mosaickv_teacher_forced_token_ids")
         if raw_teacher_ids is None:
@@ -9019,6 +9022,8 @@ class HuggingFaceMosaicKVModel:
             vl_cache_plan: VLCacheCompressionPlan | None = None
             published_kv_plan: PublishedKVCompressionPlan | None = None
             state = prefill.state
+            bounded_budget = None
+            bounded_decode_trace: JsonObject | None = None
             if not is_full_cache and not retention_one_identity:
                 cache_state_started = time.perf_counter()
                 snapshot = self.adapter.extract_past_key_values(prefill.state.past_key_values)
@@ -9078,7 +9083,46 @@ class HuggingFaceMosaicKVModel:
                     mandatory_logical_positions=mandatory_positions,
                 )
                 cache_state_construction_seconds = time.perf_counter() - cache_state_started
-                dense_budget = _dense_physical_cache_budget(full_state, self.config)
+                prompt_budget_config = self.config
+                if self.config.bounded_decode is not None:
+                    from mosaickv.adapters.huggingface.bounded_history_cache import (
+                        assert_bounded_history_support,
+                        bounded_history_budget,
+                    )
+
+                    assert_bounded_history_support(self.adapter)
+                    bytes_per_position = sum(
+                        (key.numel() * key.element_size() + value.numel() * value.element_size())
+                        // int(key.shape[-2])
+                        for key, value in self.adapter._legacy_layers(
+                            prefill.state.past_key_values
+                        )[0]
+                    )
+                    bounded_budget = bounded_history_budget(
+                        self.config.cache.budget_value,
+                        bytes_per_position,
+                        self.config.bounded_decode.generated_capacity,
+                        (
+                            len(teacher_forced_ids)
+                            if teacher_forced_ids
+                            else self.config.generation.max_new_tokens
+                        )
+                        - 1,
+                    )
+                    trace["bounded_decode"] = {
+                        "status": "generation_reserve_planned_before_prompt_selection",
+                        "budget_reservation": cast("JsonObject", asdict(bounded_budget)),
+                        "prefill_selection_budget_semantics": "bytes_only_not_nominal_retention",
+                    }
+                    prompt_budget_config = replace(
+                        self.config,
+                        cache=replace(
+                            self.config.cache,
+                            budget_value=bounded_budget.prompt_budget_bytes,
+                            retention_ratio=math.nextafter(1.0, 0.0),
+                        ),
+                    )
+                dense_budget = _dense_physical_cache_budget(full_state, prompt_budget_config)
                 physical_prompt_capacity = (
                     None if dense_budget is None else dense_budget.prompt_capacity
                 )
@@ -9088,7 +9132,7 @@ class HuggingFaceMosaicKVModel:
                     else replace(
                         self.config,
                         cache=replace(
-                            self.config.cache,
+                            prompt_budget_config.cache,
                             budget_value=dense_budget.target_bytes,
                         ),
                     )
@@ -10076,7 +10120,40 @@ class HuggingFaceMosaicKVModel:
             else:
                 trace["fidelity_diagnostic"] = {"status": "disabled"}
 
-            # Observe before preallocation so unused backing capacity is not
+            if bounded_budget is not None and bounded_budget.generated_positions:
+                from mosaickv.adapters.huggingface.bounded_history_cache import (
+                    install_bounded_history,
+                )
+
+                assert self.config.bounded_decode is not None
+                bounded_record, setup_seconds = _timed(
+                    prefill.logits,
+                    lambda: install_bounded_history(
+                        self.adapter,
+                        state,
+                        generated_capacity=bounded_budget.generated_positions,
+                        sink_tokens=min(
+                            self.config.bounded_decode.sink_tokens,
+                            bounded_budget.generated_positions - 1,
+                        ),
+                        cap_bytes=bounded_budget.cap_bytes,
+                    ),
+                )
+                packing_seconds += setup_seconds
+                bounded_decode_trace = cast("JsonObject", bounded_record)
+                bounded_decode_trace["budget_reservation"] = cast(
+                    "JsonObject", asdict(bounded_budget)
+                )
+                bounded_decode_trace["setup_seconds"] = setup_seconds
+                trace["bounded_decode"] = bounded_decode_trace
+            elif self.config.bounded_decode is not None:
+                bounded_decode_trace = {
+                    "status": "bypassed_retention_one_identity"
+                    if retention_one_identity
+                    else "no_decode_updates"
+                }
+
+            # Observe before append-only preallocation so unused backing capacity is not
             # confused with the post-compression byte target. All methods use
             # the same metadata-only instrumentation (no device copies/sync).
             cache_accounting_started = time.perf_counter()
@@ -10085,7 +10162,7 @@ class HuggingFaceMosaicKVModel:
             )
             trace_instrumentation_seconds += time.perf_counter() - cache_accounting_started
             preallocated_decode_cache = False
-            if prefixkv_plan is None:
+            if prefixkv_plan is None and not state.model_state.get("mosaickv_bounded_history"):
                 preallocated_decode_cache = self.adapter.preallocate_decode_cache(
                     state,
                     self.config.generation.max_new_tokens - 1,
@@ -10094,9 +10171,13 @@ class HuggingFaceMosaicKVModel:
             cache_lifecycle.observe(self.adapter._legacy_layers(state.past_key_values)[0])
             trace_instrumentation_seconds += time.perf_counter() - cache_accounting_started
             decode_runtime_policy["kv_growth"] = (
-                "preallocated_append_only_views"
-                if preallocated_decode_cache
-                else "backend_native_dynamic_growth"
+                "bounded_generated_ring_v1"
+                if state.model_state.get("mosaickv_bounded_history")
+                else (
+                    "preallocated_append_only_views"
+                    if preallocated_decode_cache
+                    else "backend_native_dynamic_growth"
+                )
             )
             decode_attention = (
                 self.config.execution.decode_attention_implementation
@@ -10217,7 +10298,9 @@ class HuggingFaceMosaicKVModel:
                 # the required timing boundary.
                 decode_finite_flags.append(torch.isfinite(provisional.logits).all())
                 if repair_state is None:
-                    if prefixkv_plan is not None:
+                    if prefixkv_plan is not None and not state.model_state.get(
+                        "mosaickv_bounded_history"
+                    ):
 
                         def maintain_prefix(
                             output: Any = provisional,
@@ -10509,6 +10592,24 @@ class HuggingFaceMosaicKVModel:
                     trace["trace_detail"] = "full_debug"
                 trace_instrumentation_seconds += time.perf_counter() - trace_started
             repair_transfer = sum(event.transfer_time_ms for event in repair_events) / 1000.0
+            if bounded_decode_trace is not None:
+                from mosaickv.adapters.huggingface.bounded_history_cache import (
+                    bounded_history_record,
+                )
+
+                if state.model_state.get("mosaickv_bounded_history"):
+                    bounded_decode_trace.update(bounded_history_record(state))
+                    if cache_lifecycle.peak_storage_bytes > self.config.cache.budget_value:
+                        raise HuggingFaceRuntimeError(
+                            "bounded history exceeded lifetime storage cap"
+                        )
+                trace["bounded_decode"] = bounded_decode_trace
+                if not retention_one_identity:
+                    bounded_decode_trace["prompt_policy_effective_method"] = trace.get(
+                        "effective_method", method.value
+                    )
+                    assert self.config.bounded_decode is not None
+                    trace["effective_method"] = self.config.bounded_decode.effective_method(method)
             repair_redecode = sum(event.re_decode_time_ms for event in repair_events) / 1000.0
             first_decode_step = per_token_decode_seconds[0] if per_token_decode_seconds else None
             steady_state_decode_mean = (
@@ -11024,7 +11125,11 @@ class HuggingFaceMosaicKVModel:
                             "counterfactual_draft_head_routing": bool(counterfactual_head_shifts),
                         },
                     ),
-                    "active_kv_bytes": packed_prefill_active_kv_bytes,
+                    "active_kv_bytes": (
+                        cache_lifecycle.initial_storage_bytes
+                        if state.model_state.get("mosaickv_bounded_history")
+                        else packed_prefill_active_kv_bytes
+                    ),
                     "final_active_kv_bytes": active_bytes,
                     "cache_lifecycle": cache_lifecycle.record(),
                     "residual_kv_bytes": residual_bytes,
@@ -11033,7 +11138,12 @@ class HuggingFaceMosaicKVModel:
                     ),
                     "gpu_rescue_initial_kv_bytes": gpu_rescue_initial_bytes,
                     "initial_total_gpu_kv_bytes": (
-                        packed_prefill_active_kv_bytes + gpu_rescue_initial_bytes
+                        (
+                            cache_lifecycle.initial_storage_bytes
+                            if state.model_state.get("mosaickv_bounded_history")
+                            else packed_prefill_active_kv_bytes
+                        )
+                        + gpu_rescue_initial_bytes
                     ),
                     "gpu_rescue_staging": {
                         "configured_max_blocks": self.config.residual.gpu_rescue_max_blocks,
@@ -11091,7 +11201,11 @@ class HuggingFaceMosaicKVModel:
                     decode_time=decode_seconds,
                     end_to_end_time=total_seconds,
                     generated_tokens=int(token_ids.numel()),
-                    active_kv_bytes=packed_prefill_active_kv_bytes,
+                    active_kv_bytes=(
+                        cache_lifecycle.initial_storage_bytes
+                        if state.model_state.get("mosaickv_bounded_history")
+                        else packed_prefill_active_kv_bytes
+                    ),
                     initial_active_kv_storage_bytes=cache_lifecycle.initial_storage_bytes,
                     final_active_kv_storage_bytes=cache_lifecycle.final_storage_bytes,
                     peak_active_kv_storage_bytes=cache_lifecycle.peak_storage_bytes,

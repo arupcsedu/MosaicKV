@@ -12,6 +12,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Protocol, cast
 
+from mosaickv.config import BoundedDecodeConfig
 from mosaickv.evaluation.metrics.registry import default_metric_registry
 from mosaickv.evaluation.metrics.scorers import rouge_l_f1
 from mosaickv.evaluation.metrics.types import (
@@ -21,7 +22,7 @@ from mosaickv.evaluation.metrics.types import (
 )
 from mosaickv.evaluation.model import EvaluationRequest, LocalEvaluationModel
 from mosaickv.evaluation.results import EvaluationResult, ResultStatus
-from mosaickv.types import JsonObject, ResultCategory, ResultOrigin
+from mosaickv.types import JsonObject, MosaicKVMethod, ResultCategory, ResultOrigin
 
 
 @dataclass(frozen=True, slots=True)
@@ -380,10 +381,16 @@ def evaluate_prefixkv_native_metrics(
         and model.method == "prefixkv_reimpl"
         and method == "prefixkv_selection_only_reimpl"
     )
+    bounded_config = getattr(getattr(model, "config", None), "bounded_decode", None)
+    bounded_variant = (
+        categories == {ResultCategory.UNIFIED_COMPARISON}
+        and isinstance(bounded_config, BoundedDecodeConfig)
+        and method == bounded_config.effective_method(MosaicKVMethod(model.method))
+    )
     if (
         model_id != model.model_id
         or backend != model.backend
-        or (method != model.method and not selection_variant)
+        or (method != model.method and not selection_variant and not bounded_variant)
     ):
         raise ValueError("generated rows do not match the teacher-forced model identity")
     ppl_samples = tuple(

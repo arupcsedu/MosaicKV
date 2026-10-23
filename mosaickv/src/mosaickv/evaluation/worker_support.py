@@ -101,6 +101,7 @@ def control_configs(
     full = replace(
         template,
         method=MosaicKVMethod.FULL_KV,
+        bounded_decode=None,
         cache=replace(
             template.cache,
             budget_value=2**63 - 1,
@@ -141,6 +142,7 @@ def record_hf_run(
     fullkv_reference_input: str | Path | None = None,
     fullkv_reference_sha256: str | None = None,
     fullkv_reference_output: str | Path | None = None,
+    comparison_decode_policy: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run and validate one immutable, fully paired HF measurement arm."""
 
@@ -177,6 +179,7 @@ def record_hf_run(
         sample_id_file=str(ledger_path),
         sample_id_file_sha=ledger_sha,
         local_files_only=True,
+        comparison_decode_policy=comparison_decode_policy,
     )
     if export_metrics:
         metric_root = output_root / run_id

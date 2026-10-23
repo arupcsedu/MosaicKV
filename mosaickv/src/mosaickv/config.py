@@ -375,6 +375,36 @@ class AblationConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class BoundedDecodeConfig:
+    """Opt-in shared lifetime-cap controller; every use is a labeled adaptation."""
+
+    generated_capacity: int = 32
+    sink_tokens: int = 4
+
+    def effective_method(self, method: MosaicKVMethod) -> str:
+        if method.is_published_reimplementation:
+            return f"{method.value.removesuffix('_reimpl')}__bounded_generated_history_v1_reimpl"
+        return f"{method.value}__bounded_generated_history_v1"
+
+    def __post_init__(self) -> None:
+        if type(self.generated_capacity) is not int or self.generated_capacity < 1:
+            raise ConfigurationError("bounded_decode.generated_capacity must be an integer >= 1")
+        if type(self.sink_tokens) is not int or not 0 <= self.sink_tokens < self.generated_capacity:
+            raise ConfigurationError(
+                "bounded_decode.sink_tokens must be an integer in [0, generated_capacity)"
+            )
+
+    @classmethod
+    def from_mapping(cls, value: object) -> BoundedDecodeConfig:
+        data = _mapping(value, "bounded_decode")
+        _reject_unknown(data, {"generated_capacity", "sink_tokens"}, "bounded_decode")
+        return cls(
+            _int(data, "generated_capacity", 32, "bounded_decode"),
+            _int(data, "sink_tokens", 4, "bounded_decode"),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class CacheConfig:
     """Cache budget and block layout."""
 
@@ -1683,9 +1713,7 @@ class SelectionConfig:
                 )
             reservation = self.stable_head_hierarchical_reserved_reallocation_evaluations
             beam_width = self.stable_head_hierarchical_reallocation_beam_width
-            combination_width = (
-                self.stable_head_hierarchical_reallocation_maximum_combination_width
-            )
+            combination_width = self.stable_head_hierarchical_reallocation_maximum_combination_width
             restore_donor = self.stable_head_hierarchical_logit_feedback_restore_donor
             if reservation:
                 if not 2 <= beam_width <= 8:
@@ -1703,9 +1731,7 @@ class SelectionConfig:
                         "at least one combination"
                     )
                 if (
-                    self.stable_head_hierarchical_partition_count
-                    + 1
-                    + reservation
+                    self.stable_head_hierarchical_partition_count + 1 + reservation
                     > self.stable_head_hierarchical_maximum_candidate_evaluations
                 ):
                     raise ConfigurationError(
@@ -3708,10 +3734,70 @@ class RunConfig:
     published_kv: PublishedKVConfig = field(default_factory=PublishedKVConfig)
     schema_version: int = 1
     output_preserving: OutputPreservingConfig | None = None
+    bounded_decode: BoundedDecodeConfig | None = None
 
     def __post_init__(self) -> None:
         if self.schema_version != 1:
             raise ConfigurationError("schema_version must equal 1")
+        if self.bounded_decode is not None:
+            if not isinstance(self.bounded_decode, BoundedDecodeConfig):
+                raise ConfigurationError("bounded_decode must be a validated configuration")
+            if self.cache.retention_ratio not in {1.0, math.nextafter(1.0, 0.0)}:
+                raise ConfigurationError(
+                    "bounded_decode is byte-driven: retention_ratio must be "
+                    "0.9999999999999999 or 1.0 for identity"
+                )
+            supported = {
+                MosaicKVMethod.MOSAICKV_EXACT,
+                MosaicKVMethod.RANDOM_KV,
+                MosaicKVMethod.UNIFORM_KV,
+                MosaicKVMethod.PROMPT_ATTENTION_TOPK,
+                MosaicKVMethod.VALUE_TOPK,
+                MosaicKVMethod.PREFIXKV_REIMPL,
+                MosaicKVMethod.LOOKM_REIMPL,
+                MosaicKVMethod.VL_CACHE_REIMPL,
+                MosaicKVMethod.H2O_REIMPL,
+                MosaicKVMethod.STREAMINGLLM_REIMPL,
+                MosaicKVMethod.PYRAMIDKV_REIMPL,
+                MosaicKVMethod.SNAPKV_REIMPL,
+                MosaicKVMethod.ROCO_REIMPL,
+            }
+            if (
+                self.method not in supported
+                or self.execution.backend is not Backend.HUGGINGFACE
+                or self.execution.attention_implementation != "eager"
+                or self.execution.decode_attention_implementation not in {None, "eager"}
+                or self.cache.budget_unit is not BudgetUnit.BYTES
+                or self.cache.block_size != 1
+                or self.cache.physical_budget_block_size not in {None, 1}
+                or (
+                    self.cache.total_storage_budget_bytes is not None
+                    and self.cache.total_storage_budget_bytes < self.cache.budget_value
+                )
+                or self.selection.physical_capacity_fraction != 1.0
+                or self.prototypes.enabled
+                or self.residual.enabled
+                or self.repair.enabled
+                or self.repair.policy is not RepairPolicy.NONE
+                or self.output_preserving is not None
+                or self.diagnostics.enabled
+                or self.generation.do_sample
+                or self.generation.temperature != 0
+            ):
+                raise ConfigurationError(
+                    "bounded_decode requires an audited exact/selection baseline or MosaicKV, "
+                    "HF eager, one-token byte budgets, full physical-capacity fraction, greedy "
+                    "decoding and disabled prototype/residual/repair/output-preserving diagnostics"
+                )
+            if self.method.is_prefixkv_reimplementation and (
+                self.prefixkv.hf_cache_transport != "ragged_llama_eager_v1"
+                or self.prefixkv.decode_policy != "append_only"
+                or self.prefixkv.allocation_policy != "global_apportion"
+            ):
+                raise ConfigurationError(
+                    "bounded_decode PrefixKV requires ragged_llama_eager_v1, global_apportion, "
+                    "and append_only selection: common ring replaces native decode eviction"
+                )
         if self.output_preserving is not None:
             if not isinstance(self.output_preserving, OutputPreservingConfig):
                 raise ConfigurationError("output_preserving must be a validated configuration")
@@ -4164,6 +4250,7 @@ class RunConfig:
             "vl_cache",
             "published_kv",
             "output_preserving",
+            "bounded_decode",
         }
         _reject_unknown(data, allowed, "config")
         required = {"model", "dataset", "execution", "generation", "cache"}
@@ -4200,6 +4287,11 @@ class RunConfig:
                 else OutputPreservingConfig.from_mapping(data["output_preserving"])
             ),
             schema_version=_int(data, "schema_version", 1, "config"),
+            bounded_decode=(
+                None
+                if data.get("bounded_decode") is None
+                else BoundedDecodeConfig.from_mapping(data["bounded_decode"])
+            ),
         )
 
 
@@ -4247,6 +4339,8 @@ def canonical_config(config: RunConfig) -> JsonObject:
     # Adding the opt-in candidate must not change historical config identities.
     if config.output_preserving is None:
         payload.pop("output_preserving", None)
+    if config.bounded_decode is None:
+        payload.pop("bounded_decode", None)
     return payload
 
 
@@ -4297,6 +4391,7 @@ def synthetic_evaluation_config(seed: int = 0) -> RunConfig:
 
 __all__ = [
     "AblationConfig",
+    "BoundedDecodeConfig",
     "CacheConfig",
     "ConfigurationError",
     "DatasetConfig",

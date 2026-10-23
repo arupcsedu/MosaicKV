@@ -19,7 +19,7 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import cast
 
-from mosaickv.config import OutputPreservingConfig, RunConfig
+from mosaickv.config import BoundedDecodeConfig, OutputPreservingConfig, RunConfig
 from mosaickv.evaluation.messages import MediaItem, MediaKind, build_multimodal_messages
 from mosaickv.evaluation.metric_export import export_task_metrics
 from mosaickv.evaluation.metrics.registry import default_metric_registry
@@ -61,7 +61,7 @@ from mosaickv.evaluation.results import EvaluationResult, ResultStatus
 from mosaickv.evaluation.storage import JsonlResultStore, write_parquet_aggregate
 from mosaickv.evaluation.tasks import TaskSpec, deterministic_sample_ids
 from mosaickv.manifest import sha256_bytes
-from mosaickv.types import JsonObject, ResultCategory, ResultOrigin
+from mosaickv.types import JsonObject, MosaicKVMethod, ResultCategory, ResultOrigin
 
 _PREFIXKV_TASKS = frozenset({"llava_description", "mmvet_prefixkv"})
 _PREFIXKV_METHODS = frozenset(
@@ -364,6 +364,8 @@ def _validate_method(
     task: str,
     method: str,
     result_category: ResultCategory = ResultCategory.PAPER_REPRODUCTION,
+    *,
+    common_bounded: bool = False,
 ) -> None:
     allowed = _PREFIXKV_METHODS if task in _PREFIXKV_TASKS else _MILEBENCH_METHODS
     if task == "coco_caption":
@@ -374,6 +376,19 @@ def _validate_method(
         )
     if result_category is ResultCategory.UNIFIED_COMPARISON:
         allowed = allowed | {"prompt_attention_topk"}
+        if common_bounded and task in _PREFIXKV_TASKS:
+            allowed = allowed | {
+                "lookm_reimpl",
+                "vl_cache_reimpl",
+                "random_kv",
+                "uniform_kv",
+                "value_topk",
+                "streamingllm_reimpl",
+                "snapkv_reimpl",
+                "roco_reimpl",
+            }
+    elif common_bounded:
+        raise ValueError("common bounded history is an adaptation, not paper reproduction")
     if method not in allowed:
         raise ValueError(
             f"method {method!r} is not enabled for paper-native task {task!r}; "
@@ -615,7 +630,13 @@ def run_materialized_paper_native_evaluation(
         if result_category is ResultCategory.PAPER_REPRODUCTION
         else ResultOrigin.LOCALLY_MEASURED
     )
-    _validate_method(task.name, model.method, result_category)
+    bounded_config = getattr(getattr(model, "config", None), "bounded_decode", None)
+    _validate_method(
+        task.name,
+        model.method,
+        result_category,
+        common_bounded=isinstance(bounded_config, BoundedDecodeConfig),
+    )
     selected_ids = deterministic_sample_ids(
         tuple(sample.sample_id for sample in ledger.samples),
         seed=seed,
@@ -748,10 +769,16 @@ def run_materialized_paper_native_evaluation(
             and isinstance(configured_output_preserving, OutputPreservingConfig)
             and effective_methods == {configured_output_preserving.effective_method}
         )
+        allowed_bounded_variant = (
+            result_category is ResultCategory.UNIFIED_COMPARISON
+            and isinstance(bounded_config, BoundedDecodeConfig)
+            and effective_methods == {bounded_config.effective_method(MosaicKVMethod(model.method))}
+        )
         if (
             effective_methods != {model.method}
             and not allowed_selection_variant
             and not allowed_output_preserving_variant
+            and not allowed_bounded_variant
         ):
             raise ValueError("paper-native run changed effective method or used a fallback")
         operating_point = cache_operating_point(selected_rows)

@@ -862,6 +862,7 @@ class HuggingFaceMultimodalAdapter(ABC):
         packed_validity = state.model_state.get("mosaickv_validity_masks")
         packed_all_valid = state.model_state.get("mosaickv_packed_all_valid") is True
         ragged = state.model_state.get("prefixkv_ragged") is True
+        bounded = state.model_state.get("mosaickv_bounded_history") is True
         if (
             state.active_cache_length != state.logical_sequence_length
             and packed_validity is None
@@ -885,7 +886,11 @@ class HuggingFaceMultimodalAdapter(ABC):
         layer_masks = (
             self._packed_decode_masks(state, token_id) if packed_validity is not None else ()
         )
-        if ragged:
+        if bounded:
+            from mosaickv.adapters.huggingface.bounded_history_cache import bounded_history_masks
+
+            layer_masks = bounded_history_masks(state)
+        elif ragged:
             from mosaickv.adapters.huggingface.prefixkv_cache import ragged_decode_masks
 
             layer_masks = ragged_decode_masks(self, state)
@@ -932,6 +937,10 @@ class HuggingFaceMultimodalAdapter(ABC):
         cache = self.extract_past_key_values(output, clone=False)
         active_length = self._cache_length(cache)
         expected_active = state.active_cache_length + 1
+        if bounded:
+            expected_active = min(
+                expected_active, int(state.model_state["mosaickv_bounded_history_capacity"])
+            )
         if active_length != expected_active:
             raise RuntimeError(f"decode cache grew to {active_length}; expected {expected_active}")
         model_state = state.model_state
@@ -953,7 +962,7 @@ class HuggingFaceMultimodalAdapter(ABC):
         # allocation and a model-state dictionary copy per token. Repair and
         # draft paths pass cloned states at this boundary.
         state.past_key_values = cache
-        state.attention_mask = attention_mask
+        state.attention_mask = attention_mask[..., :active_length] if bounded else attention_mask
         state.active_cache_length = active_length
         state.logical_sequence_length += 1
         state.next_decode_position += 1
@@ -1166,6 +1175,11 @@ class HuggingFaceMultimodalAdapter(ABC):
             if cache is None:
                 raise RuntimeError("forward output did not contain past_key_values")
             return cache
+        if getattr(cache, "_mosaickv_bounded_history", False):
+            raise NotImplementedError(
+                "generic snapshot/reinjection would lose bounded ring ownership and positions; "
+                "construct a separate bounded cache from an isolated prefill instead"
+            )
         legacy, source_kind = self._legacy_layers(cache)
         independent = getattr(cache, "_mosaickv_independent_layer_lengths", False) is True
         layers: list[CacheLayerSnapshot] = []
@@ -1251,6 +1265,8 @@ class HuggingFaceMultimodalAdapter(ABC):
 
         if additional_positions < 1:
             return False
+        if state.model_state.get("mosaickv_bounded_history"):
+            raise RuntimeError("append-only preallocation would erase bounded-history eviction")
         layers, source_kind = self._legacy_layers(state.past_key_values)
         if source_kind not in {"cache_object", "cache_layers"}:
             return False

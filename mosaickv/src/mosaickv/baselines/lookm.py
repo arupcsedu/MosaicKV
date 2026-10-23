@@ -432,6 +432,16 @@ def build_lookm_reimpl_plan(
         raise LookMReimplementationError("LOOK-M important count exceeds non-recent prefix")
     modalities = _modality_by_physical(full_state)
     recent_positions = tuple(range(prefix_length, length))
+    mandatory_prefix = tuple(
+        position
+        for position in range(prefix_length)
+        if full_state.logical_positions.logical_for_physical(position)
+        in full_state.mandatory_logical_positions
+    )
+    if len(mandatory_prefix) > important_count:
+        raise LookMReimplementationError(
+            "LOOK-M physical budget cannot fit mandatory tokens and its recent reservation"
+        )
     head_states: list[LookMHeadState] = []
     for layer_index, (layer, raw_attention) in enumerate(
         zip(full_state.layers, attention_weights, strict=True)
@@ -458,10 +468,13 @@ def build_lookm_reimpl_plan(
                     ranked_scores[physical] += text_prior
             important_positions = tuple(
                 sorted(
-                    sorted(
-                        range(prefix_length),
-                        key=lambda position: (-float(ranked_scores[position]), position),
-                    )[:important_count]
+                    (
+                        *mandatory_prefix,
+                        *sorted(
+                            (p for p in range(prefix_length) if p not in mandatory_prefix),
+                            key=lambda position: (-float(ranked_scores[position]), position),
+                        )[: important_count - len(mandatory_prefix)],
+                    )
                 )
             )
             selected_positions = tuple(sorted((*important_positions, *recent_positions)))

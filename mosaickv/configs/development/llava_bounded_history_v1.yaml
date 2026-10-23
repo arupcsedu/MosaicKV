@@ -1,0 +1,90 @@
+# Development candidate, not measured paper evidence or a submission authorization.
+# 120 MiB is a LIFETIME live-KV backing-storage cap, not a prefill-only cap.
+schema_version: 1
+model:
+  id: llava-hf/llava-1.5-7b-hf
+  revision: b234b804b114d9e37bb655e11cbbb5f5e971b7a9
+  precision: fp16
+dataset:
+  id: PrefixKV/LLaVA-Description
+  revision: 407c2d2f8fc13611d13f72a5e18b8c33bf9c44e6e05278bf0b4da41deeacbe6a
+  split: official_1000
+execution:
+  backend: huggingface
+  attention_implementation: eager
+  decode_attention_implementation: eager
+  seed: 20271014
+  deterministic_algorithms: true
+generation:
+  max_new_tokens: 1024
+  do_sample: false
+  temperature: 0.0
+  top_p: 1.0
+  output_length_policy: fixed_max_new_tokens
+method: mosaickv_exact
+cache:
+  budget_value: 125829120
+  budget_unit: bytes
+  retention_ratio: 0.9999999999999999
+  block_size: 1
+  physical_budget_block_size: 1
+  physical_budget_mandatory_policy: first_and_last
+  exact_gather_mode: source_views
+  packing_mode: per_head_reference
+forecasting:
+  enabled: true
+  mode: prompt_window
+  prompt_window: 16
+  draft_steps: 0
+graph:
+  enabled: true
+  max_neighbors: 8
+  semantic_weight: 1.0
+  attention_weight: 1.0
+  spatial_weight: 1.0
+  layout_weight: 1.0
+  temporal_weight: 0.0
+  same_region_weight: 1.0
+  cross_modal_weight: 1.0
+  fallback_weight: 0.25
+  attention_host_transfer_mode: deferred_layer_vectorized
+  edge_accumulation_mode: preselected
+  similarity_shortlist_multiplier: 3.0
+  similarity_shortlist_min_nodes: 64
+  candidate_descriptor_pooling: true
+  candidate_graph_mode: shortlist_rerank
+  candidate_neighbor_hops: 1
+  screening_group_blocks: 1
+  uncertain_head_only: true
+  uncertain_head_fraction: 0.00390625
+  uncertain_head_threshold: 0.15
+utility:
+  lambda_q: 1.0
+  lambda_v: -0.3
+  lambda_o: -0.3
+  normalization: layer_head_l1
+  execution_mode: vectorized_edges
+selection:
+  enabled: true
+  algorithm: vectorized_coverage
+  lambda_g: -0.25
+  lambda_m: -0.25
+  stop_on_nonpositive_gain: false
+  prompt_anchor_fraction: 0.50
+  evidence_preservation_fraction: 0.35
+  evidence_reservation_mode: spatial_stratified_prompt
+  evidence_grid_rows: 6
+  evidence_grid_columns: 6
+  stable_head_prompt_routing: true
+  stable_head_uniform_fill: false
+  routed_head_only_planning: true
+  physical_capacity_fraction: 1.0
+prototypes:
+  enabled: false
+  uncertain_head_only: true
+  uncertain_head_fraction: 0.00390625
+residual: {enabled: false}
+repair: {enabled: false, policy: none, max_blocks_per_step: 0}
+bounded_decode:
+  generated_capacity: 32
+  sink_tokens: 4
