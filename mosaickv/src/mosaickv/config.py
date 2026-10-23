@@ -10,7 +10,7 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 from enum import StrEnum
 from pathlib import Path
-from typing import TypeVar, cast
+from typing import Any, TypeVar, cast
 
 import yaml
 
@@ -380,11 +380,32 @@ class BoundedDecodeConfig:
 
     generated_capacity: int = 32
     sink_tokens: int = 4
+    history_fraction: float | None = None
+    layer_allocation: str = "uniform"
 
     def effective_method(self, method: MosaicKVMethod) -> str:
+        version = (
+            "v1" if self.history_fraction is None and self.layer_allocation == "uniform" else "v2"
+        )
+        allocation = "__output_impact_layers" if self.layer_allocation != "uniform" else ""
         if method.is_published_reimplementation:
-            return f"{method.value.removesuffix('_reimpl')}__bounded_generated_history_v1_reimpl"
-        return f"{method.value}__bounded_generated_history_v1"
+            return (
+                f"{method.value.removesuffix('_reimpl')}"
+                f"__bounded_generated_history_{version}_reimpl"
+            )
+        return f"{method.value}{allocation}__bounded_generated_history_{version}"
+
+    def resolved_capacity(self, cap_bytes: int, bytes_per_position: int) -> int:
+        """A label-blind common prompt/history partition; never use answer length."""
+        if self.history_fraction is None:
+            return self.generated_capacity
+        return min(
+            self.generated_capacity,
+            max(
+                self.sink_tokens + 1,
+                math.floor(cap_bytes / bytes_per_position * self.history_fraction),
+            ),
+        )
 
     def __post_init__(self) -> None:
         if type(self.generated_capacity) is not int or self.generated_capacity < 1:
@@ -393,14 +414,36 @@ class BoundedDecodeConfig:
             raise ConfigurationError(
                 "bounded_decode.sink_tokens must be an integer in [0, generated_capacity)"
             )
+        if self.history_fraction is not None and (
+            isinstance(self.history_fraction, bool)
+            or not isinstance(self.history_fraction, (int, float))
+            or not math.isfinite(self.history_fraction)
+            or not 0 < self.history_fraction < 1
+        ):
+            raise ConfigurationError("bounded_decode.history_fraction must be finite in (0, 1)")
+        if not isinstance(self.layer_allocation, str) or self.layer_allocation not in {
+            "uniform",
+            "output_impact_v1",
+        }:
+            raise ConfigurationError("bounded_decode.layer_allocation is unsupported")
 
     @classmethod
     def from_mapping(cls, value: object) -> BoundedDecodeConfig:
         data = _mapping(value, "bounded_decode")
-        _reject_unknown(data, {"generated_capacity", "sink_tokens"}, "bounded_decode")
+        _reject_unknown(
+            data,
+            {"generated_capacity", "sink_tokens", "history_fraction", "layer_allocation"},
+            "bounded_decode",
+        )
         return cls(
             _int(data, "generated_capacity", 32, "bounded_decode"),
             _int(data, "sink_tokens", 4, "bounded_decode"),
+            (
+                None
+                if data.get("history_fraction") is None
+                else _float(data, "history_fraction", 0.2, "bounded_decode")
+            ),
+            _optional_str(data, "layer_allocation", "uniform", "bounded_decode"),
         )
 
 
@@ -3747,6 +3790,13 @@ class RunConfig:
                     "bounded_decode is byte-driven: retention_ratio must be "
                     "0.9999999999999999 or 1.0 for identity"
                 )
+            if (
+                self.bounded_decode.layer_allocation != "uniform"
+                and self.method is not MosaicKVMethod.MOSAICKV_EXACT
+            ):
+                raise ConfigurationError(
+                    "output-impact layer allocation is a MosaicKV exact variant"
+                )
             supported = {
                 MosaicKVMethod.MOSAICKV_EXACT,
                 MosaicKVMethod.RANDOM_KV,
@@ -4341,6 +4391,13 @@ def canonical_config(config: RunConfig) -> JsonObject:
         payload.pop("output_preserving", None)
     if config.bounded_decode is None:
         payload.pop("bounded_decode", None)
+    else:
+        # Do not invalidate immutable V1 configurations or reusable predictions.
+        bounded = cast("dict[str, Any]", payload["bounded_decode"])
+        if config.bounded_decode.history_fraction is None:
+            bounded.pop("history_fraction", None)
+        if config.bounded_decode.layer_allocation == "uniform":
+            bounded.pop("layer_allocation", None)
     return payload
 
 

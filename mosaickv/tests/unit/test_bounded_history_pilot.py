@@ -55,6 +55,69 @@ def test_pilot_resources_and_scope_are_explicit():
     assert protocol["cross_budget_direct_comparisons"] == "forbidden"
 
 
+def test_memory_successor_has_a_common_grid_and_no_automatic_paper_promotion():
+    module = tooling()
+    protocol = yaml.safe_load(
+        (module.SOURCE / "mosaickv/configs/experiments/bounded_history_memory_v2.yaml").read_text()
+    )
+    assert protocol["caps_mib"] == [32, 40, 80]
+    assert protocol["max_global_a100s"] == 6
+    assert protocol["sample_offset"] == 2
+    assert protocol["samples_per_task"] == 4
+    assert protocol["history_fraction"] == 0.2
+    assert len(protocol["methods"]) == 6
+    assert not protocol["promotion"]["automatic_paper_campaign"]
+    assert protocol["cross_budget_direct_comparisons"] == "forbidden"
+
+
+def test_retry_reuses_original_execution_sha_and_rejects_changed_artifacts(tmp_path, monkeypatch):
+    import json
+
+    module = tooling()
+    parent = tmp_path / "parent"
+    parent.mkdir()
+    original = dict(
+        source_sha="a" * 40,
+        jobs=[
+            dict(index=i, method="vl_cache_reimpl" if i in [4, 9, 15, 20] else "full_kv")
+            for i in range(22)
+        ],
+        bound_files={},
+        protocol={},
+    )
+    module.write_once(parent / "plan.json", original)
+    parent_sha = module.digest(parent / "plan.json")
+    monkeypatch.setattr(module, "clean_source", lambda *_: "b" * 40)
+    monkeypatch.setattr(module, "inputs", lambda *_a, **_k: original)
+    artifact = parent / "result.json"
+    module.write_once(artifact, dict(classification="synthetic_CI_fixture_not_measured"))
+    for job in original["jobs"]:
+        if job["method"] == "vl_cache_reimpl":
+            continue
+        module.write_once(
+            parent / "workers" / f"{job['index']:02d}.json",
+            dict(
+                source_sha="a" * 40,
+                plan_sha256=parent_sha,
+                index=job["index"],
+                artifacts={str(artifact): module.digest(artifact)},
+                status="passed",
+            ),
+        )
+    root = tmp_path / "retry"
+    module.prepare_retry(root, parent, parent_sha)
+    plan = json.loads((root / "plan.json").read_text())
+    assert plan["source_sha"] == "b" * 40
+    assert plan["retry_indices"] == [4, 9, 15, 20]
+    assert len(list((root / "workers").glob("*.json"))) == 18
+    reused = json.loads((root / "workers/00.json").read_text())
+    assert reused["source_sha"] == reused["reused_from"]["source_sha"] == "a" * 40
+    assert reused["plan_sha256"] == module.digest(root / "plan.json")
+    artifact.write_text("changed synthetic fixture")
+    with pytest.raises(ValueError, match="parent result changed"):
+        module.prepare_retry(tmp_path / "bad-retry", parent, parent_sha)
+
+
 @pytest.mark.parametrize("matched", [True, False])
 def test_analysis_reduces_corpus_ppl_and_excludes_unequal_storage(tmp_path, monkeypatch, matched):
     """Synthetic CI records only: never experimental measurements."""

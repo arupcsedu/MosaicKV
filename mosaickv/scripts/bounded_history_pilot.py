@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
 import math
@@ -16,6 +17,7 @@ from pathlib import Path
 import yaml
 
 from mosaickv.config import (
+    BoundedDecodeConfig,
     DatasetConfig,
     ForecastingConfig,
     GraphConfig,
@@ -116,7 +118,7 @@ def configurations(task, cap, route, profile):
     }
 
 
-def prepare(root):
+def prepare(root, protocol_path=PROTOCOL):
     from mosaickv.evaluation.paper_native_lanes import load_paper_native_ledger
     from mosaickv.evaluation.tasks import default_task_registry
 
@@ -124,7 +126,10 @@ def prepare(root):
     root = root.resolve()
     if root.exists() or Path("/scratch/djy8hg").resolve() not in root.parents:
         raise ValueError("require a new immutable output root under /scratch/djy8hg")
-    protocol = yaml.safe_load(PROTOCOL.read_text())
+    protocol_path = Path(protocol_path).resolve()
+    if SOURCE.resolve() not in protocol_path.parents:
+        raise ValueError("protocol must be versioned inside the execution worktree")
+    protocol = yaml.safe_load(protocol_path.read_text())
     routes = yaml.safe_load(
         (SOURCE / "mosaickv/configs/experiments/shared_byte_comparison_v2.yaml").read_text()
     )["lanes"]["prefixkv"]["tasks"]
@@ -134,7 +139,7 @@ def prepare(root):
     ).strip()
     if upstream != protocol["prefixkv_commit"]:
         raise ValueError("PrefixKV upstream revision mismatch")
-    bound = {str(PROTOCOL): digest(PROTOCOL), str(profile): digest(profile)}
+    bound = {str(protocol_path): digest(protocol_path), str(profile): digest(profile)}
     jobs = []
     for task in protocol["tasks"]:
         route = routes[task]
@@ -145,7 +150,10 @@ def prepare(root):
         original = json.loads(parent.read_text())
         if any(original[key] != route[key] for key in ("dataset_id", "dataset_revision", "split")):
             raise ValueError("parent dataset provenance mismatch")
-        chosen = original["samples"][: protocol["samples_per_task"]]
+        offset = protocol.get("sample_offset", 0)
+        chosen = original["samples"][offset : offset + protocol["samples_per_task"]]
+        if len(chosen) != protocol["samples_per_task"]:
+            raise ValueError("parent ledger lacks the complete preregistered sample cohort")
         for sample in chosen:
             for media in sample["media"]:
                 if not Path(media["path"]).is_absolute():
@@ -172,6 +180,29 @@ def prepare(root):
         reference = root / "references" / f"{task}.json"
         for cap in protocol["caps_mib"]:
             configs = configurations(task, cap, route, profile)
+            if "history_fraction" in protocol:
+                configs = {
+                    name: replace(
+                        cfg,
+                        bounded_decode=(
+                            None
+                            if name == "full_kv"
+                            else BoundedDecodeConfig(
+                                protocol["generated_capacity"],
+                                protocol["sink_tokens"],
+                                protocol["history_fraction"],
+                            )
+                        ),
+                    )
+                    for name, cfg in configs.items()
+                }
+                candidate = configs["mosaickv_exact"]
+                configs["mosaickv_output_impact_v2"] = replace(
+                    candidate,
+                    bounded_decode=replace(
+                        candidate.bounded_decode, layer_allocation="output_impact_v1"
+                    ),
+                )
             methods = (
                 ["full_kv", *protocol["methods"]]
                 if cap == protocol["caps_mib"][0]
@@ -188,6 +219,7 @@ def prepare(root):
                         index=index,
                         task=task,
                         method=method,
+                        runtime_method=cfg.method.value,
                         cap_mib=None if method == "full_kv" else cap,
                         config=str(path),
                         config_sha=config_sha256(cfg),
@@ -209,9 +241,18 @@ def prepare(root):
         heldout_claim=False,
         paper_campaign_authorized=False,
         comparison_decode_policy=dict(
-            name="common_bounded_history_v1_fullkv_reference_exempt",
+            name=(
+                "common_bounded_history_v2_fullkv_reference_exempt"
+                if "history_fraction" in protocol
+                else "common_bounded_history_v1_fullkv_reference_exempt"
+            ),
             generated_capacity=protocol["generated_capacity"],
             sink_tokens=protocol["sink_tokens"],
+            **(
+                {"history_fraction": protocol["history_fraction"]}
+                if "history_fraction" in protocol
+                else {}
+            ),
         ),
     )
     write_once(root / "plan.json", plan)
@@ -244,9 +285,69 @@ def inputs(root, plan_sha, index=None, check_clean=True):
         raise ValueError("unregistered worker index")
     job = plan["jobs"][index]
     cfg = load_config(job["config"])
-    if config_sha256(cfg) != job["config_sha"] or cfg.method.value != job["method"]:
+    if config_sha256(cfg) != job["config_sha"] or cfg.method.value != job.get(
+        "runtime_method", job["method"]
+    ):
         raise ValueError("resolved configuration mismatch")
     return plan, job, cfg
+
+
+def prepare_retry(root, parent, parent_sha):
+    """Reuse hash-verified successes; execute ONLY the four missing V1 arms."""
+    source_sha = clean_source()
+    original = inputs(parent, parent_sha, check_clean=False)
+    if root.exists() or root.resolve() == parent.resolve():
+        raise ValueError("retry requires a new immutable output directory")
+    plan = copy.deepcopy(original)
+    plan.update(source_sha=source_sha, source_root=str(SOURCE))
+    plan["reuse_parent"] = dict(
+        root=str(parent), plan_sha256=parent_sha, source_sha=original["source_sha"]
+    )
+    plan["bound_files"][str(parent / "plan.json")] = parent_sha
+    plan["protocol"]["max_global_a100s"] = 6
+    records, missing = {}, []
+    for job in plan["jobs"]:
+        index = job["index"]
+        old_path = parent / "workers" / f"{index:02d}.json"
+        if old_path.is_file():
+            result = json.loads(old_path.read_text())
+            if result["plan_sha256"] != parent_sha or result["index"] != index:
+                raise ValueError("parent worker identity mismatch")
+            for path, sha in result["artifacts"].items():
+                if digest(path) != sha:
+                    raise ValueError("parent result changed; cannot reuse")
+            result["reused_from"] = dict(
+                path=str(old_path),
+                sha256=digest(old_path),
+                plan_sha256=parent_sha,
+                source_sha=result["source_sha"],
+            )
+            plan["bound_files"][str(old_path)] = digest(old_path)
+            records[index] = result
+        else:
+            if job["method"] != "vl_cache_reimpl":
+                raise ValueError("selective retry scope permits failed VL-Cache arms only")
+            missing.append(index)
+            job["output"] = str(root.resolve() / "outputs" / f"{index:02d}")
+    if missing != [4, 9, 15, 20]:
+        raise ValueError("retry scope must be exactly the four original VL-Cache workers")
+    plan["retry_indices"] = missing
+    write_once(root / "plan.json", plan)
+    sha = digest(root / "plan.json")
+    for index, result in records.items():
+        result["plan_sha256"] = sha
+        write_once(root / "workers" / f"{index:02d}.json", result)
+    print(
+        json.dumps(
+            dict(
+                root=str(root),
+                plan_sha256=sha,
+                retry_indices=missing,
+                reused_workers=len(records),
+                source_sha=source_sha,
+            )
+        )
+    )
 
 
 def worker(root, plan_sha, index):
@@ -278,8 +379,17 @@ def worker(root, plan_sha, index):
     completed = root / "workers" / f"{index:02d}.json"
     if completed.exists():
         record = json.loads(completed.read_text())
+        execution_sha = plan["source_sha"]
+        if record.get("reused_from") is not None:
+            reuse = record["reused_from"]
+            if (
+                plan.get("reuse_parent", {}).get("plan_sha256") != reuse["plan_sha256"]
+                or digest(reuse["path"]) != reuse["sha256"]
+            ):
+                raise ValueError("reused worker provenance changed")
+            execution_sha = reuse["source_sha"]
         if (record.get("source_sha"), record.get("plan_sha256"), record.get("index")) != (
-            plan["source_sha"],
+            execution_sha,
             plan_sha,
             index,
         ):
@@ -366,6 +476,24 @@ def worker(root, plan_sha, index):
             fullkv_reference_sha256=None if is_full else digest(reference),
             comparison_decode_policy=plan["comparison_decode_policy"],
         )
+        for row in record["rows"]:
+            if row.get("error") or row.get("status") != "completed":
+                raise RuntimeError("sample failed; raw failure output retained")
+            if row["generated_tokens"] != cfg.generation.max_new_tokens:
+                raise RuntimeError("incomplete output token trajectory")
+            for key in (
+                "prefill_time",
+                "compression_time",
+                "decode_time",
+                "ttft",
+                "end_to_end_time",
+            ):
+                if row.get(key) is None or not math.isfinite(row[key]) or row[key] < 0:
+                    raise RuntimeError(f"missing/non-finite measured timing: {key}")
+            if not is_full:
+                for boundary in ("initial", "final", "peak"):
+                    if row[f"{boundary}_active_kv_storage_bytes"] != cfg.cache.budget_value:
+                        raise RuntimeError("worker failed exact lifetime-storage cap")
         artifacts = {str(p): digest(p) for p in Path(job["output"]).rglob("*") if p.is_file()}
         artifacts[str(attempt / "parity.json")] = digest(attempt / "parity.json")
         artifacts[str(reference)] = digest(reference)
@@ -417,11 +545,27 @@ def analyze(root, plan_sha):
     destination = root / "analysis"
     if destination.exists():
         raise FileExistsError("analysis is write-once")
-    rows, missing, failures = [], [], []
+    rows, missing, failures, failure_records = [], [], [], []
     for job in plan["jobs"]:
         path = root / "workers" / f"{job['index']:02d}.json"
         if not path.exists():
             missing.append(job["index"])
+            attempts = sorted((root / "attempts").glob(f"{job['index']:02d}-*/failure.json"))
+            error = json.loads(attempts[-1].read_text())["error"] if attempts else "worker_missing"
+            failure_records.extend(
+                dict(
+                    index=job["index"],
+                    task=job["task"],
+                    method=job["method"],
+                    cap_mib=job["cap_mib"],
+                    sample_id=sample_id,
+                    status="failed_or_not_run",
+                    error=error,
+                    failure_stage="worker_or_warmup",
+                    metric_value=None,
+                )
+                for sample_id in job.get("sample_ids", [])
+            )
             continue
         result = json.loads(path.read_text())
         if result.get("plan_sha256") != plan_sha or result.get("index") != job["index"]:
@@ -491,17 +635,16 @@ def analyze(root, plan_sha):
     rng = np.random.default_rng(plan["protocol"]["seed"])
     for task in plan["protocol"]["tasks"]:
         for cap in plan["protocol"]["caps_mib"]:
+            candidate_name = plan["protocol"].get("candidate_arm", "mosaickv_exact")
             candidate = (
                 frame[
-                    (frame.task == task)
-                    & (frame.cap_mib == cap)
-                    & (frame.method == "mosaickv_exact")
+                    (frame.task == task) & (frame.cap_mib == cap) & (frame.method == candidate_name)
                 ]
                 .set_index("sample_id")
                 .sort_index()
             )
             for method in plan["protocol"]["methods"]:
-                if method == "mosaickv_exact":
+                if method == candidate_name:
                     continue
                 baseline = (
                     frame[(frame.task == task) & (frame.cap_mib == cap) & (frame.method == method)]
@@ -543,6 +686,7 @@ def analyze(root, plan_sha):
                         task=task,
                         cap_mib=cap,
                         baseline=method,
+                        candidate=candidate_name,
                         rouge_delta_ci95=np.quantile(quality, [0.025, 0.975]).tolist(),
                         ppl_delta_ci95=np.quantile(ppl_delta, [0.025, 0.975]).tolist(),
                         e2e_ratio_ci95=np.quantile(latency, [0.025, 0.975]).tolist(),
@@ -553,6 +697,27 @@ def analyze(root, plan_sha):
     frame.to_parquet(destination / "samples.parquet", index=False)
     summary = pd.DataFrame(summaries)
     summary.to_parquet(destination / "summary.parquet", index=False)
+    if plan["protocol"].get("equal_quality_exploratory_screen"):
+        from mosaickv.evaluation.equal_quality_memory import exploratory_memory_screen
+
+        screen = exploratory_memory_screen(
+            frame,
+            candidate=plan["protocol"]["candidate_arm"],
+            baselines=tuple(
+                m
+                for m in plan["protocol"]["methods"]
+                if m not in {plan["protocol"]["candidate_arm"], "mosaickv_exact"}
+            ),
+            replicates=plan["protocol"]["bootstrap_replicates"],
+            seed=plan["protocol"]["seed"],
+        )
+        pd.DataFrame(screen).to_parquet(
+            destination / "equal_quality_memory_screen.parquet", index=False
+        )
+    if failure_records:
+        pd.DataFrame(failure_records).to_parquet(
+            destination / "failed_samples.parquet", index=False
+        )
     write_once(
         destination / "report.json",
         dict(
@@ -567,6 +732,8 @@ def analyze(root, plan_sha):
             ),
             comparisons=comparisons,
             paper_eligible=False,
+            result_scope="small_retrospective_development_not_statistical_paper_evidence",
+            smaller_cache_at_preserved_quality_established=False,
             cross_budget_direct_comparisons=False,
         ),
     )
@@ -580,7 +747,8 @@ def analyze(root, plan_sha):
         stream.write(
             "\n\nInitial/final/peak bytes include generated reserve. No smaller-cache claim can "
             "be inferred from equal-byte points. "
-            "Two examples/task cannot establish general superiority.\n"
+            f"{plan['protocol']['samples_per_task']} examples/task cannot establish "
+            "general superiority. Smaller-cache claims require a frozen quality target.\n"
         )
     print(
         json.dumps(
@@ -596,13 +764,18 @@ def analyze(root, plan_sha):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=["prepare", "worker", "analyze"])
+    parser.add_argument("action", choices=["prepare", "prepare-retry", "worker", "analyze"])
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--plan-sha")
     parser.add_argument("--index", type=int)
+    parser.add_argument("--protocol", type=Path, default=PROTOCOL)
+    parser.add_argument("--parent", type=Path)
+    parser.add_argument("--parent-sha")
     args = parser.parse_args()
     if args.action == "prepare":
-        prepare(args.root)
+        prepare(args.root, args.protocol)
+    elif args.action == "prepare-retry":
+        prepare_retry(args.root, args.parent, args.parent_sha)
     elif args.action == "worker":
         worker(args.root, args.plan_sha, args.index)
     else:

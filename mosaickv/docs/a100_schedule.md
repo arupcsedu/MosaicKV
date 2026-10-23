@@ -1,4 +1,12 @@
-# A100 allocation rule (updated 2026-10-13)
+# A100 allocation rule (updated 2026-10-23)
+
+The user explicitly authorized **six A100s in aggregate for the bounded-history
+memory-efficiency validation** on October 23. Those registered controller policies
+use `maximum_a100s: 6` and `six_a100s_explicitly_authorized: true`; each worker
+still uses one A100, 12 CPUs and at most two hours. The controller retains the
+four-GPU default for older policies. This override does not permit more than six
+across concurrent arrays or alter other users' jobs. The remainder documents
+the historical four-GPU deployment, not the new validation's ceiling.
 
 **At most four available A100s at all times**, in aggregate across MosaicKV
 jobs, not four per array. This supersedes the earlier eight-GPU overnight

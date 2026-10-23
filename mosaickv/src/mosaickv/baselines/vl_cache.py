@@ -524,6 +524,7 @@ def build_vl_cache_reimpl_plan(
     cache_config: CacheConfig,
     *,
     physical_prompt_capacity: int | None = None,
+    layer_local_physical_budget: bool = False,
 ) -> VLCacheCompressionPlan:
     """Apply the paper equations and exact-only Top-K cache selection."""
 
@@ -615,7 +616,17 @@ def build_vl_cache_reimpl_plan(
         desired = tuple(
             ratio * length for ratio, length in zip(clipped_ratios, lengths, strict=True)
         )
-        if physical_prompt_capacity is not None:
+        if layer_local_physical_budget:
+            if cache_config.budget_unit is not BudgetUnit.BYTES:
+                raise VLCacheReimplementationError("layer-local VL-Cache requires a byte budget")
+            # Common-ring adaptation only: spend the global physical budget
+            # without charging nonexistent padding between independent layers.
+            # Preserve the relative paper-derived layer-density preferences.
+            desired_total = sum(desired)
+            if desired_total <= 0:
+                raise VLCacheReimplementationError("VL-Cache has no positive allocation weights")
+            desired = tuple(value * target_positions / desired_total for value in desired)
+        elif physical_prompt_capacity is not None:
             if physical_prompt_capacity < 1:
                 raise VLCacheReimplementationError("physical_prompt_capacity must be positive")
             upper = tuple(min(high, physical_prompt_capacity) for high in upper)

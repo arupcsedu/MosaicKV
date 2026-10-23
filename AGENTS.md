@@ -95,12 +95,13 @@ Do not vendor model weights, datasets, or code whose license does not permit red
 
 ## Engineering workflow
 
-- A100 scheduling permits at most four available A100s at all times,
+- The user's October 23, 2026 validation request permits at most six A100s,
   in aggregate across MosaicKV jobs (not per array). This supersedes the old
-  eight-GPU overnight allowance. Preserve running jobs; if occupancy is above
-  four, admit no new workers until it falls below four. Register future arrays
+  four-GPU limit for this validation. Preserve running jobs; if occupancy is above
+  six, admit no new workers until it falls below six. Register future arrays
   with the tested schedule controller;
-  see `mosaickv/docs/a100_schedule.md`. Do not change other users' jobs.
+  use `maximum_a100s: 6` and `six_a100s_explicitly_authorized: true` in its policy.
+  The controller defaults to four for historical policies. Do not change other users' jobs.
 
 - Inspect relevant code, configuration, tests, and repository status before editing.
 - Use only the common environment at `/scratch/djy8hg/env/mosaickv` for HF,

@@ -136,6 +136,60 @@ def test_prefixkv_profile_remains_layer_ragged_without_padding_or_double_evictio
     assert result.effective_method.endswith("__bounded_generated_history_v1_reimpl")
 
 
+def test_vl_cache_adaptive_layer_lengths_use_no_padding_and_keep_exact_lifetime_cap(
+    tmp_path, monkeypatch
+):
+    import mosaickv.baselines.vl_cache as vl
+    from mosaickv.config import VLCacheConfig
+
+    monkeypatch.setattr(
+        vl, "paper_layer_retention_ratios", lambda *_a, **_k: ((0.75, 0.25), (0.75, 0.25))
+    )
+    adapter = _llava()
+    adapter.processor = _VLCacheProcessor()
+    cfg = replace(
+        _config(), method=MosaicKVMethod.VL_CACHE_REIMPL, vl_cache=VLCacheConfig(enabled=True)
+    )
+    result = HuggingFaceMosaicKVModel(adapter, cfg, trace_directory=tmp_path).generate(
+        _runtime_request("vl-ragged-regression")
+    )
+    trace = json.loads(next(tmp_path.rglob("*.json")).read_text())
+    assert trace["bounded_decode"]["protected_prompt_positions_per_layer"] == [3, 1]
+    assert trace["bounded_decode"]["cross_layer_padding_bytes"] == 0
+    assert trace["packed_cache_all_slots_valid"] is True
+    assert result.metrics.initial_active_kv_storage_bytes == 512
+    assert result.metrics.final_active_kv_storage_bytes == 512
+    assert result.metrics.peak_active_kv_storage_bytes == 512
+
+
+def test_evidence_allocation_is_a_labeled_exact_byte_runtime_variant(tmp_path):
+    cfg = replace(
+        _config(MosaicKVMethod.MOSAICKV_EXACT),
+        bounded_decode=BoundedDecodeConfig(
+            generated_capacity=2,
+            sink_tokens=1,
+            history_fraction=0.2,
+            layer_allocation="output_impact_v1",
+        ),
+    )
+    result = HuggingFaceMosaicKVModel(_llava(), cfg, trace_directory=tmp_path).generate(
+        _runtime_request("layer-impact")
+    )
+    trace = json.loads(next(tmp_path.rglob("*.json")).read_text())
+    assert trace["evidence_layer_allocation"]["padding_bytes"] == 0
+    assert trace["evidence_layer_allocation"]["benchmark_labels_accessed"] is False
+    assert sum(trace["evidence_layer_allocation"]["layer_capacities"]) == 4
+    assert trace["hard_prompt_capacity"] is None
+    assert (
+        trace["selected_layer_prompt_capacities"]
+        == trace["evidence_layer_allocation"]["layer_capacities"]
+    )
+    assert trace["byte_budget_materialization"]["dense_quantization_underfill_bytes"] == 0
+    assert result.metrics.peak_active_kv_storage_bytes == 512
+    assert "output_impact_layers" in result.effective_method
+    assert result.effective_method.endswith("bounded_generated_history_v2")
+
+
 @pytest.fixture(autouse=True)
 def single_cpu_thread():
     previous = torch.get_num_threads()

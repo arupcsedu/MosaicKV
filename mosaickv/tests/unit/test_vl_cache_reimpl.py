@@ -132,6 +132,24 @@ def test_physical_byte_capacity_scales_layer_adaptation_without_overflow() -> No
     assert plan.layers[0].retained_positions_per_head >= plan.layers[1].retained_positions_per_head
 
 
+def test_layer_local_byte_allocation_preserves_adaptation_and_spends_exact_cap() -> None:
+    state = _state(heads=2)
+    cap = state.active_bytes // 2
+    plan = build_vl_cache_reimpl_plan(
+        state,
+        _attention(query_heads=4),
+        _config(sparsity_threshold=0.1),
+        CacheConfig(cap, BudgetUnit.BYTES, 0.9999999999999999, 1),
+        physical_prompt_capacity=3,
+        layer_local_physical_budget=True,
+    )
+    sizes = [layer.retained_positions_per_head for layer in plan.layers]
+    assert sizes[0] > sizes[1]
+    assert max(sizes) > 3  # No fictional all-layer padding boundary.
+    assert sum(sizes) == 6
+    assert plan.retained_bytes == cap
+
+
 def test_byte_budget_is_a_hard_selection_target_not_only_a_posthoc_check() -> None:
     state = _state(heads=2)
     bytes_per_slot = state.blocks[0].byte_size

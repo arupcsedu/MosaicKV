@@ -787,18 +787,36 @@ def run_hf_evaluation(
         comparison_controls_sha = None
         if unified_prefixkv:
             decode_policy = getattr(args, "comparison_decode_policy", None)
-            if decode_policy is not None:  # noqa: SIM102 - keep validation grouped
+            if decode_policy is not None:
+                expected = {
+                    "name": "common_bounded_history_v1_fullkv_reference_exempt",
+                    "generated_capacity": None,
+                    "sink_tokens": None,
+                }
+                if isinstance(decode_policy, dict) and decode_policy.get("name") == (
+                    "common_bounded_history_v2_fullkv_reference_exempt"
+                ):
+                    expected.update(name=decode_policy["name"], history_fraction=None)
+                actual = (
+                    None
+                    if config.bounded_decode is None
+                    else {
+                        "generated_capacity": config.bounded_decode.generated_capacity,
+                        "sink_tokens": config.bounded_decode.sink_tokens,
+                        **(
+                            {"history_fraction": config.bounded_decode.history_fraction}
+                            if "history_fraction" in expected
+                            else {}
+                        ),
+                    }
+                )
                 if (
                     not isinstance(decode_policy, dict)
-                    or set(decode_policy) != {"name", "generated_capacity", "sink_tokens"}
-                    or decode_policy["name"] != "common_bounded_history_v1_fullkv_reference_exempt"
+                    or set(decode_policy) != set(expected)
+                    or decode_policy["name"] != expected["name"]
                     or (
                         not config.method.is_full_cache
-                        and (
-                            config.bounded_decode is None
-                            or asdict(config.bounded_decode)
-                            != {k: decode_policy[k] for k in ("generated_capacity", "sink_tokens")}
-                        )
+                        and (actual != {k: decode_policy[k] for k in expected if k != "name"})
                     )
                 ):
                     raise ValueError("shared bounded-history reference policy mismatch")

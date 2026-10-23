@@ -5057,6 +5057,96 @@ def _pack_prefixkv_ragged(
     )
 
 
+def _pack_vl_cache_layer_local(
+    adapter: HuggingFaceMultimodalAdapter,
+    plan: VLCacheCompressionPlan,
+    original_cache: Any,
+) -> PackedRuntimeCache:
+    from mosaickv.adapters.huggingface.layer_local_cache import gather_layer_local_snapshot
+
+    positions = tuple(
+        tuple(head.selected_physical_positions for head in layer.heads) for layer in plan.layers
+    )
+    snapshot = gather_layer_local_snapshot(adapter, original_cache, positions)
+    actual = sum(
+        tensor_storage_bytes(tensor)
+        for layer in snapshot.layers
+        for tensor in (layer.key, layer.value)
+    )
+    if actual != plan.retained_bytes:
+        raise HuggingFaceRuntimeError("VL-Cache layer-local storage differs from selected bytes")
+    return PackedRuntimeCache(
+        snapshot=snapshot,
+        validity_masks=(),
+        prompt_capacity=snapshot.active_sequence_length,
+        all_slots_valid=True,
+        prototype_slots=(),
+        prototype_attention_biases=(),
+        slot_records=tuple(
+            {
+                "layer": layer.layer,
+                "kv_head": head.kv_head,
+                "selected_physical_positions": list(head.selected_physical_positions),
+                "selected_logical_positions": list(head.selected_logical_positions),
+                "retained_bytes": head.retained_bytes,
+                "padding_bytes": 0,
+            }
+            for layer in plan.layers
+            for head in layer.heads
+        ),
+    )
+
+
+def _reallocate_evidence_layers(
+    adapter: HuggingFaceMultimodalAdapter,
+    full_state: FullKVState,
+    original_cache: Any,
+    anchor: PackedRuntimeCache,
+    token_attention: dict[tuple[int, int], Any],
+    budget_bytes: int,
+) -> tuple[PackedRuntimeCache, dict[str, Any]]:
+    from mosaickv.adapters.huggingface.layer_local_cache import gather_layer_local_snapshot
+    from mosaickv.selection.evidence_layer_allocation import build_evidence_layer_plan
+
+    allocation = build_evidence_layer_plan(
+        full_state,
+        token_attention,
+        anchor.slot_records,
+        prompt_budget_bytes=budget_bytes,
+        uniform_capacity=anchor.prompt_capacity,
+    )
+    snapshot = gather_layer_local_snapshot(adapter, original_cache, allocation.positions)
+    actual = sum(
+        tensor_storage_bytes(tensor)
+        for layer in snapshot.layers
+        for tensor in (layer.key, layer.value)
+    )
+    if actual != allocation.prompt_bytes or actual != budget_bytes:
+        raise HuggingFaceRuntimeError("evidence allocation failed exact physical-byte transaction")
+    records = tuple(
+        {
+            "layer": layer,
+            "kv_head": head,
+            "slot": slot,
+            "logical_position": full_state.logical_positions.logical_for_physical(position),
+            "physical_position": position,
+            "tier": "exact",
+        }
+        for layer, heads in enumerate(allocation.positions)
+        for head, positions in enumerate(heads)
+        for slot, position in enumerate(positions)
+    )
+    return PackedRuntimeCache(
+        snapshot,
+        (),
+        snapshot.active_sequence_length,
+        True,
+        (),
+        (),
+        records,
+    ), allocation.trace()
+
+
 def _state_from_packed(
     adapter: HuggingFaceMultimodalAdapter,
     original: DecodeState,
@@ -9024,6 +9114,7 @@ class HuggingFaceMosaicKVModel:
             state = prefill.state
             bounded_budget = None
             bounded_decode_trace: JsonObject | None = None
+            evidence_allocation_trace = None
             if not is_full_cache and not retention_one_identity:
                 cache_state_started = time.perf_counter()
                 snapshot = self.adapter.extract_past_key_values(prefill.state.past_key_values)
@@ -9101,7 +9192,9 @@ class HuggingFaceMosaicKVModel:
                     bounded_budget = bounded_history_budget(
                         self.config.cache.budget_value,
                         bytes_per_position,
-                        self.config.bounded_decode.generated_capacity,
+                        self.config.bounded_decode.resolved_capacity(
+                            self.config.cache.budget_value, bytes_per_position
+                        ),
                         (
                             len(teacher_forced_ids)
                             if teacher_forced_ids
@@ -9759,6 +9852,7 @@ class HuggingFaceMosaicKVModel:
                             physical_prompt_capacity=(
                                 None if dense_budget is None else dense_budget.prompt_capacity
                             ),
+                            layer_local_physical_budget=self.config.bounded_decode is not None,
                         ),
                     )
                     packed_state = None
@@ -9829,20 +9923,28 @@ class HuggingFaceMosaicKVModel:
                         ),
                     )
                 elif vl_cache_plan is not None:
-                    vl_cache_payloads, vl_cache_slots = vl_cache_runtime_payloads(vl_cache_plan)
-                    packed, packing_seconds = _timed(
-                        prefill.logits,
-                        lambda: pack_runtime_payloads(
-                            self.adapter,
-                            full_state,
-                            vl_cache_payloads,
-                            vl_cache_slots,
-                            physical_prompt_capacity=(
-                                None if dense_budget is None else dense_budget.prompt_capacity
+                    if self.config.bounded_decode is not None:
+                        packed, packing_seconds = _timed(
+                            prefill.logits,
+                            lambda: _pack_vl_cache_layer_local(
+                                self.adapter, vl_cache_plan, prefill.state.past_key_values
                             ),
-                            packing_mode=self.config.cache.packing_mode,
-                        ),
-                    )
+                        )
+                    else:
+                        vl_cache_payloads, vl_cache_slots = vl_cache_runtime_payloads(vl_cache_plan)
+                        packed, packing_seconds = _timed(
+                            prefill.logits,
+                            lambda: pack_runtime_payloads(
+                                self.adapter,
+                                full_state,
+                                vl_cache_payloads,
+                                vl_cache_slots,
+                                physical_prompt_capacity=(
+                                    None if dense_budget is None else dense_budget.prompt_capacity
+                                ),
+                                packing_mode=self.config.cache.packing_mode,
+                            ),
+                        )
                 elif published_kv_plan is not None:
                     published_payloads, published_slots = published_kv_runtime_payloads(
                         published_kv_plan
@@ -9875,6 +9977,27 @@ class HuggingFaceMosaicKVModel:
                             packing_mode=self.config.cache.packing_mode,
                         ),
                     )
+                if (
+                    self.config.bounded_decode is not None
+                    and self.config.bounded_decode.layer_allocation == "output_impact_v1"
+                ):
+                    if predicted_token_attention is None or dense_budget is None:
+                        raise HuggingFaceRuntimeError(
+                            "evidence allocation lacks prompt forecast/cap"
+                        )
+                    (packed, evidence_allocation_trace), allocation_seconds = _timed(
+                        prefill.logits,
+                        lambda: _reallocate_evidence_layers(
+                            self.adapter,
+                            full_state,
+                            prefill.state.past_key_values,
+                            packed,
+                            predicted_token_attention,
+                            dense_budget.target_bytes,
+                        ),
+                    )
+                    packing_seconds += allocation_seconds
+                    evidence_allocation_trace["selection_and_pack_seconds"] = allocation_seconds
                 state = _state_from_packed(self.adapter, prefill.state, packed)
                 packed_prompt_capacity = packed.prompt_capacity
                 packed_prefill_active_kv_bytes = _cache_payload_bytes(
@@ -9955,6 +10078,18 @@ class HuggingFaceMosaicKVModel:
                         compact=not full_debug_trace,
                     )
                     payload["packed_cache_all_slots_valid"] = packed.all_slots_valid
+                    if evidence_allocation_trace is not None:
+                        payload["anchor_selected_blocks"] = payload.get("selected_blocks", [])
+                        payload["selected_blocks"] = _trace_catalog(
+                            packed.slot_records, compact=not full_debug_trace
+                        )
+                        payload["evidence_layer_allocation"] = evidence_allocation_trace
+                        payload["tier_active_cache_lengths"] = [
+                            int(layer.key.shape[2]) for layer in packed.snapshot.layers
+                        ]
+                        payload["selection_provenance"] = (
+                            "MosaicKV_forecast_graph_anchor_then_output_impact_layer_allocation_v1"
+                        )
                     return payload
 
                 deferred_trace_builder = build_deferred_cache_trace
@@ -11165,6 +11300,31 @@ class HuggingFaceMosaicKVModel:
                     "trace_path": str(trace_path.resolve()),
                 }
             )
+            if bounded_budget is not None and bounded_decode_trace is not None:
+                materialization = trace["byte_budget_materialization"]
+                if isinstance(materialization, dict):
+                    materialization["reserved_generated_bytes"] = (
+                        bounded_budget.reserved_generated_bytes
+                    )
+                    materialization["dense_quantization_underfill_bytes"] = (
+                        bounded_budget.lattice_shortfall_bytes
+                    )
+                    materialization["accounting_boundary"] = (
+                        "prompt_selection_plus_separately_charged_generated_reserve"
+                    )
+                if packed.snapshot.independent_layer_lengths:
+                    lengths = [int(layer.key.shape[2]) for layer in packed.snapshot.layers]
+                    trace["uniform_anchor_prompt_capacity"] = trace["hard_prompt_capacity"]
+                    trace["hard_prompt_capacity"] = None
+                    trace["selected_layer_prompt_capacities"] = lengths
+                    trace["tier_active_cache_lengths"] = sorted(set(lengths))
+                    if isinstance(materialization, dict):
+                        materialization["hard_prompt_capacity"] = None
+                        materialization["selected_layer_prompt_capacities"] = lengths
+                if evidence_allocation_trace is not None:
+                    trace["source_selector_plan_role"] = (
+                        "anchor_only_final_evidence_allocation_is_authoritative"
+                    )
             _write_trace(trace_path, trace)
             compression_seconds = (
                 cache_state_construction_seconds

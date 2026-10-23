@@ -64,10 +64,10 @@ def read_queue() -> list[dict[str, str]]:
     return [dict(zip(keys, line.split("|", 6), strict=True)) for line in output.splitlines()]
 
 
-def set_array_throttle(array: str) -> None:
+def set_array_throttle(array: str, maximum: int = 4) -> None:
     """Slurm can update live elements yet return an error for completed siblings."""
     try:
-        command("scontrol", "update", f"JobId={array}", "ArrayTaskThrottle=4")
+        command("scontrol", "update", f"JobId={array}", f"ArrayTaskThrottle={maximum}")
     except subprocess.CalledProcessError as exc:
         errors = (exc.stderr or "").strip().splitlines()
         if not errors or any("Job has already finished" not in line for line in errors):
@@ -78,7 +78,9 @@ def set_array_throttle(array: str) -> None:
             for line in records
             if re.search(r"JobState=(?:PENDING|RUNNING|COMPLETING|CONFIGURING|SUSPENDED)\b", line)
         ]
-        if not live or any(not re.search(r"\bArrayTaskThrottle=4\b", line) for line in live):
+        if not live or any(
+            not re.search(rf"\bArrayTaskThrottle={maximum}\b", line) for line in live
+        ):
             raise RuntimeError(f"Array {array} throttle update could not be verified") from exc
 
 
@@ -98,10 +100,14 @@ def choose_releases(
     arrays: set[str],
     admission: int,
     blocked: set[str] | None = None,
+    *,
+    maximum: int = 4,
 ) -> list[dict[str, str]]:
     """Reserve slots for all own active A100 jobs and all already released targets."""
-    if not 0 <= admission <= 4:
-        raise ValueError("aggregate A100 admission cannot exceed four")
+    if maximum not in {4, 6} or not 0 <= admission <= maximum:
+        raise ValueError(
+            "aggregate A100 admission cannot exceed four (or explicitly authorized six)"
+        )
     occupied = sum(gpu_count(row["gres"]) for row in rows if row["state"] in ACTIVE)
     released = [
         row
@@ -147,7 +153,21 @@ def tick(policy: dict, state: dict, state_path: Path, apply: bool) -> dict:
     blocked = {str(value) for value in policy.get("blocked_arrays", {})}
     now = datetime.now(ZONE)
     occupancy, admission = limits(now, policy["maximum_worker_minutes"])
+    maximum = policy.get("maximum_a100s", 4)
+    if maximum != 4:
+        if maximum != 6 or policy.get("six_a100s_explicitly_authorized") is not True:
+            raise ValueError("six A100s require an explicit user-authorized policy")
+        occupancy = admission = 6
     rows = read_queue()
+    # Do not let dependency-blocked releases reserve admission slots needed by
+    # their own prerequisite arrays. Slurm's afterok dependency remains the
+    # execution gate; this is only aggregate admission ordering.
+    prerequisites = policy.get("release_after_arrays_finish", {})
+    blocked.update(
+        str(array)
+        for array, parents in prerequisites.items()
+        if any(row["array"] in {str(parent) for parent in parents} for row in rows)
+    )
     managed = [row for row in rows if row["array"] in arrays]
     for row in managed:
         if gpu_count(row["gres"]) != 1 or not row["name"].startswith("mk-"):
@@ -213,10 +233,10 @@ def tick(policy: dict, state: dict, state_path: Path, apply: bool) -> dict:
             hold_intents.difference_update(ids)
             save()
     for array in sorted(new_arrays):
-        set_array_throttle(array)
+        set_array_throttle(array, admission)
         initialized.add(array)
     rows = read_queue()  # After the barrier: a raced start is counted as occupied.
-    released = choose_releases(rows, arrays, admission, blocked)
+    released = choose_releases(rows, arrays, admission, blocked, maximum=maximum)
     if any(row["id"] not in owned for row in released):
         raise ValueError("Refusing to release a hold not owned by this controller")
     for array in sorted(arrays):
@@ -248,11 +268,14 @@ def main() -> None:
     required = {
         "timezone": "America/New_York",
         "maximum_worker_minutes": 120,
-        "maximum_a100s": 4,
         "window": "all_times",
     }
     if any(policy.get(key) != value for key, value in required.items()):
-        raise ValueError("This controller requires the four-A100 / two-hour worker policy")
+        raise ValueError("This controller requires the registered two-hour worker policy")
+    if policy.get("maximum_a100s") not in {4, 6} or (
+        policy["maximum_a100s"] == 6 and policy.get("six_a100s_explicitly_authorized") is not True
+    ):
+        raise ValueError("A100 limit must be four, or explicitly user-authorized six")
     args.state.parent.mkdir(parents=True, exist_ok=True)
     with args.state.with_suffix(".lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
