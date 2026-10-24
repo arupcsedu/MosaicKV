@@ -226,6 +226,51 @@ def test_guarded_allocation_reports_final_errors_and_keeps_lifetime_cap(tmp_path
         assert "__guarded_output_impact_layers" in result.effective_method
 
 
+def test_one_token_teacher_forcing_ragged_cache_never_preallocates(tmp_path, monkeypatch):
+    import mosaickv.selection.direct_error_exchange as exchange
+    from mosaickv.evaluation.model import EvaluationRequest
+    from mosaickv.selection.evidence_layer_allocation import EvidenceLayerPlan
+
+    adapter = _llava()
+    cfg = replace(
+        _config(MosaicKVMethod.MOSAICKV_EXACT),
+        bounded_decode=BoundedDecodeConfig(2, 1, 0.2, "direct_error_exchange_v1"),
+    )
+    cfg = replace(cfg, cache=replace(cfg.cache, budget_value=384))
+    # Synthetic transport regression: force feasible 2/4 layer lengths, not a
+    # measured algorithm claim. Layer zero is deliberately not the longest.
+    monkeypatch.setattr(
+        exchange,
+        "build_direct_error_layer_plan",
+        lambda *_a, **_k: EvidenceLayerPlan(
+            (((2, 3),), ((0, 1, 2, 3),)), (2, 4), 384, (0.0, 0.0), (1.0, 1.0), (1, 1)
+        ),
+    )
+
+    def forbidden(*_a, **_k):
+        pytest.fail("zero decode updates must never preallocate")
+
+    monkeypatch.setattr(adapter, "preallocate_decode_cache", forbidden)
+    request = _runtime_request("one-token-ragged")
+    request = EvaluationRequest(
+        request.run_id,
+        request.sample_id,
+        request.task,
+        request.messages,
+        {"_mosaickv_teacher_forced_token_ids": (2,)},
+    )
+    result = HuggingFaceMosaicKVModel(adapter, cfg, trace_directory=tmp_path).generate(request)
+    assert result.metrics.generated_tokens == 1
+    assert result.metrics.initial_active_kv_storage_bytes == 384
+    assert result.metrics.final_active_kv_storage_bytes == 384
+    assert result.metrics.peak_active_kv_storage_bytes == 384
+    trace = json.loads(next(tmp_path.rglob("*.json")).read_text())
+    assert trace["execution_phase"] == "teacher_forced"
+    assert trace["decode_runtime_policy"]["planned_decode_updates"] == 0
+    assert trace["bounded_decode"]["status"] == "no_decode_updates"
+    assert trace["teacher_forced_evaluation"]["evaluated_tokens"] == 1
+
+
 def test_rejected_reallocation_reuses_packed_anchor_without_gathering(monkeypatch):
     from types import SimpleNamespace
 
@@ -265,6 +310,124 @@ def single_cpu_thread():
     torch.manual_seed(204)
     yield
     torch.set_num_threads(previous)
+
+
+def test_label_blind_logit_diagnostic_reuses_prefill_and_isolates_states(tmp_path, monkeypatch):
+    from mosaickv.evaluation.direct_error_diagnostic import DirectErrorLogitDiagnostic
+
+    adapter = _llava()
+    cfg = replace(
+        _config(MosaicKVMethod.MOSAICKV_EXACT),
+        bounded_decode=BoundedDecodeConfig(2, 1, 0.2, "direct_error_exchange_v1"),
+    )
+    prefill = adapter.prefill
+    calls = []
+
+    def counted(*args, **kwargs):
+        calls.append(1)
+        return prefill(*args, **kwargs)
+
+    monkeypatch.setattr(adapter, "prefill", counted)
+    runtime = DirectErrorLogitDiagnostic(adapter, cfg, trace_directory=tmp_path, horizon=2)
+    request = _runtime_request("isolated-diagnostic")
+    record = runtime.diagnose(request)
+    assert len(calls) == 1
+    assert record["measured_source_cache_unchanged"]
+    assert record["logical_positions_unchanged"]
+    assert record["benchmark_labels_accessed"] is False
+    assert record["selection_modified_by_probe"] is False
+    assert record["promotion_authorized"] is False
+    assert len(record["steps"]) == 2
+    for step in record["steps"]:
+        for name in ("anchor", "candidate"):
+            assert step[name]["active_bytes"] == 512
+            assert step[name]["logit_kl"] >= -1e-6
+    trace = json.loads(next(tmp_path.rglob("*.json")).read_text())
+    assert trace["status"] == "completed_evaluation_only_prefill_diagnostic"
+    assert trace["not_a_benchmark_prediction_or_performance_row"] is True
+    from mosaickv.evaluation.model import EvaluationRequest
+
+    with pytest.raises(ValueError, match="prompt/media only"):
+        runtime.diagnose(
+            EvaluationRequest(
+                request.run_id,
+                request.sample_id,
+                request.task,
+                request.messages,
+                {"target": "forbidden"},
+            )
+        )
+
+
+@pytest.mark.parametrize("kind", ["ppl", "diagnostic"])
+def test_recovery_worker_uses_metric_only_path_and_writes_manifest(tmp_path, monkeypatch, kind):
+    import importlib
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[2] / "scripts"))
+    recovery = importlib.import_module("recover_bounded_history_v4")
+    # Load aliases before monkeypatching the native loader; otherwise a later
+    # import could retain a mocked loader beyond this test's fixture lifetime.
+    importlib.import_module("mosaickv.hf_cli")
+    import mosaickv.adapters.huggingface as adapters
+    import mosaickv.evaluation.paper_native_lanes as native
+    from mosaickv.backends.hf_runtime import HuggingFaceMosaicKVModel
+
+    adapter = _llava()
+    cfg = replace(
+        _config(MosaicKVMethod.MOSAICKV_EXACT),
+        bounded_decode=BoundedDecodeConfig(2, 1, 0.2, "direct_error_exchange_v1"),
+    )
+    reference = tmp_path / "reference.json"
+    reference.write_text("{}")
+    job = dict(kind=kind, sample_ids=["synthetic-consumed"], horizon=2)
+    original = dict(
+        index=13,
+        task="synthetic_smoke",
+        ledger="not-read",
+        ledger_sha="c" * 64,
+        config_sha="d" * 64,
+        reference=str(reference),
+        method="mosaickv_direct_error_v4",
+    )
+    monkeypatch.setattr(
+        recovery, "validate", lambda *_: (dict(source_sha="a" * 40), job, {}, original, cfg)
+    )
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 1)
+    # Do not leak the production worker's 12-thread setting into other CPU tests.
+    monkeypatch.setattr(torch, "set_num_threads", lambda *_: None)
+    monkeypatch.setattr(torch.cuda, "get_device_name", lambda *_: "CPU mock A100; not GPU evidence")
+    monkeypatch.setenv("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+    monkeypatch.setattr(adapters, "load_hf_adapter", lambda *_a, **_k: adapter)
+    monkeypatch.setattr(
+        native,
+        "load_paper_native_ledger",
+        lambda *_a, **_k: SimpleNamespace(
+            samples=[
+                SimpleNamespace(
+                    sample_id="synthetic-consumed",
+                    prompt="tiny",
+                    media=(),
+                    teacher_forcing_target="synthetic target",
+                )
+            ]
+        ),
+    )
+    monkeypatch.setattr(HuggingFaceMosaicKVModel, "_teacher_forced_target_ids", lambda *_: (2,))
+    recovery.worker(tmp_path, "b" * 64, 0)
+    folder = tmp_path / "workers/00"
+    completed = json.loads((folder / "completed.json").read_text())
+    assert completed["status"] == "passed"
+    manifest = json.loads((folder / "manifest.json").read_text())
+    assert manifest["execution"]["generation_predictions_rerun"] is False
+    assert manifest["execution"]["new_timing_comparison"] is False
+    records = json.loads((folder / "raw.json").read_text())
+    assert len(records) == 1 and records[0]["status"] == "completed"
+    if kind == "ppl":
+        assert records[0]["result"]["tokens"] == 1
+    else:
+        assert records[0]["result"]["benchmark_labels_accessed"] is False
 
 
 def _config(method=MosaicKVMethod.PROMPT_ATTENTION_TOPK, *, ratio=0.9999999999999999):

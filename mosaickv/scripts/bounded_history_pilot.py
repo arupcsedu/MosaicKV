@@ -614,6 +614,13 @@ def worker(root, plan_sha, index):
                     if row[f"{boundary}_active_kv_storage_bytes"] != cfg.cache.budget_value:
                         raise RuntimeError("worker failed exact lifetime-storage cap")
         reconstruction_checks = {}
+        from mosaickv.evaluation.cache_phase_audit import audit_phase_directory
+
+        phase_storage_checks = audit_phase_directory(
+            Path(job["output"]) / "traces",
+            job["sample_ids"],
+            None if is_full else cfg.cache.budget_value,
+        )
         if job["method"] in GUARDED_ARMS:
             reconstruction_checks = reconstruction_trace_checks(
                 Path(job["output"]) / "traces", job["sample_ids"], cfg.cache.budget_value
@@ -638,6 +645,7 @@ def worker(root, plan_sha, index):
                 wall_seconds=time.monotonic() - started,
                 slurm_job_id=os.environ.get("SLURM_JOB_ID"),
                 reconstruction_checks=reconstruction_checks,
+                phase_storage_checks=phase_storage_checks,
             ),
         )
         progress(

@@ -149,6 +149,14 @@ class HuggingFaceRuntimeError(RuntimeError):
     mosaickv_failure_trace_payload: JsonObject | None = None
 
 
+class PrefillDiagnosticComplete(Exception):
+    """Evaluation-only early completion; never a benchmark prediction/result."""
+
+    def __init__(self, record: dict[str, Any]) -> None:
+        super().__init__("evaluation-only cache diagnostic complete")
+        self.record = record
+
+
 def _assert_prefixkv_common_hf_representable(
     plan: PrefixKVCompressionPlan, adapter: HuggingFaceMultimodalAdapter | None = None
 ) -> None:
@@ -8760,6 +8768,16 @@ class HuggingFaceMosaicKVModel:
 
     backend = "huggingface"
 
+    def _observe_evidence_allocation(
+        self,
+        prefill: Any,
+        anchor: Any,
+        candidate: Any,
+        budget: Any,
+        allocation_trace: dict[str, Any],
+    ) -> None:
+        """No-op online; evaluation subclass may inspect isolated clones only."""
+
     def __init__(
         self,
         adapter: HuggingFaceMultimodalAdapter,
@@ -8939,6 +8957,13 @@ class HuggingFaceMosaicKVModel:
                 "_mosaickv_teacher_forced_token_ids must be a non-empty tuple "
                 "of nonnegative integers"
             )
+        planned_output_tokens = (
+            len(teacher_forced_ids) if teacher_forced_ids else self.config.generation.max_new_tokens
+        )
+        planned_decode_updates = planned_output_tokens - 1
+        trace["execution_phase"] = "teacher_forced" if teacher_forced_ids else "generation"
+        trace["requested_output_tokens"] = planned_output_tokens
+        decode_runtime_policy["planned_decode_updates"] = planned_decode_updates
         teacher_forced_nll_sum = 0.0
         trace_instrumentation_seconds = 0.0
         deferred_trace_builder: Callable[[], JsonObject] | None = None
@@ -9224,12 +9249,7 @@ class HuggingFaceMosaicKVModel:
                         self.config.bounded_decode.resolved_capacity(
                             self.config.cache.budget_value, bytes_per_position
                         ),
-                        (
-                            len(teacher_forced_ids)
-                            if teacher_forced_ids
-                            else self.config.generation.max_new_tokens
-                        )
-                        - 1,
+                        planned_decode_updates,
                     )
                     trace["bounded_decode"] = {
                         "status": "generation_reserve_planned_before_prompt_selection",
@@ -10015,6 +10035,7 @@ class HuggingFaceMosaicKVModel:
                         raise HuggingFaceRuntimeError(
                             "evidence allocation lacks prompt forecast/cap"
                         )
+                    evidence_anchor = packed
                     (packed, evidence_allocation_trace), allocation_seconds = _timed(
                         prefill.logits,
                         lambda: _reallocate_evidence_layers(
@@ -10036,6 +10057,9 @@ class HuggingFaceMosaicKVModel:
                     )
                     packing_seconds += allocation_seconds
                     evidence_allocation_trace["selection_and_pack_seconds"] = allocation_seconds
+                    self._observe_evidence_allocation(
+                        prefill, evidence_anchor, packed, bounded_budget, evidence_allocation_trace
+                    )
                 state = _state_from_packed(self.adapter, prefill.state, packed)
                 packed_prompt_capacity = packed.prompt_capacity
                 packed_prefill_active_kv_bytes = _cache_payload_bytes(
@@ -10325,6 +10349,10 @@ class HuggingFaceMosaicKVModel:
                     if retention_one_identity
                     else "no_decode_updates"
                 }
+                if bounded_budget is not None:
+                    bounded_decode_trace["budget_reservation"] = cast(
+                        "JsonObject", asdict(bounded_budget)
+                    )
 
             # Observe before append-only preallocation so unused backing capacity is not
             # confused with the post-compression byte target. All methods use
@@ -10335,10 +10363,14 @@ class HuggingFaceMosaicKVModel:
             )
             trace_instrumentation_seconds += time.perf_counter() - cache_accounting_started
             preallocated_decode_cache = False
-            if prefixkv_plan is None and not state.model_state.get("mosaickv_bounded_history"):
+            if (
+                planned_decode_updates > 0
+                and prefixkv_plan is None
+                and not state.model_state.get("mosaickv_bounded_history")
+            ):
                 preallocated_decode_cache = self.adapter.preallocate_decode_cache(
                     state,
-                    self.config.generation.max_new_tokens - 1,
+                    planned_decode_updates,
                 )
             cache_accounting_started = time.perf_counter()
             cache_lifecycle.observe(self.adapter._legacy_layers(state.past_key_values)[0])
@@ -11419,6 +11451,18 @@ class HuggingFaceMosaicKVModel:
                 ),
                 effective_method=effective_method,
             )
+        except PrefillDiagnosticComplete as complete:
+            trace.update(
+                {
+                    "status": "completed_evaluation_only_prefill_diagnostic",
+                    "measurement_type": "validation_smoke",
+                    "not_a_benchmark_prediction_or_performance_row": True,
+                    "diagnostic": complete.record,
+                    "end_to_end_time": time.perf_counter() - started,
+                }
+            )
+            _write_trace(trace_path, trace)
+            raise
         except Exception as error:
             if cache_lifecycle is not None:
                 trace["partial_cache_lifecycle"] = {

@@ -61,6 +61,37 @@ def test_preallocated_dynamic_cache_reports_only_occupied_prefix() -> None:
     assert updated_keys.untyped_storage().nbytes() == 1 * 2 * 7 * 4 * 4
 
 
+def test_ragged_preallocation_keeps_independent_lengths_and_is_transactional(monkeypatch):
+    from types import SimpleNamespace
+
+    from transformers import DynamicCache
+
+    import mosaickv.adapters.huggingface.preallocated_cache as module
+
+    pairs = tuple((torch.zeros(1, 1, n, 4), torch.zeros(1, 1, n, 4)) for n in (2, 4))
+    original = DynamicCache.from_legacy_cache(pairs)
+    original._mosaickv_independent_layer_lengths = True
+    adapter = SimpleNamespace(
+        _legacy_layers=HuggingFaceMultimodalAdapter._legacy_layers,
+        _cache_length=lambda cache: (
+            max(x.keys.shape[-2] for x in cache.layers)
+            if getattr(cache, "_mosaickv_independent_layer_lengths", False)
+            else cache.get_seq_length()
+        ),
+    )
+    state = DecodeState(original, torch.ones(1, 4), 4, 20, 20, ())
+    assert HuggingFaceMultimodalAdapter.preallocate_decode_cache(adapter, state, 2)
+    assert state.past_key_values._mosaickv_independent_layer_lengths
+    assert [x.get_seq_length() for x in state.past_key_values.layers] == [2, 4]
+    assert state.next_decode_position == 20
+    retained = state.past_key_values
+    bad = build_preallocated_dynamic_cache(((pairs[0][0], pairs[0][1]),), 2)
+    monkeypatch.setattr(module, "build_preallocated_dynamic_cache", lambda *_: bad)
+    with pytest.raises(RuntimeError, match="occupied cache length"):
+        HuggingFaceMultimodalAdapter.preallocate_decode_cache(adapter, state, 2)
+    assert state.past_key_values is retained
+
+
 def test_preallocated_provisional_step_rolls_back_without_copying_storage() -> None:
     keys = torch.ones((1, 1, 3, 4))
     cache = build_preallocated_dynamic_cache(((keys, keys.clone()),), 2)

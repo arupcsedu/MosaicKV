@@ -109,6 +109,8 @@ def build_preallocated_dynamic_cache(
         "Any",
         [PreallocatedDynamicLayer(keys, values, additional_positions) for keys, values in layers],
     )
+    if len({int(key.shape[-2]) for key, _value in layers}) != 1:
+        cache._mosaickv_independent_layer_lengths = True
     return cache
 
 

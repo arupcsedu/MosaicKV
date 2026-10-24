@@ -1275,9 +1275,17 @@ class HuggingFaceMultimodalAdapter(ABC):
         )
 
         original_length = self._cache_length(state.past_key_values)
-        state.past_key_values = build_preallocated_dynamic_cache(layers, additional_positions)
-        if self._cache_length(state.past_key_values) != original_length:
+        replacement = build_preallocated_dynamic_cache(layers, additional_positions)
+        if getattr(state.past_key_values, "_mosaickv_independent_layer_lengths", False) is True:
+            replacement._mosaickv_independent_layer_lengths = True
+        if self._cache_length(replacement) != original_length or any(
+            int(before[0].shape[-2]) != int(after[0].shape[-2])
+            for before, after in zip(layers, self._legacy_layers(replacement)[0], strict=True)
+        ):
             raise RuntimeError("preallocation changed the occupied cache length")
+        # Validate before publishing the replacement so a rejected transaction
+        # never leaves the caller holding an invalid cache.
+        state.past_key_values = replacement
         state.model_state["mosaickv_decode_cache_storage"] = "preallocated_append_only"
         state.model_state["mosaickv_decode_cache_reserved_positions"] = additional_positions
         return True
