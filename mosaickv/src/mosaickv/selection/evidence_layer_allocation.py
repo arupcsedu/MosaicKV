@@ -209,7 +209,7 @@ class EvidenceLayerPlan:
     reconstruction: dict[str, Any] | None = None
 
     def trace(self) -> dict[str, Any]:
-        return {
+        result = {
             "variant": (
                 "output_impact_layer_allocation_v1"
                 if self.reconstruction is None
@@ -234,6 +234,11 @@ class EvidenceLayerPlan:
                 {} if self.reconstruction is None else {"reconstruction_guard": self.reconstruction}
             ),
         }
+        if self.reconstruction is not None and "exchange_search" in self.reconstruction:
+            result["variant"] = "direct_error_single_slot_layer_exchange_v1"
+            result["evidence_reservation_fraction"] = "unchanged_anchor_only_not_reapplied"
+            result["ocr_source"] = "unchanged_anchor_policy_no_new_OCR_or_spatial_reservation"
+        return result
 
 
 def build_evidence_layer_plan(

@@ -36,6 +36,7 @@ from mosaickv.types import ForecastMode, MosaicKVMethod, RepairPolicy
 
 SOURCE = Path(__file__).resolve().parents[2]
 PROTOCOL = SOURCE / "mosaickv/configs/experiments/bounded_history_baselines_v1.yaml"
+GUARDED_ARMS = {"mosaickv_output_impact_guarded_v3", "mosaickv_direct_error_v4"}
 
 
 def digest(path):
@@ -121,7 +122,7 @@ def configurations(task, cap, route, profile):
 def development_exclusions(protocol, task, chosen_ids):
     """Bind prior identity ledgers, not predictions, scores or failure identities."""
     records = protocol.get("development_exclusions", {}).get(task, [])
-    if protocol.get("candidate_arm") == "mosaickv_output_impact_guarded_v3" and not records:
+    if protocol.get("candidate_arm") in GUARDED_ARMS and not records:
         raise ValueError("guarded development validation requires explicit exclusion ledgers")
     if len(chosen_ids) != len(set(chosen_ids)):
         raise ValueError("development cohort contains duplicate identities")
@@ -143,7 +144,11 @@ def development_exclusions(protocol, task, chosen_ids):
         excluded_count=len(excluded),
         overlap_count=0,
         selection_uses_answers_or_scores=False,
-        scope="disjoint_from_explicit_v1_v2_development_ledgers_not_globally_untouched",
+        scope=(
+            "disjoint_from_explicit_v1_v2_v3_development_ledgers_not_globally_untouched"
+            if protocol.get("candidate_arm") == "mosaickv_direct_error_v4"
+            else "disjoint_from_explicit_v1_v2_development_ledgers_not_globally_untouched"
+        ),
     )
 
 
@@ -169,6 +174,23 @@ def prepare(root, protocol_path=PROTOCOL):
     if upstream != protocol["prefixkv_commit"]:
         raise ValueError("PrefixKV upstream revision mismatch")
     bound = {str(protocol_path): digest(protocol_path), str(profile): digest(profile)}
+    feasibility_summary = None
+    if protocol.get("candidate_arm") == "mosaickv_direct_error_v4":
+        from mosaickv.selection.direct_error_exchange import cpu_feasibility
+
+        feasibility = dict(source_sha=sha, **cpu_feasibility())
+        if not feasibility["passed"]:
+            raise ValueError("CPU exchange feasibility failed; materialization/submission blocked")
+        feasibility_path = root / "cpu-feasibility.json"
+        write_once(feasibility_path, feasibility)
+        bound[str(feasibility_path)] = digest(feasibility_path)
+        feasibility_summary = dict(
+            path=str(feasibility_path),
+            sha256=digest(feasibility_path),
+            source_sha=sha,
+            passed=feasibility["passed"],
+            classification=feasibility["classification"],
+        )
     jobs, disjointness = [], []
     for task in protocol["tasks"]:
         route = routes[task]
@@ -243,6 +265,12 @@ def prepare(root, protocol_path=PROTOCOL):
                         candidate.bounded_decode, layer_allocation="output_impact_guarded_v1"
                     ),
                 )
+                configs["mosaickv_direct_error_v4"] = replace(
+                    candidate,
+                    bounded_decode=replace(
+                        candidate.bounded_decode, layer_allocation="direct_error_exchange_v1"
+                    ),
+                )
             methods = (
                 ["full_kv", *protocol["methods"]]
                 if cap == protocol["caps_mib"][0]
@@ -281,6 +309,7 @@ def prepare(root, protocol_path=PROTOCOL):
         heldout_claim=False,
         paper_campaign_authorized=False,
         development_disjointness=disjointness,
+        **({"cpu_feasibility": feasibility_summary} if feasibility_summary is not None else {}),
         comparison_decode_policy=dict(
             name=(
                 "common_bounded_history_v2_fullkv_reference_exempt"
@@ -404,6 +433,10 @@ def reconstruction_trace_checks(trace_root, sample_ids, cap_bytes):
         if allocation["prompt_bytes"] + budget["reserved_generated_bytes"] != cap_bytes:
             raise RuntimeError("guarded allocation prompt/history accounting mismatch")
         check = validate_reconstruction_trace(allocation)
+        if "exchange_search" in allocation["reconstruction_guard"]:
+            from mosaickv.selection.direct_error_exchange import validate_exchange_trace
+
+            check = validate_exchange_trace(allocation)
         phase = "teacher_forced" if trace["teacher_forced_evaluation"]["enabled"] else "generation"
         key = (trace["sample_id"], phase)
         if key in phases:
@@ -581,7 +614,7 @@ def worker(root, plan_sha, index):
                     if row[f"{boundary}_active_kv_storage_bytes"] != cfg.cache.budget_value:
                         raise RuntimeError("worker failed exact lifetime-storage cap")
         reconstruction_checks = {}
-        if job["method"] == "mosaickv_output_impact_guarded_v3":
+        if job["method"] in GUARDED_ARMS:
             reconstruction_checks = reconstruction_trace_checks(
                 Path(job["output"]) / "traces", job["sample_ids"], cfg.cache.budget_value
             )
@@ -690,7 +723,7 @@ def analyze(root, plan_sha):
             check = result.get("reconstruction_checks", {}).get(row["sample_id"])
             if check is not None:
                 row.update({f"reconstruction_{key}": value for key, value in check.items()})
-            if job["method"] == "mosaickv_output_impact_guarded_v3" and check is None:
+            if job["method"] in GUARDED_ARMS and check is None:
                 failures.append(
                     f"missing reconstruction telemetry: {job['index']}/{row['sample_id']}"
                 )
@@ -737,7 +770,16 @@ def analyze(root, plan_sha):
                         reconstruction_final_mse_mean=group.reconstruction_final_mse_mean.mean(),
                         reconstruction_measurement_seconds=group.reconstruction_measurement_seconds.mean(),
                     )
-                    if method == "mosaickv_output_impact_guarded_v3"
+                    if method in GUARDED_ARMS
+                    else {}
+                ),
+                **(
+                    dict(
+                        changed_cache_fraction=group.reconstruction_exchange_changed.mean(),
+                        committed_exchanges_mean=group.reconstruction_exchange_committed.mean(),
+                        initial_safe_donors_mean=group.reconstruction_exchange_initial_donors.mean(),
+                    )
+                    if method == "mosaickv_direct_error_v4"
                     else {}
                 ),
             )

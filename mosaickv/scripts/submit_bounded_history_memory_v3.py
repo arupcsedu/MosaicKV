@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Submit ONLY the small guarded-allocation development cohort; no old retries."""
+"""Submit ONLY registered small V3/V4 development cohorts; no old retries."""
 
 from __future__ import annotations
 
@@ -14,18 +14,24 @@ from bounded_history_pilot import SOURCE, clean_source, digest, inputs, prepare,
 
 def validate_scope(plan):
     protocol = plan["protocol"]
-    if (
-        protocol["experiment_id"] != "bounded_history_memory_v3"
-        or protocol["tasks"] != ["llava_description", "mmvet_prefixkv"]
-        or protocol["caps_mib"] != [32, 40, 80]
-        or protocol["samples_per_task"] != 8
-        or protocol["methods"]
-        != [
+    version = protocol["experiment_id"]
+    is_v4 = version == "bounded_history_memory_v4"
+    methods = (
+        ["prompt_attention_topk", "mosaickv_exact", "mosaickv_direct_error_v4"]
+        if is_v4
+        else [
             "prompt_attention_topk",
             "mosaickv_exact",
             "mosaickv_output_impact_v2",
             "mosaickv_output_impact_guarded_v3",
         ]
+    )
+    if (
+        version not in {"bounded_history_memory_v3", "bounded_history_memory_v4"}
+        or protocol["tasks"] != ["llava_description", "mmvet_prefixkv"]
+        or protocol["caps_mib"] != [32, 40, 80]
+        or protocol["samples_per_task"] != 8
+        or protocol["methods"] != methods
         or protocol["max_global_a100s"] != 6
         or protocol["paper_campaign_authorized"]
         or protocol["heldout_claim"]
@@ -36,7 +42,7 @@ def validate_scope(plan):
     checks = plan["development_disjointness"]
     if len(checks) != 2 or any(
         row["selected_count"] != 8
-        or row["excluded_count"] != 6
+        or row["excluded_count"] != (14 if is_v4 else 6)
         or row["overlap_count"]
         or row["selection_uses_answers_or_scores"]
         for row in checks
@@ -44,17 +50,29 @@ def validate_scope(plan):
         raise ValueError("missing complete development disjointness evidence")
     references = [job["index"] for job in plan["jobs"] if job["method"] == "full_kv"]
     compressed = [job["index"] for job in plan["jobs"] if job["method"] != "full_kv"]
-    if len(references) != 2 or len(compressed) != 24:
+    if len(references) != 2 or len(compressed) != (18 if is_v4 else 24):
         raise ValueError("unexpected GPU work: no retries or large campaigns permitted")
+    if is_v4:
+        feasibility = plan.get("cpu_feasibility", {})
+        if (
+            feasibility.get("passed") is not True
+            or feasibility.get("source_sha") != plan["source_sha"]
+            or feasibility.get("classification")
+            != "synthetic_CPU_feasibility_not_pretrained_quality_evidence"
+            or plan["bound_files"].get(feasibility.get("path")) != feasibility.get("sha256")
+        ):
+            raise ValueError("missing source-bound CPU feasibility; GPU submission blocked")
     return references, compressed
 
 
-def submit(root: Path) -> dict:
+def submit(root: Path, version: int = 3) -> dict:
+    if version not in {3, 4}:
+        raise ValueError("only the small V3/V4 protocols may be submitted")
     sha = clean_source()
     root = root.resolve()
     if root.exists() or Path("/scratch/djy8hg").resolve() not in root.parents:
         raise ValueError("submission requires a new scratch output root")
-    prepare(root, SOURCE / "mosaickv/configs/experiments/bounded_history_memory_v3.yaml")
+    prepare(root, SOURCE / f"mosaickv/configs/experiments/bounded_history_memory_v{version}.yaml")
     plan_sha = digest(root / "plan.json")
     plan = inputs(root, plan_sha)
     references, compressed = validate_scope(plan)
@@ -102,7 +120,7 @@ def submit(root: Path) -> dict:
             ],
         )
         gpu = sbatch(
-            "guarded-grid",
+            "direct-error-grid" if version == 4 else "guarded-grid",
             gpu_script,
             args,
             [
@@ -164,8 +182,8 @@ def submit(root: Path) -> dict:
         root=str(root),
         plan_sha256=plan_sha,
         jobs=jobs,
-        new_gpu_workers=26,
-        expected_sample_rows=208,
+        new_gpu_workers=len(plan["jobs"]),
+        expected_sample_rows=len(plan["jobs"]) * plan["protocol"]["samples_per_task"],
         reused_gpu_results=0,
         maximum_concurrent_a100s=6,
         cpus_per_worker=12,
@@ -181,4 +199,6 @@ def submit(root: Path) -> dict:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, required=True)
-    submit(parser.parse_args().root)
+    parser.add_argument("--version", type=int, choices=[3, 4], default=3)
+    args = parser.parse_args()
+    submit(args.root, args.version)

@@ -5106,19 +5106,34 @@ def _reallocate_evidence_layers(
     budget_bytes: int,
     *,
     guard_reconstruction: bool = False,
+    direct_error_exchange: bool = False,
 ) -> tuple[PackedRuntimeCache, dict[str, Any]]:
     from mosaickv.adapters.huggingface.layer_local_cache import gather_layer_local_snapshot
     from mosaickv.selection.evidence_layer_allocation import build_evidence_layer_plan
 
-    allocation = build_evidence_layer_plan(
-        full_state,
-        token_attention,
-        anchor.slot_records,
-        prompt_budget_bytes=budget_bytes,
-        uniform_capacity=anchor.prompt_capacity,
-        guard_reconstruction=guard_reconstruction,
-    )
-    if allocation.reconstruction is not None and not allocation.reconstruction["accepted"]:
+    if direct_error_exchange:
+        from mosaickv.selection.direct_error_exchange import build_direct_error_layer_plan
+
+        allocation = build_direct_error_layer_plan(
+            full_state,
+            token_attention,
+            anchor.slot_records,
+            prompt_budget_bytes=budget_bytes,
+            uniform_capacity=anchor.prompt_capacity,
+        )
+    else:
+        allocation = build_evidence_layer_plan(
+            full_state,
+            token_attention,
+            anchor.slot_records,
+            prompt_budget_bytes=budget_bytes,
+            uniform_capacity=anchor.prompt_capacity,
+            guard_reconstruction=guard_reconstruction,
+        )
+    if allocation.reconstruction is not None and (
+        not allocation.reconstruction["accepted"]
+        or allocation.reconstruction.get("exchange_search", {}).get("changed_from_anchor") is False
+    ):
         actual = sum(
             tensor_storage_bytes(tensor)
             for layer in anchor.snapshot.layers
@@ -9994,7 +10009,7 @@ class HuggingFaceMosaicKVModel:
                 if (
                     self.config.bounded_decode is not None
                     and self.config.bounded_decode.layer_allocation
-                    in {"output_impact_v1", "output_impact_guarded_v1"}
+                    in {"output_impact_v1", "output_impact_guarded_v1", "direct_error_exchange_v1"}
                 ):
                     if predicted_token_attention is None or dense_budget is None:
                         raise HuggingFaceRuntimeError(
@@ -10011,7 +10026,11 @@ class HuggingFaceMosaicKVModel:
                             dense_budget.target_bytes,
                             guard_reconstruction=(
                                 self.config.bounded_decode.layer_allocation
-                                == "output_impact_guarded_v1"
+                                in {"output_impact_guarded_v1", "direct_error_exchange_v1"}
+                            ),
+                            direct_error_exchange=(
+                                self.config.bounded_decode.layer_allocation
+                                == "direct_error_exchange_v1"
                             ),
                         ),
                     )

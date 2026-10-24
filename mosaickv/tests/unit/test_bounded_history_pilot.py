@@ -109,6 +109,75 @@ def test_guarded_successor_keeps_controls_and_requires_disjoint_development_ids(
         assert all(len(row["sha256"]) == 64 for row in protocol["development_exclusions"][task])
 
 
+def test_direct_error_successor_is_small_disjoint_and_has_unchanged_numerical_guard():
+    from mosaickv.selection.direct_error_exchange import MAX_EXCHANGES, MAX_VERIFIED_PAIRS
+    from mosaickv.selection.evidence_layer_allocation import (
+        RECONSTRUCTION_ATOL,
+        RECONSTRUCTION_RTOL,
+    )
+
+    module = tooling()
+    p = yaml.safe_load(
+        (module.SOURCE / "mosaickv/configs/experiments/bounded_history_memory_v4.yaml").read_text()
+    )
+    assert p["caps_mib"] == [32, 40, 80]
+    assert p["sample_offset"] == 14
+    assert p["samples_per_task"] == 8
+    assert len(p["methods"]) == 3
+    assert p["cpu_feasibility_required"]
+    assert p["candidate_allocation"]["max_exchanges"] == MAX_EXCHANGES
+    assert p["candidate_allocation"]["max_verified_pairs"] == MAX_VERIFIED_PAIRS
+    assert p["candidate_allocation"]["absolute_tolerance"] == RECONSTRUCTION_ATOL
+    assert p["candidate_allocation"]["relative_tolerance"] == RECONSTRUCTION_RTOL
+    assert not p["paper_campaign_authorized"]
+    assert not p["promotion"]["powered_validation_authorized"]
+    assert all(len(p["development_exclusions"][task]) == 3 for task in p["tasks"])
+
+
+def test_direct_error_launcher_requires_clean_source_bound_positive_cpu_feasibility():
+    module = tooling()
+    submit = submission_tooling()
+    p = yaml.safe_load(
+        (module.SOURCE / "mosaickv/configs/experiments/bounded_history_memory_v4.yaml").read_text()
+    )
+    jobs = []
+    for task in p["tasks"]:
+        jobs.append(dict(index=len(jobs), method="full_kv", task=task))
+        for cap in p["caps_mib"]:
+            for method in p["methods"]:
+                jobs.append(dict(index=len(jobs), method=method, task=task, cap_mib=cap))
+    plan = dict(
+        protocol=p,
+        jobs=jobs,
+        source_sha="a" * 40,
+        bound_files={"synthetic-cpu.json": "b" * 64},
+        development_disjointness=[
+            dict(
+                task=t,
+                selected_count=8,
+                excluded_count=14,
+                overlap_count=0,
+                selection_uses_answers_or_scores=False,
+            )
+            for t in p["tasks"]
+        ],
+    )
+    with pytest.raises(ValueError, match="CPU feasibility"):
+        submit.validate_scope(plan)
+    plan["cpu_feasibility"] = dict(
+        passed=True,
+        source_sha="a" * 40,
+        path="synthetic-cpu.json",
+        sha256="b" * 64,
+        classification="synthetic_CPU_feasibility_not_pretrained_quality_evidence",
+    )
+    refs, compressed = submit.validate_scope(plan)
+    assert len(refs) == 2 and len(compressed) == 18
+    plan["cpu_feasibility"]["source_sha"] = "c" * 40
+    with pytest.raises(ValueError, match="CPU feasibility"):
+        submit.validate_scope(plan)
+
+
 def test_guarded_launcher_refuses_campaign_expansion_or_missing_disjointness():
     import copy
 

@@ -190,10 +190,11 @@ def test_evidence_allocation_is_a_labeled_exact_byte_runtime_variant(tmp_path):
     assert result.effective_method.endswith("bounded_generated_history_v2")
 
 
-def test_guarded_allocation_reports_final_errors_and_keeps_lifetime_cap(tmp_path):
+@pytest.mark.parametrize("policy", ["output_impact_guarded_v1", "direct_error_exchange_v1"])
+def test_guarded_allocation_reports_final_errors_and_keeps_lifetime_cap(tmp_path, policy):
     cfg = replace(
         _config(MosaicKVMethod.MOSAICKV_EXACT),
-        bounded_decode=BoundedDecodeConfig(2, 1, 0.2, "output_impact_guarded_v1"),
+        bounded_decode=BoundedDecodeConfig(2, 1, 0.2, policy),
     )
     result = HuggingFaceMosaicKVModel(_llava(), cfg, trace_directory=tmp_path).generate(
         _runtime_request("guarded-layer-impact")
@@ -217,7 +218,12 @@ def test_guarded_allocation_reports_final_errors_and_keeps_lifetime_cap(tmp_path
     assert result.metrics.initial_active_kv_storage_bytes == 512
     assert result.metrics.final_active_kv_storage_bytes == 512
     assert result.metrics.peak_active_kv_storage_bytes == 512
-    assert "__guarded_output_impact_layers" in result.effective_method
+    if policy == "direct_error_exchange_v1":
+        assert "__direct_error_exchange_layers" in result.effective_method
+        assert guard["exchange_search"]["verified_pairs"] <= 64
+        assert guard["exchange_search"]["committed_exchanges"] <= 16
+    else:
+        assert "__guarded_output_impact_layers" in result.effective_method
 
 
 def test_rejected_reallocation_reuses_packed_anchor_without_gathering(monkeypatch):
@@ -308,7 +314,9 @@ def test_full_runtime_caps_initial_final_peak_and_writes_variant_trace(tmp_path,
     assert record["budget_reservation"]["reserved_generated_bytes"] == 256
 
 
-@pytest.mark.parametrize("allocation", ["uniform", "output_impact_guarded_v1"])
+@pytest.mark.parametrize(
+    "allocation", ["uniform", "output_impact_guarded_v1", "direct_error_exchange_v1"]
+)
 def test_retention_one_bypasses_ring_and_matches_untouched_fullkv(tmp_path, allocation):
     adapter = _llava()
     bounded = HuggingFaceMosaicKVModel(

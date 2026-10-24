@@ -391,6 +391,7 @@ class BoundedDecodeConfig:
             "uniform": "",
             "output_impact_v1": "__output_impact_layers",
             "output_impact_guarded_v1": "__guarded_output_impact_layers",
+            "direct_error_exchange_v1": "__direct_error_exchange_layers",
         }[self.layer_allocation]
         if method.is_published_reimplementation:
             return (
@@ -429,6 +430,7 @@ class BoundedDecodeConfig:
             "uniform",
             "output_impact_v1",
             "output_impact_guarded_v1",
+            "direct_error_exchange_v1",
         }:
             raise ConfigurationError("bounded_decode.layer_allocation is unsupported")
 
@@ -3802,6 +3804,10 @@ class RunConfig:
                 raise ConfigurationError(
                     "output-impact layer allocation is a MosaicKV exact variant"
                 )
+            if self.bounded_decode.layer_allocation == "direct_error_exchange_v1" and (
+                self.cache.block_size != 1 or self.cache.physical_budget_block_size not in {None, 1}
+            ):
+                raise ConfigurationError("direct-error layer exchange requires one-token blocks")
             supported = {
                 MosaicKVMethod.MOSAICKV_EXACT,
                 MosaicKVMethod.RANDOM_KV,
