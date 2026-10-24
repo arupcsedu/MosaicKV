@@ -11,10 +11,120 @@ import hashlib
 import heapq
 import json
 import math
+import time
 from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
+
+# Fixed before the successor cohort is materialized. These are numerical
+# tolerances for FP32 attention/value arithmetic, not quality non-inferiority.
+RECONSTRUCTION_ATOL = 1e-7
+RECONSTRUCTION_RTOL = 1e-6
+
+
+def reconstruction_mse(mass: Any, values: Any, positions: tuple[tuple[int, ...], ...]) -> Any:
+    """Per-head channel-mean squared error after retained-softmax renormalization.
+
+    The target is the full prompt-derived attention output, not an answer or a
+    future decode target. Reductions use FP64 on the already FP32 working values.
+    Invalid/non-finite or zero-mass subsets cannot pass a guard.
+    """
+    import torch
+
+    if mass.ndim != 2 or values.ndim != 3 or mass.shape != values.shape[:2]:
+        raise ValueError("reconstruction requires HN attention and HND values")
+    if len(positions) != mass.shape[0]:
+        raise ValueError("reconstruction requires positions for every head")
+    if (
+        not bool(torch.isfinite(mass).all())
+        or not bool(torch.isfinite(values).all())
+        or bool((mass < 0).any())
+        or bool((mass.sum(-1) <= 0).any())
+    ):
+        raise ValueError("reconstruction requires finite values and positive attention mass")
+    mask = torch.zeros_like(mass, dtype=torch.bool)
+    for head, row in enumerate(positions):
+        if not row or len(set(row)) != len(row) or any(p < 0 or p >= mass.shape[1] for p in row):
+            raise ValueError("invalid reconstruction subset positions")
+        mask[head, list(row)] = True
+    full_mass = mass.sum(-1, dtype=torch.float64).unsqueeze(-1)
+    kept = mass * mask
+    retained_mass = kept.sum(-1, dtype=torch.float64).unsqueeze(-1)
+    if bool((retained_mass <= 0).any()):
+        raise ValueError("reconstruction subset has zero retained attention mass")
+    full = (mass.unsqueeze(-1) * values).sum(1, dtype=torch.float64) / full_mass
+    retained = (kept.unsqueeze(-1) * values).sum(1, dtype=torch.float64) / retained_mass
+    error = (retained - full).square().mean(-1)
+    if not bool(torch.isfinite(error).all()):
+        raise ValueError("non-finite reconstruction error")
+    return error
+
+
+def reconstruction_guard(
+    anchor: tuple[tuple[float, ...], ...], proposed: tuple[tuple[float, ...], ...]
+) -> dict[str, Any]:
+    """Atomic rollback unless EVERY layer/head is non-worse; never average a loss away."""
+    if not anchor or len(anchor) != len(proposed):
+        raise ValueError("reconstruction guard requires matching nonempty layers")
+    rejected = []
+    for layer, (before, after) in enumerate(zip(anchor, proposed, strict=True)):
+        if not before or len(before) != len(after):
+            raise ValueError("reconstruction guard requires matching nonempty heads")
+        for head, (a, b) in enumerate(zip(before, after, strict=True)):
+            if not math.isfinite(a) or not math.isfinite(b) or min(a, b) < 0:
+                raise ValueError("reconstruction guard requires finite nonnegative errors")
+            if b > a + RECONSTRUCTION_ATOL + RECONSTRUCTION_RTOL * a:
+                rejected.append([layer, head])
+    return {
+        "policy": "atomic_transaction_every_head_nonregression_v1",
+        "metric": "renormalized_prompt_attention_output_channel_mean_squared_error",
+        "absolute_tolerance": RECONSTRUCTION_ATOL,
+        "relative_tolerance": RECONSTRUCTION_RTOL,
+        "accepted": not rejected,
+        "rejected_layer_heads": rejected,
+        "rejected_head_count": len(rejected),
+        "decision": "accept_proposal" if not rejected else "retain_same_byte_compressed_anchor",
+        "used_fullkv_fallback": False,
+        "anchor_mse_by_layer_head": anchor,
+        "proposed_mse_by_layer_head": proposed,
+        "final_mse_by_layer_head": anchor if rejected else proposed,
+    }
+
+
+def validate_reconstruction_trace(allocation: dict[str, Any]) -> dict[str, Any]:
+    """Validate serialized guard decisions; this is NOT a model-quality gate."""
+    guard = allocation["reconstruction_guard"]
+    expected = reconstruction_guard(
+        guard["anchor_mse_by_layer_head"], guard["proposed_mse_by_layer_head"]
+    )
+    for key, value in expected.items():
+        if guard.get(key) != value:
+            raise ValueError(f"reconstruction guard trace inconsistent: {key}")
+    selected_hash = (
+        guard["proposed_positions_sha256"]
+        if guard["accepted"]
+        else guard["anchor_positions_sha256"]
+    )
+    if allocation["selected_positions_sha256"] != selected_hash:
+        raise ValueError("reconstruction guard final positions do not match decision")
+    seconds = guard["host_wall_seconds_including_device_transfers"]
+    if not math.isfinite(seconds) or seconds < 0:
+        raise ValueError("reconstruction guard timing missing or non-finite")
+    return {
+        "accepted": guard["accepted"],
+        "rejected_head_count": guard["rejected_head_count"],
+        "measurement_seconds": seconds,
+        "anchor_mse_mean": float(
+            np.mean([x for row in guard["anchor_mse_by_layer_head"] for x in row])
+        ),
+        "proposed_mse_mean": float(
+            np.mean([x for row in guard["proposed_mse_by_layer_head"] for x in row])
+        ),
+        "final_mse_mean": float(
+            np.mean([x for row in guard["final_mse_by_layer_head"] for x in row])
+        ),
+    }
 
 
 def allocate_layer_slots(
@@ -96,10 +206,15 @@ class EvidenceLayerPlan:
     anchor_errors: tuple[float, ...]
     selected_prompt_masses: tuple[float, ...]
     mandatory_counts: tuple[int, ...]
+    reconstruction: dict[str, Any] | None = None
 
     def trace(self) -> dict[str, Any]:
         return {
-            "variant": "output_impact_layer_allocation_v1",
+            "variant": (
+                "output_impact_layer_allocation_v1"
+                if self.reconstruction is None
+                else "guarded_output_impact_layer_allocation_v1"
+            ),
             "evidence": "prompt_forecast_attention_and_source_values_only",
             "benchmark_labels_accessed": False,
             "output_error_is_a_surrogate_not_answer_fidelity": True,
@@ -115,6 +230,9 @@ class EvidenceLayerPlan:
             "selected_positions_sha256": hashlib.sha256(
                 json.dumps(self.positions, separators=(",", ":")).encode()
             ).hexdigest(),
+            **(
+                {} if self.reconstruction is None else {"reconstruction_guard": self.reconstruction}
+            ),
         }
 
 
@@ -125,6 +243,7 @@ def build_evidence_layer_plan(
     *,
     prompt_budget_bytes: int,
     uniform_capacity: int,
+    guard_reconstruction: bool = False,
 ) -> EvidenceLayerPlan:
     """Allocate complete layer slots; retain original K/V and logical indices."""
     import torch
@@ -242,6 +361,52 @@ def build_evidence_layer_plan(
         tuple(tuple(sorted(row[:count])) for row in rank)
         for rank, count in zip(rankings, counts, strict=True)
     )
+    reconstruction = None
+    if guard_reconstruction:
+        guard_started = time.perf_counter()
+        anchor_positions = tuple(
+            tuple(tuple(sorted(anchor[(i, h)])) for h in range(layer.kv_heads))
+            for i, layer in enumerate(layers)
+        )
+        # A rollback must preserve the SAME measured physical budget, not quietly
+        # select FullKV or use a padded/ragged head layout.
+        if (
+            any(
+                len(row) != uniform_capacity or not set(mandatory[(i, h)]) <= set(row)
+                for i, heads in enumerate(anchor_positions)
+                for h, row in enumerate(heads)
+            )
+            or uniform_capacity * sum(costs) != prompt_budget_bytes
+        ):
+            raise ValueError(
+                "reconstruction anchor must satisfy mandatory and exact physical bytes"
+            )
+        before, proposed = [], []
+        for i, layer in enumerate(layers):
+            values = layer.value.detach()[0].float()
+            mass = torch.as_tensor(masses[i], device=values.device, dtype=torch.float32)
+            before.append(
+                tuple(
+                    float(x) for x in reconstruction_mse(mass, values, anchor_positions[i]).tolist()
+                )
+            )
+            proposed.append(
+                tuple(float(x) for x in reconstruction_mse(mass, values, positions[i]).tolist())
+            )
+        reconstruction = reconstruction_guard(tuple(before), tuple(proposed))
+        reconstruction["proposed_layer_capacities"] = counts
+        reconstruction["proposed_positions_sha256"] = hashlib.sha256(
+            json.dumps(positions, separators=(",", ":")).encode()
+        ).hexdigest()
+        reconstruction["anchor_positions_sha256"] = hashlib.sha256(
+            json.dumps(anchor_positions, separators=(",", ":")).encode()
+        ).hexdigest()
+        if not reconstruction["accepted"]:
+            positions = anchor_positions
+            counts = tuple(uniform_capacity for _ in layers)
+        reconstruction["host_wall_seconds_including_device_transfers"] = (
+            time.perf_counter() - guard_started
+        )
     selected_mass = tuple(
         float(np.mean([mass[h, list(row)].sum() for h, row in enumerate(heads)]))
         for mass, heads in zip(masses, positions, strict=True)
@@ -253,4 +418,5 @@ def build_evidence_layer_plan(
         tuple(errors),
         selected_mass,
         tuple(mandatory_counts),
+        reconstruction,
     )

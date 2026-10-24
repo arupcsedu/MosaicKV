@@ -5104,6 +5104,8 @@ def _reallocate_evidence_layers(
     anchor: PackedRuntimeCache,
     token_attention: dict[tuple[int, int], Any],
     budget_bytes: int,
+    *,
+    guard_reconstruction: bool = False,
 ) -> tuple[PackedRuntimeCache, dict[str, Any]]:
     from mosaickv.adapters.huggingface.layer_local_cache import gather_layer_local_snapshot
     from mosaickv.selection.evidence_layer_allocation import build_evidence_layer_plan
@@ -5114,7 +5116,19 @@ def _reallocate_evidence_layers(
         anchor.slot_records,
         prompt_budget_bytes=budget_bytes,
         uniform_capacity=anchor.prompt_capacity,
+        guard_reconstruction=guard_reconstruction,
     )
+    if allocation.reconstruction is not None and not allocation.reconstruction["accepted"]:
+        actual = sum(
+            tensor_storage_bytes(tensor)
+            for layer in anchor.snapshot.layers
+            for tensor in (layer.key, layer.value)
+        )
+        if actual != allocation.prompt_bytes or actual != budget_bytes:
+            raise HuggingFaceRuntimeError("reconstruction rollback violates physical-byte cap")
+        # Reuse the already packed compressed anchor. No over-budget proposal is
+        # injected, no second copy is packed, and no FullKV fallback is involved.
+        return anchor, allocation.trace()
     snapshot = gather_layer_local_snapshot(adapter, original_cache, allocation.positions)
     actual = sum(
         tensor_storage_bytes(tensor)
@@ -9979,7 +9993,8 @@ class HuggingFaceMosaicKVModel:
                     )
                 if (
                     self.config.bounded_decode is not None
-                    and self.config.bounded_decode.layer_allocation == "output_impact_v1"
+                    and self.config.bounded_decode.layer_allocation
+                    in {"output_impact_v1", "output_impact_guarded_v1"}
                 ):
                     if predicted_token_attention is None or dense_budget is None:
                         raise HuggingFaceRuntimeError(
@@ -9994,6 +10009,10 @@ class HuggingFaceMosaicKVModel:
                             packed,
                             predicted_token_attention,
                             dense_budget.target_bytes,
+                            guard_reconstruction=(
+                                self.config.bounded_decode.layer_allocation
+                                == "output_impact_guarded_v1"
+                            ),
                         ),
                     )
                     packing_seconds += allocation_seconds

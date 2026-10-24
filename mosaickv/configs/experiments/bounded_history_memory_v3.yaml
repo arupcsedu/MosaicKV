@@ -1,0 +1,76 @@
+# Guard and cohort rules registered before materializing or viewing V3 outputs.
+schema_version: 1
+experiment_id: bounded_history_memory_v3
+classification: retrospective_development_unified_comparison
+paper_campaign_authorized: false
+heldout_claim: false
+model_id: llava-hf/llava-1.5-7b-hf
+model_revision: b234b804b114d9e37bb655e11cbbb5f5e971b7a9
+precision: fp16
+backend: huggingface
+attention: eager
+caps_mib: [32, 40, 80]
+methods: [prompt_attention_topk, mosaickv_exact, mosaickv_output_impact_v2,
+          mosaickv_output_impact_guarded_v3]
+candidate_arm: mosaickv_output_impact_guarded_v3
+quality_reference: full_kv
+fullkv_latency_comparison: false
+samples_per_task: 8
+sample_offset: 6
+tasks: [llava_description, mmvet_prefixkv]
+selection: next_eight_parent_ids_after_six_consumed_development_ids_no_label_selection
+development_exclusions:
+  llava_description:
+    - path: /scratch/djy8hg/runs/mosaickv/bounded-history-baselines-v1-20261023/ledgers/llava_description.json
+      sha256: bdc854b2810ebd922a5a007c31fda49961485fd015c0121d35b1fc323a967178
+    - path: /scratch/djy8hg/runs/mosaickv/bounded-history-memory-v2-20261023-v1/memory-grid/ledgers/llava_description.json
+      sha256: e2e69f5eaf6f67f101424f03713fccf44dd91ed85de6beca85d4f210629b46c6
+  mmvet_prefixkv:
+    - path: /scratch/djy8hg/runs/mosaickv/bounded-history-baselines-v1-20261023/ledgers/mmvet_prefixkv.json
+      sha256: e534d7306f4b26d98394481f3088c3655279550cbce1c1512ea637fa18f6cdfc
+    - path: /scratch/djy8hg/runs/mosaickv/bounded-history-memory-v2-20261023-v1/memory-grid/ledgers/mmvet_prefixkv.json
+      sha256: a79f2f8c556942863234c52158d3695ec1e602c8eea4f6514d94628fee01e591
+identity_scope: disjoint_from_explicit_v1_v2_development_not_globally_untouched
+historical_parent_cohort_use: previously_evaluated_disclosed_not_heldout
+output_tokens: 1024
+warmups: 5
+quality_repetitions: 1
+latency_classification: per_example_development_not_20_repeat_microbenchmark
+seed: 20271014
+generated_capacity: 32
+sink_tokens: 4
+history_fraction: 0.2
+history_rule: unchanged_common_v2_20_percent_rule_for_every_compressed_method
+budget_boundary: initial_final_peak_unique_live_backing_storage_including_generated_reserve
+byte_tolerance: 0
+cross_budget_direct_comparisons: forbidden
+prefixkv_profile: confs/prefixkv_llava-v1.5-7b_0.5.json
+prefixkv_commit: 597f1ab032704951550f93bcc8a23f1454b80aa4
+candidate_allocation:
+  base: unchanged_output_impact_v1_ranking_and_allocation
+  guard: atomic_transaction_every_head_nonregression_v1
+  reconstruction: full_prompt_attention_output_vs_retained_renormalized_output
+  metric: per_head_channel_mean_squared_error
+  absolute_tolerance: 0.0000001
+  relative_tolerance: 0.000001
+  reject_if: any_layer_head_mse_exceeds_anchor_plus_atol_plus_rtol_times_anchor
+  rollback: reuse_same_byte_compressed_anchor_never_FullKV
+  local_exchange_search: not_implemented_global_transaction_only
+  no_benchmark_labels: true
+  original_keys_values_and_positions: unchanged
+metrics: [teacher_forced_ppl, rouge_l_f1]
+bootstrap_replicates: 10000
+confidence: 0.95
+max_global_a100s: 6
+gpus_per_worker: 1
+cpus_per_worker: 12
+time_limit_seconds: 7200
+promotion:
+  automatic_paper_campaign: false
+  powered_validation_authorized: false
+  frozen_quality_target: not_yet_registered
+  frozen_competitor_selection: not_yet_registered
+  require_consistent_smaller_cache_quality_benefit_before_confirmation: true
+  execution_success_alone_is_not_sufficient: true
+  equal_byte_tests: quality_latency_only_no_smaller_memory_claim
+  equal_quality_tests: separate_frozen_target_and_competitor_rule_required

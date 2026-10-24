@@ -19,6 +19,26 @@ def tooling():
     return module
 
 
+def submission_tooling():
+    import sys
+
+    module = tooling()
+    spec = importlib.util.spec_from_file_location(
+        "bounded_submit_v3", module.SOURCE / "mosaickv/scripts/submit_bounded_history_memory_v3.py"
+    )
+    submitted = importlib.util.module_from_spec(spec)
+    previous = sys.modules.get("bounded_history_pilot")
+    sys.modules["bounded_history_pilot"] = module
+    try:
+        spec.loader.exec_module(submitted)
+    finally:
+        if previous is None:
+            sys.modules.pop("bounded_history_pilot", None)
+        else:
+            sys.modules["bounded_history_pilot"] = previous
+    return submitted
+
+
 @pytest.mark.parametrize("task", ["llava_description", "mmvet_prefixkv"])
 @pytest.mark.parametrize("cap", [40, 80])
 def test_all_core_baselines_receive_same_lifetime_cap_and_generation(task, cap, tmp_path):
@@ -68,6 +88,148 @@ def test_memory_successor_has_a_common_grid_and_no_automatic_paper_promotion():
     assert len(protocol["methods"]) == 6
     assert not protocol["promotion"]["automatic_paper_campaign"]
     assert protocol["cross_budget_direct_comparisons"] == "forbidden"
+
+
+def test_guarded_successor_keeps_controls_and_requires_disjoint_development_ids():
+    module = tooling()
+    protocol = yaml.safe_load(
+        (module.SOURCE / "mosaickv/configs/experiments/bounded_history_memory_v3.yaml").read_text()
+    )
+    assert protocol["caps_mib"] == [32, 40, 80]
+    assert protocol["samples_per_task"] == 8
+    assert protocol["sample_offset"] == 6
+    assert protocol["history_fraction"] == 0.2
+    assert protocol["output_tokens"] == 1024
+    assert protocol["max_global_a100s"] == 6
+    assert len(protocol["methods"]) == 4
+    assert not protocol["promotion"]["automatic_paper_campaign"]
+    assert not protocol["promotion"]["powered_validation_authorized"]
+    for task in protocol["tasks"]:
+        assert len(protocol["development_exclusions"][task]) == 2
+        assert all(len(row["sha256"]) == 64 for row in protocol["development_exclusions"][task])
+
+
+def test_guarded_launcher_refuses_campaign_expansion_or_missing_disjointness():
+    import copy
+
+    module = tooling()
+    submit = submission_tooling()
+    protocol = yaml.safe_load(
+        (module.SOURCE / "mosaickv/configs/experiments/bounded_history_memory_v3.yaml").read_text()
+    )
+    jobs = []
+    for task in protocol["tasks"]:
+        jobs.append(dict(index=len(jobs), method="full_kv", task=task))
+        for cap in protocol["caps_mib"]:
+            for method in protocol["methods"]:
+                jobs.append(dict(index=len(jobs), method=method, task=task, cap_mib=cap))
+    plan = dict(
+        protocol=protocol,
+        jobs=jobs,
+        development_disjointness=[
+            dict(
+                task=task,
+                selected_count=8,
+                excluded_count=6,
+                overlap_count=0,
+                selection_uses_answers_or_scores=False,
+            )
+            for task in protocol["tasks"]
+        ],
+    )
+    references, compressed = submit.validate_scope(plan)
+    assert len(references) == 2
+    assert len(compressed) == 24
+    for field, value in [
+        ("samples_per_task", 128),
+        ("paper_campaign_authorized", True),
+        ("caps_mib", [10, 20, 40, 80]),
+        ("max_global_a100s", 8),
+    ]:
+        expanded = copy.deepcopy(plan)
+        expanded["protocol"][field] = value
+        with pytest.raises(ValueError, match="limited"):
+            submit.validate_scope(expanded)
+    plan["development_disjointness"][0]["overlap_count"] = 1
+    with pytest.raises(ValueError, match="disjointness"):
+        submit.validate_scope(plan)
+
+
+def test_development_disjointness_hashes_and_task_binding_fail_closed(tmp_path):
+    module = tooling()
+    ledger = tmp_path / "consumed.json"
+    module.write_once(ledger, dict(task="llava_description", samples=[dict(sample_id="old")]))
+    protocol = dict(
+        candidate_arm="mosaickv_output_impact_guarded_v3",
+        development_exclusions={
+            "llava_description": [dict(path=str(ledger), sha256=module.digest(ledger))]
+        },
+    )
+    bound, check = module.development_exclusions(protocol, "llava_description", ["new"])
+    assert bound == {str(ledger): module.digest(ledger)}
+    assert check["excluded_count"] == 1
+    assert check["overlap_count"] == 0
+    for ids, message in [(["old"], "overlaps"), (["new", "new"], "duplicate")]:
+        with pytest.raises(ValueError, match=message):
+            module.development_exclusions(protocol, "llava_description", ids)
+    with pytest.raises(ValueError, match="explicit exclusion"):
+        module.development_exclusions(protocol, "mmvet_prefixkv", ["new"])
+    protocol["development_exclusions"]["mmvet_prefixkv"] = protocol["development_exclusions"][
+        "llava_description"
+    ]
+    with pytest.raises(ValueError, match="task mismatch"):
+        module.development_exclusions(protocol, "mmvet_prefixkv", ["new"])
+    ledger.write_text("changed synthetic fixture")
+    with pytest.raises(ValueError, match="hash changed"):
+        module.development_exclusions(protocol, "llava_description", ["new"])
+
+
+@pytest.mark.parametrize("same_budget", [True, False])
+def test_guard_trace_validation_requires_both_label_independent_phases(tmp_path, same_budget):
+    import copy
+
+    from mosaickv.selection.evidence_layer_allocation import reconstruction_guard
+
+    module = tooling()
+    guard = dict(
+        reconstruction_guard(((1.0,),), ((0.5,),)),
+        proposed_positions_sha256="a" * 64,
+        anchor_positions_sha256="b" * 64,
+        host_wall_seconds_including_device_transfers=0.01,
+    )
+    trace = dict(
+        sample_id="synthetic-ci",
+        teacher_forced_evaluation=dict(enabled=False),
+        evidence_layer_allocation=dict(
+            reconstruction_guard=guard,
+            selected_positions_sha256="a" * 64,
+            padding_bytes=0,
+            benchmark_labels_accessed=False,
+            prompt_bytes=80,
+        ),
+        bounded_decode=dict(budget_reservation=dict(reserved_generated_bytes=20)),
+    )
+    module.write_once(tmp_path / "generated.json", trace)
+    with pytest.raises(RuntimeError, match="missing reconstruction"):
+        module.reconstruction_trace_checks(tmp_path, ["synthetic-ci"], 100)
+    forced = copy.deepcopy(trace)
+    forced["teacher_forced_evaluation"]["enabled"] = True
+    if not same_budget:
+        # Existing common policy reserves fewer history slots for short PPL
+        # targets, so it legitimately changes the available prompt capacity.
+        forced["evidence_layer_allocation"]["prompt_bytes"] = 90
+        forced["bounded_decode"]["budget_reservation"]["reserved_generated_bytes"] = 10
+        forced["evidence_layer_allocation"]["selected_positions_sha256"] = "c" * 64
+        forced["evidence_layer_allocation"]["reconstruction_guard"]["proposed_positions_sha256"] = (
+            "c" * 64
+        )
+    module.write_once(tmp_path / "forced.json", forced)
+    checked = module.reconstruction_trace_checks(tmp_path, ["synthetic-ci"], 100)
+    assert checked["synthetic-ci"]["validated_trace_count"] == 2
+    assert checked["synthetic-ci"]["teacher_forced_selection_identical"] == same_budget
+    assert checked["synthetic-ci"]["teacher_forced_budget_identical"] == same_budget
+    with pytest.raises(RuntimeError, match="accounting mismatch"):
+        module.reconstruction_trace_checks(tmp_path, ["synthetic-ci"], 99)
 
 
 def test_retry_reuses_original_execution_sha_and_rejects_changed_artifacts(tmp_path, monkeypatch):

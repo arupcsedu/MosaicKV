@@ -118,6 +118,35 @@ def configurations(task, cap, route, profile):
     }
 
 
+def development_exclusions(protocol, task, chosen_ids):
+    """Bind prior identity ledgers, not predictions, scores or failure identities."""
+    records = protocol.get("development_exclusions", {}).get(task, [])
+    if protocol.get("candidate_arm") == "mosaickv_output_impact_guarded_v3" and not records:
+        raise ValueError("guarded development validation requires explicit exclusion ledgers")
+    if len(chosen_ids) != len(set(chosen_ids)):
+        raise ValueError("development cohort contains duplicate identities")
+    bound, excluded = {}, set()
+    for record in records:
+        path = Path(record["path"])
+        if digest(path) != record["sha256"]:
+            raise ValueError("development exclusion ledger hash changed")
+        payload = json.loads(path.read_text())
+        if payload["task"] != task:
+            raise ValueError("development exclusion task mismatch")
+        excluded.update(str(sample["sample_id"]) for sample in payload["samples"])
+        bound[str(path)] = record["sha256"]
+    if set(chosen_ids) & excluded:
+        raise ValueError("development cohort overlaps a consumed candidate-tuning ledger")
+    return bound, dict(
+        task=task,
+        selected_count=len(chosen_ids),
+        excluded_count=len(excluded),
+        overlap_count=0,
+        selection_uses_answers_or_scores=False,
+        scope="disjoint_from_explicit_v1_v2_development_ledgers_not_globally_untouched",
+    )
+
+
 def prepare(root, protocol_path=PROTOCOL):
     from mosaickv.evaluation.paper_native_lanes import load_paper_native_ledger
     from mosaickv.evaluation.tasks import default_task_registry
@@ -140,7 +169,7 @@ def prepare(root, protocol_path=PROTOCOL):
     if upstream != protocol["prefixkv_commit"]:
         raise ValueError("PrefixKV upstream revision mismatch")
     bound = {str(protocol_path): digest(protocol_path), str(profile): digest(profile)}
-    jobs = []
+    jobs, disjointness = [], []
     for task in protocol["tasks"]:
         route = routes[task]
         parent = Path(route["parent_ledger"])
@@ -154,6 +183,11 @@ def prepare(root, protocol_path=PROTOCOL):
         chosen = original["samples"][offset : offset + protocol["samples_per_task"]]
         if len(chosen) != protocol["samples_per_task"]:
             raise ValueError("parent ledger lacks the complete preregistered sample cohort")
+        excluded_files, identity_record = development_exclusions(
+            protocol, task, [str(sample["sample_id"]) for sample in chosen]
+        )
+        bound.update(excluded_files)
+        disjointness.append(identity_record)
         for sample in chosen:
             for media in sample["media"]:
                 if not Path(media["path"]).is_absolute():
@@ -203,6 +237,12 @@ def prepare(root, protocol_path=PROTOCOL):
                         candidate.bounded_decode, layer_allocation="output_impact_v1"
                     ),
                 )
+                configs["mosaickv_output_impact_guarded_v3"] = replace(
+                    candidate,
+                    bounded_decode=replace(
+                        candidate.bounded_decode, layer_allocation="output_impact_guarded_v1"
+                    ),
+                )
             methods = (
                 ["full_kv", *protocol["methods"]]
                 if cap == protocol["caps_mib"][0]
@@ -240,6 +280,7 @@ def prepare(root, protocol_path=PROTOCOL):
         jobs=jobs,
         heldout_claim=False,
         paper_campaign_authorized=False,
+        development_disjointness=disjointness,
         comparison_decode_policy=dict(
             name=(
                 "common_bounded_history_v2_fullkv_reference_exempt"
@@ -348,6 +389,51 @@ def prepare_retry(root, parent, parent_sha):
             )
         )
     )
+
+
+def reconstruction_trace_checks(trace_root, sample_ids, cap_bytes):
+    from mosaickv.selection.evidence_layer_allocation import validate_reconstruction_trace
+
+    phases = {}
+    for path in Path(trace_root).rglob("*.json"):
+        trace = json.loads(path.read_text())
+        allocation = trace["evidence_layer_allocation"]
+        if allocation["padding_bytes"] or allocation["benchmark_labels_accessed"]:
+            raise RuntimeError("guarded allocation violates padding/label contract")
+        budget = trace["bounded_decode"]["budget_reservation"]
+        if allocation["prompt_bytes"] + budget["reserved_generated_bytes"] != cap_bytes:
+            raise RuntimeError("guarded allocation prompt/history accounting mismatch")
+        check = validate_reconstruction_trace(allocation)
+        phase = "teacher_forced" if trace["teacher_forced_evaluation"]["enabled"] else "generation"
+        key = (trace["sample_id"], phase)
+        if key in phases:
+            raise RuntimeError("duplicate reconstruction phase trace")
+        phases[key] = (check, allocation["selected_positions_sha256"], allocation["prompt_bytes"])
+    expected = {
+        (sample, phase) for sample in sample_ids for phase in ("generation", "teacher_forced")
+    }
+    if set(phases) != expected:
+        raise RuntimeError("missing reconstruction sample/phase trace")
+    checks = {}
+    for sample in sample_ids:
+        generated, generation_hash, generation_bytes = phases[sample, "generation"]
+        forced, forced_hash, forced_bytes = phases[sample, "teacher_forced"]
+        same_budget = generation_bytes == forced_bytes
+        same_selection = generation_hash == forced_hash
+        if same_budget and (not same_selection or generated["accepted"] != forced["accepted"]):
+            raise RuntimeError("selection must not change when teacher-forcing labels are attached")
+        if forced_bytes < generation_bytes:
+            raise RuntimeError("shorter teacher-forcing run cannot increase its history reserve")
+        checks[sample] = dict(
+            **generated,
+            teacher_forced_accepted=forced["accepted"],
+            teacher_forced_budget_identical=same_budget,
+            teacher_forced_selection_identical=same_selection,
+            generation_prompt_bytes=generation_bytes,
+            teacher_forced_prompt_bytes=forced_bytes,
+            validated_trace_count=2,
+        )
+    return checks
 
 
 def worker(root, plan_sha, index):
@@ -494,6 +580,11 @@ def worker(root, plan_sha, index):
                 for boundary in ("initial", "final", "peak"):
                     if row[f"{boundary}_active_kv_storage_bytes"] != cfg.cache.budget_value:
                         raise RuntimeError("worker failed exact lifetime-storage cap")
+        reconstruction_checks = {}
+        if job["method"] == "mosaickv_output_impact_guarded_v3":
+            reconstruction_checks = reconstruction_trace_checks(
+                Path(job["output"]) / "traces", job["sample_ids"], cfg.cache.budget_value
+            )
         artifacts = {str(p): digest(p) for p in Path(job["output"]).rglob("*") if p.is_file()}
         artifacts[str(attempt / "parity.json")] = digest(attempt / "parity.json")
         artifacts[str(reference)] = digest(reference)
@@ -513,6 +604,7 @@ def worker(root, plan_sha, index):
                 gpu_after=asdict(capture_gpu_environment(torch)),
                 wall_seconds=time.monotonic() - started,
                 slurm_job_id=os.environ.get("SLURM_JOB_ID"),
+                reconstruction_checks=reconstruction_checks,
             ),
         )
         progress(
@@ -595,6 +687,13 @@ def analyze(root, plan_sha):
                     "reimpl_adaptation" if job["method"].endswith("_reimpl") else "local_variant"
                 ),
             )
+            check = result.get("reconstruction_checks", {}).get(row["sample_id"])
+            if check is not None:
+                row.update({f"reconstruction_{key}": value for key, value in check.items()})
+            if job["method"] == "mosaickv_output_impact_guarded_v3" and check is None:
+                failures.append(
+                    f"missing reconstruction telemetry: {job['index']}/{row['sample_id']}"
+                )
             rows.append(row)
     frame = pd.DataFrame(rows)
     if not rows:
@@ -630,6 +729,17 @@ def analyze(root, plan_sha):
                 final_mib=group.final_active_kv_storage_bytes.mean() / 2**20,
                 peak_mib=group.peak_active_kv_storage_bytes.mean() / 2**20,
                 e2e_seconds=None if method == "full_kv" else group.end_to_end_time.mean(),
+                **(
+                    dict(
+                        reconstruction_acceptance_fraction=group.reconstruction_accepted.mean(),
+                        reconstruction_anchor_mse_mean=group.reconstruction_anchor_mse_mean.mean(),
+                        reconstruction_proposed_mse_mean=group.reconstruction_proposed_mse_mean.mean(),
+                        reconstruction_final_mse_mean=group.reconstruction_final_mse_mean.mean(),
+                        reconstruction_measurement_seconds=group.reconstruction_measurement_seconds.mean(),
+                    )
+                    if method == "mosaickv_output_impact_guarded_v3"
+                    else {}
+                ),
             )
         )
     rng = np.random.default_rng(plan["protocol"]["seed"])

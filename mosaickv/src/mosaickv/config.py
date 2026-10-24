@@ -387,7 +387,11 @@ class BoundedDecodeConfig:
         version = (
             "v1" if self.history_fraction is None and self.layer_allocation == "uniform" else "v2"
         )
-        allocation = "__output_impact_layers" if self.layer_allocation != "uniform" else ""
+        allocation = {
+            "uniform": "",
+            "output_impact_v1": "__output_impact_layers",
+            "output_impact_guarded_v1": "__guarded_output_impact_layers",
+        }[self.layer_allocation]
         if method.is_published_reimplementation:
             return (
                 f"{method.value.removesuffix('_reimpl')}"
@@ -424,6 +428,7 @@ class BoundedDecodeConfig:
         if not isinstance(self.layer_allocation, str) or self.layer_allocation not in {
             "uniform",
             "output_impact_v1",
+            "output_impact_guarded_v1",
         }:
             raise ConfigurationError("bounded_decode.layer_allocation is unsupported")
 

@@ -190,6 +190,68 @@ def test_evidence_allocation_is_a_labeled_exact_byte_runtime_variant(tmp_path):
     assert result.effective_method.endswith("bounded_generated_history_v2")
 
 
+def test_guarded_allocation_reports_final_errors_and_keeps_lifetime_cap(tmp_path):
+    cfg = replace(
+        _config(MosaicKVMethod.MOSAICKV_EXACT),
+        bounded_decode=BoundedDecodeConfig(2, 1, 0.2, "output_impact_guarded_v1"),
+    )
+    result = HuggingFaceMosaicKVModel(_llava(), cfg, trace_directory=tmp_path).generate(
+        _runtime_request("guarded-layer-impact")
+    )
+    trace = json.loads(next(tmp_path.rglob("*.json")).read_text())
+    allocation = trace["evidence_layer_allocation"]
+    guard = allocation["reconstruction_guard"]
+    assert allocation["padding_bytes"] == 0
+    assert allocation["benchmark_labels_accessed"] is False
+    assert len(guard["final_mse_by_layer_head"]) == 2
+    assert guard["used_fullkv_fallback"] is False
+    assert guard["host_wall_seconds_including_device_transfers"] >= 0
+    for before, after in zip(
+        guard["anchor_mse_by_layer_head"], guard["final_mse_by_layer_head"], strict=True
+    ):
+        assert all(
+            b <= a + guard["absolute_tolerance"] + a * guard["relative_tolerance"]
+            for a, b in zip(before, after, strict=True)
+        )
+    assert sum(allocation["layer_capacities"]) == 4
+    assert result.metrics.initial_active_kv_storage_bytes == 512
+    assert result.metrics.final_active_kv_storage_bytes == 512
+    assert result.metrics.peak_active_kv_storage_bytes == 512
+    assert "__guarded_output_impact_layers" in result.effective_method
+
+
+def test_rejected_reallocation_reuses_packed_anchor_without_gathering(monkeypatch):
+    from types import SimpleNamespace
+
+    import mosaickv.adapters.huggingface.layer_local_cache as gathering
+    import mosaickv.selection.evidence_layer_allocation as selection
+    from mosaickv.backends.hf_runtime import _reallocate_evidence_layers
+
+    anchor = SimpleNamespace(
+        prompt_capacity=2,
+        slot_records=(),
+        snapshot=SimpleNamespace(
+            layers=(SimpleNamespace(key=torch.zeros(1, 1, 2, 2), value=torch.zeros(1, 1, 2, 2)),)
+        ),
+    )
+    plan = SimpleNamespace(
+        prompt_bytes=32,
+        reconstruction={"accepted": False},
+        trace=lambda: {"reconstruction_guard": {"accepted": False}},
+    )
+    monkeypatch.setattr(selection, "build_evidence_layer_plan", lambda *_a, **_k: plan)
+
+    def forbidden_gather(*_a, **_k):
+        pytest.fail("rollback must reuse the existing same-byte anchor")
+
+    monkeypatch.setattr(gathering, "gather_layer_local_snapshot", forbidden_gather)
+    returned, trace = _reallocate_evidence_layers(
+        None, None, None, anchor, {}, 32, guard_reconstruction=True
+    )
+    assert returned is anchor
+    assert trace["reconstruction_guard"]["accepted"] is False
+
+
 @pytest.fixture(autouse=True)
 def single_cpu_thread():
     previous = torch.get_num_threads()
@@ -246,11 +308,15 @@ def test_full_runtime_caps_initial_final_peak_and_writes_variant_trace(tmp_path,
     assert record["budget_reservation"]["reserved_generated_bytes"] == 256
 
 
-def test_retention_one_bypasses_ring_and_matches_untouched_fullkv(tmp_path):
+@pytest.mark.parametrize("allocation", ["uniform", "output_impact_guarded_v1"])
+def test_retention_one_bypasses_ring_and_matches_untouched_fullkv(tmp_path, allocation):
     adapter = _llava()
     bounded = HuggingFaceMosaicKVModel(
         adapter,
-        _config(MosaicKVMethod.MOSAICKV_EXACT, ratio=1.0),
+        replace(
+            _config(MosaicKVMethod.MOSAICKV_EXACT, ratio=1.0),
+            bounded_decode=BoundedDecodeConfig(2, 1, layer_allocation=allocation),
+        ),
         trace_directory=tmp_path / "bounded",
     )
     reference_config = replace(
