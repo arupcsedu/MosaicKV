@@ -5116,7 +5116,6 @@ def _reallocate_evidence_layers(
     guard_reconstruction: bool = False,
     direct_error_exchange: bool = False,
 ) -> tuple[PackedRuntimeCache, dict[str, Any]]:
-    from mosaickv.adapters.huggingface.layer_local_cache import gather_layer_local_snapshot
     from mosaickv.selection.evidence_layer_allocation import build_evidence_layer_plan
 
     if direct_error_exchange:
@@ -5152,6 +5151,18 @@ def _reallocate_evidence_layers(
         # Reuse the already packed compressed anchor. No over-budget proposal is
         # injected, no second copy is packed, and no FullKV fallback is involved.
         return anchor, allocation.trace()
+    return _pack_evidence_allocation(adapter, full_state, original_cache, allocation, budget_bytes)
+
+
+def _pack_evidence_allocation(
+    adapter: HuggingFaceMultimodalAdapter,
+    full_state: FullKVState,
+    original_cache: Any,
+    allocation: Any,
+    budget_bytes: int,
+) -> tuple[PackedRuntimeCache, dict[str, Any]]:
+    from mosaickv.adapters.huggingface.layer_local_cache import gather_layer_local_snapshot
+
     snapshot = gather_layer_local_snapshot(adapter, original_cache, allocation.positions)
     actual = sum(
         tensor_storage_bytes(tensor)
@@ -10029,6 +10040,56 @@ class HuggingFaceMosaicKVModel:
                     )
                 if (
                     self.config.bounded_decode is not None
+                    and self.config.bounded_decode.layer_allocation == "draft_single_exchange_v1"
+                ):
+                    from mosaickv.backends.hf_single_exchange_guard import guard_single_exchanges
+                    from mosaickv.selection.direct_error_exchange import (
+                        build_single_exchange_layer_plans,
+                    )
+
+                    if predicted_token_attention is None or bounded_budget is None:
+                        raise HuggingFaceRuntimeError("single exchange lacks forecast/physical cap")
+                    bounded_cfg = self.config.bounded_decode
+                    (packed, draft_guard_trace), guard_seconds = _timed(
+                        prefill.logits,
+                        lambda: guard_single_exchanges(
+                            self.adapter,
+                            prefill,
+                            packed,
+                            bounded_budget,
+                            bounded_cfg.draft_guard,
+                            bounded_cfg.draft_exchange,
+                            sink_tokens=bounded_cfg.sink_tokens,
+                            clone_state=lambda state: _clone_decode_state(self.adapter, state),
+                            state_from_packed=lambda state, choice: _state_from_packed(
+                                self.adapter, state, choice
+                            ),
+                            propose=lambda current, limit: build_single_exchange_layer_plans(
+                                full_state,
+                                predicted_token_attention,
+                                current.slot_records,
+                                prompt_budget_bytes=bounded_budget.prompt_budget_bytes,
+                                max_candidates=limit,
+                            ),
+                            pack=lambda allocation: _pack_evidence_allocation(
+                                self.adapter,
+                                full_state,
+                                prefill.state.past_key_values,
+                                allocation,
+                                bounded_budget.prompt_budget_bytes,
+                            )[0],
+                        ),
+                    )
+                    logit_stability_seconds += guard_seconds
+                    draft_guard_trace["synchronized_timing_seconds"] = guard_seconds
+                    trace["draft_logit_allocation_guard"] = draft_guard_trace
+                    evidence_allocation_trace = {
+                        "variant": "bounded_single_exchange_v6",
+                        "role": "shortlist_only_final_draft_guard_is_authoritative",
+                        "benchmark_labels_accessed": False,
+                    }
+                elif (
+                    self.config.bounded_decode is not None
                     and self.config.bounded_decode.layer_allocation
                     in {
                         "output_impact_v1",
@@ -10189,7 +10250,10 @@ class HuggingFaceMosaicKVModel:
                         )
                         if draft_guard_trace is not None:
                             payload["selection_provenance"] = (
-                                "MosaicKV_V5_joint_FullKV_draft_guard_final_selection"
+                                "MosaicKV_V6_single_exchange_FullKV_draft_guard_final_selection"
+                                if draft_guard_trace.get("policy")
+                                == "bounded_single_equal_byte_draft_logit_v6"
+                                else "MosaicKV_V5_joint_FullKV_draft_guard_final_selection"
                             )
                     return payload
 

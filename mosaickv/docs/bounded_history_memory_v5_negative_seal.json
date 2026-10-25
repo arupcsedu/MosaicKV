@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "experiment_id": "bounded_history_memory_v5",
+  "classification": "negative_development_result_not_paper_evidence",
+  "source_sha": "75b4289f5826a5c0e39ed39081f506a0b787d77e",
+  "root": "/scratch/djy8hg/runs/mosaickv/bounded-history-memory-v5-20261024-v1",
+  "report_sha256": "08e357c2897bff4e9f10e58e5e16d0e352f51e65b32342585d4734ccbad2389f",
+  "ledger_sha256": {
+    "llava_description": "d24fc5f52e01ef681c49c70f54d286301c1b97e1063eef62158826cf8a3df50a",
+    "mmvet_prefixkv": "04ffac997f90ff8367a82e25a985d3f20b7e88d0f10878ce9df4906e2b8dd19f"
+  },
+  "all_16_identities_consumed": true,
+  "generation_proposals_accepted": 0,
+  "generation_proposals_tested": 16,
+  "first_failed_prefix_histogram": {"1": 9, "2": 5, "4": 2},
+  "original_artifacts_preserved": true,
+  "sample_answers_and_failure_identities_not_used_for_successor_tuning": true,
+  "calibration_authorized": false,
+  "paper_campaign_authorized": false,
+  "reason": "All generation proposals rolled back to the same-byte compressed anchor; complete execution is not algorithmic quality preservation or smaller memory at equal quality."
+}

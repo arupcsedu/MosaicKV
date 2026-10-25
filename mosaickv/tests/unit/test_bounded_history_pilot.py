@@ -75,16 +75,19 @@ def test_pilot_resources_and_scope_are_explicit():
     assert protocol["cross_budget_direct_comparisons"] == "forbidden"
 
 
-def test_v5_protocol_is_disjoint_bounded_and_not_a_paper_promotion():
+@pytest.mark.parametrize("version,offset", [(5, 22), (6, 30)])
+def test_draft_protocol_is_disjoint_bounded_and_not_a_paper_promotion(version, offset):
     import copy
 
     module = tooling()
     submit = submission_tooling()
     protocol = yaml.safe_load(
-        (module.SOURCE / "mosaickv/configs/experiments/bounded_history_memory_v5.yaml").read_text()
+        (
+            module.SOURCE / f"mosaickv/configs/experiments/bounded_history_memory_v{version}.yaml"
+        ).read_text()
     )
-    assert protocol["caps_mib"] == [40] and protocol["sample_offset"] == 22
-    assert all(len(protocol["development_exclusions"][t]) == 4 for t in protocol["tasks"])
+    assert protocol["caps_mib"] == [40] and protocol["sample_offset"] == offset
+    assert all(len(protocol["development_exclusions"][t]) == version - 1 for t in protocol["tasks"])
     assert protocol["draft_guard"]["checkpoints"] == [1, 4, 16, 32]
     jobs = []
     for task in protocol["tasks"]:
@@ -101,7 +104,7 @@ def test_v5_protocol_is_disjoint_bounded_and_not_a_paper_promotion():
             dict(
                 task=t,
                 selected_count=8,
-                excluded_count=22,
+                excluded_count=offset,
                 overlap_count=0,
                 selection_uses_answers_or_scores=False,
             )
@@ -113,6 +116,14 @@ def test_v5_protocol_is_disjoint_bounded_and_not_a_paper_promotion():
             path="fixture-cpu.json",
             sha256="b" * 64,
             classification="synthetic_CPU_feasibility_not_pretrained_quality_evidence",
+            **(
+                dict(
+                    policy="bounded_single_equal_byte_draft_logit_v6",
+                    exact_bytes_and_mandatory=True,
+                )
+                if version == 6
+                else {}
+            ),
         ),
     )
     refs, compressed = submit.validate_scope(plan)
@@ -126,17 +137,25 @@ def test_v5_protocol_is_disjoint_bounded_and_not_a_paper_promotion():
     with pytest.raises(ValueError, match="limited"):
         submit.validate_scope(altered)
     summaries = [
-        dict(task=t, method=m, samples=8, cap_mib=40, rouge_l_f1=0.5, corpus_ppl=4.0)
+        dict(
+            task=t,
+            method=m,
+            samples=8,
+            cap_mib=40,
+            rouge_l_f1=0.5,
+            corpus_ppl=4.0,
+            draft_guard_acceptance_fraction=1.0,
+        )
         for t in protocol["tasks"]
-        for m in (module.DRAFT_GUARDED_ARM, "prompt_attention_topk")
+        for m in (protocol["candidate_arm"], "prompt_attention_topk", "mosaickv_exact")
     ]
-    screen = module.v5_preliminary_screen(summaries, protocol["tasks"])
+    screen = module.v5_preliminary_screen(summaries, protocol["tasks"], protocol["candidate_arm"])
     assert screen["preliminary_point_estimate_screen_passed"]
     assert not screen["frozen_candidate_eligible"] and not screen["paper_campaign_authorized"]
     summaries[0]["corpus_ppl"] = 5.0
-    assert not module.v5_preliminary_screen(summaries, protocol["tasks"])[
-        "preliminary_point_estimate_screen_passed"
-    ]
+    assert not module.v5_preliminary_screen(
+        summaries, protocol["tasks"], protocol["candidate_arm"]
+    )["preliminary_point_estimate_screen_passed"]
 
 
 def test_memory_successor_has_a_common_grid_and_no_automatic_paper_promotion():

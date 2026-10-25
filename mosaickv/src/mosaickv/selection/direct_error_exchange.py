@@ -151,23 +151,26 @@ def _safe(context: LayerContext, errors: Any) -> bool:
     )
 
 
-def build_direct_error_layer_plan(
+def _exchange_contexts(
     full_state: Any,
     token_attention: dict[tuple[int, int], Any],
     anchor_records: tuple[dict[str, Any], ...],
     *,
     prompt_budget_bytes: int,
-    uniform_capacity: int,
-) -> EvidenceLayerPlan:
-    """One removed token/head in donor layer funds one added token/head elsewhere."""
+    uniform_capacity: int | None,
+) -> tuple[Any, ...]:
+    """Build audited route contexts once, including nonuniform layer capacities."""
     import torch
 
-    started = time.perf_counter()
     layers = full_state.layers
-    if not layers or type(uniform_capacity) is not int or uniform_capacity < 1:
+    if not layers or (
+        uniform_capacity is not None and (type(uniform_capacity) is not int or uniform_capacity < 1)
+    ):
         raise ValueError("exchange requires nonempty layers and a positive anchor capacity")
     costs = tuple(layer.byte_size // layer.sequence_length for layer in layers)
-    if len(set(costs)) != 1 or uniform_capacity * sum(costs) != prompt_budget_bytes:
+    if len(set(costs)) != 1 or (
+        uniform_capacity is not None and uniform_capacity * sum(costs) != prompt_budget_bytes
+    ):
         raise ValueError("exchange requires equal layer-slot costs and exact anchor bytes")
     logical = full_state.logical_positions.physical_to_logical
     physical = {p: i for i, p in enumerate(logical)}
@@ -197,7 +200,15 @@ def build_direct_error_layer_plan(
         ) != (1, 2, 1, 2) or int(layer.value.shape[0]) != 1:
             raise ValueError("exchange supports audited batch-one BHSD source tensors only")
         head_positions = tuple(tuple(sorted(selected[i, h])) for h in range(layer.kv_heads))
-        if any(len(row) != uniform_capacity for row in head_positions):
+        if (
+            not head_positions[0]
+            or len({len(row) for row in head_positions}) != 1
+            or (
+                uniform_capacity is not None
+                and any(len(row) != uniform_capacity for row in head_positions)
+            )
+            or any(not mandatory[i, h].issubset(row) for h, row in enumerate(head_positions))
+        ):
             raise ValueError("exchange anchor has padded or unequal per-head capacity")
         values = layer.value.detach()[0].float()
         mass = torch.as_tensor(
@@ -216,6 +227,117 @@ def build_direct_error_layer_plan(
             )
         )
         anchor_positions.append(head_positions)
+    if sum(len(heads[0]) * cost for heads, cost in zip(anchor_positions, costs, strict=True)) != (
+        prompt_budget_bytes
+    ):
+        raise ValueError("exchange anchor has unequal physical bytes")
+    return contexts, costs, mandatory, anchor_positions
+
+
+def build_single_exchange_layer_plans(
+    full_state: Any,
+    token_attention: dict[tuple[int, int], Any],
+    anchor_records: tuple[dict[str, Any], ...],
+    *,
+    prompt_budget_bytes: int,
+    max_candidates: int,
+) -> tuple[EvidenceLayerPlan, ...]:
+    """Bounded independent single exchanges; prompt error only shortlists them.
+
+    No transaction is installed here. Actual model logits decide promotion in
+    the backend, and a later composition must start from a fully passed parent.
+    """
+    if type(max_candidates) is not int or not 1 <= max_candidates <= 8:
+        raise ValueError("single exchanges require 1..8 shortlisted candidates")
+    contexts, costs, mandatory, initial = _exchange_contexts(
+        full_state,
+        token_attention,
+        anchor_records,
+        prompt_budget_bytes=prompt_budget_bytes,
+        uniform_capacity=None,
+    )
+    counts = [len(heads[0]) for heads in initial]
+    moves = [(c.best_move(remove=True), c.best_move(remove=False)) for c in contexts]
+    pairs = sorted(
+        (-(donor.gain + receiver.gain), d, r)
+        for d, (donor, _) in enumerate(moves)
+        if donor is not None and counts[d] > 1
+        for r, (_, receiver) in enumerate(moves)
+        if receiver is not None and d != r and donor.gain + receiver.gain > 0
+    )
+    plans = []
+    anchors = tuple(tuple(float(v) for v in c.errors.tolist()) for c in contexts)
+    for _, d, r in pairs[:MAX_VERIFIED_PAIRS]:
+        remove, add = moves[d][0], moves[r][1]
+        positions = list(initial)
+        positions[d] = contexts[d].changed_positions(remove, remove=True)
+        positions[r] = contexts[r].changed_positions(add, remove=False)
+        errors = list(anchors)
+        derr, rerr = contexts[d].exact_errors(positions[d]), contexts[r].exact_errors(positions[r])
+        if not _safe(contexts[d], derr) or not _safe(contexts[r], rerr):
+            continue
+        errors[d], errors[r] = tuple(derr.tolist()), tuple(rerr.tolist())
+        guard = reconstruction_guard(anchors, tuple(errors))
+        gain = sum(sum(a) - sum(b) for a, b in zip(anchors, errors, strict=True))
+        if not guard["accepted"] or gain <= 0:
+            continue
+        capacities = list(counts)
+        capacities[d] -= 1
+        capacities[r] += 1
+        if sum(n * c for n, c in zip(capacities, costs, strict=True)) != prompt_budget_bytes:
+            raise ValueError("single exchange changed physical bytes")
+        guard["single_exchange"] = dict(
+            donor_layer=d,
+            receiver_layer=r,
+            transferred_bytes=costs[d],
+            removed_positions=remove.positions,
+            added_positions=add.positions,
+            initial_layer_capacities=counts,
+            summed_head_mse_gain=gain,
+            promotion_requires_actual_full_horizon_draft_logits=True,
+        )
+        plans.append(
+            EvidenceLayerPlan(
+                tuple(positions),
+                tuple(capacities),
+                prompt_budget_bytes,
+                tuple(float(np.mean(np.sqrt(row))) for row in anchors),
+                tuple(
+                    float(
+                        np.mean([c.mass[h, list(row)].sum().item() for h, row in enumerate(heads)])
+                    )
+                    for c, heads in zip(contexts, positions, strict=True)
+                ),
+                tuple(
+                    max(len(mandatory[i, h]) for h in range(layer.kv_heads))
+                    for i, layer in enumerate(full_state.layers)
+                ),
+                guard,
+            )
+        )
+        if len(plans) == max_candidates:
+            break
+    return tuple(plans)
+
+
+def build_direct_error_layer_plan(
+    full_state: Any,
+    token_attention: dict[tuple[int, int], Any],
+    anchor_records: tuple[dict[str, Any], ...],
+    *,
+    prompt_budget_bytes: int,
+    uniform_capacity: int,
+) -> EvidenceLayerPlan:
+    """One removed token/head in donor layer funds one added token/head elsewhere."""
+    started = time.perf_counter()
+    layers = full_state.layers
+    contexts, costs, mandatory, anchor_positions = _exchange_contexts(
+        full_state,
+        token_attention,
+        anchor_records,
+        prompt_budget_bytes=prompt_budget_bytes,
+        uniform_capacity=uniform_capacity,
+    )
     anchors = tuple(tuple(float(v) for v in c.anchor_errors.tolist()) for c in contexts)
     counts = [uniform_capacity] * len(layers)
     lows = [
@@ -370,6 +492,63 @@ def build_direct_error_layer_plan(
         ),
         guard,
     )
+
+
+def single_exchange_cpu_feasibility() -> dict[str, Any]:
+    """Source-bound synthetic gate for the actual V6 shortlist, not quality data."""
+    import torch
+
+    from mosaickv.cache_state import FullKVState
+
+    previous = torch.get_num_threads()
+    torch.set_num_threads(1)
+    try:
+        values = (
+            [0.0, 0.0, 0.0, 4.0, 2.0, 2.0, 2.0, 2.0],
+            [0.0, 0.0, 0.0, 0.0, 2.0, 2.0, 2.0, 2.0],
+        )
+        full = FullKVState.from_tensors(
+            tuple(
+                (
+                    torch.zeros(1, 32, 8, 1),
+                    torch.tensor(row).reshape(1, 1, 8, 1).repeat(1, 32, 1, 1),
+                )
+                for row in values
+            ),
+            block_size=1,
+            mandatory_logical_positions=(3,),
+        )
+        records = tuple(
+            dict(layer=i, kv_head=h, logical_position=p, tier="exact")
+            for i in range(2)
+            for h in range(32)
+            for p in range(4)
+        )
+        attention = {(i, h): np.ones(8) / 8 for i in range(2) for h in range(32)}
+        plans = build_single_exchange_layer_plans(
+            full,
+            attention,
+            records,
+            prompt_budget_bytes=full.active_bytes // 2,
+            max_candidates=4,
+        )
+        passed = bool(plans) and all(
+            plan.prompt_bytes == full.active_bytes // 2
+            and sum(plan.capacities) == 8
+            and all(3 in row for layer in plan.positions for row in layer)
+            and sorted(plan.capacities) == [3, 5]
+            for plan in plans
+        )
+        return dict(
+            passed=passed,
+            classification="synthetic_CPU_feasibility_not_pretrained_quality_evidence",
+            policy="bounded_single_equal_byte_draft_logit_v6",
+            single_candidates=len(plans),
+            exact_bytes_and_mandatory=passed,
+            model_weights_or_benchmark_labels_loaded=False,
+        )
+    finally:
+        torch.set_num_threads(previous)
 
 
 def validate_exchange_trace(allocation: dict[str, Any]) -> dict[str, Any]:

@@ -238,6 +238,12 @@ class EvidenceLayerPlan:
             result["variant"] = "direct_error_single_slot_layer_exchange_v1"
             result["evidence_reservation_fraction"] = "unchanged_anchor_only_not_reapplied"
             result["ocr_source"] = "unchanged_anchor_policy_no_new_OCR_or_spatial_reservation"
+        if self.reconstruction is not None and "single_exchange" in self.reconstruction:
+            result["variant"] = "V6_single_exchange_shortlist_not_final_selection"
+            result["allocation_bounds"] = "one_layer_slot_donor_to_receiver_per_proposal"
+            result["evidence_reservation_fraction"] = "unchanged_anchor_only_not_reapplied"
+            result["ocr_source"] = "unchanged_anchor_policy_no_new_OCR_or_spatial_reservation"
+            result["role"] = "actual_full_horizon_draft_guard_required_before_promotion"
         return result
 
 

@@ -35,43 +35,52 @@ def packed_positions_sha(packed: Any) -> str:
 def decide_draft_stability(
     rows: Sequence[dict[str, Any]],
     policy: DraftAllocationGuardConfig,
+    *,
+    allow_early_rejection: bool = False,
 ) -> dict[str, Any]:
     """EVERY prefix must be non-worse; averaging cannot conceal a regression."""
-    if len(rows) != policy.horizon or [r["step"] for r in rows] != list(
-        range(1, policy.horizon + 1)
+    if (
+        not 1 <= len(rows) <= policy.horizon
+        or (len(rows) != policy.horizon and not allow_early_rejection)
+        or [r["step"] for r in rows] != list(range(1, len(rows) + 1))
     ):
         raise ValueError("draft guard requires the entire registered horizon")
     rejected = []
     for row in rows:
-        causes = []
-        for metric in ("logit_kl", "maximum_logit_difference"):
-            a, b = row["anchor"][metric], row["candidate"][metric]
-            if any(
-                isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v)
-                for v in (a, b)
-            ) or min(a, b) < (-1e-6 if metric == "logit_kl" else 0):
-                raise ValueError("draft guard requires finite valid divergence")
-            if b > a + policy.absolute_tolerance + policy.relative_tolerance * abs(a):
-                causes.append(metric)
-        for name in ("anchor", "candidate"):
-            if type(row[name]["greedy_token_agreement"]) is not bool:
-                raise ValueError("draft token agreement must be boolean")
-        if (
-            row["anchor"]["greedy_token_agreement"]
-            and not row["candidate"]["greedy_token_agreement"]
-        ):
-            causes.append("new_greedy_token_disagreement")
+        causes = draft_row_causes(row, policy)
         if causes:
             rejected.append(dict(step=row["step"], causes=causes))
+    if len(rows) != policy.horizon and not rejected:
+        raise ValueError("passing draft guard requires the entire registered horizon")
     return dict(
         accepted=not rejected,
         decision="accept_joint_allocation"
         if not rejected
         else "retain_same_byte_compressed_anchor",
         rejected_steps=rejected,
-        all_prefixes_checked=True,
+        all_prefixes_checked=len(rows) == policy.horizon,
         later_checkpoints_completed=all(p in {r["step"] for r in rows} for p in policy.checkpoints),
     )
+
+
+def draft_row_causes(row: dict[str, Any], policy: DraftAllocationGuardConfig) -> list[str]:
+    """Identical V5 thresholds, reusable for fail-fast rejection (never acceptance)."""
+    causes = []
+    for metric in ("logit_kl", "maximum_logit_difference"):
+        a, b = row["anchor"][metric], row["candidate"][metric]
+        if any(
+            isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v)
+            for v in (a, b)
+        ) or min(a, b) < (-1e-6 if metric == "logit_kl" else 0):
+            raise ValueError("draft guard requires finite valid divergence")
+        if b > a + policy.absolute_tolerance + policy.relative_tolerance * abs(a):
+            causes.append(metric)
+    for name in ("anchor", "candidate"):
+        if type(row[name]["greedy_token_agreement"]) is not bool:
+            raise ValueError("draft token agreement must be boolean")
+    if row["anchor"]["greedy_token_agreement"] and not row["candidate"]["greedy_token_agreement"]:
+        causes.append("new_greedy_token_disagreement")
+    return causes
 
 
 def guard_joint_allocation(

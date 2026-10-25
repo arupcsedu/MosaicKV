@@ -428,6 +428,33 @@ class DraftAllocationGuardConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class DraftExchangeSearchConfig:
+    """V6 limits; each round probes single exchanges before any composition."""
+
+    candidates_per_round: int = 4
+    max_rounds: int = 2
+
+    def __post_init__(self) -> None:
+        for name, limit in (("candidates_per_round", 8), ("max_rounds", 4)):
+            value = getattr(self, name)
+            if type(value) is not int or not 1 <= value <= limit:
+                raise ConfigurationError(
+                    f"draft_exchange.{name} must be an integer in [1, {limit}]"
+                )
+        if self.candidates_per_round * self.max_rounds > 16:
+            raise ConfigurationError("draft_exchange permits at most 16 total proposals")
+
+    @classmethod
+    def from_mapping(cls, value: object) -> DraftExchangeSearchConfig:
+        data = _mapping(value, "draft_exchange")
+        _reject_unknown(data, {"candidates_per_round", "max_rounds"}, "draft_exchange")
+        return cls(
+            _int(data, "candidates_per_round", 4, "draft_exchange"),
+            _int(data, "max_rounds", 2, "draft_exchange"),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class BoundedDecodeConfig:
     """Opt-in shared lifetime-cap controller; every use is a labeled adaptation."""
 
@@ -436,6 +463,7 @@ class BoundedDecodeConfig:
     history_fraction: float | None = None
     layer_allocation: str = "uniform"
     draft_guard: DraftAllocationGuardConfig | None = None
+    draft_exchange: DraftExchangeSearchConfig | None = None
 
     def effective_method(self, method: MosaicKVMethod) -> str:
         version = (
@@ -447,6 +475,7 @@ class BoundedDecodeConfig:
             "output_impact_guarded_v1": "__guarded_output_impact_layers",
             "direct_error_exchange_v1": "__direct_error_exchange_layers",
             "draft_logit_guard_v1": "__draft_logit_guard_layers_v5",
+            "draft_single_exchange_v1": "__draft_single_exchange_layers_v6",
         }[self.layer_allocation]
         if method.is_published_reimplementation:
             return (
@@ -487,15 +516,25 @@ class BoundedDecodeConfig:
             "output_impact_guarded_v1",
             "direct_error_exchange_v1",
             "draft_logit_guard_v1",
+            "draft_single_exchange_v1",
         }:
             raise ConfigurationError("bounded_decode.layer_allocation is unsupported")
-        if (self.layer_allocation == "draft_logit_guard_v1") != (self.draft_guard is not None) or (
+        if (self.layer_allocation in {"draft_logit_guard_v1", "draft_single_exchange_v1"}) != (
+            self.draft_guard is not None
+        ) or (
             self.draft_guard is not None
             and not isinstance(self.draft_guard, DraftAllocationGuardConfig)
         ):
             raise ConfigurationError(
-                "bounded_decode.draft_guard is required only for draft_logit_guard_v1"
+                "bounded_decode.draft_guard is required only for draft logit allocation policies"
             )
+        if (self.layer_allocation == "draft_single_exchange_v1") != (
+            self.draft_exchange is not None
+        ) or (
+            self.draft_exchange is not None
+            and not isinstance(self.draft_exchange, DraftExchangeSearchConfig)
+        ):
+            raise ConfigurationError("bounded_decode.draft_exchange is required only for V6")
 
     @classmethod
     def from_mapping(cls, value: object) -> BoundedDecodeConfig:
@@ -508,6 +547,7 @@ class BoundedDecodeConfig:
                 "history_fraction",
                 "layer_allocation",
                 "draft_guard",
+                "draft_exchange",
             },
             "bounded_decode",
         )
@@ -523,6 +563,9 @@ class BoundedDecodeConfig:
             None
             if data.get("draft_guard") is None
             else DraftAllocationGuardConfig.from_mapping(data["draft_guard"]),
+            None
+            if data.get("draft_exchange") is None
+            else DraftExchangeSearchConfig.from_mapping(data["draft_exchange"]),
         )
 
 
@@ -3879,6 +3922,7 @@ class RunConfig:
             if self.bounded_decode.layer_allocation in {
                 "direct_error_exchange_v1",
                 "draft_logit_guard_v1",
+                "draft_single_exchange_v1",
             } and (
                 self.cache.block_size != 1 or self.cache.physical_budget_block_size not in {None, 1}
             ):
@@ -4486,6 +4530,8 @@ def canonical_config(config: RunConfig) -> JsonObject:
             bounded.pop("layer_allocation", None)
         if config.bounded_decode.draft_guard is None:
             bounded.pop("draft_guard", None)
+        if config.bounded_decode.draft_exchange is None:
+            bounded.pop("draft_exchange", None)
     return payload
 
 
@@ -4541,6 +4587,7 @@ __all__ = [
     "ConfigurationError",
     "DatasetConfig",
     "DraftAllocationGuardConfig",
+    "DraftExchangeSearchConfig",
     "ExecutionConfig",
     "ForecastingConfig",
     "GenerationConfig",

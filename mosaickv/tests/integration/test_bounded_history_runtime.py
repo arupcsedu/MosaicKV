@@ -518,14 +518,116 @@ def test_v5_runtime_uses_isolated_later_prefix_guard_and_preserves_byte_cap(tmp_
     assert len(prefill_calls) == 2
 
 
-def test_v5_one_token_ppl_skips_all_draft_probes_and_does_not_preallocate(tmp_path, monkeypatch):
-    from mosaickv.config import DraftAllocationGuardConfig
+def test_v6_single_exchange_uses_real_transport_and_no_label_input(tmp_path, monkeypatch):
+    import mosaickv.selection.direct_error_exchange as planner
+    from mosaickv.backends.hf_single_exchange_guard import validate_single_exchange_trace
+    from mosaickv.config import DraftAllocationGuardConfig, DraftExchangeSearchConfig
+    from mosaickv.evaluation.model import EvaluationRequest
+    from mosaickv.selection.evidence_layer_allocation import EvidenceLayerPlan
+
+    def singles(source, mass, records, *, prompt_budget_bytes, max_candidates):
+        assert max_candidates == 2 and mass
+        physical = {p: i for i, p in enumerate(source.logical_positions.physical_to_logical)}
+        grouped = [[[] for _ in range(layer.kv_heads)] for layer in source.layers]
+        for row in records:
+            grouped[row["layer"]][row["kv_head"]].append(physical[row["logical_position"]])
+        counts = [len(heads[0]) for heads in grouped]
+        d, r = 0, 1
+        removed, added = [], []
+        for head in range(len(grouped[d])):
+            removed.append(grouped[d][head].pop(0))
+            added.append(
+                next(
+                    p for p in range(source.layers[r].sequence_length) if p not in grouped[r][head]
+                )
+            )
+            grouped[r][head].append(added[-1])
+        positions = tuple(tuple(tuple(sorted(head)) for head in layer) for layer in grouped)
+        capacities = tuple(len(layer[0]) for layer in positions)
+        costs = source.layers[d].byte_size // source.layers[d].sequence_length
+        event = dict(
+            donor_layer=d,
+            receiver_layer=r,
+            transferred_bytes=costs,
+            initial_layer_capacities=counts,
+            removed_positions=removed,
+            added_positions=added,
+        )
+        return (
+            EvidenceLayerPlan(
+                positions,
+                capacities,
+                prompt_budget_bytes,
+                (0.0,) * len(counts),
+                (0.0,) * len(counts),
+                (0,) * len(counts),
+                {"single_exchange": event},
+            ),
+        )
+
+    monkeypatch.setattr(planner, "build_single_exchange_layer_plans", singles)
+    cfg = replace(
+        _config(MosaicKVMethod.MOSAICKV_EXACT),
+        bounded_decode=BoundedDecodeConfig(
+            2,
+            1,
+            0.2,
+            "draft_single_exchange_v1",
+            DraftAllocationGuardConfig(8, (1, 4, 8)),
+            DraftExchangeSearchConfig(2, 1),
+        ),
+    )
+    adapter = _llava()
+    calls = []
+    original = adapter.prefill
+
+    def prefill(*args, **kwargs):
+        calls.append(1)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(adapter, "prefill", prefill)
+    request = _runtime_request("V6-generation")
+    result = HuggingFaceMosaicKVModel(adapter, cfg, trace_directory=tmp_path).generate(request)
+    generation = json.loads(next((tmp_path / request.run_id).glob("*.json")).read_text())
+    guard = generation["draft_logit_allocation_guard"]
+    assert validate_single_exchange_trace(guard)
+    assert len(calls) == 1 and 0 < guard["probe_updates"] <= 24
+    assert result.metrics.peak_active_kv_storage_bytes == 512
+    assert "__draft_single_exchange_layers_v6" in result.effective_method
+    assert "V6_single_exchange" in generation["selection_provenance"]
+    assert generation["timing_breakdown"]["logit_stability"] > 0
+    teacher = EvaluationRequest(
+        "V6-ppl",
+        request.sample_id,
+        request.task,
+        request.messages,
+        {"_mosaickv_teacher_forced_token_ids": (2,) * 20},
+    )
+    HuggingFaceMosaicKVModel(adapter, cfg, trace_directory=tmp_path).generate(teacher)
+    forced = json.loads(next((tmp_path / teacher.run_id).glob("*.json")).read_text())[
+        "draft_logit_allocation_guard"
+    ]
+    assert forced["attempts"] == guard["attempts"]
+    assert forced["final_positions_sha256"] == guard["final_positions_sha256"]
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize("version", [5, 6])
+def test_draft_one_token_ppl_skips_all_probes_and_does_not_preallocate(
+    tmp_path, monkeypatch, version
+):
+    from mosaickv.config import DraftAllocationGuardConfig, DraftExchangeSearchConfig
     from mosaickv.evaluation.model import EvaluationRequest
 
     cfg = replace(
         _config(MosaicKVMethod.MOSAICKV_EXACT),
         bounded_decode=BoundedDecodeConfig(
-            2, 1, 0.2, "draft_logit_guard_v1", DraftAllocationGuardConfig(4, (1, 4))
+            2,
+            1,
+            0.2,
+            "draft_single_exchange_v1" if version == 6 else "draft_logit_guard_v1",
+            DraftAllocationGuardConfig(4, (1, 4)),
+            DraftExchangeSearchConfig() if version == 6 else None,
         ),
     )
     from mosaickv.config import ForecastingConfig
@@ -567,14 +669,21 @@ def test_v5_one_token_ppl_skips_all_draft_probes_and_does_not_preallocate(tmp_pa
     )
 
 
-def test_v5_retention_one_bypasses_probes_and_matches_fullkv(tmp_path, monkeypatch):
+@pytest.mark.parametrize("version", [5, 6])
+def test_draft_retention_one_bypasses_probes_and_matches_fullkv(tmp_path, monkeypatch, version):
     import mosaickv.backends.hf_allocation_guard as guard_module
-    from mosaickv.config import DraftAllocationGuardConfig
+    import mosaickv.backends.hf_single_exchange_guard as single_module
+    from mosaickv.config import DraftAllocationGuardConfig, DraftExchangeSearchConfig
 
     cfg = replace(
         _config(MosaicKVMethod.MOSAICKV_EXACT, ratio=1.0),
         bounded_decode=BoundedDecodeConfig(
-            2, 1, 0.2, "draft_logit_guard_v1", DraftAllocationGuardConfig(4, (1, 4))
+            2,
+            1,
+            0.2,
+            "draft_single_exchange_v1" if version == 6 else "draft_logit_guard_v1",
+            DraftAllocationGuardConfig(4, (1, 4)),
+            DraftExchangeSearchConfig() if version == 6 else None,
         ),
     )
     full = replace(
@@ -591,6 +700,7 @@ def test_v5_retention_one_bypasses_probes_and_matches_fullkv(tmp_path, monkeypat
         pytest.fail("retention-1 identity must not probe or change the cache")
 
     monkeypatch.setattr(guard_module, "guard_joint_allocation", forbidden)
+    monkeypatch.setattr(single_module, "guard_single_exchanges", forbidden)
     request = _runtime_request("V5-identity")
     reference = HuggingFaceMosaicKVModel(adapter, full, trace_directory=tmp_path / "full").generate(
         request

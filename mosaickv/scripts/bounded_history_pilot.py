@@ -20,6 +20,7 @@ from mosaickv.config import (
     BoundedDecodeConfig,
     DatasetConfig,
     DraftAllocationGuardConfig,
+    DraftExchangeSearchConfig,
     ForecastingConfig,
     GraphConfig,
     LookMConfig,
@@ -39,6 +40,8 @@ SOURCE = Path(__file__).resolve().parents[2]
 PROTOCOL = SOURCE / "mosaickv/configs/experiments/bounded_history_baselines_v1.yaml"
 GUARDED_ARMS = {"mosaickv_output_impact_guarded_v3", "mosaickv_direct_error_v4"}
 DRAFT_GUARDED_ARM = "mosaickv_draft_logit_guard_v5"
+SINGLE_EXCHANGE_ARM = "mosaickv_draft_single_exchange_v6"
+DRAFT_GUARDED_ARMS = {DRAFT_GUARDED_ARM, SINGLE_EXCHANGE_ARM}
 
 
 def digest(path):
@@ -124,7 +127,7 @@ def configurations(task, cap, route, profile):
 def development_exclusions(protocol, task, chosen_ids):
     """Bind prior identity ledgers, not predictions, scores or failure identities."""
     records = protocol.get("development_exclusions", {}).get(task, [])
-    if protocol.get("candidate_arm") in GUARDED_ARMS | {DRAFT_GUARDED_ARM} and not records:
+    if protocol.get("candidate_arm") in GUARDED_ARMS | DRAFT_GUARDED_ARMS and not records:
         raise ValueError("guarded development validation requires explicit exclusion ledgers")
     if len(chosen_ids) != len(set(chosen_ids)):
         raise ValueError("development cohort contains duplicate identities")
@@ -147,7 +150,9 @@ def development_exclusions(protocol, task, chosen_ids):
         overlap_count=0,
         selection_uses_answers_or_scores=False,
         scope=(
-            "disjoint_from_explicit_v1_v2_v3_v4_development_not_globally_untouched"
+            "disjoint_from_explicit_v1_v2_v3_v4_v5_development_not_globally_untouched"
+            if protocol.get("candidate_arm") == SINGLE_EXCHANGE_ARM
+            else "disjoint_from_explicit_v1_v2_v3_v4_development_not_globally_untouched"
             if protocol.get("candidate_arm") == DRAFT_GUARDED_ARM
             else "disjoint_from_explicit_v1_v2_v3_development_ledgers_not_globally_untouched"
             if protocol.get("candidate_arm") == "mosaickv_direct_error_v4"
@@ -183,10 +188,18 @@ def prepare(root, protocol_path=PROTOCOL):
             raise ValueError("prior negative-result seal changed")
         bound[record["path"]] = record["sha256"]
     feasibility_summary = None
-    if protocol.get("candidate_arm") in {"mosaickv_direct_error_v4", DRAFT_GUARDED_ARM}:
-        from mosaickv.selection.direct_error_exchange import cpu_feasibility
+    if protocol.get("candidate_arm") in {"mosaickv_direct_error_v4"} | DRAFT_GUARDED_ARMS:
+        from mosaickv.selection.direct_error_exchange import (
+            cpu_feasibility,
+            single_exchange_cpu_feasibility,
+        )
 
-        feasibility = dict(source_sha=sha, **cpu_feasibility())
+        check = (
+            single_exchange_cpu_feasibility
+            if protocol.get("candidate_arm") == SINGLE_EXCHANGE_ARM
+            else cpu_feasibility
+        )
+        feasibility = dict(source_sha=sha, **check())
         if not feasibility["passed"]:
             raise ValueError("CPU exchange feasibility failed; materialization/submission blocked")
         feasibility_path = root / "cpu-feasibility.json"
@@ -198,6 +211,11 @@ def prepare(root, protocol_path=PROTOCOL):
             source_sha=sha,
             passed=feasibility["passed"],
             classification=feasibility["classification"],
+            **(
+                {k: feasibility[k] for k in ("policy", "exact_bytes_and_mandatory")}
+                if protocol.get("candidate_arm") == SINGLE_EXCHANGE_ARM
+                else {}
+            ),
         )
     jobs, disjointness = [], []
     for task in protocol["tasks"]:
@@ -279,15 +297,23 @@ def prepare(root, protocol_path=PROTOCOL):
                         candidate.bounded_decode, layer_allocation="direct_error_exchange_v1"
                     ),
                 )
-                if protocol.get("candidate_arm") == DRAFT_GUARDED_ARM:
-                    configs[DRAFT_GUARDED_ARM] = replace(
+                if protocol.get("candidate_arm") in DRAFT_GUARDED_ARMS:
+                    single = protocol["candidate_arm"] == SINGLE_EXCHANGE_ARM
+                    configs[protocol["candidate_arm"]] = replace(
                         candidate,
                         bounded_decode=replace(
                             candidate.bounded_decode,
-                            layer_allocation="draft_logit_guard_v1",
+                            layer_allocation="draft_single_exchange_v1"
+                            if single
+                            else "draft_logit_guard_v1",
                             draft_guard=DraftAllocationGuardConfig.from_mapping(
                                 protocol["draft_guard"]
                             ),
+                            draft_exchange=DraftExchangeSearchConfig.from_mapping(
+                                protocol["draft_exchange"]
+                            )
+                            if single
+                            else None,
                         ),
                     )
             methods = (
@@ -490,17 +516,23 @@ def reconstruction_trace_checks(trace_root, sample_ids, cap_bytes):
 
 def draft_allocation_trace_checks(trace_root, sample_ids, cap_bytes):
     from mosaickv.backends.hf_allocation_guard import validate_draft_guard_trace
+    from mosaickv.backends.hf_single_exchange_guard import validate_single_exchange_trace
     from mosaickv.selection.direct_error_exchange import validate_exchange_trace
 
     phases = {}
     for path in Path(trace_root).rglob("*.json"):
         trace = json.loads(path.read_text())
         proposal = trace["evidence_layer_allocation"]
-        validate_exchange_trace(proposal)
-        if proposal.get("role") != "proposal_only_before_draft_guard_not_final_selection":
-            raise RuntimeError("V5 proposal must not masquerade as its final selection")
         guard = trace["draft_logit_allocation_guard"]
-        check = validate_draft_guard_trace(guard)
+        if guard["policy"] == "bounded_single_equal_byte_draft_logit_v6":
+            if proposal.get("role") != "shortlist_only_final_draft_guard_is_authoritative":
+                raise RuntimeError("V6 shortlist must not masquerade as final selection")
+            check = validate_single_exchange_trace(guard)
+        else:
+            validate_exchange_trace(proposal)
+            if proposal.get("role") != "proposal_only_before_draft_guard_not_final_selection":
+                raise RuntimeError("V5 proposal must not masquerade as its final selection")
+            check = validate_draft_guard_trace(guard)
         if guard["active_cap_bytes"] != cap_bytes:
             raise RuntimeError("draft guard cap changed")
         phase = "teacher_forced" if trace["teacher_forced_evaluation"]["enabled"] else "generation"
@@ -685,7 +717,7 @@ def worker(root, plan_sha, index):
             reconstruction_checks = reconstruction_trace_checks(
                 Path(job["output"]) / "traces", job["sample_ids"], cfg.cache.budget_value
             )
-        if job["method"] == DRAFT_GUARDED_ARM:
+        if job["method"] in DRAFT_GUARDED_ARMS:
             draft_guard_checks = draft_allocation_trace_checks(
                 Path(job["output"]) / "traces", job["sample_ids"], cfg.cache.budget_value
             )
@@ -735,10 +767,10 @@ def worker(root, plan_sha, index):
         raise
 
 
-def v5_preliminary_screen(summaries, tasks):
+def v5_preliminary_screen(summaries, tasks, candidate_arm=DRAFT_GUARDED_ARM):
     checks = []
     for task in tasks:
-        candidate = [r for r in summaries if r["task"] == task and r["method"] == DRAFT_GUARDED_ARM]
+        candidate = [r for r in summaries if r["task"] == task and r["method"] == candidate_arm]
         baseline = [
             r for r in summaries if r["task"] == task and r["method"] == "prompt_attention_topk"
         ]
@@ -752,6 +784,15 @@ def v5_preliminary_screen(summaries, tasks):
             and a["rouge_l_f1"] >= b["rouge_l_f1"]
             and a["corpus_ppl"] <= b["corpus_ppl"]
         )
+        if candidate_arm == SINGLE_EXCHANGE_ARM:
+            anchor = [r for r in summaries if r["task"] == task and r["method"] == "mosaickv_exact"]
+            passed = (
+                passed
+                and len(anchor) == 1
+                and a.get("draft_guard_acceptance_fraction", 0) > 0
+                and a["rouge_l_f1"] >= anchor[0]["rouge_l_f1"]
+                and a["corpus_ppl"] <= anchor[0]["corpus_ppl"]
+            )
         checks.append(
             dict(
                 task=task,
@@ -835,7 +876,7 @@ def analyze(root, plan_sha):
                     f"missing reconstruction telemetry: {job['index']}/{row['sample_id']}"
                 )
             rows.append(row)
-            if job["method"] == DRAFT_GUARDED_ARM:
+            if job["method"] in DRAFT_GUARDED_ARMS:
                 check = result.get("draft_guard_checks", {}).get(row["sample_id"])
                 if check is None:
                     failures.append(
@@ -894,7 +935,7 @@ def analyze(root, plan_sha):
                         draft_guard_probe_updates_mean=group.draft_guard_probe_updates.mean(),
                         draft_guard_wall_seconds_mean=group.draft_guard_wall_seconds.mean(),
                     )
-                    if method == DRAFT_GUARDED_ARM
+                    if method in DRAFT_GUARDED_ARMS
                     else {}
                 ),
                 **(
@@ -1009,11 +1050,13 @@ def analyze(root, plan_sha):
             comparisons=comparisons,
             **(
                 {
-                    "v5_preliminary_quality_screen": v5_preliminary_screen(
-                        summaries, plan["protocol"]["tasks"]
+                    "v6_preliminary_quality_screen"
+                    if plan["protocol"].get("candidate_arm") == SINGLE_EXCHANGE_ARM
+                    else "v5_preliminary_quality_screen": v5_preliminary_screen(
+                        summaries, plan["protocol"]["tasks"], plan["protocol"]["candidate_arm"]
                     )
                 }
-                if plan["protocol"].get("candidate_arm") == DRAFT_GUARDED_ARM
+                if plan["protocol"].get("candidate_arm") in DRAFT_GUARDED_ARMS
                 else {}
             ),
             paper_eligible=False,
