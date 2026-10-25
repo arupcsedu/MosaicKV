@@ -19,6 +19,7 @@ import yaml
 from mosaickv.config import (
     BoundedDecodeConfig,
     DatasetConfig,
+    DraftAllocationGuardConfig,
     ForecastingConfig,
     GraphConfig,
     LookMConfig,
@@ -37,6 +38,7 @@ from mosaickv.types import ForecastMode, MosaicKVMethod, RepairPolicy
 SOURCE = Path(__file__).resolve().parents[2]
 PROTOCOL = SOURCE / "mosaickv/configs/experiments/bounded_history_baselines_v1.yaml"
 GUARDED_ARMS = {"mosaickv_output_impact_guarded_v3", "mosaickv_direct_error_v4"}
+DRAFT_GUARDED_ARM = "mosaickv_draft_logit_guard_v5"
 
 
 def digest(path):
@@ -122,7 +124,7 @@ def configurations(task, cap, route, profile):
 def development_exclusions(protocol, task, chosen_ids):
     """Bind prior identity ledgers, not predictions, scores or failure identities."""
     records = protocol.get("development_exclusions", {}).get(task, [])
-    if protocol.get("candidate_arm") in GUARDED_ARMS and not records:
+    if protocol.get("candidate_arm") in GUARDED_ARMS | {DRAFT_GUARDED_ARM} and not records:
         raise ValueError("guarded development validation requires explicit exclusion ledgers")
     if len(chosen_ids) != len(set(chosen_ids)):
         raise ValueError("development cohort contains duplicate identities")
@@ -145,7 +147,9 @@ def development_exclusions(protocol, task, chosen_ids):
         overlap_count=0,
         selection_uses_answers_or_scores=False,
         scope=(
-            "disjoint_from_explicit_v1_v2_v3_development_ledgers_not_globally_untouched"
+            "disjoint_from_explicit_v1_v2_v3_v4_development_not_globally_untouched"
+            if protocol.get("candidate_arm") == DRAFT_GUARDED_ARM
+            else "disjoint_from_explicit_v1_v2_v3_development_ledgers_not_globally_untouched"
             if protocol.get("candidate_arm") == "mosaickv_direct_error_v4"
             else "disjoint_from_explicit_v1_v2_development_ledgers_not_globally_untouched"
         ),
@@ -174,8 +178,12 @@ def prepare(root, protocol_path=PROTOCOL):
     if upstream != protocol["prefixkv_commit"]:
         raise ValueError("PrefixKV upstream revision mismatch")
     bound = {str(protocol_path): digest(protocol_path), str(profile): digest(profile)}
+    for record in protocol.get("prior_negative_evidence", []):
+        if digest(record["path"]) != record["sha256"]:
+            raise ValueError("prior negative-result seal changed")
+        bound[record["path"]] = record["sha256"]
     feasibility_summary = None
-    if protocol.get("candidate_arm") == "mosaickv_direct_error_v4":
+    if protocol.get("candidate_arm") in {"mosaickv_direct_error_v4", DRAFT_GUARDED_ARM}:
         from mosaickv.selection.direct_error_exchange import cpu_feasibility
 
         feasibility = dict(source_sha=sha, **cpu_feasibility())
@@ -271,6 +279,17 @@ def prepare(root, protocol_path=PROTOCOL):
                         candidate.bounded_decode, layer_allocation="direct_error_exchange_v1"
                     ),
                 )
+                if protocol.get("candidate_arm") == DRAFT_GUARDED_ARM:
+                    configs[DRAFT_GUARDED_ARM] = replace(
+                        candidate,
+                        bounded_decode=replace(
+                            candidate.bounded_decode,
+                            layer_allocation="draft_logit_guard_v1",
+                            draft_guard=DraftAllocationGuardConfig.from_mapping(
+                                protocol["draft_guard"]
+                            ),
+                        ),
+                    )
             methods = (
                 ["full_kv", *protocol["methods"]]
                 if cap == protocol["caps_mib"][0]
@@ -469,6 +488,46 @@ def reconstruction_trace_checks(trace_root, sample_ids, cap_bytes):
     return checks
 
 
+def draft_allocation_trace_checks(trace_root, sample_ids, cap_bytes):
+    from mosaickv.backends.hf_allocation_guard import validate_draft_guard_trace
+    from mosaickv.selection.direct_error_exchange import validate_exchange_trace
+
+    phases = {}
+    for path in Path(trace_root).rglob("*.json"):
+        trace = json.loads(path.read_text())
+        proposal = trace["evidence_layer_allocation"]
+        validate_exchange_trace(proposal)
+        if proposal.get("role") != "proposal_only_before_draft_guard_not_final_selection":
+            raise RuntimeError("V5 proposal must not masquerade as its final selection")
+        guard = trace["draft_logit_allocation_guard"]
+        check = validate_draft_guard_trace(guard)
+        if guard["active_cap_bytes"] != cap_bytes:
+            raise RuntimeError("draft guard cap changed")
+        phase = "teacher_forced" if trace["teacher_forced_evaluation"]["enabled"] else "generation"
+        key = trace["sample_id"], phase
+        if key in phases:
+            raise RuntimeError("duplicate draft guard phase trace")
+        phases[key] = (check, guard["final_positions_sha256"], guard["prompt_bytes"])
+    expected = {(s, p) for s in sample_ids for p in ("generation", "teacher_forced")}
+    if set(phases) != expected:
+        raise RuntimeError("missing draft guard sample/phase trace")
+    result = {}
+    for sample in sample_ids:
+        generated, gh, gb = phases[sample, "generation"]
+        forced, fh, fb = phases[sample, "teacher_forced"]
+        if gb == fb and gh != fh:
+            raise RuntimeError("draft selection changed when target labels were attached")
+        result[sample] = dict(
+            **generated,
+            teacher_forced_accepted=forced["accepted"],
+            target_tokens_not_used_by_guard=True,
+            same_prompt_budget=gb == fb,
+            same_selection=gh == fh,
+            validated_trace_count=2,
+        )
+    return result
+
+
 def worker(root, plan_sha, index):
     import torch
 
@@ -614,6 +673,7 @@ def worker(root, plan_sha, index):
                     if row[f"{boundary}_active_kv_storage_bytes"] != cfg.cache.budget_value:
                         raise RuntimeError("worker failed exact lifetime-storage cap")
         reconstruction_checks = {}
+        draft_guard_checks = {}
         from mosaickv.evaluation.cache_phase_audit import audit_phase_directory
 
         phase_storage_checks = audit_phase_directory(
@@ -623,6 +683,10 @@ def worker(root, plan_sha, index):
         )
         if job["method"] in GUARDED_ARMS:
             reconstruction_checks = reconstruction_trace_checks(
+                Path(job["output"]) / "traces", job["sample_ids"], cfg.cache.budget_value
+            )
+        if job["method"] == DRAFT_GUARDED_ARM:
+            draft_guard_checks = draft_allocation_trace_checks(
                 Path(job["output"]) / "traces", job["sample_ids"], cfg.cache.budget_value
             )
         artifacts = {str(p): digest(p) for p in Path(job["output"]).rglob("*") if p.is_file()}
@@ -646,6 +710,7 @@ def worker(root, plan_sha, index):
                 slurm_job_id=os.environ.get("SLURM_JOB_ID"),
                 reconstruction_checks=reconstruction_checks,
                 phase_storage_checks=phase_storage_checks,
+                **({"draft_guard_checks": draft_guard_checks} if draft_guard_checks else {}),
             ),
         )
         progress(
@@ -668,6 +733,40 @@ def worker(root, plan_sha, index):
             ),
         )
         raise
+
+
+def v5_preliminary_screen(summaries, tasks):
+    checks = []
+    for task in tasks:
+        candidate = [r for r in summaries if r["task"] == task and r["method"] == DRAFT_GUARDED_ARM]
+        baseline = [
+            r for r in summaries if r["task"] == task and r["method"] == "prompt_attention_topk"
+        ]
+        if len(candidate) != 1 or len(baseline) != 1:
+            checks.append(dict(task=task, passed=False, reason="incomplete_or_duplicate_arms"))
+            continue
+        a, b = candidate[0], baseline[0]
+        passed = (
+            a["samples"] == b["samples"] == 8
+            and a["cap_mib"] == b["cap_mib"] == 40
+            and a["rouge_l_f1"] >= b["rouge_l_f1"]
+            and a["corpus_ppl"] <= b["corpus_ppl"]
+        )
+        checks.append(
+            dict(
+                task=task,
+                passed=passed,
+                rouge_delta=a["rouge_l_f1"] - b["rouge_l_f1"],
+                ppl_delta=a["corpus_ppl"] - b["corpus_ppl"],
+            )
+        )
+    return dict(
+        per_task=checks,
+        preliminary_point_estimate_screen_passed=all(r["passed"] for r in checks),
+        frozen_candidate_eligible=False,
+        paper_campaign_authorized=False,
+        reason="eight_examples_per_task_are_not_consistent_independent_quality_evidence",
+    )
 
 
 def analyze(root, plan_sha):
@@ -736,6 +835,14 @@ def analyze(root, plan_sha):
                     f"missing reconstruction telemetry: {job['index']}/{row['sample_id']}"
                 )
             rows.append(row)
+            if job["method"] == DRAFT_GUARDED_ARM:
+                check = result.get("draft_guard_checks", {}).get(row["sample_id"])
+                if check is None:
+                    failures.append(
+                        f"missing draft guard telemetry: {job['index']}/{row['sample_id']}"
+                    )
+                else:
+                    row.update({f"draft_guard_{key}": value for key, value in check.items()})
     frame = pd.DataFrame(rows)
     if not rows:
         write_once(
@@ -779,6 +886,15 @@ def analyze(root, plan_sha):
                         reconstruction_measurement_seconds=group.reconstruction_measurement_seconds.mean(),
                     )
                     if method in GUARDED_ARMS
+                    else {}
+                ),
+                **(
+                    dict(
+                        draft_guard_acceptance_fraction=group.draft_guard_accepted.mean(),
+                        draft_guard_probe_updates_mean=group.draft_guard_probe_updates.mean(),
+                        draft_guard_wall_seconds_mean=group.draft_guard_wall_seconds.mean(),
+                    )
+                    if method == DRAFT_GUARDED_ARM
                     else {}
                 ),
                 **(
@@ -891,6 +1007,15 @@ def analyze(root, plan_sha):
                 len(plan["jobs"]) * plan["protocol"]["samples_per_task"] - len(rows)
             ),
             comparisons=comparisons,
+            **(
+                {
+                    "v5_preliminary_quality_screen": v5_preliminary_screen(
+                        summaries, plan["protocol"]["tasks"]
+                    )
+                }
+                if plan["protocol"].get("candidate_arm") == DRAFT_GUARDED_ARM
+                else {}
+            ),
             paper_eligible=False,
             result_scope="small_retrospective_development_not_statistical_paper_evidence",
             smaller_cache_at_preserved_quality_established=False,

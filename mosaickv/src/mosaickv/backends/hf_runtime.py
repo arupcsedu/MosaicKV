@@ -9169,6 +9169,7 @@ class HuggingFaceMosaicKVModel:
             bounded_budget = None
             bounded_decode_trace: JsonObject | None = None
             evidence_allocation_trace = None
+            draft_guard_trace = None
             if not is_full_cache and not retention_one_identity:
                 cache_state_started = time.perf_counter()
                 snapshot = self.adapter.extract_past_key_values(prefill.state.past_key_values)
@@ -10029,7 +10030,12 @@ class HuggingFaceMosaicKVModel:
                 if (
                     self.config.bounded_decode is not None
                     and self.config.bounded_decode.layer_allocation
-                    in {"output_impact_v1", "output_impact_guarded_v1", "direct_error_exchange_v1"}
+                    in {
+                        "output_impact_v1",
+                        "output_impact_guarded_v1",
+                        "direct_error_exchange_v1",
+                        "draft_logit_guard_v1",
+                    }
                 ):
                     if predicted_token_attention is None or dense_budget is None:
                         raise HuggingFaceRuntimeError(
@@ -10047,11 +10053,15 @@ class HuggingFaceMosaicKVModel:
                             dense_budget.target_bytes,
                             guard_reconstruction=(
                                 self.config.bounded_decode.layer_allocation
-                                in {"output_impact_guarded_v1", "direct_error_exchange_v1"}
+                                in {
+                                    "output_impact_guarded_v1",
+                                    "direct_error_exchange_v1",
+                                    "draft_logit_guard_v1",
+                                }
                             ),
                             direct_error_exchange=(
                                 self.config.bounded_decode.layer_allocation
-                                == "direct_error_exchange_v1"
+                                in {"direct_error_exchange_v1", "draft_logit_guard_v1"}
                             ),
                         ),
                     )
@@ -10060,6 +10070,31 @@ class HuggingFaceMosaicKVModel:
                     self._observe_evidence_allocation(
                         prefill, evidence_anchor, packed, bounded_budget, evidence_allocation_trace
                     )
+                    if self.config.bounded_decode.draft_guard is not None:
+                        from mosaickv.backends.hf_allocation_guard import guard_joint_allocation
+
+                        (packed, draft_guard_trace), guard_seconds = _timed(
+                            prefill.logits,
+                            lambda: guard_joint_allocation(
+                                self.adapter,
+                                prefill,
+                                evidence_anchor,
+                                packed,
+                                bounded_budget,
+                                self.config.bounded_decode.draft_guard,
+                                sink_tokens=self.config.bounded_decode.sink_tokens,
+                                clone_state=lambda state: _clone_decode_state(self.adapter, state),
+                                state_from_packed=lambda state, choice: _state_from_packed(
+                                    self.adapter, state, choice
+                                ),
+                            ),
+                        )
+                        logit_stability_seconds += guard_seconds
+                        draft_guard_trace["synchronized_timing_seconds"] = guard_seconds
+                        trace["draft_logit_allocation_guard"] = draft_guard_trace
+                        evidence_allocation_trace["role"] = (
+                            "proposal_only_before_draft_guard_not_final_selection"
+                        )
                 state = _state_from_packed(self.adapter, prefill.state, packed)
                 packed_prompt_capacity = packed.prompt_capacity
                 packed_prefill_active_kv_bytes = _cache_payload_bytes(
@@ -10152,6 +10187,10 @@ class HuggingFaceMosaicKVModel:
                         payload["selection_provenance"] = (
                             "MosaicKV_forecast_graph_anchor_then_output_impact_layer_allocation_v1"
                         )
+                        if draft_guard_trace is not None:
+                            payload["selection_provenance"] = (
+                                "MosaicKV_V5_joint_FullKV_draft_guard_final_selection"
+                            )
                     return payload
 
                 deferred_trace_builder = build_deferred_cache_trace
@@ -11393,7 +11432,9 @@ class HuggingFaceMosaicKVModel:
                         materialization["selected_layer_prompt_capacities"] = lengths
                 if evidence_allocation_trace is not None:
                     trace["source_selector_plan_role"] = (
-                        "anchor_only_final_evidence_allocation_is_authoritative"
+                        "anchor_and_proposal_audit_only_final_draft_guard_is_authoritative"
+                        if draft_guard_trace is not None
+                        else "anchor_only_final_evidence_allocation_is_authoritative"
                     )
             _write_trace(trace_path, trace)
             compression_seconds = (

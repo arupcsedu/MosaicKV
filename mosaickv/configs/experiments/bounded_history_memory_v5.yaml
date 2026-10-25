@@ -1,0 +1,94 @@
+schema_version: 1
+experiment_id: bounded_history_memory_v5
+classification: retrospective_development_unified_comparison
+paper_campaign_authorized: false
+heldout_claim: false
+model_id: llava-hf/llava-1.5-7b-hf
+model_revision: b234b804b114d9e37bb655e11cbbb5f5e971b7a9
+precision: fp16
+backend: huggingface
+attention: eager
+caps_mib: [40]
+methods: [prompt_attention_topk, mosaickv_exact, mosaickv_draft_logit_guard_v5]
+candidate_arm: mosaickv_draft_logit_guard_v5
+quality_reference: full_kv
+fullkv_latency_comparison: false
+samples_per_task: 8
+sample_offset: 22
+tasks: [llava_description, mmvet_prefixkv]
+selection: next_eight_parent_ids_after_twenty_two_consumed_ids_no_label_selection
+development_exclusions:
+  llava_description:
+    - path: /scratch/djy8hg/runs/mosaickv/bounded-history-baselines-v1-20261023/ledgers/llava_description.json
+      sha256: bdc854b2810ebd922a5a007c31fda49961485fd015c0121d35b1fc323a967178
+    - path: /scratch/djy8hg/runs/mosaickv/bounded-history-memory-v2-20261023-v1/memory-grid/ledgers/llava_description.json
+      sha256: e2e69f5eaf6f67f101424f03713fccf44dd91ed85de6beca85d4f210629b46c6
+    - path: /scratch/djy8hg/runs/mosaickv/bounded-history-memory-v3-20261023-v1/ledgers/llava_description.json
+      sha256: 68bc150cfa86c027f310bf8ad89c1fbdd27a2ded63ef6258ce703843b3503ece
+    - path: /scratch/djy8hg/runs/mosaickv/bounded-history-memory-v4-20261024-v1/ledgers/llava_description.json
+      sha256: 11ab5e55663b9a2bf10bdbbdcbd9d69e2776ba98caf709148dc2192d93894942
+  mmvet_prefixkv:
+    - path: /scratch/djy8hg/runs/mosaickv/bounded-history-baselines-v1-20261023/ledgers/mmvet_prefixkv.json
+      sha256: e534d7306f4b26d98394481f3088c3655279550cbce1c1512ea637fa18f6cdfc
+    - path: /scratch/djy8hg/runs/mosaickv/bounded-history-memory-v2-20261023-v1/memory-grid/ledgers/mmvet_prefixkv.json
+      sha256: a79f2f8c556942863234c52158d3695ec1e602c8eea4f6514d94628fee01e591
+    - path: /scratch/djy8hg/runs/mosaickv/bounded-history-memory-v3-20261023-v1/ledgers/mmvet_prefixkv.json
+      sha256: b4bed1c51a5ec639d0f6e6ed69798707121cfa90d335b19a1461962a0a294609
+    - path: /scratch/djy8hg/runs/mosaickv/bounded-history-memory-v4-20261024-v1/ledgers/mmvet_prefixkv.json
+      sha256: f4fdf7ae0dc1587e354b89f87e24296e05c08336796177fe804f28e2677a5422
+prior_negative_evidence:
+  - path: /scratch/djy8hg/runs/mosaickv/bounded-history-v4-metric-recovery-20261024-v1/analysis/report.json
+    sha256: 6894de58291f6d94dd7125a02081b36390f89ff2d0fbf8fafdb5a07340f895a5
+identity_scope: disjoint_from_explicit_v1_v2_v3_v4_development_not_globally_untouched
+historical_parent_cohort_use: previously_evaluated_disclosed_not_heldout
+output_tokens: 1024
+warmups: 5
+quality_repetitions: 1
+latency_classification: per_example_development_not_20_repeat_microbenchmark
+seed: 20271014
+generated_capacity: 32
+sink_tokens: 4
+history_fraction: 0.2
+history_rule: unchanged_common_v2_20_percent_rule_for_every_compressed_method
+budget_boundary: initial_final_peak_unique_live_backing_storage_including_generated_reserve
+byte_tolerance: 0
+cross_budget_direct_comparisons: forbidden
+prefixkv_profile: confs/prefixkv_llava-v1.5-7b_0.5.json
+prefixkv_commit: 597f1ab032704951550f93bcc8a23f1454b80aa4
+candidate_allocation:
+  proposal: unchanged_V4_direct_error_exchange_with_original_limits
+  transaction: whole_proposal_or_original_same_byte_compressed_anchor
+  no_FullKV_fallback: true
+  original_keys_values_and_positions: unchanged
+draft_guard:
+  horizon: 32
+  checkpoints: [1, 4, 16, 32]
+  absolute_tolerance: 0.0000001
+  relative_tolerance: 0.000001
+draft_guard_requirements:
+  inspect_every_prefix: true
+  prompt_cache_and_probe_state_isolation: true
+  no_second_prefill: true
+  no_benchmark_target_or_reference_input: true
+  require_KL_and_maximum_logit_difference_nonregression: true
+  forbid_new_greedy_disagreements_where_anchor_agrees: true
+  charge_probe_time_to_compression_and_end_to_end: true
+  report_temporary_probe_memory_separately_from_live_KV: true
+cpu_feasibility_required: true
+metrics: [teacher_forced_ppl, rouge_l_f1]
+bootstrap_replicates: 10000
+confidence: 0.95
+max_global_a100s: 6
+gpus_per_worker: 1
+cpus_per_worker: 12
+time_limit_seconds: 7200
+promotion:
+  automatic_paper_campaign: false
+  powered_validation_authorized: false
+  frozen_quality_target: not_yet_registered
+  frozen_competitor_selection: not_yet_registered
+  require_consistent_smaller_cache_quality_benefit_before_confirmation: true
+  execution_success_alone_is_not_sufficient: true
+  eight_sample_preflight_cannot_create_frozen_candidate: true
+  equal_byte_tests: quality_latency_only_no_smaller_memory_claim
+  equal_quality_tests: separate_frozen_target_and_competitor_rule_required

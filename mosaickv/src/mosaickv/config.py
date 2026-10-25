@@ -375,6 +375,59 @@ class AblationConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class DraftAllocationGuardConfig:
+    """Opt-in V5 joint-allocation test using model-generated evidence only."""
+
+    horizon: int = 32
+    checkpoints: tuple[int, ...] = (1, 4, 16, 32)
+    absolute_tolerance: float = 1e-7
+    relative_tolerance: float = 1e-6
+
+    def __post_init__(self) -> None:
+        if type(self.horizon) is not int or not 4 <= self.horizon <= 64:
+            raise ConfigurationError("draft_guard.horizon must be an integer in [4, 64]")
+        if (
+            not isinstance(self.checkpoints, tuple)
+            or not self.checkpoints
+            or any(type(x) is not int or not 1 <= x <= self.horizon for x in self.checkpoints)
+            or tuple(sorted(set(self.checkpoints))) != self.checkpoints
+            or self.checkpoints[0] != 1
+            or self.checkpoints[-1] != self.horizon
+        ):
+            raise ConfigurationError(
+                "draft_guard.checkpoints must be sorted, unique and include 1/horizon"
+            )
+        for name in ("absolute_tolerance", "relative_tolerance"):
+            value = getattr(self, name)
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(value)
+                or value < 0
+            ):
+                raise ConfigurationError(f"draft_guard.{name} must be finite and nonnegative")
+
+    @classmethod
+    def from_mapping(cls, value: object) -> DraftAllocationGuardConfig:
+        data = _mapping(value, "draft_guard")
+        _reject_unknown(
+            data,
+            {"horizon", "checkpoints", "absolute_tolerance", "relative_tolerance"},
+            "draft_guard",
+        )
+        horizon = _int(data, "horizon", 32, "draft_guard")
+        points = data.get("checkpoints", (1, 4, 16, 32))
+        if not isinstance(points, (tuple, list)):
+            raise ConfigurationError("draft_guard.checkpoints must be an integer sequence")
+        return cls(
+            horizon,
+            tuple(points),
+            _float(data, "absolute_tolerance", 1e-7, "draft_guard"),
+            _float(data, "relative_tolerance", 1e-6, "draft_guard"),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class BoundedDecodeConfig:
     """Opt-in shared lifetime-cap controller; every use is a labeled adaptation."""
 
@@ -382,6 +435,7 @@ class BoundedDecodeConfig:
     sink_tokens: int = 4
     history_fraction: float | None = None
     layer_allocation: str = "uniform"
+    draft_guard: DraftAllocationGuardConfig | None = None
 
     def effective_method(self, method: MosaicKVMethod) -> str:
         version = (
@@ -392,6 +446,7 @@ class BoundedDecodeConfig:
             "output_impact_v1": "__output_impact_layers",
             "output_impact_guarded_v1": "__guarded_output_impact_layers",
             "direct_error_exchange_v1": "__direct_error_exchange_layers",
+            "draft_logit_guard_v1": "__draft_logit_guard_layers_v5",
         }[self.layer_allocation]
         if method.is_published_reimplementation:
             return (
@@ -431,15 +486,29 @@ class BoundedDecodeConfig:
             "output_impact_v1",
             "output_impact_guarded_v1",
             "direct_error_exchange_v1",
+            "draft_logit_guard_v1",
         }:
             raise ConfigurationError("bounded_decode.layer_allocation is unsupported")
+        if (self.layer_allocation == "draft_logit_guard_v1") != (self.draft_guard is not None) or (
+            self.draft_guard is not None
+            and not isinstance(self.draft_guard, DraftAllocationGuardConfig)
+        ):
+            raise ConfigurationError(
+                "bounded_decode.draft_guard is required only for draft_logit_guard_v1"
+            )
 
     @classmethod
     def from_mapping(cls, value: object) -> BoundedDecodeConfig:
         data = _mapping(value, "bounded_decode")
         _reject_unknown(
             data,
-            {"generated_capacity", "sink_tokens", "history_fraction", "layer_allocation"},
+            {
+                "generated_capacity",
+                "sink_tokens",
+                "history_fraction",
+                "layer_allocation",
+                "draft_guard",
+            },
             "bounded_decode",
         )
         return cls(
@@ -451,6 +520,9 @@ class BoundedDecodeConfig:
                 else _float(data, "history_fraction", 0.2, "bounded_decode")
             ),
             _optional_str(data, "layer_allocation", "uniform", "bounded_decode"),
+            None
+            if data.get("draft_guard") is None
+            else DraftAllocationGuardConfig.from_mapping(data["draft_guard"]),
         )
 
 
@@ -3804,7 +3876,10 @@ class RunConfig:
                 raise ConfigurationError(
                     "output-impact layer allocation is a MosaicKV exact variant"
                 )
-            if self.bounded_decode.layer_allocation == "direct_error_exchange_v1" and (
+            if self.bounded_decode.layer_allocation in {
+                "direct_error_exchange_v1",
+                "draft_logit_guard_v1",
+            } and (
                 self.cache.block_size != 1 or self.cache.physical_budget_block_size not in {None, 1}
             ):
                 raise ConfigurationError("direct-error layer exchange requires one-token blocks")
@@ -4409,6 +4484,8 @@ def canonical_config(config: RunConfig) -> JsonObject:
             bounded.pop("history_fraction", None)
         if config.bounded_decode.layer_allocation == "uniform":
             bounded.pop("layer_allocation", None)
+        if config.bounded_decode.draft_guard is None:
+            bounded.pop("draft_guard", None)
     return payload
 
 
@@ -4463,6 +4540,7 @@ __all__ = [
     "CacheConfig",
     "ConfigurationError",
     "DatasetConfig",
+    "DraftAllocationGuardConfig",
     "ExecutionConfig",
     "ForecastingConfig",
     "GenerationConfig",

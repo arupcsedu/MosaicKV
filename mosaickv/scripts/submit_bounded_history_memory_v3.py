@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Submit ONLY registered small V3/V4 development cohorts; no old retries."""
+"""Submit ONLY registered small V3/V4/V5 development cohorts; no old retries."""
 
 from __future__ import annotations
 
@@ -16,9 +16,14 @@ def validate_scope(plan):
     protocol = plan["protocol"]
     version = protocol["experiment_id"]
     is_v4 = version == "bounded_history_memory_v4"
+    is_v5 = version == "bounded_history_memory_v5"
     methods = (
-        ["prompt_attention_topk", "mosaickv_exact", "mosaickv_direct_error_v4"]
-        if is_v4
+        [
+            "prompt_attention_topk",
+            "mosaickv_exact",
+            "mosaickv_draft_logit_guard_v5" if is_v5 else "mosaickv_direct_error_v4",
+        ]
+        if is_v4 or is_v5
         else [
             "prompt_attention_topk",
             "mosaickv_exact",
@@ -27,9 +32,14 @@ def validate_scope(plan):
         ]
     )
     if (
-        version not in {"bounded_history_memory_v3", "bounded_history_memory_v4"}
+        version
+        not in {
+            "bounded_history_memory_v3",
+            "bounded_history_memory_v4",
+            "bounded_history_memory_v5",
+        }
         or protocol["tasks"] != ["llava_description", "mmvet_prefixkv"]
-        or protocol["caps_mib"] != [32, 40, 80]
+        or protocol["caps_mib"] != ([40] if is_v5 else [32, 40, 80])
         or protocol["samples_per_task"] != 8
         or protocol["methods"] != methods
         or protocol["max_global_a100s"] != 6
@@ -39,10 +49,22 @@ def validate_scope(plan):
         or protocol["promotion"]["powered_validation_authorized"]
     ):
         raise ValueError("submission limited to the registered small development validation")
+    if is_v5 and (
+        protocol["sample_offset"] != 22
+        or protocol["output_tokens"] != 1024
+        or protocol["warmups"] != 5
+        or protocol["history_fraction"] != 0.2
+        or protocol["draft_guard"]
+        != dict(
+            horizon=32, checkpoints=[1, 4, 16, 32], absolute_tolerance=1e-7, relative_tolerance=1e-6
+        )
+        or not protocol["promotion"]["eight_sample_preflight_cannot_create_frozen_candidate"]
+    ):
+        raise ValueError("V5 frozen guard/controls changed; submission blocked")
     checks = plan["development_disjointness"]
     if len(checks) != 2 or any(
         row["selected_count"] != 8
-        or row["excluded_count"] != (14 if is_v4 else 6)
+        or row["excluded_count"] != (22 if is_v5 else 14 if is_v4 else 6)
         or row["overlap_count"]
         or row["selection_uses_answers_or_scores"]
         for row in checks
@@ -50,9 +72,9 @@ def validate_scope(plan):
         raise ValueError("missing complete development disjointness evidence")
     references = [job["index"] for job in plan["jobs"] if job["method"] == "full_kv"]
     compressed = [job["index"] for job in plan["jobs"] if job["method"] != "full_kv"]
-    if len(references) != 2 or len(compressed) != (18 if is_v4 else 24):
+    if len(references) != 2 or len(compressed) != (6 if is_v5 else 18 if is_v4 else 24):
         raise ValueError("unexpected GPU work: no retries or large campaigns permitted")
-    if is_v4:
+    if is_v4 or is_v5:
         feasibility = plan.get("cpu_feasibility", {})
         if (
             feasibility.get("passed") is not True
@@ -66,8 +88,8 @@ def validate_scope(plan):
 
 
 def submit(root: Path, version: int = 3) -> dict:
-    if version not in {3, 4}:
-        raise ValueError("only the small V3/V4 protocols may be submitted")
+    if version not in {3, 4, 5}:
+        raise ValueError("only the small V3/V4/V5 protocols may be submitted")
     sha = clean_source()
     root = root.resolve()
     if root.exists() or Path("/scratch/djy8hg").resolve() not in root.parents:
@@ -120,7 +142,11 @@ def submit(root: Path, version: int = 3) -> dict:
             ],
         )
         gpu = sbatch(
-            "direct-error-grid" if version == 4 else "guarded-grid",
+            "draft-guard-grid"
+            if version == 5
+            else "direct-error-grid"
+            if version == 4
+            else "guarded-grid",
             gpu_script,
             args,
             [
@@ -199,6 +225,6 @@ def submit(root: Path, version: int = 3) -> dict:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, required=True)
-    parser.add_argument("--version", type=int, choices=[3, 4], default=3)
+    parser.add_argument("--version", type=int, choices=[3, 4, 5], default=3)
     args = parser.parse_args()
     submit(args.root, args.version)

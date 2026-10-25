@@ -430,6 +430,181 @@ def test_recovery_worker_uses_metric_only_path_and_writes_manifest(tmp_path, mon
         assert records[0]["result"]["benchmark_labels_accessed"] is False
 
 
+def test_v5_runtime_uses_isolated_later_prefix_guard_and_preserves_byte_cap(tmp_path, monkeypatch):
+    import mosaickv.backends.hf_runtime as runtime
+    from mosaickv.adapters.huggingface.layer_local_cache import gather_layer_local_snapshot
+    from mosaickv.backends.hf_allocation_guard import (
+        validate_draft_guard_trace,
+    )
+    from mosaickv.config import DraftAllocationGuardConfig
+    from mosaickv.evaluation.model import EvaluationRequest
+
+    # Force one exact equal-byte exchange in this RANDOM-WEIGHT fixture so the
+    # real transport/probe path is exercised even if the planner finds no move.
+    def proposal(adapter, _source, original, anchor, _mass, _budget, **_kwargs):
+        grouped = [[[] for _ in range(int(x.key.shape[1]))] for x in anchor.snapshot.layers]
+        for r in anchor.slot_records:
+            physical = dict(
+                (logical, index)
+                for index, logical in enumerate(_source.logical_positions.physical_to_logical)
+            )
+            grouped[r["layer"]][r["kv_head"]].append(physical[r["logical_position"]])
+        chosen = grouped[0][0]
+        if len(chosen) < 4:
+            omitted = next(p for p in range(3) if p not in chosen)
+            chosen[0] = omitted
+        snapshot = gather_layer_local_snapshot(
+            adapter, original, tuple(tuple(tuple(sorted(h)) for h in layer) for layer in grouped)
+        )
+        records = tuple(
+            dict(
+                layer=layer_index,
+                kv_head=h,
+                slot=s,
+                physical_position=p,
+                logical_position=_source.logical_positions.physical_to_logical[p],
+                tier="exact",
+            )
+            for layer_index, heads in enumerate(grouped)
+            for h, positions in enumerate(heads)
+            for s, p in enumerate(sorted(positions))
+        )
+        packed = runtime.PackedRuntimeCache(
+            snapshot, (), snapshot.active_sequence_length, True, (), (), records
+        )
+        return packed, dict(padding_bytes=0, benchmark_labels_accessed=False, fixture_only=True)
+
+    monkeypatch.setattr(runtime, "_reallocate_evidence_layers", proposal)
+    cfg = replace(
+        _config(MosaicKVMethod.MOSAICKV_EXACT),
+        bounded_decode=BoundedDecodeConfig(
+            2, 1, 0.2, "draft_logit_guard_v1", DraftAllocationGuardConfig(8, (1, 4, 8))
+        ),
+    )
+    adapter = _llava()
+    prefill_calls = []
+    original_prefill = adapter.prefill
+
+    def prefill(*args, **kwargs):
+        prefill_calls.append(1)
+        return original_prefill(*args, **kwargs)
+
+    monkeypatch.setattr(adapter, "prefill", prefill)
+    request = _runtime_request("V5-generation")
+    result = HuggingFaceMosaicKVModel(adapter, cfg, trace_directory=tmp_path).generate(request)
+    generation = json.loads(next((tmp_path / request.run_id).glob("*.json")).read_text())
+    guard = generation["draft_logit_allocation_guard"]
+    assert len(prefill_calls) == 1 and guard["probe_updates"] == 24
+    assert validate_draft_guard_trace(guard)
+    assert guard["later_checkpoints_completed"] and len(guard["steps"]) == 8
+    assert result.metrics.peak_active_kv_storage_bytes == 512
+    assert "__draft_logit_guard_layers_v5" in result.effective_method
+    assert generation["evidence_layer_allocation"]["role"].startswith("proposal_only")
+    assert generation["timing_breakdown"]["logit_stability"] > 0
+    # Teacher-forced labels change decode inputs, never the guard's draft prefix.
+    teacher = EvaluationRequest(
+        "V5-ppl",
+        request.sample_id,
+        request.task,
+        request.messages,
+        {"_mosaickv_teacher_forced_token_ids": (2,) * 20},
+    )
+    HuggingFaceMosaicKVModel(adapter, cfg, trace_directory=tmp_path).generate(teacher)
+    forced = json.loads(next((tmp_path / teacher.run_id).glob("*.json")).read_text())[
+        "draft_logit_allocation_guard"
+    ]
+    assert forced["steps"] == guard["steps"]
+    assert forced["final_positions_sha256"] == guard["final_positions_sha256"]
+    assert len(prefill_calls) == 2
+
+
+def test_v5_one_token_ppl_skips_all_draft_probes_and_does_not_preallocate(tmp_path, monkeypatch):
+    from mosaickv.config import DraftAllocationGuardConfig
+    from mosaickv.evaluation.model import EvaluationRequest
+
+    cfg = replace(
+        _config(MosaicKVMethod.MOSAICKV_EXACT),
+        bounded_decode=BoundedDecodeConfig(
+            2, 1, 0.2, "draft_logit_guard_v1", DraftAllocationGuardConfig(4, (1, 4))
+        ),
+    )
+    from mosaickv.config import ForecastingConfig
+    from mosaickv.types import ForecastMode
+
+    cfg = replace(
+        cfg,
+        forecasting=ForecastingConfig(
+            enabled=True,
+            mode=ForecastMode.PROMPT_WINDOW,
+            prompt_window=2,
+            draft_steps=0,
+            centroid_count=2,
+        ),
+    )
+    adapter = _llava()
+
+    def forbidden(*_a, **_k):
+        pytest.fail("zero-update PPL must not decode or preallocate")
+
+    monkeypatch.setattr(adapter, "decode_one_token", forbidden)
+    monkeypatch.setattr(adapter, "preallocate_decode_cache", forbidden)
+    request = _runtime_request("V5-single-token")
+    request = EvaluationRequest(
+        request.run_id,
+        request.sample_id,
+        request.task,
+        request.messages,
+        {"_mosaickv_teacher_forced_token_ids": (2,)},
+    )
+    result = HuggingFaceMosaicKVModel(adapter, cfg, trace_directory=tmp_path).generate(request)
+    trace = json.loads(next(tmp_path.rglob("*.json")).read_text())
+    guard = trace["draft_logit_allocation_guard"]
+    assert guard["reason"] == "no_decode_updates" and guard["probe_updates"] == 0
+    assert (
+        result.metrics.initial_active_kv_storage_bytes
+        == result.metrics.peak_active_kv_storage_bytes
+        == 512
+    )
+
+
+def test_v5_retention_one_bypasses_probes_and_matches_fullkv(tmp_path, monkeypatch):
+    import mosaickv.backends.hf_allocation_guard as guard_module
+    from mosaickv.config import DraftAllocationGuardConfig
+
+    cfg = replace(
+        _config(MosaicKVMethod.MOSAICKV_EXACT, ratio=1.0),
+        bounded_decode=BoundedDecodeConfig(
+            2, 1, 0.2, "draft_logit_guard_v1", DraftAllocationGuardConfig(4, (1, 4))
+        ),
+    )
+    full = replace(
+        cfg,
+        method=MosaicKVMethod.FULL_KV,
+        bounded_decode=None,
+        forecasting=replace(cfg.forecasting, enabled=False),
+        graph=replace(cfg.graph, enabled=False),
+        selection=replace(cfg.selection, enabled=False),
+    )
+    adapter = _llava()
+
+    def forbidden(*_a, **_k):
+        pytest.fail("retention-1 identity must not probe or change the cache")
+
+    monkeypatch.setattr(guard_module, "guard_joint_allocation", forbidden)
+    request = _runtime_request("V5-identity")
+    reference = HuggingFaceMosaicKVModel(adapter, full, trace_directory=tmp_path / "full").generate(
+        request
+    )
+    result = HuggingFaceMosaicKVModel(
+        adapter, cfg, trace_directory=tmp_path / "candidate"
+    ).generate(request)
+    assert result.answer == reference.answer
+    left = json.loads(next((tmp_path / "full").rglob("*.json")).read_text())
+    right = json.loads(next((tmp_path / "candidate").rglob("*.json")).read_text())
+    assert left["generated_token_ids"] == right["generated_token_ids"]
+    assert "draft_logit_allocation_guard" not in right
+
+
 def _config(method=MosaicKVMethod.PROMPT_ATTENTION_TOPK, *, ratio=0.9999999999999999):
     base = (
         _baseline_runtime_config(method, ratio)

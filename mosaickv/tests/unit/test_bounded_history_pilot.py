@@ -75,6 +75,70 @@ def test_pilot_resources_and_scope_are_explicit():
     assert protocol["cross_budget_direct_comparisons"] == "forbidden"
 
 
+def test_v5_protocol_is_disjoint_bounded_and_not_a_paper_promotion():
+    import copy
+
+    module = tooling()
+    submit = submission_tooling()
+    protocol = yaml.safe_load(
+        (module.SOURCE / "mosaickv/configs/experiments/bounded_history_memory_v5.yaml").read_text()
+    )
+    assert protocol["caps_mib"] == [40] and protocol["sample_offset"] == 22
+    assert all(len(protocol["development_exclusions"][t]) == 4 for t in protocol["tasks"])
+    assert protocol["draft_guard"]["checkpoints"] == [1, 4, 16, 32]
+    jobs = []
+    for task in protocol["tasks"]:
+        jobs.extend(
+            dict(index=len(jobs) + i, method=method, task=task)
+            for i, method in enumerate(["full_kv", *protocol["methods"]])
+        )
+    plan = dict(
+        protocol=protocol,
+        jobs=jobs,
+        source_sha="a" * 40,
+        bound_files={"fixture-cpu.json": "b" * 64},
+        development_disjointness=[
+            dict(
+                task=t,
+                selected_count=8,
+                excluded_count=22,
+                overlap_count=0,
+                selection_uses_answers_or_scores=False,
+            )
+            for t in protocol["tasks"]
+        ],
+        cpu_feasibility=dict(
+            passed=True,
+            source_sha="a" * 40,
+            path="fixture-cpu.json",
+            sha256="b" * 64,
+            classification="synthetic_CPU_feasibility_not_pretrained_quality_evidence",
+        ),
+    )
+    refs, compressed = submit.validate_scope(plan)
+    assert len(refs) == 2 and len(compressed) == 6
+    altered = copy.deepcopy(plan)
+    altered["protocol"]["draft_guard"]["horizon"] = 4
+    with pytest.raises(ValueError, match="frozen guard"):
+        submit.validate_scope(altered)
+    altered = copy.deepcopy(plan)
+    altered["protocol"]["caps_mib"] = [32, 40, 80]
+    with pytest.raises(ValueError, match="limited"):
+        submit.validate_scope(altered)
+    summaries = [
+        dict(task=t, method=m, samples=8, cap_mib=40, rouge_l_f1=0.5, corpus_ppl=4.0)
+        for t in protocol["tasks"]
+        for m in (module.DRAFT_GUARDED_ARM, "prompt_attention_topk")
+    ]
+    screen = module.v5_preliminary_screen(summaries, protocol["tasks"])
+    assert screen["preliminary_point_estimate_screen_passed"]
+    assert not screen["frozen_candidate_eligible"] and not screen["paper_campaign_authorized"]
+    summaries[0]["corpus_ppl"] = 5.0
+    assert not module.v5_preliminary_screen(summaries, protocol["tasks"])[
+        "preliminary_point_estimate_screen_passed"
+    ]
+
+
 def test_memory_successor_has_a_common_grid_and_no_automatic_paper_promotion():
     module = tooling()
     protocol = yaml.safe_load(
