@@ -75,6 +75,24 @@ def test_pilot_resources_and_scope_are_explicit():
     assert protocol["cross_budget_direct_comparisons"] == "forbidden"
 
 
+def test_numpy_scalars_serialize_without_leaving_partial_invalid_files(tmp_path):
+    import json
+
+    import numpy as np
+
+    module = tooling()
+    path = tmp_path / "valid.json"
+    module.write_once(path, dict(passed=np.bool_(False), n=np.int64(8), metric=np.float32(0.5)))
+    assert json.loads(path.read_text()) == dict(passed=False, n=8, metric=0.5)
+    with pytest.raises(FileExistsError):
+        module.write_once(path, dict(passed=True))
+    for value in (float("nan"), object()):
+        failed = tmp_path / "invalid.json"
+        with pytest.raises((ValueError, TypeError)):
+            module.write_once(failed, dict(value=value))
+        assert not failed.exists()
+
+
 @pytest.mark.parametrize("version,offset", [(5, 22), (6, 30)])
 def test_draft_protocol_is_disjoint_bounded_and_not_a_paper_promotion(version, offset):
     import copy

@@ -612,6 +612,57 @@ def test_v6_single_exchange_uses_real_transport_and_no_label_input(tmp_path, mon
     assert len(calls) == 2
 
 
+def test_one_head_diagnostic_uses_one_prefill_private_states_and_complete_horizon(
+    tmp_path, monkeypatch
+):
+    from mosaickv.evaluation.head_substitution_diagnostic import (
+        HeadDiagnosticPolicy,
+        HeadSubstitutionDiagnostic,
+    )
+    from mosaickv.evaluation.model import EvaluationRequest
+    from mosaickv.selection.draft_shortlist import validate_shortlist_trace
+
+    adapter = _llava()
+    cfg = _config(MosaicKVMethod.MOSAICKV_EXACT)
+    calls = []
+    original = adapter.prefill
+
+    def prefill(*args, **kwargs):
+        calls.append(1)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(adapter, "prefill", prefill)
+    runtime = HeadSubstitutionDiagnostic(
+        adapter, cfg, policy=HeadDiagnosticPolicy(pool_size=2), trace_directory=tmp_path
+    )
+    request = _runtime_request("one-head-diagnostic")
+    result = runtime.diagnose(request)
+    assert len(calls) == 1
+    assert result["measured_source_cache_unchanged"] and result["logical_positions_unchanged"]
+    assert result["live_private_states_after_diagnostic"] == 0
+    assert result["active_cap_bytes"] == 512 and result["padding_bytes"] == 0
+    assert not result["fresh_cohort_authorized"] and not result["paper_campaign_authorized"]
+    assert result["one_head_replacement_only"] and not result["layer_capacities_changed"]
+    validate_shortlist_trace(result["selection"])
+    assert all(
+        len(event["steps"]) == 32
+        for event in result["selection"]["events"]
+        if event["status"] == "full_horizon_pass"
+    )
+    with pytest.raises(ValueError, match="never targets"):
+        runtime.diagnose(
+            EvaluationRequest(
+                request.run_id,
+                request.sample_id,
+                request.task,
+                request.messages,
+                {"reference": "forbidden"},
+            )
+        )
+    saved = json.loads(next(tmp_path.rglob("*.json")).read_text())
+    assert saved["not_a_benchmark_prediction_or_performance_row"]
+
+
 @pytest.mark.parametrize("version", [5, 6])
 def test_draft_one_token_ppl_skips_all_probes_and_does_not_preallocate(
     tmp_path, monkeypatch, version

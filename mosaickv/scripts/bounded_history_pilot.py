@@ -53,11 +53,20 @@ def progress(event, **details):
 
 
 def write_once(path, payload):
+    # Validate/normalize before opening: a serialization failure must not leave
+    # an incomplete write-once artifact that cannot be safely overwritten.
+    def scalar(value):
+        import numpy as np
+
+        if isinstance(value, np.generic):
+            return value.item()
+        raise TypeError(f"unsupported JSON value: {type(value).__name__}")
+
+    encoded = json.dumps(payload, indent=2, sort_keys=True, allow_nan=False, default=scalar)
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("x", encoding="utf-8") as stream:
-        json.dump(payload, stream, indent=2, sort_keys=True, allow_nan=False)
-        stream.write("\n")
+        stream.write(encoded + "\n")
 
 
 def clean_source(expected_sha=None):
@@ -796,7 +805,7 @@ def v5_preliminary_screen(summaries, tasks, candidate_arm=DRAFT_GUARDED_ARM):
         checks.append(
             dict(
                 task=task,
-                passed=passed,
+                passed=bool(passed),
                 rouge_delta=a["rouge_l_f1"] - b["rouge_l_f1"],
                 ppl_delta=a["corpus_ppl"] - b["corpus_ppl"],
             )
@@ -810,12 +819,22 @@ def v5_preliminary_screen(summaries, tasks, candidate_arm=DRAFT_GUARDED_ARM):
     )
 
 
-def analyze(root, plan_sha):
+def analyze(root, plan_sha, *, analysis_root=None):
     import numpy as np
     import pandas as pd
 
-    plan = inputs(root, plan_sha)
-    destination = root / "analysis"
+    plan = (
+        inputs(root, plan_sha)
+        if analysis_root is None
+        else inputs(root, plan_sha, check_clean=False)
+    )
+    destination = root / "analysis" if analysis_root is None else Path(analysis_root).resolve()
+    if analysis_root is not None and (
+        Path("/scratch/djy8hg").resolve() not in destination.parents
+        or destination == root.resolve()
+        or root.resolve() in destination.parents
+    ):
+        raise ValueError("derived analysis requires a separate new scratch directory")
     if destination.exists():
         raise FileExistsError("analysis is write-once")
     rows, missing, failures, failure_records = [], [], [], []
@@ -1011,6 +1030,32 @@ def analyze(root, plan_sha):
                     )
                 )
     destination.mkdir()
+    if analysis_root is not None:
+        patch = subprocess.check_output(["git", "diff", "--binary", "HEAD"], cwd=SOURCE)
+        (destination / "analysis-source.patch").write_bytes(patch)
+        write_once(
+            destination / "analysis_provenance.json",
+            dict(
+                classification="derived_CPU_analysis_no_new_GPU_inference",
+                producer_git_sha=plan["source_sha"],
+                parent_plan_sha256=plan_sha,
+                parent_root=str(root.resolve()),
+                original_analysis_preserved=True,
+                original_analysis_artifacts={
+                    str(p): digest(p) for p in (root / "analysis").iterdir() if p.is_file()
+                },
+                analyzer_git_sha=subprocess.check_output(
+                    ["git", "rev-parse", "HEAD"], cwd=SOURCE, text=True
+                ).strip(),
+                analyzer_worktree_dirty=bool(
+                    subprocess.check_output(["git", "status", "--porcelain"], cwd=SOURCE)
+                ),
+                analyzer_patch_sha256=hashlib.sha256(patch).hexdigest(),
+                analyzer_script_sha256=digest(__file__),
+                gpu_reruns=0,
+                producer_artifacts_verified=True,
+            ),
+        )
     frame.to_parquet(destination / "samples.parquet", index=False)
     summary = pd.DataFrame(summaries)
     summary.to_parquet(destination / "summary.parquet", index=False)
@@ -1099,6 +1144,7 @@ if __name__ == "__main__":
     parser.add_argument("--protocol", type=Path, default=PROTOCOL)
     parser.add_argument("--parent", type=Path)
     parser.add_argument("--parent-sha")
+    parser.add_argument("--analysis-root", type=Path)
     args = parser.parse_args()
     if args.action == "prepare":
         prepare(args.root, args.protocol)
@@ -1107,4 +1153,4 @@ if __name__ == "__main__":
     elif args.action == "worker":
         worker(args.root, args.plan_sha, args.index)
     else:
-        analyze(args.root, args.plan_sha)
+        analyze(args.root, args.plan_sha, analysis_root=args.analysis_root)

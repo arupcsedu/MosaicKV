@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "experiment_id": "bounded_history_memory_v6",
+  "classification": "negative_development_result_not_paper_evidence",
+  "producer_source_sha": "799ca3c6c3eccadadb52688ebc3823cfbe66522f",
+  "root": "/scratch/djy8hg/runs/mosaickv/bounded-history-memory-v6-20261025-v1",
+  "parent_plan_sha256": "7c5d8db2d2107b9d4a1fa5b23ca07e0e9429e81694d5dd1fc61bad10689ba414",
+  "preserved_incomplete_report_sha256": "3eb8dd6c0c0d84bfe01856447e3fb1ee86f576eccebdc4e5914320679d987112",
+  "derived_analysis_root": "/scratch/djy8hg/runs/mosaickv/bounded-history-v6-derived-analysis-20261025-v1",
+  "derived_report_sha256": "8a258d75548aa9c744e224442526241cfcec91592a4644777894c9142b543896",
+  "derived_analysis_provenance_sha256": "991d6fc0f3288e89af51d99e6d05615fb2e25927ad9b9b000118bf2d2a188726",
+  "consumed_identity_ledgers": [
+    {
+      "task": "llava_description",
+      "path": "/scratch/djy8hg/runs/mosaickv/bounded-history-memory-v6-20261025-v1/ledgers/llava_description.json",
+      "sha256": "d3bc227f887b9f61119a7bd5e7c2c71f57f7e3689eb3d7cc948b3851b9895874",
+      "count": 8
+    },
+    {
+      "task": "mmvet_prefixkv",
+      "path": "/scratch/djy8hg/runs/mosaickv/bounded-history-memory-v6-20261025-v1/ledgers/mmvet_prefixkv.json",
+      "sha256": "8ef5c46929e618e8534557f1079756cf7f4a36bfe07dc00ab12a7e1d64b4339a",
+      "count": 8
+    }
+  ],
+  "all_16_identities_consumed": true,
+  "complete_gpu_rows": 64,
+  "failed_gpu_rows": 0,
+  "generation_proposals_tested": 64,
+  "generation_proposals_accepted": 0,
+  "first_failed_prefix_histogram": {"1": 26, "2": 26, "3": 3, "5": 9},
+  "both_preliminary_quality_screens_failed": true,
+  "answers_and_failure_identities_not_used_for_successor_tuning": true,
+  "gpu_retries_required": false,
+  "fresh_cohort_authorized": false,
+  "calibration_authorized": false,
+  "paper_campaign_authorized": false,
+  "reason": "Fail-fast execution succeeded, but all whole-layer proposals rolled back and preserved the original anchor's quality deficit."
+}

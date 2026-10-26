@@ -1,0 +1,40 @@
+schema_version: 1
+classification: consumed_identity_mechanistic_diagnostic_not_quality_evidence
+parent_root: /scratch/djy8hg/runs/mosaickv/bounded-history-memory-v6-20261025-v1
+parent_plan_sha256: 7c5d8db2d2107b9d4a1fa5b23ca07e0e9429e81694d5dd1fc61bad10689ba414
+parent_source_sha: 799ca3c6c3eccadadb52688ebc3823cfbe66522f
+negative_seal: mosaickv/docs/bounded_history_memory_v6_negative_seal.json
+tasks: [llava_description, mmvet_prefixkv]
+selection: first_consumed_parent_ledger_identity_per_task_by_order_not_failure_identity
+samples_per_task: 1
+model_id: llava-hf/llava-1.5-7b-hf
+model_revision: b234b804b114d9e37bb655e11cbbb5f5e971b7a9
+backend: huggingface
+attention: eager
+precision: fp16
+cap_mib: 40
+transaction: one_head_one_selected_token_for_one_omitted_token_no_capacity_change
+diagnostic:
+  pool_size: 16
+  short_horizon: 4
+  shortlist_size: 2
+  guard:
+    horizon: 32
+    checkpoints: [1, 4, 16, 32]
+    absolute_tolerance: 0.0000001
+    relative_tolerance: 0.000001
+ranking: actual_draft_disagreements_then_sum_KL_then_sum_maxlogit_then_identity
+pool_source: prompt_only_route_diverse_proposals_no_positive_reconstruction_filter
+shortlist_source: actual_FullKV_and_compressed_anchor_draft_logits
+benchmark_labels_accessible_to_worker: false
+reference_outputs_accessible_to_worker: false
+meaningful_change_required: accepted_entire_horizon_and_improvement_above_unchanged_numerical_tolerance
+second_prefill: forbidden_within_diagnostic_request
+fresh_cohort_authorized: false
+calibration_authorized: false
+paper_campaign_authorized: false
+max_global_a100s: 6
+workers: 2
+gpus_per_worker: 1
+cpus_per_worker: 12
+time_limit_seconds: 7200

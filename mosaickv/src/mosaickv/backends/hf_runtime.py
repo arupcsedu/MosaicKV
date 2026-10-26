@@ -8779,6 +8779,16 @@ class HuggingFaceMosaicKVModel:
 
     backend = "huggingface"
 
+    def _observe_exact_anchor(
+        self,
+        prefill: Any,
+        full_state: Any,
+        anchor: Any,
+        attention: Any,
+        budget: Any,
+    ) -> None:
+        """No-op online; a label-blind diagnostic may inspect private clones."""
+
     def _observe_evidence_allocation(
         self,
         prefill: Any,
@@ -10037,6 +10047,17 @@ class HuggingFaceMosaicKVModel:
                             physical_prompt_capacity=physical_prompt_capacity,
                             packing_mode=self.config.cache.packing_mode,
                         ),
+                    )
+                if (
+                    self.config.method is MosaicKVMethod.MOSAICKV_EXACT
+                    and bounded_budget is not None
+                ):
+                    self._observe_exact_anchor(
+                        prefill,
+                        full_state,
+                        packed,
+                        predicted_token_attention,
+                        bounded_budget,
                     )
                 if (
                     self.config.bounded_decode is not None
