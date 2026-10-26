@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from contextlib import nullcontext
 from types import SimpleNamespace
 from typing import Any
 
@@ -23,6 +24,7 @@ class HeadProbeSession:
         logits_observer: Any = None,
         capture_draft_attentions: bool = False,
         draft_observer: Any = None,
+        decode_observer: Any = None,
     ) -> None:
         if budget is None or budget.generated_positions < 1:
             raise ValueError("one-head diagnostic requires a prompt/history byte budget")
@@ -40,6 +42,7 @@ class HeadProbeSession:
         self.anchor_logits: list[Any] = []
         self.capture_draft_attentions = capture_draft_attentions
         self.draft_observer = draft_observer
+        self.decode_observer = decode_observer
         if (
             self.bytes(tuple((layer.key, layer.value) for layer in anchor.snapshot.layers))
             != budget.prompt_budget_bytes
@@ -119,6 +122,20 @@ class HeadProbeSession:
             metrics.update(shadow_logit_metrics(full.logits, out.logits))
         return metrics
 
+    def decode(self, token, state, role, step, *, attentions=False):
+        """Optional read-only instrumentation; ordinary probes keep their path."""
+        context = (
+            nullcontext()
+            if self.decode_observer is None
+            else self.decode_observer.capture(role, step)
+        )
+        with context:
+            if attentions:
+                return self.adapter.decode_one_token(
+                    token, state, capture_queries=False, capture_attentions=True
+                )
+            return self.adapter.decode_one_token(token, state, capture_queries=False)
+
     def prefix(self, step):
         from mosaickv.backends.hf_runtime import _clone_decode_state
 
@@ -132,16 +149,11 @@ class HeadProbeSession:
                 if not self.evidence
                 else self.evidence[-1][1].next_token_id
             )
-            if self.capture_draft_attentions:
-                full = self.adapter.decode_one_token(
-                    token, self.reference, capture_queries=False, capture_attentions=True
-                )
-            else:
-                full = self.adapter.decode_one_token(token, self.reference, capture_queries=False)
-            self.reference = full.state
-            original = self.adapter.decode_one_token(
-                token, self.anchor_state, capture_queries=False
+            full = self.decode(
+                token, self.reference, "fullkv", step, attentions=self.capture_draft_attentions
             )
+            self.reference = full.state
+            original = self.decode(token, self.anchor_state, "anchor", step)
             self.anchor_state = original.state
             if self.draft_observer is not None:
                 self.draft_observer(step, full, original.state)
@@ -167,7 +179,7 @@ class HeadProbeSession:
         try:
             for step in range(1, self.policy.horizon + 1):
                 token, full, original = self.prefix(step)
-                out = self.adapter.decode_one_token(token, state, capture_queries=False)
+                out = self.decode(token, state, label or f"candidate_{identity}", step)
                 state = out.state
                 self.live[identity] = state
                 self.candidate_updates += 1

@@ -40,6 +40,10 @@ def prepare(root, protocol_path=PROTOCOL):
         raise ValueError("require a new immutable scratch diagnostic directory")
     protocol_path = Path(protocol_path).resolve()
     protocol = yaml.safe_load(protocol_path.read_text())
+    if protocol.get("output_replay_from_v8") is not None:
+        from prepare_prefix_output_replay import prepare_output_replay
+
+        return prepare_output_replay(root, sha, protocol_path, protocol)
     if protocol.get("draft_conditioned_from_v7_1") is not None:
         from prepare_draft_head import prepare_draft
 
@@ -154,6 +158,8 @@ def validate(root, plan_sha, index):
         expected_keys.add("followup")
     if plan["protocol"].get("draft_conditioned_from_v7_1") is not None:
         expected_keys.add("draft_conditioned")
+    if plan["protocol"].get("output_replay_from_v8") is not None:
+        expected_keys.add("output_replay")
     if set(payload) != expected_keys or config_sha256(cfg) != job["config_sha"]:
         raise ValueError("diagnostic input is not label-redacted or config changed")
     if any(
@@ -224,7 +230,22 @@ def worker(root, plan_sha, index):
     write_once(destination / "parity.json", parity)
     followup = plan["protocol"].get("followup_from_v7") is not None
     draft = plan["protocol"].get("draft_conditioned_from_v7_1") is not None
-    if draft:
+    output_replay = plan["protocol"].get("output_replay_from_v8") is not None
+    if output_replay:
+        from mosaickv.evaluation.prefix_output_replay import PrefixOutputReplay
+
+        paths = payload["output_replay"]
+        runtime = PrefixOutputReplay(
+            adapter,
+            cfg,
+            trace_directory=destination / "traces",
+            frozen_record=json.loads(Path(paths["diagnostic.json"]).read_text())["result"],
+            reference_logits=torch.load(paths["logits.pt"], map_location="cpu", weights_only=True),
+            draft_evidence=torch.load(
+                paths["draft-evidence.pt"], map_location="cpu", weights_only=True
+            ),
+        )
+    elif draft:
         from mosaickv.evaluation.draft_head_diagnostic import DraftConditionedHeadDiagnostic
         from mosaickv.selection.draft_head_substitution import DraftHeadPoolPolicy
 
@@ -247,7 +268,7 @@ def worker(root, plan_sha, index):
         )
     else:
         runtime = HeadSubstitutionDiagnostic(adapter, cfg, trace_directory=destination / "traces")
-    version = "8" if draft else "7.1" if followup else "7"
+    version = "8.1" if output_replay else "8" if draft else "7.1" if followup else "7"
     run_id = f"head-v{version}-{index}"
     try:
         result = runtime.diagnose(
@@ -257,10 +278,13 @@ def worker(root, plan_sha, index):
     except Exception as error:
         record = dict(status="failed", error=f"{type(error).__name__}: {error}")
     write_once(destination / "diagnostic.json", record)
-    if followup or draft:
+    if followup or draft or output_replay:
         torch.save(runtime.saved_logits, destination / "logits.pt")
     if draft:
         torch.save(runtime.saved_evidence, destination / "draft-evidence.pt")
+    if output_replay:
+        torch.save(runtime.saved_outputs, destination / "prefix-outputs.pt")
+        torch.save(runtime.saved_predictions, destination / "frozen-query-predictions.pt")
     artifacts = {str(p): digest(p) for p in destination.rglob("*") if p.is_file()}
     write_once(destination / "artifact-hashes.json", artifacts)
     preprocessing = dict(
@@ -286,7 +310,9 @@ def worker(root, plan_sha, index):
         ),
         run_id=run_id,
         execution_metadata=dict(
-            phase="consumed_identity_draft_conditioned_head_diagnostic"
+            phase="consumed_identity_frozen_proposal_attention_projection_residual_replay"
+            if output_replay
+            else "consumed_identity_draft_conditioned_head_diagnostic"
             if draft
             else "consumed_identity_numerical_controls_and_survivor_replay"
             if followup
@@ -321,12 +347,21 @@ def worker(root, plan_sha, index):
             else record.get("result", {}).get("selection", {}).get("meaningful", False),
             **(
                 dict(controls_passed=record.get("result", {}).get("controls_passed", False))
-                if followup or draft
+                if followup or draft or output_replay
                 else {}
             ),
             **(
                 dict(diagnostic_passed=record.get("result", {}).get("diagnostic_passed", False))
                 if draft
+                else {}
+            ),
+            **(
+                dict(
+                    instrumentation_passed=record.get("result", {}).get(
+                        "instrumentation_passed", False
+                    )
+                )
+                if output_replay
                 else {}
             ),
             fresh_cohort_authorized=False,

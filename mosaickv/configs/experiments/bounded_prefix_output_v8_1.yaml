@@ -1,0 +1,40 @@
+schema_version: 1
+classification: consumed_input_frozen_V8_output_replay_not_quality_evidence
+output_replay_from_v8: /scratch/djy8hg/runs/mosaickv/bounded-draft-head-v8-20261026-v1
+parent_plan_sha256: 92e043fd68e16d77f90ff397c0053c61548f22b216360931fbb5eb0730c3206c
+parent_source_sha: 0eb7a72329c4cdbcd2fd31374febeb94b0312316
+parent_artifacts:
+  '0':
+    diagnostic.json: 69579df1c4e1b36543c4339193ed02843d9dd9a454c14379da45f5a7dd4f4219
+    logits.pt: cd727cb3415e5f561146a50d452aeeb4bd1324944c170ce85ee2f1cef39abe5b
+    draft-evidence.pt: a95792b4b427f56704a69165d5abe628dd976a85c04fb9235ba37669c3c338f3
+  '1':
+    diagnostic.json: ff681db2896a27a23c44822e62d9bacadb9566aceb18db0e53798f1068c46662
+    logits.pt: 3e1589679cd56e031975894acf496c9499a69046442fae15e9527bf23510d93d
+    draft-evidence.pt: 933c9d96685ca145fef5a1bc99ac940d04f243ae0b0c32a540443169bd94a2ad
+diagnostic:
+  pool_size: 16
+  short_horizon: 4
+  shortlist_size: 2
+  guard:
+    horizon: 32
+    checkpoints: [1, 4, 16, 32]
+    absolute_tolerance: 0.0000001
+    relative_tolerance: 0.000001
+proposal_construction: frozen_V8_descriptors_no_new_search_or_ranking
+prefixes: exactly_original_observed_prefixes_per_proposal_no_extension
+capture: [attention_heads_before_o_proj, projected_attention, residual_input,
+          normalized_attention_input, post_attention_residual, layer_output]
+layers: all_Llama_decoder_layers
+active_cap_bytes: 41943040
+controls: [identical_anchor_clone, identical_anchor_repack]
+instrumentation_gate: all_saved_full_anchor_control_and_proposal_logits_bitwise_replay
+sideband_projection: CPU_FP64_does_not_replace_registered_FP32_guard
+fresh_cohort_authorized: false
+calibration_authorized: false
+paper_campaign_authorized: false
+max_global_a100s: 6
+workers: 2
+gpus_per_worker: 1
+cpus_per_worker: 12
+time_limit_seconds: 7200
