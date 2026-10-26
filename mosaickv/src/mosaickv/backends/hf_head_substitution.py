@@ -21,6 +21,8 @@ class HeadProbeSession:
         sink_tokens: int,
         capture_fp64: bool = False,
         logits_observer: Any = None,
+        capture_draft_attentions: bool = False,
+        draft_observer: Any = None,
     ) -> None:
         if budget is None or budget.generated_positions < 1:
             raise ValueError("one-head diagnostic requires a prompt/history byte budget")
@@ -36,6 +38,8 @@ class HeadProbeSession:
         self.capture_fp64 = capture_fp64
         self.logits_observer = logits_observer
         self.anchor_logits: list[Any] = []
+        self.capture_draft_attentions = capture_draft_attentions
+        self.draft_observer = draft_observer
         if (
             self.bytes(tuple((layer.key, layer.value) for layer in anchor.snapshot.layers))
             != budget.prompt_budget_bytes
@@ -128,12 +132,19 @@ class HeadProbeSession:
                 if not self.evidence
                 else self.evidence[-1][1].next_token_id
             )
-            full = self.adapter.decode_one_token(token, self.reference, capture_queries=False)
+            if self.capture_draft_attentions:
+                full = self.adapter.decode_one_token(
+                    token, self.reference, capture_queries=False, capture_attentions=True
+                )
+            else:
+                full = self.adapter.decode_one_token(token, self.reference, capture_queries=False)
             self.reference = full.state
             original = self.adapter.decode_one_token(
                 token, self.anchor_state, capture_queries=False
             )
             self.anchor_state = original.state
+            if self.draft_observer is not None:
+                self.draft_observer(step, full, original.state)
             frozen = SimpleNamespace(
                 logits=full.logits.detach().clone(),
                 next_token_id=full.next_token_id.detach().clone(),

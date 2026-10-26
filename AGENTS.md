@@ -95,6 +95,11 @@ Do not vendor model weights, datasets, or code whose license does not permit red
 
 ## Engineering workflow
 
+- The user's October 26, 2026 instruction authorizes scoped local commits
+  without repeated consent. Consolidate related changes and avoid commits less
+  than two hours apart unless the user explicitly requests an immediate commit.
+  This does not authorize pushes, fresh cohorts, or larger experiment campaigns.
+
 - The user's October 23, 2026 validation request permits at most six A100s,
   in aggregate across MosaicKV jobs (not per array). This supersedes the old
   four-GPU limit for this validation. Preserve running jobs; if occupancy is above

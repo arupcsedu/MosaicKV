@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "classification": "negative_consumed_input_mechanistic_diagnostics_not_quality_evidence",
+  "v7_source_sha": "236182cc85bfe6276111bc4ab5337208f1917ce8",
+  "v7_1_source_sha": "f069718213cd253991ba3e595158e63a9c252ebf",
+  "all_inputs_already_consumed_by_v6": true,
+  "new_identities": 0,
+  "distinct_input_count": 2,
+  "proposals_per_input": 16,
+  "accepted_proposals": 0,
+  "v7_1_both_controls_passed_both_inputs": true,
+  "v7_1_unextended_survivors_replayed": 3,
+  "v7_1_survivor_rejected_prefixes": [5, 5, 6],
+  "v7_1_survivor_regressions_persist_in_fp64": true,
+  "registered_guard_unchanged": true,
+  "artifacts": {
+    "/scratch/djy8hg/runs/mosaickv/bounded-head-substitution-v7-20261025-v1/plan.json": "0e005799706978d299bc46b75337260edafd4b84a107579555b74c7367e47c38",
+    "/scratch/djy8hg/runs/mosaickv/bounded-head-substitution-v7-20261025-v1/workers/0/diagnostic.json": "6148a005ca8dbfa88d87e06cc149838f64dbaca288b75ce6f2185e7bedfb6356",
+    "/scratch/djy8hg/runs/mosaickv/bounded-head-substitution-v7-20261025-v1/workers/1/diagnostic.json": "f7a6161829bb1ab2ea3dae5049305da12b1d470f53c39735f74dab77e95fff93",
+    "/scratch/djy8hg/runs/mosaickv/bounded-head-substitution-v7-1-20261026-v1/plan.json": "a7b3ebeb59ac35585537cfc711446b9c83e84124eb7a2d4577ebd613c3be23d8",
+    "/scratch/djy8hg/runs/mosaickv/bounded-head-substitution-v7-1-20261026-v1/workers/0/diagnostic.json": "f4ad6c21277d25af4e7c9f35939e019c2b50c6ff401352451759cb6bf6996c1b",
+    "/scratch/djy8hg/runs/mosaickv/bounded-head-substitution-v7-1-20261026-v1/workers/1/diagnostic.json": "0bcafc747f6f1d5b1012810f13bd5657b7a1deac4d62c78af0ba112793c60a20",
+    "/scratch/djy8hg/runs/mosaickv/bounded-head-substitution-v7-1-20261026-v1/workers/0/logits.pt": "6a6952e7129cef3639cd965f8f0d5a14edb18f65357b562562da138ffb351d89",
+    "/scratch/djy8hg/runs/mosaickv/bounded-head-substitution-v7-1-20261026-v1/workers/1/logits.pt": "a3bfdd21d909464d6419b04b18c22b06004ccdc81a667b74e33c6429156e8abf"
+  },
+  "gpu_retries_required": false,
+  "fresh_cohort_authorized": false,
+  "calibration_authorized": false,
+  "paper_campaign_authorized": false
+}

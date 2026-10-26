@@ -40,6 +40,10 @@ def prepare(root, protocol_path=PROTOCOL):
         raise ValueError("require a new immutable scratch diagnostic directory")
     protocol_path = Path(protocol_path).resolve()
     protocol = yaml.safe_load(protocol_path.read_text())
+    if protocol.get("draft_conditioned_from_v7_1") is not None:
+        from prepare_draft_head import prepare_draft
+
+        return prepare_draft(root, sha, protocol_path, protocol)
     if protocol.get("followup_from_v7") is not None:
         from prepare_head_followup import prepare_followup
 
@@ -148,6 +152,8 @@ def validate(root, plan_sha, index):
     }
     if plan["protocol"].get("followup_from_v7") is not None:
         expected_keys.add("followup")
+    if plan["protocol"].get("draft_conditioned_from_v7_1") is not None:
+        expected_keys.add("draft_conditioned")
     if set(payload) != expected_keys or config_sha256(cfg) != job["config_sha"]:
         raise ValueError("diagnostic input is not label-redacted or config changed")
     if any(
@@ -217,7 +223,23 @@ def worker(root, plan_sha, index):
             raise RuntimeError("diagnostic FullKV parity failed")
     write_once(destination / "parity.json", parity)
     followup = plan["protocol"].get("followup_from_v7") is not None
-    if followup:
+    draft = plan["protocol"].get("draft_conditioned_from_v7_1") is not None
+    if draft:
+        from mosaickv.evaluation.draft_head_diagnostic import DraftConditionedHeadDiagnostic
+        from mosaickv.selection.draft_head_substitution import DraftHeadPoolPolicy
+
+        reference = torch.load(
+            payload["draft_conditioned"]["reference_logits"], map_location="cpu", weights_only=True
+        )
+        runtime = DraftConditionedHeadDiagnostic(
+            adapter,
+            cfg,
+            trace_directory=destination / "traces",
+            anchor_positions_sha256=payload["draft_conditioned"]["anchor_positions_sha256"],
+            reference_logits={role: reference[role] for role in ("fullkv", "anchor")},
+            pool_policy=DraftHeadPoolPolicy(**plan["protocol"]["proposal_policy"]),
+        )
+    elif followup:
         from mosaickv.evaluation.head_substitution_followup import HeadSubstitutionFollowup
 
         runtime = HeadSubstitutionFollowup(
@@ -225,7 +247,7 @@ def worker(root, plan_sha, index):
         )
     else:
         runtime = HeadSubstitutionDiagnostic(adapter, cfg, trace_directory=destination / "traces")
-    version = "7.1" if followup else "7"
+    version = "8" if draft else "7.1" if followup else "7"
     run_id = f"head-v{version}-{index}"
     try:
         result = runtime.diagnose(
@@ -235,8 +257,10 @@ def worker(root, plan_sha, index):
     except Exception as error:
         record = dict(status="failed", error=f"{type(error).__name__}: {error}")
     write_once(destination / "diagnostic.json", record)
-    if followup:
+    if followup or draft:
         torch.save(runtime.saved_logits, destination / "logits.pt")
+    if draft:
+        torch.save(runtime.saved_evidence, destination / "draft-evidence.pt")
     artifacts = {str(p): digest(p) for p in destination.rglob("*") if p.is_file()}
     write_once(destination / "artifact-hashes.json", artifacts)
     preprocessing = dict(
@@ -262,12 +286,15 @@ def worker(root, plan_sha, index):
         ),
         run_id=run_id,
         execution_metadata=dict(
-            phase="consumed_identity_numerical_controls_and_survivor_replay"
+            phase="consumed_identity_draft_conditioned_head_diagnostic"
+            if draft
+            else "consumed_identity_numerical_controls_and_survivor_replay"
             if followup
             else "consumed_identity_diagnostic",
             plan_sha256=plan_sha,
             slurm_job_id=os.environ.get("SLURM_JOB_ID"),
             diagnostic_policy=plan["protocol"]["diagnostic"],
+            **(dict(proposal_policy=plan["protocol"]["proposal_policy"]) if draft else {}),
             benchmark_labels_accessed=False,
             fresh_cohort_authorized=False,
         ),
@@ -294,7 +321,12 @@ def worker(root, plan_sha, index):
             else record.get("result", {}).get("selection", {}).get("meaningful", False),
             **(
                 dict(controls_passed=record.get("result", {}).get("controls_passed", False))
-                if followup
+                if followup or draft
+                else {}
+            ),
+            **(
+                dict(diagnostic_passed=record.get("result", {}).get("diagnostic_passed", False))
+                if draft
                 else {}
             ),
             fresh_cohort_authorized=False,

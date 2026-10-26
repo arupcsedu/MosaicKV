@@ -712,6 +712,98 @@ def test_identical_anchor_followup_null_controls_on_real_cpu_transport(tmp_path,
         )
 
 
+@pytest.mark.parametrize("condition", ["clean", "reference_changed", "control_rejected"])
+def test_draft_conditioned_heads_reuse_prefill_and_preserve_reference_and_null_controls(
+    tmp_path, monkeypatch, condition
+):
+    from mosaickv.backends.hf_allocation_guard import packed_positions_sha
+    from mosaickv.evaluation.draft_head_diagnostic import DraftConditionedHeadDiagnostic
+    from mosaickv.evaluation.head_substitution_followup import HeadSubstitutionFollowup
+    from mosaickv.selection.draft_shortlist import validate_shortlist_trace
+
+    adapter = _llava()
+    cfg = _config(MosaicKVMethod.MOSAICKV_EXACT)
+
+    class ReferenceFixture(HeadSubstitutionFollowup):
+        def _observe_exact_anchor(self, prefill, full_state, anchor, attention, budget):
+            self.followup["anchor_positions_sha256"] = packed_positions_sha(anchor)
+            return super()._observe_exact_anchor(prefill, full_state, anchor, attention, budget)
+
+    # Synthetic baseline fixture only. The real worker reads immutable V7.1
+    # logits; it never obtains its baseline through a second prefill.
+    reference = ReferenceFixture(
+        adapter,
+        cfg,
+        trace_directory=tmp_path / "reference",
+        followup=dict(anchor_positions_sha256="fixture", survivors=[]),
+    )
+    assert reference.diagnose(_runtime_request("reference"))["controls_passed"]
+    if condition == "reference_changed":
+        reference.saved_logits["fullkv"][1][0, 0] += 1
+    if condition == "control_rejected":
+        import mosaickv.evaluation.draft_head_diagnostic as module
+
+        audit = module.audit_null_control
+
+        def rejected_control(rows, policy):
+            return dict(audit(rows, policy), passed=False)
+
+        monkeypatch.setattr(module, "audit_null_control", rejected_control)
+    calls, captures = [], []
+    prefill, decode = adapter.prefill, adapter.decode_one_token
+
+    def observe_prefill(*args, **kwargs):
+        calls.append(1)
+        return prefill(*args, **kwargs)
+
+    def observe_decode(*args, **kwargs):
+        captures.append(kwargs.get("capture_attentions", False))
+        return decode(*args, **kwargs)
+
+    monkeypatch.setattr(adapter, "prefill", observe_prefill)
+    monkeypatch.setattr(adapter, "decode_one_token", observe_decode)
+    phase_starts = []
+
+    class InstrumentedDraft(DraftConditionedHeadDiagnostic):
+        def _observe_exact_anchor(self, *args):
+            # The ordinary MosaicKV pipeline can perform its configured draft
+            # forecast before the diagnostic hook. Audit this phase separately.
+            phase_starts.append(len(captures))
+            return super()._observe_exact_anchor(*args)
+
+    runtime = InstrumentedDraft(
+        adapter,
+        cfg,
+        trace_directory=tmp_path / "draft",
+        anchor_positions_sha256=reference.followup["anchor_positions_sha256"],
+        reference_logits={key: reference.saved_logits[key] for key in ("fullkv", "anchor")},
+    )
+    result = runtime.diagnose(_runtime_request("V8-draft-heads"))
+    assert len(calls) == 1 and result["fullkv_prefills"] == 0
+    phase_captures = captures[phase_starts[0] :]
+    assert sum(phase_captures) == 32 and len(phase_captures) == result["probe_updates"] <= 248
+    assert result["controls_passed"] == (condition != "control_rejected")
+    assert result["original_reference_and_anchor_32_prefixes_replayed"] == (
+        condition != "reference_changed"
+    )
+    assert result["evidence_prefixes"] == 32 and result["evidence_storage_bytes"] > 0
+    assert result["active_cap_bytes"] == 512 and result["padding_bytes"] == 0
+    assert result["measured_source_cache_unchanged"] and result["logical_positions_unchanged"]
+    assert result["live_private_states_after_diagnostic"] == 0
+    assert not result["benchmark_labels_accessed"] and not result["selection_modified_by_probe"]
+    assert not result["fresh_cohort_authorized"] and not result["paper_campaign_authorized"]
+    assert not result["used_fullkv_fallback"]
+    assert all(row["prompt_probabilities"].shape[1] == 64 for row in runtime.saved_evidence)
+    if result["proposals"]:
+        validate_shortlist_trace(result["selection"])
+    if condition != "clean":
+        assert result["proposals"] == {} and result["candidate_updates"] == 64
+        assert not result["diagnostic_passed"]
+    assert result["diagnostic_passed"] == bool(
+        result["selection"]["accepted"] and result["selection"]["meaningful"]
+    )
+
+
 @pytest.mark.parametrize("version", [5, 6])
 def test_draft_one_token_ppl_skips_all_probes_and_does_not_preallocate(
     tmp_path, monkeypatch, version

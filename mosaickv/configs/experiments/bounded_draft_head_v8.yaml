@@ -1,0 +1,35 @@
+schema_version: 1
+classification: consumed_input_draft_conditioned_one_head_diagnostic_not_quality_evidence
+draft_conditioned_from_v7_1: /scratch/djy8hg/runs/mosaickv/bounded-head-substitution-v7-1-20261026-v1
+parent_plan_sha256: a7b3ebeb59ac35585537cfc711446b9c83e84124eb7a2d4577ebd613c3be23d8
+parent_source_sha: f069718213cd253991ba3e595158e63a9c252ebf
+negative_seal: mosaickv/docs/bounded_head_v7_negative_seal.json
+diagnostic:
+  pool_size: 16
+  short_horizon: 4
+  shortlist_size: 2
+  guard:
+    horizon: 32
+    checkpoints: [1, 4, 16, 32]
+    absolute_tolerance: 0.0000001
+    relative_tolerance: 0.000001
+proposal_policy:
+  choices_per_side: 4
+  position_chunk_size: 64
+evidence: actual_eager_FullKV_draft_attention_from_original_prefill
+queries: separate_draft_prefixes_and_query_heads_no_prompt_mass_ranking
+objective: mean_renormalized_draft_value_output_squared_error_including_retained_history
+pool_rule: best_positive_gain_equal_capacity_pair_per_route_then_global_top_16
+controls: [identical_anchor_clone, identical_anchor_repack]
+original_32_prefix_reference_and_anchor_logits_must_replay: true
+acceptance: unchanged_every_prefix_32_token_guard_and_meaningful_improvement
+save_raw_logits: true
+save_draft_evidence: true
+fresh_cohort_authorized: false
+calibration_authorized: false
+paper_campaign_authorized: false
+max_global_a100s: 6
+workers: 2
+gpus_per_worker: 1
+cpus_per_worker: 12
+time_limit_seconds: 7200
