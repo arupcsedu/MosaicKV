@@ -33,12 +33,17 @@ def redact(sample):
     )
 
 
-def prepare(root):
+def prepare(root, protocol_path=PROTOCOL):
     sha = clean_source()
     root = Path(root).resolve()
     if root.exists() or Path("/scratch/djy8hg").resolve() not in root.parents:
         raise ValueError("require a new immutable scratch diagnostic directory")
-    protocol = yaml.safe_load(PROTOCOL.read_text())
+    protocol_path = Path(protocol_path).resolve()
+    protocol = yaml.safe_load(protocol_path.read_text())
+    if protocol.get("followup_from_v7") is not None:
+        from prepare_head_followup import prepare_followup
+
+        return prepare_followup(root, sha, protocol_path, protocol)
     from mosaickv.evaluation.head_substitution_diagnostic import HeadDiagnosticPolicy
 
     raw = protocol["diagnostic"].copy()
@@ -132,11 +137,18 @@ def validate(root, plan_sha, index):
     job = plan["jobs"][index]
     cfg = load_config(job["config"])
     payload = json.loads(Path(job["input"]).read_text())
-    if (
-        set(payload)
-        != {"task", "dataset_id", "dataset_revision", "split", "sample_id", "prompt", "media"}
-        or config_sha256(cfg) != job["config_sha"]
-    ):
+    expected_keys = {
+        "task",
+        "dataset_id",
+        "dataset_revision",
+        "split",
+        "sample_id",
+        "prompt",
+        "media",
+    }
+    if plan["protocol"].get("followup_from_v7") is not None:
+        expected_keys.add("followup")
+    if set(payload) != expected_keys or config_sha256(cfg) != job["config_sha"]:
         raise ValueError("diagnostic input is not label-redacted or config changed")
     if any(
         plan[k]
@@ -204,15 +216,27 @@ def worker(root, plan_sha, index):
         if result.token_agreement != 1.0 or result.maximum_logit_difference > 0.001:
             raise RuntimeError("diagnostic FullKV parity failed")
     write_once(destination / "parity.json", parity)
-    runtime = HeadSubstitutionDiagnostic(adapter, cfg, trace_directory=destination / "traces")
+    followup = plan["protocol"].get("followup_from_v7") is not None
+    if followup:
+        from mosaickv.evaluation.head_substitution_followup import HeadSubstitutionFollowup
+
+        runtime = HeadSubstitutionFollowup(
+            adapter, cfg, trace_directory=destination / "traces", followup=payload["followup"]
+        )
+    else:
+        runtime = HeadSubstitutionDiagnostic(adapter, cfg, trace_directory=destination / "traces")
+    version = "7.1" if followup else "7"
+    run_id = f"head-v{version}-{index}"
     try:
         result = runtime.diagnose(
-            EvaluationRequest(f"head-v7-{index}", payload["sample_id"], job["task"], messages, {})
+            EvaluationRequest(run_id, payload["sample_id"], job["task"], messages, {})
         )
         record = dict(status="completed", result=result)
     except Exception as error:
         record = dict(status="failed", error=f"{type(error).__name__}: {error}")
     write_once(destination / "diagnostic.json", record)
+    if followup:
+        torch.save(runtime.saved_logits, destination / "logits.pt")
     artifacts = {str(p): digest(p) for p in destination.rglob("*") if p.is_file()}
     write_once(destination / "artifact-hashes.json", artifacts)
     preprocessing = dict(
@@ -236,9 +260,11 @@ def worker(root, plan_sha, index):
             "not_applicable",
             digest(destination / "artifact-hashes.json"),
         ),
-        run_id=f"head-v7-{index}",
+        run_id=run_id,
         execution_metadata=dict(
-            phase="consumed_identity_diagnostic",
+            phase="consumed_identity_numerical_controls_and_survivor_replay"
+            if followup
+            else "consumed_identity_diagnostic",
             plan_sha256=plan_sha,
             slurm_job_id=os.environ.get("SLURM_JOB_ID"),
             diagnostic_policy=plan["protocol"]["diagnostic"],
@@ -247,7 +273,7 @@ def worker(root, plan_sha, index):
         ),
         evaluation_provenance=EvaluationProvenance(
             evaluator_name="one_head_actual_draft_logit_diagnostic",
-            evaluator_version="7",
+            evaluator_version=version,
             evaluator_commit=plan["source_sha"],
             reference_output_sha256="not_used",
             baseline_name="mosaickv_exact_anchor",
@@ -260,8 +286,17 @@ def worker(root, plan_sha, index):
             status=record["status"],
             manifest=str(manifest),
             manifest_sha256=digest(manifest),
-            accepted=record.get("result", {}).get("selection", {}).get("accepted", False),
-            meaningful=record.get("result", {}).get("selection", {}).get("meaningful", False),
+            accepted=any(e["accepted"] for e in record.get("result", {}).get("extensions", []))
+            if followup
+            else record.get("result", {}).get("selection", {}).get("accepted", False),
+            meaningful=any(e["meaningful"] for e in record.get("result", {}).get("extensions", []))
+            if followup
+            else record.get("result", {}).get("selection", {}).get("meaningful", False),
+            **(
+                dict(controls_passed=record.get("result", {}).get("controls_passed", False))
+                if followup
+                else {}
+            ),
             fresh_cohort_authorized=False,
             calibration_authorized=False,
             paper_campaign_authorized=False,
@@ -271,9 +306,9 @@ def worker(root, plan_sha, index):
         raise RuntimeError("diagnostic failed; structured error and manifest preserved")
 
 
-def submit(root):
+def submit(root, protocol_path=PROTOCOL):
     root = root.resolve()
-    prepare(root)
+    prepare(root, protocol_path)
     plan_sha = digest(root / "plan.json")
     for index in range(2):
         validate(root, plan_sha, index)
@@ -355,8 +390,9 @@ if __name__ == "__main__":
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--plan-sha")
     parser.add_argument("--index", type=int)
+    parser.add_argument("--protocol", type=Path, default=PROTOCOL)
     args = parser.parse_args()
     if args.mode == "worker":
         worker(args.root, args.plan_sha, args.index)
     else:
-        globals()[args.mode](args.root)
+        globals()[args.mode](args.root, args.protocol)

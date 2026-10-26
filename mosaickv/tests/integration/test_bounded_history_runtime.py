@@ -663,6 +663,55 @@ def test_one_head_diagnostic_uses_one_prefill_private_states_and_complete_horizo
     assert saved["not_a_benchmark_prediction_or_performance_row"]
 
 
+def test_identical_anchor_followup_null_controls_on_real_cpu_transport(tmp_path, monkeypatch):
+    from mosaickv.backends.hf_allocation_guard import packed_positions_sha
+    from mosaickv.evaluation.head_substitution_followup import HeadSubstitutionFollowup
+
+    adapter = _llava()
+    calls = []
+    original_prefill = adapter.prefill
+
+    def prefill(*args, **kwargs):
+        calls.append(1)
+        return original_prefill(*args, **kwargs)
+
+    monkeypatch.setattr(adapter, "prefill", prefill)
+
+    class FixtureFollowup(HeadSubstitutionFollowup):
+        def _observe_exact_anchor(self, prefill, full_state, anchor, attention, budget):
+            # Synthetic CPU fixture only; real runs obtain this from the hashed V7 artifact.
+            self.followup["anchor_positions_sha256"] = packed_positions_sha(anchor)
+            return super()._observe_exact_anchor(prefill, full_state, anchor, attention, budget)
+
+    runtime = FixtureFollowup(
+        adapter,
+        _config(MosaicKVMethod.MOSAICKV_EXACT),
+        trace_directory=tmp_path,
+        followup={"anchor_positions_sha256": "fixture-only", "survivors": []},
+    )
+    result = runtime.diagnose(_runtime_request("identical-anchor-controls"))
+    assert len(calls) == 1 and result["fullkv_prefills"] == 0
+    assert result["controls_passed"] and result["extensions"] == []
+    assert result["candidate_updates"] == 64 and result["reference_updates"] == 32
+    assert result["probe_updates"] == 128
+    assert result["active_cap_bytes"] == 512 and result["padding_bytes"] == 0
+    assert result["measured_source_cache_unchanged"] and result["logical_positions_unchanged"]
+    assert result["live_private_states_after_diagnostic"] == 0
+    assert not result["selection_modified_by_probe"] and not result["existing_pool_exhausted"]
+    assert not result["fresh_cohort_authorized"] and not result["paper_campaign_authorized"]
+    assert set(runtime.saved_logits) == {"fullkv", "anchor", "null_clone", "null_repack"}
+    for control in result["controls"].values():
+        assert control["registered_guard"]["all_prefixes_checked"]
+        assert len(control["steps"]) == 32
+        assert all("logit_kl_fp64" in r["candidate"] for r in control["steps"])
+    for role in ("null_clone", "null_repack"):
+        assert len(runtime.saved_logits[role]) == 32
+        assert all(
+            torch.equal(runtime.saved_logits[role][step], tensor)
+            for step, tensor in runtime.saved_logits["anchor"].items()
+        )
+
+
 @pytest.mark.parametrize("version", [5, 6])
 def test_draft_one_token_ppl_skips_all_probes_and_does_not_preallocate(
     tmp_path, monkeypatch, version

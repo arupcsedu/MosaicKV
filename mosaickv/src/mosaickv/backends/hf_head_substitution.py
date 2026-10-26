@@ -11,7 +11,16 @@ from mosaickv.measurements.cache_lifecycle import CacheLifecycle
 
 class HeadProbeSession:
     def __init__(
-        self, adapter: Any, prefill: Any, anchor: Any, budget: Any, policy: Any, *, sink_tokens: int
+        self,
+        adapter: Any,
+        prefill: Any,
+        anchor: Any,
+        budget: Any,
+        policy: Any,
+        *,
+        sink_tokens: int,
+        capture_fp64: bool = False,
+        logits_observer: Any = None,
     ) -> None:
         if budget is None or budget.generated_positions < 1:
             raise ValueError("one-head diagnostic requires a prompt/history byte budget")
@@ -24,6 +33,9 @@ class HeadProbeSession:
         self.private_probe_peak_bytes = 0
         self.live: dict[int, Any] = {}
         self.next_id = 0
+        self.capture_fp64 = capture_fp64
+        self.logits_observer = logits_observer
+        self.anchor_logits: list[Any] = []
         if (
             self.bytes(tuple((layer.key, layer.value) for layer in anchor.snapshot.layers))
             != budget.prompt_budget_bytes
@@ -91,7 +103,7 @@ class HeadProbeSession:
             torch.log_softmax(full.logits.float(), -1),
             torch.log_softmax(out.logits.float(), -1),
         )
-        return dict(
+        metrics = dict(
             logit_kl=float((logp.exp() * (logp - logq)).sum(-1).mean().item()),
             maximum_logit_difference=float(
                 (full.logits.float() - out.logits.float()).abs().max().item()
@@ -99,6 +111,9 @@ class HeadProbeSession:
             greedy_token_agreement=bool(torch.equal(full.next_token_id, out.next_token_id)),
             active_bytes=active,
         )
+        if self.capture_fp64:
+            metrics.update(shadow_logit_metrics(full.logits, out.logits))
+        return metrics
 
     def prefix(self, step):
         from mosaickv.backends.hf_runtime import _clone_decode_state
@@ -124,10 +139,15 @@ class HeadProbeSession:
                 next_token_id=full.next_token_id.detach().clone(),
             )
             self.evidence.append((token.detach().clone(), frozen, self.measure(full, original)))
+            if self.capture_fp64:
+                self.anchor_logits.append(original.logits.detach().clone())
+            if self.logits_observer is not None:
+                self.logits_observer("fullkv", step, full.logits)
+                self.logits_observer("anchor", step, original.logits)
             self.record_storage()
         return self.evidence[step - 1]
 
-    def probe(self, packed):
+    def probe(self, packed, *, label=None):
         identity = self.next_id
         self.next_id += 1
         state = self.private(packed)
@@ -141,11 +161,27 @@ class HeadProbeSession:
                 self.live[identity] = state
                 self.candidate_updates += 1
                 self.record_storage()
+                metrics = self.measure(full, out)
+                if self.capture_fp64:
+                    import torch
+
+                    anchor_logits = self.anchor_logits[step - 1]
+                    metrics.update(
+                        bitwise_equal_to_anchor_logits=bool(torch.equal(anchor_logits, out.logits)),
+                        anchor_candidate_maximum_logit_difference=float(
+                            (anchor_logits.double() - out.logits.double()).abs().max().item()
+                        ),
+                        anchor_candidate_kl_fp64=shadow_logit_metrics(anchor_logits, out.logits)[
+                            "logit_kl_fp64"
+                        ],
+                    )
+                if self.logits_observer is not None:
+                    self.logits_observer(label or f"candidate_{identity}", step, out.logits)
                 yield dict(
                     step=step,
                     checkpoint=step in self.policy.checkpoints,
                     anchor=original,
-                    candidate=self.measure(full, out),
+                    candidate=metrics,
                 )
         finally:
             self.live.pop(identity, None)
@@ -176,3 +212,29 @@ class HeadProbeSession:
             live_private_states_after_diagnostic=len(self.live),
             fullkv_prefills=0,
         )
+
+
+def shadow_logit_metrics(reference: Any, candidate: Any) -> dict[str, Any]:
+    """Recompute distributions in FP64; never replace registered FP32 checks.
+
+    This measures reduction/softmax precision only. It cannot recover precision
+    already lost in FP16 model inference.
+    """
+    import torch
+
+    if (
+        reference.shape != candidate.shape
+        or reference.ndim < 1
+        or reference.numel() == 0
+        or not torch.isfinite(reference).all()
+        or not torch.isfinite(candidate).all()
+    ):
+        raise ValueError("shadow KL requires matching finite logits")
+    logp = torch.log_softmax(reference.double(), -1)
+    logq = torch.log_softmax(candidate.double(), -1)
+    return dict(
+        logit_kl_fp64=float((logp.exp() * (logp - logq)).sum(-1).mean().item()),
+        reference_greedy_token_ids=reference.argmax(-1).detach().cpu().reshape(-1).tolist(),
+        candidate_greedy_token_ids=candidate.argmax(-1).detach().cpu().reshape(-1).tolist(),
+        model_logits_dtype=str(candidate.dtype),
+    )

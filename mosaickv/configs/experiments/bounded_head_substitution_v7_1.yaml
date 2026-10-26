@@ -1,0 +1,36 @@
+schema_version: 1
+classification: retrospective_consumed_input_numerical_controls_and_survivor_replay
+followup_from_v7: /scratch/djy8hg/runs/mosaickv/bounded-head-substitution-v7-20261025-v1
+parent_plan_sha256: 0e005799706978d299bc46b75337260edafd4b84a107579555b74c7367e47c38
+parent_source_sha: 236182cc85bfe6276111bc4ab5337208f1917ce8
+parent_diagnostic_sha256:
+  llava_description: 6148a005ca8dbfa88d87e06cc149838f64dbaca288b75ce6f2185e7bedfb6356
+  mmvet_prefixkv: f7a6161829bb1ab2ea3dae5049305da12b1d470f53c39735f74dab77e95fff93
+expected_survivors:
+  llava_description: 0
+  mmvet_prefixkv: 3
+diagnostic:
+  pool_size: 16
+  short_horizon: 4
+  shortlist_size: 2
+  guard:
+    horizon: 32
+    checkpoints: [1, 4, 16, 32]
+    absolute_tolerance: 0.0000001
+    relative_tolerance: 0.000001
+controls: [identical_anchor_clone, identical_anchor_repack]
+controls_require_bitwise_logits_and_KV_identity: true
+controls_collect_full_32_prefixes_even_on_failure: true
+extensions_require_both_controls_pass: true
+extensions: all_three_immutable_unextended_MMVet_survivors_no_new_proposals
+extension_rule: unchanged_every_prefix_guard_fail_fast_and_complete_32_for_acceptance
+fp64_KL: shadow_only_never_replaces_registered_FP32_gate
+save_raw_logits: true
+fresh_cohort_authorized: false
+calibration_authorized: false
+paper_campaign_authorized: false
+max_global_a100s: 6
+workers: 2
+gpus_per_worker: 1
+cpus_per_worker: 12
+time_limit_seconds: 7200
