@@ -131,6 +131,66 @@ def test_job_scope_and_finite_duration():
     assert API["gpu_count"]("N/A") == 0
 
 
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("30:00", 30),
+        ("00:30", 1),
+        ("59:59", 60),
+        ("120:01", 121),
+        ("0:00", 0),
+        ("00:30:00", 30),
+        ("2:00:01", 121),
+        ("1-00:00:00", 1440),
+        ("2-03:04:05", 3065),
+    ],
+)
+def test_subhour_and_day_duration_formats_preserve_conservative_rounding(value, expected):
+    assert API["duration_minutes"](value) == expected
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "UNLIMITED",
+        "NOT_SET",
+        "N/A",
+        "",
+        "30",
+        "-30:00",
+        "30:60",
+        "1:60:00",
+        "1-24:00:00",
+        "1-30:00",
+        "30:00;touch",
+        "30:00 ",
+    ],
+)
+def test_nonfinite_ambiguous_and_malformed_durations_fail_closed(value):
+    with pytest.raises(ValueError):
+        API["duration_minutes"](value)
+
+
+def test_v9_subhour_workers_are_released_without_changing_aggregate_limit(tmp_path, monkeypatch):
+    namespace = API["tick"].__globals__
+    rows = [dict(row(22033772, i), limit="30:00") for i in range(2)]
+    calls = []
+    monkeypatch.setitem(namespace, "read_queue", lambda: rows)
+    monkeypatch.setitem(namespace, "command", lambda *args: calls.append(args) or "")
+    policy = dict(
+        arrays=[22033772],
+        adopt_existing_holds=[22033772],
+        maximum_worker_minutes=120,
+        maximum_a100s=6,
+        six_a100s_explicitly_authorized=True,
+    )
+    result = API["tick"](policy, {}, tmp_path / "state.json", True)
+    assert result["released"] == ["22033772_0", "22033772_1"]
+    assert result["admission_cap"] == 6
+    assert ("scontrol", "release", "22033772_[0,1]") in calls
+    assert not any("cancel" in call or "suspend" in call for call in calls)
+
+
 def test_hold_barrier_precedes_throttle_and_release(tmp_path, monkeypatch):
     namespace = API["tick"].__globals__
     rows = [row(1, 0, held=False), row(2, 0)]

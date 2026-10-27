@@ -33,11 +33,28 @@ def limits(now: datetime, max_worker_minutes: int = 120) -> tuple[int, int]:
 
 
 def duration_minutes(value: str) -> int:
+    """Parse finite squeue durations, including its sub-hour MM:SS output.
+
+    Round partial minutes up: a 120:01 worker must not enter a 120-minute
+    admission horizon. Unknown/unlimited and malformed values fail closed.
+    """
+    if (
+        not isinstance(value, str)
+        or re.fullmatch(r"(?:[0-9]+-)?[0-9]+:[0-9]{2}(?::[0-9]{2})?", value) is None
+    ):
+        raise ValueError(f"Expected finite Slurm MM:SS, HH:MM:SS or D-HH:MM:SS time, got {value!r}")
     days, clock = value.split("-", 1) if "-" in value else ("0", value)
     parts = [int(part) for part in clock.split(":")]
-    if len(parts) != 3:
-        raise ValueError(f"Expected finite Slurm D-HH:MM:SS time, got {value!r}")
-    hours, minutes, seconds = parts
+    if len(parts) == 2 and "-" not in value:
+        hours, minutes, seconds = 0, *parts
+    elif len(parts) == 3:
+        hours, minutes, seconds = parts
+        if minutes >= 60 or ("-" in value and hours >= 24):
+            raise ValueError(f"Noncanonical Slurm time fields: {value!r}")
+    else:
+        raise ValueError(f"Ambiguous Slurm day-prefixed time: {value!r}")
+    if seconds >= 60:
+        raise ValueError(f"Invalid Slurm seconds: {value!r}")
     return int(days) * 1440 + hours * 60 + minutes + (seconds > 0)
 
 
