@@ -1,0 +1,42 @@
+schema_version: 1
+classification: cpu_consumed_capture_feasibility_not_benchmark_evidence
+effective_method: attention_matching_protected_reimpl
+online_compactor_enabled: false
+gpu_execution_authorized: false
+fresh_cohort_authorized: false
+calibration_authorized: false
+paper_campaign_authorized: false
+policy:
+  enabled: true # Algebraic CPU construction only; not an online runtime flag.
+  mass_iterations: 256
+  mass_ridge: 0.000001
+  value_ridge: 0.000001
+  maximum_mass_multiplier: 64.0
+  maximum_value_norm_ratio: 4.0
+  minimum_improvement: 0.00000001
+  svd_relative_tolerance: 0.000001
+capacity_planning:
+  cap_bytes: 29360128 # 28 MiB including proposed bias/mask allocations.
+  layers: 32
+  kv_heads: 32
+  query_heads: 32
+  key_dimension: 128
+  value_dimension: 128
+  cache_element_bytes: 2
+  history_positions: 16
+  mandatory_positions: 2
+dictionary_audit:
+  reference_queries: 32
+  protected_positions: [first, last] # Stand-ins: actual mandatory mapping is NOT saved.
+  selection: stable_mean_draft_attention_topk
+  maximum_cpu_threads: 4
+  may_read_original_values: false # Original source K/V was not saved.
+  may_read_benchmark_annotations: false
+consumed_capture_root: /scratch/djy8hg/runs/mosaickv/bounded-draft-head-v8-20261026-v1
+captures:
+  - worker: 0
+    evidence_sha256: a95792b4b427f56704a69165d5abe628dd976a85c04fb9235ba37669c3c338f3
+    manifest_sha256: e957e91b1fe88c8ab6c4e9e35eefdc5bc5694f8be9d7f50856995d3f6fd141ab
+  - worker: 1
+    evidence_sha256: 933c9d96685ca145fef5a1bc99ac940d04f243ae0b0c32a540443169bd94a2ad
+    manifest_sha256: 8e6ec83bcc2e6447a2aabe4f40871df8aada69d7d006ee86519f57fe7ada501c
