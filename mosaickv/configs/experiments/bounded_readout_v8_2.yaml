@@ -1,0 +1,32 @@
+schema_version: 1
+classification: consumed_input_CPU_readout_audit_not_quality_evidence
+parent_root: /scratch/djy8hg/runs/mosaickv/bounded-prefix-output-v8-1-20261026-v1
+parent_source_sha: da225342fd6c8e8bb7ce2b418a1cd75542a10500
+parent_report_sha256: 3017a67b38c970e0b7ba66b525573894e18b18baf2a46915d8a1480dfe3193bc
+registered_guard:
+  horizon: 32
+  absolute_tolerance: 0.0000001
+  relative_tolerance: 0.000001
+screen:
+  minimum_rank_correlation: 0.3
+  minimum_rank_gain_over_reconstruction: 0.1
+  minimum_positive_precision: 0.75
+  minimum_positive_predictions: 4
+primary_observation: fixed_prefix_one_for_every_proposal
+prospective_feature_aggregation: mean_over_all_32_FullKV_and_anchor_draft_prefixes
+prospective_features:
+  - head_reconstruction
+  - projected_residual
+  - identity_tail_readout_linear
+  - identity_tail_readout_quadratic
+post_probe_features_are_explanatory_only: true
+screen_interpretation: descriptive_candidate_design_signal_not_promotion_or_quality_evidence
+readout_arithmetic: CPU_FP64_sideband_no_registered_guard_changes
+model_access: cached_final_RMSNorm_and_lm_head_only_no_download_no_full_model_load
+max_cpu_seconds: 600
+cpus: 4
+memory_gib: 12
+gpu_count: 0
+fresh_cohort_authorized: false
+calibration_authorized: false
+paper_campaign_authorized: false

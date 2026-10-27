@@ -95,6 +95,13 @@ Do not vendor model weights, datasets, or code whose license does not permit red
 
 ## Engineering workflow
 
+- For the user's October 26 event-driven workflow, chain finite Slurm jobs
+  with `afterany` so failed producers also receive completeness/error analysis.
+  Use write-once decisions and explicitly bounded follow-up scope; do not
+  continuously poll queue state or tail logs. The readout-audit completion
+  example runs one constrained, ephemeral Codex CLI review, not an automatic
+  wake-up of the interactive chat or authority to widen experiment permissions.
+
 - The user's October 26, 2026 instruction authorizes scoped local commits
   without repeated consent. Consolidate related changes and avoid commits less
   than two hours apart unless the user explicitly requests an immediate commit.
