@@ -93,6 +93,47 @@ def codex_command(executable, root, schema):
     ]
 
 
+def protected_command(bwrap, executable, root, cache, application_home, schema, auth_fd):
+    """All application runtime writes land on scratch, not the home filesystem.
+
+    Bind an already-open, read-only auth file descriptor after overlaying the
+    application runtime. Do not copy or persist credential contents. HOME and
+    CODEX_HOME are not reassigned. A descriptor avoids resolving a mount alias
+    before Bubblewrap has installed that alias.
+    """
+    runtime = root / "codex/runtime"
+    return [
+        bwrap,
+        "--die-with-parent",
+        "--new-session",
+        "--ro-bind",
+        "/",
+        "/",
+        "--bind",
+        str(root),
+        str(root),
+        "--bind",
+        str(cache),
+        str(cache),
+        "--bind",
+        str(runtime),
+        str(application_home),
+        "--ro-bind-fd",
+        str(auth_fd),
+        str(application_home / "auth.json"),
+        "--dev",
+        "/dev",
+        "--proc",
+        "/proc",
+        "--",
+        *codex_command(executable, root, schema),
+    ]
+
+
+def application_directory():
+    return Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))).resolve()
+
+
 def review_with_codex(root, executable, decision, report):
     bwrap = shutil.which("bwrap")
     if bwrap is None:
@@ -110,6 +151,14 @@ def review_with_codex(root, executable, decision, report):
         raise ValueError("Codex callback cache cannot be in home")
     destination = root / "codex"
     destination.mkdir()
+    application_home = application_directory()
+    if not (application_home / "auth.json").is_file():
+        return dict(
+            status="unavailable",
+            error="existing_read_only_Codex_auth_not_found",
+            automatic_code_or_GPU_execution=False,
+        )
+    (destination / "runtime").mkdir()
     schema = destination / "review-schema.json"
     write_once(
         schema,
@@ -150,27 +199,12 @@ def review_with_codex(root, executable, decision, report):
         (destination / "events.jsonl").open("x") as out,
         (destination / "stderr.log").open("x") as err,
     ):
+        auth_fd = None
         try:
-            command = [
-                bwrap,
-                "--die-with-parent",
-                "--new-session",
-                "--ro-bind",
-                "/",
-                "/",
-                "--bind",
-                str(root),
-                str(root),
-                "--bind",
-                str(cache),
-                str(cache),
-                "--dev",
-                "/dev",
-                "--proc",
-                "/proc",
-                "--",
-                *codex_command(executable, root, schema),
-            ]
+            auth_fd = os.open(application_home / "auth.json", os.O_RDONLY)
+            command = protected_command(
+                bwrap, executable, root, cache, application_home, schema, auth_fd
+            )
             result = subprocess.run(
                 command,
                 input=prompt,
@@ -180,6 +214,7 @@ def review_with_codex(root, executable, decision, report):
                 timeout=180,
                 cwd=SOURCE,
                 check=False,
+                pass_fds=(auth_fd,),
             )
         except (OSError, subprocess.TimeoutExpired) as error:
             return dict(
@@ -187,6 +222,9 @@ def review_with_codex(root, executable, decision, report):
                 error=type(error).__name__,
                 automatic_code_or_GPU_execution=False,
             )
+        finally:
+            if auth_fd is not None:
+                os.close(auth_fd)
     if result.returncode != 0 or not (destination / "review.json").is_file():
         return dict(
             status="failed", returncode=result.returncode, automatic_code_or_GPU_execution=False
@@ -205,6 +243,9 @@ def review_with_codex(root, executable, decision, report):
         status="completed",
         review_sha256=digest(destination / "review.json"),
         independent_ephemeral_review_not_UI_session_resume=True,
+        application_runtime_physical_storage="scratch_bind_mount",
+        credentials_copied=False,
+        original_auth_mounted_read_only=True,
         automatic_code_or_GPU_execution=False,
     )
 

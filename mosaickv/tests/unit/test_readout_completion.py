@@ -5,7 +5,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
-from complete_readout_v8_2 import codex_command, decide, review_with_codex
+from complete_readout_v8_2 import codex_command, decide, protected_command, review_with_codex
 from submit_readout_v8_2 import dependency
 
 
@@ -77,11 +77,86 @@ def test_codex_review_is_ephemeral_read_only_and_scratch_logged(tmp_path):
     assert not any("API_KEY" in item or "CODEX_HOME=" in item for item in command)
 
 
+def test_runtime_overlay_retains_read_only_auth_without_reassigning_home(tmp_path):
+    original = Path("/original/application-home")
+    cache = tmp_path / "cache"
+    command = protected_command(
+        "/mock/bwrap", "/mock/codex", tmp_path, cache, original, tmp_path / "schema.json", 37
+    )
+    runtime_mount = command.index(str(tmp_path / "codex/runtime"))
+    assert command[runtime_mount - 1] == "--bind"
+    auth_source = command.index("37")
+    assert command[auth_source - 1] == "--ro-bind-fd"
+    assert command[auth_source + 1] == str(original / "auth.json")
+    assert "--setenv" not in command and "--bind-data" not in command
+
+
+def test_real_runtime_overlay_writes_only_scratch_and_cannot_modify_auth(tmp_path):
+    import os
+    import shutil
+    import sys
+
+    bwrap = shutil.which("bwrap")
+    if bwrap is None:
+        pytest.skip("rootless Bubblewrap unavailable")
+    callback = tmp_path / "callback"
+    cache = tmp_path / "cache"
+    original = tmp_path / "host-home/.codex"
+    for path in (callback / "codex/runtime", callback / "codex/auth-source-ro", cache, original):
+        path.mkdir(parents=True, exist_ok=True)
+    (original / "auth.json").write_text("synthetic-credential-fixture-not-a-secret")
+    program = """from pathlib import Path
+import sys
+application=Path(sys.argv[1])
+(application/'cache-fixture.json').write_text('scratch-only')
+for forbidden in [application/'auth.json',application.parent/'forbidden-fixture']:
+    try:
+        forbidden.write_text('must-not-write')
+    except OSError as error:
+        assert error.errno in (1, 13, 30)
+    else:
+        raise AssertionError('read-only mount failed')
+"""
+    fd = os.open(original / "auth.json", os.O_RDONLY)
+    try:
+        command = protected_command(
+            bwrap, "/unused/codex", callback, cache, original, callback / "schema.json", fd
+        )
+        prefix = command[: command.index("--") + 1]
+        result = subprocess.run(
+            [*prefix, sys.executable, "-c", program, str(original)],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            pass_fds=(fd,),
+        )
+    finally:
+        os.close(fd)
+    if result.returncode and any(
+        message in result.stderr
+        for message in (
+            "No permissions to create new namespace",
+            "Creating new namespace failed",
+            "unshare: Operation not permitted",
+        )
+    ):
+        pytest.skip("host does not permit rootless namespace setup")
+    assert result.returncode == 0, result.stderr
+    assert (callback / "codex/runtime/cache-fixture.json").read_text() == "scratch-only"
+    assert (original / "auth.json").read_text() == "synthetic-credential-fixture-not-a-secret"
+    assert not (original / "cache-fixture.json").exists()
+    assert not (original.parent / "forbidden-fixture").exists()
+
+
 @pytest.mark.parametrize("outcome", ["completed", "timeout", "error", "wrong_action"])
 def test_agent_review_never_overrides_deterministic_decision(tmp_path, monkeypatch, outcome):
     import complete_readout_v8_2 as module
 
     deterministic = decide(report())
+    fake_auth = tmp_path / "fixture-auth"
+    fake_auth.mkdir()
+    (fake_auth / "auth.json").write_text('{"fixture_only":true}')
+    monkeypatch.setattr(module, "application_directory", lambda: fake_auth)
 
     def fake_run(command, **kwargs):
         assert command[:6] == [

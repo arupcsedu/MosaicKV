@@ -94,7 +94,11 @@ source, or submit jobs. Shell tools and web search are disabled. A rootless
 Bubblewrap mount makes the filesystem, including home, read-only except for
 the scratch callback directory and scratch cache root. Codex logs/SQLite
 are explicitly redirected to scratch; history/session persistence and shell
-snapshots are disabled. Missing Bubblewrap, credentials, connectivity, or a
+snapshots are disabled. Because CLI startup also needs application runtime
+files, its original application-directory mount is overlaid by a scratch
+runtime directory; only the existing auth file is rebound read-only using an
+already-open read-only file descriptor. No credential content is copied, and neither `HOME` nor
+`CODEX_HOME` is reassigned. Missing Bubblewrap, credentials, connectivity, or a
 timeout are recorded once, without retrying or weakening the scientific gates.
 
 The CLI integration follows [official non-interactive documentation](https://developers.openai.com/codex/noninteractive/)
