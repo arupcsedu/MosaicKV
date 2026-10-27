@@ -40,6 +40,10 @@ def prepare(root, protocol_path=PROTOCOL):
         raise ValueError("require a new immutable scratch diagnostic directory")
     protocol_path = Path(protocol_path).resolve()
     protocol = yaml.safe_load(protocol_path.read_text())
+    if protocol.get("downstream_jacobian") is not None:
+        from downstream_v9 import prepare_downstream
+
+        return prepare_downstream(root, sha, protocol_path, protocol)
     if protocol.get("output_replay_from_v8") is not None:
         from prepare_prefix_output_replay import prepare_output_replay
 
@@ -231,7 +235,24 @@ def worker(root, plan_sha, index):
     followup = plan["protocol"].get("followup_from_v7") is not None
     draft = plan["protocol"].get("draft_conditioned_from_v7_1") is not None
     output_replay = plan["protocol"].get("output_replay_from_v8") is not None
-    if output_replay:
+    downstream = plan["protocol"].get("downstream_jacobian") is not None
+    if downstream:
+        from mosaickv.evaluation.downstream_head_diagnostic import DownstreamHeadDiagnostic
+        from mosaickv.selection.head_substitution import HeadSubstitution
+
+        paths = payload["output_replay"]
+        frozen = json.loads(Path(paths["diagnostic.json"]).read_text())["result"]
+        key = sorted(frozen["proposals"])[0]  # Descriptor only; no outcome-based choice.
+        saved = torch.load(paths["logits.pt"], map_location="cpu", weights_only=True)
+        runtime = DownstreamHeadDiagnostic(
+            adapter,
+            cfg,
+            trace_directory=destination / "traces",
+            anchor_positions_sha256=frozen["anchor_positions_sha256"],
+            reference_logits={role: saved[role] for role in ("fullkv", "anchor")},
+            jvp_proposal=HeadSubstitution(**frozen["proposals"][key]),
+        )
+    elif output_replay:
         from mosaickv.evaluation.prefix_output_replay import PrefixOutputReplay
 
         paths = payload["output_replay"]
@@ -268,7 +289,17 @@ def worker(root, plan_sha, index):
         )
     else:
         runtime = HeadSubstitutionDiagnostic(adapter, cfg, trace_directory=destination / "traces")
-    version = "8.1" if output_replay else "8" if draft else "7.1" if followup else "7"
+    version = (
+        "9"
+        if downstream
+        else "8.1"
+        if output_replay
+        else "8"
+        if draft
+        else "7.1"
+        if followup
+        else "7"
+    )
     run_id = f"head-v{version}-{index}"
     try:
         result = runtime.diagnose(
@@ -277,12 +308,21 @@ def worker(root, plan_sha, index):
         record = dict(status="completed", result=result)
     except Exception as error:
         record = dict(status="failed", error=f"{type(error).__name__}: {error}")
+        if downstream:
+            record.update(
+                downstream_sensitivity=runtime.downstream_record,
+                probe_storage=getattr(runtime, "last_probe_storage", {}),
+                original_guard_unchanged=True,
+                benchmark_labels_accessed=False,
+            )
     write_once(destination / "diagnostic.json", record)
     if followup or draft or output_replay:
         torch.save(runtime.saved_logits, destination / "logits.pt")
-    if draft:
+    if draft or downstream:
         torch.save(runtime.saved_evidence, destination / "draft-evidence.pt")
-    if output_replay:
+    if downstream:
+        torch.save(runtime.saved_sensitivities, destination / "downstream-sensitivities.pt")
+    if output_replay and not downstream:
         torch.save(runtime.saved_outputs, destination / "prefix-outputs.pt")
         torch.save(runtime.saved_predictions, destination / "frozen-query-predictions.pt")
     artifacts = {str(p): digest(p) for p in destination.rglob("*") if p.is_file()}
@@ -310,7 +350,9 @@ def worker(root, plan_sha, index):
         ),
         run_id=run_id,
         execution_metadata=dict(
-            phase="consumed_identity_frozen_proposal_attention_projection_residual_replay"
+            phase="consumed_identity_downstream_sensitivity_proposer"
+            if downstream
+            else "consumed_identity_frozen_proposal_attention_projection_residual_replay"
             if output_replay
             else "consumed_identity_draft_conditioned_head_diagnostic"
             if draft
@@ -320,6 +362,11 @@ def worker(root, plan_sha, index):
             plan_sha256=plan_sha,
             slurm_job_id=os.environ.get("SLURM_JOB_ID"),
             diagnostic_policy=plan["protocol"]["diagnostic"],
+            **(
+                dict(downstream_policy=plan["protocol"]["downstream_jacobian"])
+                if downstream
+                else {}
+            ),
             **(dict(proposal_policy=plan["protocol"]["proposal_policy"]) if draft else {}),
             benchmark_labels_accessed=False,
             fresh_cohort_authorized=False,
@@ -375,7 +422,7 @@ def worker(root, plan_sha, index):
 
 def submit(root, protocol_path=PROTOCOL):
     root = root.resolve()
-    prepare(root, protocol_path)
+    plan = prepare(root, protocol_path)
     plan_sha = digest(root / "plan.json")
     for index in range(2):
         validate(root, plan_sha, index)
@@ -395,6 +442,11 @@ def submit(root, protocol_path=PROTOCOL):
         [
             "--hold",
             "--array=0-1%2",
+            *(
+                ["--time=00:30:00", "--job-name=mk-downstream-v9"]
+                if plan["protocol"].get("downstream_jacobian") is not None
+                else []
+            ),
             f"--output={logs}/gpu-%A_%a.out",
             f"--error={logs}/gpu-%A_%a.err",
             str(SOURCE / "mosaickv/slurm/head_substitution_v7.sbatch"),
@@ -437,11 +489,24 @@ def submit(root, protocol_path=PROTOCOL):
             str(SOURCE / "mosaickv/slurm/a100_schedule_controller.sbatch"),
         ]
     )
+    analysis = None
+    if plan["protocol"].get("downstream_jacobian") is not None:
+        analysis = sbatch(
+            [
+                f"--dependency=afterany:{array}",
+                f"--output={logs}/analysis-%j.out",
+                f"--error={logs}/analysis-%j.err",
+                str(SOURCE / "mosaickv/slurm/downstream_analysis.sbatch"),
+                str(SOURCE),
+                str(root),
+            ]
+        )
     write_once(
         root / "submission.json",
         dict(
             array=array,
             controller=controller,
+            analysis=analysis,
             plan_sha256=plan_sha,
             maximum_a100s=6,
             new_identities=0,

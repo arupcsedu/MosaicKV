@@ -12,7 +12,7 @@ from mosaickv.evaluation.head_substitution_diagnostic import HeadDiagnosticPolic
 from mosaickv.evaluation.prefix_output_replay import frozen_trajectories
 
 
-def prepare_output_replay(root, source_sha, protocol_path, protocol):
+def prepare_output_replay(root, source_sha, protocol_path, protocol, extra_bound=None):
     raw = protocol["diagnostic"].copy()
     raw["guard"] = DraftAllocationGuardConfig.from_mapping(raw["guard"])
     if (
@@ -38,6 +38,8 @@ def prepare_output_replay(root, source_sha, protocol_path, protocol):
         str(protocol_path): digest(protocol_path),
         str(parent / "plan.json"): digest(parent / "plan.json"),
     }
+    if extra_bound:
+        bound.update(extra_bound)
     for path, sha in plan["bound_files"].items():
         if digest(path) != sha:
             raise ValueError("V8 input/configuration provenance changed")

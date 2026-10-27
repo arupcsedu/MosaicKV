@@ -38,6 +38,16 @@ class DraftConditionedHeadDiagnostic(HeadSubstitutionDiagnostic):
         self.pool_policy = DraftHeadPoolPolicy() if pool_policy is None else pool_policy
         self.saved_logits: dict[str, dict[int, Any]] = {}
         self.saved_evidence: tuple[dict[str, Any], ...] = ()
+        self.decode_observer: Any = None
+
+    def _construct_pool(self, full_state, anchor):
+        return draft_substitution_pool(
+            full_state,
+            anchor,
+            self.saved_evidence,
+            limit=self.policy.pool_size,
+            policy=self.pool_policy,
+        )
 
     def _observe_exact_anchor(self, prefill, full_state, anchor, attention, budget):
         import torch
@@ -62,6 +72,7 @@ class DraftConditionedHeadDiagnostic(HeadSubstitutionDiagnostic):
             logits_observer=observe,
             capture_draft_attentions=True,
             draft_observer=recorder.observe,
+            decode_observer=self.decode_observer,
         )
         session.sync()
         started = time.perf_counter()
@@ -109,13 +120,7 @@ class DraftConditionedHeadDiagnostic(HeadSubstitutionDiagnostic):
             if controls_passed and replayed:
                 session.sync()
                 t0 = time.perf_counter()
-                pool, pool_trace = draft_substitution_pool(
-                    full_state,
-                    anchor,
-                    self.saved_evidence,
-                    limit=self.policy.pool_size,
-                    policy=self.pool_policy,
-                )
+                pool, pool_trace = self._construct_pool(full_state, anchor)
                 session.sync()
                 pool_seconds = time.perf_counter() - t0
 
@@ -150,6 +155,7 @@ class DraftConditionedHeadDiagnostic(HeadSubstitutionDiagnostic):
                 raise RuntimeError("V8 control/proposal probe accounting mismatch")
         finally:
             storage = session.finish()
+            self.last_probe_storage = storage
         session.sync()
         record = dict(
             classification="V8_consumed_input_draft_conditioned_diagnostic_not_quality_evidence",

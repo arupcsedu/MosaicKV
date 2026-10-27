@@ -1,0 +1,24 @@
+schema_version: 1
+classification: consumed_input_downstream_sensitivity_not_benchmark_quality
+base_protocol: mosaickv/configs/experiments/bounded_prefix_output_v8_1.yaml
+base_protocol_sha256: bdfe8c0c60e8160d2ba4706b641f9df985df0b214999f387b179c6cab860846c
+negative_readout_report: /scratch/djy8hg/runs/mosaickv/bounded-readout-v8-2-20261026-v1/audit/report.json
+negative_readout_report_sha256: 7b37a6586f62fcce5f5502ca46dc640629f6079cb2d0b099db99505000e8af27
+downstream_jacobian:
+  prefixes: [1, 4]
+  derivative_seconds_limit: 120
+  loss_scale: 1024.0
+  diagnostic_jvp_atol: 0.00001
+  diagnostic_jvp_rtol: 0.05
+  shared_anchor_VJP: true
+  one_JVP_crosscheck: true
+  past_cache_held_fixed: true
+  parameters_updated: false
+fresh_cohort_authorized: false
+calibration_authorized: false
+paper_campaign_authorized: false
+workers: 2
+gpus_per_worker: 1
+cpus_per_worker: 12
+time_limit_seconds: 1800
+max_global_a100s: 6

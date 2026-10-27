@@ -27,7 +27,7 @@ class DraftHeadPoolPolicy:
             raise ValueError("draft-head proposal shortlists/chunks must remain bounded")
 
 
-def _single_scores(p, v, numerator, denominator, target, *, sign, chunk):
+def _single_scores(p, v, numerator, denominator, target, *, sign, chunk, gradient=None):
     import torch
 
     scores = []
@@ -36,7 +36,12 @@ def _single_scores(p, v, numerator, denominator, target, *, sign, chunk):
         weight = p[:, :, start:end]
         num = numerator.unsqueeze(2) + sign * weight.unsqueeze(-1) * v[:, None, start:end]
         den = denominator.unsqueeze(-1) + sign * weight
-        loss = (num / den.clamp_min(1e-30).unsqueeze(-1) - target.unsqueeze(2)).square()
+        output = num / den.clamp_min(1e-30).unsqueeze(-1)
+        loss = (
+            (output - target.unsqueeze(2)).square()
+            if gradient is None
+            else output * gradient.unsqueeze(2)
+        )
         score = loss.mean((1, 3))
         scores.append(score.masked_fill(~(den > 0).all(1), float("inf")))
     return torch.cat(scores, dim=-1)
@@ -49,6 +54,7 @@ def draft_substitution_pool(
     *,
     limit: int,
     policy: DraftHeadPoolPolicy | None = None,
+    output_gradients: tuple[Any, ...] | None = None,
 ) -> tuple[tuple[HeadSubstitution, ...], list[dict[str, Any]]]:
     import torch
 
@@ -61,6 +67,8 @@ def draft_substitution_pool(
         raise ValueError("draft-head proposals require an unpadded, exact-only anchor")
     if len(evidence) != len(full_state.layers):
         raise ValueError("draft evidence must cover every source layer")
+    if output_gradients is not None and len(output_gradients) != len(full_state.layers):
+        raise ValueError("downstream gradients must cover every source layer")
     logical = full_state.logical_positions.physical_to_logical
     physical = {position: i for i, position in enumerate(logical)}
     positions: dict[tuple[int, int], set[int]] = {
@@ -127,9 +135,23 @@ def draft_substitution_pool(
         den = (p * mask.unsqueeze(1)).sum(-1) + tail_den
         if not bool((den > 0).all()):
             raise ValueError("draft anchor has zero retained probability")
-        baseline = (num / den.unsqueeze(-1) - target).square().mean((1, 2))
-        add = _single_scores(p, v, num, den, target, sign=1, chunk=policy.position_chunk_size)
-        drop = _single_scores(p, v, num, den, target, sign=-1, chunk=policy.position_chunk_size)
+        gradient = None if output_gradients is None else output_gradients[i].to(v.device, v.dtype)
+        if gradient is not None and (
+            gradient.shape != target.shape or not torch.isfinite(gradient).all()
+        ):
+            raise ValueError("downstream gradient shape/nonfinite mismatch")
+        reconstruction = (num / den.unsqueeze(-1) - target).square().mean((1, 2))
+        baseline = (
+            reconstruction
+            if gradient is None
+            else (num / den.unsqueeze(-1) * gradient).mean((1, 2))
+        )
+        add = _single_scores(
+            p, v, num, den, target, sign=1, chunk=policy.position_chunk_size, gradient=gradient
+        )
+        drop = _single_scores(
+            p, v, num, den, target, sign=-1, chunk=policy.position_chunk_size, gradient=gradient
+        )
         add.masked_fill_(mask, float("inf"))
         drop.masked_fill_(~mask | mandatory, float("inf"))
         k = min(policy.choices_per_side, n)
@@ -150,11 +172,10 @@ def draft_substitution_pool(
                     + pa.unsqueeze(-1) * v[routes, receiver, None]
                     - pd.unsqueeze(-1) * v[routes, donor, None]
                 )
+                output = candidate_num / candidate_den.clamp_min(1e-30).unsqueeze(-1)
                 error = (
-                    (candidate_num / candidate_den.clamp_min(1e-30).unsqueeze(-1) - target)
-                    .square()
-                    .mean((1, 2))
-                )
+                    (output - target).square() if gradient is None else output * gradient
+                ).mean((1, 2))
                 valid = ~mask[routes, receiver] & mask[routes, donor] & ~mandatory[routes, donor]
                 valid = valid & (candidate_den > 0).all(-1) & torch.isfinite(error)
                 improve = valid & (error < best)
@@ -172,7 +193,25 @@ def draft_substitution_pool(
         ):
             if after < before:
                 proposal = HeadSubstitution(i, h, d, r, cost)
-                candidates.append((before - after, i, h, d, r, proposal, before, after))
+                pa, pd = p[h, :, r], p[h, :, d]
+                actual = (num[h] + pa[:, None] * v[h, r] - pd[:, None] * v[h, d]) / (
+                    den[h] + pa - pd
+                )[:, None]
+                reconstructed_after = float((actual - target[h]).square().mean())
+                candidates.append(
+                    (
+                        before - after,
+                        i,
+                        h,
+                        d,
+                        r,
+                        proposal,
+                        before,
+                        after,
+                        float(reconstruction[h]),
+                        reconstructed_after,
+                    )
+                )
     # At most one analytically best exchange per route. Cross-route ranking is
     # absolute draft-output error reduction, not prompt mass or reference labels.
     ranked = sorted(candidates, key=lambda row: (-row[0], *row[1:5]))[:limit]
@@ -190,9 +229,14 @@ def draft_substitution_pool(
             kv_head=row[2],
             removed_position=row[3],
             added_position=row[4],
-            draft_output_error_before=row[6],
-            draft_output_error_after=row[7],
+            draft_output_error_before=row[8],
+            draft_output_error_after=row[9],
             predicted_gain=row[0],
+            ranking_objective="draft_output_reconstruction"
+            if output_gradients is None
+            else "frozen_downstream_directional_KL",
+            ranking_objective_before=row[6],
+            ranking_objective_after=row[7],
             replaced_bytes=row[5].replaced_bytes,
         )
         for row in ranked
