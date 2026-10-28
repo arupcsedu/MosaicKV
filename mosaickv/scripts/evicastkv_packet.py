@@ -131,9 +131,9 @@ def timing_statistics(root, output):
                     mean_e2e=statistics.mean(r["e2e_wall_seconds"] for r in values),
                     repeat_stddev=statistics.stdev(r["e2e_wall_seconds"] for r in values),
                     mean_compression=statistics.mean(
-                        r["metrics"]["compression_seconds"] for r in values
+                        r["metrics"]["compression_time"] for r in values
                     )
-                    if "compression_seconds" in values[0]["metrics"]
+                    if "compression_time" in values[0]["metrics"]
                     else None,
                     mean_first_emitted=statistics.mean(
                         r["timings"]["first_token_emitted_seconds"] for r in values
@@ -215,10 +215,7 @@ def numerical_summary(root, output):
 
 
 def render_plots(root, output, rows):
-    import matplotlib
-
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
+    from xml.etree import ElementTree as ET
 
     plotted = []
     native = root / "analysis/scoring/native/native_metrics.json"
@@ -248,31 +245,125 @@ def render_plots(root, output, rows):
                         score=score,
                     )
                 )
-            fig, ax = plt.subplots(figsize=(5.3, 3.5))
-            for method in sorted({p["method"] for p in points}):
+            if not points:
+                continue
+            xmin = min(p["active_mib"] for p in points)
+            xmax = max(p["active_mib"] for p in points)
+            ymin = min(0.0, min(p["score"] for p in points))
+            ymax = max(p["score"] for p in points)
+            width, height = 640, 400
+
+            def xy(p, xmin=xmin, xmax=xmax, ymin=ymin, ymax=ymax):
+                return (
+                    70 + 500 * (p["active_mib"] - xmin) / max(1.0, xmax - xmin),
+                    315 - 250 * (p["score"] - ymin) / max(1.0, ymax - ymin),
+                )
+
+            svg = ET.Element(
+                "svg",
+                xmlns="http://www.w3.org/2000/svg",
+                width=str(width),
+                height=str(height),
+                viewBox="0 0 640 400",
+            )
+
+            def label(x, y, text, *, svg=svg, **extra):
+                node = ET.SubElement(
+                    svg, "text", x=str(x), y=str(y), attrib={"font-size": "12", **extra}
+                )
+                node.text = text
+
+            label(70, 22, f"{report['workload']}: {metric} (development only)")
+            ET.SubElement(svg, "path", d="M 70 55 V 315 H 580", stroke="black", fill="none")
+            label(205, 390, "Measured initial live KV (MiB)")
+            for tick in range(5):
+                value = ymin + (ymax - ymin) * tick / 4
+                label(5, 319 - 250 * tick / 4, f"{value:.2f}")
+            colors = ("#005b96", "#d55e00", "#009e73", "#6b3fa0")
+            tex = [
+                r"\begin{tikzpicture}",
+                r"\begin{axis}[xlabel={Initial live KV (MiB)},ylabel={"
+                + metric.replace("_", r"\_")
+                + r"},legend pos=outer north east]",
+            ]
+            for index, method in enumerate(sorted({p["method"] for p in points})):
                 values = sorted(
                     (p for p in points if p["method"] == method), key=lambda p: p["active_mib"]
                 )
-                ax.plot(
-                    [p["active_mib"] for p in values],
-                    [p["score"] for p in values],
-                    "o-",
-                    label=method.replace("mosaickv_exact", "EviCastKV exact"),
+                color = colors[index % len(colors)]
+                ET.SubElement(
+                    svg,
+                    "polyline",
+                    points=" ".join(f"{x:.3f},{y:.3f}" for x, y in map(xy, values)),
+                    fill="none",
+                    stroke=color,
                 )
-            ax.set(
-                xlabel="Measured initial live KV (MiB)",
-                ylabel=metric,
-                title=f"{report['workload']} — development only",
-            )
-            ax.legend(fontsize=7)
-            ax.grid(alpha=0.25)
-            fig.tight_layout()
-            filename = f"{report['workload']}-{metric}.pdf"
-            fig.savefig(output / filename)
-            plt.close(fig)
-            write_once(output / filename.replace(".pdf", ".json"), points)
+                for p in values:
+                    x, y = xy(p)
+                    ET.SubElement(svg, "circle", cx=str(x), cy=str(y), r="4", fill=color)
+                    label(x - 9, 335, f"{p['active_mib']:.1f}")
+                label(70 + (index % 2) * 270, 350 + (index // 2) * 17, method, fill=color)
+                tex += [
+                    r"\addplot coordinates {"
+                    + " ".join(f"({p['active_mib']:.12g},{p['score']:.12g})" for p in values)
+                    + "};",
+                    r"\addlegendentry{" + method.replace("_", r"\_") + "}",
+                ]
+            tex += [r"\end{axis}", r"\end{tikzpicture}"]
+            filename = f"{report['workload']}-{metric}.svg"
+            text_once(output / filename, ET.tostring(svg, encoding="unicode"))
+            text_once(output / filename.replace(".svg", ".tex"), "\n".join(tex) + "\n")
+            write_once(output / filename.replace(".svg", ".json"), points)
             plotted.append(filename)
     return plotted
+
+
+def native_tables(root, output):
+    """Keep three metric families separate and expose adjusted intervals."""
+    path = root / "analysis/scoring/native/native_metrics.json"
+    if not path.exists():
+        return []
+    tables = []
+    for report in read(path):
+        metric = report.get("metric", "cider")
+        lines = [
+            "% Complete development cohort only; not fresh confirmation.",
+            r"\begin{tabular}{lrrr}",
+            r"Method / initial cap & N & Score & Type \\",
+        ]
+        n = report["unique_inputs"]
+        for name, score in sorted(report["scores"].items()):
+            method, budget = name.split(":")
+            label = method.replace("mosaickv_exact", "EviCastKV exact").replace("_", r"\_")
+            cap = "Full" if budget == "full" else f"{int(budget) / 2**20:g} MiB"
+            origin = "reimpl" if method.endswith("reimpl") else "local"
+            lines.append(f"{label} / {cap} & {n} & {score:.6f} & {origin} " + r"\\")
+        lines.append(r"\end{tabular}")
+        name = f"{report['workload']}-{metric}-quality.tex"
+        text_once(output / name, "\n".join(lines) + "\n")
+        contrasts = []
+        for item in report["contrasts"]:
+            contrasts.append(
+                dict(
+                    workload=report["workload"],
+                    metric=metric,
+                    reference=item["reference"],
+                    candidate=item["candidate"],
+                    difference=item["difference"],
+                    ordinary_95_ci=item["ordinary_95_ci"],
+                    simultaneous_ci=item["simultaneous_ci"],
+                    claim=(
+                        "positive_in_development_scope_only"
+                        if item["simultaneous_ci"][0] > 0
+                        else "negative_in_development_scope_only"
+                        if item["simultaneous_ci"][1] < 0
+                        else "inconclusive_not_equivalent"
+                    ),
+                )
+            )
+        write_once(output / name.replace(".tex", "-contrasts.json"), contrasts)
+        tables.append(name)
+    return tables
 
 
 def packet(root, output):
@@ -288,6 +379,7 @@ def packet(root, output):
     if current.get("measurement", {}).get("status") == "passed":
         timing = timing_statistics(root, output)
     plots = render_plots(root, output, rows)
+    quality_tables = native_tables(root, output)
     counts = []
     for stage in (
         "smoke",
@@ -322,6 +414,21 @@ def packet(root, output):
         )
     csv_once(output / "completeness.csv", counts)
     write_once(output / "failures.json", failures)
+    archived = []
+    for previous in sorted(root.parent.glob("fox-review-202610*-v[123]")):
+        path = previous / "protocol_lock.json"
+        if path.exists():
+            old = read(path)
+            archived.append(
+                dict(
+                    root=str(previous),
+                    protocol_sha256=sha(path),
+                    source_sha=old["source_sha"],
+                    gates=stages(previous),
+                    old_measurements_reused=False,
+                )
+            )
+    write_once(output / "archived_attempts.json", archived)
     write_once(
         output / "capacity_cases.json",
         [
@@ -399,6 +506,7 @@ def packet(root, output):
         f"Numerical reports: {len(numerics)}; profiler ranges: {len(profiles)}; "
         f"paired timing comparisons: {len(timing) if timing is not None else 'NOT_RUN'}.",
         f"Plots generated from measured saved points only: {', '.join(plots) or 'NOT_RUN'}.",
+        f"Separate metric tables: {', '.join(quality_tables) or 'NOT_RUN'}.",
         "",
         "## Reproduction",
         "",
@@ -455,9 +563,29 @@ def watch(root, stage):
     decision = read(decision_path)
     if decision.get("action") != "submitted_registered_successor":
         packet(root, root / "writing" / f"after-{stage}")
+        if (
+            stage == "measurement"
+            and decision.get("action") == "stop_for_measured_hotspot_review"
+            and read(root / "analysis/measurement/GATE_measurement.json")["status"] == "passed"
+        ):
+            # No outcome-based choice and no configuration tuning: execute only
+            # the already registered controlled-development matrix, with the
+            # unchanged measured reference runtime. Confirmation stays blocked.
+            from evicastkv_campaign import submit
+            from evicastkv_development import prepare
+
+            child = root.parent / (root.name + "-mechanisms")
+            prepare(root, child)
+            submit(child, "mechanisms")
+            submission = read(child / "jobs/mechanisms-submission.json")
+            schedule_watch(child, "mechanisms", submission["analysis"])
         return
     successor = decision["stage"]
     submission = read(root / "jobs" / f"{successor}-submission.json")
+    schedule_watch(root, successor, submission["analysis"])
+
+
+def schedule_watch(root, successor, dependency):
     command = [
         "sbatch",
         "--parsable",
@@ -469,13 +597,14 @@ def watch(root, stage):
         "--mem=16G",
         "--time=00:20:00",
         "--job-name=evicast-packet",
-        f"--dependency=afterany:{submission['analysis']}",
+        f"--dependency=afterany:{dependency}",
         f"--output={root}/slurm/{successor}-packet-%j.out",
         f"--error={root}/slurm/{successor}-packet-%j.err",
         str(SOURCE / "mosaickv/slurm/evicastkv_packet.sbatch"),
         str(SOURCE),
         str(root),
         successor,
+        clean_source(SOURCE),
     ]
     jobid = subprocess.check_output(command, text=True).strip().split(";")[0]
     write_once(

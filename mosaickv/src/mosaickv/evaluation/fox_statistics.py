@@ -98,6 +98,7 @@ def corpus_cider_statistics(
     resamples=10000,
     seed=20271014,
     workers=4,
+    family_size=6,
 ):
     if not points or workers < 1:
         raise ValueError("missing corpus points or CPU allocation")
@@ -144,6 +145,7 @@ def corpus_cider_statistics(
                     scores[reference],
                     scores[candidate],
                     list(boot[:, keys.index(candidate)] - boot[:, keys.index(reference)]),
+                    family_size=family_size,
                 ),
             )
         )

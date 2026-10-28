@@ -231,6 +231,9 @@ def load_lock(root):
     for path, expected in lock["historical_bindings"].items():
         if sha(Path(path)) != expected:
             raise ValueError("historical input/configuration changed")
+    for path, expected in lock.get("inherited_gates", {}).items():
+        if sha(Path(path)) != expected or json.loads(Path(path).read_text())["status"] != "passed":
+            raise ValueError("inherited execution control changed or failed")
     for info in lock["templates"].values():
         if sha(Path(info["path"])) != info["sha256"]:
             raise ValueError("template hash mismatch")
@@ -303,10 +306,13 @@ def jobs_for(lock, stage):
         "profiling": "profiler",
         "measurement": "timing",
         "mechanisms": "development",
+        "full_graph_pilot": "profiler",
     }[stage]
     for workload in BUDGETS:
         count = len(lock["cohorts"][workload][subset]["sample_ids"])
-        chunk = 2 if stage == "profiling" else 4 if stage == "measurement" else 8
+        chunk = (
+            2 if stage in {"profiling", "full_graph_pilot"} else 4 if stage == "measurement" else 8
+        )
         for start in range(0, count, chunk):
             jobs.append(
                 dict(
@@ -409,7 +415,7 @@ def submit(root, stage, dependency=None):
         "--partition=bii",
         "--cpus-per-task=4",
         "--mem=16G",
-        "--time=00:20:00",
+        "--time=01:00:00" if stage == "mechanisms" else "--time=00:20:00",
         "--dependency=afterany:" + ":".join([gpu, *extra_analysis_dependencies]),
         f"--output={root}/slurm/{stage}-analysis-%j.out",
         f"--error={root}/slurm/{stage}-analysis-%j.err",

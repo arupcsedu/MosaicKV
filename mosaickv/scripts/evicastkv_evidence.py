@@ -320,6 +320,114 @@ def native_statistics(root, stage, output, workers):
     return reports
 
 
+def mechanism_statistics(root, output, workers=4):
+    """Sixty prespecified secondary contrasts; seeds never become extra inputs."""
+    lock, rows = validated_rows(root, "mechanisms")
+    groups = group_manifest(root)
+    reports = []
+    treatments = (
+        "routed-prompt",
+        "coverage-off",
+        "value-off",
+        "cross-modal-off",
+        "route-0",
+        "route-0.00390625",
+        "route-0.25",
+        "random-13",
+        "random-29",
+        "random-47",
+    )
+    for workload in ("coco", "milebench"):
+        selected = [r for r in rows if r["workload"] == workload]
+        point_rows = defaultdict(dict)
+        for row in selected:
+            point_rows[f"{row['variant']}:{row['budget_bytes']}"][row["sample_id"]] = row
+        expected = set(lock["cohorts"][workload]["development"]["sample_ids"])
+        if any(set(v) != expected for v in point_rows.values()):
+            raise ValueError("incomplete controlled mechanism cohort")
+        comparisons = [
+            (f"{variant}:{cap * 2**20}", f"mechanism-complete:{cap * 2**20}")
+            for cap in lock["budgets_mib"][workload]
+            for variant in treatments
+        ]
+        group_map = {sid: groups["groups"][workload][sid] for sid in expected}
+        if workload == "coco":
+            points = {
+                key: tuple(
+                    MetricSample(sid, row["answer"], tuple(row["references"]))
+                    for sid, row in sorted(values.items())
+                )
+                for key, values in point_rows.items()
+            }
+            report = corpus_cider_statistics(
+                points,
+                comparisons,
+                group_map,
+                resamples=10000,
+                seed=lock["seed"],
+                workers=workers,
+                family_size=60,
+            )
+            reports.append(
+                dict(workload=workload, statistical_family="secondary_mechanisms_60", **report)
+            )
+        else:
+            for metric, tasks in (("accuracy", TASKS[:2]), ("rouge_l_f1", TASKS[2:])):
+                task_map = {r["sample_id"]: r["subtask"] for r in selected if r["subtask"] in tasks}
+                values = {
+                    key: {sid: row["score"] for sid, row in point.items() if sid in task_map}
+                    for key, point in point_rows.items()
+                }
+                contrasts = [
+                    dict(
+                        reference=reference,
+                        candidate=candidate,
+                        **paired_scalar_statistics(
+                            values[reference],
+                            values[candidate],
+                            {sid: group_map[sid] for sid in task_map},
+                            task_map,
+                            resamples=10000,
+                            seed=lock["seed"],
+                            hierarchy=True,
+                            family_size=60,
+                        ),
+                    )
+                    for reference, candidate in comparisons
+                ]
+                scores = {
+                    key: statistics.mean(
+                        statistics.mean(v[sid] for sid in task_map if task_map[sid] == task)
+                        for task in tasks
+                    )
+                    for key, v in values.items()
+                }
+                reports.append(
+                    dict(
+                        workload=workload,
+                        metric=metric,
+                        scores=scores,
+                        contrasts=contrasts,
+                        statistical_family="secondary_mechanisms_60",
+                        unique_inputs=len(task_map),
+                    )
+                )
+    write_once(output / "mechanism_metrics.json", reports)
+    write_once(
+        output / "analysis_manifest.json",
+        dict(
+            source_sha=clean_source(SOURCE),
+            runtime_source_sha=lock["source_sha"],
+            raw_rows_sha256=digest(rows),
+            resamples=10000,
+            secondary_family=60,
+            seeds_reported_separately=True,
+            development_only=True,
+        ),
+    )
+    return reports
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("mode", choices=("inventory", "statistics"))

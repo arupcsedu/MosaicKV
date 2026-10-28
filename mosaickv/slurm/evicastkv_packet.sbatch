@@ -2,6 +2,8 @@
 # Finite event callback: no queue/log polling; report failed stages too.
 set -euo pipefail
 cd "$1"
+test "$(git rev-parse HEAD)" = "$4"
+bash mosaickv/scripts/assert_clean_worktree.sh
 source mosaickv/scripts/cache_env.sh
 export PYTHONDONTWRITEBYTECODE=1 CUDA_VISIBLE_DEVICES=""
 export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1

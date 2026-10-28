@@ -70,3 +70,31 @@ changed coherently in routing ablations, despite prototype construction being
 disabled. A route-zero dispatch may use shared Top-K only after checking its
 selected IDs against the actual all-stable-head selector; equivalence is not
 assumed from the method names.
+
+## Finite execution and evidence export
+
+The current user explicitly authorized automatic progression on October 27.
+Finite `afterany` callbacks analyze failures as well as successes; no log-polling
+daemon or claim of automatically waking this interactive conversation is used.
+The separate writing-packet callback follows recorded successor job IDs once per
+completed stage. On failed gates it writes an incomplete/negative packet and stops.
+
+After valid unprofiled measurement, the registered development matrix can run on
+the **unchanged reference runtime**. This is not an optimization result: zero
+runtime changes and no before/after speedup are claimed. A later optimization
+still needs inspection of measured hotspots, semantic equivalence and new timing.
+Development includes fixed candidate/quota/descriptor checks, raw utility and
+marginal terms in Parquet, explicit removal of all inter-modality edges without
+neighbor refill, quota-matched random controls, and an eight-input full-graph
+pilot. Every random seed remains separately labeled.
+
+The recovered router computes entropy of **pooled** prompt attention. It is not
+silently relabeled as the prompt package's proposed mean per-query entropy.
+Graph construction and actual node/edge changes must be measured before making
+an inter-modal-specific claim. Secondary mechanism tests form a declared
+60-contrast family, separate from the six primary quality contrasts.
+
+SVG and PGFPlots/TikZ sources are generated from measured JSON without installing
+plotting packages. Unavailable PDF compilation is not reported as a successful
+LaTeX build. Archived attempts keep their own protocol/source hashes. Fresh
+confirmation and optional batching remain separately gated and may be NOT_RUN.

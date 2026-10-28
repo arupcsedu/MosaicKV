@@ -448,7 +448,7 @@ def run_worker(root: Path, stage: str, index: int, spec_sha: str):
                         diagnostic = stage in {"correctness", "representation_canary"}
                         from mosaickv.evaluation.fox_mechanisms import mechanism_audit
 
-                        mechanism = stage == "mechanisms"
+                        mechanism = stage in {"mechanisms", "full_graph_pilot"}
                         profiling = stage == "profiling"
                         with (
                             layout_capture(adapter)
@@ -462,6 +462,7 @@ def run_worker(root: Path, stage: str, index: int, spec_sha: str):
                                 stable_policy=resolved_config(
                                     lock, workload, "mosaickv_exact", cap
                                 ),
+                                raw_terms_directory=output / "mechanism-terms" / key,
                             )
                             if mechanism
                             else contextlib.nullcontext({}) as activity,

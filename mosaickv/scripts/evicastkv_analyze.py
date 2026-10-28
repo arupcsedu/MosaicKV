@@ -238,6 +238,13 @@ def analyze(root: Path, stage: str):
             ),
         )
     paired = []
+    if stage == "mechanisms":
+        from mosaickv.evaluation.fox_mechanisms import validate_mechanism_contract
+
+        try:
+            write_once(output / "configuration_activity.json", validate_mechanism_contract(rows))
+        except Exception as error:
+            errors.append(dict(error=f"mechanism control failed: {type(error).__name__}: {error}"))
     try:
         paired = pairing(rows)
     except Exception as error:
@@ -269,11 +276,14 @@ def analyze(root: Path, stage: str):
         blockers=errors,
     )
     write_once(output / f"GATE_{stage}.json", gate)
-    if stage == "scoring" and gate["status"] == "passed":
-        from evicastkv_evidence import native_statistics
+    if stage in {"scoring", "mechanisms"} and gate["status"] == "passed":
+        from evicastkv_evidence import mechanism_statistics, native_statistics
 
         try:
-            native_statistics(root, stage, output / "native", workers=4)
+            if stage == "scoring":
+                native_statistics(root, stage, output / "native", workers=4)
+            else:
+                mechanism_statistics(root, output / "native", workers=4)
         except Exception as error:
             write_once(
                 output / "native_statistics_blocked.json",
@@ -301,6 +311,17 @@ def analyze(root: Path, stage: str):
             reason=(
                 "No optimization is authorized without actual hotspot evidence; "
                 "fresh confirmation is independently blocked"
+            ),
+        )
+    elif gate["status"] == "passed" and stage == "mechanisms":
+        submit(root, "full_graph_pilot")
+        action = dict(action="submitted_registered_successor", stage="full_graph_pilot")
+    elif gate["status"] == "passed" and stage == "full_graph_pilot":
+        action = dict(
+            action="NO_CONFIG_FROZEN",
+            reason=(
+                "Human configuration review and exhaustive freshness required; "
+                "confirmation not submitted"
             ),
         )
     else:
