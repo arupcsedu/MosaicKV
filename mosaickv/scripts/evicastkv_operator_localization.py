@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import subprocess
@@ -94,22 +95,44 @@ def worker(root):
                     )
                 )
                 if workload == "milebench":
-                    full = adapter.prefill(
-                        prepared, capture_queries=False, capture_attentions=False
-                    )
-                    records = padding_localization(
-                        adapter, full.state, int(full.next_token_id.item())
-                    )
+                    from mosaickv.evaluation.fox_valid_slots import valid_slot_diagnostic
+
+                    transport = protocol.get("valid_slot_transport_diagnostic", False)
+                    with valid_slot_diagnostic(adapter) if transport else contextlib.nullcontext():
+                        full = adapter.prefill(
+                            prepared, capture_queries=False, capture_attentions=False
+                        )
+                        records = padding_localization(
+                            adapter, full.state, int(full.next_token_id.item())
+                        )
+                        parity = {}
+                        if transport:
+                            from mosaickv.adapters.huggingface import (
+                                compare_cache_reinjection,
+                                compare_with_generate,
+                            )
+
+                            parity = {
+                                name: asdict(check(adapter, prepared, max_new_tokens=16))
+                                for name, check in (
+                                    ("ordinary_generate", compare_with_generate),
+                                    ("retention_one", compare_cache_reinjection),
+                                )
+                            }
                     del full
                 else:
                     records = [boundary_localization(adapter, prepared)]
+                    parity = {}
                 case = dict(
                     workload=workload,
                     sample_id=sid,
                     operators=records,
                     model=asdict(cfg.model),
                     dataset=asdict(cfg.dataset),
-                    policy="native_fp16",
+                    policy="diagnostic_valid_slot_canonicalization"
+                    if protocol.get("valid_slot_transport_diagnostic", False)
+                    else "native_fp16",
+                    parity=parity,
                     allow_fp16_reduced_precision_reduction=native_reduction_policy(lock),
                     measurement_type="instrumented_operator_diagnostic_not_latency_or_quality",
                 )
@@ -169,6 +192,19 @@ def analyze(root):
                 else None,
                 maximum_normalized_logit_error=max(r["logits"]["normalized_linf"] for r in rows),
                 maximum_absolute_logit_error=max(r["logits"]["absolute_linf"] for r in rows),
+                padding_control_passed=not failures if case["workload"] == "milebench" else None,
+                policy=case["policy"],
+                parity_passed=(
+                    all(
+                        p["generated_tokens"] >= 16
+                        and p["token_agreement"] == 1
+                        and p["maximum_logit_difference"] <= 1e-4
+                        for p in case.get("parity", {}).values()
+                    )
+                    and set(case.get("parity", {})) == {"ordinary_generate", "retention_one"}
+                )
+                if protocol.get("valid_slot_transport_diagnostic", False)
+                else None,
             )
         )
     write_once(
@@ -182,7 +218,16 @@ def analyze(root):
             cases=summaries,
             errors=results["errors"],
             thresholds_changed=False,
-            no_arithmetic_or_weight_change=True,
+            no_precision_or_weight_change=True,
+            valid_slot_transport_diagnostic=protocol.get("valid_slot_transport_diagnostic", False),
+            transport_controls_passed=all(
+                s["padding_control_passed"] and s["parity_passed"] for s in summaries
+            )
+            and len(summaries) == len(expected)
+            and not results["errors"]
+            if protocol.get("valid_slot_transport_diagnostic", False)
+            else None,
+            original_native_failures_preserved=True,
             fresh_confirmation_authorized=False,
             notes=(
                 "First nonidentical operator is localization, "
@@ -192,10 +237,36 @@ def analyze(root):
     )
 
 
-def submit(root, numerical_parent, *, incomplete_parent=None):
+def submit(root, numerical_parent, *, incomplete_parent=None, valid_slot_parent=None):
     revision = clean_source(SOURCE)
     enabled_workloads = ["coco", "milebench"]
     inherited = None
+    if incomplete_parent is not None and valid_slot_parent is not None:
+        raise ValueError("retry scopes cannot be combined")
+    if valid_slot_parent is not None:
+        previous = json.loads((valid_slot_parent / "results.json").read_text())
+        if previous.get("errors") or len(previous["cases"]) != 2:
+            raise ValueError("targeted transport requires two complete native cases")
+        for binding in previous["cases"]:
+            path = Path(binding["path"])
+            if sha(path) != binding["sha256"]:
+                raise ValueError("native operator capture changed")
+            case = json.loads(path.read_text())
+            if case["workload"] != "milebench" or case["policy"] != "native_fp16":
+                raise ValueError("targeted transport requires native MileBench evidence")
+            if not any(r["logits"]["normalized_linf"] > 8 * 2**-10 for r in case["operators"]):
+                raise ValueError("no registered native failure to diagnose")
+            first = case["operators"][0]["first_nonidentical_operator"]
+            if not first or not first.endswith(
+                ("valid_attention_probabilities", "attention_context")
+            ):
+                raise ValueError("first drift is outside the targeted attention boundary")
+        enabled_workloads = ["milebench"]
+        inherited = dict(
+            root=str(valid_slot_parent),
+            results_sha256=sha(valid_slot_parent / "results.json"),
+            native_cases_preserved=previous["cases"],
+        )
     if incomplete_parent is not None:
         previous = json.loads((incomplete_parent / "results.json").read_text())
         errors = previous.get("errors", [])
@@ -222,6 +293,7 @@ def submit(root, numerical_parent, *, incomplete_parent=None):
             source_sha=revision,
             enabled_workloads=enabled_workloads,
             inherited_completed_diagnostic=inherited,
+            valid_slot_transport_diagnostic=valid_slot_parent is not None,
             numerical_parent=str(numerical_parent),
             numerical_results_sha256=sha(numerical_parent / "results.json"),
             native_policy_only=True,
@@ -284,8 +356,14 @@ if __name__ == "__main__":
     p.add_argument("--root", required=True, type=Path)
     p.add_argument("--numerical-parent", type=Path)
     p.add_argument("--incomplete-parent", type=Path)
+    p.add_argument("--valid-slot-parent", type=Path)
     a = p.parse_args()
     if a.mode == "submit":
-        submit(a.root, a.numerical_parent, incomplete_parent=a.incomplete_parent)
+        submit(
+            a.root,
+            a.numerical_parent,
+            incomplete_parent=a.incomplete_parent,
+            valid_slot_parent=a.valid_slot_parent,
+        )
     else:
         (worker if a.mode == "worker" else analyze)(a.root)
