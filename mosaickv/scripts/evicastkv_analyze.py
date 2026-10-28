@@ -173,6 +173,8 @@ def export_descriptive(root, stage, rows):
         )
         for r in summaries:
             method = r["method"].replace("_", r"\_")
+            if r.get("variant") not in (None, "complete"):
+                method += "/" + r["variant"].replace("_", r"\_")
             cap = "Full" if r["budget_bytes"] is None else f"{r['budget_bytes'] / 2**20:g}"
             stream.write(
                 f"{r['workload']} & {r['subtask'] or 'COCO'} & {method} & {cap} & "

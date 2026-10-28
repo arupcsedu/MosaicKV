@@ -1,0 +1,33 @@
+schema_version: 1
+name: evicastkv_opportunity_development_v1
+classification: consumed_development_not_confirmation
+policy_source_sha: 1667824865af882141bc85f1b1e8c1a811674d67
+samples: 64
+sample_selection: all_existing_fox_coco_development_ids_in_original_order
+budgets_mib: [20, 40]
+variants: [complete, evidence-routing-v1, evidence-coverage-v1, evidence-both-v1]
+policy:
+  shortlist_size: 8
+  minimum_query_mass_fraction: 0.95
+statistics:
+  resamples: 10000
+  seed: 20271014
+  family_size: 18
+  comparisons: each_new_variant_minus_each_of_topk_vlcache_frozen_at_each_shared_budget
+  improvement: strictly_positive_simultaneous_lower_bound
+  no_interim_selection: true
+  no_optional_enlargement: true
+resources:
+  maximum_a100s: 6
+  six_a100s_explicitly_authorized: true
+  array_concurrency: 6
+  cpus_per_worker: 12
+  samples_per_worker: 4
+  wall_minutes: 45
+  memory_gib_per_worker: 64
+  partition: bii-gpu
+  reservation: bi_fox_dgx
+  account: bii_dsc_community
+fresh_materialization_authorized: false
+confirmation_authorized: false
+paper_campaign_authorized: false
