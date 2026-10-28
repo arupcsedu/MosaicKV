@@ -1,7 +1,8 @@
 # A representation change, not another exact-substitution successor
 
-Status: experimental numerical core and consumed-capture CPU feasibility tool.
-There is **no HF/vLLM integration or new benchmark-quality result**. Existing
+Status: experimental numerical core, consumed-capture CPU feasibility tool, and
+an isolated HF eager engineering transport. There is **no production runtime,
+vLLM integration, or new benchmark-quality result**. Existing
 `mosaickv_exact`, paper results, and running-job sources are not modified.
 The local method label is `attention_matching_protected_reimpl`, never official
 code and never a silent replacement for exact retention. If later incorporated
@@ -143,19 +144,71 @@ export PYTHONPATH="$PWD/mosaickv/src:$PWD/mosaickv/scripts"
   --output /scratch/djy8hg/runs/mosaickv/attention-compaction-v1-20261027-v1/cpu-audit
 ```
 
-## Next engineering gate, not another cohort
+## Isolated HF engineering gate, not another cohort
 
-Only if the numerical feasibility is worth pursuing, implement an **isolated**
-HF bias-transport adapter. Do not bypass the current exact-only bounded-history
-safety check or claim that synthetic values are exact. First prove zero-bias
-and retention-1 parity, unchanged mandatory entries and logical positions, and
-actual auxiliary/backing-storage accounting on synthetic and consumed inputs.
+The separate `attention_compaction_hf_gate_v1.yaml` authorizes only two one-A100,
+12-CPU, 30-minute workers on the SAME two consumed inputs. The original CPU
+protocol's permissions are unchanged. No new cohort, calibration, paper run, or
+unbounded follow-up is authorized.
 
-Then capture original source K/V for only the same consumed inputs and test
-bounded construction plus the unchanged 32-token clone/repack and logit guard.
-Keep reference/draft fitting, construction, transport and decode timing separate.
-Fail closed on excessive value norms, poor conditioning, nonfinite output or
-unsupported kernels. No validation threshold is relaxed in this implementation.
-Even success there would justify only independent development validation, not
-paper-scale execution or an automatic 30%/latency claim. Fresh cohorts,
-calibration, GPU submission and paper campaigns remain disabled in this protocol.
+`hf_attention_bias.install_attention_bias_cache` is a NEW installer, not a
+bypass of the existing exact-only installer. It verifies every original
+post-RoPE key and actual first/last mandatory value against the source. It
+allocates its own bounded-history K/V, FP32 bias and per-query-head mask, and
+counts unique backing storage including auxiliary decode metadata. Original
+logical positions are recorded, and the next token retains its original position.
+Only the audited Transformers 4.55.2 LLaVA-1.5 eager implementation is accepted.
+
+Each worker performs ONE prefill, then a 32-token FullKV greedy draft together
+with a zero-bias retention-1 transport. Bitwise logit and token identity is the
+registered null gate. Failure prevents fitting/probing. Draft attention is
+captured from real FullKV forwards; the generated-ring position schedule is
+computed deterministically without pretending to execute another model.
+
+If parity passes, recover real original K/V from that prefill and construct
+39-slot dictionaries using separate heads/prefixes and the frozen mean-draft
+ranking. The two actual mandatory boundary positions are protected—not the
+CPU feasibility audit's unverified stand-ins. This is an attention-matching
+control dictionary, **not** the frozen MosaicKV graph selector. CPU fitting
+is explicitly measured with D2H/H2D costs. One fixed joint candidate is tested;
+no hyperparameter search, alternative ranking, or extra model probing is allowed.
+
+Compare the fitted cache to the identical-key, original-value, zero-bias anchor
+with identical actual backing storage. Run independent clone and source-regather
+controls, including an A-B-A repack replay after candidate execution. Every
+accepted candidate must complete the unchanged 32-token, every-prefix guard:
+`atol=1e-7`, `rtol=1e-6`, no worse KL/max-logit difference and no new greedy-token
+disagreement. Rejections stop at their first violation; partial execution can
+never pass. A numerical tie or all-head rollback is not meaningful improvement.
+FP64 KL is diagnostic sideband, never a substitute for the registered GPU-FP32
+decision. No tolerance is relaxed after a failure.
+
+Phase events are flushed for partial failures. Save raw logits, real draft
+evidence, fitted/anchor values, per-head decisions, storage observations and
+manifests. An `afterany` CPU job independently rechecks hashes, null-control
+logits, guard decisions and storage, then writes a fail-closed decision. A
+single schedule-controller admission pass enforces the aggregate six-A100 cap;
+this two-task array does not need a polling watcher. No automatic new GPU run
+is permitted, regardless of outcome.
+
+Synthetic CPU parity does not establish pretrained parity. A positive GPU
+diagnostic would open a design review only, not paper-scale execution or a
+30%/latency claim. First demonstrate useful model-level changes, then separately
+authorize independent benchmark-quality evaluation.
+
+From a clean committed snapshot, submit only this gate with:
+
+```bash
+source mosaickv/scripts/cache_env.sh
+export PYTHONDONTWRITEBYTECODE=1
+export PYTHONPATH="$PWD/mosaickv/src:$PWD/mosaickv/scripts"
+/scratch/djy8hg/env/mosaickv/bin/python \
+  mosaickv/scripts/attention_compaction_hf_gate.py submit \
+  --root /scratch/djy8hg/runs/mosaickv/attention-compaction-hf-gate-v1-20261027-v1
+```
+
+The GPU array uses `bii-gpu`, reservation `bi_fox_dgx`; the dependent five-minute
+CPU analyzer uses `bii`. `submission.json` records job IDs. Completion produces
+`analysis/report.json` and `analysis/decision.json`; negative or missing workers
+cannot promote a new run. Pending resources are not a license to change samples,
+thresholds, budgets, reservations, or other users' jobs.

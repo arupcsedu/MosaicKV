@@ -1,0 +1,32 @@
+schema_version: 1
+classification: consumed_input_compaction_engineering_not_benchmark_quality
+effective_method: attention_matching_protected_reimpl
+core_protocol: mosaickv/configs/experiments/attention_compaction_v1.yaml
+core_protocol_sha256: 091ea8311c42fcc63bf379626b9a02834b68cf8d583af6ce5115bccdaf8831b3
+cpu_feasibility_report: /scratch/djy8hg/runs/mosaickv/attention-compaction-v1-20261027-v1/cpu-audit/report.json
+cpu_feasibility_sha256: 65ad09671c5bb7ec7d42a467167675f837f062f676b33040b4f000ce473cc36e
+consumed_parent: /scratch/djy8hg/runs/mosaickv/bounded-draft-head-v8-20261026-v1
+consumed_parent_plan_sha256: 92e043fd68e16d77f90ff397c0053c61548f22b216360931fbb5eb0730c3206c
+gpu_execution_authorized: true # User's October 27 isolated engineering gate only.
+fresh_cohort_authorized: false
+calibration_authorized: false
+paper_campaign_authorized: false
+workers: 2
+gpus_per_worker: 1
+cpus_per_worker: 12
+max_global_a100s: 6
+time_limit_seconds: 1800
+required_mandatory_policy: first_and_last
+dictionary: stable_mean_draft_attention_topk
+history: {capacity: 16, sink_tokens: 4}
+retention_one: {horizon: 32, maximum_logit_difference: 0.0, token_agreement: 1.0}
+guard:
+  horizon: 32
+  checkpoints: [1, 4, 16, 32]
+  absolute_tolerance: 0.0000001
+  relative_tolerance: 0.000001
+maximum_joint_candidates: 1
+maximum_cpu_construction_seconds: 600
+controls: [clone, repack_after_candidate]
+on_negative: stop_no_automatic_successor
+on_positive: design_review_only_not_fresh_cohort_or_paper_authorization
