@@ -74,10 +74,10 @@ def group_manifest(root):
     )
 
 
-def exclusion_inventory(root, output, max_seconds=90):
+def exclusion_inventory(root, output, max_seconds=90, *, run_root=None):
     """Bounded canonical-manifest inventory. Does not parse scheduler/raw logs."""
     started = time.monotonic()
-    run_root = Path("/scratch/djy8hg/runs/mosaickv")
+    run_root = Path(run_root or "/scratch/djy8hg/runs/mosaickv")
     queue = []
     unclassified = []
     for entry in os.scandir(run_root):
@@ -113,7 +113,7 @@ def exclusion_inventory(root, output, max_seconds=90):
         if match:
             used_mile.add(f"{match[1]}-{int(match[2]):04d}")
 
-    def visit(value):
+    def visit(value, base):
         if isinstance(value, dict):
             for key, item in value.items():
                 if key in (
@@ -139,18 +139,21 @@ def exclusion_inventory(root, output, max_seconds=90):
                     and isinstance(item, str)
                     and item.endswith(".json")
                 ):
-                    queue.append(Path(item))
+                    # Relative links belong to the containing manifest, never
+                    # the process CWD. Resolve strictly in the queue reader and
+                    # retain missing/out-of-scratch links as errors, not guesses.
+                    queue.append(base / Path(item))
                 if key == "bound_files" and isinstance(item, dict):
                     queue.extend(
-                        Path(p)
+                        base / Path(p)
                         for p in item
                         if str(p).endswith(".json")
                         and ("/ledgers/" in str(p) or Path(p).name == "ledger.json")
                     )
-                visit(item)
+                visit(item, base)
         elif isinstance(value, list):
             for item in value:
-                visit(item)
+                visit(item, base)
 
     while queue and time.monotonic() - started < max_seconds:
         path = queue.pop()
@@ -163,7 +166,7 @@ def exclusion_inventory(root, output, max_seconds=90):
                 raise ValueError("canonical manifest exceeds bounded inventory size")
             value = json.loads(path.read_text())
             seen[str(path)] = sha(path)
-            visit(value)
+            visit(value, path.parent)
         except Exception as error:
             errors.append(dict(path=str(path), error=f"{type(error).__name__}: {error}"))
     for workload in json.loads((root / "protocol_lock.json").read_text())["cohorts"]:
@@ -172,7 +175,7 @@ def exclusion_inventory(root, output, max_seconds=90):
                 "development"
             ]["path"]
         )
-        visit(json.loads(p.read_text()))
+        visit(json.loads(p.read_text()), p.parent)
     per_task = {task: len({s for s in used_mile if s.startswith(task + "-")}) for task in TASKS}
     report = dict(
         status="freshness_unverified",
