@@ -211,6 +211,16 @@ def numerical_summary(root, output):
     with (output / "correctness_cases.jsonl").open("x") as stream:
         for item in reports:
             stream.write(json.dumps(item, sort_keys=True, allow_nan=False) + "\n")
+    with (output / "capacity_cases.jsonl").open("x") as stream:
+        for item in reports:
+            capacity = dict(
+                path=item["path"],
+                status=item["status"],
+                retained_head_position_entries=item.get("retained_entries"),
+                physical_head_position_slots_including_padding=item.get("padded_entries"),
+                unique_backing_bytes=item.get("actual_unique_backing_bytes"),
+            )
+            stream.write(json.dumps(capacity, sort_keys=True, allow_nan=False) + "\n")
     return reports
 
 
@@ -396,11 +406,15 @@ def packet(root, output):
         planned = None
         if specpath.exists():
             spec = read(specpath)
-            planned = sum(
-                len(j["indices"])
-                * len(j["arms"])
-                * (lock["repeats"] if stage == "measurement" else 1)
-                for j in spec["jobs"]
+            planned = (
+                sum(
+                    len(j["indices"])
+                    * len(j["arms"])
+                    * (lock["repeats"] if stage == "measurement" else 1)
+                    for j in spec["jobs"]
+                )
+                if all("arms" in j for j in spec["jobs"])
+                else None
             )
         counts.append(
             dict(
