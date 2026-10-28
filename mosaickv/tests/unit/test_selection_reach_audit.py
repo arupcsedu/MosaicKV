@@ -37,6 +37,13 @@ def test_no_benchmark_label_or_model_access_in_audit():
     assert "fresh_confirmation=False" in source
 
 
+def test_activity_lists_are_not_retained_for_all_treatments():
+    source = inspect.getsource(audit.build)
+    assert 'array("q", activity["selected_source_ids"])' in source
+    assert "activities =" not in source
+    assert "activity = activity_for(row)" in source
+
+
 def test_zero_edges_does_not_invent_cross_modal_activity():
     result = audit.summarize(
         [

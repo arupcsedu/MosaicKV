@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import statistics
+from array import array
 from collections import defaultdict
 from pathlib import Path
 
@@ -94,26 +95,29 @@ def build(root, output):
     }
     # Compare all registered treatments, never pick a winning fraction or seed.
     reference = {}
-    activities = {}
     bindings = {str(lock_path): sha(lock_path), str(gate_path): sha(gate_path)}
-    for row in rows:
+
+    def activity_for(row):
         path = Path(row["mechanism_audit_path"])
         actual_sha = sha(path)
         if actual_sha != row["mechanism_audit_sha256"]:
             raise ValueError("mechanism activity hash changed")
-        activity = json.loads(path.read_text())
-        key = (row["workload"], row["sample_id"], row["budget_bytes"])
-        activities[(*key, row["variant"])] = activity
         bindings[str(path)] = actual_sha
+        return json.loads(path.read_text())
+
+    # Keep compact baseline IDs only, never all 1,664 large selected-ID lists.
+    for row in rows:
         if row["variant"] == "route-zero-control":
-            reference[key] = activity["selected_source_ids"]
+            activity = activity_for(row)
+            key = (row["workload"], row["sample_id"], row["budget_bytes"])
+            reference[key] = array("q", activity["selected_source_ids"])
     records = []
     coverage = defaultdict(set)
     for row in rows:
         key = (row["workload"], row["sample_id"], row["budget_bytes"])
         if key not in reference:
             raise ValueError("missing same-input/same-capacity Prompt Top-K reference")
-        activity = activities[(*key, row["variant"])]
+        activity = activity_for(row)
         delta = selection_delta(reference[key], activity["selected_source_ids"])
         records.append(
             dict(
