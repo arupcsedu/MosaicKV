@@ -1,0 +1,56 @@
+{
+  "protocol_id": "fox-milebench-additional-subtasks-v1",
+  "classification": "new_scope_preparation_not_confirmation_execution",
+  "source_dataset": {
+    "id": "FreedomIntelligence/MileBench",
+    "revision": "53c7a58051ef88bacf76541d91f03f5ba2d71e7d"
+  },
+  "preserved_original_tasks": ["ActionPrediction", "ActionSequence", "CLEVR-Change", "Spot-the-Diff"],
+  "proposed_tasks": {
+    "ActionLocalization": "multi-choice",
+    "CharacterOrder": "multi-choice",
+    "ALFRED": "open-ended",
+    "IEdit": "open-ended"
+  },
+  "scope_selection_basis": "Two official temporal multiple-choice and two official semantic open-ended tasks with existing scorer routes and official one-image montage representation. Availability only; no predictions, responses or scores used. No outcome-dependent replacement.",
+  "projected_columns": ["sample_id", "task_instance.images_path", "task_instance.combined_1_images", "task_instance.choice_list"],
+  "model": {
+    "id": "llava-hf/llava-1.5-7b-hf",
+    "revision": "b234b804b114d9e37bb655e11cbbb5f5e971b7a9"
+  },
+  "proposed_common_controls": {
+    "backend": "huggingface",
+    "attention": "eager",
+    "weights_and_cache_dtype": "float16",
+    "attention_arithmetic": "UNRESOLVED_PENDING_NUMERICAL_GATE",
+    "generation_decisions": 64,
+    "decode_append_forwards": 63,
+    "block_size": 1,
+    "mandatory_policy": "first_and_last",
+    "initial_caps_mib": [16, 40],
+    "methods": ["full_kv", "prompt_attention_topk", "lookm_reimpl", "mosaickv_exact"],
+    "fullkv_is_uncompressed_quality_reference": true,
+    "media_representation": "official_combined_1_images",
+    "online_draft_steps": 0,
+    "prototypes": false,
+    "residual_repair": false
+  },
+  "correctness_per_task": 8,
+  "confirmation_per_task": 64,
+  "selection_seed": 20271014,
+  "selection_rule_after_freshness_certification": "Deterministic hash-ranked source-media groups; correctness and confirmation groups disjoint across all tasks and history. No label-dependent substitutions.",
+  "statistics": {
+    "metric_families": ["accuracy", "rouge_l_f1"],
+    "never_average_metric_families": true,
+    "hierarchy": "Equal subtask means within each metric family only; not a full-MileBench aggregate",
+    "bootstrap_replicates": 10000,
+    "paired_cluster_unit": "underlying_video_document_or_image_group",
+    "new_scope_test_family": "Must be registered after common numerical configuration freeze and before outcome access",
+    "original_six_contrast_family": "Preserved unchanged; missing original MileBench contrasts remain NOT_RUN"
+  },
+  "metadata_audit_authorized": true,
+  "materialization_authorized": false,
+  "gpu_execution_authorized": false,
+  "confirmation_authorized": false,
+  "automatic_task_replacement_authorized": false
+}
