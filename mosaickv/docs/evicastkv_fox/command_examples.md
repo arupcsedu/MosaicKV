@@ -11,7 +11,7 @@ export CUBLAS_WORKSPACE_CONFIG=:4096:8
 export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
 export CUDA_VISIBLE_DEVICES=""
 PY=/scratch/djy8hg/env/mosaickv/bin/python
-RUN=/scratch/djy8hg/runs/evicastkv/fox-review-20261027-v1
+RUN=/scratch/djy8hg/runs/evicastkv/fox-review-20261028-v4
 
 $PY -m pytest mosaickv/tests/unit/test_fox_campaign.py -q \
   -o cache_dir=/scratch/djy8hg/cache/mosaickv/pytest/fox-v1
@@ -30,7 +30,7 @@ never treats a failed Slurm dependency as a successful scientific gate.
 The user's current explicit instruction supersedes the prompt package's default
 manual stage-by-stage launch rule, **not** correctness or freshness requirements.
 No push is authorized. The GPU ceiling is four in aggregate for this campaign,
-one GPU/12 CPUs/96 GiB per worker, two-hour limit, `bii-gpu`, `bi_fox_dgx`,
+one GPU/12 CPUs/64 GiB per worker, two-hour limit, `bii-gpu`, `bi_fox_dgx`,
 account `bii_dsc_community`. Current user jobs are checked before admission.
 
 Additional implemented command modes:
@@ -49,9 +49,14 @@ selective retry needs a separately bound retry specification, not output mutatio
 
 ## Measurement meaning
 
-The E2E outer wall clock includes runtime input preparation, prefill, compression,
-decode, output detokenization and trace publication; model loading and scoring
-are outside it. The runtime's narrower model measurement is retained separately.
+The version-4 E2E outer wall clock includes media loading, runtime input preparation,
+prefill, compression, decode and output detokenization, ending at an explicit
+output-completion callback. Model loading, scoring and post-output trace publication
+are outside it. Full return wall time and post-output instrumentation time are
+recorded separately. Earlier attempts included trace publication and must not be
+pooled as the same timing definition. The runtime's narrower model measurement is
+retained separately. Process-memory samples cover the whole instrumented request,
+including post-output work, and are labeled separately from live-KV bytes.
 Token-observer timestamps measure a real local CPU consumer handoff, not network
 streaming latency. First-logit readiness is separately recorded. CUDA work is
 synchronized at declared request/phase boundaries; no CUDA_LAUNCH_BLOCKING is set.

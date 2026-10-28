@@ -37,6 +37,18 @@ def generation_observer(adapter):
             self.emissions = []
             self.capture_first_logits = False
             self.first_logits = None
+            self.output_completed = None
+            self.completion_memory = None
+
+        def complete(self, answer):
+            import torch
+
+            torch.cuda.synchronize(adapter.device)
+            self.output_completed = time.perf_counter()
+            self.completion_memory = dict(
+                allocated=torch.cuda.max_memory_allocated(adapter.device),
+                reserved=torch.cuda.max_memory_reserved(adapter.device),
+            )
 
         def emit(self, index, token):
             # A real consumer handoff, not a retrospective prefill-time proxy.
@@ -136,6 +148,10 @@ def layout_capture(adapter):
         capture.update(
             reference=reference,
             compact=compact,
+            independent_positions={
+                identity: tuple(p for _, p in sorted(entries))
+                for identity, entries in positions.items()
+            },
             positions_sha256=digest(packed.slot_records),
             actual_unique_backing_bytes=unique_storage_bytes(
                 [t for pair in compact_layers for t in pair]
@@ -152,40 +168,14 @@ def layout_capture(adapter):
 
 
 def check_layout(adapter, capture, token_ids):
-    import torch
-
     if not capture or len(token_ids) < 17:
         raise AssertionError("missing compressed representation or forced continuation")
     reference, compact = capture.pop("reference"), capture.pop("compact")
-    differences = []
-    agreements = []
-    # A separate FP16 representation contract, never a relaxation of retention-1.
-    atol = rtol = 8 * torch.finfo(torch.float16).eps
-    for index in range(16):
-        token = torch.tensor([[token_ids[index]]], device=adapter.device, dtype=torch.long)
-        a = adapter.decode_one_token(
-            token, reference, capture_queries=False, capture_attentions=False
-        )
-        b = adapter.decode_one_token(
-            token, compact, capture_queries=False, capture_attentions=False
-        )
-        differences.append(float((a.logits.float() - b.logits.float()).abs().max().item()))
-        agreements.append(bool(torch.equal(a.next_token_id, b.next_token_id)))
-        if not torch.allclose(a.logits, b.logits, atol=atol, rtol=rtol):
-            raise AssertionError(
-                f"masked-source/packed representation mismatch at step {index}: {differences[-1]}"
-            )
-        if a.state.next_decode_position != b.state.next_decode_position:
-            raise AssertionError("logical decode positions changed")
+    from mosaickv.evaluation.fox_numerics import validate_independent_layout
+
+    positions = capture.pop("independent_positions")
     return dict(
-        capture,
-        forced_steps=16,
-        maximum_logit_difference=max(differences),
-        per_step_max_logit_difference=differences,
-        greedy_agreement=sum(agreements) / 16,
-        tolerance=dict(
-            atol=atol, rtol=rtol, contract="separate_fp16_8epsilon_representation_control"
-        ),
+        capture, **validate_independent_layout(adapter, reference, compact, positions, token_ids)
     )
 
 
@@ -254,11 +244,22 @@ def run_worker(root: Path, stage: str, index: int, spec_sha: str):
             processor_kwargs={"local_files_only": True},
         )
         summary["model_load_seconds"] = time.perf_counter() - load_start
+        parameter_devices = sorted({str(p.device) for p in adapter.model.parameters()})
+        if any(
+            p.device.type != "cuda" or p.dtype != torch.float16 for p in adapter.model.parameters()
+        ):
+            raise RuntimeError(
+                "registered single-GPU FP16 lane forbids automatic CPU offload "
+                "or mixed parameter precision"
+            )
+        summary["model_parameter_devices"] = parameter_devices
         processor_sha = digest(processor_signature(adapter.processor))
         gpu = asdict(capture_gpu_environment(torch))
         visible = [x for x in gpu["devices"] if x["visible_to_process"]]
         if len(visible) != 1 or "A100" not in visible[0]["name"]:
             raise RuntimeError("registered campaign requires one A100")
+        if gpu["query_error"] or gpu["background_processes"]:
+            raise RuntimeError("GPU isolation cannot be established from telemetry")
         # Shared-node processes on OTHER allocated devices do not invalidate isolation.
         gpu_uuid = visible[0]["uuid"] if "uuid" in visible[0] else visible[0].get("gpu_uuid")
         write_once(
@@ -330,7 +331,7 @@ def run_worker(root: Path, stage: str, index: int, spec_sha: str):
                 ("full_kv", None, "complete"),
                 ("mosaickv_exact", BUDGETS[workload][0], "complete"),
             ]
-        elif stage == "correctness":
+        elif stage in {"correctness", "representation_canary"}:
             arms = [("mosaickv_exact", cap, "complete") for cap in BUDGETS[workload]]
         elif stage == "mechanisms":
             arms = [
@@ -349,6 +350,14 @@ def run_worker(root: Path, stage: str, index: int, spec_sha: str):
                 )
                 for cap in BUDGETS[workload]
             ]
+            arms += [
+                ("prompt_attention_topk", cap, "route-zero-control") for cap in BUDGETS[workload]
+            ]
+            arms += [
+                ("mosaickv_exact", cap, f"random-{seed}")
+                for seed in (13, 29, 47)
+                for cap in BUDGETS[workload]
+            ]
         else:
             arms = [("full_kv", None, "complete")] + [
                 (m, b, "complete")
@@ -356,6 +365,8 @@ def run_worker(root: Path, stage: str, index: int, spec_sha: str):
                 for m in METHODS[workload]
                 if m != "full_kv"
             ]
+        if "arms" in job:
+            arms = [tuple(a) for a in job["arms"]]
         # Five full-request warmups per arm on its actual shape regime; no prefills shared.
         if stage == "measurement":
             for method, cap, variant in arms:
@@ -365,8 +376,15 @@ def run_worker(root: Path, stage: str, index: int, spec_sha: str):
                 )
                 for repeat in range(lock["warmups"]):
                     settle(adapter)
+                    warm_sample = samples[repeat % len(samples)]
+                    warm_messages = build_multimodal_messages(
+                        warm_sample.prompt,
+                        tuple(MediaItem(m.kind, _media_payload(m)) for m in warm_sample.media),
+                    )
                     result = runtime.generate(
-                        EvaluationRequest(f"warmup-{repeat}", first.sample_id, task, messages, {})
+                        EvaluationRequest(
+                            f"warmup-{repeat}", warm_sample.sample_id, task, warm_messages, {}
+                        )
                     )
                     write_once(
                         output / "warmups" / f"{method}-{cap}" / f"{repeat}.json",
@@ -376,7 +394,7 @@ def run_worker(root: Path, stage: str, index: int, spec_sha: str):
         repeats = lock["repeats"] if stage == "measurement" else 1
         for position, sample in enumerate(samples):
             for repeat in range(repeats):
-                offset = (position + repeat) % len(arms)
+                offset = (job["indices"][position] + repeat) % len(arms)
                 ordered = arms[offset:] + arms[:offset]
                 for method, cap, variant in ordered:
                     key = f"{job['indices'][position]:03d}-{method}-{cap}-{variant}-r{repeat}"
@@ -398,6 +416,7 @@ def run_worker(root: Path, stage: str, index: int, spec_sha: str):
                         source_sha=lock["source_sha"],
                         config_sha=config_sha,
                         manifest_path=str(output / "environment.json"),
+                        manifest_sha256=sha(output / "environment.json"),
                         input_sha=digest(
                             dict(prompt=sample.prompt, media=[m.sha256 for m in sample.media])
                         ),
@@ -424,8 +443,12 @@ def run_worker(root: Path, stage: str, index: int, spec_sha: str):
                             current,
                             trace_directory=trace_dir,
                             token_observer=observer.emit,
+                            completion_observer=observer.complete,
                         )
-                        diagnostic = stage == "correctness"
+                        diagnostic = stage in {"correctness", "representation_canary"}
+                        from mosaickv.evaluation.fox_mechanisms import mechanism_audit
+
+                        mechanism = stage == "mechanisms"
                         profiling = stage == "profiling"
                         with (
                             layout_capture(adapter)
@@ -433,6 +456,15 @@ def run_worker(root: Path, stage: str, index: int, spec_sha: str):
                             else contextlib.nullcontext({}) as captured,
                             observer.install(),
                             phase_ranges(),
+                            mechanism_audit(
+                                variant,
+                                sample.sample_id,
+                                stable_policy=resolved_config(
+                                    lock, workload, "mosaickv_exact", cap
+                                ),
+                            )
+                            if mechanism
+                            else contextlib.nullcontext({}) as activity,
                             ProcessSampler(gpu_uuid) as sampler,
                             torch.profiler.profile(
                                 activities=[
@@ -457,7 +489,10 @@ def run_worker(root: Path, stage: str, index: int, spec_sha: str):
                                 EvaluationRequest(key, sample.sample_id, task, messages, {})
                             )
                             torch.cuda.synchronize()
-                            wall_seconds = time.perf_counter() - wall
+                            returned_wall_seconds = time.perf_counter() - wall
+                            if observer.output_completed is None:
+                                raise RuntimeError("missing output-completion handoff")
+                            wall_seconds = observer.output_completed - wall
                         if profiling:
                             profile_dir = output / "profiler" / key
                             profile_dir.mkdir(parents=True, exist_ok=True)
@@ -475,6 +510,8 @@ def run_worker(root: Path, stage: str, index: int, spec_sha: str):
                             ]
                             write_once(profile_dir / "operators.json", averages)
                         write_once(output / "telemetry" / f"{key}.json", sampler.record())
+                        if mechanism:
+                            write_once(output / "mechanisms" / f"{key}.json", activity)
                         traces = [completed_trace(trace_dir, key)]
                         trace = json.loads(traces[0].read_text())
                         tokens = trace.get("generated_token_ids", trace.get("token_ids"))
@@ -486,10 +523,16 @@ def run_worker(root: Path, stage: str, index: int, spec_sha: str):
                         ):
                             raise AssertionError("FullKV executed unused policy observations")
                         if diagnostic:
+                            representation = check_layout(adapter, captured, tokens)
                             write_once(
                                 output / "correctness" / f"{key}.json",
-                                check_layout(adapter, captured, tokens),
+                                representation,
                             )
+                            if representation["status"] != "passed":
+                                raise AssertionError(
+                                    "independent representation/control gate failed; "
+                                    "complete report preserved"
+                                )
                         metrics = asdict(result.metrics)
                         if len(tokens) != 64 or len(observer.steps) != 63:
                             raise AssertionError("locked fixed output/forward schedule changed")
@@ -506,13 +549,16 @@ def run_worker(root: Path, stage: str, index: int, spec_sha: str):
                             initial_kv_bytes=metrics["initial_active_kv_storage_bytes"],
                             final_kv_bytes=metrics["final_active_kv_storage_bytes"],
                             peak_kv_bytes=metrics["peak_active_kv_storage_bytes"],
-                            peak_allocated_bytes=torch.cuda.max_memory_allocated(),
-                            peak_reserved_bytes=torch.cuda.max_memory_reserved(),
+                            peak_allocated_bytes=observer.completion_memory["allocated"],
+                            peak_reserved_bytes=observer.completion_memory["reserved"],
                             e2e_wall_seconds=wall_seconds,
                             metrics=metrics,
                             timings=dict(
                                 observer.phases,
                                 input_load_seconds=input_load_seconds,
+                                full_measurement_return_wall_seconds=returned_wall_seconds,
+                                post_output_instrumentation_seconds=returned_wall_seconds
+                                - wall_seconds,
                                 per_token_forward_wall=observer.steps,
                                 first_logit_ready_seconds=observer.prefill_finished - wall,
                                 first_token_emitted_seconds=observer.emissions[0][1] - wall,
@@ -527,7 +573,11 @@ def run_worker(root: Path, stage: str, index: int, spec_sha: str):
                             ),
                             trace_path=str(traces[0]),
                         )
-                        if workload == "milebench":
+                        if workload == "milebench" and stage not in {
+                            "smoke",
+                            "correctness",
+                            "representation_canary",
+                        }:
                             from mosaickv.evaluation.milebench import (
                                 route_milebench_dataset,
                                 score_milebench_sample,
@@ -549,6 +599,22 @@ def run_worker(root: Path, stage: str, index: int, spec_sha: str):
                             ),
                             trace_sha256=sha(traces[0]),
                             boundary="A",
+                            actual_method=current.method.value,
+                            resolved_config_path=str(output / "resolved-configs" / f"{key}.json"),
+                            resolved_config_file_sha256=sha(
+                                output / "resolved-configs" / f"{key}.json"
+                            ),
+                            quality_decoding=trace.get("quality_decoding"),
+                            experiment_arm_sha256=digest(
+                                dict(
+                                    runtime_config=canonical_config(current),
+                                    variant=variant,
+                                    requested_method=method,
+                                )
+                            ),
+                            mechanism_audit_path=str(output / "mechanisms" / f"{key}.json")
+                            if mechanism
+                            else None,
                         )
                         if stage == "scoring":
                             from mosaickv.evaluation.fox_boundary import run_boundary_b

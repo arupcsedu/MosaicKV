@@ -17,6 +17,13 @@ def test_media_closure_is_transitive_and_label_independent():
         media_components(("a",), {"b": ("x",)})
 
 
+def test_single_independent_cluster_cannot_claim_inferential_precision():
+    with pytest.raises(ValueError, match="two independent"):
+        cluster_draws(
+            ("a", "b"), dict(a=("same",), b=("same",)), dict(a="all", b="all"), resamples=3
+        )
+
+
 def test_cluster_resampling_preserves_linked_media_and_each_subtask():
     ids = ("a", "b", "c", "d")
     groups = dict(a=("x",), b=("x",), c=("y",), d=("z",))

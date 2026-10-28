@@ -185,9 +185,10 @@ def test_all_declared_mechanism_variants_have_distinct_configuration():
             w: dict(
                 path=str(
                     __import__(
-                        "mosaickv.evaluation.fox_campaign", fromlist=["HISTORICAL"]
-                    ).HISTORICAL[w]
-                    / "configs/validation/mosaickv_exact-40.json"
+                        "mosaickv.evaluation.fox_campaign", fromlist=["REFERENCE_CONFIG_ROOT"]
+                    ).REFERENCE_CONFIG_ROOT
+                    / w
+                    / "mosaickv_exact.json"
                 )
             )
             for w in ("coco", "milebench")
@@ -238,15 +239,18 @@ def test_local_token_handoff_preserves_tiny_hf_outputs(tmp_path, monkeypatch):
     plain = HuggingFaceMosaicKVModel(adapter, cfg, trace_directory=tmp_path / "plain")
     expected = plain.generate(_request("plain"))
     emitted = []
+    completed = []
     stream = HuggingFaceMosaicKVModel(
         adapter,
         cfg,
         trace_directory=tmp_path / "stream",
         token_observer=lambda index, token: emitted.append((index, token.detach().cpu().tolist())),
+        completion_observer=lambda answer: completed.append((answer, len(emitted))),
     )
     actual = stream.generate(_request("stream"))
     assert actual.answer == expected.answer
     assert [index for index, _ in emitted] == list(range(4))
+    assert completed == [(expected.answer, 4)]
     trace = json.loads(next((tmp_path / "stream").rglob("*.json")).read_text())
     assert [ids[0][0] for _, ids in emitted] == trace["generated_token_ids"]
 
@@ -285,6 +289,7 @@ def test_routed_retention_one_validator_uses_identity_without_planner(monkeypatc
 
     monkeypatch.setattr(runtime, "build_compression_plan", forbidden)
     monkeypatch.setattr(runtime, "forecast_with_rollout", forbidden)
+    monkeypatch.setattr(runtime.MosaicKVState, "retention_one", forbidden)
     report = runtime.compare_runtime_retention_one(adapter, prepared, config)
     assert report.token_agreement == 1
     assert report.maximum_logit_difference <= 1e-4

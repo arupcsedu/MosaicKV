@@ -3883,11 +3883,26 @@ def compare_runtime_retention_one(
         packed = pack_runtime_cache(
             adapter,
             full_state,
-            MosaicKVState.retention_one(full_state),
+            MosaicKVState.create(
+                full_state,
+                exact=full_state.gather_exact_blocks(full_state.blocks, gather_mode="source_views"),
+            ),
             (),
             (),
             packing_mode=config.cache.packing_mode,
         )
+        # Verify every retained value directly, in whole-layer operations. The
+        # generic retention_one() convenience routine also reconstructs by a
+        # per-block scatter, which creates hundreds of thousands of diagnostic
+        # GPU transactions at block size one. Packing already supplies the
+        # independent reconstructed representation needed by this parity test.
+        for source_layer, packed_layer in zip(full_state.layers, packed.snapshot.layers, strict=True):
+            if not torch.equal(source_layer.key, packed_layer.key) or not torch.equal(
+                source_layer.value, packed_layer.value
+            ):
+                raise HuggingFaceRuntimeError("retention-one packing changed source K/V")
+        if not packed.all_slots_valid:
+            raise HuggingFaceRuntimeError("retention-one packing introduced invalid slots")
     elif config.method.is_compressed_baseline:
         prompt_attention = (
             _prompt_attention_by_node(
@@ -8780,6 +8795,7 @@ class HuggingFaceMosaicKVModel:
         *,
         trace_directory: str | Path,
         token_observer: Callable[[int, Any], None] | None = None,
+        completion_observer: Callable[[str], None] | None = None,
     ) -> None:
         if config.execution.backend.value != "huggingface":
             raise ValueError("HuggingFaceMosaicKVModel requires execution.backend='huggingface'")
@@ -8808,6 +8824,7 @@ class HuggingFaceMosaicKVModel:
         # Optional local streaming handoff. Never changes logits or decode order;
         # default callers retain their existing transport and timing behavior.
         self._token_observer = token_observer
+        self._completion_observer = completion_observer
         self.model_id = config.model.id
         self.method = config.method.value
         self.retention_ratio = config.cache.retention_ratio
@@ -10872,6 +10889,8 @@ class HuggingFaceMosaicKVModel:
                 self._terminal_token_ids,
             )
             answer = quality.text
+            if self._completion_observer is not None:
+                self._completion_observer(answer)
             live_cache = self.adapter.extract_past_key_values(state.past_key_values, clone=False)
             active_bytes = sum(
                 tensor_storage_bytes(key) + tensor_storage_bytes(value)

@@ -32,3 +32,41 @@ No prototype, residual, repair, draft, training, new backend or new serving
 scheduler is implemented under this campaign. Older V3 value-correction jobs
 22090651/22090652 are separate diagnostics; their failed coefficient validation
 does not constitute evidence for this frozen exact-selection campaign.
+
+## Numerical-contract revision after the first irregular-layout diagnostic
+
+The first real COCO irregular-layout tests failed the provisional **elementwise**
+8-epsilon FP16 allclose check at later forced steps (maximum absolute differences
+about 0.01--0.023 in the inspected failures). Those attempts remain negative;
+they are not relabeled as passes. No benchmark-score-based tuning follows them.
+
+The replacement numerical study adds independent evidence rather than silently
+raising that tolerance:
+
+1. An independently gathered compact source cache, with independently built
+   additive masks, must match production packing bitwise and its 16-step logits
+   within **1e-4 absolute**, including greedy-token identity.
+2. A **no-eviction** FullKV/padded-FullKV control tests floating-point layout
+   sensitivity on the same checkpoint without changing its retained evidence.
+3. The original-layout masked-source execution is still run for all 16 forced
+   steps. Its elementwise failures are retained, and a separately registered
+   normwise error `||delta logits||inf / max(1, ||reference logits||inf)` must be
+   at most eight machine epsilons. The no-eviction control must independently
+   satisfy that same bound. This is not the retention-one tolerance.
+4. Free-running masked-source agreement is reported separately, excluding the
+   untouched first-prefill token. It is not confused with packing equivalence.
+
+The new references do not call the production packer or mask builder. They use
+only original K/V, selected positions and original logical decode positions.
+Correctness workers do not calculate task scores. All affected reference and
+candidate executions are rerun under this versioned diagnostic contract before
+dependent quality or performance work. If either independent control fails,
+the gate remains blocked. Retention-one's historical **1e-4** criterion remains
+unchanged.
+
+Exact-mode routing has two historical namespaces: both
+`graph.uncertain_head_fraction` and `prototypes.uncertain_head_fraction` must be
+changed coherently in routing ablations, despite prototype construction being
+disabled. A route-zero dispatch may use shared Top-K only after checking its
+selected IDs against the actual all-stable-head selector; equivalence is not
+assumed from the method names.

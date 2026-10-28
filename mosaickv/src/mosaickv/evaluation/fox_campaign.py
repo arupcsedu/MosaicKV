@@ -6,6 +6,7 @@ Historical artifacts are read-only; all outputs use exclusive, atomic publicatio
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import math
@@ -32,8 +33,53 @@ METHODS = {
     "coco": ("full_kv", "prompt_attention_topk", "vl_cache_reimpl", "mosaickv_exact"),
     "milebench": ("full_kv", "prompt_attention_topk", "lookm_reimpl", "mosaickv_exact"),
 }
+REFERENCE_CONFIG_ROOT = Path(__file__).resolve().parents[3] / "configs/experiments/evicastkv_fox"
+
+
+def registered_arms(workload, stage):
+    if stage == "smoke":
+        return [("full_kv", None, "complete"), ("mosaickv_exact", BUDGETS[workload][0], "complete")]
+    if stage in {"correctness", "representation_canary"}:
+        return [
+            (method, cap, "complete")
+            for cap in BUDGETS[workload]
+            for method in ("prompt_attention_topk", "mosaickv_exact")
+        ]
+    if stage == "mechanisms":
+        arms = [
+            ("mosaickv_exact", cap, f"route-{fraction}")
+            for fraction in (0, 1 / 256, 1 / 16, 1 / 4)
+            for cap in BUDGETS[workload]
+        ]
+        arms += [
+            ("mosaickv_exact", cap, variant)
+            for variant in (
+                "mechanism-complete",
+                "routed-prompt",
+                "coverage-off",
+                "value-off",
+                "cross-modal-off",
+            )
+            for cap in BUDGETS[workload]
+        ]
+        arms += [("prompt_attention_topk", cap, "route-zero-control") for cap in BUDGETS[workload]]
+        arms += [
+            ("mosaickv_exact", cap, f"random-{seed}")
+            for seed in (13, 29, 47)
+            for cap in BUDGETS[workload]
+        ]
+        return arms
+    return [("full_kv", None, "complete")] + [
+        (method, cap, "complete")
+        for cap in BUDGETS[workload]
+        for method in METHODS[workload]
+        if method != "full_kv"
+    ]
+
+
 STAGES = (
     "smoke",
+    "representation_canary",
     "correctness",
     "scoring",
     "profiling",
@@ -88,6 +134,18 @@ def clean_source(source: Path, expected: str | None = None) -> str:
     return actual
 
 
+def production_runtime_sha(source: Path) -> str:
+    """Identity-test implementation may change, never production runtime math."""
+    tree = ast.parse((source / "mosaickv/src/mosaickv/backends/hf_runtime.py").read_text())
+    tree.body = [
+        node
+        for node in tree.body
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        or node.name != "compare_runtime_retention_one"
+    ]
+    return hashlib.sha256(ast.dump(tree, include_attributes=False).encode()).hexdigest()
+
+
 def development_subset(samples: list[dict], *, count: int, task: str) -> list[dict]:
     """Length-stratified input-only round robin; never read reference/score fields."""
     if len({s["sample_id"] for s in samples}) != len(samples):
@@ -111,9 +169,7 @@ def development_subset(samples: list[dict], *, count: int, task: str) -> list[di
 
 
 def source_config(workload: str) -> dict:
-    return json.loads(
-        (HISTORICAL[workload] / "configs/validation/mosaickv_exact-40.json").read_text()
-    )
+    return json.loads((REFERENCE_CONFIG_ROOT / workload / "mosaickv_exact.json").read_text())
 
 
 def validate_locked_policy(config: dict) -> None:
@@ -125,6 +181,7 @@ def validate_locked_policy(config: dict) -> None:
         ("graph", "candidate_nonmandatory_fraction"): 0.08,
         ("graph", "max_neighbors"): 8,
         ("graph", "uncertain_head_fraction"): 1 / 256,
+        ("prototypes", "uncertain_head_fraction"): 1 / 256,
         ("selection", "coverage_correction_rounds"): 2,
         ("utility", "lambda_q"): 1.0,
         ("utility", "lambda_v"): -0.3,
@@ -162,6 +219,7 @@ class CampaignRow:
     attempt: str
     repeat: int
     status: str
+    manifest_sha256: str | None = None
     error: str | None = None
     answer: str | None = None
     token_ids: tuple[int, ...] = ()
@@ -195,6 +253,7 @@ class CampaignRow:
                 self.peak_kv_bytes,
                 self.e2e_wall_seconds,
                 self.trace_path,
+                self.manifest_sha256,
             )
             if any(value is None for value in required):
                 raise ValueError("completed row has missing measurements")

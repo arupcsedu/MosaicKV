@@ -4,10 +4,12 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.metadata
 import json
 import os
 import platform
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -15,15 +17,15 @@ from pathlib import Path
 from mosaickv.evaluation.fox_campaign import (
     BUDGETS,
     COCO_POOL,
-    HISTORICAL,
     METHODS,
     MILE_POOL,
+    REFERENCE_CONFIG_ROOT,
     SEED,
     STAGES,
     TASKS,
     clean_source,
     development_subset,
-    digest,
+    registered_arms,
     sha,
     source_config,
     validate_locked_policy,
@@ -68,12 +70,12 @@ def prepare(root: Path):
     source_sha = clean_source(SOURCE)
     templates, cohorts, bindings = {}, {}, {}
     for workload in BUDGETS:
-        template_path = HISTORICAL[workload] / "configs/validation/mosaickv_exact-40.json"
+        template_path = REFERENCE_CONFIG_ROOT / workload / "mosaickv_exact.json"
         templates[workload] = source_config(workload)
         validate_locked_policy(templates[workload])
         bindings[str(template_path)] = sha(template_path)
         for method in METHODS[workload]:
-            method_path = HISTORICAL[workload] / "configs/validation" / f"{method}-40.json"
+            method_path = REFERENCE_CONFIG_ROOT / workload / f"{method}.json"
             bindings[str(method_path)] = sha(method_path)
         if workload == "coco":
             parent = json.loads(COCO_POOL.read_text())
@@ -126,16 +128,18 @@ def prepare(root: Path):
         write_once(root / "configs" / f"{workload}-historical.json", templates[workload])
     lock = dict(
         schema_version=1,
-        name="evicastkv_fox_v1",
+        name="evicastkv_fox_v2_controlled_numerics",
         source_sha=source_sha,
         source_root=str(SOURCE),
-        source_patch_sha256=digest(""),
+        source_patch_sha256=hashlib.sha256(b"").hexdigest(),
+        source_patch_encoding="raw_git_diff_bytes_empty_clean_worktree",
         seed=SEED,
         historical_base_sha="edb6edfaf50f4539c9c1969371fefecf0eabccbf",
         stages=list(STAGES),
         resources=dict(
             maximum_a100s=4,
             cpus_per_worker=12,
+            memory_gib_per_worker=64,
             wall_minutes=120,
             partition="bii-gpu",
             reservation="bi_fox_dgx",
@@ -165,7 +169,11 @@ def prepare(root: Path):
             synthetic_rtol=1e-8,
             compressed_logit_atol=0.0078125,
             compressed_logit_rtol=0.0078125,
-            compressed_contract="independently_preregistered_fp16_8epsilon_not_retention_one",
+            compressed_contract="independent_compact_strict_plus_unpruned_controlled_normwise_FP16_v2",
+            compressed_independent_compact_max_absolute=1e-4,
+            original_masked_metric="Linf_difference / max(1,Linf_reference)",
+            unpruned_padding_control_required=True,
+            legacy_elementwise_8epsilon_results_retained=True,
         ),
         authorization=dict(
             automatic_stage_progression=True,
@@ -216,6 +224,10 @@ def prepare(root: Path):
 def load_lock(root):
     lock = json.loads((root / "protocol_lock.json").read_text())
     clean_source(SOURCE, lock["source_sha"])
+    import mosaickv
+
+    if not Path(mosaickv.__file__).resolve().is_relative_to(SOURCE / "mosaickv/src"):
+        raise ValueError("imported package is not the registered source worktree")
     for path, expected in lock["historical_bindings"].items():
         if sha(Path(path)) != expected:
             raise ValueError("historical input/configuration changed")
@@ -234,7 +246,7 @@ def resolved_config(lock, workload, method, cap, *, variant="complete"):
 
     template = json.loads(Path(lock["templates"][workload]["path"]).read_text())
     if method != "mosaickv_exact":
-        historical = HISTORICAL[workload] / "configs/validation" / f"{method}-40.json"
+        historical = REFERENCE_CONFIG_ROOT / workload / f"{method}.json"
         template = json.loads(historical.read_text())
     template["cache"]["budget_value"] = int(cap * 2**20) if cap else 2**63 - 1
     # Keep each pinned port's validated nominal convention. These runs are
@@ -250,14 +262,21 @@ def resolved_config(lock, workload, method, cap, *, variant="complete"):
             # Explicit route-zero control is Prompt Top-K, not silently a graph run.
             return resolved_config(lock, workload, "prompt_attention_topk", cap)
         template["graph"]["uncertain_head_fraction"] = fraction
+        # Exact-mode planner routing still uses this historical configuration
+        # namespace even though prototypes themselves are disabled.
+        template["prototypes"]["uncertain_head_fraction"] = fraction
     if variant in (
         "routed-prompt",
         "coverage-off",
         "value-off",
         "cross-modal-off",
         "mechanism-complete",
+        "random-13",
+        "random-29",
+        "random-47",
     ):
         template["graph"]["uncertain_head_fraction"] = 1 / 16
+        template["prototypes"]["uncertain_head_fraction"] = 1 / 16
     if variant in ("coverage-off", "routed-prompt"):
         template["selection"]["lambda_g"] = 0.0
         template["selection"]["lambda_m"] = 0.0
@@ -271,8 +290,13 @@ def resolved_config(lock, workload, method, cap, *, variant="complete"):
 
 def jobs_for(lock, stage):
     jobs = []
-    if stage == "smoke":
-        return [dict(workload=w, subset="smoke", indices=[0], stage=stage) for w in BUDGETS]
+    if stage in {"smoke", "representation_canary"}:
+        return [
+            dict(
+                workload=w, subset="smoke", indices=[0], stage=stage, arms=registered_arms(w, stage)
+            )
+            for w in BUDGETS
+        ]
     subset = {
         "correctness": "validation",
         "scoring": "validation",
@@ -290,6 +314,7 @@ def jobs_for(lock, stage):
                     subset=subset,
                     indices=list(range(start, min(count, start + chunk))),
                     stage=stage,
+                    arms=registered_arms(workload, stage),
                 )
             )
     return jobs
@@ -299,11 +324,72 @@ def submit(root, stage, dependency=None):
     lock = load_lock(root)
     jobs = jobs_for(lock, stage)
     spec = root / "jobs" / f"{stage}.json"
-    write_once(spec, dict(stage=stage, protocol_sha256=sha(root / "protocol_lock.json"), jobs=jobs))
+    imported = {}
+    extra_analysis_dependencies = []
+    import_path = root / "imported_correctness.json"
+    if stage == "correctness" and import_path.exists():
+        from mosaickv.evaluation.fox_campaign import production_runtime_sha
+
+        registration = json.loads(import_path.read_text())
+        parent = Path(registration["parent_root"])
+        old_lock = json.loads((parent / "protocol_lock.json").read_text())
+        if (
+            old_lock["tolerances"]["compressed_contract"]
+            != lock["tolerances"]["compressed_contract"]
+        ):
+            raise ValueError("cannot reuse a different numerical validation contract")
+        clean_source(Path(old_lock["source_root"]), old_lock["source_sha"])
+        if production_runtime_sha(SOURCE) != production_runtime_sha(Path(old_lock["source_root"])):
+            raise ValueError("cannot reuse correctness across production-runtime changes")
+        if sha(parent / "analysis/smoke/GATE_smoke.json") != registration["smoke_gate_sha256"]:
+            raise ValueError("imported smoke gate changed")
+        if (
+            json.loads((parent / "analysis/smoke/GATE_smoke.json").read_text())["status"]
+            != "passed"
+        ):
+            raise ValueError("imported smoke gate did not pass")
+        for index in registration["worker_indices"]:
+            job = jobs[index]
+            if (
+                old_lock["cohorts"][job["workload"]][job["subset"]]["sha256"]
+                != lock["cohorts"][job["workload"]][job["subset"]]["sha256"]
+            ):
+                raise ValueError("imported correctness inputs changed")
+            imported[str(index)] = dict(
+                parent_root=str(parent), source_sha=old_lock["source_sha"], index=index
+            )
+        extra_analysis_dependencies = registration["wait_for_jobs"]
+    write_once(
+        spec,
+        dict(
+            stage=stage,
+            protocol_sha256=sha(root / "protocol_lock.json"),
+            jobs=jobs,
+            imported_workers=imported,
+        ),
+    )
     common = ["sbatch", "--parsable", "--account=bii_dsc_community"]
+    active = subprocess.check_output(
+        ["squeue", "-h", "-u", os.environ["USER"], "-t", "RUNNING,COMPLETING", "-o", "%i|%b"],
+        text=True,
+    )
+    active_gpus = 0
+    gpu_jobs = []
+    for line in active.splitlines():
+        identity, gres = line.split("|", 1)
+        match = re.search(r"gpu(?::[a-zA-Z0-9_-]+)?:(\d+)", gres)
+        if match:
+            active_gpus += int(match[1])
+            gpu_jobs.append(identity)
+    available = max(0, lock["resources"]["maximum_a100s"] - active_gpus)
+    if available == 0:
+        dependency = ":".join(([dependency] if dependency else []) + gpu_jobs)
+        available = lock["resources"]["maximum_a100s"]
     command = [
         *common,
-        f"--array=0-{len(jobs) - 1}%4",
+        "--array="
+        + ",".join(str(i) for i in range(len(jobs)) if str(i) not in imported)
+        + f"%{available}",
         f"--output={root}/slurm/{stage}-%A_%a.out",
         f"--error={root}/slurm/{stage}-%A_%a.err",
     ]
@@ -324,7 +410,7 @@ def submit(root, stage, dependency=None):
         "--cpus-per-task=4",
         "--mem=16G",
         "--time=00:20:00",
-        f"--dependency=afterany:{gpu}",
+        "--dependency=afterany:" + ":".join([gpu, *extra_analysis_dependencies]),
         f"--output={root}/slurm/{stage}-analysis-%j.out",
         f"--error={root}/slurm/{stage}-analysis-%j.err",
         str(SOURCE / "mosaickv/slurm/evicastkv_completion.sbatch"),
@@ -378,11 +464,11 @@ def main():
         )
     elif args.mode in ("dry-run", "validate"):
         lock = load_lock(args.root)
-        print(
-            json.dumps(
-                dict(status="validated", jobs=jobs_for(lock, args.stage), GPU_launched=False)
-            )
-        )
+        jobs = jobs_for(lock, args.stage)
+        for job in jobs:
+            for method, cap, variant in job["arms"]:
+                resolved_config(lock, job["workload"], method, cap, variant=variant)
+        print(json.dumps(dict(status="validated", jobs=jobs, GPU_launched=False)))
     else:
         # Resume is selective: a new retry spec is needed rather than overwrite.
         if args.mode == "resume":

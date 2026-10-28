@@ -44,6 +44,8 @@ def cluster_draws(identities, groups_by_id, task_by_id, *, resamples=10000, seed
     if resamples < 1 or set(identities) != set(task_by_id):
         raise ValueError("invalid resampling contract")
     components = media_components(identities, groups_by_id)
+    if len(components) < 2:
+        raise ValueError("at least two independent reusable-media clusters are required")
     strata = defaultdict(list)
     for component in components:
         signature = tuple(sorted({task_by_id[identities[index]] for index in component}))

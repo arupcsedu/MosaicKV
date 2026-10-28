@@ -6,12 +6,13 @@ import csv
 import json
 import math
 import statistics
+import subprocess
 from collections import defaultdict
 from pathlib import Path
 
 from evicastkv_campaign import load_lock, submit
 
-from mosaickv.evaluation.fox_campaign import digest, gate_payload, sha, write_once
+from mosaickv.evaluation.fox_campaign import digest, gate_payload, registered_arms, sha, write_once
 
 
 def collect(root, stage):
@@ -20,7 +21,9 @@ def collect(root, stage):
     rows = []
     errors = []
     for index, _job in enumerate(spec["jobs"]):
-        paths = list((root / "outputs" / stage / f"{index:03d}").glob("*/worker.json"))
+        imported = spec.get("imported_workers", {}).get(str(index))
+        worker_root = Path(imported["parent_root"]) if imported else root
+        paths = list((worker_root / "outputs" / stage / f"{index:03d}").glob("*/worker.json"))
         if len(paths) != 1:
             errors.append(
                 dict(
@@ -31,6 +34,8 @@ def collect(root, stage):
             )
             continue
         worker = json.loads(paths[0].read_text())
+        if imported and worker["source_sha"] != imported["source_sha"]:
+            raise ValueError("imported correctness source identity changed")
         workers.append(worker)
         if worker["status"] != "passed":
             errors.append(dict(index=index, errors=worker["errors"]))
@@ -39,6 +44,11 @@ def collect(root, stage):
             if sha(path) != binding["sha256"]:
                 raise ValueError("raw record hash mismatch")
             row = json.loads(path.read_text())
+            if (
+                row.get("manifest_sha256") is not None
+                and sha(Path(row["manifest_path"])) != row["manifest_sha256"]
+            ):
+                raise ValueError("run manifest changed")
             if row["status"] != "completed":
                 errors.append(dict(index=index, sample_id=row["sample_id"], error=row.get("error")))
             elif sha(Path(row["trace_path"])) != row["trace_sha256"]:
@@ -189,6 +199,44 @@ def analyze(root: Path, stage: str):
     spec, workers, rows, errors = collect(root, stage)
     output = root / "analysis" / stage
     output.mkdir(parents=True, exist_ok=True)
+    if stage == "scoring":
+        from evicastkv_campaign import PYTHON, SOURCE
+
+        command = [
+            PYTHON,
+            "-m",
+            "pytest",
+            "mosaickv/tests/unit/test_paper_native_metrics.py",
+            "mosaickv/tests/unit/test_coco_shared_bytes.py",
+            "mosaickv/tests/unit/test_lookm_reimpl.py",
+            "mosaickv/tests/unit/test_vl_cache_reimpl.py",
+            "-q",
+            "-o",
+            "cache_dir=/scratch/djy8hg/cache/mosaickv/pytest/fox-scoring",
+            "--junitxml=" + str(output / "scoring_fixtures.xml"),
+        ]
+        result = subprocess.run(command, cwd=SOURCE, capture_output=True, text=True, timeout=180)
+        write_once(
+            output / "scoring_fixtures.json",
+            dict(
+                status="passed" if result.returncode == 0 else "failed",
+                command=command,
+                stdout=result.stdout,
+                stderr=result.stderr,
+                measurement_type="synthetic_fixtures_not_benchmark_measurements",
+            ),
+        )
+        if result.returncode != 0:
+            errors.append(dict(error="native scorer/formula fixture tests failed"))
+        write_once(
+            output / "baseline_fidelity.json",
+            dict(
+                lookm_reimpl="upstream_execution_unverified_missing_custom_LLaVA_fork",
+                vl_cache_reimpl="no_official_implementation_available",
+                strong_official_baseline_superiority_claim_allowed=False,
+                local_formula_test_status="see_scoring_fixtures",
+            ),
+        )
     paired = []
     try:
         paired = pairing(rows)
@@ -196,7 +244,7 @@ def analyze(root: Path, stage: str):
         errors.append(dict(error=f"{type(error).__name__}: {error}"))
     expected = 0
     for job in spec["jobs"]:
-        arms = 2 if stage in ("smoke", "correctness") else 18 if stage == "mechanisms" else 7
+        arms = len(job.get("arms", registered_arms(job["workload"], stage)))
         repeats = lock["repeats"] if stage == "measurement" else 1
         expected += len(job["indices"]) * arms * repeats
     if len(rows) != expected:
@@ -221,9 +269,25 @@ def analyze(root: Path, stage: str):
         blockers=errors,
     )
     write_once(output / f"GATE_{stage}.json", gate)
+    if stage == "scoring" and gate["status"] == "passed":
+        from evicastkv_evidence import native_statistics
+
+        try:
+            native_statistics(root, stage, output / "native", workers=4)
+        except Exception as error:
+            write_once(
+                output / "native_statistics_blocked.json",
+                dict(
+                    status="blocked",
+                    error=f"{type(error).__name__}: {error}",
+                    quality_inference_allowed=False,
+                    scoring_execution_preserved=True,
+                ),
+            )
     # Positive execution is not an instruction to manufacture a scientific claim.
     successor = {
-        "smoke": "correctness",
+        "representation_canary": "correctness",
+        "smoke": "representation_canary",
         "correctness": "scoring",
         "scoring": "profiling",
         "profiling": "measurement",
