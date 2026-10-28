@@ -8805,6 +8805,7 @@ class HuggingFaceMosaicKVModel:
         config: RunConfig,
         *,
         trace_directory: str | Path,
+        token_observer: Callable[[int, Any], None] | None = None,
     ) -> None:
         if config.execution.backend.value != "huggingface":
             raise ValueError("HuggingFaceMosaicKVModel requires execution.backend='huggingface'")
@@ -8830,6 +8831,9 @@ class HuggingFaceMosaicKVModel:
         self.adapter = adapter
         self.config = config
         self.trace_directory = Path(trace_directory)
+        # Optional local streaming handoff. Never changes logits or decode order;
+        # default callers retain their existing transport and timing behavior.
+        self._token_observer = token_observer
         self.model_id = config.model.id
         self.method = config.method.value
         self.retention_ratio = config.cache.retention_ratio
@@ -10552,6 +10556,8 @@ class HuggingFaceMosaicKVModel:
             else:
                 tokens = [prefill.next_token_id]
                 token = prefill.next_token_id
+            if self._token_observer is not None:
+                self._token_observer(0, token)
             decode_seconds = 0.0
             oracle_repair_diagnostic_seconds = 0.0
             per_token_decode_seconds: list[float] = []
@@ -10700,6 +10706,8 @@ class HuggingFaceMosaicKVModel:
                     else:
                         token = provisional.next_token_id
                     tokens.append(token)
+                    if self._token_observer is not None:
+                        self._token_observer(step_index, token)
                     continue
 
                 if plan is None:
@@ -10868,6 +10876,8 @@ class HuggingFaceMosaicKVModel:
                     )
                     token = torch.full_like(token, target_id)
                 tokens.append(token)
+                if self._token_observer is not None:
+                    self._token_observer(step_index, token)
 
             if decode_finite_flags:
                 finite_logits, validation_seconds = _timed(

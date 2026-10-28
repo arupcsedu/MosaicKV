@@ -1,0 +1,54 @@
+{
+  "00_MASTER.md": {
+    "bytes": 4520,
+    "sha256": "65e30887393d94303efcf172d225d44731ca62fae8ea14e766ff4c75c57d4d01"
+  },
+  "01_DISCOVER_AND_LOCK.md": {
+    "bytes": 3430,
+    "sha256": "b558a42133f935eb9efbddf0af78475c2381738c89488030cb4a1ea8b731638a"
+  },
+  "02_CACHE_CORRECTNESS.md": {
+    "bytes": 3325,
+    "sha256": "97247da6a14ff04fc3dc34a2014e899898019b727b2dd61064db4812c3f85a79"
+  },
+  "03_SCORING_AND_BOUNDARY.md": {
+    "bytes": 3652,
+    "sha256": "188b9b48964788791a1fb09d037d09030343c8db54eaed96116e93622c217786"
+  },
+  "04_PROFILE_AND_MEASURE.md": {
+    "bytes": 3456,
+    "sha256": "6bcaac3eff48a656471403a624896864be448ea5b2790c7ab0222d41365717e5"
+  },
+  "05_SAFE_OPTIMIZATION.md": {
+    "bytes": 2784,
+    "sha256": "088aa678c0c10cd3196896f675740f096093d2388e808d5536db7fb7495573a6"
+  },
+  "06_MECHANISM_ABLATIONS.md": {
+    "bytes": 3929,
+    "sha256": "44d4c6bbaafc89b4f3d2c64533ec80cf0efad7068860fdda0572747c55aeb366"
+  },
+  "07_FRESH_CONFIRMATION.md": {
+    "bytes": 3669,
+    "sha256": "f1a2560b395cb8ee0aeb7d2b20c14bb4dafe28ede707852cb9fecb397df6931b"
+  },
+  "08_OPTIONAL_BATCHING.md": {
+    "bytes": 2671,
+    "sha256": "507718d8b7391e549f4fabe4c6230ce85a66e24a4c53759e6b724bfe387feead"
+  },
+  "09_STATISTICS_AND_EXPORT.md": {
+    "bytes": 4323,
+    "sha256": "da95c87c3f9bdc774086e8f91f8796ed6c6cc117b95be56f3c4c015900413510"
+  },
+  "10_FINAL_REPRODUCTION_AUDIT.md": {
+    "bytes": 1958,
+    "sha256": "811df398b2284ad0660806d14ddce940e6d2c2d3bf6859adb32fa9a7e3d385fa"
+  },
+  "ALL_PROMPTS.md": {
+    "bytes": 37949,
+    "sha256": "206a29aef6671668dc2b736a3eec7314f7b3d1439024a1a06ad36a83eef0c129"
+  },
+  "README.md": {
+    "bytes": 9301,
+    "sha256": "ef2e1b55ea826d26d55da2fd1f349f05ea2a75c5bca776ca04753a541b07a5d6"
+  }
+}
