@@ -32,6 +32,42 @@ def test_follow_does_not_poll_or_submit_gpu_work(monkeypatch):
     assert "submit(" not in source
 
 
+def test_only_explicit_cpu_provenance_is_separate_from_numerical_results(monkeypatch):
+    m = module(monkeypatch)
+    a = [
+        dict(
+            scores={"x": 100.0},
+            unique_inputs=64,
+            reducer_verification=dict(
+                requested_cpus=4,
+                used_cpus=4,
+                maximum_absolute_CIDEr_difference=1e-14,
+            ),
+        )
+    ]
+    b = [
+        dict(
+            a[0],
+            reducer_verification=dict(a[0]["reducer_verification"], requested_cpus=1, used_cpus=1),
+        )
+    ]
+    provenance = []
+    assert m.compare_numeric(a, b, provenance=provenance) == 0
+    assert [(p["reference"], p["candidate"]) for p in provenance] == [(4, 1), (4, 1)]
+    for change in (dict(unique_inputs=63), dict(scores={"x": 99.0})):
+        with pytest.raises(ValueError):
+            m.compare_numeric(a, [dict(b[0], **change)])
+    for change in (dict(used_cpus=0), dict(maximum_absolute_CIDEr_difference=0.1)):
+        with pytest.raises(ValueError):
+            m.compare_numeric(
+                a, [dict(b[0], reducer_verification=dict(b[0]["reducer_verification"], **change))]
+            )
+    with pytest.raises(ValueError):
+        m.compare_numeric(dict(requested_cpus=4), dict(requested_cpus=1))
+    with pytest.raises(ValueError):
+        m.compare_numeric(a, [dict(b[0], reducer_verification={})])
+
+
 def test_mechanism_shards_partition_complete_cohort_without_changing_arms(monkeypatch):
     module(monkeypatch)
     from evicastkv_campaign import jobs_for

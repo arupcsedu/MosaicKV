@@ -21,20 +21,51 @@ from evicastkv_packet import packet, read
 
 from mosaickv.evaluation.fox_campaign import clean_source, sha, write_once
 
+PROVENANCE_PATHS = frozenset(
+    {
+        ("reducer_verification", "requested_cpus"),
+        ("reducer_verification", "used_cpus"),
+    }
+)
 
-def compare_numeric(reference, candidate, *, tolerance=1e-10):
+
+def compare_numeric(reference, candidate, *, tolerance=1e-10, path=(), provenance=None):
     """Reference keys must all survive; extra implementation metadata is allowed."""
     maximum = 0.0
     if isinstance(reference, dict):
         if not isinstance(candidate, dict) or not set(reference) <= set(candidate):
             raise ValueError("reproduction dropped reference fields")
         for key, value in reference.items():
-            maximum = max(maximum, compare_numeric(value, candidate[key], tolerance=tolerance))
+            child_path = (*path, key)
+            # Only these two exact reducer provenance fields may differ. Keep
+            # them visible, never ignore a generic metadata subtree or count.
+            if tuple(p for p in child_path if not isinstance(p, int)) in PROVENANCE_PATHS:
+                other = candidate[key]
+                if type(value) is not int or type(other) is not int or min(value, other) < 1:
+                    raise ValueError("invalid reducer CPU provenance")
+                if provenance is not None:
+                    provenance.append(dict(path=list(child_path), reference=value, candidate=other))
+                continue
+            maximum = max(
+                maximum,
+                compare_numeric(
+                    value,
+                    candidate[key],
+                    tolerance=tolerance,
+                    path=child_path,
+                    provenance=provenance,
+                ),
+            )
     elif isinstance(reference, list):
         if not isinstance(candidate, list) or len(reference) != len(candidate):
             raise ValueError("reproduction changed a denominator or contrast family")
-        for left, right in zip(reference, candidate, strict=True):
-            maximum = max(maximum, compare_numeric(left, right, tolerance=tolerance))
+        for index, (left, right) in enumerate(zip(reference, candidate, strict=True)):
+            maximum = max(
+                maximum,
+                compare_numeric(
+                    left, right, tolerance=tolerance, path=(*path, index), provenance=provenance
+                ),
+            )
     elif isinstance(reference, (int, float)) and not isinstance(reference, bool):
         if not isinstance(candidate, (int, float)) or not math.isfinite(candidate):
             raise ValueError("reproduction contains nonfinite or missing measurements")
@@ -69,7 +100,12 @@ def reproduce(root, output, *, include_packets=False):
         if read(a / name) != read(b / name) or sha(a / name) != sha(b / name):
             raise ValueError("repeated statistical regeneration is not deterministic")
         original = root / "analysis" / stage / "native" / name
-        error = compare_numeric(read(original), first) if original.exists() else None
+        provenance = []
+        error = (
+            compare_numeric(read(original), first, provenance=provenance)
+            if original.exists()
+            else None
+        )
         results.append(
             dict(
                 stage=stage,
@@ -78,6 +114,7 @@ def reproduce(root, output, *, include_packets=False):
                 resamples_per_repetition=10000,
                 wall_seconds=time.monotonic() - started,
                 actual_source_equivalence_max_absolute_error=error,
+                reducer_provenance_comparison=provenance,
                 canonical_source_present=original.exists(),
                 canonical_source_sha256=sha(original) if original.exists() else None,
                 regenerated_sha256=sha(a / name),

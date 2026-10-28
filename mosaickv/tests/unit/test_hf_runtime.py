@@ -191,6 +191,59 @@ def test_spatial_stratified_prompt_evidence_requires_complete_nonnegative_scores
         )
 
 
+@pytest.mark.parametrize("fraction", [0.5, 1.0])
+@pytest.mark.parametrize("uniform_fill", [False, True])
+def test_routing_extremes_initialize_stable_reservations(fraction, uniform_fill) -> None:
+    key = np.arange(2 * 8 * 4, dtype=np.float32).reshape(1, 2, 8, 4) + 1
+    full = FullKVState.from_tensors(
+        ((key, np.flip(key, axis=-1).copy()),),
+        block_size=1,
+        mandatory_logical_positions=(0, 7),
+        cached_key_state=CachedKeyState.NOT_APPLICABLE,
+    )
+    base = _config(MosaicKVMethod.MOSAICKV_EXACT, 0.5)
+    cfg = replace(
+        base,
+        cache=CacheConfig(16, BudgetUnit.BLOCKS, 0.5, 1),
+        graph=replace(
+            base.graph,
+            uncertain_head_only=True,
+            uncertain_head_fraction=fraction,
+            uncertain_head_threshold=0.0,
+            candidate_descriptor_pooling=True,
+            similarity_shortlist_multiplier=2.0,
+            candidate_graph_mode="shortlist_rerank",
+        ),
+        prototypes=replace(
+            base.prototypes,
+            uncertain_head_only=True,
+            uncertain_head_fraction=fraction,
+            uncertain_head_threshold=0.0,
+        ),
+        selection=replace(
+            base.selection,
+            stable_head_prompt_routing=True,
+            routed_head_only_planning=True,
+            stable_head_uniform_fill=uniform_fill,
+            algorithm="vectorized_coverage",
+            coverage_correction_rounds=2,
+            minimum_stratum_fraction=0.0,
+        ),
+    )
+    scores = {i: float(100 - i) for i in range(len(full.blocks))}
+    kwargs = dict(
+        prompt_attention_by_node=scores, graph_head_uncertainty={(0, 0): 1.0, (0, 1): 0.5}
+    )
+    plan = build_compression_plan(full, None, scores, _capabilities(safe=False), cfg, **kwargs)
+    again = build_compression_plan(full, None, scores, _capabilities(safe=False), cfg, **kwargs)
+    assert plan.construction.exact_node_ids == again.construction.exact_node_ids
+    assert plan.selection.budget_spent <= plan.selection.budget.value
+    kept = set(plan.construction.exact_node_ids)
+    assert all(i in kept for i, block in enumerate(full.blocks) if block.mandatory)
+    if fraction == 1:
+        assert set(plan.graph_head_routes) == {(0, 0), (0, 1)}
+
+
 def test_routed_head_only_plan_bypasses_stable_graph_utility_and_selection() -> None:
     sequence = 8
     key = np.arange(2 * sequence * 4, dtype=np.float32).reshape(1, 2, sequence, 4) + 1
@@ -353,35 +406,30 @@ def test_routed_head_only_plan_compacts_and_defers_source_audit() -> None:
         sum(block.byte_size for block in full.blocks),
         BudgetUnit.BYTES,
     )
-    construction, progressive_selection, external_ids = (
-        hf_runtime._progressive_exact_construction(
-            plan,
-            _capabilities(safe=False),
-            config,
-            range(len(full.blocks)),
-            key_transform=None,
-            active_budget=full_budget,
-        )
+    construction, progressive_selection, external_ids = hf_runtime._progressive_exact_construction(
+        plan,
+        _capabilities(safe=False),
+        config,
+        range(len(full.blocks)),
+        key_transform=None,
+        active_budget=full_budget,
     )
     assert construction.exact_node_ids == tuple(range(len(full.blocks)))
     assert not set(external_ids).intersection(planner_sources)
     assert {
-        plan.source_node_id(node_id)
-        for node_id in progressive_selection.selected_node_ids
+        plan.source_node_id(node_id) for node_id in progressive_selection.selected_node_ids
     } == planner_sources
 
     removed_planner = min(planner_sources)
     removed_external = min(stable_sources)
     retained = set(range(len(full.blocks))) - {removed_planner, removed_external}
-    reduced, reduced_selection, reduced_external = (
-        hf_runtime._progressive_exact_construction(
-            plan,
-            _capabilities(safe=False),
-            config,
-            retained,
-            key_transform=None,
-            active_budget=full_budget,
-        )
+    reduced, reduced_selection, reduced_external = hf_runtime._progressive_exact_construction(
+        plan,
+        _capabilities(safe=False),
+        config,
+        retained,
+        key_transform=None,
+        active_budget=full_budget,
     )
     assert set(reduced.exact_node_ids) == retained
     assert removed_planner not in {
@@ -472,9 +520,7 @@ def test_dense_routed_plan_keeps_stable_exact_blocks_outside_objective() -> None
     assert plan.external_exact_capacity_records[0].shortfall_positions == 0
     assert all(full.blocks[node_id].kv_head == 1 for node_id in plan.external_exact_node_ids)
     assert len(plan.construction.exact_node_ids) == 12
-    assert {
-        layout.active_cache_length for layout in plan.construction.active_layouts
-    } == {6}
+    assert {layout.active_cache_length for layout in plan.construction.active_layouts} == {6}
     dense_budget = hf_runtime.DensePhysicalCacheBudget(
         source_bytes=full.active_bytes,
         target_bytes=full.active_bytes,
@@ -1547,10 +1593,13 @@ def test_dense_physical_byte_budget_supports_fixed_multitoken_blocks() -> None:
         dense.target_bytes - 3 * dense.bytes_per_position
     )
     effective_target = 5 * dense.bytes_per_position
-    assert dense.minimum_block_representable_fill(
-        1,
-        target_bytes=effective_target,
-    ) == effective_target
+    assert (
+        dense.minimum_block_representable_fill(
+            1,
+            target_bytes=effective_target,
+        )
+        == effective_target
+    )
     with pytest.raises(ValueError, match="within the dense hard cap"):
         dense.minimum_block_representable_fill(
             1,

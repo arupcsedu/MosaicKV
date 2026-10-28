@@ -3632,23 +3632,22 @@ def build_compression_plan(
                     label="stable-head prompt reservation",
                 )
             )
-        if external_exact_node_ids:
-            stable_prompt_ids: tuple[int, ...] = ()
-        elif not stable_prompt_reference_ids:
-            stable_prompt_reference_ids = select_prompt_attention_topk_ids(
-                full_state,
-                SelectionBudget(target, config.cache.budget_unit),
-                prompt_attention_by_node=(
-                    prompt_attention_by_node
-                    if isinstance(prompt_attention_by_node, Mapping)
-                    else {
-                        node_id: float(prompt_attention_by_node[node_id])
-                        for node_id in range(len(full_state.blocks))
-                    }
-                ),
-                position_limits=reservation_position_limits,
-            )
-        else:
+        stable_prompt_ids: tuple[int, ...] = ()
+        if not external_exact_node_ids:
+            if not stable_prompt_reference_ids:
+                stable_prompt_reference_ids = select_prompt_attention_topk_ids(
+                    full_state,
+                    SelectionBudget(target, config.cache.budget_unit),
+                    prompt_attention_by_node=(
+                        prompt_attention_by_node
+                        if isinstance(prompt_attention_by_node, Mapping)
+                        else {
+                            node_id: float(prompt_attention_by_node[node_id])
+                            for node_id in range(len(full_state.blocks))
+                        }
+                    ),
+                    position_limits=reservation_position_limits,
+                )
             stable_prompt_ids = tuple(
                 source_to_planner[node_id]
                 for node_id in stable_prompt_reference_ids
