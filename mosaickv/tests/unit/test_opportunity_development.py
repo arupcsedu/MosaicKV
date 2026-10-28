@@ -1,14 +1,66 @@
 """CPU synthetic fixtures validate analysis, not measured quality claims."""
 
 import copy
+import json
 
 import pytest
 from evicastkv_opportunity_development import (
     expected_keys,
     quality_decision,
     registered_comparisons,
+    validate_config_record,
     validate_rows,
 )
+
+from mosaickv.evaluation.fox_campaign import digest, sha
+
+
+def config_record(tmp_path):
+    cfg = dict(
+        graph=dict(allowed_modality_pairs=(("text", "image"),)),
+        cache=dict(budget_value=20971520),
+        diagnostics=dict(sample_ids=()),
+    )
+    path = tmp_path / "resolved.json"
+    path.write_text(json.dumps(cfg))
+    arithmetic = dict(allow_fp16_reduced_precision_reduction=True)
+    row = dict(
+        resolved_config_path=str(path),
+        resolved_config_file_sha256=sha(path),
+        config_sha=digest(dict(runtime_config=cfg, arithmetic=arithmetic)),
+        source_sha="producer",
+    )
+    return cfg, arithmetic, row
+
+
+def test_serialized_json_arrays_are_equal_to_canonical_python_tuples(tmp_path):
+    config, arithmetic, row = config_record(tmp_path)
+    validate_config_record(row, config, "producer", arithmetic)
+
+
+@pytest.mark.parametrize(
+    "change", ["cap", "modality", "artifact_hash", "config_hash", "source", "nan"]
+)
+def test_canonical_normalization_does_not_accept_actual_config_or_provenance_drift(
+    tmp_path, change
+):
+    config, arithmetic, row = config_record(tmp_path)
+    if change == "source":
+        row["source_sha"] = "different"
+    elif change == "config_hash":
+        row["config_sha"] = "0" * 64
+    else:
+        path = __import__("pathlib").Path(row["resolved_config_path"])
+        actual = json.loads(path.read_text())
+        if change in ("cap", "nan", "artifact_hash"):
+            actual["cache"]["budget_value"] = float("nan") if change == "nan" else 20971521
+        else:
+            actual["graph"]["allowed_modality_pairs"][0][0] = "video"
+        path.write_text(json.dumps(actual))
+        if change != "artifact_hash":
+            row["resolved_config_file_sha256"] = sha(path)
+    with pytest.raises(ValueError):
+        validate_config_record(row, config, "producer", arithmetic)
 
 
 def rows_fixture():

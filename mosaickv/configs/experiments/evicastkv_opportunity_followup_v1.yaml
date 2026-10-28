@@ -17,7 +17,7 @@ shortlist_size: 8
 resources:
   maximum_a100s: 6
   six_a100s_explicitly_authorized: true
-  array_concurrency: 6
+  array_concurrency: 3
   cpus_per_worker: 12
   samples_per_worker: 4
   wall_minutes: 90

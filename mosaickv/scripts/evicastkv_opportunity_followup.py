@@ -54,7 +54,7 @@ def validate_registration(registration):
     required = dict(
         maximum_a100s=6,
         six_a100s_explicitly_authorized=True,
-        array_concurrency=6,
+        array_concurrency=3,
         cpus_per_worker=12,
         samples_per_worker=4,
         memory_gib_per_worker=64,
@@ -145,12 +145,23 @@ def schedule(root, phase, dependency):
     return job
 
 
-def register(root):
+def register(root, *, first_root=None, analysis_job=None):
     revision = clean_source(SOURCE)
     if root.exists():
         raise FileExistsError("follow-up root must be new")
     registration = yaml.safe_load(REGISTRATION.read_text())
     validate_registration(registration)
+    if first_root is not None:
+        recovery = json.loads((first_root / "analysis_recovery.json").read_text())
+        if (
+            Path(recovery["producer_root"]).resolve() != Path(registration["first_root"]).resolve()
+            or recovery["new_GPU_requests"] != 0
+            or recovery["reused_rows"] != 832
+            or sha(first_root / "protocol_lock.json") != recovery["original_protocol_sha256"]
+        ):
+            raise ValueError("replacement first root must be a CPU-only recovery of the original")
+        registration["first_root"] = str(first_root)
+        registration["first_analysis_job"] = analysis_job
     first = Path(registration["first_root"])
     lock_path = first / "protocol_lock.json"
     lock = json.loads(lock_path.read_text())
@@ -319,6 +330,7 @@ def submit_derived(target, lock, stage):
     ]
     gpu = subprocess.check_output(command, text=True).strip().split(";")[0]
     write_once(target / "jobs/gpu_submission.json", dict(array=gpu, command=command))
+    analysis_source = runtime if is_canary else SOURCE
     callback = [
         *common,
         "--partition=bii",
@@ -329,8 +341,8 @@ def submit_derived(target, lock, stage):
         f"--dependency=afterany:{gpu}",
         f"--output={target}/slurm/analysis-%j.out",
         f"--error={target}/slurm/analysis-%j.err",
-        str(runtime / f"mosaickv/slurm/evicastkv_{analysis_stem}.sbatch"),
-        str(runtime),
+        str(analysis_source / f"mosaickv/slurm/evicastkv_{analysis_stem}.sbatch"),
+        str(analysis_source),
         str(target),
     ]
     cpu = subprocess.check_output(callback, text=True).strip().split(";")[0]
@@ -423,11 +435,13 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("mode", choices=("register", "after-first", "after-canary", "after-second"))
     parser.add_argument("--root", required=True, type=Path)
+    parser.add_argument("--first-root", type=Path)
+    parser.add_argument("--analysis-job")
     a = parser.parse_args()
     if not a.root.resolve().is_relative_to(Path("/scratch/djy8hg").resolve()):
         raise ValueError("scratch-only follow-up artifacts")
     if a.mode == "register":
-        register(a.root)
+        register(a.root, first_root=a.first_root, analysis_job=a.analysis_job)
     else:
         try:
             execute(a.root, a.mode)

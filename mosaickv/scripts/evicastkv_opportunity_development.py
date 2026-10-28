@@ -122,6 +122,42 @@ def quality_decision(statistics):
     return results
 
 
+def load_analysis_lock(root):
+    """Separate immutable producer provenance from a corrected CPU analyzer."""
+    lock = json.loads((root / "protocol_lock.json").read_text())
+    producer = Path(lock["source_root"])
+    clean_source(producer, lock["source_sha"])
+    clean_source(SOURCE)
+    if any(sha(SOURCE / p) != sha(producer / p) for p in POLICY_PATHS):
+        raise ValueError("historical analysis requires unchanged policy/runtime sources")
+    for path, expected in lock["historical_bindings"].items():
+        if sha(Path(path)) != expected:
+            raise ValueError("historical binding changed")
+    for path, expected in lock.get("inherited_gates", {}).items():
+        if sha(Path(path)) != expected or json.loads(Path(path).read_text())["status"] != "passed":
+            raise ValueError("inherited gate changed or failed")
+    for info in lock["templates"].values():
+        if sha(Path(info["path"])) != info["sha256"]:
+            raise ValueError("template hash changed")
+    for groups in lock["cohorts"].values():
+        for info in groups.values():
+            if sha(Path(info["path"])) != info["sha256"]:
+                raise ValueError("cohort hash changed")
+    return lock
+
+
+def validate_config_record(row, config, source_sha, arithmetic):
+    """JSON arrays and Python tuples share a canonical JSON identity, not values."""
+    path = Path(row["resolved_config_path"])
+    if (
+        sha(path) != row["resolved_config_file_sha256"]
+        or digest(json.loads(path.read_text())) != digest(config)
+        or row["config_sha"] != digest(dict(runtime_config=config, arithmetic=arithmetic))
+        or row["source_sha"] != source_sha
+    ):
+        raise ValueError("executed runtime configuration/source changed")
+
+
 def prepare(root):
     revision = clean_source(SOURCE)
     if root.exists():
@@ -230,8 +266,8 @@ def prepare(root):
     )
 
 
-def analyze(root):
-    lock = load_lock(root)
+def analyze(root, *, recorded_source=False):
+    lock = load_analysis_lock(root) if recorded_source else load_lock(root)
     output = root / "analysis" / STAGE
     if output.exists():
         raise FileExistsError("analysis is write-once")
@@ -247,15 +283,7 @@ def analyze(root):
             config = canonical_config(
                 resolved_config(lock, "coco", row["method"], cap, variant=row["variant"])
             )
-            path = Path(row["resolved_config_path"])
-            if (
-                sha(path) != row["resolved_config_file_sha256"]
-                or json.loads(path.read_text()) != config
-                or row["config_sha"]
-                != digest(dict(runtime_config=config, arithmetic=lock["arithmetic"]))
-                or row["source_sha"] != lock["source_sha"]
-            ):
-                raise ValueError("executed runtime configuration/source changed")
+            validate_config_record(row, config, lock["source_sha"], lock["arithmetic"])
             trace = json.loads(Path(row["trace_path"]).read_text())
             activity = trace.get("experimental_evidence_policy")
             if row["variant"].startswith("evidence-") and not activity:
@@ -354,6 +382,7 @@ def analyze(root):
         dict(
             status="passed_execution_development_only",
             source_sha=lock["source_sha"],
+            analysis_source_sha=clean_source(SOURCE),
             protocol_sha256=sha(root / "protocol_lock.json"),
             actual_rows=len(rows),
             quality_decisions=decisions,
@@ -462,12 +491,19 @@ if __name__ == "__main__":
     parser.add_argument("mode", choices=("prepare", "worker", "analyze", "submit"))
     parser.add_argument("--root", required=True, type=Path)
     parser.add_argument("--spec-sha")
+    parser.add_argument("--recorded-source", action="store_true")
     args = parser.parse_args()
+    if args.recorded_source and args.mode != "analyze":
+        parser.error("recorded-source is CPU analysis only")
     if not args.root.resolve().is_relative_to(Path("/scratch/djy8hg").resolve()):
         raise ValueError("scratch-only artifacts")
     if args.mode == "worker":
         from evicastkv_worker import run_worker
 
         run_worker(args.root, STAGE, int(os.environ["SLURM_ARRAY_TASK_ID"]), args.spec_sha)
+    elif args.mode == "analyze":
+        analyze(args.root, recorded_source=args.recorded_source)
     else:
+        if args.recorded_source:
+            parser.error("recorded-source is CPU analysis only")
         globals()[args.mode](args.root)
