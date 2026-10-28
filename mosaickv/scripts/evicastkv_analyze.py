@@ -198,6 +198,10 @@ def export_descriptive(root, stage, rows):
 
 def analyze(root: Path, stage: str):
     lock = load_lock(root)
+    if lock.get("optimization_protocol"):
+        from evicastkv_optimization import analyze_optimization
+
+        return analyze_optimization(root, stage)
     spec, workers, rows, errors = collect(root, stage)
     output = root / "analysis" / stage
     output.mkdir(parents=True, exist_ok=True)

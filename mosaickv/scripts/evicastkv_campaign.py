@@ -48,6 +48,11 @@ def environment():
         "lmms-eval",
         "datasets",
         "pycocoevalcap",
+        "numpy",
+        "scipy",
+        "pandas",
+        "pyarrow",
+        "pydantic",
     ):
         try:
             packages[name] = importlib.metadata.version(name)
@@ -65,7 +70,14 @@ def environment():
     )
 
 
-def prepare(root: Path, *, strict_fp16_reductions=False, workloads=None, scope_registration=None):
+def prepare(
+    root: Path,
+    *,
+    strict_fp16_reductions=False,
+    workloads=None,
+    scope_registration=None,
+    optimization_protocol=None,
+):
     """Read previously materialized development pools; no HF access/downloads."""
     source_sha = clean_source(SOURCE)
     workloads = tuple(workloads or BUDGETS)
@@ -213,6 +225,9 @@ def prepare(root: Path, *, strict_fp16_reductions=False, workloads=None, scope_r
             path=str(scope_registration), sha256=sha(Path(scope_registration))
         )
         bindings[str(scope_registration)] = sha(Path(scope_registration))
+    if optimization_protocol is not None:
+        lock["optimization_protocol"] = optimization_protocol
+        lock["resources"]["maximum_a100s"] = 2
     # Avoid asserting a fresh cohort from an incomplete historical inventory.
     write_once(
         root / "exclusion_report.json",
@@ -269,6 +284,24 @@ def load_lock(root):
         for info in cohort.values():
             if sha(Path(info["path"])) != info["sha256"]:
                 raise ValueError("cohort hash mismatch")
+    if lock.get("optimization_protocol"):
+        contract = lock["optimization_protocol"]
+        reference = Path(contract["reference_source_root"])
+        clean_source(reference, contract["reference_source_sha"])
+        for path, expected in contract["prerequisite_gates"].items():
+            if (
+                sha(Path(path)) != expected
+                or json.loads(Path(path).read_text())["status"] != "passed"
+            ):
+                raise ValueError("optimization prerequisite changed or failed")
+        if sha(root / "preparation/profiler_hotspots.json") != contract["profiler_report_sha256"]:
+            raise ValueError("measured optimization rationale changed")
+        for source, expected in (
+            (reference, contract["reference_runtime_sha256"]),
+            (SOURCE, contract["optimized_runtime_sha256"]),
+        ):
+            if sha(source / "mosaickv/src/mosaickv/backends/hf_runtime.py") != expected:
+                raise ValueError("optimization/reference runtime changed")
     return lock
 
 
@@ -333,6 +366,7 @@ def jobs_for(lock, stage):
         "scoring": "validation",
         "profiling": "profiler",
         "measurement": "timing",
+        "optimization": "timing",
         "mechanisms": "development",
         "full_graph_pilot": "profiler",
     }[stage]
@@ -342,7 +376,7 @@ def jobs_for(lock, stage):
             2
             if stage in {"profiling", "full_graph_pilot", "mechanisms"}
             else 4
-            if stage == "measurement"
+            if stage in {"measurement", "optimization"}
             else 8
         )
         for start in range(0, count, chunk):

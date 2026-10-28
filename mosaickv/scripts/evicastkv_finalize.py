@@ -21,6 +21,7 @@ ORDER = (
     "scoring",
     "profiling",
     "measurement",
+    "optimization",
     "mechanisms",
     "full_graph_pilot",
 )

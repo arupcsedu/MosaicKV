@@ -737,6 +737,66 @@ class _HierarchicalExactArtifact:
     storage_accounting: ExactCacheStorageAccounting | None = None
 
 
+def _identical_unit_reference_budget(
+    full_state: FullKVState,
+    config: RunConfig,
+) -> DensePhysicalCacheBudget:
+    """Reuse a validated one-token partition for identical reference accounting.
+
+    This specializes only the formerly redundant re-blockization branch below.
+    Costs come from actual layer geometry, not independently normalized scores
+    or descriptor estimates. Complete source coverage is already a FullKVState
+    invariant. With one-position blocks and the identical mandatory set, every
+    head has the same exact integer capacity lattice; no selection is changed.
+    """
+    lengths = {layer.sequence_length for layer in full_state.layers}
+    if len(lengths) != 1:
+        raise HuggingFaceRuntimeError(
+            "dense HF physical-byte budgeting requires a uniform source sequence length"
+        )
+    source_length = next(iter(lengths))
+    bytes_per_identity = {}
+    for layer_index, layer in enumerate(full_state.layers):
+        width = FullKVState._position_bytes(
+            layer.key, layer.key_head_dimension, layer.key_sequence_dimension, 1
+        ) + FullKVState._position_bytes(
+            layer.value, layer.value_head_dimension, layer.value_sequence_dimension, 1
+        )
+        for head in range(layer.kv_heads):
+            bytes_per_identity[(layer_index, head)] = width
+    bytes_per_position = sum(bytes_per_identity.values())
+    source_bytes = bytes_per_position * source_length
+    if source_bytes != full_state.active_bytes:
+        raise HuggingFaceRuntimeError(
+            "dense HF byte accounting does not reconstruct the FullKV tensor storage"
+        )
+    requested = min(
+        math.ceil(source_bytes * config.cache.retention_ratio), config.cache.budget_value
+    )
+    capacity = requested // bytes_per_position
+    mandatory = sum(
+        position in full_state.mandatory_logical_positions
+        for position in full_state.logical_positions.physical_to_logical
+    )
+    if config.cache.retention_ratio == 1.0:
+        capacity = source_length
+    elif mandatory > capacity:
+        raise HuggingFaceRuntimeError(
+            "physical byte budget cannot represent the mandatory block subset"
+        )
+    if capacity < 1:
+        raise HuggingFaceRuntimeError(
+            "physical byte budget cannot represent one KV position per layer/head"
+        )
+    capacity = min(capacity, source_length)
+    return DensePhysicalCacheBudget(
+        source_bytes,
+        capacity * bytes_per_position,
+        capacity,
+        {identity: capacity for identity in bytes_per_identity},
+    )
+
+
 def _dense_physical_cache_budget(
     full_state: FullKVState,
     config: RunConfig,
@@ -768,6 +828,14 @@ def _dense_physical_cache_budget(
             if accounting_policy == "first_and_last"
             else (full_state.original_logical_sequence_length - 1,)
         )
+        if (
+            reference_block_size == full_state.block_size == 1
+            and frozenset(reference_mandatory) == full_state.mandatory_logical_positions
+        ):
+            # The reference factory would regenerate the identical complete
+            # unit partition and mandatory flags. Keep its canonical identity
+            # ordering and arithmetic without allocating those descriptors.
+            return _identical_unit_reference_budget(full_state, config)
         accounting_state = FullKVState.from_tensors(
             tuple((layer.key, layer.value) for layer in full_state.layers),
             modality_spans=full_state.modality_spans,
@@ -3896,7 +3964,9 @@ def compare_runtime_retention_one(
         # per-block scatter, which creates hundreds of thousands of diagnostic
         # GPU transactions at block size one. Packing already supplies the
         # independent reconstructed representation needed by this parity test.
-        for source_layer, packed_layer in zip(full_state.layers, packed.snapshot.layers, strict=True):
+        for source_layer, packed_layer in zip(
+            full_state.layers, packed.snapshot.layers, strict=True
+        ):
             if not torch.equal(source_layer.key, packed_layer.key) or not torch.equal(
                 source_layer.value, packed_layer.value
             ):

@@ -189,3 +189,38 @@ def test_mechanism_export_keeps_corpus_cider_and_all_failed_denominators(tmp_pat
     assert (result["attempted"], result["completed"], result["failed"]) == (2, 1, 1)
     assert "NO_CONFIG_FROZEN" in (output / "development_decision.md").read_text()
     assert len((output / "development_predictions.jsonl").read_text().splitlines()) == 2
+
+
+def test_profiler_cpu_and_cuda_annotations_are_not_averaged_as_two_requests(tmp_path, monkeypatch):
+    m = packet_module(monkeypatch)
+    from mosaickv.evaluation.fox_campaign import write_once
+
+    write_once(
+        tmp_path / "outputs/profiling/000/attempt/profiler/arm/operators.json",
+        [
+            dict(
+                name="evicastkv/test",
+                inclusive_cpu_us=400,
+                self_cpu_us=100,
+                inclusive_device_us=300,
+                self_device_us=10,
+            ),
+            dict(
+                name="evicastkv/test",
+                inclusive_cpu_us=0,
+                self_cpu_us=0,
+                inclusive_device_us=400,
+                self_device_us=400,
+            ),
+        ],
+    )
+    output = tmp_path / "derived"
+    output.mkdir()
+    record = m.profile_summary(tmp_path, output)[0]
+    assert record["observations"] == 1
+    assert record["annotation_rows"] == 2
+    assert record["mean_inclusive_cpu_ms"] == 0.4
+    assert record["mean_self_cpu_ms"] == 0.1
+    assert record["mean_self_device_ms"] == 0.01
+    assert record["mean_device_annotation_ms"] == 0.4
+    assert m.read(output / "profiler_hotspots.json")["aggregation_contract_version"] == 2

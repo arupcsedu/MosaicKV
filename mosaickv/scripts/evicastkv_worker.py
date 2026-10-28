@@ -380,11 +380,14 @@ def run_worker(root: Path, stage: str, index: int, spec_sha: str):
         if "arms" in job:
             arms = [tuple(a) for a in job["arms"]]
         # Five full-request warmups per arm on its actual shape regime; no prefills shared.
-        if stage == "measurement":
+        if stage in {"measurement", "optimization"}:
             for method, cap, variant in arms:
                 current = resolved_config(lock, workload, method, cap, variant=variant)
+                warmup_arm = (
+                    f"{method}-{cap}-{variant}" if stage == "optimization" else f"{method}-{cap}"
+                )
                 runtime = HuggingFaceMosaicKVModel(
-                    adapter, current, trace_directory=output / "warmups" / f"{method}-{cap}"
+                    adapter, current, trace_directory=output / "warmups" / warmup_arm
                 )
                 for repeat in range(lock["warmups"]):
                     settle(adapter)
@@ -393,22 +396,29 @@ def run_worker(root: Path, stage: str, index: int, spec_sha: str):
                         warm_sample.prompt,
                         tuple(MediaItem(m.kind, _media_payload(m)) for m in warm_sample.media),
                     )
-                    result = runtime.generate(
-                        EvaluationRequest(
-                            f"warmup-{repeat}", warm_sample.sample_id, task, warm_messages, {}
+                    from mosaickv.evaluation.fox_optimization import budget_implementation
+
+                    with budget_implementation(lock, variant, required=stage == "optimization"):
+                        result = runtime.generate(
+                            EvaluationRequest(
+                                f"warmup-{repeat}", warm_sample.sample_id, task, warm_messages, {}
+                            )
                         )
-                    )
                     write_once(
-                        output / "warmups" / f"{method}-{cap}" / f"{repeat}.json",
+                        output / "warmups" / warmup_arm / f"{repeat}.json",
                         dict(metrics=asdict(result.metrics)),
                     )
                 del runtime
-        repeats = lock["repeats"] if stage == "measurement" else 1
+        repeats = lock["repeats"] if stage in {"measurement", "optimization"} else 1
         for position, sample in enumerate(samples):
             for repeat in range(repeats):
                 offset = (job["indices"][position] + repeat) % len(arms)
                 ordered = arms[offset:] + arms[:offset]
-                for method, cap, variant in ordered:
+                if stage == "optimization":
+                    from mosaickv.evaluation.fox_optimization import factorial_order
+
+                    ordered = factorial_order(arms, job["indices"][position], repeat)
+                for order_position, (method, cap, variant) in enumerate(ordered):
                     key = f"{job['indices'][position]:03d}-{method}-{cap}-{variant}-r{repeat}"
                     record_path = output / "records" / f"{key}.json"
                     current = resolved_config(lock, workload, method, cap, variant=variant)
@@ -465,7 +475,10 @@ def run_worker(root: Path, stage: str, index: int, spec_sha: str):
 
                         mechanism = stage in {"mechanisms", "full_graph_pilot"}
                         profiling = stage == "profiling"
+                        from mosaickv.evaluation.fox_optimization import budget_implementation
+
                         with (
+                            budget_implementation(lock, variant, required=stage == "optimization"),
                             layout_capture(adapter)
                             if diagnostic
                             else contextlib.nullcontext({}) as captured,
@@ -700,6 +713,7 @@ def run_worker(root: Path, stage: str, index: int, spec_sha: str):
                             output / "errors" / f"{key}.json",
                             dict(error=row["error"], traceback=traceback.format_exc()),
                         )
+                    row["arm_execution_position"] = order_position
                     write_once(record_path, row)
                     summary["records"].append(
                         dict(path=str(record_path), sha256=sha(record_path), status=row["status"])

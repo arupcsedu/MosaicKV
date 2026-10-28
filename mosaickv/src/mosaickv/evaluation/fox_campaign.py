@@ -37,6 +37,13 @@ REFERENCE_CONFIG_ROOT = Path(__file__).resolve().parents[3] / "configs/experimen
 
 
 def registered_arms(workload, stage):
+    if stage == "optimization":
+        return [("full_kv", None, "complete")] + [
+            (method, cap, variant)
+            for cap in BUDGETS[workload]
+            for method in ("prompt_attention_topk", "mosaickv_exact")
+            for variant in ("reference-budget", "reuse-budget")
+        ]
     if stage == "full_graph_pilot":
         return [("mosaickv_exact", cap, "route-1.0") for cap in BUDGETS[workload]]
     if stage == "smoke":

@@ -166,15 +166,43 @@ def profile_summary(root, output):
     bindings = {}
     for path in sorted((root / "outputs/profiling").glob("*/*/profiler/*/operators.json")):
         bindings[str(path)] = sha(path)
+        per_request = defaultdict(list)
         for item in read(path):
             if item["name"].startswith("evicastkv/"):
-                grouped[item["name"]].append(item)
+                per_request[item["name"]].append(item)
+        for name, range_rows in per_request.items():
+            # Kineto exports CPU ranges and correlated CUDA-only annotations
+            # with the SAME name. They are not independent request samples.
+            cpu = [
+                i
+                for i in range_rows
+                if i["inclusive_cpu_us"] or i["self_cpu_us"] or not i.get("inclusive_device_us", 0)
+            ]
+            device = [i for i in range_rows if i not in cpu]
+            grouped[name].append(
+                dict(
+                    inclusive_cpu_us=sum(i["inclusive_cpu_us"] for i in cpu),
+                    self_cpu_us=sum(i["self_cpu_us"] for i in cpu),
+                    self_device_us=sum(
+                        i["self_device_us"] for i in cpu if i.get("self_device_us") is not None
+                    )
+                    if any(i.get("self_device_us") is not None for i in cpu)
+                    else None,
+                    device_annotation_us=sum(
+                        i["self_device_us"] for i in device if i.get("self_device_us") is not None
+                    )
+                    if any(i.get("self_device_us") is not None for i in device)
+                    else None,
+                    annotation_rows=len(range_rows),
+                )
+            )
     values = []
     for name, items in sorted(grouped.items()):
         values.append(
             dict(
                 name=name,
                 observations=len(items),
+                annotation_rows=sum(i["annotation_rows"] for i in items),
                 mean_inclusive_cpu_ms=statistics.mean(i["inclusive_cpu_us"] for i in items) / 1000,
                 mean_self_cpu_ms=statistics.mean(i["self_cpu_us"] for i in items) / 1000,
                 mean_self_device_ms=(
@@ -185,7 +213,18 @@ def profile_summary(root, output):
                     if any(i.get("self_device_us") is not None for i in items)
                     else None
                 ),
-                qualification="diagnostic_profiler_contaminated_nested_ranges_not_additive",
+                mean_device_annotation_ms=(
+                    statistics.mean(
+                        i["device_annotation_us"]
+                        for i in items
+                        if i["device_annotation_us"] is not None
+                    )
+                    / 1000
+                    if any(i["device_annotation_us"] is not None for i in items)
+                    else None
+                ),
+                qualification="per_request_CPU_separate_from_device_annotations;"
+                "diagnostic_profiler_contaminated_nested_ranges_not_additive",
             )
         )
     values.sort(key=lambda r: (-r["mean_inclusive_cpu_ms"], r["name"]))
@@ -194,6 +233,8 @@ def profile_summary(root, output):
         dict(
             bindings=bindings,
             ranges=values,
+            aggregation_contract_version=2,
+            supersedes="earlier annotation-row means, not raw profiles or unprofiled timings",
             optimization_selected=False,
             reason=(
                 "Inspect measured ranges before choosing at most two semantics-preserving changes."
@@ -201,6 +242,22 @@ def profile_summary(root, output):
         ),
     )
     csv_once(output / "profiler_hotspots.csv", values)
+    lines = [
+        "# Complete-request diagnostic hotspots",
+        "",
+        "CPU and CUDA-only annotations are separated; observations count requests, "
+        "not annotation rows. Inclusive ranges overlap and are not additive. "
+        "These are profiler-contaminated diagnostics, never headline latency.",
+        "",
+        "| Range | Requests | CPU inclusive (ms) | CPU self (ms) |",
+        "|---|---:|---:|---:|",
+    ]
+    lines += [
+        f"| {r['name']} | {r['observations']} | {r['mean_inclusive_cpu_ms']:.6f} | "
+        f"{r['mean_self_cpu_ms']:.6f} |"
+        for r in values
+    ]
+    text_once(output / "hotspot_report.md", "\n".join(lines) + "\n")
     return values
 
 
@@ -536,14 +593,18 @@ def supplemental_exports(root, output, rows, lock):
     write_once(output / "experimental_setup.json", setup)
     phases = []
     for row in rows:
-        if row["stage"] != "measurement" or row["status"] != "completed":
+        if row["stage"] not in {"measurement", "optimization"} or row["status"] != "completed":
             continue
         metrics = row["metrics"]
+        telemetry_path = Path(row["timings"].get("sampled_telemetry_path", "MISSING"))
+        telemetry = read(telemetry_path) if telemetry_path.is_file() else {}
         emissions = row["timings"].get("token_emission_seconds", [])
         gaps = [b - a for a, b in pairwise(emissions)]
         phases.append(
             dict(
                 model=setup[row["workload"]]["model"]["id"],
+                stage=row["stage"],
+                implementation_variant=row.get("variant"),
                 workload=row["workload"],
                 task=row["subtask"] or "COCO Caption",
                 sample_id=row["sample_id"],
@@ -562,11 +623,31 @@ def supplemental_exports(root, output, rows, lock):
                 peak_kv_bytes=row["peak_kv_bytes"],
                 peak_allocated_bytes=row["peak_allocated_bytes"],
                 peak_reserved_bytes=row["peak_reserved_bytes"],
+                sampled_process_gpu_peak_bytes=telemetry.get("sampled_process_gpu_peak_bytes"),
+                sampled_cpu_rss_peak_bytes=telemetry.get("sampled_cpu_rss_peak_bytes"),
+                sampler_interval_seconds=telemetry.get("interval_seconds"),
+                telemetry_sha256_at_analysis=sha(telemetry_path) if telemetry else None,
+                telemetry_hash_scope="first bound at derived analysis, not original raw-write hash",
+                process_peak_scope=telemetry.get("process_peak_scope", "NOT_AVAILABLE"),
                 gpu_uuid=row.get("gpu_uuid"),
                 source_sha=row["source_sha"],
             )
         )
     csv_once(output / "phase_breakdown.csv", phases)
+    text_once(
+        output / "measurement_contract.md",
+        "# Measurement contract\n\nFP16 HF eager; 64 decisions and 63 append forwards; "
+        "no draft/prototype/residual/repair. Each timed request recomputes media input, "
+        "prefill, policy and decode. Five warmups and three counterbalanced repeats. "
+        "Wall E2E ends after detokenization at the completion callback; full API return "
+        "and post-output instrumentation are separate. Token times are local consumer "
+        "handoffs, not network timings. CUDA phase events are synchronized. "
+        "Profiler rows never enter headline latency. Physical active KV includes backing "
+        "storage/padding/preallocation, and is not process HBM. Allocator allocated/reserved "
+        "peaks cover the complete request. NVML/RSS peaks are sampled at the recorded "
+        "interval and can miss peaks; their scope includes post-output instrumentation. "
+        "Unavailable telemetry remains null, never replaced with KV bytes.\n",
+    )
     csv_once(output / "fullkv_reference.csv", [r for r in phases if r["method"] == "full_kv"])
     csv_once(
         output / "memory_boundaries.csv",
@@ -830,6 +911,7 @@ def packet(root, output):
         "scoring",
         "profiling",
         "measurement",
+        "optimization",
         "mechanisms",
         "confirmation",
     ):
