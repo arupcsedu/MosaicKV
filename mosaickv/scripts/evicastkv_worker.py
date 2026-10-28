@@ -17,6 +17,7 @@ from mosaickv.evaluation.fox_campaign import (
     BUDGETS,
     METHODS,
     CampaignRow,
+    completed_trace,
     digest,
     sha,
     unique_storage_bytes,
@@ -34,6 +35,8 @@ def generation_observer(adapter):
             self.prefill_kwargs = None
             self.prefill_finished = None
             self.emissions = []
+            self.capture_first_logits = False
+            self.first_logits = None
 
         def emit(self, index, token):
             # A real consumer handoff, not a retrospective prefill-time proxy.
@@ -64,6 +67,8 @@ def generation_observer(adapter):
                 ):
                     result = original_prefill(*a, **kw)
                 __import__("torch").cuda.synchronize(adapter.device)
+                if self.capture_first_logits:
+                    self.first_logits = result.logits.detach().float().cpu()
                 self.prefill_finished = time.perf_counter()
                 self.phases["prefill_observed_wall"] = self.prefill_finished - start
                 return result
@@ -195,6 +200,7 @@ def run_worker(root: Path, stage: str, index: int, spec_sha: str):
     from mosaickv.backends.hf_runtime import HuggingFaceMosaicKVModel
     from mosaickv.config import canonical_config, config_sha256
     from mosaickv.evaluation.coco_shared_bytes import processor_signature
+    from mosaickv.evaluation.fox_measurement import ProcessSampler, phase_ranges
     from mosaickv.evaluation.messages import MediaItem, build_multimodal_messages
     from mosaickv.evaluation.model import EvaluationRequest
     from mosaickv.evaluation.paper_native_lanes import _media_payload, load_paper_native_ledger
@@ -300,6 +306,23 @@ def run_worker(root: Path, stage: str, index: int, spec_sha: str):
                 > lock["tolerances"]["retention_one_max_logit"]
             ):
                 raise AssertionError(f"FullKV parity failed: {name}")
+        from dataclasses import replace
+
+        from mosaickv.backends.hf_runtime import compare_runtime_retention_one
+
+        identity = resolved_config(lock, workload, "mosaickv_exact", BUDGETS[workload][1])
+        identity = replace(
+            identity,
+            cache=replace(identity.cache, retention_ratio=1.0, budget_value=2**63 - 1),
+            generation=replace(identity.generation, max_new_tokens=16),
+        )
+        packed_identity = asdict(compare_runtime_retention_one(adapter, prepared, identity))
+        parity["mosaickv_runtime_retention_one"] = packed_identity
+        if (
+            packed_identity["token_agreement"] != 1
+            or packed_identity["maximum_logit_difference"] > 1e-4
+        ):
+            raise AssertionError("MosaicKV packed retention-one parity failed")
         write_once(output / "retention_one.json", parity)
         del prepared
         if stage == "smoke":
@@ -362,6 +385,7 @@ def run_worker(root: Path, stage: str, index: int, spec_sha: str):
                     config_sha = config_sha256(current)
                     trace_dir = output / "traces" / key
                     observer = generation_observer(adapter)
+                    observer.capture_first_logits = stage == "scoring"
                     row = dict(
                         run_id=key,
                         sample_id=sample.sample_id,
@@ -388,15 +412,13 @@ def run_worker(root: Path, stage: str, index: int, spec_sha: str):
                     try:
                         if time.perf_counter() - start > 6800:
                             raise TimeoutError("two-hour shard safety boundary reached")
-                        messages = build_multimodal_messages(
-                            sample.prompt,
-                            tuple(MediaItem(m.kind, _media_payload(m)) for m in sample.media),
-                        )
                         write_once(
                             output / "resolved-configs" / f"{key}.json", canonical_config(current)
                         )
                         settle(adapter)
                         torch.cuda.reset_peak_memory_stats()
+                        baseline_allocated = torch.cuda.memory_allocated()
+                        baseline_reserved = torch.cuda.memory_reserved()
                         runtime = HuggingFaceMosaicKVModel(
                             adapter,
                             current,
@@ -404,22 +426,56 @@ def run_worker(root: Path, stage: str, index: int, spec_sha: str):
                             token_observer=observer.emit,
                         )
                         diagnostic = stage == "correctness"
+                        profiling = stage == "profiling"
                         with (
                             layout_capture(adapter)
                             if diagnostic
                             else contextlib.nullcontext({}) as captured,
                             observer.install(),
+                            phase_ranges(),
+                            ProcessSampler(gpu_uuid) as sampler,
+                            torch.profiler.profile(
+                                activities=[
+                                    torch.profiler.ProfilerActivity.CPU,
+                                    torch.profiler.ProfilerActivity.CUDA,
+                                ],
+                                record_shapes=False,
+                                profile_memory=True,
+                                with_stack=False,
+                            )
+                            if profiling
+                            else contextlib.nullcontext(None) as profiler,
                         ):
                             torch.cuda.synchronize()
                             wall = time.perf_counter()
+                            messages = build_multimodal_messages(
+                                sample.prompt,
+                                tuple(MediaItem(m.kind, _media_payload(m)) for m in sample.media),
+                            )
+                            input_load_seconds = time.perf_counter() - wall
                             result = runtime.generate(
                                 EvaluationRequest(key, sample.sample_id, task, messages, {})
                             )
                             torch.cuda.synchronize()
                             wall_seconds = time.perf_counter() - wall
-                        traces = list(trace_dir.glob("*.json"))
-                        if len(traces) != 1:
-                            raise AssertionError("one complete trace required")
+                        if profiling:
+                            profile_dir = output / "profiler" / key
+                            profile_dir.mkdir(parents=True, exist_ok=True)
+                            profiler.export_chrome_trace(str(profile_dir / "trace.json"))
+                            averages = [
+                                dict(
+                                    name=item.key,
+                                    count=item.count,
+                                    self_cpu_us=item.self_cpu_time_total,
+                                    inclusive_cpu_us=item.cpu_time_total,
+                                    self_device_us=getattr(item, "self_device_time_total", None),
+                                    inclusive_device_us=getattr(item, "device_time_total", None),
+                                )
+                                for item in profiler.key_averages()
+                            ]
+                            write_once(profile_dir / "operators.json", averages)
+                        write_once(output / "telemetry" / f"{key}.json", sampler.record())
+                        traces = [completed_trace(trace_dir, key)]
                         trace = json.loads(traces[0].read_text())
                         tokens = trace.get("generated_token_ids", trace.get("token_ids"))
                         if tokens is None:
@@ -456,6 +512,7 @@ def run_worker(root: Path, stage: str, index: int, spec_sha: str):
                             metrics=metrics,
                             timings=dict(
                                 observer.phases,
+                                input_load_seconds=input_load_seconds,
                                 per_token_forward_wall=observer.steps,
                                 first_logit_ready_seconds=observer.prefill_finished - wall,
                                 first_token_emitted_seconds=observer.emissions[0][1] - wall,
@@ -463,6 +520,10 @@ def run_worker(root: Path, stage: str, index: int, spec_sha: str):
                                 last_token_emitted_seconds=observer.emissions[-1][1] - wall,
                                 token_emission_seconds=[t - wall for _, t, _ in observer.emissions],
                                 emission_status="local_cpu_token_consumer_handoff_not_network_stream",
+                                baseline_allocated_bytes=baseline_allocated,
+                                baseline_reserved_bytes=baseline_reserved,
+                                sampled_telemetry_path=str(output / "telemetry" / f"{key}.json"),
+                                profiler_contaminated=profiling,
                             ),
                             trace_path=str(traces[0]),
                         )
@@ -489,6 +550,56 @@ def run_worker(root: Path, stage: str, index: int, spec_sha: str):
                             trace_sha256=sha(traces[0]),
                             boundary="A",
                         )
+                        if stage == "scoring":
+                            from mosaickv.evaluation.fox_boundary import run_boundary_b
+
+                            try:
+                                boundary = run_boundary_b(
+                                    adapter,
+                                    current,
+                                    messages,
+                                    EvaluationRequest(
+                                        key + "-B", sample.sample_id, task, messages, {}
+                                    ),
+                                    output / "boundary-traces" / key,
+                                )
+                                first_logits = boundary.pop("first_logits")
+                                first_A = observer.first_logits
+                                boundary.update(
+                                    first_token_A=int(first_A.argmax(-1).item()),
+                                    first_token_A_probability=float(
+                                        first_A.softmax(-1).max().item()
+                                    ),
+                                    first_token_B_probability=float(
+                                        first_logits.softmax(-1).max().item()
+                                    ),
+                                    A_B_first_logit_max_difference=float(
+                                        (first_A - first_logits).abs().max().item()
+                                    ),
+                                    first_token_changed=int(first_A.argmax(-1).item())
+                                    != boundary["first_token_id"],
+                                    A_answer=row["answer"],
+                                    A_B_answer_changed=row["answer"] != boundary["answer"],
+                                )
+                                if method == "full_kv":
+                                    boundary["fullkv_chunked_logit_control_passed"] = bool(
+                                        (first_A - first_logits).abs().max().item() <= 1e-4
+                                    )
+                                if workload == "milebench":
+                                    boundary["task_score"] = score_milebench_sample(
+                                        route,
+                                        boundary["answer"],
+                                        sample.references[0],
+                                        choices=sample.choices,
+                                    )
+                            except Exception as error:
+                                boundary = dict(
+                                    boundary="B",
+                                    status="blocked",
+                                    error=f"{type(error).__name__}: {error}",
+                                    primary_A_row_preserved=True,
+                                )
+                            write_once(output / "boundary" / f"{key}.json", boundary)
                     except Exception as error:
                         row.update(
                             status="failed",

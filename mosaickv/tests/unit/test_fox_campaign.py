@@ -126,6 +126,41 @@ def test_failed_sample_schema_requires_error():
     assert asdict(CampaignRow(**args, error="explicit failure"))["status"] == "failed"
 
 
+def test_runtime_trace_lookup_respects_run_subdirectory(tmp_path):
+    from mosaickv.evaluation.fox_campaign import completed_trace
+
+    write_once(tmp_path / "run-1" / "sample.json", dict(status="completed"))
+    assert completed_trace(tmp_path, "run-1") == tmp_path / "run-1" / "sample.json"
+    with pytest.raises(ValueError, match="one complete trace"):
+        completed_trace(tmp_path, "missing")
+
+
+def test_boundary_b_holds_back_only_original_text_and_rejects_image_tail():
+    from mosaickv.adapters.huggingface import PreparedInputs
+    from mosaickv.cache_state import Modality, ModalitySpan
+    from mosaickv.evaluation.fox_boundary import hold_back_last_text_token
+
+    image = torch.zeros(1, 3, 2, 2)
+    prepared = PreparedInputs(
+        dict(
+            input_ids=torch.tensor([[1, 2, 3, 4]]),
+            attention_mask=torch.ones(1, 4),
+            pixel_values=image,
+        ),
+        (ModalitySpan(0, 2, Modality.IMAGE), ModalitySpan(2, 4, Modality.TEXT)),
+        4,
+    )
+    prefix, held = hold_back_last_text_token(prepared)
+    assert prefix.model_inputs["input_ids"].tolist() == [[1, 2, 3]]
+    assert held.tolist() == [[4]]
+    assert prefix.model_inputs["pixel_values"] is image
+    assert prefix.modality_map[-1].end == 3
+    assert prepared.logical_sequence_length == 4
+    prepared.modality_map = (ModalitySpan(0, 4, Modality.IMAGE),)
+    with pytest.raises(NotImplementedError, match="text token"):
+        hold_back_last_text_token(prepared)
+
+
 @pytest.mark.parametrize("workload", ["coco", "milebench"])
 def test_recovered_policy_matches_actual_campaign(workload):
     validate_locked_policy(source_config(workload))

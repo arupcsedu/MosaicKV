@@ -276,12 +276,13 @@ def jobs_for(lock, stage):
     subset = {
         "correctness": "validation",
         "scoring": "validation",
+        "profiling": "profiler",
         "measurement": "timing",
         "mechanisms": "development",
     }[stage]
     for workload in BUDGETS:
         count = len(lock["cohorts"][workload][subset]["sample_ids"])
-        chunk = 4 if stage == "measurement" else 8
+        chunk = 2 if stage == "profiling" else 4 if stage == "measurement" else 8
         for start in range(0, count, chunk):
             jobs.append(
                 dict(

@@ -222,9 +222,12 @@ def analyze(root: Path, stage: str):
     )
     write_once(output / f"GATE_{stage}.json", gate)
     # Positive execution is not an instruction to manufacture a scientific claim.
-    successor = {"smoke": "correctness", "correctness": "scoring", "scoring": "measurement"}.get(
-        stage
-    )
+    successor = {
+        "smoke": "correctness",
+        "correctness": "scoring",
+        "scoring": "profiling",
+        "profiling": "measurement",
+    }.get(stage)
     if gate["status"] == "passed" and successor:
         submit(root, successor)
         action = dict(action="submitted_registered_successor", stage=successor)

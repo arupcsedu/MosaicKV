@@ -36,6 +36,7 @@ STAGES = (
     "smoke",
     "correctness",
     "scoring",
+    "profiling",
     "measurement",
     "optimization",
     "mechanisms",
@@ -213,6 +214,15 @@ def unique_storage_bytes(tensors) -> int:
         identity = (str(tensor.device), storage.data_ptr(), storage.nbytes())
         storages[identity] = storage.nbytes()
     return sum(storages.values())
+
+
+def completed_trace(directory: Path, run_id: str) -> Path:
+    paths = list((directory / run_id).glob("*.json"))
+    if len(paths) != 1:
+        raise ValueError("one complete trace required in the runtime's run-ID subdirectory")
+    if json.loads(paths[0].read_text()).get("status") != "completed":
+        raise ValueError("trace is incomplete")
+    return paths[0]
 
 
 def independent_masked_attention(query, keys, values, positions, *, mandatory=()):
