@@ -17,8 +17,8 @@ def test_question_type_does_not_parse_answers(monkeypatch):
     m = module(monkeypatch)
     # Invalid/non-JSON data after the metadata object must never be parsed.
     raw = (
-        b'{"meta_data":{"question_type":"multi-choice","instruction":"} escaped \\""},'
-        b'"data":SECRET_NON_JSON'
+        b'{"meta_data":{"question_type":"multi-choice",'
+        b'"instruction":"bracket }"},"data":SECRET_NON_JSON'
     )
     assert m.question_type_only(raw) == "multi-choice"
     with pytest.raises(ValueError):
@@ -47,3 +47,31 @@ def test_requested_archive_symlink_rejected_without_extraction(tmp_path, monkeyp
     with pytest.raises(ValueError, match="regular file"):
         m.scan_archive(archive, {"IEdit/images/a.jpg"})
     assert sorted(p.name for p in tmp_path.iterdir()) == ["test.tar.gz"]
+
+
+def test_history_scan_recognizes_replacement_tasks_without_reading_response_values(
+    tmp_path, monkeypatch
+):
+    module(monkeypatch)
+    from evicastkv_evidence import exclusion_inventory
+
+    from mosaickv.evaluation.fox_campaign import write_once
+
+    runs = tmp_path / "runs"
+    write_once(
+        runs / "old" / "ledger.json",
+        dict(
+            samples=[dict(sample_id="CharacterOrder-0012", response="ALFRED-0013")],
+            references=["IEdit-0014"],
+        ),
+    )
+    write_once(tmp_path / "source/protocol_lock.json", dict(cohorts={}))
+    # The inventory requires paths under scratch; pytest's configured tmpdir is scratch.
+    report = exclusion_inventory(
+        tmp_path / "source",
+        tmp_path / "inventory.json",
+        run_root=runs,
+        identity_tasks=("CharacterOrder", "ALFRED", "IEdit"),
+    )
+    assert report["MileBench_consumed_ids"] == ["CharacterOrder-0012"]
+    assert report["complete_scan"] is False

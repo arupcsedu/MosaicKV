@@ -32,6 +32,9 @@ def test_capture_hooks_are_read_only_and_cleaned_up(monkeypatch):
     assert cap.values and all(
         t.shape[1] == 1 and t.device.type == "cpu" for t in cap.values.values()
     )
+    assert "layer.0.query_after_rope" in cap.values
+    assert "layer.0.valid_attention_probabilities" in cap.values
+    assert "layer.0.attention_context" in cap.values
     cap.clear()
     adapter.prefill(prepared, capture_queries=False, capture_attentions=False)
     assert not cap.values

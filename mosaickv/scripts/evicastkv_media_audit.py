@@ -140,7 +140,17 @@ def historical_catalogs():
 
 
 def audit(scope, output):
+    from evicastkv_evidence import exclusion_inventory
+
+    from mosaickv.evaluation.milebench import MILEBENCH_DATASET_TO_GROUP
+
     revision = clean_source(SOURCE)
+    inventory = exclusion_inventory(
+        Path("/scratch/djy8hg/runs/evicastkv/fox-review-20261028-v4"),
+        output / "history_all_official_tasks.json",
+        identity_tasks=tuple(MILEBENCH_DATASET_TO_GROUP),
+    )
+    consumed_ids = set(inventory["MileBench_consumed_ids"])
     availability = json.loads((scope / "availability.json").read_text())
     proposed = []
     bindings = {str(scope / "availability.json"): sha(scope / "availability.json")}
@@ -166,6 +176,9 @@ def audit(scope, output):
     with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
         results = list(pool.map(lambda p: scan_archive(p, required - identities.keys()), archives))
     for result in results:
+        cached_digest = Path(result["path"]).resolve(strict=True).name
+        if len(cached_digest) != 64 or result["sha256"] != cached_digest:
+            raise ValueError("official cached archive failed its content-addressed SHA check")
         bindings[result["path"]] = result["sha256"]
         errors.extend(result["errors"])
         for name, identity in result["identities"].items():
@@ -203,6 +216,7 @@ def audit(scope, output):
                 dict(
                     sample_id=row["sample_id"],
                     task=task,
+                    known_consumed_identity=row["sample_id"] in consumed_ids,
                     missing_assets=missing,
                     overlapping_historical_assets=overlapping,
                     all_assets_verified=not missing,
@@ -219,9 +233,12 @@ def audit(scope, output):
                     bool(r["overlapping_historical_assets"]) for r in subset
                 ),
                 observed_disjoint_complete_samples=sum(
-                    r["all_assets_verified"] and not r["overlapping_historical_assets"]
+                    r["all_assets_verified"]
+                    and not r["overlapping_historical_assets"]
+                    and not r["known_consumed_identity"]
                     for r in subset
                 ),
+                known_consumed_ids=sum(r["known_consumed_identity"] for r in subset),
                 official_question_type_verified=metadata.get(task, {}).get("question_type")
                 == PROPOSED_TASKS[task],
             )
@@ -249,6 +266,8 @@ def audit(scope, output):
             available_archive_parts=[p.name for p in archives],
             source_video_document_identity_complete=False,
             exhaustive_historical_media_inventory_complete=False,
+            historical_task_identity_taxonomy="all_29_official_tasks_not_only_the_original_four",
+            unresolved_history_roots=inventory["unclassified_workload_roots"],
             missing_or_unverified_media_not_treated_as_fresh=True,
             fresh_confirmation_certified=False,
             confirmation_authorized=False,

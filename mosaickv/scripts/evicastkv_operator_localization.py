@@ -16,6 +16,14 @@ from evicastkv_campaign import SOURCE, environment, resolved_config
 from mosaickv.evaluation.fox_campaign import clean_source, sha, write_once
 
 
+def native_reduction_policy(lock):
+    """Match evicastkv_worker.run_worker's documented pre-field fallback."""
+    value = lock.get("arithmetic", {}).get("allow_fp16_reduced_precision_reduction", True)
+    if type(value) is not bool:
+        raise ValueError("invalid native reduction policy")
+    return value
+
+
 def worker(root):
     import torch
 
@@ -50,13 +58,15 @@ def worker(root):
             raise ValueError("consumed numerical evidence changed")
         parent_protocol = json.loads((parent / "protocol.json").read_text())
         for workload, spec in parent_protocol["workloads"].items():
+            if workload not in protocol.get("enabled_workloads", parent_protocol["workloads"]):
+                continue
             path = Path(spec["parent"]) / "protocol_lock.json"
             if sha(path) != spec["protocol_sha256"]:
                 raise ValueError("original input protocol changed")
             lock = json.loads(path.read_text())
-            torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = lock["arithmetic"][
-                "allow_fp16_reduced_precision_reduction"
-            ]
+            torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = (
+                native_reduction_policy(lock)
+            )
             cfg = resolved_config(lock, workload, "full_kv", None)
             cohort = lock["cohorts"][workload]["validation"]
             ledger = load_paper_native_ledger(
@@ -100,6 +110,7 @@ def worker(root):
                     model=asdict(cfg.model),
                     dataset=asdict(cfg.dataset),
                     policy="native_fp16",
+                    allow_fp16_reduced_precision_reduction=native_reduction_policy(lock),
                     measurement_type="instrumented_operator_diagnostic_not_latency_or_quality",
                 )
                 file = root / "cases" / f"{workload}-{sid}.json"
@@ -123,6 +134,14 @@ def worker(root):
 
 
 def analyze(root):
+    protocol = json.loads((root / "protocol.json").read_text())
+    parent_protocol = json.loads((Path(protocol["numerical_parent"]) / "protocol.json").read_text())
+    expected = {
+        (workload, sid)
+        for workload, spec in parent_protocol["workloads"].items()
+        if workload in protocol.get("enabled_workloads", parent_protocol["workloads"])
+        for sid in spec["sample_ids"]
+    }
     raw = root / "results.json"
     results = (
         json.loads(raw.read_text()) if raw.exists() else dict(cases=[], errors=["worker missing"])
@@ -156,7 +175,9 @@ def analyze(root):
         root / "analysis.json",
         dict(
             status="diagnosis_complete_not_promotion"
-            if len(summaries) == 4 and not results["errors"]
+            if len(summaries) == len(expected)
+            and {(s["workload"], s["sample_id"]) for s in summaries} == expected
+            and not results["errors"]
             else "blocked_incomplete",
             cases=summaries,
             errors=results["errors"],
@@ -171,12 +192,36 @@ def analyze(root):
     )
 
 
-def submit(root, numerical_parent):
+def submit(root, numerical_parent, *, incomplete_parent=None):
     revision = clean_source(SOURCE)
+    enabled_workloads = ["coco", "milebench"]
+    inherited = None
+    if incomplete_parent is not None:
+        previous = json.loads((incomplete_parent / "results.json").read_text())
+        errors = previous.get("errors", [])
+        if len(errors) != 1 or errors[0]["error"] != "KeyError: 'arithmetic'":
+            raise ValueError("unreviewed diagnostic retry failure")
+        completed = []
+        for binding in previous["cases"]:
+            path = Path(binding["path"])
+            if sha(path) != binding["sha256"]:
+                raise ValueError("completed operator capture changed")
+            case = json.loads(path.read_text())
+            completed.append(case["workload"])
+        if completed != ["coco", "coco"]:
+            raise ValueError("retry would duplicate or omit unreviewed cases")
+        enabled_workloads = ["milebench"]
+        inherited = dict(
+            root=str(incomplete_parent),
+            results_sha256=sha(incomplete_parent / "results.json"),
+            completed_coco_cases_preserved=previous["cases"],
+        )
     write_once(
         root / "protocol.json",
         dict(
             source_sha=revision,
+            enabled_workloads=enabled_workloads,
+            inherited_completed_diagnostic=inherited,
             numerical_parent=str(numerical_parent),
             numerical_results_sha256=sha(numerical_parent / "results.json"),
             native_policy_only=True,
@@ -238,8 +283,9 @@ if __name__ == "__main__":
     p.add_argument("mode", choices=("submit", "worker", "analyze"))
     p.add_argument("--root", required=True, type=Path)
     p.add_argument("--numerical-parent", type=Path)
+    p.add_argument("--incomplete-parent", type=Path)
     a = p.parse_args()
     if a.mode == "submit":
-        submit(a.root, a.numerical_parent)
+        submit(a.root, a.numerical_parent, incomplete_parent=a.incomplete_parent)
     else:
         (worker if a.mode == "worker" else analyze)(a.root)

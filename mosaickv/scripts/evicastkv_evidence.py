@@ -74,7 +74,7 @@ def group_manifest(root):
     )
 
 
-def exclusion_inventory(root, output, max_seconds=90, *, run_root=None):
+def exclusion_inventory(root, output, max_seconds=90, *, run_root=None, identity_tasks=None):
     """Bounded canonical-manifest inventory. Does not parse scheduler/raw logs."""
     started = time.monotonic()
     run_root = Path(run_root or "/scratch/djy8hg/runs/mosaickv")
@@ -101,7 +101,8 @@ def exclusion_inventory(root, output, max_seconds=90, *, run_root=None):
     used_coco = set()
     used_mile = set()
     errors = []
-    pattern = re.compile(r"(" + "|".join(map(re.escape, TASKS)) + r")[-:]0*(\d+)$")
+    identity_tasks = tuple(identity_tasks or TASKS)
+    pattern = re.compile(r"(" + "|".join(map(re.escape, identity_tasks)) + r")[-:]0*(\d+)$")
 
     def identity(value):
         if not isinstance(value, str):
@@ -121,6 +122,8 @@ def exclusion_inventory(root, output, max_seconds=90, *, run_root=None):
                     "reference",
                     "answers",
                     "answer",
+                    "response",
+                    "responses",
                     "predictions",
                     "scores",
                     "score",
@@ -176,7 +179,9 @@ def exclusion_inventory(root, output, max_seconds=90, *, run_root=None):
             ]["path"]
         )
         visit(json.loads(p.read_text()), p.parent)
-    per_task = {task: len({s for s in used_mile if s.startswith(task + "-")}) for task in TASKS}
+    per_task = {
+        task: len({s for s in used_mile if s.startswith(task + "-")}) for task in identity_tasks
+    }
     report = dict(
         status="freshness_unverified",
         complete_scan=False,
@@ -185,6 +190,7 @@ def exclusion_inventory(root, output, max_seconds=90, *, run_root=None):
         COCO_consumed_ids=sorted(used_coco),
         MileBench_consumed_ids=sorted(used_mile),
         MileBench_known_used_per_task=per_task,
+        MileBench_identity_tasks=list(identity_tasks),
         unclassified_workload_roots=unclassified,
         errors=errors,
         remaining_manifest_queue=len(queue),
@@ -451,9 +457,16 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--stage", default="scoring")
     parser.add_argument("--workers", type=int, default=4)
+    parser.add_argument("--all-milebench-tasks", action="store_true")
     args = parser.parse_args()
     if args.mode == "inventory":
-        report = exclusion_inventory(args.root, args.output)
+        if args.all_milebench_tasks:
+            from mosaickv.evaluation.milebench import MILEBENCH_DATASET_TO_GROUP
+
+            identity_tasks = tuple(MILEBENCH_DATASET_TO_GROUP)
+        else:
+            identity_tasks = None
+        report = exclusion_inventory(args.root, args.output, identity_tasks=identity_tasks)
         print(
             json.dumps(
                 {

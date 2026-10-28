@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 
 
 def difference(reference, candidate):
@@ -50,7 +50,13 @@ class OperatorCapture:
 
     @contextmanager
     def install(self):
+        import importlib
+        from unittest.mock import patch
+
+        import torch
+
         handles = []
+        patches = ExitStack()
 
         def hook(name, *, output=True):
             def record(module, inputs, result):
@@ -63,6 +69,51 @@ class OperatorCapture:
 
         try:
             layers = tuple(self.adapter._language_layers())
+            attention_owners = {id(layer.self_attn): i for i, layer in enumerate(layers)}
+            modules = {
+                importlib.import_module(type(layer.self_attn).__module__) for layer in layers
+            }
+            for modeling in modules:
+                original = modeling.eager_attention_forward
+
+                def observed(module, q, k, v, attention_mask, *args, _original=original, **kwargs):
+                    index = attention_owners.get(id(module))
+                    if index is None:
+                        return _original(module, q, k, v, attention_mask, *args, **kwargs)
+                    for label, value in (
+                        ("query_after_rope", q),
+                        ("last_key_after_rope", k),
+                        ("last_value", v),
+                    ):
+                        self.save(
+                            f"layer.{index}.{label}",
+                            value[:, :, -1:, :].transpose(1, 2).flatten(2),
+                        )
+                    result = _original(module, q, k, v, attention_mask, *args, **kwargs)
+                    probabilities = result[1]
+                    if attention_mask is None:
+                        keep = torch.ones(
+                            (q.shape[1], k.shape[2]), dtype=torch.bool, device=q.device
+                        )
+                    else:
+                        keep = attention_mask[0, :, -1, : k.shape[2]] == 0
+                        if keep.shape[0] == 1:
+                            keep = keep.expand(q.shape[1], -1)
+                    last_rows = [probabilities[0, h, -1, keep[h]] for h in range(q.shape[1])]
+                    if len({row.numel() for row in last_rows}) != 1:
+                        raise NotImplementedError(
+                            "operator audit requires equal unpruned valid lengths"
+                        )
+                    self.save(
+                        f"layer.{index}.valid_attention_probabilities",
+                        torch.stack(last_rows).reshape(1, 1, -1),
+                    )
+                    self.save(
+                        f"layer.{index}.attention_context", result[0][:, -1:, :, :].flatten(2)
+                    )
+                    return result
+
+                patches.enter_context(patch.object(modeling, "eager_attention_forward", observed))
             for index, layer in enumerate(layers):
                 for suffix in (
                     "input_layernorm",
@@ -99,6 +150,7 @@ class OperatorCapture:
                 handles.append(module.register_forward_hook(hook(name + ".output")))
             yield self
         finally:
+            patches.close()
             for handle in handles:
                 handle.remove()
 
