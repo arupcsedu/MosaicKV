@@ -308,7 +308,11 @@ def analyze(root: Path, stage: str):
         "scoring": "profiling",
         "profiling": "measurement",
     }.get(stage)
-    if gate["status"] == "passed" and successor:
+    if lock.get("authorization", {}).get("automatic_stage_progression", True) is False:
+        action = dict(
+            action="stop_at_registered_stage_boundary", reason="Automatic promotion disabled"
+        )
+    elif gate["status"] == "passed" and successor:
         submit(root, successor)
         action = dict(action="submitted_registered_successor", stage=successor)
     elif gate["status"] == "passed" and stage == "measurement":
