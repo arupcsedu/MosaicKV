@@ -117,3 +117,21 @@ common gates. All methods and references share the registered arithmetic policy;
 no old quality or latency row is reused. Composite configuration hashes include
 that policy. The original numerical thresholds and retention-one 1e-4 criterion
 remain unchanged. Failure stops the successor; it does not increase tolerances.
+
+## Model-scoped continuation after V4
+
+V4 completed all 256 checks: COCO/Mistral passed all 128; the eight failures
+were confined to the LLaVA-1.5/MileBench no-eviction padding control. The
+reduction-flag diagnostic did not fix both consumed inputs and is negative;
+strict reductions are not adopted. Both original gates stay blocked/negative.
+
+A separately registered continuation may execute **COCO only**, with every
+COCO method, input, original FP16/eager arithmetic setting, budget, and threshold
+unchanged. It reruns common gates on its clean source; no failed MileBench
+example is filtered into a favorable subset. The whole MileBench configuration
+remains blocked. This narrowing is registered from numerical support before
+task scoring, never from benchmark wins. The original six-contrast primary
+family is retained conservatively: the four MileBench contrasts are NOT_RUN,
+not zero or removed to improve significance. Local-port secondary tests remain
+a separate six-contrast family. Results remain consumed-input development
+evidence, not the requested fresh two-workload confirmation.

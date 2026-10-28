@@ -82,7 +82,7 @@ def timing_statistics(root, output):
     groups = group_manifest(root)
     reports = []
     phase_rows = []
-    for workload in ("coco", "milebench"):
+    for workload in lock["cohorts"]:
         subset = [r for r in rows if r["workload"] == workload]
         observations = defaultdict(list)
         for row in subset:
@@ -348,6 +348,8 @@ def contrast_plot(report, output):
 
     values = []
     for item in report["contrasts"]:
+        if not item.get("reference", "prompt_attention_topk:").startswith("prompt_attention_topk:"):
+            continue
         values.append(
             dict(
                 cap_mib=int(item["candidate"].rsplit(":", 1)[-1]) / 2**20,
@@ -476,14 +478,15 @@ def native_tables(root, output):
         write_once(output / name.replace(".tex", "-contrasts.json"), contrasts)
         diff_lines = [
             r"\begin{tabular}{lrrr}",
-            r"Cap / EviCastKV minus Top-K & Difference & 95\% CI & Adjusted CI \\",
+            r"Baseline / cap & EviCastKV difference & 95\% CI & Adjusted CI \\",
         ]
         for item in contrasts:
             cap = int(item["candidate"].rsplit(":", 1)[-1]) / 2**20
+            baseline = item["reference"].split(":")[0].replace("_", r"\_")
             lo, hi = item["ordinary_95_ci"]
             alo, ahi = item["simultaneous_ci"]
             diff_lines.append(
-                f"{cap:g} MiB & {item['difference']:.6f} & "
+                f"{baseline} / {cap:g} MiB & {item['difference']:.6f} & "
                 f"[{lo:.6f}, {hi:.6f}] & [{alo:.6f}, {ahi:.6f}] " + r"\\"
             )
         diff_lines.append(r"\end{tabular}")
@@ -499,6 +502,16 @@ def supplemental_exports(root, output, rows, lock):
     from itertools import pairwise
 
     setup = {}
+    write_once(
+        output / "workload_scope.json",
+        dict(
+            originally_requested=lock.get("originally_requested_workloads", ["coco", "milebench"]),
+            enabled=lock.get("enabled_workloads", list(lock.get("cohorts", {}))),
+            unexecuted_primary_contrasts=lock.get("unexecuted_primary_contrasts", 0),
+            scope_registration=lock.get("scope_registration"),
+            primary_family_size_retained=6,
+        ),
+    )
     for workload, info in lock.get("templates", {}).items():
         if sha(Path(info["path"])) != info["sha256"]:
             raise ValueError("frozen template changed")

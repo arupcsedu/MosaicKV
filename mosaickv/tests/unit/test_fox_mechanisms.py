@@ -151,6 +151,36 @@ def test_real_planner_activity_retains_fixed_candidates_quotas_and_raw_terms(tmp
             assert first[field].equals(other[field])
 
 
+def test_zero_route_audit_uses_actual_shared_runtime_baseline():
+    from dataclasses import replace
+
+    import mosaickv.backends.hf_runtime as runtime
+    from mosaickv.config import RunConfig
+    from mosaickv.evaluation.fox_campaign import source_config
+    from mosaickv.evaluation.fox_mechanisms import mechanism_audit
+    from mosaickv.types import MosaicKVMethod
+
+    keys = np.ones((1, 2, 12, 4), np.float32)
+    state = FullKVState.from_tensors(
+        ((keys, keys.copy()),), block_size=1, mandatory_logical_positions=(11,)
+    )
+    config = RunConfig.from_mapping(source_config("coco"))
+    cache = replace(config.cache, budget_value=2 * 6 * 4 * 4 * 2)
+    prompt = {i: float(i % 12 + 1) for i in range(24)}
+    limits = {(0, h): 6 for h in range(2)}
+    with mechanism_audit("route-0", "fixture", stable_policy=config) as record:
+        runtime.build_exact_baseline_plan(
+            state,
+            MosaicKVMethod.PROMPT_ATTENTION_TOPK,
+            cache,
+            seed=17,
+            prompt_attention_by_node=prompt,
+            position_limits=limits,
+        )
+    assert record["zero_route_equivalence_passed"]
+    assert record["graph_nodes"] == 0
+
+
 def test_mechanism_contract_rejects_different_candidates(tmp_path):
     import copy
 

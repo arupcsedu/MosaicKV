@@ -25,10 +25,12 @@ MATERIALIZATION = Path(
 def group_manifest(root):
     """Recover underlying frames/images, not just the combined-image montage."""
     lock = json.loads((root / "protocol_lock.json").read_text())
-    source_meta = json.loads(MATERIALIZATION.read_text())
+    source_meta = (
+        json.loads(MATERIALIZATION.read_text()) if "milebench" in lock["cohorts"] else None
+    )
     maps = {}
-    bindings = {str(MATERIALIZATION): sha(MATERIALIZATION)}
-    for workload in ("coco", "milebench"):
+    bindings = {str(MATERIALIZATION): sha(MATERIALIZATION)} if source_meta else {}
+    for workload in lock["cohorts"]:
         path = Path(lock["cohorts"][workload]["development"]["path"])
         if sha(path) != lock["cohorts"][workload]["development"]["sha256"]:
             raise ValueError("cohort changed")
@@ -164,7 +166,7 @@ def exclusion_inventory(root, output, max_seconds=90):
             visit(value)
         except Exception as error:
             errors.append(dict(path=str(path), error=f"{type(error).__name__}: {error}"))
-    for workload in ("coco", "milebench"):
+    for workload in json.loads((root / "protocol_lock.json").read_text())["cohorts"]:
         p = Path(
             json.loads((root / "protocol_lock.json").read_text())["cohorts"][workload][
                 "development"
@@ -229,7 +231,7 @@ def native_statistics(root, stage, output, workers):
             raise ValueError("generation nondeterminism across repeats")
         quality[key] = row
     reports = []
-    for workload in ("coco", "milebench"):
+    for workload in lock["cohorts"]:
         chosen = [r for r in quality.values() if r["workload"] == workload]
         point_rows = defaultdict(dict)
         for row in chosen:
@@ -243,6 +245,10 @@ def native_statistics(root, stage, output, workers):
         comparisons = [
             (f"prompt_attention_topk:{int(cap * 2**20)}", f"mosaickv_exact:{int(cap * 2**20)}")
             for cap in caps
+        ]
+        port = "vl_cache_reimpl" if workload == "coco" else "lookm_reimpl"
+        comparisons += [
+            (f"{port}:{int(cap * 2**20)}", f"mosaickv_exact:{int(cap * 2**20)}") for cap in caps
         ]
         if workload == "coco":
             points = {
@@ -301,6 +307,13 @@ def native_statistics(root, stage, output, workers):
                         unique_inputs=len(ids),
                     )
                 )
+    for report in reports:
+        for contrast in report["contrasts"]:
+            contrast["statistical_family"] = (
+                "primary_quality_six"
+                if contrast["reference"].startswith("prompt_attention_topk:")
+                else "secondary_local_ports_six"
+            )
     write_once(output / "native_metrics.json", reports)
     write_once(
         output / "analysis_manifest.json",
@@ -337,7 +350,7 @@ def mechanism_statistics(root, output, workers=4):
         "random-29",
         "random-47",
     )
-    for workload in ("coco", "milebench"):
+    for workload in lock["cohorts"]:
         selected = [r for r in rows if r["workload"] == workload]
         point_rows = defaultdict(dict)
         for row in selected:

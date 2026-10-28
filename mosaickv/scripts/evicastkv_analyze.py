@@ -233,8 +233,8 @@ def analyze(root: Path, stage: str):
         write_once(
             output / "baseline_fidelity.json",
             dict(
-                lookm_reimpl="upstream_execution_unverified_missing_custom_LLaVA_fork",
-                vl_cache_reimpl="no_official_implementation_available",
+                lookm_reimpl="upstream_execution_not_validated_in_pinned_common_environment",
+                vl_cache_reimpl="no_audited_executable_official_path_in_this_repository",
                 strong_official_baseline_superiority_claim_allowed=False,
                 local_formula_test_status="see_scoring_fixtures",
             ),

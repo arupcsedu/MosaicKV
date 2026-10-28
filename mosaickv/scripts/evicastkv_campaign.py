@@ -65,12 +65,30 @@ def environment():
     )
 
 
-def prepare(root: Path, *, strict_fp16_reductions=False):
+def prepare(root: Path, *, strict_fp16_reductions=False, workloads=None, scope_registration=None):
     """Read previously materialized development pools; no HF access/downloads."""
     source_sha = clean_source(SOURCE)
+    workloads = tuple(workloads or BUDGETS)
+    if not workloads or set(workloads) - set(BUDGETS):
+        raise ValueError("unknown workload scope")
+    if set(workloads) != set(BUDGETS):
+        if scope_registration is None:
+            raise ValueError("narrowed execution requires a pre-quality scope registration")
+        scope = json.loads(Path(scope_registration).read_text())
+        if set(scope["enabled_workloads"]) != set(workloads):
+            raise ValueError("scope registration differs from enabled workloads")
+        if (
+            scope.get("basis") != "model_scoped_numerical_failure_only"
+            or scope.get("task_scores_used") is not False
+        ):
+            raise ValueError(
+                "scope must be registered from numerical support, not quality outcomes"
+            )
+        if sha(Path(scope["parent_gate_path"])) != scope["parent_gate_sha256"]:
+            raise ValueError("scope evidence changed")
     arithmetic = dict(allow_fp16_reduced_precision_reduction=not strict_fp16_reductions)
     templates, cohorts, bindings = {}, {}, {}
-    for workload in BUDGETS:
+    for workload in workloads:
         template_path = REFERENCE_CONFIG_ROOT / workload / "mosaickv_exact.json"
         templates[workload] = source_config(workload)
         validate_locked_policy(templates[workload])
@@ -147,15 +165,18 @@ def prepare(root: Path, *, strict_fp16_reductions=False):
             reservation="bi_fox_dgx",
             account="bii_dsc_community",
         ),
-        budgets_mib=BUDGETS,
-        methods=METHODS,
+        budgets_mib={w: BUDGETS[w] for w in workloads},
+        methods={w: METHODS[w] for w in workloads},
+        originally_requested_workloads=list(BUDGETS),
+        enabled_workloads=list(workloads),
+        unexecuted_primary_contrasts=0 if set(workloads) == set(BUDGETS) else 4,
         cohorts=cohorts,
         templates={
             w: dict(
                 path=str(root / "configs" / f"{w}-historical.json"),
                 sha256=sha(root / "configs" / f"{w}-historical.json"),
             )
-            for w in BUDGETS
+            for w in workloads
         },
         historical_bindings=bindings,
         environment=environment(),
@@ -187,6 +208,11 @@ def prepare(root: Path, *, strict_fp16_reductions=False):
         bootstrap_resamples=10000,
         primary_contrasts=6,
     )
+    if scope_registration is not None:
+        lock["scope_registration"] = dict(
+            path=str(scope_registration), sha256=sha(Path(scope_registration))
+        )
+        bindings[str(scope_registration)] = sha(Path(scope_registration))
     # Avoid asserting a fresh cohort from an incomplete historical inventory.
     write_once(
         root / "exclusion_report.json",
@@ -300,7 +326,7 @@ def jobs_for(lock, stage):
             dict(
                 workload=w, subset="smoke", indices=[0], stage=stage, arms=registered_arms(w, stage)
             )
-            for w in BUDGETS
+            for w in lock["budgets_mib"]
         ]
     subset = {
         "correctness": "validation",
@@ -310,7 +336,7 @@ def jobs_for(lock, stage):
         "mechanisms": "development",
         "full_graph_pilot": "profiler",
     }[stage]
-    for workload in BUDGETS:
+    for workload in lock["budgets_mib"]:
         count = len(lock["cohorts"][workload][subset]["sample_ids"])
         chunk = (
             2 if stage in {"profiling", "full_graph_pilot"} else 4 if stage == "measurement" else 8
@@ -455,9 +481,16 @@ def main():
     parser.add_argument("--index", type=int, default=0)
     parser.add_argument("--spec-sha")
     parser.add_argument("--strict-fp16-reductions", action="store_true")
+    parser.add_argument("--workloads", nargs="+", choices=tuple(BUDGETS))
+    parser.add_argument("--scope-registration", type=Path)
     args = parser.parse_args()
     if args.mode == "prepare":
-        prepare(args.root, strict_fp16_reductions=args.strict_fp16_reductions)
+        prepare(
+            args.root,
+            strict_fp16_reductions=args.strict_fp16_reductions,
+            workloads=args.workloads,
+            scope_registration=args.scope_registration,
+        )
     elif args.mode == "worker":
         from evicastkv_worker import run_worker
 
