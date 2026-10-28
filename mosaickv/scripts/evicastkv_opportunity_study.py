@@ -125,6 +125,102 @@ def prepare(root):
     )
 
 
+def retry_parent_rows(rows):
+    failed = [r for r in rows if r["status"] != "completed"]
+    valid = [r for r in rows if r["status"] == "completed"]
+    identities = {r["sample_id"] for r in rows}
+    actual = {(r["sample_id"], r["method"], r["budget_bytes"], r["variant"]) for r in rows}
+    expected = {
+        (sid, method, None if cap is None else cap * 2**20, variant)
+        for sid in identities
+        for method, cap, variant in arms()
+    }
+    if (
+        len(identities) != 2
+        or actual != expected
+        or len(rows) != 26
+        or len(failed) != 4
+        or len(valid) != 22
+        or any(
+            r["method"] != "vl_cache_reimpl"
+            or r["budget_bytes"] not in {20 * 2**20, 40 * 2**20}
+            or r.get("error") != "AssertionError: campaign must retain original exact KV"
+            for r in failed
+        )
+    ):
+        raise ValueError("retry may recover only the four known VL exact-tier diagnostic failures")
+    return valid, failed
+
+
+def prepare_retry(root, parent):
+    revision = clean_source(SOURCE)
+    if root.exists():
+        raise FileExistsError("retry root must be new")
+    parent_lock = json.loads((parent / "protocol_lock.json").read_text())
+    previous_source = Path(parent_lock["source_root"])
+    clean_source(previous_source, parent_lock["source_sha"])
+    unchanged = (
+        "mosaickv/src/mosaickv/backends/hf_runtime.py",
+        "mosaickv/src/mosaickv/config.py",
+        "mosaickv/src/mosaickv/selection/opportunity_demand.py",
+        "mosaickv/src/mosaickv/baselines/vl_cache.py",
+        "mosaickv/scripts/evicastkv_campaign.py",
+    )
+    if any(sha(SOURCE / name) != sha(previous_source / name) for name in unchanged):
+        raise ValueError("cannot reuse successful rows across changed policy/runtime sources")
+    old_worker = (previous_source / "mosaickv/scripts/evicastkv_worker.py").read_text()
+    expected = old_worker.replace(
+        'if item["tier"] != "exact":', 'if item["tier"] not in {"exact", "vl_cache_reimpl_exact"}:'
+    )
+    if (
+        old_worker == expected
+        or expected != (SOURCE / "mosaickv/scripts/evicastkv_worker.py").read_text()
+    ):
+        raise ValueError("worker change must be the isolated exact-tier diagnostic correction")
+    _, _, rows, _ = collect(parent, STAGE)
+    valid, failed = retry_parent_rows(rows)
+    lock = copy.deepcopy(parent_lock)
+    lock.update(source_root=str(SOURCE), source_sha=revision)
+    bindings = {str(parent / "protocol_lock.json"): sha(parent / "protocol_lock.json")}
+    for name in unchanged:
+        bindings[str(previous_source / name)] = sha(previous_source / name)
+    lock["historical_bindings"].update(bindings)
+    lock["evidence_retry"] = dict(
+        parent_root=str(parent),
+        bindings=bindings,
+        original_failed_attempts=len(failed),
+        reused_successful_rows=len(valid),
+        numerical_policy_unchanged=True,
+        fresh_confirmation=False,
+    )
+    root.mkdir(parents=True)
+    write_once(root / "protocol_lock.json", lock)
+    jobs = [
+        dict(
+            workload="coco",
+            stage=STAGE,
+            subset="consumed_canary",
+            indices=[i],
+            arms=[("vl_cache_reimpl", cap, "complete") for cap in (20, 40)],
+        )
+        for i in range(2)
+    ]
+    write_once(
+        root / f"jobs/{STAGE}.json",
+        dict(stage=STAGE, protocol_sha256=sha(root / "protocol_lock.json"), jobs=jobs),
+    )
+    write_once(
+        root / "readiness.json",
+        dict(
+            status="selective_retry_prepared",
+            requests=4,
+            reused_successful_rows=22,
+            original_failed_attempts=4,
+            source_sha=revision,
+        ),
+    )
+
+
 def analyze(root):
     lock = load_lock(root)
     output = root / "analysis/evidence_canary"
@@ -132,8 +228,22 @@ def analyze(root):
         raise FileExistsError("analysis is write-once")
     errors, summaries = [], []
     rows, workers, pairs = [], [], []
+    search_roots = [root]
     try:
         _, workers, rows, errors = collect(root, STAGE)
+        if lock.get("evidence_retry"):
+            parent = Path(lock["evidence_retry"]["parent_root"])
+            parent_lock = json.loads((parent / "protocol_lock.json").read_text())
+            clean_source(Path(parent_lock["source_root"]), parent_lock["source_sha"])
+            _, _, parent_rows, _ = collect(parent, STAGE)
+            valid, _ = retry_parent_rows(parent_rows)
+            if len(rows) != 4:
+                errors.append(dict(error="selective retry must contain four requests"))
+            rows = valid + rows
+            search_roots.append(parent)
+        keys = [(r["sample_id"], r["method"], r["variant"], r["budget_bytes"]) for r in rows]
+        if len(keys) != len(set(keys)):
+            raise ValueError("duplicate successful/retry experimental key")
         if len(rows) != 26 or len(workers) != 2:
             errors.append(
                 dict(error="incomplete registered denominator", actual=len(rows), expected=26)
@@ -166,15 +276,19 @@ def analyze(root):
                 key = row["run_id"]
                 # Actual trace catalogs may be nested; locate the worker's output directory.
                 worker_paths = list(
-                    (root / "outputs" / STAGE).glob("*/*/correctness/" + key + ".json")
+                    p
+                    for source_root in search_roots
+                    for p in (source_root / "outputs" / STAGE).glob(
+                        "*/*/correctness/" + key + ".json"
+                    )
                 )
                 if len(worker_paths) != 1:
                     raise ValueError("missing independent packed-cache correctness report")
                 correctness = worker_paths[0]
                 report = json.loads(correctness.read_text())
-                if (
-                    report["status"] != "passed"
-                    or report["retained_entries"] != report["padded_entries"]
+                if report["status"] != "passed" or (
+                    row["method"] != "vl_cache_reimpl"
+                    and report["retained_entries"] != report["padded_entries"]
                 ):
                     raise ValueError("representation parity or zero-padding gate failed")
             summaries.append(
@@ -186,6 +300,13 @@ def analyze(root):
                     initial_bytes=row["initial_kv_bytes"],
                     final_bytes=row["final_kv_bytes"],
                     peak_bytes=row["peak_kv_bytes"],
+                    source_sha=row["source_sha"],
+                    selected_positions_sha256=None
+                    if row["budget_bytes"] is None
+                    else report["positions_sha256"],
+                    physical_padding_entries=None
+                    if row["budget_bytes"] is None
+                    else report["padded_entries"] - report["retained_entries"],
                     experimental_activity=activity,
                     diagnostic_wall_seconds=row["e2e_wall_seconds"],
                 )
@@ -206,6 +327,12 @@ def analyze(root):
             quality_claim_allowed=False,
             fresh_confirmation=False,
             calibration_submitted=False,
+            original_failed_attempts=lock.get("evidence_retry", {}).get(
+                "original_failed_attempts", 0
+            ),
+            reused_successful_rows=lock.get("evidence_retry", {}).get("reused_successful_rows", 0),
+            total_attempted_rows=26
+            + lock.get("evidence_retry", {}).get("original_failed_attempts", 0),
         ),
     )
     write_once(output / "activity.json", summaries)
@@ -282,13 +409,18 @@ def submit(root):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("prepare", "worker", "analyze", "submit"))
+    parser.add_argument("mode", choices=("prepare", "prepare-retry", "worker", "analyze", "submit"))
     parser.add_argument("--root", required=True, type=Path)
     parser.add_argument("--spec-sha")
+    parser.add_argument("--parent", type=Path)
     args = parser.parse_args()
     if args.mode == "worker":
         from evicastkv_worker import run_worker
 
         run_worker(args.root, STAGE, int(os.environ["SLURM_ARRAY_TASK_ID"]), args.spec_sha)
+    elif args.mode == "prepare-retry":
+        if args.parent is None:
+            parser.error("prepare-retry requires --parent")
+        prepare_retry(args.root, args.parent)
     else:
         globals()[args.mode](args.root)

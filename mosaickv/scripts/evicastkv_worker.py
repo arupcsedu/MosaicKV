@@ -121,7 +121,7 @@ def layout_capture(adapter):
         masks = []
         positions = {}
         for item in packed.slot_records:
-            if item["tier"] != "exact":
+            if item["tier"] not in {"exact", "vl_cache_reimpl_exact"}:
                 raise AssertionError("campaign must retain original exact KV")
             positions.setdefault((int(item["layer"]), int(item["kv_head"])), []).append(
                 (int(item["slot"]), int(item["logical_position"]))

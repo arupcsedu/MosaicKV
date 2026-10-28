@@ -93,6 +93,28 @@ performance**. Captions/references are retained, but two consumed inputs are
 not statistical quality evidence. Acceptance cannot depend on favorable CIDEr.
 No fresh development, confirmation or paper campaign is auto-submitted.
 
+### Exact baseline diagnostic correction
+
+The first canary's four VL-Cache requests hit the exact-only oracle's literal
+`tier == exact` check before numerical validation. The pinned local VL-Cache
+payload builder labels unchanged source entries `vl_cache_reimpl_exact`.
+The corrective oracle accepts that explicit label only; it still independently
+compares every retained K and V bitwise to the source and rejects transformed,
+unknown, prototype and residual tiers. No runtime, policy, precision or numerical
+tolerance changes are permitted when reusing the other 22 passed requests.
+
+VL-Cache's unchanged adaptive layer allocation can legitimately introduce
+padding in the shared dense packer. Its padding must be reported and charged
+to the same actual initial/final/peak physical byte boundary; it must not be
+forced to use uniform allocation or certified by logical bytes alone. Zero
+padding remains required for Top-K and all four MosaicKV arms. Independent
+packed/original-layout numerical tests remain mandatory for VL-Cache as well;
+recognizing a tier name is not a numerical pass.
+
+The selective retry preserves the original 26 attempts, reuses only 22 successes,
+and runs only the four failures. Merged analysis reports all 30 attempts and
+rejects duplicate successful keys or any policy/runtime source change.
+
 Commands, after a clean immutable commit:
 
 ```bash
