@@ -74,12 +74,16 @@ def group_manifest(root):
     )
 
 
-def exclusion_inventory(root, output, max_seconds=90, *, run_root=None, identity_tasks=None):
+def exclusion_inventory(
+    root, output, max_seconds=90, *, run_root=None, identity_tasks=None, extra_manifest_names=()
+):
     """Bounded canonical-manifest inventory. Does not parse scheduler/raw logs."""
     started = time.monotonic()
     run_root = Path(run_root or "/scratch/djy8hg/runs/mosaickv")
     queue = []
     unclassified = []
+    if any(Path(name).name != name or not name.endswith(".json") for name in extra_manifest_names):
+        raise ValueError("extra manifest seeds must be exact JSON basenames")
     for entry in os.scandir(run_root):
         if not entry.is_dir(follow_symlinks=False):
             continue
@@ -90,6 +94,7 @@ def exclusion_inventory(root, output, max_seconds=90, *, run_root=None, identity
             "materialization.json",
             "ledger.json",
             "registration.json",
+            *extra_manifest_names,
         ):
             path = Path(entry.path) / name
             if path.is_file():

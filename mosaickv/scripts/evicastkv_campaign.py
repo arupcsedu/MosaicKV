@@ -406,8 +406,17 @@ def admitted_array_concurrency(resources, active_gpus):
     return min(limit, max(0, ceiling - active_gpus))
 
 
+def worker_time_limit(resources):
+    """Honor the registered wall limit instead of silently using sbatch defaults."""
+    minutes = resources.get("wall_minutes", 120)
+    if type(minutes) is not int or not 1 <= minutes <= 120:
+        raise ValueError("worker wall_minutes must be an integer between 1 and 120")
+    return f"{minutes // 60:02d}:{minutes % 60:02d}:00"
+
+
 def submit(root, stage, dependency=None):
     lock = load_lock(root)
+    time_limit = worker_time_limit(lock["resources"])
     jobs = jobs_for(lock, stage)
     spec = root / "jobs" / f"{stage}.json"
     imported = {}
@@ -473,6 +482,7 @@ def submit(root, stage, dependency=None):
         available = lock["resources"].get("array_concurrency", lock["resources"]["maximum_a100s"])
     command = [
         *common,
+        f"--time={time_limit}",
         "--array="
         + ",".join(str(i) for i in range(len(jobs)) if str(i) not in imported)
         + f"%{available}",
