@@ -223,7 +223,10 @@ def validate_mechanism_contract(rows):
     for row in rows:
         if row["status"] != "completed":
             raise ValueError("incomplete mechanism experiment")
-        activity = json.loads(Path(row["mechanism_audit_path"]).read_text())
+        path = Path(row["mechanism_audit_path"])
+        if sha(path) != row.get("mechanism_audit_sha256"):
+            raise ValueError("mechanism activity artifact changed or is not hash-bound")
+        activity = json.loads(path.read_text())
         for path, expected in activity.get("raw_terms", {}).items():
             if sha(Path(path)) != expected:
                 raise ValueError("mechanism term artifacts changed")

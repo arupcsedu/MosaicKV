@@ -5,11 +5,11 @@ from __future__ import annotations
 import math
 import random
 from collections import defaultdict
-from concurrent.futures import ProcessPoolExecutor
 
 import numpy as np
 
 from mosaickv.evaluation.coco_shared_bytes import TokenizedCider
+from mosaickv.evaluation.fox_cider_matrix import FrozenCiderMatrix
 from mosaickv.evaluation.metrics.types import MetricSample
 
 
@@ -123,15 +123,22 @@ def corpus_cider_statistics(
     draws = cluster_draws(
         identities, groups_by_id, dict.fromkeys(identities, "COCO"), resamples=resamples, seed=seed
     )
-    width = max(1, math.ceil(len(draws) / (workers * 2)))
-    payloads = [(tuple(ordered), draws[i : i + width]) for i in range(0, len(draws), width)]
-    if workers == 1:
-        chunks = map(_cider_chunk, payloads)
-        boot = np.asarray([row for chunk in chunks for row in chunk])
-    else:
-        with ProcessPoolExecutor(max_workers=workers) as pool:
-            boot = np.asarray([row for chunk in pool.map(_cider_chunk, payloads) for row in chunk])
     scorer = TokenizedCider([sample for point in ordered for sample in point])
+    matrix = FrozenCiderMatrix(tuple(ordered), tokenizer=scorer)
+    # Validate this actual prediction cohort, not only a synthetic fixture.
+    # Keep the official implementation as the point-estimate authority.
+    verification_draws = (tuple(range(len(identities))), *draws[:8])
+    official = np.asarray(
+        [
+            [scorer([point[index] for index in draw]) for point in ordered]
+            for draw in verification_draws
+        ]
+    )
+    sparse = matrix.score_draws(verification_draws)
+    maximum_error = float(np.max(np.abs(official - sparse)))
+    if maximum_error > 1e-10:
+        raise ValueError(f"sparse CIDEr disagrees with pinned official reducer: {maximum_error}")
+    boot = matrix.score_draws(draws)
     scores = {key: scorer(ordered[index]) for index, key in enumerate(keys)}
     reports = []
     for reference, candidate in comparisons:
@@ -159,6 +166,15 @@ def corpus_cider_statistics(
         unique_inputs=len(identities),
         media_clusters=len(media_components(identities, groups_by_id)),
         reducer="pinned lmms_eval PTBTokenizer+Cider x100; DF recomputed each draw",
+        bootstrap_implementation="FP64 sparse ngram algebra; official point estimates",
+        reducer_verification=dict(
+            actual_cohort_draws=len(verification_draws),
+            maximum_absolute_CIDEr_difference=maximum_error,
+            absolute_tolerance=1e-10,
+            requested_cpus=workers,
+            used_cpus=1,
+            not_a_model_numerical_tolerance=True,
+        ),
     )
 
 

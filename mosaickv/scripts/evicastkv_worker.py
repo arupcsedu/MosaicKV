@@ -635,6 +635,9 @@ def run_worker(root: Path, stage: str, index: int, spec_sha: str):
                             mechanism_audit_path=str(output / "mechanisms" / f"{key}.json")
                             if mechanism
                             else None,
+                            mechanism_audit_sha256=sha(output / "mechanisms" / f"{key}.json")
+                            if mechanism
+                            else None,
                         )
                         if stage == "scoring":
                             from mosaickv.evaluation.fox_boundary import run_boundary_b

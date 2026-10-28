@@ -186,7 +186,7 @@ def test_mechanism_contract_rejects_different_candidates(tmp_path):
 
     import pytest
 
-    from mosaickv.evaluation.fox_campaign import write_once
+    from mosaickv.evaluation.fox_campaign import sha, write_once
     from mosaickv.evaluation.fox_mechanisms import validate_mechanism_contract
 
     variants = (
@@ -221,6 +221,7 @@ def test_mechanism_contract_rejects_different_candidates(tmp_path):
                 budget_bytes=2,
                 variant=variant,
                 mechanism_audit_path=str(path),
+                mechanism_audit_sha256=sha(path),
                 status="completed",
                 token_ids=[1, 2],
                 score=None,

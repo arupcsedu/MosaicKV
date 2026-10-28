@@ -65,3 +65,35 @@ GPU allocator peaks are not process HBM. GPU telemetry and visibility limitation
 must be reported separately. Five warmups and three counterbalanced repeats are
 required for registered timing rows; one quality execution is not a repeated
 latency benchmark. Diagnostic clones never enter timed workers.
+
+## CPU-only statistical reproduction
+
+The sparse analysis implementation uses the installed official PTB tokenizer
+and ngram extraction. It caches ngram counts, **not fixed-DF CIDEr scores**.
+Each of the 10,000 resamples recomputes reference document frequencies, TF-IDF
+norms, clipping and the Gaussian length penalty, with duplicate image occurrences
+counted separately. The official scorer remains the point-estimate authority.
+Every actual cohort is checked against that scorer on the complete original
+corpus and eight paired resamples before the sparse bootstrap is accepted
+(absolute tolerance 1e-10 CIDEr points). This analysis tolerance does not alter
+any model, logit, cache, quality or memory gate. No package is installed.
+
+```bash
+$PY mosaickv/scripts/evicastkv_statistics_recheck.py reproduce \
+  --root /scratch/djy8hg/runs/evicastkv/fox-review-20261028-v6-coco-scoped \
+  --output NEW_EMPTY_DERIVED_DIRECTORY
+```
+
+This executes two independent regenerations from saved rows and checks exact
+derived hashes plus agreement with any existing official-reducer statistics.
+Canonical predictions/statistics remain untouched. Add `--include-packets`
+only after all producer jobs have terminated, so both report snapshots use the
+same immutable set of raw rows. The finite `follow` callback schedules itself
+only after already registered completion jobs; it never polls or starts GPU work.
+
+The mechanism study is sharded into two development inputs per worker (32
+workers for 64 inputs), without changing any condition, input, coefficient,
+statistical family or output policy. Its greater per-input treatment count must
+not inherit the eight-input quality-validation shard size. Each worker still
+requests one A100, 12 CPUs, 64 GiB and at most two hours; at most four are admitted
+concurrently. This is scheduling, not a new inference batching policy.

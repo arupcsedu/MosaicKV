@@ -339,7 +339,11 @@ def jobs_for(lock, stage):
     for workload in lock["budgets_mib"]:
         count = len(lock["cohorts"][workload][subset]["sample_ids"])
         chunk = (
-            2 if stage in {"profiling", "full_graph_pilot"} else 4 if stage == "measurement" else 8
+            2
+            if stage in {"profiling", "full_graph_pilot", "mechanisms"}
+            else 4
+            if stage == "measurement"
+            else 8
         )
         for start in range(0, count, chunk):
             jobs.append(

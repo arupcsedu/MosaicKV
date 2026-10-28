@@ -18,7 +18,7 @@ from pathlib import Path
 from evicastkv_campaign import PYTHON, SOURCE
 from evicastkv_evidence import group_manifest, validated_rows
 
-from mosaickv.evaluation.fox_campaign import clean_source, digest, sha, write_once
+from mosaickv.evaluation.fox_campaign import TASKS, clean_source, digest, sha, write_once
 from mosaickv.evaluation.fox_statistics import paired_scalar_statistics
 
 
@@ -617,6 +617,191 @@ def supplemental_exports(root, output, rows, lock):
     )
 
 
+def claim_ledger(root, output, bindings, current, timing):
+    """Human-readable, hash-bound claims; missing contrasts stay NOT_TESTED."""
+    write_once(output / "raw_bindings.json", bindings)
+    raw_sha = sha(output / "raw_bindings.json")
+    native = root / "analysis/scoring/native/native_metrics.json"
+    claims = []
+    if native.exists():
+        for report in read(native):
+            for contrast in report["contrasts"]:
+                low, high = contrast["simultaneous_ci"]
+                claims.append(
+                    dict(
+                        statement="positive quality difference at matched physical bytes",
+                        status=(
+                            "supported_in_development_scope"
+                            if low > 0
+                            else "contradicted_in_development_scope"
+                            if high < 0
+                            else "inconclusive"
+                        ),
+                        workload=report["workload"],
+                        metric=report.get("metric", "cider"),
+                        unique_inputs=report["unique_inputs"],
+                        reference=contrast["reference"],
+                        candidate=contrast["candidate"],
+                        row_filter="scoring; completed entire paired cohort; one record/input/arm",
+                        test="10000 input-media-cluster paired draws; corpus/hierarchy reducer",
+                        point_difference=contrast["difference"],
+                        ordinary_95_ci=contrast["ordinary_95_ci"],
+                        simultaneous_ci=contrast["simultaneous_ci"],
+                        family_size=contrast["family_size"],
+                        family=contrast.get("statistical_family", "registered_family"),
+                        source=str(native),
+                        source_sha256=sha(native),
+                        raw_manifest_sha256=raw_sha,
+                        confirmatory=False,
+                    )
+                )
+    lines = [
+        "# Claim-to-evidence ledger",
+        "",
+        "Every quality statement below is development-only. Zero-crossing or zero-width "
+        "intervals do not establish population equivalence. Local ports are not official code.",
+        "",
+        f"Raw records: `raw_bindings.json`, SHA256 `{raw_sha}`.",
+        "",
+    ]
+    for index, item in enumerate(claims, 1):
+        lines.extend(
+            [
+                f"## Q{index}: {item['workload']} / {item['metric']}",
+                "",
+                f"- Classification: **{item['status']}**.",
+                f"- Contrast: `{item['candidate']}` minus `{item['reference']}`; "
+                f"N={item['unique_inputs']}.",
+                f"- Difference: {item['point_difference']:.12g}; ordinary 95% CI "
+                f"{item['ordinary_95_ci']}; adjusted CI {item['simultaneous_ci']}.",
+                f"- Test: {item['test']}; family `{item['family']}`, size {item['family_size']}.",
+                f"- Filter: {item['row_filter']}.",
+                f"- Artifact: `{item['source']}`; SHA256 `{item['source_sha256']}`.",
+                "",
+            ]
+        )
+    lines.extend(
+        [
+            "## Unestablished claims",
+            "",
+            "- Lower memory at equal quality: NOT_TESTED by this equal-budget matrix.",
+            "- Fresh confirmation: NOT_RUN/BLOCKED; development is not independent confirmation.",
+            "- General latency superiority: NOT_ESTABLISHED; consult separate paired timing rows.",
+            "- Prototype/residual/repair and serving: NOT_TESTED in this exact-only campaign.",
+            "- Optimization speedup: NOT_TESTED until an explicit before/after equivalence run.",
+            "- Missing workload contrasts remain NOT_TESTED; "
+            "the original six-test family is retained.",
+            "",
+            f"Scoring gate: {current.get('scoring', {}).get('status', 'NOT_RUN')}. "
+            f"Paired timing contrasts: {len(timing) if timing is not None else 'NOT_RUN'}.",
+        ]
+    )
+    text_once(output / "claim_evidence.md", "\n".join(lines) + "\n")
+    write_once(output / "quality_claims.json", claims)
+    return claims
+
+
+def mechanism_exports(root, output, rows):
+    """Separate controlled-mechanism results from native deployment timing."""
+    selected = [r for r in rows if r["stage"] == "mechanisms"]
+    if not selected:
+        return
+    with (output / "development_predictions.jsonl").open("x") as stream:
+        for row in selected:
+            stream.write(json.dumps(row, sort_keys=True, allow_nan=False) + "\n")
+    activity_path = root / "analysis/mechanisms/configuration_activity.json"
+    activity = read(activity_path) if activity_path.exists() else []
+    write_once(output / "configuration_activity.json", activity)
+    by_key = {(r["workload"], r["sample_id"], r["variant"], r["budget_bytes"]): r for r in activity}
+    native_path = root / "analysis/mechanisms/native/mechanism_metrics.json"
+    scores = {}
+    if native_path.exists():
+        for report in read(native_path):
+            for point, value in report["scores"].items():
+                scores[(report["workload"], report.get("metric", "cider"), point)] = value
+    groups = defaultdict(list)
+    for row in selected:
+        groups[(row["workload"], row["variant"], row["budget_bytes"])].append(row)
+    summaries = []
+    for (workload, variant, budget), values in sorted(groups.items()):
+        for metric in ("cider",) if workload == "coco" else ("accuracy", "rouge_l_f1"):
+            family_tasks = TASKS[:2] if metric == "accuracy" else TASKS[2:]
+            applicable = (
+                values
+                if workload == "coco"
+                else [r for r in values if r["subtask"] in family_tasks]
+            )
+            completed = [r for r in applicable if r["status"] == "completed"]
+            measures = [
+                by_key[(workload, r["sample_id"], variant, budget)]
+                for r in completed
+                if (workload, r["sample_id"], variant, budget) in by_key
+            ]
+            summaries.append(
+                dict(
+                    workload=workload,
+                    variant=variant,
+                    metric=metric,
+                    budget_bytes=budget,
+                    attempted=len(applicable),
+                    completed=len(completed),
+                    failed=len(applicable) - len(completed),
+                    native_quality=scores.get((workload, metric, f"{variant}:{budget}")),
+                    mean_initial_kv_bytes=statistics.mean(r["initial_kv_bytes"] for r in completed)
+                    if completed
+                    else None,
+                    mean_graph_nodes=statistics.mean(r["graph_nodes"] for r in measures)
+                    if measures
+                    else None,
+                    mean_graph_edges=statistics.mean(r["graph_edges"] for r in measures)
+                    if measures
+                    else None,
+                    mean_selected_jaccard=statistics.mean(r["selected_jaccard"] for r in measures)
+                    if measures
+                    else None,
+                    mean_controlled_e2e=statistics.mean(r["e2e_wall_seconds"] for r in completed)
+                    if completed
+                    else None,
+                    timing_scope="fixed-quota mechanism diagnostic, not native deployment timing",
+                )
+            )
+    fixed = {"mechanism-complete", "routed-prompt", "coverage-off", "value-off", "cross-modal-off"}
+    csv_once(
+        output / "routing_sweep.csv", [s for s in summaries if s["variant"].startswith("route-")]
+    )
+    csv_once(output / "component_ablation.csv", [s for s in summaries if s["variant"] in fixed])
+    csv_once(
+        output / "routing_controls.csv",
+        [
+            s
+            for s in summaries
+            if s["variant"].startswith("random-") or s["variant"] == "mechanism-complete"
+        ],
+    )
+    write_once(output / "mechanism_summaries.json", summaries)
+    text_once(
+        output / "development_decision.md",
+        "# Development decision\n\nNO_CONFIG_FROZEN. All registered controls and random seeds "
+        "remain reported separately; no best-seed selection. Controlled diagnostic timings "
+        "are not native deployment latency. No confirmation authorized.\n",
+    )
+    lines = [
+        r"\begin{tabular}{llrrrr}",
+        r"Workload / metric & Variant & Cap (MiB) & N & Score & Nodes \\",
+    ]
+    for r in summaries:
+        score = "NOT RUN" if r["native_quality"] is None else f"{r['native_quality']:.6f}"
+        nodes = "NOT RUN" if r["mean_graph_nodes"] is None else f"{r['mean_graph_nodes']:.1f}"
+        label = f"{r['workload']}/{r['metric']}".replace("_", r"\_")
+        variant = r["variant"].replace("_", r"\_")
+        lines.append(
+            f"{label} & {variant} & {r['budget_bytes'] / 2**20:g} & "
+            f"{r['completed']} & {score} & {nodes} " + r"\\"
+        )
+    lines.append(r"\end{tabular}")
+    text_once(output / "mechanism_complete_matrix.tex", "\n".join(lines) + "\n")
+
+
 def packet(root, output):
     analysis_sha = clean_source(SOURCE)
     lock = read(root / "protocol_lock.json")
@@ -629,6 +814,7 @@ def packet(root, output):
     ):
         raise ValueError("gate belongs to a different protocol")
     supplemental_exports(root, output, rows, lock)
+    mechanism_exports(root, output, rows)
     numerics = numerical_summary(root, output)
     profiles = profile_summary(root, output)
     timing = None
@@ -792,6 +978,24 @@ def packet(root, output):
             prototype_residual_repair="NOT_TESTED",
             numerical_correctness="see controls and gates; no legacy failure relabeled",
             raw_bindings=bindings,
+        ),
+    )
+    claims = claim_ledger(root, output, bindings, current, timing)
+    required = ("correctness", "scoring", "profiling", "measurement", "mechanisms", "confirmation")
+    missing = [name for name in required if current.get(name, {}).get("status") != "passed"]
+    write_once(
+        output / "GATE_analysis.json",
+        dict(
+            status="partial" if missing else "passed",
+            source_sha=analysis_sha,
+            protocol_sha256=sha(root / "protocol_lock.json"),
+            bound_exports_validated=True,
+            missing_or_blocked_required_stages=missing,
+            actual_raw_rows=len(rows),
+            failed_rows=len(failures),
+            quality_contrasts_exported=len(claims),
+            confirmation_claim_allowed=False,
+            no_missing_results_invented=True,
         ),
     )
     generated = {

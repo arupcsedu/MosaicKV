@@ -85,6 +85,9 @@ def test_incomplete_packet_keeps_missing_stages_missing(tmp_path, monkeypatch):
     assert "NOT_RUN" in text
     assert "confirmation" in text
     assert module.read(output / "analysis_manifest.json")["raw_modified"] is False
+    assert module.read(output / "GATE_analysis.json")["status"] == "partial"
+    assert (output / "claim_evidence.md").exists()
+    assert module.read(output / "quality_claims.json") == []
 
 
 def test_native_tables_do_not_call_zero_crossing_equivalence(tmp_path, monkeypatch):
@@ -148,3 +151,41 @@ def test_legacy_numerical_record_without_status_is_not_certified(tmp_path, monke
     output.mkdir()
     m.numerical_summary(root, output)
     assert m.read(output / "numerical_error_summary.json")["legacy_without_explicit_status"] == 1
+
+
+def test_mechanism_export_keeps_corpus_cider_and_all_failed_denominators(tmp_path, monkeypatch):
+    m = packet_module(monkeypatch)
+    from mosaickv.evaluation.fox_campaign import write_once
+
+    write_once(
+        tmp_path / "analysis/mechanisms/native/mechanism_metrics.json",
+        [dict(workload="coco", metric="cider", scores={"route-0:20971520": 41.25})],
+    )
+    rows = [
+        dict(
+            stage="mechanisms",
+            workload="coco",
+            variant="route-0",
+            budget_bytes=20971520,
+            sample_id="a",
+            status="completed",
+            initial_kv_bytes=20971520,
+            e2e_wall_seconds=2,
+        ),
+        dict(
+            stage="mechanisms",
+            workload="coco",
+            variant="route-0",
+            budget_bytes=20971520,
+            sample_id="b",
+            status="failed",
+        ),
+    ]
+    output = tmp_path / "exports"
+    output.mkdir()
+    m.mechanism_exports(tmp_path, output, rows)
+    result = m.read(output / "mechanism_summaries.json")[0]
+    assert result["native_quality"] == 41.25
+    assert (result["attempted"], result["completed"], result["failed"]) == (2, 1, 1)
+    assert "NO_CONFIG_FROZEN" in (output / "development_decision.md").read_text()
+    assert len((output / "development_predictions.jsonl").read_text().splitlines()) == 2
