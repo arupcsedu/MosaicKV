@@ -210,7 +210,8 @@ def test_cpu_submission_is_finite_and_has_failure_aware_analysis(study, monkeypa
     study.submit(tmp_path)
     assert len(calls) == 2 and "--array=0-5%4" in calls[0]
     assert "--dependency=afterany:3001" in calls[1]
-    assert all("gres" not in token for call in calls for token in call)
+    # "regression" in an ordinary source path is not a GPU resource request.
+    assert all(not token.startswith(("--gres", "--gpus")) for call in calls for token in call)
     record = json.loads((tmp_path / "submission.json").read_text())
     assert record["gpu_execution_authorized"] is False and not record["gpu_jobs_submitted"]
     assert not record["fresh_cohort_authorized"] and not record["calibration_authorized"]

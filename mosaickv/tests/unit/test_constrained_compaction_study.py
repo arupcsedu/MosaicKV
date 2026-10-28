@@ -173,7 +173,8 @@ def test_submission_is_two_cpu_workers_and_finite_afterany_analysis_without_gpu(
     assert len(calls) == 2
     assert "--array=0-1%2" in calls[0]
     assert "--dependency=afterany:1001" in calls[1]
-    assert all("gres" not in token for call in calls for token in call)
+    # Inspect scheduler options, not substrings of filesystem paths.
+    assert all(not token.startswith(("--gres", "--gpus")) for call in calls for token in call)
     result = json.loads((tmp_path / "submission.json").read_text())
     assert not result["gpu_jobs_submitted"] and result["source_dirty_exploratory"]
     assert not result["calibration_authorized"] and not result["fresh_cohort_authorized"]

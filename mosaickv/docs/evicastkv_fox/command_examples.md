@@ -119,3 +119,23 @@ Its unit policy checks do not authorize that old campaign. A separate regression
 requires the actual preparer to reject source drift **before** catalog access or
 output creation and verifies that the historical contract is not rewritten.
 There is no refreshed historical seal, relaxed fingerprint, or reused paper run.
+
+## Qualify saved first-token diagnostics separately
+
+`evicastkv_boundary_audit.py` joins every completed A row with its hash-bound B
+snapshot, rejects missing/duplicate/changed records and writes
+`first_token_sensitivity.csv` plus `GATE_boundary_B.json` under a new directory.
+Every B method inherits its input's independent FullKV chunking control.
+Execution completion is not a numerical pass; an invalid FullKV control leaves
+B blocked without rewriting the valid primary A gate. B's changed observations
+and capacity boundary cannot be interpreted as a single causal factor.
+
+```bash
+$PY mosaickv/scripts/evicastkv_boundary_audit.py \
+  --root /scratch/djy8hg/runs/evicastkv/fox-review-20261028-v6-coco-scoped \
+  --boundary-export PREVIOUS_PACKET/boundary_A_B_diagnostics.json \
+  --boundary-export-sha REVIEWED_SHA256 --output NEW_EMPTY_BOUNDARY_AUDIT_DIRECTORY
+```
+
+This command never runs GPU inference, scores an invalid B corpus, changes a
+numerical threshold, or turns an A/B diagnostic into primary task evidence.
