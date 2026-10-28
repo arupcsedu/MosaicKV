@@ -1,0 +1,50 @@
+schema_version: 1
+classification: retrospective_development_not_untouched_confirmation
+historical_root: /scratch/djy8hg/runs/mosaickv/prefixkv/full-campaign-e4de390-20261019-v6
+historical_plan_sha256: 2500e5773cfb98c6d5aee8eda69359dd9fed77d5fc117dbec6af8654a73dc704
+historical_source_sha: e4de39001ea8edc74630f1864636bbc924d5486a
+tasks: [llava_description, mmvet_prefixkv]
+samples_per_task: 8
+initial_caps_mib: [80, 160]
+methods: [prompt_attention_topk, prefixkv_reimpl, mosaickv_exact]
+output_tokens: 1024
+warmups: 5
+timed_repetitions: 20
+timing_ids_per_task: 2
+parity_tokens: 16
+maximum_logit_difference: 0.001
+bootstrap_replicates: 10000
+seed: 20271014
+planned_lower_memory_pair:
+  candidate: mosaickv_exact
+  candidate_cap_mib: 80
+  reference: prefixkv_reimpl
+  reference_cap_mib: 160
+  label: unequal_budget_equal_quality_test_not_byte_matched
+quality_margins: {teacher_forced_ppl: 0.0, rouge_l_f1: 0.0}
+latency_ratio_upper_bound: 1.0
+resources:
+  maximum_a100s: 6
+  six_a100s_explicitly_authorized: true
+  prefixkv_array_concurrency: 3
+  fox_array_concurrency: 3
+  cpus_per_worker: 12
+  memory_gib_per_worker: 64
+  wall_minutes: 120
+  partition: bii-gpu
+  reservation: bi_fox_dgx
+  account: bii_dsc_community
+controls:
+  fullkv_quality_reference_only: true
+  precision: fp16
+  attention: eager
+  block_size: 1
+  mandatory_policy: first_and_last
+  generated_history: append_only
+  reference_target: frozen_fullkv_outputs
+  ppl_target: complete_annotation_no_truncation
+  prototypes: false
+  repair: false
+  unchanged_candidate: true
+paper_campaign_authorized: false
+untouched_confirmation_authorized: false
