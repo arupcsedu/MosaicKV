@@ -1,8 +1,29 @@
 # Profiler-justified unit-reference budget reuse
 
-This is one **candidate implementation optimization**, not a new selector.
+This is one **candidate implementation optimization** and one corrected
+baseline materialization bug, not a new selector.
 Do not claim a speedup until its GPU correctness/equivalence and factorial
 measurements complete. The original reference campaign remains unchanged.
+
+## Common gather-policy correction
+
+The simple-baseline builder previously ignored `cache.exact_gather_mode` and
+always performed `batched_layer` gathering. The frozen Fox templates request
+`source_views`, which EviCastKV already honored. Both methods published the
+same-size final cache, but Top-K unnecessarily copied staging payloads before
+the common packer gathered again. Historical Top-K latency/process-memory
+comparisons must not be described as having uniform materialization policy.
+Their measured predictions and published-cache byte counts are preserved.
+
+The corrected builder passes the configured mode explicitly, leaving its
+default behavior unchanged when `batched_layer` is configured. Tests verify
+all three modes and identical selected IDs/values. **Both** before/after budget
+arms use this corrected common gather policy. The old source supplies only the
+slow budget function, not a buggy historical full-method reference. Old Top-K
+latencies are not pooled into the corrected factorial. This correction changes
+intermediate allocation/lifetime as intended; it is labeled a bug correction,
+not a formerly identical-allocation speedup. The budget specialization itself
+does not change allocation policy.
 
 ## Measured motivation
 

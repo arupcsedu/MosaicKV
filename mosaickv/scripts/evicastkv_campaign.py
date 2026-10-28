@@ -227,7 +227,9 @@ def prepare(
         bindings[str(scope_registration)] = sha(Path(scope_registration))
     if optimization_protocol is not None:
         lock["optimization_protocol"] = optimization_protocol
-        lock["resources"]["maximum_a100s"] = 2
+        lock["resources"]["maximum_a100s"] = 6
+        lock["resources"]["array_concurrency"] = 2
+        lock["resources"]["six_a100s_explicitly_authorized"] = True
     # Avoid asserting a fresh cohort from an incomplete historical inventory.
     write_once(
         root / "exclusion_report.json",
@@ -302,6 +304,10 @@ def load_lock(root):
         ):
             if sha(source / "mosaickv/src/mosaickv/backends/hf_runtime.py") != expected:
                 raise ValueError("optimization/reference runtime changed")
+        if contract.get("corrected_baseline_source_sha256") != sha(
+            SOURCE / "mosaickv/src/mosaickv/baselines/selectors.py"
+        ):
+            raise ValueError("corrected baseline materialization source changed")
     return lock
 
 
@@ -392,6 +398,14 @@ def jobs_for(lock, stage):
     return jobs
 
 
+def admitted_array_concurrency(resources, active_gpus):
+    ceiling = int(resources["maximum_a100s"])
+    limit = int(resources.get("array_concurrency", ceiling))
+    if not 1 <= limit <= ceiling <= 6 or active_gpus < 0:
+        raise ValueError("invalid aggregate/array GPU admission limits")
+    return min(limit, max(0, ceiling - active_gpus))
+
+
 def submit(root, stage, dependency=None):
     lock = load_lock(root)
     jobs = jobs_for(lock, stage)
@@ -453,10 +467,10 @@ def submit(root, stage, dependency=None):
         if match:
             active_gpus += int(match[1])
             gpu_jobs.append(identity)
-    available = max(0, lock["resources"]["maximum_a100s"] - active_gpus)
+    available = admitted_array_concurrency(lock["resources"], active_gpus)
     if available == 0:
         dependency = ":".join(([dependency] if dependency else []) + gpu_jobs)
-        available = lock["resources"]["maximum_a100s"]
+        available = lock["resources"].get("array_concurrency", lock["resources"]["maximum_a100s"])
     command = [
         *common,
         "--array="

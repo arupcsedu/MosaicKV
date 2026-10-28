@@ -47,3 +47,26 @@ def test_mechanism_shards_partition_complete_cohort_without_changing_arms(monkey
     assert [i for job in jobs for i in job["indices"]] == list(range(64))
     assert all(len(job["indices"]) == 2 for job in jobs)
     assert all(job["arms"] == registered_arms("coco", "mechanisms") for job in jobs)
+
+
+def test_analysis_can_follow_an_explicitly_pinned_different_finalizer_source(tmp_path, monkeypatch):
+    m = module(monkeypatch)
+    from mosaickv.evaluation.fox_campaign import write_once
+
+    finalizer = "1" * 40
+    analyst = "2" * 40
+    monkeypatch.setattr(m, "clean_source", lambda *a: analyst)
+    root = tmp_path / "primary"
+    write_once(
+        root / "analysis/mechanisms/completion_decision.json",
+        dict(action="submitted_registered_successor", stage="full_graph_pilot"),
+    )
+    write_once(
+        root / "jobs" / f"full_graph_pilot-final-audit-{finalizer[:12]}.json",
+        dict(job="12345", source_sha=finalizer),
+    )
+    calls = []
+    monkeypatch.setattr(m, "schedule", lambda *args: calls.append(args))
+    monkeypatch.setattr(m, "reproduce", lambda *a, **k: pytest.fail("producer still pending"))
+    m.follow(root, root, "mechanisms", finalizer)
+    assert calls == [(root, root, "full_graph_pilot", "12345", finalizer)]

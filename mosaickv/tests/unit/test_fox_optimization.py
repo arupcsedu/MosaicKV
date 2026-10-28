@@ -35,6 +35,16 @@ def test_implementation_factorial_has_no_duplicated_fullkv_or_changed_budgets():
             )
 
 
+def test_pipeline_limit_is_distinct_from_six_gpu_aggregate_ceiling(monkeypatch):
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[2] / "scripts"))
+    from evicastkv_campaign import admitted_array_concurrency
+
+    resources = dict(maximum_a100s=6, array_concurrency=2)
+    assert [admitted_array_concurrency(resources, n) for n in (0, 3, 4, 5, 6)] == [2, 2, 2, 1, 0]
+    with pytest.raises(ValueError):
+        admitted_array_concurrency(dict(maximum_a100s=8), 0)
+
+
 def test_reference_function_is_hash_bound_and_context_is_restored(tmp_path, monkeypatch):
     import mosaickv.backends.hf_runtime as runtime
     import mosaickv.evaluation.fox_optimization as module

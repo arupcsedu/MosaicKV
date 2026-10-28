@@ -596,6 +596,7 @@ def supplemental_exports(root, output, rows, lock):
         if row["stage"] not in {"measurement", "optimization"} or row["status"] != "completed":
             continue
         metrics = row["metrics"]
+        breakdown = read(row["trace_path"]).get("timing_breakdown", {})
         telemetry_path = Path(row["timings"].get("sampled_telemetry_path", "MISSING"))
         telemetry = read(telemetry_path) if telemetry_path.is_file() else {}
         emissions = row["timings"].get("token_emission_seconds", [])
@@ -612,11 +613,22 @@ def supplemental_exports(root, output, rows, lock):
                 budget_bytes=row["budget_bytes"],
                 repeat=row["repeat"],
                 prefill_cuda_seconds=metrics.get("prefill_time"),
+                image_video_encoder_seconds=breakdown.get("image_video_encoder"),
+                projector_seconds=breakdown.get("projector"),
+                language_model_prefill_seconds=breakdown.get("language_model_prefill"),
+                cache_state_construction_seconds=breakdown.get("cache_state_construction"),
+                forecast_seconds=breakdown.get("forecast"),
+                planner_preparation_seconds=breakdown.get("planner_preparation"),
+                graph_seconds=breakdown.get("graph"),
+                utility_and_selection_seconds=breakdown.get("utility_and_selection"),
+                tier_construction_seconds=breakdown.get("tier_construction"),
+                cache_packing_seconds=breakdown.get("cache_packing"),
                 compression_seconds=metrics.get("compression_time"),
                 decode_cuda_seconds=metrics.get("decode_time"),
                 e2e_wall_seconds=row["e2e_wall_seconds"],
                 mean_local_token_handoff_gap=statistics.mean(gaps) if gaps else None,
                 first_handoff_seconds=row["timings"].get("first_token_emitted_seconds"),
+                first_logit_ready_seconds=row["timings"].get("first_logit_ready_seconds"),
                 second_handoff_seconds=row["timings"].get("second_token_emitted_seconds"),
                 initial_kv_bytes=row["initial_kv_bytes"],
                 final_kv_bytes=row["final_kv_bytes"],
@@ -646,7 +658,11 @@ def supplemental_exports(root, output, rows, lock):
         "storage/padding/preallocation, and is not process HBM. Allocator allocated/reserved "
         "peaks cover the complete request. NVML/RSS peaks are sampled at the recorded "
         "interval and can miss peaks; their scope includes post-output instrumentation. "
-        "Unavailable telemetry remains null, never replaced with KV bytes.\n",
+        "Unavailable telemetry remains null, never replaced with KV bytes. "
+        "Prefill includes vision/projector/LM subranges; nested ranges are not additive. "
+        "Published active KV is not total resident KV: source/plan objects remain in the "
+        "runtime frame through output construction. No total-resident-KV or process-HBM "
+        "compression claim may be inferred from this active-cache ratio.\n",
     )
     csv_once(output / "fullkv_reference.csv", [r for r in phases if r["method"] == "full_kv"])
     csv_once(
@@ -987,6 +1003,17 @@ def packet(root, output):
         "| Stage | Gate | Planned | Attempted | Complete | Failed |",
         "|---|---|---:|---:|---:|---:|",
     ]
+    notice = root / "writing/implementation_correction_notice.json"
+    if notice.exists():
+        correction = read(notice)
+        write_once(output / "implementation_correction_notice.json", correction)
+        lines[1:1] = [
+            "", "## Materialization correction — read before using latency results", "",
+            correction["summary"],
+            "The original predictions and published-cache byte counts are preserved. "
+            "Do not use the affected Top-K timings as uniform-materialization comparison evidence.",
+            f"Notice SHA256: `{sha(notice)}`.", "",
+        ]
     lines += [
         f"| {r['stage']} | {r['gate']} | "
         f"{r['planned'] if r['planned'] is not None else 'NOT_RUN'} | "

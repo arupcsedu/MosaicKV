@@ -90,6 +90,23 @@ def test_incomplete_packet_keeps_missing_stages_missing(tmp_path, monkeypatch):
     assert module.read(output / "quality_claims.json") == []
 
 
+def test_materialization_correction_notice_survives_regenerated_packet(tmp_path, monkeypatch):
+    module = packet_module(monkeypatch)
+    from mosaickv.evaluation.fox_campaign import write_once
+
+    monkeypatch.setattr(module, "clean_source", lambda *a: "test-fixture-not-measured")
+    root = tmp_path / "run"
+    write_once(
+        root / "protocol_lock.json", dict(source_root=str(root), source_sha="fixture", repeats=3)
+    )
+    notice = dict(summary="Fixture: baseline ignored configured gather mode.")
+    write_once(root / "writing/implementation_correction_notice.json", notice)
+    output = tmp_path / "derived"
+    module.packet(root, output)
+    assert module.read(output / "implementation_correction_notice.json") == notice
+    assert "uniform-materialization" in (output / "final_writing_packet.md").read_text()
+
+
 def test_native_tables_do_not_call_zero_crossing_equivalence(tmp_path, monkeypatch):
     module = packet_module(monkeypatch)
     from mosaickv.evaluation.fox_campaign import write_once

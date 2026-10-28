@@ -117,7 +117,7 @@ def reproduce(root, output, *, include_packets=False):
     )
 
 
-def schedule(primary, root, stage, dependency):
+def schedule(primary, root, stage, dependency, finalizer_source_sha=None):
     revision = clean_source(SOURCE)
     command = [
         "sbatch",
@@ -139,16 +139,25 @@ def schedule(primary, root, stage, dependency):
         str(root),
         stage,
         revision,
+        finalizer_source_sha or revision,
     ]
     record = root / "jobs" / f"{stage}-reproduction-{revision[:12]}.json"
     if record.exists():
         raise FileExistsError("finite reproduction callback already registered")
     job = subprocess.check_output(command, text=True).strip().split(";")[0]
-    write_once(record, dict(job=job, command=command, source_sha=revision))
+    write_once(
+        record,
+        dict(
+            job=job,
+            command=command,
+            source_sha=revision,
+            finalizer_source_sha=finalizer_source_sha or revision,
+        ),
+    )
     print(json.dumps(dict(reproduction_job=job, stage=stage)))
 
 
-def follow(primary, root, stage):
+def follow(primary, root, stage, finalizer_source_sha=None):
     """Called after a finite finalizer; follows only its already scheduled job."""
     clean_source(SOURCE)
     decision_path = root / "analysis" / stage / "completion_decision.json"
@@ -166,10 +175,12 @@ def follow(primary, root, stage):
         if successor not in ORDER or ORDER.index(successor) <= ORDER.index(stage):
             raise ValueError("reproduction callbacks cannot loop or reorder stages")
         # Finalizer source can differ from the immutable GPU runtime source.
-        revision = clean_source(SOURCE)
+        revision = finalizer_source_sha or clean_source(SOURCE)
         next_job = root / "jobs" / f"{successor}-final-audit-{revision[:12]}.json"
         if next_job.exists():
-            schedule(primary, root, successor, read(next_job)["job"])
+            if read(next_job)["source_sha"] != revision:
+                raise ValueError("unexpected finalizer source revision")
+            schedule(primary, root, successor, read(next_job)["job"], revision)
             return
     output = primary / "writing" / f"reproduced-{clean_source(SOURCE)[:12]}"
     for index, candidate in enumerate((primary, primary.parent / (primary.name + "-mechanisms"))):
@@ -186,13 +197,20 @@ def main():
     parser.add_argument("--stage", choices=ORDER, default="profiling")
     parser.add_argument("--dependency")
     parser.add_argument("--include-packets", action="store_true")
+    parser.add_argument("--finalizer-source-sha")
     args = parser.parse_args()
     if args.mode == "reproduce":
         reproduce(args.root, args.output, include_packets=args.include_packets)
     elif args.mode == "schedule":
-        schedule(args.primary or args.root, args.root, args.stage, args.dependency)
+        schedule(
+            args.primary or args.root,
+            args.root,
+            args.stage,
+            args.dependency,
+            args.finalizer_source_sha,
+        )
     else:
-        follow(args.primary or args.root, args.root, args.stage)
+        follow(args.primary or args.root, args.root, args.stage, args.finalizer_source_sha)
 
 
 if __name__ == "__main__":

@@ -4009,7 +4009,9 @@ def build_exact_baseline_plan(
     )
     selection_seconds = time.perf_counter() - started
     tier_started = time.perf_counter()
-    exact = full_state.gather_exact_blocks(selection.selected_blocks)
+    exact = full_state.gather_exact_blocks(
+        selection.selected_blocks, gather_mode=cache_config.exact_gather_mode
+    )
     state = MosaicKVState.create(full_state, exact=exact)
     if cache_config.retention_ratio == 1.0:
         state.reconstruct_full_state(full_state)

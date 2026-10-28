@@ -98,7 +98,7 @@ def prepare(parent, root):
     ):
         raise ValueError("the slow reference branch was changed, not just optimized")
     contract = dict(
-        changes=1,
+        changes=2,
         parent_root=str(parent),
         parent_protocol_sha256=sha(parent / "protocol_lock.json"),
         prerequisite_gates=gates,
@@ -109,9 +109,22 @@ def prepare(parent, root):
             ast.dump(budget_function_tree(path), include_attributes=False)
         ),
         optimized_runtime_sha256=sha(SOURCE / "mosaickv/src/mosaickv/backends/hf_runtime.py"),
+        superseded_baseline_source_sha256=sha(
+            reference / "mosaickv/src/mosaickv/baselines/selectors.py"
+        ),
+        corrected_baseline_source_sha256=sha(
+            SOURCE / "mosaickv/src/mosaickv/baselines/selectors.py"
+        ),
+        baseline_materialization="configured exact_gather_mode honored in BOTH factorial arms",
         target=target,
         profiler_report_sha256=sha(evidence / "profiler_hotspots.json"),
-        classification="candidate_semantics_preserving_requires_equivalence",
+        classification="corrected_common_gather_policy_plus_unit_budget_reuse",
+        classifications=[
+            "corrected_baseline_staging_policy",
+            "candidate_semantics_preserving_budget",
+        ],
+        parent_latency_restriction="original Top-K ignored the common source_views setting; "
+        "do not reuse those rows as uniform-materialization latency evidence",
         rationale="Skip only identical re-blockization of a validated immutable FullKVState; "
         "unchanged budget computation, mandatory policy, layout lattice and source tensors.",
         nonselected_hotspot="Exact-tier source-view bookkeeping is more invasive; "
@@ -137,6 +150,7 @@ def prepare(parent, root):
             clean_source(SOURCE),
             "--",
             "mosaickv/src/mosaickv/backends/hf_runtime.py",
+            "mosaickv/src/mosaickv/baselines/selectors.py",
         ],
         cwd=SOURCE,
         text=True,
@@ -264,7 +278,8 @@ def analyze_optimization(root, stage):
             report = [
                 "# Dense-budget state reuse: measured implementation factorial",
                 "",
-                "No objective, routing, precision, allocation or output-policy change. "
+                "Both factorial arms honor the corrected common gather policy; "
+                "their only difference is unit-budget metadata reuse. "
                 "Five warmups and three counterbalanced repeats; 16 consumed timing inputs. "
                 "FullKV is an uncompressed reference, not a matched-budget latency competitor.",
                 "",
