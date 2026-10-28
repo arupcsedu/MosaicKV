@@ -581,6 +581,7 @@ class MosaicKVCompressionPlan:
     hierarchical_storage_accounting: ExactCacheStorageAccounting | None = None
     hierarchical_rejected_proposal_storage_accounting: ExactCacheStorageAccounting | None = None
     hierarchical_rejected_proposal_id: str | None = None
+    evidence_policy_statistics: Mapping[str, Any] | None = None
 
     @property
     def uses_compact_node_ids(self) -> bool:
@@ -3218,6 +3219,68 @@ def build_compression_plan(
         position_limits,
     )
     total_active_budget = SelectionBudget(target, config.cache.budget_unit)
+    evidence_policy_statistics = None
+    route_evidence = None
+    evidence_seconds = 0.0
+    if config.evidence_policy is not None and config.cache.retention_ratio < 1.0:
+        from types import SimpleNamespace
+
+        from mosaickv.selection.opportunity_demand import make_route_evidence, opportunity
+
+        evidence_started = time.perf_counter()
+        if position_limits is None or prompt_attentions is None or prompt_attention_by_node is None:
+            raise HuggingFaceRuntimeError(
+                "evidence policy needs full prompt queries and physical capacities"
+            )
+        queries = _prompt_query_token_attention_by_head(
+            full_state,
+            SimpleNamespace(attention_weights=prompt_attentions),
+            prompt_window=config.forecasting.prompt_window,
+        )
+        if not config.evidence_policy.opportunity_routing:
+            selected_routes = _uncertain_head_routes(
+                position_limits,
+                graph_head_uncertainty,
+                fraction=config.prototypes.uncertain_head_fraction,
+                threshold=config.prototypes.uncertain_head_threshold,
+                label="coverage-only unchanged entropy router",
+            )
+            queries = {identity: queries[identity] for identity in selected_routes}
+        route_evidence = make_route_evidence(
+            full_state,
+            queries,
+            prompt_attention_by_node,
+            position_limits,
+        )
+        evidence_policy_statistics = dict(
+            variant=config.evidence_policy.variant,
+            full_domain_query_normalization=True,
+            individual_prompt_positions=True,
+            grouped_query_heads_averaged=True,
+            route_count_unchanged=True,
+            capacities_unchanged=True,
+        )
+        if config.evidence_policy.opportunity_routing:
+            opportunities = {
+                identity: opportunity(
+                    evidence,
+                    shortlist_size=config.evidence_policy.shortlist_size,
+                    minimum_query_mass_fraction=config.evidence_policy.minimum_query_mass_fraction,
+                )
+                for identity, evidence in route_evidence.items()
+            }
+            graph_head_uncertainty = {
+                identity: row["score"] for identity, row in opportunities.items()
+            }
+            evidence_policy_statistics["opportunities"] = [
+                dict(layer=identity[0], kv_head=identity[1], **row)
+                for identity, row in sorted(opportunities.items())
+            ]
+            evidence_policy_statistics["positive_opportunity_routes"] = sum(
+                row["score"] > 0 for row in opportunities.values()
+            )
+        evidence_seconds = time.perf_counter() - evidence_started
+        evidence_policy_statistics["evidence_preparation_seconds"] = evidence_seconds
     planner_target = target
     all_head_routes = {(block.layer, block.kv_head) for block in full_state.blocks}
     routed_head_routes: set[tuple[int, int]] | None = None
@@ -3478,7 +3541,7 @@ def build_compression_plan(
                         | exact_route_source_node_ids
                     )
                 )
-        stable_routing_seconds = time.perf_counter() - stable_routing_started
+        stable_routing_seconds = evidence_seconds + time.perf_counter() - stable_routing_started
     shortlist_started = time.perf_counter()
     similarity_candidate_node_ids = _similarity_shortlist(
         full_state,
@@ -3552,6 +3615,20 @@ def build_compression_plan(
         value_aware_node_ids=planner_optimization_node_ids,
     )
     objective = BudgetedObjective(graph, utilities, config.selection)
+    if (
+        config.evidence_policy is not None
+        and config.evidence_policy.demand_coverage
+        and route_evidence is not None
+    ):
+        from mosaickv.selection.opportunity_demand import DemandWeightedObjective
+
+        objective = DemandWeightedObjective(
+            graph,
+            utilities,
+            config.selection,
+            route_evidence,
+            config.evidence_policy.minimum_query_mass_fraction,
+        )
     utility_seconds = time.perf_counter() - utility_started
     reservation_started = time.perf_counter()
     if config.selection.prompt_anchor_fraction and prompt_attention_by_node is None:
@@ -3752,6 +3829,9 @@ def build_compression_plan(
             evidence_node_ids=evidence_node_ids,
             optimization_node_ids=planner_optimization_node_ids,
         )
+        if config.evidence_policy is not None and config.evidence_policy.demand_coverage:
+            selection = objective.protect_selection(selection)
+            evidence_policy_statistics["query_guard"] = objective.guard_report
         selector_seconds = time.perf_counter() - selector_started
         selection_seconds = utility_seconds + reservation_seconds + selector_seconds
         tier_started = time.perf_counter()
@@ -3813,6 +3893,8 @@ def build_compression_plan(
         effective_method = f"{config.method.value}__{construction.mode.value}"
     if config.ablation.variant is not AblationVariant.NONE:
         effective_method = f"{effective_method}__ablation_{config.ablation.variant.value}"
+    if config.evidence_policy is not None:
+        effective_method = f"{effective_method}__evidence_{config.evidence_policy.variant}_v1"
     graph_head_routes = tuple(
         sorted(
             {
@@ -3854,7 +3936,9 @@ def build_compression_plan(
         planner_mapping_seconds=planner_mapping_seconds,
         graph_head_routes=graph_head_routes,
         graph_routing_provenance=(
-            "routed_head_only_prompt_shortlist_plus_normalized_head_entropy"
+            "opportunity_relative_to_same_capacity_prompt_topk_v1"
+            if config.evidence_policy is not None and config.evidence_policy.opportunity_routing
+            else "routed_head_only_prompt_shortlist_plus_normalized_head_entropy"
             if config.selection.routed_head_only_planning
             else "prompt_hierarchical_shortlist_plus_normalized_head_entropy"
             if config.graph.uncertain_head_only
@@ -3864,6 +3948,7 @@ def build_compression_plan(
                 else "full_graph"
             )
         ),
+        evidence_policy_statistics=evidence_policy_statistics,
     )
 
 
@@ -8252,6 +8337,7 @@ def _plan_trace(
             "prototypes": _trace_catalog(prototypes, compact=compact_catalogs),
             "graph_edges": _trace_catalog(edges, compact=compact_catalogs),
             "graph_diagnostics": asdict(plan.graph.diagnostics),
+            "experimental_evidence_policy": plan.evidence_policy_statistics,
             "candidate_graph_routing": {
                 "provenance": plan.graph_routing_provenance,
                 "routed_head_only_planning": plan.optimization_node_ids is not None,

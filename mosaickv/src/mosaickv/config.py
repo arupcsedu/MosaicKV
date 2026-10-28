@@ -3875,6 +3875,51 @@ class OutputPreservingConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class EvidencePolicyConfig:
+    """Opt-in prompt-only routing/coverage study; never an implicit default."""
+
+    variant: str = "both"
+    shortlist_size: int = 8
+    minimum_query_mass_fraction: float = 0.95
+
+    def __post_init__(self) -> None:
+        if self.variant not in {"routing_only", "coverage_only", "both"}:
+            raise ConfigurationError(
+                "evidence_policy.variant must be routing_only, coverage_only, or both"
+            )
+        if type(self.shortlist_size) is not int or not 1 <= self.shortlist_size <= 32:
+            raise ConfigurationError("evidence_policy.shortlist_size must be an integer in [1,32]")
+        value = self.minimum_query_mass_fraction
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+            or not 0 < value <= 1
+        ):
+            raise ConfigurationError("evidence_policy.minimum_query_mass_fraction must be in (0,1]")
+
+    @property
+    def opportunity_routing(self) -> bool:
+        return self.variant in {"routing_only", "both"}
+
+    @property
+    def demand_coverage(self) -> bool:
+        return self.variant in {"coverage_only", "both"}
+
+    @classmethod
+    def from_mapping(cls, value: object) -> EvidencePolicyConfig:
+        data = _mapping(value, "evidence_policy")
+        _reject_unknown(data, set(cls.__dataclass_fields__), "evidence_policy")
+        return cls(
+            variant=_optional_str(data, "variant", "both", "evidence_policy"),
+            shortlist_size=_int(data, "shortlist_size", 8, "evidence_policy"),
+            minimum_query_mass_fraction=_float(
+                data, "minimum_query_mass_fraction", 0.95, "evidence_policy"
+            ),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class RunConfig:
     """Fully resolved MosaicKV run configuration."""
 
@@ -3900,10 +3945,36 @@ class RunConfig:
     schema_version: int = 1
     output_preserving: OutputPreservingConfig | None = None
     bounded_decode: BoundedDecodeConfig | None = None
+    evidence_policy: EvidencePolicyConfig | None = None
 
     def __post_init__(self) -> None:
         if self.schema_version != 1:
             raise ConfigurationError("schema_version must equal 1")
+        if self.evidence_policy is not None:
+            if not isinstance(self.evidence_policy, EvidencePolicyConfig):
+                raise ConfigurationError("evidence_policy must be a validated configuration")
+            if (
+                self.method is not MosaicKVMethod.MOSAICKV_EXACT
+                or self.execution.backend is not Backend.HUGGINGFACE
+                or self.execution.attention_implementation != "eager"
+                or self.forecasting.draft_steps != 0
+                or self.forecasting.prompt_window < 1
+                or self.prototypes.enabled
+                or self.residual.enabled
+                or self.repair.enabled
+                or self.bounded_decode is not None
+                or self.output_preserving is not None
+                or self.ablation.variant is not AblationVariant.NONE
+                or self.cache.block_size != 1
+                or self.cache.budget_unit is not BudgetUnit.BYTES
+                or not self.selection.routed_head_only_planning
+                or not self.selection.stable_head_prompt_routing
+                or self.selection.physical_capacity_fraction != 1.0
+            ):
+                raise ConfigurationError(
+                    "evidence_policy requires eager HF prompt-only exact unit-block "
+                    "shared-byte selection without other variants"
+                )
         if self.bounded_decode is not None:
             if not isinstance(self.bounded_decode, BoundedDecodeConfig):
                 raise ConfigurationError("bounded_decode must be a validated configuration")
@@ -4431,6 +4502,7 @@ class RunConfig:
             "published_kv",
             "output_preserving",
             "bounded_decode",
+            "evidence_policy",
         }
         _reject_unknown(data, allowed, "config")
         required = {"model", "dataset", "execution", "generation", "cache"}
@@ -4471,6 +4543,11 @@ class RunConfig:
                 None
                 if data.get("bounded_decode") is None
                 else BoundedDecodeConfig.from_mapping(data["bounded_decode"])
+            ),
+            evidence_policy=(
+                None
+                if data.get("evidence_policy") is None
+                else EvidencePolicyConfig.from_mapping(data["evidence_policy"])
             ),
         )
 
@@ -4519,6 +4596,8 @@ def canonical_config(config: RunConfig) -> JsonObject:
     # Adding the opt-in candidate must not change historical config identities.
     if config.output_preserving is None:
         payload.pop("output_preserving", None)
+    if config.evidence_policy is None:
+        payload.pop("evidence_policy", None)
     if config.bounded_decode is None:
         payload.pop("bounded_decode", None)
     else:

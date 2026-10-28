@@ -1,0 +1,30 @@
+schema_version: 1
+name: evicastkv_opportunity_demand_v1
+classification: exploratory_algorithm_variant_not_confirmation
+frozen_reference_source: 9af7c713557fbab9742b9e02125945409a970282
+workload: coco
+budgets_mib: [20, 40]
+policy:
+  shortlist_size: 8
+  minimum_query_mass_fraction: 0.95
+variants: [complete, evidence-routing-v1, evidence-coverage-v1, evidence-both-v1]
+canary:
+  samples: 2
+  selection: first_two_previously_consumed_validation_inputs
+  quality_claim_allowed: false
+  numerical_thresholds: unchanged_parent_contract
+  fullkv_reference: true
+  prompt_topk_and_vl_cache_at_both_budgets: true
+resources:
+  maximum_a100s: 6
+  six_a100s_explicitly_authorized: true
+  array_concurrency: 2
+  cpus_per_worker: 12
+  wall_minutes: 20
+  memory_gib_per_worker: 64
+  partition: bii-gpu
+  reservation: bi_fox_dgx
+  account: bii_dsc_community
+fresh_development_materialization_authorized: false
+confirmation_authorized: false
+paper_campaign_authorized: false

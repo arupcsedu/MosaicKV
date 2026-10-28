@@ -346,6 +346,18 @@ def run_worker(root: Path, stage: str, index: int, spec_sha: str):
             or packed_identity["maximum_logit_difference"] > 1e-4
         ):
             raise AssertionError("MosaicKV packed retention-one parity failed")
+        if stage == "evidence_canary":
+            for variant in ("evidence-routing-v1", "evidence-coverage-v1", "evidence-both-v1"):
+                candidate = resolved_config(lock, workload, "mosaickv_exact", 40, variant=variant)
+                candidate = replace(
+                    candidate,
+                    cache=replace(candidate.cache, retention_ratio=1.0, budget_value=2**63 - 1),
+                    generation=replace(candidate.generation, max_new_tokens=16),
+                )
+                report = asdict(compare_runtime_retention_one(adapter, prepared, candidate))
+                parity[variant] = report
+                if report["token_agreement"] != 1 or report["maximum_logit_difference"] > 1e-4:
+                    raise AssertionError(f"experimental retention-one parity failed: {variant}")
         write_once(output / "retention_one.json", parity)
         del prepared
         if stage == "smoke":
@@ -480,7 +492,9 @@ def run_worker(root: Path, stage: str, index: int, spec_sha: str):
                             token_observer=observer.emit,
                             completion_observer=observer.complete,
                         )
-                        diagnostic = stage in {"correctness", "representation_canary"}
+                        diagnostic = stage in {"correctness", "representation_canary"} or (
+                            stage == "evidence_canary" and method != "full_kv"
+                        )
                         from mosaickv.evaluation.fox_mechanisms import mechanism_audit
 
                         mechanism = stage in {"mechanisms", "full_graph_pilot"}
