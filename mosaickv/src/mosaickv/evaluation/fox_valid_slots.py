@@ -25,21 +25,35 @@ def valid_slot_forward(original, module, query, key, value, mask, *args, **kwarg
     if not bool(((active_mask == 0) | torch.isneginf(active_mask)).all()):
         raise NotImplementedError("valid-slot diagnostic does not support attention biases")
     keep = active_mask[0, :, 0, :] == 0
-    if not bool((keep == keep[:1]).all()):
-        raise NotImplementedError("head-dependent validity is outside this bounded diagnosis")
-    indices = keep[0].nonzero(as_tuple=False).flatten()
-    if not indices.numel():
+    query_heads, kv_heads = query.shape[1], key.shape[1]
+    if query_heads % kv_heads or keep.shape[0] not in {1, query_heads}:
+        raise NotImplementedError("unsupported query/KV ownership")
+    keep = keep.expand(query_heads, -1)
+    groups = query_heads // kv_heads
+    grouped = keep.reshape(kv_heads, groups, -1)
+    if not bool((grouped == grouped[:, :1]).all()):
+        raise NotImplementedError("GQA query heads disagree on their owned KV slots")
+    kv_keep = grouped[:, 0]
+    counts = kv_keep.sum(-1)
+    if not bool((counts == counts[0]).all()):
+        raise NotImplementedError("unequal per-head capacities require a separate ragged kernel")
+    if int(counts[0]) == 0:
         raise ValueError("all attention slots invalid")
-    compact_key = key.index_select(-2, indices).contiguous()
-    compact_value = value.index_select(-2, indices).contiguous()
-    compact_mask = active_mask.index_select(-1, indices).contiguous()
+    indices = torch.stack([row.nonzero(as_tuple=False).flatten() for row in kv_keep])
+    gather = indices[None, :, :, None].expand(1, kv_heads, -1, key.shape[-1])
+    compact_key = key.gather(-2, gather).contiguous()
+    compact_value = value.gather(-2, gather).contiguous()
+    query_indices = indices.repeat_interleave(groups, dim=0)[None, :, None, :]
+    compact_mask = (
+        active_mask.expand(1, query_heads, 1, key.shape[-2]).gather(-1, query_indices).contiguous()
+    )
     output, compact_probabilities = original(
         module, query, compact_key, compact_value, compact_mask, *args, **kwargs
     )
     probabilities = compact_probabilities.new_zeros(
         (*compact_probabilities.shape[:-1], key.shape[-2])
     )
-    probabilities.index_copy_(-1, indices, compact_probabilities)
+    probabilities.scatter_(-1, query_indices, compact_probabilities)
     return output, probabilities
 
 

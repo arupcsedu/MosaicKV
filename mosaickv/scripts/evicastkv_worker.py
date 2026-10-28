@@ -220,6 +220,7 @@ def run_worker(root: Path, stage: str, index: int, spec_sha: str):
         attempt=attempt,
     )
     start = time.perf_counter()
+    attention_transport = contextlib.ExitStack()
     try:
         if not os.environ.get("SLURM_JOB_ID") or torch.cuda.device_count() != 1:
             raise RuntimeError("exactly one allocated GPU required; no login-node GPU execution")
@@ -249,6 +250,15 @@ def run_worker(root: Path, stage: str, index: int, spec_sha: str):
             model_kwargs=_model_kwargs(cfg, local_files_only=True),
             processor_kwargs={"local_files_only": True},
         )
+        policy = arithmetic.get("attention_layout_policy", "native")
+        if policy == "valid_slot_decode":
+            if stage not in {"correctness", "representation_canary"}:
+                raise RuntimeError("valid-slot transport is registered for correctness only")
+            from mosaickv.evaluation.fox_valid_slots import valid_slot_diagnostic
+
+            attention_transport.enter_context(valid_slot_diagnostic(adapter))
+        elif policy != "native":
+            raise RuntimeError("unsupported attention-layout policy")
         summary["model_load_seconds"] = time.perf_counter() - load_start
         parameter_devices = sorted({str(p.device) for p in adapter.model.parameters()})
         if any(
@@ -726,6 +736,7 @@ def run_worker(root: Path, stage: str, index: int, spec_sha: str):
             dict(error=f"{type(error).__name__}: {error}", traceback=traceback.format_exc())
         )
     finally:
+        attention_transport.close()
         summary["wall_seconds"] = time.perf_counter() - start
         write_once(output / "worker.json", summary)
     if summary["status"] != "passed":

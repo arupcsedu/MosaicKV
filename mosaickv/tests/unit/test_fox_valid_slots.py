@@ -49,12 +49,32 @@ def test_all_valid_fast_path_is_exact_object_identity():
     assert valid_slot_forward(original, None, q, k, v, mask) is sentinel
 
 
-def test_head_dependent_masks_and_biases_are_explicitly_unsupported():
+def test_unequal_head_capacities_are_explicitly_unsupported():
     q, k = torch.ones(1, 2, 1, 2), torch.ones(1, 2, 3, 2)
     mask = torch.zeros(1, 2, 1, 3)
     mask[0, 0, 0, 0] = -torch.inf
-    with pytest.raises(NotImplementedError, match="head-dependent"):
+    with pytest.raises(NotImplementedError, match="unequal per-head"):
         valid_slot_forward(None, None, q, k, k, mask)
+
+
+def test_equal_capacity_different_head_positions_preserve_source_values_and_gqa():
+    from transformers.models.llama.modeling_llama import eager_attention_forward
+
+    owner = SimpleNamespace(num_key_value_groups=2, training=False)
+    torch.manual_seed(7)
+    q, k = torch.randn(1, 4, 1, 4), torch.randn(1, 2, 6, 4)
+    v = torch.randn_like(k)
+    positions = torch.tensor([[0, 2, 5], [1, 3, 5]])
+    mask = torch.full((1, 4, 1, 6), -torch.inf)
+    for head in range(4):
+        mask[0, head, 0, positions[head // 2]] = 0
+    ck = torch.stack([k[0, h, positions[h]] for h in range(2)])[None]
+    cv = torch.stack([v[0, h, positions[h]] for h in range(2)])[None]
+    expected = eager_attention_forward(owner, q, ck, cv, torch.zeros(1, 4, 1, 3), scaling=0.5)
+    got = valid_slot_forward(eager_attention_forward, owner, q, k, v, mask, scaling=0.5)
+    assert torch.equal(got[0], expected[0])
+    for head in range(4):
+        assert torch.equal(got[1][0, head, 0, positions[head // 2]], expected[1][0, head, 0])
     mask[0, 1, 0, 1] = -0.5
     with pytest.raises(NotImplementedError, match="biases"):
         valid_slot_forward(None, None, q, k, k, mask)

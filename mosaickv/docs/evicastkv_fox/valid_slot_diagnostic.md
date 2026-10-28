@@ -5,13 +5,16 @@ attention probabilities (layer 0) or the attention context (layer 5), before
 downstream residual amplification. This justifies one bounded execution
 experiment, not another broad precision sweep or a quality-cohort revision.
 
-For batch-one, one-query eager attention with the same binary validity pattern
-for all heads, gather valid K/V slots in their original order, call the installed
+For batch-one, one-query eager attention, gather valid K/V slots in their
+original per-head order, call the installed
 eager implementation without changing its precision, and scatter returned
 probabilities back onto the original physical axis. Stored K/V tensors, logical
 positions and physical-cache accounting are unchanged. The temporary attention
-operands are explicitly not new compressed-cache storage. Head-dependent masks
-and finite attention biases remain unsupported for this narrow diagnosis.
+operands are explicitly not new compressed-cache storage. The original
+two-case diagnosis used a shared validity pattern. The common-policy regate
+extends it to different per-KV-head positions with equal valid counts and
+consistent GQA ownership. Unequal capacities and finite attention biases remain
+unsupported. This extension requires its own correctness evidence.
 
 The all-valid path calls the installed function with the original object
 identities; it does not gather or change its operands. The wrapper is scoped to
