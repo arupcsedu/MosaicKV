@@ -97,3 +97,25 @@ statistical family or output policy. Its greater per-input treatment count must
 not inherit the eight-input quality-validation shard size. Each worker still
 requests one A100, 12 CPUs, 64 GiB and at most two hours; at most four are admitted
 concurrently. This is scheduling, not a new inference batching policy.
+
+## Full offline CPU regression audit
+
+The broader unit suite includes fixture checks against pinned upstream source.
+In a **separate audit worktree**, initialize the existing gitlinks before the
+audit; this retrieves licensed source only, not packages, datasets or weights:
+
+```bash
+git submodule update --init --jobs 3 -- third_party/LOOK-M third_party/PrefixKV \
+  third_party/StreamingLLM third_party/PyramidKV third_party/SnapKV third_party/ElasticCache
+export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 HF_DATASETS_OFFLINE=1
+$PY -m pytest mosaickv/tests/unit -q -p no:cacheprovider \
+  --junitxml=/scratch/djy8hg/runs/evicastkv/NEW_AUDIT_DIRECTORY/unit_results.xml
+```
+
+Do not initialize or alter source in an actively running experiment worktree.
+Historical `shared_byte_comparison_v2.yaml` retains its original source digest;
+the Fox instrumented/optimized checkout is intentionally a different source.
+Its unit policy checks do not authorize that old campaign. A separate regression
+requires the actual preparer to reject source drift **before** catalog access or
+output creation and verifies that the historical contract is not rewritten.
+There is no refreshed historical seal, relaxed fingerprint, or reused paper run.

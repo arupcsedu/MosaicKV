@@ -61,14 +61,15 @@ def test_frozen_contract_accepts_exact_coco_policy_and_rejects_retuning():
     from dataclasses import replace
 
     from mosaickv.evaluation.shared_byte_contract import (
-        candidate_content_digest,
         load_contract,
         validate_configuration,
     )
 
     source = SCRIPTS.parents[1]
     contract = load_contract(source / "mosaickv/configs/experiments/shared_byte_comparison_v2.yaml")
-    assert candidate_content_digest(source) == contract["candidate"]["content_sha256"]
+    # Policy compatibility is independent of source-code admission. New Fox
+    # instrumentation is deliberately NOT the historical frozen implementation;
+    # prepare() must still reject it rather than rewriting that old fingerprint.
     route = contract["lanes"]["vl_cache"]["tasks"]["coco_caption"]
     dataset = DatasetConfig(route["dataset_id"], route["dataset_revision"], route["split"])
     for cap in worker.CAPS:
@@ -82,6 +83,27 @@ def test_frozen_contract_accepts_exact_coco_policy_and_rejects_retuning():
     changed_generation = replace(cfg, generation=replace(cfg.generation, max_new_tokens=32))
     with pytest.raises(ValueError, match="controls mismatch"):
         validate_configuration(contract, "vl_cache", "coco_caption", changed_generation)
+
+
+def test_historical_source_freeze_rejects_drift_before_materialization(monkeypatch, tmp_path):
+    """A different checkout may pass policy tests but cannot reuse the old seal."""
+    from types import SimpleNamespace
+
+    source = SCRIPTS.parents[1]
+    contract_path = source / "mosaickv/configs/experiments/shared_byte_comparison_v2.yaml"
+    contract_before = contract_path.read_bytes()
+    root = tmp_path / "must-not-be-created"
+    monkeypatch.setattr(worker, "_require_clean_source", lambda *_: None)
+    monkeypatch.setattr(worker, "candidate_content_digest", lambda _: "0" * 64)
+
+    def forbidden_catalog_access():
+        pytest.fail("source admission must precede dataset/catalog access")
+
+    monkeypatch.setattr(worker, "default_task_registry", forbidden_catalog_access)
+    with pytest.raises(ValueError, match="frozen candidate content changed"):
+        worker.prepare(SimpleNamespace(root=root, source_sha="a" * 40))
+    assert not root.exists()
+    assert contract_path.read_bytes() == contract_before
 
 
 def test_milebench_revision_is_pinned_and_rejects_another_revision():
