@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import replace
+from functools import partial
 from types import SimpleNamespace
 
 from mosaickv.backends.hf_allocation_guard import decide_draft_stability, draft_row_causes
@@ -108,10 +109,24 @@ def diagnose_bias_transport(
     policy,
     generated_capacity=16,
     sink_tokens=4,
+    construction_variant="protected_v1",
+    fixed_dictionary=None,
     event=lambda _row: None,
 ):
     import torch
 
+    if construction_variant == "protected_v1" and fixed_dictionary is None:
+        effective_method = "attention_matching_protected_reimpl"
+        constructor = construct_heads
+        coefficient_fit_prefixes = 32
+    elif construction_variant == "anchor_preserving_v3_joint" and fixed_dictionary is not None:
+        from mosaickv.evaluation.anchor_compaction_diagnostic import METHOD, construct_anchor_heads
+
+        effective_method = METHOD
+        coefficient_fit_prefixes = 16
+        constructor = partial(construct_anchor_heads, fixed_dictionary=fixed_dictionary)
+    else:
+        raise ValueError("unregistered compaction constructor or missing frozen dictionary")
     guard = DraftAllocationGuardConfig()  # Never replace/relax the registered 32-prefix guard.
     phases, saved, storage_rows = {}, {}, []
     device = adapter.device
@@ -269,7 +284,7 @@ def diagnose_bias_transport(
     try:
         anchor, fitted, fits = phase(
             "cpu_value_and_mass_construction",
-            lambda: construct_heads(source, evidence, prompt_positions, policy, required),
+            lambda: constructor(source, evidence, prompt_positions, policy, required),
             cpu_only=True,
         )
     finally:
@@ -369,7 +384,9 @@ def diagnose_bias_transport(
     )
     return dict(
         classification="consumed_input_compaction_engineering_not_benchmark_quality",
-        effective_method="attention_matching_protected_reimpl",
+        effective_method=effective_method,
+        construction_variant=construction_variant,
+        coefficient_fit_prefixes=coefficient_fit_prefixes,
         source_contract=source_contract(),
         retention_one_parity=parity,
         zero_bias_retention_one_passed=True,

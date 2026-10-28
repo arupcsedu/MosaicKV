@@ -235,3 +235,54 @@ def test_failed_identity_emits_complete_parity_and_stops_before_fitting(monkeypa
     rows = next(row["steps"] for row in events if row["event"] == "retention_one_parity")
     assert len(rows) == 32 and not all(row["bitwise_equal"] for row in rows)
     assert not any(row.get("phase") == "cpu_value_and_mass_construction" for row in events)
+
+
+def test_v3_random_weight_transport_keeps_full_guard_controls_and_replay():
+    import anchor_compaction_hf_v3 as gate
+    import yaml
+
+    from mosaickv.evaluation.anchor_compaction_diagnostic import METHOD, VARIANT
+    from mosaickv.evaluation.attention_compaction_diagnostic import diagnose_bias_transport
+    from mosaickv.prototypes.attention_compaction import AttentionCompactionPolicy
+
+    torch.manual_seed(73)
+    adapter = _llava(kv_heads=2)
+    prepared = adapter.prepare_inputs([dict(role="user", content="tiny")])
+    dictionary = (((0, 1, 3), (0, 1, 3)), ((0, 1, 3), (0, 1, 3)))
+    result, artifacts = diagnose_bias_transport(
+        adapter,
+        prepared,
+        prompt_positions=3,
+        cap_bytes=2**20,
+        policy=AttentionCompactionPolicy(True),
+        construction_variant=VARIANT,
+        fixed_dictionary=dictionary,
+    )
+    assert result["effective_method"] == METHOD and result["coefficient_fit_prefixes"] == 16
+    assert result["engineering_passed"] and result["zero_bias_retention_one_passed"]
+    assert all(control["passed"] for control in result["controls"].values())
+    assert result["fullkv_prefills"] == 1 and result["source_cache_unchanged"]
+    assert result["source_weights_unchanged"] and result["source_logical_positions_unchanged"]
+    assert result["original_guard"]["horizon"] == 32
+    reviewed = gate.base.review_result(
+        result, artifacts["logits"], yaml.safe_load(gate.PROTOCOL.read_text())
+    )
+    assert reviewed["engineering_passed"]
+    fit = gate.review_coefficients(
+        artifacts["constructed"], artifacts["evidence"], AttentionCompactionPolicy(True), dictionary
+    )
+    assert fit["first_16_fit_bitwise_reproduced"] and fit["maximum_delta_norm_ratio"] <= 0.1
+
+
+def test_unknown_constructor_fails_before_prefill():
+    from mosaickv.evaluation.attention_compaction_diagnostic import diagnose_bias_transport
+
+    with pytest.raises(ValueError, match="unregistered"):
+        diagnose_bias_transport(
+            None,
+            None,
+            prompt_positions=3,
+            cap_bytes=2**20,
+            policy=None,
+            construction_variant="silently_use_another_method",
+        )

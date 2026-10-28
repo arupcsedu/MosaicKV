@@ -1,0 +1,52 @@
+schema_version: 1
+classification: exploratory_CPU_consumed_capture_anchor_study_NOT_model_quality
+effective_method: attention_matching_anchor_preserving_reimpl
+base_source_sha: 51b51b9642b63d8971c8ea59db01fc0a4a04ddc0
+negative_v2_root: /scratch/djy8hg/runs/mosaickv/constrained-compaction-cpu-v2-20261027-v1
+negative_v2_plan_sha256: 18dee511b5b2e28aa8cf20ec71a361e4c1bc3f68cf7a86ff75f7e419e3ccb800
+negative_v2_report_sha256: ef37eb3d5d6555c25d0b64d7a3199705b7ca4b19c99aa6f4b5437eb200fa69d4
+negative_v2_decision_sha256: 61c935c4d6c8d536d0d8f7c59c245a6e575a81f6cbfc42fe970757f6729027f6
+cases:
+  - name: ridge_only
+    policy: {iterations: 256, ridge_multiplier: 10000.0, maximum_delta_norm_ratio: null}
+    role: mechanism_ablation_not_promotable
+  - name: delta_only
+    policy: {iterations: 256, ridge_multiplier: 1.0, maximum_delta_norm_ratio: 0.1}
+    role: mechanism_ablation_not_promotable
+  - name: anchor_preserving
+    policy: {iterations: 256, ridge_multiplier: 10000.0, maximum_delta_norm_ratio: 0.1}
+    role: fixed_candidate
+components: [anchor, mass_only, value_only, joint]
+prefix_folds:
+  - {train_prefixes: 8, holdout_start: 9, holdout_end: 16}
+  - {train_prefixes: 16, holdout_start: 17, holdout_end: 24}
+  - {train_prefixes: 24, holdout_start: 25, holdout_end: 32}
+dictionary_scope: frozen_39_keys_selected_using_all_32_parent_draft_prefixes
+holdout_scope: coefficient_fit_only_NOT_independent_key_selection_or_benchmark_evidence
+unchanged_value_norm_limit: 4.0
+unchanged_mass_multiplier_limit: 64.0
+chunk_routes: 64
+torch_threads: 1
+workers: 6
+maximum_concurrent_cpu_workers: 4
+cpus_per_worker: 1
+memory_gib_per_worker: 4
+maximum_worker_seconds: 1200
+gpu_execution_authorized: false
+fresh_cohort_authorized: false
+calibration_authorized: false
+paper_campaign_authorized: false
+useful_screen:
+  maximum_each_fold_holdout_mse_ratio: 1.000001
+  maximum_each_input_mean_holdout_mse_ratio: 0.95
+  minimum_changed_heads_each_fold: 1
+  require_all_stored_value_norms_within_four_x: true
+  require_mandatory_values_and_bias_unchanged: true
+  candidate_rule: lowest_worst_fold_ratio_then_mean_then_component_name
+future_guard_unchanged:
+  same_consumed_inputs_only: true
+  cap_bytes: 29360128
+  horizon: 32
+  checkpoints: [1, 4, 16, 32]
+  absolute_tolerance: 0.0000001
+  relative_tolerance: 0.000001

@@ -1,0 +1,42 @@
+schema_version: 1
+classification: consumed_input_compaction_engineering_not_benchmark_quality
+effective_method: attention_matching_anchor_preserving_reimpl
+construction_variant: anchor_preserving_v3_joint
+construction:
+  component: joint
+  coefficient_fit_prefixes: 16
+  value_policy: {iterations: 256, ridge_multiplier: 10000.0, maximum_delta_norm_ratio: 0.1}
+  chunk_routes: 64
+  dictionary: frozen_parent_39_positions
+  evidence_prefixes: 32
+cpu_root: /scratch/djy8hg/runs/mosaickv/anchor-compaction-cpu-v3-20261027-v1
+cpu_plan_sha256: 4a0f43d11e344b97de3797eb6cf8b7b84095de37d8cc9da481a99f4525d97792
+cpu_report_sha256: e5c474ebe38ab0efa16d80b838d789d66f5ac71db1426e11b7a99e5e8dda4b4d
+cpu_decision_sha256: 81eb25798a27979cb35bd563c0d88a1778fd7ac176cb4595b986163878d1cb01
+consumed_gpu_parent: /scratch/djy8hg/runs/mosaickv/attention-compaction-hf-gate-v1-20261027-v1
+consumed_gpu_plan_sha256: 7c6a7ffdca99f571cbca1b724a9fd41075b06f14e9d6ee63aa673053c85c5117
+gpu_execution_authorized: true # Two consumed-input workers only, explicitly requested.
+fresh_cohort_authorized: false
+calibration_authorized: false
+paper_campaign_authorized: false
+workers: 2
+gpus_per_worker: 1
+cpus_per_worker: 12
+max_global_a100s: 6
+time_limit_seconds: 1800
+required_mandatory_policy: first_and_last
+dictionary: frozen_parent_39_positions
+history: {capacity: 16, sink_tokens: 4}
+retention_one: {horizon: 32, maximum_logit_difference: 0.0, token_agreement: 1.0}
+guard:
+  horizon: 32
+  checkpoints: [1, 4, 16, 32]
+  absolute_tolerance: 0.0000001
+  relative_tolerance: 0.000001
+cap_bytes: 29360128
+prompt_positions: 39
+maximum_joint_candidates: 1
+maximum_cpu_construction_seconds: 600
+controls: [clone, repack_after_candidate]
+on_negative: stop_no_automatic_successor
+on_positive: design_review_only_not_fresh_cohort_or_paper_authorization

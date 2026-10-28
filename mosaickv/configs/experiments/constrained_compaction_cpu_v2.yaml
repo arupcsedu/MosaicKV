@@ -1,0 +1,43 @@
+schema_version: 1
+classification: exploratory_CPU_saved_capture_surrogate_study_not_model_quality
+effective_method: attention_matching_constrained_reimpl
+parent_root: /scratch/djy8hg/runs/mosaickv/attention-compaction-hf-gate-v1-20261027-v1
+parent_plan_sha256: 7c6a7ffdca99f571cbca1b724a9fd41075b06f14e9d6ee63aa673053c85c5117
+negative_report_sha256: d3184b3f8b75d6bc1e1127c3028eb5d3c34e0a04412d1fac37d6b076faf3dde8
+negative_decision_sha256: b0278b5af6608b63a9464ec76571ce43acd2ce18c3519060e3a65b9f959d8ecd
+base_source_sha: 51b51b9642b63d8971c8ea59db01fc0a4a04ddc0
+components: [anchor, mass_only, value_only, joint]
+prefix_folds:
+  - {train_prefixes: 8, holdout_start: 9, holdout_end: 16}
+  - {train_prefixes: 16, holdout_start: 17, holdout_end: 24}
+  - {train_prefixes: 24, holdout_start: 25, holdout_end: 32}
+dictionary_scope: frozen_39_keys_selected_using_all_32_parent_draft_prefixes
+holdout_scope: coefficient_fit_only_NOT_independent_key_selection_or_benchmark_evidence
+value_solver: {iterations: 256}
+source_policy: unchanged_parent_ridge_mass_limit_and_four_x_value_norm_bound
+chunk_routes: 64
+torch_threads: 1
+workers: 2
+cpus_per_worker: 1
+memory_gib_per_worker: 4
+maximum_worker_seconds: 1200
+gpu_execution_authorized: false
+same_consumed_GPU_followup_authorized_only_if_useful: true
+fresh_cohort_authorized: false
+calibration_authorized: false
+paper_campaign_authorized: false
+useful_screen:
+  maximum_each_fold_holdout_mse_ratio: 1.000001
+  maximum_each_input_mean_holdout_mse_ratio: 0.95
+  minimum_changed_heads_each_fold: 1
+  require_all_stored_value_norms_within_four_x: true
+  require_mandatory_values_and_bias_unchanged: true
+  candidate_rule: lowest_worst_fold_ratio_then_mean_then_component_name
+GPU_followup_if_useful:
+  coefficient_fit_prefixes: 16
+  same_dictionary_and_consumed_inputs_only: true
+  cap_bytes: 29360128
+  horizon: 32
+  checkpoints: [1, 4, 16, 32]
+  absolute_tolerance: 0.0000001
+  relative_tolerance: 0.000001

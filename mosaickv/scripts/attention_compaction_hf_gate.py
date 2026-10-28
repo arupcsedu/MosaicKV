@@ -29,11 +29,11 @@ BLOCKED = dict(
 METHOD = "attention_matching_protected_reimpl"
 
 
-def manifest_control_config(config, core):
+def manifest_control_config(config, core, *, method=METHOD):
     """Keep frozen model controls; never misreport the parent's 40 MiB cap."""
     accounting_sha = object_sha(
         dict(
-            representation=METHOD,
+            representation=method,
             boundary="unique_KV_bias_masks_and_decode_metadata_backing_storage",
             original_kv_accounting_spec_sha=config.cache.accounting_spec_sha,
             history_positions=core["capacity_planning"]["history_positions"],
@@ -49,11 +49,11 @@ def manifest_control_config(config, core):
     )
 
 
-def validate_protocol(protocol):
+def validate_protocol(protocol, *, method=METHOD, dictionary="stable_mean_draft_attention_topk"):
     if (
         any(protocol[k] is not False for k in BLOCKED)
         or protocol["gpu_execution_authorized"] is not True
-        or protocol["effective_method"] != METHOD
+        or protocol["effective_method"] != method
         or protocol["guard"]
         != dict(
             horizon=32, checkpoints=[1, 4, 16, 32], absolute_tolerance=1e-7, relative_tolerance=1e-6
@@ -62,7 +62,7 @@ def validate_protocol(protocol):
         != dict(horizon=32, maximum_logit_difference=0.0, token_agreement=1.0)
         or protocol["history"] != dict(capacity=16, sink_tokens=4)
         or protocol["required_mandatory_policy"] != "first_and_last"
-        or protocol["dictionary"] != "stable_mean_draft_attention_topk"
+        or protocol["dictionary"] != dictionary
         or protocol["maximum_joint_candidates"] != 1
         or protocol["controls"] != ["clone", "repack_after_candidate"]
         or tuple(
@@ -176,6 +176,21 @@ def validate(root, plan_sha):
 
 
 def worker(root, plan_sha, index):
+    return execute_worker(root, plan_sha, index, plan=validate(root, plan_sha))
+
+
+def execute_worker(
+    root,
+    plan_sha,
+    index,
+    *,
+    plan,
+    method=METHOD,
+    construction_variant="protected_v1",
+    run_prefix="attention-compaction-hf-v1",
+    evaluator_version="compaction-v1",
+):
+    """Shared isolated transport/manifest path; caller validates its own protocol."""
     import torch
 
     from mosaickv.adapters.huggingface import load_hf_adapter
@@ -191,7 +206,12 @@ def worker(root, plan_sha, index):
     )
     from mosaickv.types import MeasurementType
 
-    plan = validate(root, plan_sha)
+    clean_source(plan["source_sha"])
+    if (construction_variant, method) not in {
+        ("protected_v1", METHOD),
+        ("anchor_preserving_v3_joint", "attention_matching_anchor_preserving_reimpl"),
+    }:
+        raise ValueError("constructor and effective method labels disagree")
     if type(index) is not int or not 0 <= index < 2:
         raise ValueError("invalid consumed gate worker index")
     job = plan["jobs"][index]
@@ -239,6 +259,10 @@ def worker(root, plan_sha, index):
                 prompt_positions=plan["capacity_planning"]["prompt_positions"],
                 cap_bytes=plan["core"]["capacity_planning"]["cap_bytes"],
                 policy=AttentionCompactionPolicy(**plan["core"]["policy"]),
+                construction_variant=construction_variant,
+                fixed_dictionary=json.loads(Path(job["dictionary"]).read_text())
+                if construction_variant == "anchor_preserving_v3_joint"
+                else None,
                 event=event,
             )
         record = dict(status="completed", result=result)
@@ -246,7 +270,7 @@ def worker(root, plan_sha, index):
         record = dict(
             status="failed",
             error=f"{type(error).__name__}: {error}",
-            effective_method=METHOD,
+            effective_method=method,
             phase_events=str(events),
             **BLOCKED,
         )
@@ -261,7 +285,7 @@ def worker(root, plan_sha, index):
         revision=cfg.model.revision,
         config=getattr(adapter.processor, "to_dict", lambda: {})() if adapter else {},
     )
-    manifest_cfg = manifest_control_config(cfg, plan["core"])
+    manifest_cfg = manifest_control_config(cfg, plan["core"], method=method)
     effective_config_sha = object_sha(
         dict(
             model_controls=canonical_config(manifest_cfg),
@@ -286,10 +310,10 @@ def worker(root, plan_sha, index):
             "not_applicable",
             digest(output / "artifact-hashes.json"),
         ),
-        run_id=f"attention-compaction-hf-v1-{index}",
+        run_id=f"{run_prefix}-{index}",
         execution_metadata=dict(
             phase="consumed_input_compaction_engineering_not_benchmark_quality",
-            effective_method=METHOD,
+            effective_method=method,
             effective_config_sha=effective_config_sha,
             frozen_parent_control_config_sha=job["control_config_sha"],
             retention_ratio_semantics="unused_sentinel_selection_is_physical_byte_capped",
@@ -302,7 +326,7 @@ def worker(root, plan_sha, index):
         ),
         evaluation_provenance=EvaluationProvenance(
             evaluator_name="unchanged_32_prefix_guard",
-            evaluator_version="compaction-v1",
+            evaluator_version=evaluator_version,
             evaluator_commit=plan["source_sha"],
             reference_output_sha256=digest(output / "logits.pt") if artifacts else "not_used",
             baseline_name="same_dictionary_exact_zero_bias_anchor",
@@ -543,6 +567,18 @@ def submit(root):
     plan = prepare(root)
     plan_sha = digest(root / "plan.json")
     validate(root, plan_sha)
+    return submit_prepared(root, plan, plan_sha)
+
+
+def submit_prepared(
+    root,
+    plan,
+    plan_sha,
+    *,
+    worker_script="attention_compaction_hf_gate.sbatch",
+    analysis_script="attention_compaction_analysis.sbatch",
+):
+    """Submit an already validated immutable two-worker engineering plan."""
     logs = root / "logs"
     logs.mkdir()
 
@@ -561,7 +597,7 @@ def submit(root):
             "--array=0-1%2",
             f"--output={logs}/gpu-%A_%a.out",
             f"--error={logs}/gpu-%A_%a.err",
-            str(SOURCE / "mosaickv/slurm/attention_compaction_hf_gate.sbatch"),
+            str(SOURCE / "mosaickv/slurm" / worker_script),
             str(SOURCE),
             str(root),
             plan_sha,
@@ -590,7 +626,7 @@ def submit(root):
             f"--dependency=afterany:{array}",
             f"--output={logs}/analysis-%j.out",
             f"--error={logs}/analysis-%j.err",
-            str(SOURCE / "mosaickv/slurm/attention_compaction_analysis.sbatch"),
+            str(SOURCE / "mosaickv/slurm" / analysis_script),
             str(SOURCE),
             str(root),
             plan_sha,
