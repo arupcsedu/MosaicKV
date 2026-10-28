@@ -205,6 +205,10 @@ def follow(primary, root, stage):
 
 
 def schedule(primary, root, stage, dependency):
+    source_sha = clean_source(SOURCE)
+    registration = root / "jobs" / f"{stage}-final-audit-{source_sha[:12]}.json"
+    if registration.exists():
+        raise FileExistsError("this immutable completion callback is already registered")
     command = [
         "sbatch",
         "--parsable",
@@ -224,12 +228,10 @@ def schedule(primary, root, stage, dependency):
         str(primary),
         str(root),
         stage,
-        clean_source(SOURCE),
+        source_sha,
     ]
     jobid = subprocess.check_output(command, text=True).strip().split(";")[0]
-    write_once(
-        root / "jobs" / f"{stage}-final-audit-submission.json", dict(job=jobid, command=command)
-    )
+    write_once(registration, dict(job=jobid, command=command, source_sha=source_sha))
     print(json.dumps(dict(stage=stage, final_audit_job=jobid)))
 
 

@@ -129,12 +129,11 @@ def _step(adapter, token, state, masks=None):
         )
 
 
-def validate_independent_layout(adapter, original, candidate, positions, token_ids, *, steps=16):
+def unpruned_padding_control(adapter, original, first_token, *, steps=16):
+    """Identical evidence/logical positions; only physical trailing holes differ."""
     import torch
 
     source = adapter._legacy_layers(original.past_key_values)[0]
-    dtype = source[0][0].dtype
-    eps = 8 * torch.finfo(dtype).eps
     all_positions = {
         (layer, head): tuple(range(k.shape[2]))
         for layer, (k, _v) in enumerate(source)
@@ -150,15 +149,28 @@ def validate_independent_layout(adapter, original, candidate, positions, token_i
         original_layout=True,
         padding=max(1, original.active_cache_length // 3),
     )
-    token = torch.tensor([[token_ids[0]]], device=adapter.device, dtype=torch.long)
+    token = torch.tensor([[int(first_token)]], device=adapter.device, dtype=torch.long)
     padding_errors = []
     for _ in range(steps):
         a = _step(adapter, token, full, full_masks)
         b = _step(adapter, token, padded, padded_masks)
+        if not bool(torch.isfinite(a.logits).all() and torch.isfinite(b.logits).all()):
+            raise AssertionError("non-finite logits in unpruned padding control")
         absolute = float((a.logits.float() - b.logits.float()).abs().max().item())
         norm = max(1.0, float(a.logits.float().abs().max().item()))
         padding_errors.append(dict(absolute=absolute, normalized_linf=absolute / norm))
         token = a.next_token_id
+        if full.next_decode_position != padded.next_decode_position:
+            raise AssertionError("padding control changed logical next position")
+    return padding_errors
+
+
+def validate_independent_layout(adapter, original, candidate, positions, token_ids, *, steps=16):
+    import torch
+
+    dtype = adapter._legacy_layers(original.past_key_values)[0][0][0].dtype
+    eps = 8 * torch.finfo(dtype).eps
+    padding_errors = unpruned_padding_control(adapter, original, token_ids[0], steps=steps)
     control_pass = all(item["normalized_linf"] <= eps for item in padding_errors)
     compact, compact_masks = independent_state(adapter, original, positions)
     masked, masked_masks = independent_state(adapter, original, positions, original_layout=True)

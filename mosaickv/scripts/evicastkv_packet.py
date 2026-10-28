@@ -61,6 +61,11 @@ def all_records(root):
                 and sha(Path(row["manifest_path"])) != row["manifest_sha256"]
             ):
                 raise ValueError("run manifest changed")
+            if (
+                row.get("resolved_config_path")
+                and sha(Path(row["resolved_config_path"])) != row["resolved_config_file_sha256"]
+            ):
+                raise ValueError("resolved runtime configuration changed")
             if row["status"] == "completed":
                 if sha(Path(row["trace_path"])) != row["trace_sha256"]:
                     raise ValueError("runtime trace changed")
@@ -172,8 +177,14 @@ def profile_summary(root, output):
                 observations=len(items),
                 mean_inclusive_cpu_ms=statistics.mean(i["inclusive_cpu_us"] for i in items) / 1000,
                 mean_self_cpu_ms=statistics.mean(i["self_cpu_us"] for i in items) / 1000,
-                mean_self_device_ms=statistics.mean(i.get("self_device_us") or 0 for i in items)
-                / 1000,
+                mean_self_device_ms=(
+                    statistics.mean(
+                        i["self_device_us"] for i in items if i.get("self_device_us") is not None
+                    )
+                    / 1000
+                    if any(i.get("self_device_us") is not None for i in items)
+                    else None
+                ),
                 qualification="diagnostic_profiler_contaminated_nested_ranges_not_additive",
             )
         )
@@ -205,7 +216,8 @@ def numerical_summary(root, output):
             records=reports,
             bound_files=bindings,
             qualified_contracts=sorted({r.get("numerical_contract", "legacy") for r in reports}),
-            failed=sum(r.get("status") != "passed" for r in reports),
+            failed=sum(r.get("status") == "failed" for r in reports),
+            legacy_without_explicit_status=sum("status" not in r for r in reports),
         ),
     )
     with (output / "correctness_cases.jsonl").open("x") as stream:
@@ -215,7 +227,7 @@ def numerical_summary(root, output):
         for item in reports:
             capacity = dict(
                 path=item["path"],
-                status=item["status"],
+                status=item.get("status", "legacy_result_without_explicit_status"),
                 retained_head_position_entries=item.get("retained_entries"),
                 physical_head_position_slots_including_padding=item.get("padded_entries"),
                 unique_backing_bytes=item.get("actual_unique_backing_bytes"),
@@ -325,7 +337,97 @@ def render_plots(root, output, rows):
             text_once(output / filename.replace(".svg", ".tex"), "\n".join(tex) + "\n")
             write_once(output / filename.replace(".svg", ".json"), points)
             plotted.append(filename)
+            if report.get("contrasts"):
+                plotted.append(contrast_plot(report, output))
     return plotted
+
+
+def contrast_plot(report, output):
+    """Draw the actual paired intervals; never infer pointwise error bars."""
+    from xml.etree import ElementTree as ET
+
+    values = []
+    for item in report["contrasts"]:
+        values.append(
+            dict(
+                cap_mib=int(item["candidate"].rsplit(":", 1)[-1]) / 2**20,
+                difference=item["difference"],
+                ordinary=item["ordinary_95_ci"],
+                adjusted=item["simultaneous_ci"],
+            )
+        )
+    low = min(0.0, *(min(v["adjusted"][0], v["ordinary"][0], v["difference"]) for v in values))
+    high = max(0.0, *(max(v["adjusted"][1], v["ordinary"][1], v["difference"]) for v in values))
+    span = max(high - low, 1e-12)
+
+    def y(value):
+        return 310 - 240 * (value - low) / span
+
+    svg = ET.Element("svg", xmlns="http://www.w3.org/2000/svg", width="640", height="390")
+
+    def text(x, y_pos, value):
+        ET.SubElement(svg, "text", x=str(x), y=str(y_pos), attrib={"font-size": "12"}).text = value
+
+    text(60, 22, f"{report['workload']}: EviCastKV minus Top-K, {report.get('metric', 'cider')}")
+    text(60, 40, "Development only: ordinary 95% (blue), Bonferroni-adjusted (orange)")
+    ET.SubElement(
+        svg,
+        "line",
+        x1="60",
+        x2="600",
+        y1=str(y(0)),
+        y2=str(y(0)),
+        stroke="gray",
+        attrib={"stroke-dasharray": "4 3"},
+    )
+    tex = [
+        r"\begin{tikzpicture}",
+        r"\begin{axis}[xlabel={Initial cap (MiB)},ylabel={Paired score difference}]",
+    ]
+    for index, v in enumerate(values):
+        x = 150 + 300 * index / max(1, len(values) - 1)
+        for bounds, color, offset in (
+            (v["adjusted"], "#d55e00", -3),
+            (v["ordinary"], "#005b96", 3),
+        ):
+            ET.SubElement(
+                svg,
+                "line",
+                x1=str(x + offset),
+                x2=str(x + offset),
+                y1=str(y(bounds[0])),
+                y2=str(y(bounds[1])),
+                stroke=color,
+                attrib={"stroke-width": "3"},
+            )
+            for endpoint in bounds:
+                ET.SubElement(
+                    svg,
+                    "line",
+                    x1=str(x + offset - 7),
+                    x2=str(x + offset + 7),
+                    y1=str(y(endpoint)),
+                    y2=str(y(endpoint)),
+                    stroke=color,
+                )
+        ET.SubElement(svg, "circle", cx=str(x), cy=str(y(v["difference"])), r="4", fill="black")
+        text(x - 15, 335, f"{v['cap_mib']:g} MiB")
+        text(x - 55, 355, f"Delta {v['difference']:.4g}")
+        lo, hi = v["adjusted"]
+        tex += [
+            r"\addplot[orange] coordinates {"
+            + f"({v['cap_mib']},{lo}) ({v['cap_mib']},{hi})"
+            + "};",
+            r"\addplot[only marks] coordinates {" + f"({v['cap_mib']},{v['difference']})" + "};",
+        ]
+    text(5, 75, f"{high:.5g}")
+    text(5, 310, f"{low:.5g}")
+    tex += [r"\end{axis}", r"\end{tikzpicture}"]
+    name = f"{report['workload']}-{report.get('metric', 'cider')}-paired-difference.svg"
+    text_once(output / name, ET.tostring(svg, encoding="unicode"))
+    text_once(output / name.replace(".svg", ".tex"), "\n".join(tex) + "\n")
+    write_once(output / name.replace(".svg", ".json"), values)
+    return name
 
 
 def native_tables(root, output):
@@ -372,8 +474,134 @@ def native_tables(root, output):
                 )
             )
         write_once(output / name.replace(".tex", "-contrasts.json"), contrasts)
+        diff_lines = [
+            r"\begin{tabular}{lrrr}",
+            r"Cap / EviCastKV minus Top-K & Difference & 95\% CI & Adjusted CI \\",
+        ]
+        for item in contrasts:
+            cap = int(item["candidate"].rsplit(":", 1)[-1]) / 2**20
+            lo, hi = item["ordinary_95_ci"]
+            alo, ahi = item["simultaneous_ci"]
+            diff_lines.append(
+                f"{cap:g} MiB & {item['difference']:.6f} & "
+                f"[{lo:.6f}, {hi:.6f}] & [{alo:.6f}, {ahi:.6f}] " + r"\\"
+            )
+        diff_lines.append(r"\end{tabular}")
+        text_once(
+            output / name.replace("quality.tex", "differences.tex"), "\n".join(diff_lines) + "\n"
+        )
         tables.append(name)
     return tables
+
+
+def supplemental_exports(root, output, rows, lock):
+    """No scorer/runtime change: expose setup, complete phases and B controls."""
+    from itertools import pairwise
+
+    setup = {}
+    for workload, info in lock.get("templates", {}).items():
+        if sha(Path(info["path"])) != info["sha256"]:
+            raise ValueError("frozen template changed")
+        config = read(info["path"])
+        setup[workload] = {
+            key: config.get(key)
+            for key in (
+                "model",
+                "dataset",
+                "execution",
+                "generation",
+                "cache",
+                "forecasting",
+                "graph",
+                "utility",
+                "selection",
+                "prototypes",
+                "residual",
+                "repair",
+            )
+        }
+    write_once(output / "experimental_setup.json", setup)
+    phases = []
+    for row in rows:
+        if row["stage"] != "measurement" or row["status"] != "completed":
+            continue
+        metrics = row["metrics"]
+        emissions = row["timings"].get("token_emission_seconds", [])
+        gaps = [b - a for a, b in pairwise(emissions)]
+        phases.append(
+            dict(
+                model=setup[row["workload"]]["model"]["id"],
+                workload=row["workload"],
+                task=row["subtask"] or "COCO Caption",
+                sample_id=row["sample_id"],
+                method=row["method"],
+                budget_bytes=row["budget_bytes"],
+                repeat=row["repeat"],
+                prefill_cuda_seconds=metrics.get("prefill_time"),
+                compression_seconds=metrics.get("compression_time"),
+                decode_cuda_seconds=metrics.get("decode_time"),
+                e2e_wall_seconds=row["e2e_wall_seconds"],
+                mean_local_token_handoff_gap=statistics.mean(gaps) if gaps else None,
+                first_handoff_seconds=row["timings"].get("first_token_emitted_seconds"),
+                second_handoff_seconds=row["timings"].get("second_token_emitted_seconds"),
+                initial_kv_bytes=row["initial_kv_bytes"],
+                final_kv_bytes=row["final_kv_bytes"],
+                peak_kv_bytes=row["peak_kv_bytes"],
+                peak_allocated_bytes=row["peak_allocated_bytes"],
+                peak_reserved_bytes=row["peak_reserved_bytes"],
+                gpu_uuid=row.get("gpu_uuid"),
+                source_sha=row["source_sha"],
+            )
+        )
+    csv_once(output / "phase_breakdown.csv", phases)
+    csv_once(output / "fullkv_reference.csv", [r for r in phases if r["method"] == "full_kv"])
+    csv_once(
+        output / "memory_boundaries.csv",
+        [
+            {
+                k: r[k]
+                for k in (
+                    "workload",
+                    "task",
+                    "sample_id",
+                    "method",
+                    "budget_bytes",
+                    "repeat",
+                    "initial_kv_bytes",
+                    "final_kv_bytes",
+                    "peak_kv_bytes",
+                    "peak_allocated_bytes",
+                    "peak_reserved_bytes",
+                )
+            }
+            for r in phases
+        ],
+    )
+    boundaries = []
+    for path in sorted((root / "outputs/scoring").glob("*/*/boundary/*.json")):
+        item = read(path)
+        boundaries.append(dict(path=str(path), sha256=sha(path), **item))
+    write_once(
+        output / "boundary_A_B_diagnostics.json",
+        dict(
+            stratum="changed_boundary_not_primary_quality_or_headline_timing",
+            records=boundaries,
+            completed=sum(r.get("status") == "completed" for r in boundaries),
+            blocked=sum(r.get("status") == "blocked" for r in boundaries),
+            invalid_fullkv_control=sum(
+                r.get("fullkv_chunked_logit_control_passed") is False for r in boundaries
+            ),
+            first_token_frozen_in_boundary_A=True,
+        ),
+    )
+    inherited = lock.get("inherited_gates", {})
+    write_once(
+        output / "inherited_controls.json",
+        dict(
+            gates=inherited,
+            note="Inherited gates are not new executions; parent/source hashes remain separate.",
+        ),
+    )
 
 
 def packet(root, output):
@@ -383,6 +611,11 @@ def packet(root, output):
     output.mkdir(parents=True, exist_ok=False)
     rows, failures, bindings = all_records(root)
     current = stages(root)
+    if any(
+        gate["protocol_sha256"] != sha(root / "protocol_lock.json") for gate in current.values()
+    ):
+        raise ValueError("gate belongs to a different protocol")
+    supplemental_exports(root, output, rows, lock)
     numerics = numerical_summary(root, output)
     profiles = profile_summary(root, output)
     timing = None

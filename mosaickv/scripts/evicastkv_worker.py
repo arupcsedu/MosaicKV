@@ -202,6 +202,8 @@ def run_worker(root: Path, stage: str, index: int, spec_sha: str):
     spec = root / "jobs" / f"{stage}.json"
     if sha(spec) != spec_sha:
         raise ValueError("job specification changed")
+    if json.loads(spec.read_text())["protocol_sha256"] != sha(root / "protocol_lock.json"):
+        raise ValueError("job specification belongs to a different protocol")
     lock = load_lock(root)
     job = json.loads(spec.read_text())["jobs"][index]
     workload = job["workload"]
@@ -224,6 +226,10 @@ def run_worker(root: Path, stage: str, index: int, spec_sha: str):
         if os.environ.get("CUBLAS_WORKSPACE_CONFIG") != ":4096:8":
             raise RuntimeError("deterministic cuBLAS must be set before Python starts")
         torch.set_num_threads(12)
+        arithmetic = lock.get("arithmetic", dict(allow_fp16_reduced_precision_reduction=True))
+        torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = arithmetic[
+            "allow_fp16_reduced_precision_reduction"
+        ]
         torch.manual_seed(lock["seed"])
         torch.use_deterministic_algorithms(True)
         cfg = resolved_config(lock, workload, "full_kv", None)
@@ -273,6 +279,12 @@ def run_worker(root: Path, stage: str, index: int, spec_sha: str):
                 processor_sha256=processor_sha,
                 backend="huggingface",
                 attention="eager",
+                arithmetic_policy=arithmetic,
+                actual_arithmetic_flags=dict(
+                    allow_fp16_reduced_precision_reduction=torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction,
+                    allow_fp16_accumulation=torch.backends.cuda.matmul.allow_fp16_accumulation,
+                    allow_tf32=torch.backends.cuda.matmul.allow_tf32,
+                ),
                 seed=lock["seed"],
                 measurement_type="measured_development",
                 slurm_job_id=os.environ["SLURM_JOB_ID"],
@@ -400,7 +412,10 @@ def run_worker(root: Path, stage: str, index: int, spec_sha: str):
                     key = f"{job['indices'][position]:03d}-{method}-{cap}-{variant}-r{repeat}"
                     record_path = output / "records" / f"{key}.json"
                     current = resolved_config(lock, workload, method, cap, variant=variant)
-                    config_sha = config_sha256(current)
+                    runtime_config_sha = config_sha256(current)
+                    config_sha = digest(
+                        dict(runtime_config=canonical_config(current), arithmetic=arithmetic)
+                    )
                     trace_dir = output / "traces" / key
                     observer = generation_observer(adapter)
                     observer.capture_first_logits = stage == "scoring"
@@ -601,6 +616,9 @@ def run_worker(root: Path, stage: str, index: int, spec_sha: str):
                             trace_sha256=sha(traces[0]),
                             boundary="A",
                             actual_method=current.method.value,
+                            runtime_config_sha256=runtime_config_sha,
+                            arithmetic_policy=arithmetic,
+                            config_hash_contract="canonical runtime config plus arithmetic policy",
                             resolved_config_path=str(output / "resolved-configs" / f"{key}.json"),
                             resolved_config_file_sha256=sha(
                                 output / "resolved-configs" / f"{key}.json"
@@ -611,6 +629,7 @@ def run_worker(root: Path, stage: str, index: int, spec_sha: str):
                                     runtime_config=canonical_config(current),
                                     variant=variant,
                                     requested_method=method,
+                                    arithmetic=arithmetic,
                                 )
                             ),
                             mechanism_audit_path=str(output / "mechanisms" / f"{key}.json")

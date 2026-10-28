@@ -65,9 +65,10 @@ def environment():
     )
 
 
-def prepare(root: Path):
+def prepare(root: Path, *, strict_fp16_reductions=False):
     """Read previously materialized development pools; no HF access/downloads."""
     source_sha = clean_source(SOURCE)
+    arithmetic = dict(allow_fp16_reduced_precision_reduction=not strict_fp16_reductions)
     templates, cohorts, bindings = {}, {}, {}
     for workload in BUDGETS:
         template_path = REFERENCE_CONFIG_ROOT / workload / "mosaickv_exact.json"
@@ -134,6 +135,7 @@ def prepare(root: Path):
         source_patch_sha256=hashlib.sha256(b"").hexdigest(),
         source_patch_encoding="raw_git_diff_bytes_empty_clean_worktree",
         seed=SEED,
+        arithmetic=arithmetic,
         historical_base_sha="edb6edfaf50f4539c9c1969371fefecf0eabccbf",
         stages=list(STAGES),
         resources=dict(
@@ -452,9 +454,10 @@ def main():
     parser.add_argument("--stage", choices=STAGES, default="smoke")
     parser.add_argument("--index", type=int, default=0)
     parser.add_argument("--spec-sha")
+    parser.add_argument("--strict-fp16-reductions", action="store_true")
     args = parser.parse_args()
     if args.mode == "prepare":
-        prepare(args.root)
+        prepare(args.root, strict_fp16_reductions=args.strict_fp16_reductions)
     elif args.mode == "worker":
         from evicastkv_worker import run_worker
 

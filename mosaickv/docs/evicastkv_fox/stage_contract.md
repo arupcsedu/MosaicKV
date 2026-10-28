@@ -98,3 +98,22 @@ SVG and PGFPlots/TikZ sources are generated from measured JSON without installin
 plotting packages. Unavailable PDF compilation is not reported as a successful
 LaTeX build. Archived attempts keep their own protocol/source hashes. Fresh
 confirmation and optional batching remain separately gated and may be NOT_RUN.
+
+## Bounded FP16-reduction diagnosis
+
+V4's full gate executed all 256 compressed checks. Independent compact logits
+matched production exactly throughout; eight checks failed the unpruned padding
+control on two consumed MileBench inputs. These remain failed, not waived.
+No task-score-based selection follows this result.
+
+The next diagnostic changes only PyTorch 2.8's
+`torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction` on those same
+consumed inputs, holding FP16 model/cache tensors, eager attention and every
+tolerance fixed. This is a hypothesis, not an asserted cause. See
+[PyTorch 2.8 numerical accuracy](https://docs.pytorch.org/docs/2.8/notes/numerical_accuracy.html#reduced-precision-reduction-for-fp16-and-bf16-gemms).
+If and only if both strict controls pass and a default failure is reproduced,
+the finite callback prepares a **new** strict-reduction campaign and reruns all
+common gates. All methods and references share the registered arithmetic policy;
+no old quality or latency row is reused. Composite configuration hashes include
+that policy. The original numerical thresholds and retention-one 1e-4 criterion
+remain unchanged. Failure stops the successor; it does not increase tolerances.

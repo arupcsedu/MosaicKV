@@ -17,6 +17,8 @@ from mosaickv.evaluation.fox_campaign import digest, gate_payload, registered_ar
 
 def collect(root, stage):
     spec = json.loads((root / "jobs" / f"{stage}.json").read_text())
+    if spec["protocol_sha256"] != sha(root / "protocol_lock.json"):
+        raise ValueError("analysis specification belongs to a different protocol")
     workers = []
     rows = []
     errors = []

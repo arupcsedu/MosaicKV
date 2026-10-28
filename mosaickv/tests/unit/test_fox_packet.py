@@ -117,3 +117,34 @@ def test_native_tables_do_not_call_zero_crossing_equivalence(tmp_path, monkeypat
     result = module.read(output / "coco-cider-quality-contrasts.json")
     assert result[0]["claim"] == "inconclusive_not_equivalent"
     assert "reimpl" not in (output / "coco-cider-quality.tex").read_text()
+
+
+def test_interval_plot_uses_actual_adjusted_endpoints(tmp_path, monkeypatch):
+    m = packet_module(monkeypatch)
+    report = dict(
+        workload="coco",
+        metric="cider",
+        contrasts=[
+            dict(
+                candidate="mosaickv_exact:20971520",
+                difference=0.25,
+                ordinary_95_ci=[-0.2, 0.4],
+                simultaneous_ci=[-0.3, 0.6],
+            )
+        ],
+    )
+    name = m.contrast_plot(report, tmp_path)
+    assert name.endswith("paired-difference.svg")
+    assert m.read(tmp_path / name.replace(".svg", ".json"))[0]["adjusted"] == [-0.3, 0.6]
+
+
+def test_legacy_numerical_record_without_status_is_not_certified(tmp_path, monkeypatch):
+    m = packet_module(monkeypatch)
+    from mosaickv.evaluation.fox_campaign import write_once
+
+    root = tmp_path / "run"
+    write_once(root / "outputs/correctness/000/old/correctness/x.json", dict(max_logit=0.01))
+    output = tmp_path / "derived"
+    output.mkdir()
+    m.numerical_summary(root, output)
+    assert m.read(output / "numerical_error_summary.json")["legacy_without_explicit_status"] == 1
