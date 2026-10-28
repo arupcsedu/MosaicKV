@@ -1,0 +1,37 @@
+schema_version: 1
+name: evicastkv_opportunity_followup_r16_v1
+classification: finite_development_followup_not_confirmation
+first_root: /scratch/djy8hg/runs/evicastkv/fox-review-20261028-opportunity-development-v1
+runtime_source: /scratch/djy8hg/worktrees/evicastkv-opportunity-demand-development-v1
+runtime_sha: a2adfc37e0253b131b4592055939afaf1b634adf
+first_analysis_job: '22123859'
+condition: complete_first_study_and_no_variant_has_all_registered_positive_development_contrasts
+only_treatment_change:
+  graph.uncertain_head_fraction: 0.0625
+  prototypes.uncertain_head_fraction: 0.0625
+canary_samples: 2
+development_samples: 64
+budgets_mib: [20, 40]
+minimum_query_mass_fraction: 0.95
+shortlist_size: 8
+resources:
+  maximum_a100s: 6
+  six_a100s_explicitly_authorized: true
+  array_concurrency: 6
+  cpus_per_worker: 12
+  samples_per_worker: 4
+  wall_minutes: 90
+  memory_gib_per_worker: 64
+  partition: bii-gpu
+  reservation: bi_fox_dgx
+  account: bii_dsc_community
+canary_wall_minutes: 30
+statistics:
+  resamples: 10000
+  seed: 20271014
+  family_size: 18
+no_optional_enlargement: true
+maximum_additional_gpu_requests: 858
+fresh_cohorts_authorized: false
+confirmation_authorized: false
+paper_campaign_authorized: false
