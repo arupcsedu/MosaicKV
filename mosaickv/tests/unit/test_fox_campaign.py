@@ -249,3 +249,42 @@ def test_local_token_handoff_preserves_tiny_hf_outputs(tmp_path, monkeypatch):
     assert [index for index, _ in emitted] == list(range(4))
     trace = json.loads(next((tmp_path / "stream").rglob("*.json")).read_text())
     assert [ids[0][0] for _, ids in emitted] == trace["generated_token_ids"]
+
+
+def test_routed_retention_one_validator_uses_identity_without_planner(monkeypatch):
+    from dataclasses import replace
+    from pathlib import Path
+
+    scripts = Path(__file__).resolve().parents[2] / "scripts"
+    monkeypatch.syspath_prepend(str(scripts))
+    from verify_hf_runtime import _config, tiny_adapters
+
+    import mosaickv.backends.hf_runtime as runtime
+    from mosaickv.evaluation.messages import build_multimodal_messages
+    from mosaickv.types import MosaicKVMethod
+
+    _, adapter = tiny_adapters()[0]
+    config = _config("tiny", MosaicKVMethod.MOSAICKV_EXACT, 1.0, max_new_tokens=16)
+    config = replace(
+        config,
+        graph=replace(
+            config.graph,
+            candidate_graph_mode="shortlist_rerank",
+            candidate_descriptor_pooling=True,
+            similarity_shortlist_multiplier=3.0,
+        ),
+        prototypes=replace(config.prototypes, uncertain_head_only=True),
+        selection=replace(
+            config.selection, routed_head_only_planning=True, stable_head_prompt_routing=True
+        ),
+    )
+    prepared = adapter.prepare_inputs(build_multimodal_messages("tiny prompt"))
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("retention one must not run a compression planner or rollout")
+
+    monkeypatch.setattr(runtime, "build_compression_plan", forbidden)
+    monkeypatch.setattr(runtime, "forecast_with_rollout", forbidden)
+    report = runtime.compare_runtime_retention_one(adapter, prepared, config)
+    assert report.token_agreement == 1
+    assert report.maximum_logit_difference <= 1e-4

@@ -3875,42 +3875,16 @@ def compare_runtime_retention_one(
             else (prefill.state.logical_sequence_length - 1,)
         ),
     )
-    if config.output_preserving is not None:
+    # This helper is already restricted to retention==1. MosaicKV's production
+    # identity path does not forecast or route a compression plan. In particular,
+    # the routed planner requires prompt-head scores which this diagnostic never
+    # supplied. Exercise unchanged all-exact packing, not a lossy policy branch.
+    if config.output_preserving is not None or config.method.is_mosaickv:
         packed = pack_runtime_cache(
             adapter,
             full_state,
             MosaicKVState.retention_one(full_state),
             (),
-            (),
-            packing_mode=config.cache.packing_mode,
-        )
-    elif config.method.is_mosaickv:
-        forecast, rollout = forecast_with_rollout(
-            adapter,
-            prefill,
-            config.forecasting,
-            capture_attentions=True,
-        )
-        prototype_token_attention = _forecast_token_attention_by_head(
-            full_state,
-            prefill,
-            rollout,
-            config,
-        )
-        mosaic_plan = build_compression_plan(
-            full_state,
-            forecast,
-            _block_attention_from_token_attention(full_state, prototype_token_attention),
-            adapter.capabilities,
-            config,
-            prompt_attentions=prefill.attention_weights,
-            prototype_token_weight_by_head=prototype_token_attention,
-        )
-        packed = pack_runtime_cache(
-            adapter,
-            full_state,
-            mosaic_plan.construction.state,
-            mosaic_plan.construction.prototypes,
             (),
             packing_mode=config.cache.packing_mode,
         )
