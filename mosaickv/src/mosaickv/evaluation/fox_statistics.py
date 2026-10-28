@@ -169,6 +169,7 @@ def paired_scalar_statistics(
     resamples=10000,
     seed=20271014,
     hierarchy=False,
+    family_size=6,
 ):
     identities = tuple(sorted(reference))
     if set(reference) != set(candidate) or not identities:
@@ -192,9 +193,14 @@ def paired_scalar_statistics(
     delta = [b - a for a, b in boot]
     ratios = [a / b for a, b in boot if b > 0]
     return dict(
-        **difference_report(r, c, delta),
+        **difference_report(r, c, delta, family_size=family_size),
         speedup_ratio_of_means=r / c if c > 0 else None,
         speedup_95_ci=interval(ratios, confidence=0.95) if len(ratios) == len(draws) else None,
+        speedup_simultaneous_ci=(
+            interval(ratios, confidence=1 - 0.05 / family_size)
+            if len(ratios) == len(draws)
+            else None
+        ),
         percentage_reduction=100 * (1 - c / r) if r > 0 else None,
         resamples=resamples,
         seed=seed,
