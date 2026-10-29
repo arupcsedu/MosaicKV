@@ -3883,9 +3883,10 @@ class EvidencePolicyConfig:
     minimum_query_mass_fraction: float = 0.95
 
     def __post_init__(self) -> None:
-        if self.variant not in {"routing_only", "coverage_only", "both"}:
+        if self.variant not in {"routing_only", "coverage_only", "both", "output_guarded"}:
             raise ConfigurationError(
-                "evidence_policy.variant must be routing_only, coverage_only, or both"
+                "evidence_policy.variant must be routing_only, coverage_only, "
+                "both, or output_guarded"
             )
         if type(self.shortlist_size) is not int or not 1 <= self.shortlist_size <= 32:
             raise ConfigurationError("evidence_policy.shortlist_size must be an integer in [1,32]")

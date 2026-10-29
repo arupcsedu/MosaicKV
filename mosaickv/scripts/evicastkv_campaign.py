@@ -330,6 +330,7 @@ def resolved_config(lock, workload, method, cap, *, variant="complete"):
         "evidence-routing-v1": "routing_only",
         "evidence-coverage-v1": "coverage_only",
         "evidence-both-v1": "both",
+        "evidence-output-guarded-v2": "output_guarded",
     }
     if variant in evidence_variants:
         contract = lock.get("evidence_study")

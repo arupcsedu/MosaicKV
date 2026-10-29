@@ -1146,6 +1146,7 @@ def _prompt_query_token_attention_by_head(
     prefill: PrefillOutput,
     *,
     prompt_window: int,
+    preserve_query_heads: bool = False,
 ) -> dict[tuple[int, int], np.ndarray[Any, Any]]:
     """Retain one attention distribution for each prompt query position.
 
@@ -1189,9 +1190,19 @@ def _prompt_query_token_attention_by_head(
                 window,
                 sequence_length,
             )
-            pooled_layers.append(grouped.mean(dim=(0, 2)))
+            pooled_layers.append(
+                grouped[0].reshape(layer.kv_heads, -1, sequence_length)
+                if preserve_query_heads
+                else grouped.mean(dim=(0, 2))
+            )
             minima.append(tensor.amin())
-            shapes.append((layer.kv_heads, window, sequence_length))
+            shapes.append(
+                (
+                    layer.kv_heads,
+                    window * (query_heads // layer.kv_heads) if preserve_query_heads else window,
+                    sequence_length,
+                )
+            )
         flattened_counts = tuple(heads * window * length for heads, window, length in shapes)
         combined = torch.cat(
             (
@@ -1235,7 +1246,12 @@ def _prompt_query_token_attention_by_head(
                 start : start + group,
                 -window:,
                 : layer.sequence_length,
-            ].mean(axis=0)
+            ]
+            values = (
+                values.reshape(-1, layer.sequence_length)
+                if preserve_query_heads
+                else values.mean(axis=0)
+            )
             result[(layer_index, kv_head)] = np.maximum(
                 values,
                 float(np.finfo(np.float64).tiny),
@@ -3236,6 +3252,7 @@ def build_compression_plan(
             full_state,
             SimpleNamespace(attention_weights=prompt_attentions),
             prompt_window=config.forecasting.prompt_window,
+            preserve_query_heads=config.evidence_policy.variant == "output_guarded",
         )
         if not config.evidence_policy.opportunity_routing:
             selected_routes = _uncertain_head_routes(
@@ -3256,7 +3273,7 @@ def build_compression_plan(
             variant=config.evidence_policy.variant,
             full_domain_query_normalization=True,
             individual_prompt_positions=True,
-            grouped_query_heads_averaged=True,
+            grouped_query_heads_averaged=config.evidence_policy.variant != "output_guarded",
             route_count_unchanged=True,
             capacities_unchanged=True,
         )
@@ -3832,6 +3849,21 @@ def build_compression_plan(
         if config.evidence_policy is not None and config.evidence_policy.demand_coverage:
             selection = objective.protect_selection(selection)
             evidence_policy_statistics["query_guard"] = objective.guard_report
+        if (
+            config.evidence_policy is not None
+            and config.evidence_policy.variant == "output_guarded"
+        ):
+            from mosaickv.selection.installed_output_guard import guard_installed_selection
+
+            selection, guard_report = guard_installed_selection(
+                full_state,
+                graph,
+                objective,
+                selection,
+                route_evidence,
+                minimum_query_mass_fraction=config.evidence_policy.minimum_query_mass_fraction,
+            )
+            evidence_policy_statistics["installed_output_guard"] = guard_report
         selector_seconds = time.perf_counter() - selector_started
         selection_seconds = utility_seconds + reservation_seconds + selector_seconds
         tier_started = time.perf_counter()

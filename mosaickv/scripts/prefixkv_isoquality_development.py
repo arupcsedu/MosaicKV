@@ -276,7 +276,7 @@ def inputs(root, plan_sha):
     return plan
 
 
-def worker(root, plan_sha, index):
+def worker(root, plan_sha, index, *, plan_loader=None):
     import torch
 
     from mosaickv.adapters.huggingface import (
@@ -297,7 +297,7 @@ def worker(root, plan_sha, index):
     from mosaickv.hf_cli import _model_kwargs
     from mosaickv.measurements.telemetry import capture_gpu_environment
 
-    plan = inputs(root, plan_sha)
+    plan = (plan_loader or inputs)(root, plan_sha)
     if plan.get("retry") and index not in plan["retry"]["retry_indices"]:
         raise ValueError("only the explicitly registered failed worker may be rerun")
     job = plan["jobs"][index]
@@ -373,7 +373,7 @@ def worker(root, plan_sha, index):
                 raise RuntimeError("registered full runtime retention-1 parity failed")
         write_once(attempt / "parity.json", parity)
         runtime = HuggingFaceMosaicKVModel(adapter, cfg, trace_directory=attempt / "warmup-traces")
-        for repeat in range(5):
+        for repeat in range(plan["protocol"].get("quality_warmups", 5)):
             settle(adapter)
             warm = runtime.generate(
                 EvaluationRequest(f"warmup-{repeat}", first.sample_id, job["task"], messages, {})
@@ -822,7 +822,7 @@ def timing(root, plan_sha, index):
         write_once(root / f"timing/workers/{index:02d}.json", result)
 
 
-def latency_interval(candidate, reference, *, seed=20271014, replicates=10000):
+def latency_interval(candidate, reference, *, seed=20271014, replicates=10000, family_size=2):
     """Paired hierarchical bootstrap: input clusters first, repetitions within."""
     c, r = np.asarray(candidate, float), np.asarray(reference, float)
     if c.shape != r.shape or c.ndim != 2 or c.shape[1] != 20 or min(c.shape) < 1:
@@ -835,12 +835,14 @@ def latency_interval(candidate, reference, *, seed=20271014, replicates=10000):
         ids = rng.integers(0, len(c), size=len(c))
         reps = rng.integers(0, 20, size=(len(c), 20))
         ratios.append(float(c[ids[:, None], reps].mean() / r[ids[:, None], reps].mean()))
-    low, high = map(float, np.quantile(ratios, [0.0125, 0.9875]))
+    if type(family_size) is not int or family_size < 1:
+        raise ValueError("positive registered comparison family required")
+    low, high = map(float, np.quantile(ratios, [0.025 / family_size, 1 - 0.025 / family_size]))
     return dict(
         mean_latency_ratio=float(c.mean() / r.mean()),
         simultaneous_ci_low=low,
         simultaneous_ci_high=high,
-        family_size=2,
+        family_size=family_size,
         no_slower_gate=high <= 1,
         independent_timing_inputs=len(c),
         repetitions=20,

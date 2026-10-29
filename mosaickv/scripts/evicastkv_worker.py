@@ -347,7 +347,10 @@ def run_worker(root: Path, stage: str, index: int, spec_sha: str):
         ):
             raise AssertionError("MosaicKV packed retention-one parity failed")
         if stage == "evidence_canary":
-            for variant in ("evidence-routing-v1", "evidence-coverage-v1", "evidence-both-v1"):
+            for variant in job.get(
+                "identity_variants",
+                ("evidence-routing-v1", "evidence-coverage-v1", "evidence-both-v1"),
+            ):
                 candidate = resolved_config(lock, workload, "mosaickv_exact", 40, variant=variant)
                 candidate = replace(
                     candidate,
