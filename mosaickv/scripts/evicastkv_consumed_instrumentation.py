@@ -9,7 +9,7 @@ import math
 import os
 import subprocess
 import time
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 
 from evicastkv_campaign import environment, resolved_config
@@ -37,7 +37,7 @@ def sha(path):
     return file_sha(Path(path))
 
 
-def prepare(root):
+def prepare(root, *, compact_source_views=False):
     revision = clean_source(SOURCE)
     if root.exists():
         raise FileExistsError("new immutable diagnostic root required")
@@ -133,6 +133,9 @@ def prepare(root):
         wall_minutes=30,
         profiler_contaminated=True,
         no_benchmark_scoring=True,
+        comparison=(
+            "reference_vs_compact_source_views" if compact_source_views else "audit_off_on"
+        ),
     )
     write_once(root / "plan.json", plan)
     return sha(root / "plan.json")
@@ -201,6 +204,20 @@ def logit_capture(destination):
     return capture
 
 
+def comparison_config(cfg, *, compact_comparison, candidate):
+    if not compact_comparison:
+        return cfg
+    if cfg.cache.exact_gather_mode != "source_views":
+        raise ValueError("compact comparison requires frozen source_views configuration")
+    return replace(
+        cfg,
+        cache=replace(
+            cfg.cache,
+            exact_gather_mode="source_views" if candidate else "source_views_reference",
+        ),
+    )
+
+
 def worker(root, expected, index):
     import numpy as np
     import torch
@@ -221,6 +238,7 @@ def worker(root, expected, index):
     from mosaickv.measurements.telemetry import capture_gpu_environment
 
     plan = inputs(root, expected)
+    compact_comparison = plan.get("comparison") == "reference_vs_compact_source_views"
     job = plan["jobs"][index]
     output = root / f"workers/{index}"
     if output.exists():
@@ -311,16 +329,25 @@ def worker(root, expected, index):
             pair = []
             reference_logits = None
             for enabled in (False, True):
-                label = arm["label"] + ("-instrumented" if enabled else "-control")
+                suffix = (
+                    ("-compact" if enabled else "-reference")
+                    if compact_comparison
+                    else ("-instrumented" if enabled else "-control")
+                )
+                label = arm["label"] + suffix
+                execution_cfg = comparison_config(
+                    cfg, compact_comparison=compact_comparison, candidate=enabled
+                )
+                profiling = enabled or compact_comparison
                 settle(adapter)
                 logits = []
 
                 hook = head.register_forward_hook(logit_capture(logits))
                 runtime = HuggingFaceMosaicKVModel(
-                    adapter, cfg, trace_directory=output / "traces" / label
+                    adapter, execution_cfg, trace_directory=output / "traces" / label
                 )
                 try:
-                    if enabled:
+                    if profiling:
                         with collect_execution_audit(torch_module=torch) as audit:
                             generation = runtime.generate(
                                 EvaluationRequest(
@@ -333,7 +360,7 @@ def worker(root, expected, index):
                         )
                 finally:
                     hook.remove()
-                    if enabled and audit is not None:
+                    if profiling and audit is not None:
                         payload = audit.payload()
                         write_once(output / f"profiles/{label}.json", payload)
                         audit = None
@@ -366,6 +393,9 @@ def worker(root, expected, index):
                     trace_path=str(traces[0]),
                     trace_sha256=sha(traces[0]),
                     profiler_contaminated=True,
+                    execution_config=canonical_config(execution_cfg),
+                    execution_config_sha=config_sha256(execution_cfg),
+                    frozen_config_sha=arm["config_sha"],
                 )
                 if len(row["tokens"]) != job["expected_tokens"]:
                     raise ValueError("truncated diagnostic output")
@@ -394,7 +424,8 @@ def worker(root, expected, index):
 
 def analyze(root, expected):
     inputs(root, expected)
-    failures, workers, phases, routes = [], [], [], []
+    plan = read(root / "plan.json")
+    failures, workers, phases, routes, representations = [], [], [], [], []
     for index in (0, 1):
         output = root / f"workers/{index}"
         path = output / "result.json"
@@ -407,6 +438,24 @@ def analyze(root, expected):
             failures.append(result)
         for profile_path in sorted((output / "profiles").glob("*.json")):
             profile = read(profile_path)
+            representations.extend(
+                dict(worker=index, arm=profile_path.stem, **row)
+                for row in profile.get("exact_representations", [])
+            )
+            if plan.get("comparison") == "reference_vs_compact_source_views":
+                rows = profile.get("exact_representations", [])
+                is_compact = profile_path.stem.endswith("-compact")
+                compact_rows = [r for r in rows if r["sequence_type"] == "_ExactViewSequence"]
+                if is_compact and any(r["materialized_block_views"] for r in compact_rows):
+                    failures.append(
+                        dict(worker=index, error="compact path materialized block views")
+                    )
+                if "prefixkv_reimpl" not in profile_path.stem and (
+                    not rows or (is_compact and not compact_rows)
+                ):
+                    failures.append(
+                        dict(worker=index, error="missing exact representation evidence")
+                    )
             phases.extend(dict(worker=index, arm=profile_path.stem, **r) for r in profile["phases"])
             for row in profile["routing"]:
                 try:
@@ -422,6 +471,7 @@ def analyze(root, expected):
     out.mkdir()
     pd.DataFrame(phases).to_parquet(out / "tier_operations.parquet", index=False)
     write_once(out / "routing_scores.json", routes)
+    write_once(out / "exact_representations.json", representations)
     gate = dict(
         status="passed_diagnostic_only" if not failures and len(workers) == 2 else "failed",
         workers=workers,
@@ -452,6 +502,49 @@ def analyze(root, expected):
             .head(35)
             .to_string(index=False),
             "```",
+        ]
+    if plan.get("comparison") == "reference_vs_compact_source_views" and len(table):
+        paired = []
+        operations = (
+            "exact.descriptor_gather_and_views",
+            "exact.tier_invariants",
+            "tier.complete_construction",
+            "state.create_and_account_storage",
+        )
+        for worker_index in (0, 1):
+            for arm in plan["jobs"][worker_index]["arms"]:
+                for operation in operations:
+                    subset = table[(table.worker == worker_index) & (table.operation == operation)]
+                    reference = subset[subset.arm == arm["label"] + "-reference"]
+                    compact = subset[subset.arm == arm["label"] + "-compact"]
+                    if len(reference) and len(compact):
+                        a = float(reference.inclusive_wall_seconds.sum())
+                        b = float(compact.inclusive_wall_seconds.sum())
+                        paired.append(
+                            dict(
+                                worker=worker_index,
+                                arm=arm["label"],
+                                operation=operation,
+                                reference_seconds=a,
+                                compact_seconds=b,
+                                reduction_fraction=1 - b / a if a > 0 else None,
+                            )
+                        )
+        pd.DataFrame(paired).to_parquet(out / "representation_timing_pairs.parquet", index=False)
+        lines += [
+            "",
+            "## Reference versus compact representation",
+            "",
+            "Same consumed inputs; synchronized, single-pair profiling, not a latency claim.",
+            "Operation rows are nested and must not be added together.",
+            "",
+            "```text",
+            pd.DataFrame(paired).to_string(index=False),
+            "```",
+            "",
+            "Exact view counts are recorded in exact_representations.json. Selected payload "
+            "sizes are not the full aliased source allocation; request records separately "
+            "validate actual initial/final/peak packed backing storage.",
         ]
     lines += [
         "",
@@ -580,9 +673,10 @@ def main():
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--plan-sha")
     parser.add_argument("--index", type=int, choices=(0, 1))
+    parser.add_argument("--compact-source-views", action="store_true")
     args = parser.parse_args()
     if args.mode == "prepare":
-        print(prepare(args.root))
+        print(prepare(args.root, compact_source_views=args.compact_source_views))
     elif args.mode == "submit":
         submit(args.root, args.plan_sha)
     elif args.mode == "worker":

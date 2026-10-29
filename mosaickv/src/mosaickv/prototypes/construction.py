@@ -2376,9 +2376,11 @@ def construct_three_tier_cache(
         "per_head_reference",
         "batched_layer",
         "source_views",
+        "source_views_reference",
     }:
         raise ValueError(
-            "exact_gather_mode must be 'per_head_reference', 'batched_layer', or 'source_views'"
+            "exact_gather_mode must be 'per_head_reference', 'batched_layer', "
+            "'source_views', or 'source_views_reference'"
         )
     _validate_inputs(full_state, graph, selection)
     external_exact_node_ids = tuple(

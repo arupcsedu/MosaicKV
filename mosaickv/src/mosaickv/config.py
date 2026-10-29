@@ -614,10 +614,11 @@ class CacheConfig:
             "per_head_reference",
             "batched_layer",
             "source_views",
+            "source_views_reference",
         }:
             raise ConfigurationError(
                 "cache.exact_gather_mode must be 'per_head_reference', 'batched_layer', "
-                "or 'source_views'"
+                "'source_views', or 'source_views_reference'"
             )
         if self.packing_mode not in {
             "per_head_reference",

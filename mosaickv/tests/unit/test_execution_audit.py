@@ -189,6 +189,91 @@ def test_manifest_hash_accepts_serialized_string_paths(tmp_path):
     assert sha(str(path)) == sha(path)
 
 
+def test_representation_comparison_changes_only_gather_mode():
+    from evicastkv_consumed_instrumentation import comparison_config
+
+    from mosaickv.config import canonical_config
+
+    cfg = _config(MosaicKVMethod.MOSAICKV_EXACT, 0.5)
+    cfg = replace(cfg, cache=replace(cfg.cache, exact_gather_mode="source_views"))
+    first = comparison_config(cfg, compact_comparison=True, candidate=False)
+    second = comparison_config(cfg, compact_comparison=True, candidate=True)
+    assert first.cache.exact_gather_mode == "source_views_reference"
+    assert second == cfg
+    assert replace(first, cache=cfg.cache) == cfg
+    assert comparison_config(cfg, compact_comparison=False, candidate=False) is cfg
+    assert canonical_config(first) != canonical_config(second)
+    with pytest.raises(ValueError, match="frozen source_views"):
+        comparison_config(
+            replace(cfg, cache=replace(cfg.cache, exact_gather_mode="batched_layer")),
+            compact_comparison=True,
+            candidate=False,
+        )
+
+
+def test_audit_counts_views_without_materializing_them():
+    from mosaickv.cache_state import MosaicKVState
+
+    full = _full()
+    exact = full.gather_exact_blocks(full.blocks, gather_mode="source_views")
+    with collect_execution_audit() as audit:
+        MosaicKVState.create(full, exact=exact)
+    row = audit.payload()["exact_representations"][0]
+    assert row["selected_blocks"] == len(full.blocks)
+    assert row["materialized_block_views"] == 0
+    assert exact.materialized_block_view_count == 0
+    assert row["selected_payload_bytes"] == full.active_bytes
+
+
+def test_compact_analysis_writes_paired_timings_and_rejects_materialization(tmp_path, monkeypatch):
+    import json
+
+    import evicastkv_consumed_instrumentation as module
+
+    jobs = [{"arms": [{"label": "mosaickv_exact"}]} for _ in range(2)]
+    for index in (0, 1):
+        path = tmp_path / f"workers/{index}/profiles"
+        path.mkdir(parents=True)
+        (path.parent / "result.json").write_text(
+            json.dumps({"status": "passed_instrumentation_equivalence_only"})
+        )
+        for suffix, elapsed, views, sequence in (
+            ("reference", 2.0, 20, "tuple"),
+            ("compact", 0.5, 0 if index == 0 else 1, "_ExactViewSequence"),
+        ):
+            (path / f"mosaickv_exact-{suffix}.json").write_text(
+                json.dumps(
+                    {
+                        "phases": [
+                            {
+                                "operation": "exact.descriptor_gather_and_views",
+                                "inclusive_wall_seconds": elapsed,
+                                "exclusive_wall_seconds": elapsed,
+                            }
+                        ],
+                        "routing": [],
+                        "exact_representations": [
+                            {"sequence_type": sequence, "materialized_block_views": views}
+                        ],
+                    }
+                )
+            )
+    (tmp_path / "plan.json").write_text(
+        json.dumps({"comparison": "reference_vs_compact_source_views", "jobs": jobs})
+    )
+    monkeypatch.setattr(module, "inputs", lambda *args: {})
+    monkeypatch.setattr(module, "clean_source", lambda *args: "fixture")
+    module.analyze(tmp_path, "fixture")
+    gate = json.loads((tmp_path / "analysis/GATE.json").read_text())
+    assert gate["status"] == "failed"
+    assert any("materialized block views" in f["error"] for f in gate["failures"])
+    assert not gate["fresh_evaluation_authorized"]
+    import pandas as pd
+
+    pairs = pd.read_parquet(tmp_path / "analysis/representation_timing_pairs.parquet")
+    assert pairs.reduction_fraction.tolist() == [0.75, 0.75]
+
+
 @pytest.mark.parametrize("registration_fails", [False, True])
 def test_launch_registers_recognized_worker_and_preserves_callback_before_tick(
     tmp_path, monkeypatch, registration_fails

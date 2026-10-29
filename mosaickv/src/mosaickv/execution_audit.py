@@ -24,6 +24,7 @@ class ExecutionAudit:
     torch_module: Any = None
     phases: list[dict[str, Any]] = field(default_factory=list)
     routing: list[dict[str, Any]] = field(default_factory=list)
+    exact_representations: list[dict[str, Any]] = field(default_factory=list)
     _stack: list[int] = field(default_factory=list, repr=False)
 
     def synchronize(self) -> None:
@@ -42,10 +43,26 @@ class ExecutionAudit:
             "selection_uses_audit_records": False,
             "phases": self.phases,
             "routing": self.routing,
+            "exact_representations": self.exact_representations,
         }
 
 
 _ACTIVE: ContextVar[ExecutionAudit | None] = ContextVar("evicastkv_execution_audit", default=None)
+
+
+def record_exact_representation(exact: Any) -> None:
+    """Observe existing counts only; never enumerate/materialize deferred views."""
+    audit = _ACTIVE.get()
+    if audit is not None:
+        audit.exact_representations.append(
+            {
+                "sequence_type": type(exact.key_blocks).__name__,
+                "selected_blocks": len(exact.blocks),
+                "materialized_block_views": exact.materialized_block_view_count,
+                "selected_payload_bytes": exact.active_bytes,
+                "payload_bytes_are_not_parent_backing_storage": True,
+            }
+        )
 
 
 @contextmanager

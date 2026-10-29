@@ -13,9 +13,9 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 from itertools import pairwise
-from typing import Any, Self
+from typing import Any, Self, overload
 
-from mosaickv.execution_audit import audit_operation
+from mosaickv.execution_audit import audit_operation, record_exact_representation
 
 
 class Modality(StrEnum):
@@ -582,10 +582,7 @@ class _MembershipIndex:
             containers = other.ranges_by_identity.get(identity, ())
             container_index = 0
             for start, end in ranges:
-                while (
-                    container_index < len(containers)
-                    and containers[container_index][1] < start
-                ):
+                while container_index < len(containers) and containers[container_index][1] < start:
                     container_index += 1
                 if container_index >= len(containers):
                     return False
@@ -622,12 +619,185 @@ def _ensure_unique_tensors(tensors: Sequence[Any], name: str) -> None:
 
 
 @dataclass(frozen=True, slots=True)
+class _ViewSource:
+    """One frozen storage binding; basic slicing never copies K/V payloads."""
+
+    tensor: Any
+    head_axis: int
+    sequence_axis: int
+    shape: tuple[int, ...] = field(init=False)
+    dtype: str = field(init=False)
+    device: str = field(init=False)
+    position_bytes: int = field(init=False)
+
+    def __post_init__(self) -> None:
+        shape = _shape(self.tensor)
+        # Freeze the binding with one alias per layer/tensor, not per block.
+        # A later source_tensor.set_() must not redirect an existing exact tier.
+        alias = self.tensor[tuple(slice(None) for _ in shape)]
+        object.__setattr__(self, "tensor", alias)
+        object.__setattr__(self, "shape", shape)
+        object.__setattr__(self, "dtype", _dtype_name(alias))
+        object.__setattr__(self, "device", _device_name(alias))
+        object.__setattr__(
+            self,
+            "position_bytes",
+            tensor_storage_bytes(alias) // (shape[self.head_axis] * shape[self.sequence_axis]),
+        )
+
+    def validate_geometry(self) -> None:
+        if (_shape(self.tensor), _dtype_name(self.tensor), _device_name(self.tensor)) != (
+            self.shape,
+            self.dtype,
+            self.device,
+        ):
+            raise ValueError("compact exact source geometry/dtype/device changed")
+
+    def view(self, block: KVBlockDescriptor) -> Any:
+        self.validate_geometry()
+        index: list[Any] = [slice(None)] * len(self.shape)
+        index[self.head_axis] = slice(block.kv_head, block.kv_head + 1)
+        index[self.sequence_axis] = slice(
+            block.physical_cache_indices[0], block.physical_cache_indices[-1] + 1
+        )
+        return self.tensor[tuple(index)]
+
+    def validate_view(self, tensor: Any, block: KVBlockDescriptor) -> None:
+        expected = list(self.shape)
+        expected[self.head_axis] = 1
+        expected[self.sequence_axis] = block.position_count
+        if (_shape(tensor), _dtype_name(tensor), _device_name(tensor)) != (
+            tuple(expected),
+            self.dtype,
+            self.device,
+        ) or tensor_storage_bytes(tensor) != self.position_bytes * block.position_count:
+            raise ValueError("materialized compact exact view metadata/storage mismatch")
+
+
+@dataclass(frozen=True, slots=True)
+class _ExactViewBank:
+    """Validated descriptors plus O(layers) aliases, with legacy views on demand.
+
+    This preserves the existing source_views alias semantics. It does not
+    assert that the full backing allocation is compressed: the HF packer must
+    still materialize and account for its actual active cache independently.
+    """
+
+    source: FullKVState = field(repr=False)
+    blocks: tuple[KVBlockDescriptor, ...] = field(repr=False)
+    keys: tuple[_ViewSource, ...] = field(init=False, repr=False)
+    values: tuple[_ViewSource, ...] = field(init=False, repr=False)
+    payload_bytes: int = field(init=False)
+    key_cache: dict[int, Any] = field(default_factory=dict, init=False, repr=False)
+    value_cache: dict[int, Any] = field(default_factory=dict, init=False, repr=False)
+
+    @audit_operation("exact.compact_bank_validation")
+    def __post_init__(self) -> None:
+        keys = tuple(
+            _ViewSource(layer.key, layer.key_head_dimension, layer.key_sequence_dimension)
+            for layer in self.source.layers
+        )
+        values = tuple(
+            _ViewSource(layer.value, layer.value_head_dimension, layer.value_sequence_dimension)
+            for layer in self.source.layers
+        )
+        total = 0
+        for block in self.blocks:
+            self.source._validate_descriptor(block)
+            key, value = keys[block.layer], values[block.layer]
+            positions = block.physical_cache_indices
+            if positions != tuple(range(positions[0], positions[-1] + 1)):
+                raise ValueError("source-view exact gathering requires contiguous source blocks")
+            if any(
+                block.kv_head >= s.shape[s.head_axis]
+                or positions[0] < 0
+                or positions[-1] >= s.shape[s.sequence_axis]
+                for s in (key, value)
+            ):
+                raise ValueError("compact exact descriptor lies outside source geometry")
+            if (block.key_dtype, block.value_dtype, block.key_device, block.value_device) != (
+                key.dtype,
+                value.dtype,
+                key.device,
+                value.device,
+            ):
+                raise ValueError("compact exact descriptor dtype/device metadata mismatch")
+            actual = (key.position_bytes + value.position_bytes) * block.position_count
+            if block.byte_size != actual:
+                raise ValueError("compact exact descriptor byte accounting mismatch")
+            total += actual
+        object.__setattr__(self, "keys", keys)
+        object.__setattr__(self, "values", values)
+        object.__setattr__(self, "payload_bytes", total)
+
+    def validate(self) -> None:
+        for source in (*self.keys, *self.values):
+            source.validate_geometry()
+        for sources, cache in ((self.keys, self.key_cache), (self.values, self.value_cache)):
+            for index, view in cache.items():
+                block = self.blocks[index]
+                sources[block.layer].validate_view(view, block)
+        _ensure_unique_tensors(self.materialized_objects(), "compact exact tier")
+
+    def materialized_objects(self) -> tuple[Any, ...]:
+        return (*self.key_cache.values(), *self.value_cache.values())
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class _ExactViewSequence(Sequence[Any]):
+    """Immutable sequence interface; cached access keeps tensor-object identity."""
+
+    bank: _ExactViewBank = field(repr=False)
+    key: bool = field(kw_only=True)
+
+    def __len__(self) -> int:
+        return len(self.bank.blocks)
+
+    @overload
+    def __getitem__(self, index: int) -> Any: ...
+
+    @overload
+    def __getitem__(self, index: slice) -> tuple[Any, ...]: ...
+
+    def __getitem__(self, index: int | slice) -> Any:
+        if isinstance(index, slice):
+            return tuple(self[i] for i in range(*index.indices(len(self))))
+        if index < 0:
+            index += len(self)
+        if index < 0 or index >= len(self):
+            raise IndexError("exact view index out of range")
+        cache = self.bank.key_cache if self.key else self.bank.value_cache
+        if index not in cache:
+            block = self.bank.blocks[index]
+            source = (self.bank.keys if self.key else self.bank.values)[block.layer]
+            cache[index] = source.view(block)
+        return cache[index]
+
+
+def _supports_compact_source_views(tensor: Any) -> bool:
+    # Subclasses can override slicing semantics; retain their validated legacy
+    # path rather than assuming they return shape/dtype-preserving views.
+    if type(tensor).__module__ == "torch":
+        import torch
+
+        return type(tensor) is torch.Tensor
+    if type(tensor).__module__ == "numpy":
+        import numpy as np
+
+        return type(tensor) is np.ndarray
+    return False
+
+
+@dataclass(frozen=True, slots=True)
 class ExactTier:
     """Lossless selected K/V blocks copied from the source cache."""
 
     blocks: tuple[KVBlockDescriptor, ...] = ()
-    key_blocks: tuple[Any, ...] = ()
-    value_blocks: tuple[Any, ...] = ()
+    key_blocks: Sequence[Any] = ()
+    value_blocks: Sequence[Any] = ()
+    _compact_bank: _ExactViewBank | None = field(
+        init=False, default=None, repr=False, compare=False
+    )
     _membership_index: _MembershipIndex = field(init=False, repr=False, compare=False)
     _source_memberships: frozenset[tuple[int, int, int]] | None = field(
         init=False, repr=False, compare=False, default=None
@@ -638,6 +808,23 @@ class ExactTier:
         if len(self.blocks) != len(self.key_blocks) or len(self.blocks) != len(self.value_blocks):
             raise ValueError("exact tier blocks and K/V payloads must align")
         object.__setattr__(self, "_membership_index", _MembershipIndex.from_blocks(self.blocks))
+        if isinstance(self.key_blocks, _ExactViewSequence) or isinstance(
+            self.value_blocks, _ExactViewSequence
+        ):
+            if not (
+                isinstance(self.key_blocks, _ExactViewSequence)
+                and isinstance(self.value_blocks, _ExactViewSequence)
+                and self.key_blocks.bank is self.value_blocks.bank
+                and self.key_blocks.key
+                and not self.value_blocks.key
+            ):
+                raise ValueError("compact exact K/V sequences must share a validated bank")
+            bank = self.key_blocks.bank
+            if self.blocks != bank.blocks:
+                raise ValueError("compact exact descriptors differ from their validated bank")
+            bank.validate()
+            object.__setattr__(self, "_compact_bank", bank)
+            return
         _ensure_unique_tensors((*self.key_blocks, *self.value_blocks), "exact tier")
         for index, (block, key, value) in enumerate(
             zip(self.blocks, self.key_blocks, self.value_blocks, strict=True)
@@ -677,7 +864,25 @@ class ExactTier:
 
     @property
     def active_bytes(self) -> int:
+        if self._compact_bank is not None:
+            self._compact_bank.validate()
+            return self._compact_bank.payload_bytes
         return sum(tensor_storage_bytes(item) for item in (*self.key_blocks, *self.value_blocks))
+
+    def tensor_objects_for_validation(self) -> tuple[Any, ...]:
+        if self._compact_bank is not None:
+            self._compact_bank.validate()
+            # Deferred views cannot alias an existing tensor object's identity.
+            # Explicitly retrieved views are cached and must participate in the
+            # original cross-tier identity check.
+            return self._compact_bank.materialized_objects()
+        return (*self.key_blocks, *self.value_blocks)
+
+    @property
+    def materialized_block_view_count(self) -> int:
+        if self._compact_bank is not None:
+            return len(self._compact_bank.key_cache) + len(self._compact_bank.value_cache)
+        return len(self.key_blocks) + len(self.value_blocks)
 
     def selected_positions(self, layer: int, kv_head: int) -> tuple[int, ...]:
         return tuple(
@@ -862,9 +1067,9 @@ class FullKVState:
         init=False, repr=False, compare=False, default=None
     )
     _source_block_ids: frozenset[int] = field(init=False, repr=False, compare=False)
-    _source_blocks_by_membership: Mapping[
-        tuple[int, int, tuple[int, ...]], KVBlockDescriptor
-    ] = field(init=False, repr=False, compare=False)
+    _source_blocks_by_membership: Mapping[tuple[int, int, tuple[int, ...]], KVBlockDescriptor] = (
+        field(init=False, repr=False, compare=False)
+    )
 
     def __post_init__(self) -> None:
         if not self.layers:
@@ -1298,8 +1503,7 @@ class FullKVState:
                             key_device=key_device,
                             value_device=value_device,
                             byte_size=(
-                                (key_bytes_per_position + value_bytes_per_position)
-                                * position_count
+                                (key_bytes_per_position + value_bytes_per_position) * position_count
                             ),
                             mandatory=is_mandatory,
                         )
@@ -1389,12 +1593,27 @@ class FullKVState:
         *,
         gather_mode: str,
     ) -> ExactTier:
-        if gather_mode not in {"per_head_reference", "batched_layer", "source_views"}:
+        if gather_mode not in {
+            "per_head_reference",
+            "batched_layer",
+            "source_views",
+            "source_views_reference",
+        }:
             raise ValueError(
-                "gather_mode must be 'per_head_reference', 'batched_layer', or 'source_views'"
+                "gather_mode must be 'per_head_reference', 'batched_layer', "
+                "'source_views', or 'source_views_reference'"
             )
         selected = tuple(descriptors)
-        if gather_mode == "source_views":
+        if gather_mode == "source_views" and all(
+            _supports_compact_source_views(tensor)
+            for layer in self.layers
+            for tensor in (layer.key, layer.value)
+        ):
+            bank = _ExactViewBank(self, selected)
+            return ExactTier(
+                selected, _ExactViewSequence(bank, key=True), _ExactViewSequence(bank, key=False)
+            )
+        if gather_mode in {"source_views", "source_views_reference"}:
             aliased_key_blocks: list[Any] = []
             aliased_value_blocks: list[Any] = []
             for block in selected:
@@ -1708,9 +1927,7 @@ class MosaicKVState:
     residuals: ResidualTier
     logical_positions: LogicalPositionMap
     statistics: CompressionStatistics
-    _source_membership_index: _MembershipIndex = field(
-        init=False, repr=False, compare=False
-    )
+    _source_membership_index: _MembershipIndex = field(init=False, repr=False, compare=False)
 
     @audit_operation("state.membership_and_storage_invariants")
     def __post_init__(self) -> None:
@@ -1730,8 +1947,7 @@ class MosaicKVState:
             raise ValueError(f"exact memberships conflict with a compressed tier: {conflict}")
         _ensure_unique_tensors(
             (
-                *self.exact.key_blocks,
-                *self.exact.value_blocks,
+                *self.exact.tensor_objects_for_validation(),
                 *self.prototypes.prototype_keys,
                 *self.prototypes.prototype_values,
                 *self.residuals.key_residuals,
@@ -1754,6 +1970,7 @@ class MosaicKVState:
             raise ValueError("active source-membership accounting mismatch")
         if source.count != self.statistics.source_memberships:
             raise ValueError("source-membership accounting mismatch")
+        record_exact_representation(self.exact)
 
     @classmethod
     @audit_operation("state.create_and_account_storage")
