@@ -328,6 +328,49 @@ def worker(root, expected, index):
                 if len(traces) != 2:
                     raise ValueError("both generation and PPL traces required")
                 phase = {read(p)["execution_phase"]: read(p) for p in traces}
+                memory_audit = None
+                memory_paths = []
+                if plan.get("separate_memory_replay", False):
+                    # Do not interpret per-concatenation observer overhead as
+                    # algorithm latency. Replay privately for memory; demand
+                    # identical tokens before admitting its accounting.
+                    settle(adapter)
+                    memory_runtime = HuggingFaceMosaicKVModel(
+                        adapter, cfg, trace_directory=out / "memory_audit" / arm["label"]
+                    )
+                    memory_generation = memory_runtime.generate(
+                        EvaluationRequest(
+                            arm["label"] + "-memory-audit",
+                            sample.sample_id,
+                            job["task"],
+                            messages,
+                            {
+                                "_mosaickv_capture_kv_ownership": True,
+                                "_mosaickv_capture_kv_transactions": True,
+                            },
+                        )
+                    )
+                    memory_paths = list((out / "memory_audit" / arm["label"]).rglob("*.json"))
+                    if len(memory_paths) != 1:
+                        raise ValueError("one private memory-replay trace required")
+                    memory_audit = read(memory_paths[0])
+                    if (
+                        memory_audit["generated_token_ids"]
+                        != phase["generation"]["generated_token_ids"]
+                        or memory_generation.answer != generation.answer
+                    ):
+                        raise ValueError("memory observer changed generated tokens")
+                    del memory_runtime, memory_generation
+                if cfg.bounded_decode is not None and (
+                    cfg.bounded_decode.incremental_history is not None
+                    and cfg.bounded_decode.incremental_history.fixed_prompt_reservation
+                ):
+                    a, b = phase["generation"], phase["teacher_forced"]
+                    if (
+                        a["packed_prefill_active_kv_bytes"] != b["packed_prefill_active_kv_bytes"]
+                        or a["selected_blocks"] != b["selected_blocks"]
+                    ):
+                        raise ValueError("generation and PPL did not use the same prompt selection")
                 if generation.metrics.generated_tokens != 1024:
                     raise ValueError("truncated generation")
                 if (
@@ -339,9 +382,12 @@ def worker(root, expected, index):
                     for trace in phase.values():
                         if trace["source_KV_retirement"]["remaining_source_tensor_objects"]:
                             raise ValueError("inactive source KV still retained")
-                        peak = trace["bounded_decode"]["owned_decode_KV_including_growth_peak"][
-                            "peak_storage_bytes"
-                        ]
+                        bounded = trace["bounded_decode"]
+                        peak = (
+                            bounded["owned_decode_KV_including_growth_peak"]["peak_storage_bytes"]
+                            if "owned_decode_KV_including_growth_peak" in bounded
+                            else trace["cache_lifecycle"]["peak_active_kv_storage_bytes"]
+                        )
                         if peak > cfg.cache.budget_value:
                             raise ValueError("hard transient cap exceeded")
                 row.update(
@@ -361,6 +407,16 @@ def worker(root, expected, index):
                         "peak_storage_bytes"
                     ],
                     request_peak_not_certified_complete_prefill=True,
+                    memory_audit_traces={str(p): sha(p) for p in memory_paths},
+                    audited_request_owned_peak_bytes=(
+                        None
+                        if memory_audit is None
+                        else memory_audit["request_KV_ownership"]["peak_storage_bytes"]
+                    ),
+                    pytorch_request_peak_allocated_bytes=(
+                        None if memory_audit is None else memory_audit["peak_gpu_memory_allocated"]
+                    ),
+                    memory_observer_token_parity=(None if memory_audit is None else True),
                 )
                 result["completed_arms"].append(arm["label"])
             except Exception as exc:

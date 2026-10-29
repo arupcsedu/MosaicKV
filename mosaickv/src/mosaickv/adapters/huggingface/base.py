@@ -1182,6 +1182,17 @@ class HuggingFaceMultimodalAdapter(ABC):
             if cache is None:
                 raise RuntimeError("forward output did not contain past_key_values")
             return cache
+        return self._snapshot_cache(cache, copy_tensors=True)
+
+    def borrow_past_key_values(self, cache: Any) -> CacheSnapshot:
+        """Read-only typed views; caller must not mutate the source until packing ends.
+
+        Not a state-isolation API. Drafts/repair must continue to use cloned snapshots.
+        The opt-in runtime only uses these views for pure selection and private gathering.
+        """
+        return self._snapshot_cache(cache, copy_tensors=False)
+
+    def _snapshot_cache(self, cache: Any, *, copy_tensors: bool) -> CacheSnapshot:
         if getattr(cache, "_mosaickv_bounded_history", False):
             raise NotImplementedError(
                 "generic snapshot/reinjection would lose bounded ring ownership and positions; "
@@ -1209,7 +1220,9 @@ class HuggingFaceMultimodalAdapter(ABC):
             active_length = max(active_length, key_length)
             layers.append(
                 CacheLayerSnapshot(
-                    key.detach().clone(), item_value.detach().clone(), sequence_dimension
+                    key.detach().clone() if copy_tensors else key.detach(),
+                    item_value.detach().clone() if copy_tensors else item_value.detach(),
+                    sequence_dimension,
                 )
             )
         if active_length is None:

@@ -9184,6 +9184,19 @@ class HuggingFaceMosaicKVModel:
             from mosaickv.measurements.kv_ownership import KVOwnershipLedger
 
             request_kv_ownership = KVOwnershipLedger()
+        transactions_requested = request.generation_kwargs.get(
+            "_mosaickv_capture_kv_transactions", False
+        )
+        if type(transactions_requested) is not bool or (
+            transactions_requested and request_kv_ownership is None
+        ):
+            raise ValueError("KV transaction capture requires boolean flag and ownership capture")
+        kv_transactions = None
+        if transactions_requested:
+            from mosaickv.measurements.kv_transactions import DynamicKVTransactions
+
+            kv_transactions = DynamicKVTransactions(request_kv_ownership)
+            kv_transactions.__enter__()
         retired_plan_metadata = None
         retired_byte_trace = None
         try:
@@ -9396,7 +9409,23 @@ class HuggingFaceMosaicKVModel:
             draft_guard_trace = None
             if not is_full_cache and not retention_one_identity:
                 cache_state_started = time.perf_counter()
-                snapshot = self.adapter.extract_past_key_values(prefill.state.past_key_values)
+                history_config = (
+                    None
+                    if self.config.bounded_decode is None
+                    else self.config.bounded_decode.incremental_history
+                )
+                borrowed_snapshot = (
+                    history_config is not None and history_config.borrow_prefill_snapshot
+                )
+                snapshot = (
+                    self.adapter.borrow_past_key_values(prefill.state.past_key_values)
+                    if borrowed_snapshot
+                    else self.adapter.extract_past_key_values(prefill.state.past_key_values)
+                )
+                trace["source_snapshot_ownership"] = {
+                    "mode": "borrowed_read_only" if borrowed_snapshot else "cloned",
+                    "draft_and_repair_disabled_when_borrowed": bool(borrowed_snapshot),
+                }
                 if request_kv_ownership is not None:
                     request_kv_ownership.track(
                         "source_snapshot",
@@ -9490,6 +9519,9 @@ class HuggingFaceMosaicKVModel:
                             ),
                             self.config.bounded_decode.generated_capacity,
                             planned_decode_updates,
+                            fixed_prompt_reservation=(
+                                self.config.bounded_decode.incremental_history.fixed_prompt_reservation
+                            ),
                         )
                     else:
                         bounded_budget = bounded_history_budget(
@@ -10727,7 +10759,12 @@ class HuggingFaceMosaicKVModel:
                         "JsonObject", asdict(bounded_budget)
                     )
 
-            if state.model_state.get("mosaickv_incremental_history"):
+            if state.model_state.get("mosaickv_incremental_history") or (
+                bounded_budget is not None
+                and self.config.bounded_decode is not None
+                and self.config.bounded_decode.incremental_history is not None
+                and not retention_one_identity
+            ):
                 import gc
                 import weakref
 
@@ -11428,6 +11465,8 @@ class HuggingFaceMosaicKVModel:
                 )
                 request_kv_ownership.observe()
                 trace["request_KV_ownership"] = request_kv_ownership.record()
+            if kv_transactions is not None:
+                trace["request_KV_transactions"] = kv_transactions.record()
             trace.update(
                 {
                     "status": "completed",
@@ -12015,6 +12054,9 @@ class HuggingFaceMosaicKVModel:
             if not trace_path.exists():
                 _write_trace(trace_path, trace)
             raise
+        finally:
+            if kv_transactions is not None:
+                kv_transactions.__exit__(None, None, None)
 
 
 __all__ = [

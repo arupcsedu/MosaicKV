@@ -25,7 +25,14 @@ class IncrementalHistoryBudget:
     resident_ceiling_bytes: int
 
 
-def incremental_history_budget(cap_bytes, layer_position_bytes, generated_capacity, decode_updates):
+def incremental_history_budget(
+    cap_bytes,
+    layer_position_bytes,
+    generated_capacity,
+    decode_updates,
+    *,
+    fixed_prompt_reservation=False,
+):
     costs = tuple(layer_position_bytes)
     if (
         type(cap_bytes) is not int
@@ -42,7 +49,8 @@ def incremental_history_budget(cap_bytes, layer_position_bytes, generated_capaci
     # At most one layer's previous allocation coexists with its replacement.
     slots = cap_bytes // (total + largest)
     generated = min(generated_capacity, decode_updates)
-    if slots <= generated:
+    reserved = generated_capacity if fixed_prompt_reservation else generated
+    if slots <= reserved:
         raise ValueError("incremental cap cannot fit history, scratch reserve and one prompt slot")
     resident = slots * total
     reserve = slots * largest
@@ -50,8 +58,8 @@ def incremental_history_budget(cap_bytes, layer_position_bytes, generated_capaci
         cap_bytes,
         total,
         generated,
-        generated * total,
-        (slots - generated) * total,
+        reserved * total,
+        (slots - reserved) * total,
         cap_bytes - resident - reserve,
         reserve,
         resident,
@@ -100,6 +108,7 @@ class IncrementalHistoryLayer(BoundedHistoryLayer):
         self.config = config
         self._scores = torch.zeros(generated_capacity, dtype=torch.float32, device=keys.device)
         self._next_victim = None
+        self._victim_queue = []
         self._transaction_observer = transaction_observer
         self.growth_events = []
         self.eviction_count = 0
@@ -144,6 +153,8 @@ class IncrementalHistoryLayer(BoundedHistoryLayer):
                 self.generated_capacity - self.sink_tokens
             )
         else:
+            if self._victim_queue:
+                self._next_victim = self._victim_queue.pop(0)
             if self._next_victim is None:
                 raise RuntimeError(
                     "importance eviction needs the preceding causal attention update"
@@ -200,6 +211,17 @@ class IncrementalHistoryLayer(BoundedHistoryLayer):
             probabilities
         ).all()
 
+    def eligible_victims(self):
+        return sorted(
+            (
+                i
+                for i, p in enumerate(self._generated_positions)
+                if i >= self.sink_tokens
+                and p < self._next_logical_position - self.config.recent_tokens + 1
+            ),
+            key=lambda i: self._generated_positions[i],
+        )
+
 
 def update_incremental_importance(state, attention_weights):
     import torch
@@ -207,6 +229,35 @@ def update_incremental_importance(state, attention_weights):
     layers = state.past_key_values.layers
     if len(layers) != len(attention_weights):
         raise RuntimeError("history attention capture missing a layer")
+    if layers[0].config.importance_refresh_tokens > 1:
+        # Uniform physical lengths allow one batched reduction/update. Layer-local
+        # original positions remain independent; no query/head renumbering occurs.
+        cache = state.past_key_values
+        if len({tuple(p.shape) for p in attention_weights}) != 1:
+            raise RuntimeError("batched history scoring requires uniform attention geometry")
+        probabilities = torch.stack(attention_weights)
+        if not bool(torch.isfinite(probabilities).all()):
+            raise RuntimeError("nonfinite causal history attention")
+        count = len(layers[0]._generated_positions)
+        mass = probabilities.float().mean(dim=(1, 2, 3))[:, layers[0].prompt_length :]
+        cache._mosaickv_history_scores[:, :count].mul_(layers[0].config.importance_decay).add_(mass)
+        if (
+            count < layers[0].generated_capacity
+            or count <= (layers[0].sink_tokens + layers[0].config.recent_tokens)
+            or layers[0]._victim_queue
+        ):
+            return
+        eligible = [x.eligible_victims() for x in layers]
+        if not eligible[0] or len({len(e) for e in eligible}) != 1:
+            raise RuntimeError("history layers have inconsistent eligible capacities")
+        indices = torch.tensor(eligible, dtype=torch.long, device=probabilities.device)
+        scores = cache._mosaickv_history_scores.gather(1, indices)
+        width = min(layers[0].config.importance_refresh_tokens, len(eligible[0]))
+        order = torch.argsort(scores, dim=1, stable=True)[:, :width]
+        choices = indices.gather(1, order).cpu().tolist()
+        for layer, queue in zip(layers, choices, strict=True):
+            layer._victim_queue = queue
+        return
     updates = [
         layer.observe_attention(p) for layer, p in zip(layers, attention_weights, strict=True)
     ]
@@ -273,6 +324,14 @@ def install_incremental_history(
         )
         for k, v in original
     ]
+    if config.importance_refresh_tokens > 1:
+        cache._mosaickv_history_scores = torch.zeros(
+            (len(cache.layers), generated_capacity),
+            dtype=torch.float32,
+            device=original[0][0].device,
+        )
+        for index, layer in enumerate(cache.layers):
+            layer._scores = cache._mosaickv_history_scores[index]
     resident_ceiling = sum(
         (k.numel() * k.element_size() + v.numel() * v.element_size())
         // k.shape[-2]

@@ -462,8 +462,16 @@ class IncrementalHistoryConfig:
     recent_tokens: int = 64
     policy: str = "recent_importance"
     importance_decay: float = 0.95
+    fixed_prompt_reservation: bool = False
+    borrow_prefill_snapshot: bool = False
+    importance_refresh_tokens: int = 1
 
     def __post_init__(self) -> None:
+        for name in ("fixed_prompt_reservation", "borrow_prefill_snapshot"):
+            if type(getattr(self, name)) is not bool:
+                raise ConfigurationError(f"incremental_history.{name} must be boolean")
+        if type(self.importance_refresh_tokens) is not int or self.importance_refresh_tokens < 1:
+            raise ConfigurationError("incremental_history.importance_refresh_tokens must be >= 1")
         if type(self.chunk_tokens) is not int or self.chunk_tokens < 1:
             raise ConfigurationError("incremental_history.chunk_tokens must be an integer >= 1")
         if type(self.recent_tokens) is not int or self.recent_tokens < 1:
@@ -486,7 +494,15 @@ class IncrementalHistoryConfig:
         data = _mapping(value, "incremental_history")
         _reject_unknown(
             data,
-            {"chunk_tokens", "recent_tokens", "policy", "importance_decay"},
+            {
+                "chunk_tokens",
+                "recent_tokens",
+                "policy",
+                "importance_decay",
+                "fixed_prompt_reservation",
+                "borrow_prefill_snapshot",
+                "importance_refresh_tokens",
+            },
             "incremental_history",
         )
         return cls(
@@ -494,6 +510,9 @@ class IncrementalHistoryConfig:
             _int(data, "recent_tokens", 64, "incremental_history"),
             _optional_str(data, "policy", "recent_importance", "incremental_history"),
             _float(data, "importance_decay", 0.95, "incremental_history"),
+            _bool(data, "fixed_prompt_reservation", False, "incremental_history"),
+            _bool(data, "borrow_prefill_snapshot", False, "incremental_history"),
+            _int(data, "importance_refresh_tokens", 1, "incremental_history"),
         )
 
 
@@ -513,7 +532,17 @@ class BoundedDecodeConfig:
         if self.incremental_history is not None:
             name = method.value.removesuffix("_reimpl")
             suffix = "_reimpl" if method.is_published_reimplementation else ""
-            return f"{name}__incremental_history_{self.incremental_history.policy}_v1{suffix}"
+            history = self.incremental_history
+            version = (
+                "v2"
+                if (
+                    history.fixed_prompt_reservation
+                    or history.borrow_prefill_snapshot
+                    or history.importance_refresh_tokens != 1
+                )
+                else "v1"
+            )
+            return f"{name}__incremental_history_{history.policy}_{version}{suffix}"
         version = (
             "v1" if self.history_fraction is None and self.layer_allocation == "uniform" else "v2"
         )
@@ -4689,6 +4718,15 @@ def canonical_config(config: RunConfig) -> JsonObject:
             bounded.pop("draft_exchange", None)
         if config.bounded_decode.incremental_history is None:
             bounded.pop("incremental_history", None)
+        else:
+            history = cast("dict[str, Any]", bounded["incremental_history"])
+            for name, default in (
+                ("fixed_prompt_reservation", False),
+                ("borrow_prefill_snapshot", False),
+                ("importance_refresh_tokens", 1),
+            ):
+                if history[name] == default:
+                    history.pop(name)
     return payload
 
 
