@@ -31,6 +31,22 @@ PARENT_SHA = "c74c12fb58ecf38cad5d6a2cec7dfe70e13e16d4327c5662aca5a3516fe24c6a"
 HORIZON = 32
 
 
+def redacted_messages(payload):
+    from PIL import Image
+
+    from mosaickv.evaluation.messages import MediaItem, MediaKind, build_multimodal_messages
+
+    if set(payload) != {"task", "sample_id", "prompt", "media", "fullkv_prefix_tokens"}:
+        raise ValueError("only label-redacted diagnostic input allowed")
+    media = []
+    for item in payload["media"]:
+        if item["kind"] != "image" or sha(Path(item["path"])) != item["sha256"]:
+            raise ValueError("pinned image input required")
+        with Image.open(item["path"]) as image:
+            media.append(MediaItem(MediaKind.IMAGE, image.convert("RGB").copy()))
+    return build_multimodal_messages(payload["prompt"], tuple(media))
+
+
 def prepare(root):
     source = clean_source(SOURCE)
     if root.exists() or sha(PARENT / "plan.json") != PARENT_SHA:
@@ -126,7 +142,6 @@ def prepare(root):
 
 def worker(root, expected, index):
     import torch
-    from PIL import Image
 
     import mosaickv.backends.hf_runtime as runtime_module
     from mosaickv.adapters.huggingface import load_hf_adapter
@@ -134,7 +149,6 @@ def worker(root, expected, index):
         compare_cache_reinjection,
         compare_with_generate,
     )
-    from mosaickv.evaluation.messages import MediaItem, build_multimodal_messages
     from mosaickv.evaluation.model import EvaluationRequest
     from mosaickv.evaluation.worker_support import settle
     from mosaickv.hf_cli import _model_kwargs
@@ -176,13 +190,7 @@ def worker(root, expected, index):
             model_kwargs=_model_kwargs(cfg, local_files_only=True),
             processor_kwargs={"local_files_only": True},
         )
-        media = []
-        for m in payload["media"]:
-            if m["kind"] != "image" or sha(Path(m["path"])) != m["sha256"]:
-                raise ValueError("pinned image input required")
-            with Image.open(m["path"]) as image:
-                media.append(MediaItem("image", image.convert("RGB").copy()))
-        messages = build_multimodal_messages(payload["prompt"], tuple(media))
+        messages = redacted_messages(payload)
         write_once(
             out / "manifest.json",
             dict(

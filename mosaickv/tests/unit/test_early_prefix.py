@@ -77,3 +77,29 @@ def test_only_authoritative_grid_coordinates_are_reported_not_ocr_labels():
     assert position_metadata(0, spans)["modality"] == "unknown"
     spans[0]["end"] = 9
     assert position_metadata(6, spans)["grid_row"] is None
+
+
+def test_worker_media_boundary_uses_enum_and_rgb_without_annotation_targets(tmp_path):
+    import evicastkv_early_prefix as runner
+    from PIL import Image
+
+    from mosaickv.evaluation.fox_campaign import sha
+
+    path = tmp_path / "source.png"
+    Image.new("L", (2, 2), 128).save(path)
+    payload = dict(
+        task="synthetic",
+        sample_id="consumed",
+        prompt="Describe the image.",
+        media=[dict(kind="image", path=str(path), sha256=sha(path))],
+        fullkv_prefix_tokens=[1, 2],
+    )
+    messages = runner.redacted_messages(payload)
+    assert messages[0].content[0].type == "image"
+    assert messages[0].content[0].value.mode == "RGB"
+    assert messages[0].content[-1].value == payload["prompt"]
+    with pytest.raises(ValueError, match="label-redacted"):
+        runner.redacted_messages(dict(payload, reference="not allowed"))
+    payload["media"][0]["sha256"] = "0" * 64
+    with pytest.raises(ValueError, match="pinned"):
+        runner.redacted_messages(payload)
