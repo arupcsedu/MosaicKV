@@ -5,7 +5,37 @@ process-memory profiler and does not classify pre-RoPE activations as KV.
 """
 
 from contextlib import ExitStack
+from contextvars import ContextVar
+from typing import Any
 from unittest.mock import patch
+
+_CURRENT_LEDGER: ContextVar[Any | None] = ContextVar("mosaickv_cache_ownership_audit", default=None)
+_DECODE_LEDGER: ContextVar[Any | None] = ContextVar(
+    "mosaickv_decode_transaction_audit", default=None
+)
+
+
+def observe_kv_owners(role, pairs):
+    """Register real cache owners at explicit, audited allocation boundaries."""
+    ledgers = tuple(x for x in (_CURRENT_LEDGER.get(), _DECODE_LEDGER.get()) if x is not None)
+    if ledgers:
+        materialized = tuple(pairs)
+        for ledger in ledgers:
+            ledger.track(role, materialized)
+            ledger.observe()
+            ledger.allocation_operations[role] = ledger.allocation_operations.get(role, 0) + 1
+
+
+def release_decode_owners(*roles):
+    """A finished transaction's old buffers are not active decode owners.
+
+    Global weak ownership deliberately remains: unused snapshots that really
+    stay alive are still request storage, not silently hidden as active KV.
+    """
+    ledger = _DECODE_LEDGER.get()
+    if ledger is not None:
+        for role in roles:
+            ledger._owners.pop(role, None)
 
 
 class DynamicKVTransactions:
@@ -15,6 +45,28 @@ class DynamicKVTransactions:
         self.concat_count = 0
         self._active = None
         self._stack = ExitStack()
+        self.decode_ledger = None
+
+    def begin_decode(self, cache):
+        from mosaickv.measurements.kv_ownership import KVOwnershipLedger
+
+        if self.decode_ledger is not None:
+            raise RuntimeError("decode boundary already entered")
+        self.decode_ledger = KVOwnershipLedger()
+        token = _DECODE_LEDGER.set(self.decode_ledger)
+        self._stack.callback(_DECODE_LEDGER.reset, token)
+        self.observe_decode_cache(cache)
+
+    def observe_decode_cache(self, cache):
+        if self.decode_ledger is not None:
+            self.decode_ledger.track("model_cache", self.pairs(cache))
+            self.decode_ledger.observe()
+
+    def observe(self, cache, **temporary):
+        for ledger in (self.ledger, self.decode_ledger):
+            if ledger is not None:
+                ledger.track("model_cache", self.pairs(cache))
+                ledger.observe(**temporary)
 
     @staticmethod
     def pairs(cache):
@@ -30,6 +82,8 @@ class DynamicKVTransactions:
         from transformers.cache_utils import Cache, DynamicCache
 
         original_update, original_cat = Cache.update, torch.cat
+        token = _CURRENT_LEDGER.set(self.ledger)
+        self._stack.callback(_CURRENT_LEDGER.reset, token)
 
         def update(cache, key, value, layer_idx, cache_kwargs=None):
             if not isinstance(cache, DynamicCache):
@@ -39,11 +93,9 @@ class DynamicKVTransactions:
             self.update_count += 1
             self._active = (cache, key, value)
             try:
-                self.ledger.track("model_cache", self.pairs(cache))
-                self.ledger.observe(cache_update_inputs=((key, value),))
+                self.observe(cache, cache_update_inputs=((key, value),))
                 result = original_update(cache, key, value, layer_idx, cache_kwargs)
-                self.ledger.track("model_cache", self.pairs(cache))
-                self.ledger.observe(cache_update_inputs=((key, value),))
+                self.observe(cache, cache_update_inputs=((key, value),))
                 return result
             finally:
                 self._active = None
@@ -53,8 +105,8 @@ class DynamicKVTransactions:
             if self._active is not None:
                 cache, key, value = self._active
                 self.concat_count += 1
-                self.ledger.track("model_cache", self.pairs(cache))
-                self.ledger.observe(
+                self.observe(
+                    cache,
                     cache_update_inputs=((key, value),),
                     concat_result=((result, result),),
                 )
@@ -75,4 +127,13 @@ class DynamicKVTransactions:
             "boundary": "DynamicCache_inputs_owners_and_concat_results",
             "not_all_internal_prefill_activations_are_KV": True,
             "not_process_memory": True,
+            "explicit_cache_allocation_operations": dict(self.ledger.allocation_operations),
+            "decode_transaction_storage": (
+                None
+                if self.decode_ledger is None
+                else dict(
+                    self.decode_ledger.record(),
+                    boundary="post_compression_KV_including_preallocation_concat_eviction_growth_inputs",
+                )
+            ),
         }

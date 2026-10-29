@@ -1193,6 +1193,8 @@ class HuggingFaceMultimodalAdapter(ABC):
         return self._snapshot_cache(cache, copy_tensors=False)
 
     def _snapshot_cache(self, cache: Any, *, copy_tensors: bool) -> CacheSnapshot:
+        from mosaickv.measurements.kv_transactions import observe_kv_owners
+
         if getattr(cache, "_mosaickv_bounded_history", False):
             raise NotImplementedError(
                 "generic snapshot/reinjection would lose bounded ring ownership and positions; "
@@ -1225,6 +1227,8 @@ class HuggingFaceMultimodalAdapter(ABC):
                     sequence_dimension,
                 )
             )
+            if copy_tensors:
+                observe_kv_owners("snapshot_construction", ((x.key, x.value) for x in layers))
         if active_length is None:
             raise RuntimeError("cache contains no layers")
         return CacheSnapshot(

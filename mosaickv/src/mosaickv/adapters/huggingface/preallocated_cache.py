@@ -105,12 +105,17 @@ def build_preallocated_dynamic_cache(
     except ImportError as error:  # pragma: no cover - optional HF environment
         raise RuntimeError("preallocated cache requires Transformers") from error
     cache = DynamicCache()
-    cache.layers = cast(
-        "Any",
-        [PreallocatedDynamicLayer(keys, values, additional_positions) for keys, values in layers],
-    )
+    from mosaickv.measurements.kv_transactions import observe_kv_owners, release_decode_owners
+
+    observe_kv_owners("append_preallocation_source", layers)
+    result = []
+    for keys, values in layers:
+        result.append(PreallocatedDynamicLayer(keys, values, additional_positions))
+        observe_kv_owners("append_preallocation_destination", ((x.keys, x.values) for x in result))
+    cache.layers = cast("Any", result)
     if len({int(key.shape[-2]) for key, _value in layers}) != 1:
         cache._mosaickv_independent_layer_lengths = True
+    release_decode_owners("append_preallocation_source", "append_preallocation_destination")
     return cache
 
 

@@ -30,6 +30,9 @@ def gather_layer_local_snapshot(
     if len(legacy) != len(positions):
         raise ValueError("layer-local selection/cache layer counts differ")
     layers = []
+    from mosaickv.measurements.kv_transactions import observe_kv_owners
+
+    observe_kv_owners("layer_local_pack_source", legacy)
     for (key, value), heads in zip(legacy, positions, strict=True):
         if key.ndim != 4 or key.shape[0] != 1 or key.shape != value.shape:
             raise ValueError("layer-local packing requires matching batch-one BHSD tensors")
@@ -46,6 +49,7 @@ def gather_layer_local_snapshot(
         layers.append(
             CacheLayerSnapshot(key.gather(2, indices), value.gather(2, indices.to(value.device)), 2)
         )
+        observe_kv_owners("layer_local_pack_destination", ((x.key, x.value) for x in layers))
     return CacheSnapshot(
         tuple(layers),
         DynamicCache,

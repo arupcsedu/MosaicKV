@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 import tomllib
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
@@ -465,8 +466,28 @@ class IncrementalHistoryConfig:
     fixed_prompt_reservation: bool = False
     borrow_prefill_snapshot: bool = False
     importance_refresh_tokens: int = 1
+    layer_profile_path: str | None = None
+    layer_profile_sha256: str | None = None
 
     def __post_init__(self) -> None:
+        if (self.layer_profile_path is None) != (self.layer_profile_sha256 is None):
+            raise ConfigurationError("incremental_history layer profile needs path and SHA256")
+        if self.layer_profile_path is not None:
+            if not isinstance(self.layer_profile_path, str) or not self.layer_profile_path.strip():
+                raise ConfigurationError("incremental_history.layer_profile_path must be nonempty")
+            if (
+                not isinstance(self.layer_profile_sha256, str)
+                or re.fullmatch(r"[0-9a-f]{64}", self.layer_profile_sha256) is None
+            ):
+                raise ConfigurationError("incremental_history.layer_profile_sha256 must be SHA256")
+            if (
+                not self.fixed_prompt_reservation
+                or self.policy != "sink_recent"
+                or self.importance_refresh_tokens != 1
+            ):
+                raise ConfigurationError(
+                    "profiled prompt requires fixed reservation and FIFO history"
+                )
         for name in ("fixed_prompt_reservation", "borrow_prefill_snapshot"):
             if type(getattr(self, name)) is not bool:
                 raise ConfigurationError(f"incremental_history.{name} must be boolean")
@@ -502,6 +523,8 @@ class IncrementalHistoryConfig:
                 "fixed_prompt_reservation",
                 "borrow_prefill_snapshot",
                 "importance_refresh_tokens",
+                "layer_profile_path",
+                "layer_profile_sha256",
             },
             "incremental_history",
         )
@@ -513,6 +536,12 @@ class IncrementalHistoryConfig:
             _bool(data, "fixed_prompt_reservation", False, "incremental_history"),
             _bool(data, "borrow_prefill_snapshot", False, "incremental_history"),
             _int(data, "importance_refresh_tokens", 1, "incremental_history"),
+            None
+            if data.get("layer_profile_path") is None
+            else _required_str(data, "layer_profile_path", "incremental_history"),
+            None
+            if data.get("layer_profile_sha256") is None
+            else _required_str(data, "layer_profile_sha256", "incremental_history"),
         )
 
 
@@ -542,6 +571,8 @@ class BoundedDecodeConfig:
                 )
                 else "v1"
             )
+            if history.layer_profile_path is not None:
+                version = "profiled_v3"
             return f"{name}__incremental_history_{history.policy}_{version}{suffix}"
         version = (
             "v1" if self.history_fraction is None and self.layer_allocation == "uniform" else "v2"
@@ -4724,6 +4755,8 @@ def canonical_config(config: RunConfig) -> JsonObject:
                 ("fixed_prompt_reservation", False),
                 ("borrow_prefill_snapshot", False),
                 ("importance_refresh_tokens", 1),
+                ("layer_profile_path", None),
+                ("layer_profile_sha256", None),
             ):
                 if history[name] == default:
                     history.pop(name)

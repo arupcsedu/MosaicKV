@@ -125,6 +125,9 @@ class IncrementalHistoryLayer(BoundedHistoryLayer):
         )
         shape = (*self.keys.shape[:-2], new_length, self.keys.shape[-1])
         new_key, new_value = self.keys.new_empty(shape), self.values.new_empty(shape)
+        from mosaickv.measurements.kv_transactions import observe_kv_owners
+
+        observe_kv_owners("incremental_growth_destination", ((new_key, new_value),))
         new_key[..., : self._length, :].copy_(self.keys)
         new_value[..., : self._length, :].copy_(self.values)
         if self._transaction_observer is not None:

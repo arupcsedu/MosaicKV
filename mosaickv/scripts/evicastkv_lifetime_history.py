@@ -258,7 +258,9 @@ def worker(root, expected, index):
             parity[label] = asdict(check)
             if check.token_agreement != 1 or check.maximum_logit_difference > 0.001:
                 raise ValueError("FullKV parity failed")
-        identity = RunConfig.from_mapping(job["arms"][-1]["config"])
+        identity = RunConfig.from_mapping(
+            job.get("retention_one_config", job["arms"][-1]["config"])
+        )
         identity = replace(
             identity,
             cache=replace(identity.cache, retention_ratio=1.0, budget_value=2**63 - 1),
@@ -270,6 +272,19 @@ def worker(root, expected, index):
             raise ValueError("incremental retention-one parity failed")
         write_once(out / "parity.json", parity)
         reference = None
+        if job.get("frozen_fullkv_reference"):
+            reference_path = Path(job["frozen_fullkv_reference"])
+            record = read(reference_path)
+            if (
+                record["sample_id"] != sample.sample_id
+                or record["model"] != asdict(first.model)
+                or record["generation"] != asdict(first.generation)
+            ):
+                raise ValueError("reused FullKV reference controls differ")
+            reference = record["answer"]
+            write_once(out / "fullkv_reference.json", record)
+            if sha(out / "fullkv_reference.json") != sha(reference_path):
+                raise ValueError("reference copy changed content")
         for arm in job["arms"]:
             if time.monotonic() - started > 3300:
                 raise TimeoutError("bounded worker wall budget")
@@ -360,6 +375,13 @@ def worker(root, expected, index):
                         or memory_generation.answer != generation.answer
                     ):
                         raise ValueError("memory observer changed generated tokens")
+                    audited_peak = memory_audit["request_KV_transactions"][
+                        "decode_transaction_storage"
+                    ]["peak_storage_bytes"]
+                    if audited_peak < generation.metrics.peak_active_kv_storage_bytes:
+                        raise ValueError("transaction peak is below sampled active-cache peak")
+                    if cfg.bounded_decode is not None and audited_peak > cfg.cache.budget_value:
+                        raise ValueError("audited decode transaction exceeded lifetime cap")
                     del memory_runtime, memory_generation
                 if cfg.bounded_decode is not None and (
                     cfg.bounded_decode.incremental_history is not None
@@ -390,6 +412,16 @@ def worker(root, expected, index):
                         )
                         if peak > cfg.cache.budget_value:
                             raise ValueError("hard transient cap exceeded")
+                eos = getattr(getattr(adapter.processor, "tokenizer", None), "eos_token_id", None)
+                eos_ids = set(
+                    eos if isinstance(eos, (list, tuple)) else (() if eos is None else (eos,))
+                )
+                eos_positions = [
+                    i + 1
+                    for i, t in enumerate(phase["generation"]["generated_token_ids"])
+                    if t in eos_ids
+                ]
+                first_eos = min(eos_positions) if eos_positions else None
                 row.update(
                     status="completed",
                     answer=generation.answer,
@@ -413,10 +445,31 @@ def worker(root, expected, index):
                         if memory_audit is None
                         else memory_audit["request_KV_ownership"]["peak_storage_bytes"]
                     ),
+                    audited_decode_transaction_peak_bytes=(
+                        None
+                        if memory_audit is None
+                        else memory_audit["request_KV_transactions"]["decode_transaction_storage"][
+                            "peak_storage_bytes"
+                        ]
+                    ),
                     pytorch_request_peak_allocated_bytes=(
                         None if memory_audit is None else memory_audit["peak_gpu_memory_allocated"]
                     ),
                     memory_observer_token_parity=(None if memory_audit is None else True),
+                    first_eos_generated_position=first_eos,
+                    forced_tokens_after_first_eos=(
+                        None
+                        if first_eos is None
+                        else generation.metrics.generated_tokens - first_eos
+                    ),
+                    first_eviction_can_affect_pre_eos_output=(
+                        None
+                        if cfg.bounded_decode is None
+                        else (
+                            first_eos is None
+                            or first_eos > cfg.bounded_decode.generated_capacity + 1
+                        )
+                    ),
                 )
                 result["completed_arms"].append(arm["label"])
             except Exception as exc:

@@ -5056,6 +5056,9 @@ def _pack_exact_runtime_blocks(
     """Vectorized materialization for exact-only selectors and baselines."""
 
     torch = _torch()
+    from mosaickv.measurements.kv_transactions import observe_kv_owners
+
+    observe_kv_owners("exact_pack_source", ((x.key, x.value) for x in full_state.layers))
     entries: dict[tuple[int, int], list[tuple[int, int, int]]] = {}
     for block_id, block in enumerate(blocks):
         for logical, physical in zip(
@@ -5130,6 +5133,7 @@ def _pack_exact_runtime_blocks(
                 source_layer.key_sequence_dimension,
             )
         )
+        observe_kv_owners("exact_pack_destination", ((x.key, x.value) for x in layers))
         validity_masks.append(validity)
     if not bool(torch.stack(finite_flags).all().item()):
         raise HuggingFaceRuntimeError("packed cache contains NaN or infinity")
@@ -9406,6 +9410,8 @@ class HuggingFaceMosaicKVModel:
             bounded_budget = None
             bounded_decode_trace: JsonObject | None = None
             evidence_allocation_trace = None
+            profiled_capacity = None
+            profiled_sha = None
             draft_guard_trace = None
             if not is_full_cache and not retention_one_identity:
                 cache_state_started = time.perf_counter()
@@ -9545,6 +9551,46 @@ class HuggingFaceMosaicKVModel:
                             retention_ratio=math.nextafter(1.0, 0.0),
                         ),
                     )
+                    history_config = self.config.bounded_decode.incremental_history
+                    if history_config is not None and history_config.layer_profile_path is not None:
+                        from mosaickv.selection.profile_lifetime import allocate_profile_lifetime
+
+                        profile_bytes = Path(history_config.layer_profile_path).read_bytes()
+                        profiled_sha = hashlib.sha256(profile_bytes).hexdigest()
+                        if profiled_sha != history_config.layer_profile_sha256:
+                            raise HuggingFaceRuntimeError("pinned prompt profile hash mismatch")
+                        profile_values = json.loads(profile_bytes)
+                        profiled_capacity = allocate_profile_lifetime(
+                            profile_values,
+                            tuple(layer.sequence_length for layer in full_state.layers),
+                            (max(1, len(full_state.mandatory_logical_positions)),)
+                            * len(full_state.layers),
+                            tuple(
+                                (
+                                    layer.key.numel() * layer.key.element_size()
+                                    + layer.value.numel() * layer.value.element_size()
+                                )
+                                // layer.sequence_length
+                                for layer in full_state.layers
+                            ),
+                            cap_bytes=self.config.cache.budget_value,
+                            generated_capacity=self.config.bounded_decode.generated_capacity,
+                        )
+                        # The uniform anchor's lattice may leave a whole layer
+                        # slot unused. Its read-only selection metadata may be
+                        # rounded up; only the final unpadded profile is packed.
+                        anchor_bytes = max(
+                            prompt_budget_config.cache.budget_value,
+                            math.ceil(profiled_capacity.prompt_bytes / bytes_per_position)
+                            * bytes_per_position,
+                        )
+                        prompt_budget_config = replace(
+                            prompt_budget_config,
+                            cache=replace(
+                                prompt_budget_config.cache,
+                                budget_value=anchor_bytes,
+                            ),
+                        )
                 dense_budget = _dense_physical_cache_budget(full_state, prompt_budget_config)
                 physical_prompt_capacity = (
                     None if dense_budget is None else dense_budget.prompt_capacity
@@ -10295,18 +10341,49 @@ class HuggingFaceMosaicKVModel:
                 else:
                     if packed_state is None:
                         raise HuggingFaceRuntimeError("runtime cache plan has no active state")
-                    packed, packing_seconds = _timed(
-                        prefill.logits,
-                        lambda: pack_runtime_cache(
-                            self.adapter,
-                            full_state,
-                            packed_state,
-                            prototype_records,
-                            tuple(record.prototype_id for record in prototype_records),
-                            physical_prompt_capacity=physical_prompt_capacity,
-                            packing_mode=self.config.cache.packing_mode,
-                        ),
-                    )
+                    if profiled_capacity is not None:
+                        from mosaickv.selection.profile_lifetime import (
+                            build_profiled_exact_selection,
+                        )
+
+                        def pack_profiled():
+                            allocation = build_profiled_exact_selection(
+                                full_state,
+                                _prompt_token_attention_by_head(
+                                    full_state,
+                                    prefill,
+                                    prompt_window=self.config.forecasting.prompt_window,
+                                ),
+                                packed_state.exact.blocks,
+                                profiled_capacity,
+                                profiled_sha,
+                            )
+                            return _pack_evidence_allocation(
+                                self.adapter,
+                                full_state,
+                                prefill.state.past_key_values,
+                                allocation,
+                                profiled_capacity.prompt_bytes,
+                            )
+
+                        (packed, evidence_allocation_trace), packing_seconds = _timed(
+                            prefill.logits,
+                            pack_profiled,
+                        )
+                        logical_prefill_active_kv_bytes = profiled_capacity.prompt_bytes
+                    else:
+                        packed, packing_seconds = _timed(
+                            prefill.logits,
+                            lambda: pack_runtime_cache(
+                                self.adapter,
+                                full_state,
+                                packed_state,
+                                prototype_records,
+                                tuple(record.prototype_id for record in prototype_records),
+                                physical_prompt_capacity=physical_prompt_capacity,
+                                packing_mode=self.config.cache.packing_mode,
+                            ),
+                        )
                 if (
                     self.config.method is MosaicKVMethod.MOSAICKV_EXACT
                     and bounded_budget is not None
@@ -10537,6 +10614,13 @@ class HuggingFaceMosaicKVModel:
                         payload["selection_provenance"] = (
                             "MosaicKV_forecast_graph_anchor_then_output_impact_layer_allocation_v1"
                         )
+                        if profiled_capacity is not None:
+                            payload["selection_provenance"] = (
+                                "exact_forecast_graph_anchor_then_pinned_profile_resize_v3"
+                            )
+                            payload["selected_layer_prompt_capacities"] = list(
+                                profiled_capacity.prompt_positions
+                            )
                         if draft_guard_trace is not None:
                             payload["selection_provenance"] = (
                                 "MosaicKV_V6_single_exchange_FullKV_draft_guard_final_selection"
@@ -10794,12 +10878,11 @@ class HuggingFaceMosaicKVModel:
                         "planner_mapping_seconds",
                     )
                 }
-                retired_plan_metadata["active_lengths"] = (
-                    []
-                    if plan is None
-                    else sorted(
-                        {layout.active_cache_length for layout in plan.construction.active_layouts}
-                    )
+                retired_plan_metadata["active_lengths"] = sorted(
+                    {
+                        int(k.shape[-2])
+                        for k, v in self.adapter._legacy_layers(state.past_key_values)[0]
+                    }
                 )
                 retired_byte_trace = _byte_budget_materialization_trace(
                     dense_budget,
@@ -10852,6 +10935,8 @@ class HuggingFaceMosaicKVModel:
             # Observe before append-only preallocation so unused backing capacity is not
             # confused with the post-compression byte target. All methods use
             # the same metadata-only instrumentation (no device copies/sync).
+            if kv_transactions is not None:
+                kv_transactions.begin_decode(state.past_key_values)
             cache_accounting_started = time.perf_counter()
             cache_lifecycle = CacheLifecycle.start(
                 self.adapter._legacy_layers(state.past_key_values)[0]
@@ -10869,6 +10954,8 @@ class HuggingFaceMosaicKVModel:
                 )
             cache_accounting_started = time.perf_counter()
             cache_lifecycle.observe(self.adapter._legacy_layers(state.past_key_values)[0])
+            if kv_transactions is not None:
+                kv_transactions.observe_decode_cache(state.past_key_values)
             trace_instrumentation_seconds += time.perf_counter() - cache_accounting_started
             decode_runtime_policy["kv_growth"] = (
                 "incremental_generated_history_v1"
@@ -11954,6 +12041,17 @@ class HuggingFaceMosaicKVModel:
                         if draft_guard_trace is not None
                         else "anchor_only_final_evidence_allocation_is_authoritative"
                     )
+                    if profiled_capacity is not None:
+                        trace["hard_prompt_capacity"] = None
+                        trace["selected_layer_prompt_capacities"] = list(
+                            profiled_capacity.prompt_positions
+                        )
+                        if isinstance(materialization, dict):
+                            materialization["hard_prompt_capacity"] = None
+                            materialization["selected_layer_prompt_capacities"] = list(
+                                profiled_capacity.prompt_positions
+                            )
+                            materialization["profile_lifetime_capacity"] = asdict(profiled_capacity)
             _write_trace(trace_path, trace)
             compression_seconds = (
                 cache_state_construction_seconds

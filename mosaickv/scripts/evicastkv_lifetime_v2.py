@@ -459,10 +459,14 @@ def prepare_followup(parent_root, parent_sha, label, child):
     return sha(child / "plan.json")
 
 
-def submit(root, expected):
+def submit(
+    root, expected, *, script_name="evicastkv_lifetime_v2.sbatch", worker_minutes=120, memory_gb=64
+):
+    if type(worker_minutes) is not int or not 1 <= worker_minutes <= 120:
+        raise ValueError("worker duration must be within the registered two-hour maximum")
     plan = previous.inputs(root, expected)
     (root / "slurm").mkdir()
-    script = str(SOURCE / "mosaickv/slurm/evicastkv_lifetime_v2.sbatch")
+    script = str(SOURCE / "mosaickv/slurm" / script_name)
     args = [str(SOURCE), str(root), expected]
     gpu = (
         subprocess.check_output(
@@ -477,8 +481,8 @@ def submit(root, expected):
                 "--ntasks=1",
                 "--gres=gpu:a100:1",
                 "--cpus-per-task=12",
-                "--mem=64G",
-                "--time=02:00:00",
+                f"--mem={memory_gb}G",
+                f"--time={worker_minutes // 60:02d}:{worker_minutes % 60:02d}:00",
                 f"--array=0-{len(plan['jobs']) - 1}%{min(6, len(plan['jobs']))}",
                 f"--output={root}/slurm/gpu-%A_%a.out",
                 f"--error={root}/slurm/gpu-%A_%a.err",

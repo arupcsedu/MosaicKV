@@ -15,6 +15,7 @@ from typing import Any
 class KVOwnershipLedger:
     peak_storage_bytes: int = 0
     observations: int = 0
+    allocation_operations: dict[str, int] = field(default_factory=dict)
     peak_roles: dict[str, int] = field(default_factory=dict)
     _owners: dict[str, tuple[weakref.ReferenceType[Any], ...]] = field(
         default_factory=dict, repr=False

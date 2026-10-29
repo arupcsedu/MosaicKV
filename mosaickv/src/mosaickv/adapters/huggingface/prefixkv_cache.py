@@ -53,6 +53,9 @@ def build_ragged_snapshot(
     if len(legacy) != len(plan.layers):
         raise RuntimeError("PrefixKV plan/cache layer count mismatch")
     layers = []
+    from mosaickv.measurements.kv_transactions import observe_kv_owners
+
+    observe_kv_owners("prefix_pack_source", legacy)
     for (key, value), layer in zip(legacy, plan.layers, strict=True):
         if key.ndim != 4 or key.shape[0] != 1 or key.shape != value.shape:
             raise RuntimeError("ragged PrefixKV requires batch-one matching BHSD tensors")
@@ -64,6 +67,7 @@ def build_ragged_snapshot(
                 key.index_select(-2, indices), value.index_select(-2, indices.to(value.device)), 2
             )
         )
+        observe_kv_owners("prefix_pack_destination", ((x.key, x.value) for x in layers))
     snapshot = CacheSnapshot(
         tuple(layers),
         DynamicCache,
@@ -119,6 +123,9 @@ def evict_ragged_prefixkv(
 
     legacy, _ = adapter._legacy_layers(state.past_key_values)
     all_positions = state.model_state["prefixkv_logical_positions"]
+    from mosaickv.measurements.kv_transactions import observe_kv_owners, release_decode_owners
+
+    observe_kv_owners("prefix_eviction_source", legacy)
     positions_after = []
     layers = []
     events: list[JsonObject] = []
@@ -177,6 +184,7 @@ def evict_ragged_prefixkv(
             value = value.index_select(-2, keep.to(value.device))
             logical = logical[:offset] + logical[offset + 1 :]
         layers.append(CacheLayerSnapshot(key, value, 2))
+        observe_kv_owners("prefix_eviction_destination", ((x.key, x.value) for x in layers))
         positions_after.append(logical)
         events.append(
             {
@@ -210,6 +218,7 @@ def evict_ragged_prefixkv(
         independent_layer_lengths=True,
     )
     state.past_key_values = adapter.inject_past_key_values(snapshot)
+    release_decode_owners("prefix_eviction_source", "prefix_eviction_destination")
     state.active_cache_length = snapshot.active_sequence_length  # maximum, not logical length
     state.model_state["prefixkv_logical_positions"] = tuple(positions_after)
     state.attention_mask = torch.ones(
