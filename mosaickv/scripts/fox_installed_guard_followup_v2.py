@@ -25,7 +25,7 @@ PARENT = Path(
 )
 POOL = Path("/scratch/djy8hg/runs/mosaickv/coco-shared-pool-edb6edf-retry1-20261014/ledger.json")
 VARIANT = "evidence-output-guarded-v2"
-PREFIX_ROOT = Path("/scratch/djy8hg/runs/mosaickv/prefix-native-intermediate-20261029-v2")
+PREFIX_ROOT = Path("/scratch/djy8hg/runs/mosaickv/prefix-native-intermediate-20261029-v2-retry1")
 
 
 def arms():

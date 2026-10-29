@@ -43,6 +43,20 @@ def prefix_concurrency():
     return 3
 
 
+def exclude_known_media_groups(samples, blocked):
+    """Input-only transitive media exclusion, not ID-only alias checking."""
+    from mosaickv.evaluation.fox_statistics import media_components
+
+    ids = [str(s["sample_id"]) for s in samples]
+    groups = {str(s["sample_id"]): tuple(m["sha256"] for m in s["media"]) for s in samples}
+    expanded = set(blocked)
+    for component in media_components(ids, groups):
+        members = {ids[i] for i in component}
+        if members & expanded:
+            expanded.update(members)
+    return expanded
+
+
 def prepare(root):
     revision = clean_source(SOURCE)
     old = native.read(PRIOR / "plan.json")
@@ -75,6 +89,7 @@ def prepare(root):
         data = native.read(parent_path)
         bound[str(parent_path)] = sha(parent_path)
         excluded = blocked[task] | set(old["cohorts"][task]["sample_ids"])
+        excluded = exclude_known_media_groups(data["samples"], excluded)
         ids = native.choose_ids(data["samples"], excluded, count=32, seed=2026102901)
         by_id = {str(s["sample_id"]): s for s in data["samples"]}
         cohorts[task] = dict(

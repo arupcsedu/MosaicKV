@@ -116,3 +116,18 @@ def test_queued_fox_gpu_forbids_early_handoff(tmp_path, monkeypatch):
     with pytest.raises(ValueError, match="handoff forbidden"):
         fox.release_prefix_slots(tmp_path)
     assert not (tmp_path / "decisions/terminal.json").exists()
+
+
+def test_transitive_media_aliases_are_excluded_before_id_selection():
+    samples = [
+        dict(sample_id=sid, media=[dict(sha256=h) for h in hashes])
+        for sid, hashes in [
+            ("old", ["x"]),
+            ("alias", ["x", "y"]),
+            ("alias2", ["y"]),
+            ("unused", ["z"]),
+        ]
+    ]
+    excluded = prefix.exclude_known_media_groups(samples, {"old"})
+    assert excluded == {"old", "alias", "alias2"}
+    assert prefix.native.choose_ids(samples, excluded, count=1, seed=42) == ["unused"]
