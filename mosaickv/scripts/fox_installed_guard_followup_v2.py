@@ -41,12 +41,19 @@ def arms():
     ]
 
 
-def prepare(root):
+def prepare(root, *, cpu_gate=None, after_prefix_calibration=False):
     revision = clean_source(SOURCE)
-    cpu_gate = PREFIX_ROOT / "verification/cpu-tests.json"
+    cpu_gate = cpu_gate or PREFIX_ROOT / "verification/cpu-tests.json"
     cpu = json.loads(cpu_gate.read_text())
     if cpu["status"] != "passed" or cpu["source_sha"] != revision:
         raise ValueError("clean-source CPU verification must pass first")
+    if after_prefix_calibration:
+        prefix_gate = json.loads((PREFIX_ROOT / "analysis/GATE.json").read_text())
+        if (
+            prefix_gate["status"] != "complete_calibration_development_only"
+            or prefix_gate["rows"] != 640
+        ):
+            raise ValueError("PrefixKV calibration must finish before this retry uses GPUs")
     if root.exists():
         raise FileExistsError("new immutable root required")
     old = json.loads((PARENT / "protocol_lock.json").read_text())
@@ -79,7 +86,10 @@ def prepare(root):
         ),
     )
     lock["resources"].update(
-        maximum_a100s=6, array_concurrency=3, six_a100s_explicitly_authorized=True, wall_minutes=60
+        maximum_a100s=6,
+        array_concurrency=4 if after_prefix_calibration else 3,
+        six_a100s_explicitly_authorized=True,
+        wall_minutes=60,
     )
     root.mkdir(parents=True)
     for subset, samples in [
@@ -107,6 +117,7 @@ def prepare(root):
         }
     )
     lock.setdefault("inherited_gates", {})[str(cpu_gate)] = sha(cpu_gate)
+    lock["new_scope"]["after_prefix_calibration"] = after_prefix_calibration
     # Unchanged entropy 1/256 routing and graph/utility coefficients. New guard
     # compares the actual installed subset to its exact same-route anchor.
     lock["evidence_study"]["policy"] = dict(shortlist_size=8, minimum_query_mass_fraction=0.95)
@@ -147,6 +158,7 @@ def submit(root, stage, mode, dependency=None):
         f"--error={root}/slurm/{stage}-{mode}-%A_%a.err",
     ]
     if mode == "worker":
+        ceiling = load_lock(root)["resources"]["array_concurrency"]
         spec = root / f"jobs/{stage}.json"
         count = len(json.loads(spec.read_text())["jobs"])
         command += [
@@ -156,7 +168,7 @@ def submit(root, stage, mode, dependency=None):
             "--cpus-per-task=12",
             "--mem=64G",
             "--time=01:00:00",
-            f"--array=0-{count - 1}%3",
+            f"--array=0-{count - 1}%{ceiling}",
         ]
         command += [f"--dependency=afterany:{dependency}"] if dependency else []
         command += [
@@ -188,8 +200,8 @@ def submit(root, stage, mode, dependency=None):
             maximum_a100s=6,
             six_a100s_explicitly_authorized=True,
             arrays=[job],
-            per_lane_static_throttle=3,
-            other_lane_reserved_slots=3,
+            per_lane_static_throttle=ceiling,
+            other_lane_reserved_slots=6 - ceiling,
         )
         write_once(root / f"scheduler/{job}-policy.json", policy)
         report = tick(policy, {}, root / f"scheduler/{job}-state.json", False)
@@ -351,6 +363,18 @@ def release_prefix_slots(root):
         root / "decisions/terminal.json", dict(source_sha=revision, no_more_fox_gpu_jobs=True)
     )
     plan_path = PREFIX_ROOT / "plan.json"
+    lock = load_lock(root)
+    if lock.get("new_scope", {}).get("after_prefix_calibration"):
+        write_once(
+            root / "decisions/prefix-slot-release.json",
+            dict(
+                status="not_needed_prefix_quality_already_finished",
+                maximum_prefix_timing_workers=2,
+                maximum_fox_workers=4,
+                no_prefix_source_or_jobs_modified=True,
+            ),
+        )
+        return
     if not plan_path.exists() or json.loads(plan_path.read_text())["source_sha"] != revision:
         raise ValueError("cannot release an unregistered PrefixKV campaign")
     registered = {

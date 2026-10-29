@@ -533,7 +533,7 @@ def submit(root, stage, dependency=None):
     print(json.dumps(dict(stage=stage, array=gpu, analysis=cpu)))
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "mode",
@@ -550,13 +550,16 @@ def main():
         ),
     )
     parser.add_argument("--root", type=Path, required=True)
-    parser.add_argument("--stage", choices=STAGES, default="smoke")
+    custom_worker_stages = ("evidence_canary", "installed_guard_development")
+    parser.add_argument("--stage", choices=(*STAGES, *custom_worker_stages), default="smoke")
     parser.add_argument("--index", type=int, default=0)
     parser.add_argument("--spec-sha")
     parser.add_argument("--strict-fp16-reductions", action="store_true")
     parser.add_argument("--workloads", nargs="+", choices=tuple(BUDGETS))
     parser.add_argument("--scope-registration", type=Path)
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
+    if args.stage in custom_worker_stages and args.mode != "worker":
+        parser.error("registered custom stages are worker-only; use their scope-bound controller")
     if args.mode == "prepare":
         prepare(
             args.root,

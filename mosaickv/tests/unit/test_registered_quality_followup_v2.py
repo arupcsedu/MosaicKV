@@ -87,6 +87,7 @@ def test_fox_scheduler_uses_only_three_slots(tmp_path, monkeypatch):
         return "54321\n"
 
     monkeypatch.setattr(fox.subprocess, "check_output", run)
+    monkeypatch.setattr(fox, "load_lock", lambda *_: dict(resources=dict(array_concurrency=3)))
     monkeypatch.setattr(control_a100_schedule, "tick", lambda *args: dict(dry_run=True))
     assert fox.submit(tmp_path, "evidence_canary", "worker") == "54321"
     assert "--array=0-1%3" in commands[0]
