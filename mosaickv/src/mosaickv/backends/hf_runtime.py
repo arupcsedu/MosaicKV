@@ -9255,6 +9255,21 @@ class HuggingFaceMosaicKVModel:
                 prompt_evidence = map_prompt_evidence(self.adapter, prepared, request.messages)
 
             def run_prefill() -> Any:
+                evidence_kwargs = {}
+                if (
+                    self.config.bounded_decode is not None
+                    and self.config.bounded_decode.incremental_history is not None
+                    and not retention_one_identity
+                ):
+                    weight = self.config.bounded_decode.incremental_history.full_prompt_prior_weight
+                    if weight > 0:
+                        evidence_kwargs["attention_full_prompt_prior_weight"] = weight
+                        trace["prompt_attention_evidence_basis"] = {
+                            "kind": "per_head_full_prior_and_window_query_mixture_v7",
+                            "full_prompt_prior_weight": weight,
+                            "raw_model_attention_probabilities_modified": False,
+                            "benchmark_labels_accessed": False,
+                        }
                 return self.adapter.prefill(
                     prepared,
                     capture_queries=(
@@ -9277,6 +9292,7 @@ class HuggingFaceMosaicKVModel:
                         (method.is_mosaickv or method is MosaicKVMethod.PROMPT_ATTENTION_TOPK)
                         and self.config.output_preserving is None
                     ),
+                    **evidence_kwargs,
                 )
 
             image_video_encoder_seconds: float | None = None

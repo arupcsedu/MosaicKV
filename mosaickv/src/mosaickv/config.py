@@ -469,8 +469,18 @@ class IncrementalHistoryConfig:
     layer_profile_path: str | None = None
     layer_profile_sha256: str | None = None
     history_allocation: str = "uniform"
+    full_prompt_prior_weight: float = 0.0
 
     def __post_init__(self) -> None:
+        if (
+            isinstance(self.full_prompt_prior_weight, bool)
+            or not isinstance(self.full_prompt_prior_weight, (int, float))
+            or not math.isfinite(self.full_prompt_prior_weight)
+            or not 0 <= self.full_prompt_prior_weight <= 1
+        ):
+            raise ConfigurationError(
+                "incremental_history.full_prompt_prior_weight must be in [0,1]"
+            )
         if not isinstance(self.history_allocation, str) or self.history_allocation not in {
             "uniform", "profile_weighted"
         }:
@@ -533,6 +543,7 @@ class IncrementalHistoryConfig:
                 "layer_profile_path",
                 "layer_profile_sha256",
                 "history_allocation",
+                "full_prompt_prior_weight",
             },
             "incremental_history",
         )
@@ -551,6 +562,7 @@ class IncrementalHistoryConfig:
             if data.get("layer_profile_sha256") is None
             else _required_str(data, "layer_profile_sha256", "incremental_history"),
             _optional_str(data, "history_allocation", "uniform", "incremental_history"),
+            _float(data, "full_prompt_prior_weight", 0.0, "incremental_history"),
         )
 
 
@@ -582,6 +594,8 @@ class BoundedDecodeConfig:
             )
             if history.layer_profile_path is not None:
                 version = "profiled_v3" if history.history_allocation == "uniform" else "joint_v4"
+            if history.full_prompt_prior_weight > 0:
+                version += "_full_prompt_prior_v7"
             return f"{name}__incremental_history_{history.policy}_{version}{suffix}"
         version = (
             "v1" if self.history_fraction is None and self.layer_allocation == "uniform" else "v2"
@@ -4767,6 +4781,7 @@ def canonical_config(config: RunConfig) -> JsonObject:
                 ("layer_profile_path", None),
                 ("layer_profile_sha256", None),
                 ("history_allocation", "uniform"),
+                ("full_prompt_prior_weight", 0.0),
             ):
                 if history[name] == default:
                     history.pop(name)

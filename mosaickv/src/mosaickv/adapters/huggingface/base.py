@@ -107,9 +107,19 @@ class AttentionCapture(AbstractContextManager["AttentionCapture"]):
         *,
         query_window: int | None = None,
         kv_heads: Sequence[int] | None = None,
+        full_prompt_prior_weight: float = 0.0,
     ) -> None:
         self._attentions = tuple(attentions)
         self._query_window = query_window
+        self._full_prompt_prior_weight = full_prompt_prior_weight
+        if (
+            isinstance(full_prompt_prior_weight, bool)
+            or not isinstance(full_prompt_prior_weight, (int, float))
+            or not 0 <= full_prompt_prior_weight <= 1
+        ):
+            raise ValueError("attention prior weight must be in [0,1]")
+        if full_prompt_prior_weight > 0 and query_window is None:
+            raise ValueError("attention prior mixture requires a bounded query window")
         self._kv_heads = None if kv_heads is None else tuple(int(value) for value in kv_heads)
         self._handles: list[Any] = []
         self._layers: list[Any | None] = [None] * len(self._attentions)
@@ -137,8 +147,17 @@ class AttentionCapture(AbstractContextManager["AttentionCapture"]):
                         f"eager attention layer {index} did not expose attention probabilities"
                     )
                 probabilities = output[1]
+                prior = (
+                    probabilities.float().mean(dim=-2, keepdim=True)
+                    if self._full_prompt_prior_weight > 0
+                    else None
+                )
                 if self._query_window is not None:
                     probabilities = probabilities[..., -self._query_window :, :]
+                if prior is not None:
+                    probabilities = (
+                        1 - self._full_prompt_prior_weight
+                    ) * probabilities.float() + self._full_prompt_prior_weight * prior
                 if self._kv_heads is not None:
                     batch, query_heads, query_count, key_count = probabilities.shape
                     local_kv_heads = self._kv_heads[index]
@@ -393,6 +412,7 @@ class HuggingFaceMultimodalAdapter(ABC):
         *,
         query_window: int | None = None,
         reduce_query_heads: bool = False,
+        full_prompt_prior_weight: float = 0.0,
     ) -> AttentionCapture:
         """Return a context that captures every eager language attention map."""
 
@@ -419,6 +439,7 @@ class HuggingFaceMultimodalAdapter(ABC):
             attentions,
             query_window=query_window,
             kv_heads=kv_heads,
+            full_prompt_prior_weight=full_prompt_prior_weight,
         )
 
     def get_profiling_modules(self) -> AdapterProfilingModules:
@@ -764,6 +785,7 @@ class HuggingFaceMultimodalAdapter(ABC):
         capture_attentions: bool = False,
         attention_query_window: int | None = None,
         reduce_attention_to_kv_heads: bool = False,
+        attention_full_prompt_prior_weight: float = 0.0,
     ) -> PrefillOutput:
         """Run one full prefill without calling GenerationMixin.generate."""
 
@@ -786,11 +808,15 @@ class HuggingFaceMultimodalAdapter(ABC):
             )
             attention_capture = (
                 stack.enter_context(
-                    self.capture_attention_weights(query_window=attention_query_window)
+                    self.capture_attention_weights(
+                        query_window=attention_query_window,
+                        full_prompt_prior_weight=attention_full_prompt_prior_weight,
+                    )
                     if not reduce_attention_to_kv_heads
                     else self.capture_attention_weights(
                         query_window=attention_query_window,
                         reduce_query_heads=True,
+                        full_prompt_prior_weight=attention_full_prompt_prior_weight,
                     )
                 )
                 if capture_attentions
