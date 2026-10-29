@@ -21,6 +21,7 @@ from mosaickv.cache_state import (
     tensor_storage_bytes,
 )
 from mosaickv.config import PrototypeConfig, ResidualConfig
+from mosaickv.execution_audit import audit_operation
 from mosaickv.graph.types import SparseEvidenceGraph
 from mosaickv.prototypes.rope import RotaryPrototypeKeyTransform
 from mosaickv.prototypes.types import (
@@ -153,6 +154,7 @@ def _coerce_key_state(value: Any) -> CachedKeyState:
         return CachedKeyState.UNKNOWN
 
 
+@audit_operation("tier.prototype_safety_check")
 def assess_prototype_safety(
     full_state: FullKVState,
     capabilities: AdapterCapabilities,
@@ -224,6 +226,7 @@ def assess_prototype_safety(
     )
 
 
+@audit_operation("tier.active_layout_metadata")
 def _active_layouts(
     full_state: FullKVState,
     exact: ExactTier,
@@ -259,6 +262,7 @@ def _active_layouts(
     return tuple(result)
 
 
+@audit_operation("tier.exact_only_construction")
 def _exact_only(
     full_state: FullKVState,
     selection: SelectionResult,
@@ -328,6 +332,7 @@ def _retention_one(
     )
 
 
+@audit_operation("tier.graph_selection_validation")
 def _validate_inputs(
     full_state: FullKVState,
     graph: SparseEvidenceGraph,
@@ -2337,6 +2342,7 @@ def estimate_prototype_assignment_anchor_ids(
     return tuple(sorted({anchor_id for anchor_id, _weight in assignments.values()})), None
 
 
+@audit_operation("tier.complete_construction")
 def construct_three_tier_cache(
     full_state: FullKVState,
     graph: SparseEvidenceGraph,

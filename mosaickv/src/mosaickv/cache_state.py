@@ -15,6 +15,8 @@ from enum import StrEnum
 from itertools import pairwise
 from typing import Any, Self
 
+from mosaickv.execution_audit import audit_operation
+
 
 class Modality(StrEnum):
     """Logical token modalities represented in the language sequence."""
@@ -631,6 +633,7 @@ class ExactTier:
         init=False, repr=False, compare=False, default=None
     )
 
+    @audit_operation("exact.tier_invariants")
     def __post_init__(self) -> None:
         if len(self.blocks) != len(self.key_blocks) or len(self.blocks) != len(self.value_blocks):
             raise ValueError("exact tier blocks and K/V payloads must align")
@@ -1379,6 +1382,7 @@ class FullKVState:
         if block.mandatory != expected_mandatory:
             raise ValueError("block mandatory flag differs from the source cache")
 
+    @audit_operation("exact.descriptor_gather_and_views")
     def _gather_descriptors(
         self,
         descriptors: Sequence[KVBlockDescriptor],
@@ -1524,6 +1528,7 @@ class FullKVState:
             raise RuntimeError("exact-tier grouped gather left an uninitialized block")
         return ExactTier(selected, tuple(key_blocks), tuple(value_blocks))
 
+    @audit_operation("exact.gather_source_membership_and_descriptors")
     def gather_exact_blocks(
         self,
         blocks: Sequence[KVBlockDescriptor],
@@ -1707,6 +1712,7 @@ class MosaicKVState:
         init=False, repr=False, compare=False
     )
 
+    @audit_operation("state.membership_and_storage_invariants")
     def __post_init__(self) -> None:
         source = _MembershipIndex.from_blocks(self.source_blocks)
         object.__setattr__(self, "_source_membership_index", source)
@@ -1750,6 +1756,7 @@ class MosaicKVState:
             raise ValueError("source-membership accounting mismatch")
 
     @classmethod
+    @audit_operation("state.create_and_account_storage")
     def create(
         cls,
         full: FullKVState,

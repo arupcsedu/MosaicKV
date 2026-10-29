@@ -80,6 +80,7 @@ from mosaickv.evaluation.oracle_queries import (
     collect_evaluation_only_true_future_queries,
 )
 from mosaickv.evaluation.prefixkv_metrics import TeacherForcedNll
+from mosaickv.execution_audit import record_routing_scores
 from mosaickv.forecasting import QueryForecast, build_query_forecast, forecast_with_rollout
 from mosaickv.forecasting.huggingface import (
     IsolatedQueryRollout,
@@ -1853,7 +1854,11 @@ def _uncertain_head_routes(
     routed = tuple(
         identity for identity in ordered[:count] if head_uncertainty[identity] >= threshold
     )
-    return routed or (ordered[0],)
+    selected = routed or (ordered[0],)
+    record_routing_scores(
+        ordered, head_uncertainty, selected, fraction=fraction, threshold=threshold, label=label
+    )
+    return selected
 
 
 def _attention_uncertainty_by_head(
