@@ -4,6 +4,7 @@ import pytest
 from evicastkv_review_closure_v2 import (
     coco_identity,
     freshness_gate,
+    interval_plot,
     projected_ids,
     strict_positive,
     summarize_activity,
@@ -110,3 +111,37 @@ def test_finite_cpu_submission_analyzes_all_producers_afterany(tmp_path, monkeyp
     assert json.loads((root / "submission.json").read_text())["gpu_jobs"] == 0
     with pytest.raises(FileExistsError):
         closure.submit(root)
+
+
+def test_intervals_render_without_matplotlib_or_extra_packages(tmp_path, monkeypatch):
+    import builtins
+
+    original_import = builtins.__import__
+
+    def locked_import(name, *args, **kwargs):
+        if name.startswith("matplotlib"):
+            raise AssertionError("do not add a dependency to the common environment")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", locked_import)
+    path = tmp_path / "intervals.pdf"
+    interval_plot(
+        [
+            dict(
+                study="r16",
+                candidate="mosaickv_exact/evidence-both-v1/40",
+                reference="prompt_attention_topk/complete/40",
+                difference=0.6,
+                low=0.0,
+                high=2.2,
+            )
+        ],
+        path,
+    )
+    data = path.read_bytes()
+    assert data.startswith(b"%PDF-1.4")
+    assert b"r16 / both / 40 MiB" in data
+    assert b"zero is not strict superiority" in data
+    assert b"xref" in data and data.rstrip().endswith(b"%%EOF")
+    with pytest.raises(ValueError, match="missing registered"):
+        interval_plot([], path)

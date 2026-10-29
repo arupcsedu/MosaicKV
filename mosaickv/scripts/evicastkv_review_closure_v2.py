@@ -13,6 +13,7 @@ import copy
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import traceback
@@ -158,6 +159,47 @@ def freshness_gate(*, available_ids, unresolved_roots, global_media_complete):
     return bool(available_ids >= 256 and not unresolved_roots and global_media_complete)
 
 
+def interval_plot(comparisons, path):
+    """Use the existing dependency-free vector renderer, not a new package."""
+    from analyze_component_ablations import _PdfCanvas
+
+    chosen = [c for c in comparisons if c["reference"].startswith("prompt_attention_topk/")]
+    if not chosen:
+        raise ValueError("missing registered Top-K contrasts")
+    minimum = min(0.0, *(c["low"] for c in chosen))
+    maximum = max(0.0, *(c["high"] for c in chosen))
+    padding = max(0.1, (maximum - minimum) * 0.08)
+    minimum -= padding
+    maximum += padding
+
+    def x(value):
+        return 270 + 490 * (value - minimum) / (maximum - minimum)
+
+    canvas = _PdfCanvas(810, 500)
+    canvas.text(25, 474, "Same-budget CIDEr differences against Prompt Top-K", size=13)
+    canvas.text(
+        25, 455, "Adjusted 95% intervals; same 64 consumed inputs; not confirmation", size=10
+    )
+    canvas.line(x(0), 70, x(0), 433, color=(0.5, 0.5, 0.5))
+    for tick in range(6):
+        value = minimum + (maximum - minimum) * tick / 5
+        canvas.line(x(value), 70, x(value), 65)
+        canvas.text(x(value) - 12, 50, f"{value:.2f}")
+    for i, c in enumerate(chosen):
+        _method, variant, budget = c["candidate"].split("/")
+        label = variant.removeprefix("evidence-").removesuffix("-v1")
+        y = 420 - i * 29
+        color = (0.12, 0.47, 0.71) if c["study"] == "r256" else (0.95, 0.45, 0.05)
+        canvas.text(25, y - 3, f"{c['study']} / {label} / {budget} MiB", size=10)
+        canvas.line(x(c["low"]), y, x(c["high"]), y, color=color, width=1.5)
+        for end in (c["low"], c["high"]):
+            canvas.line(x(end), y - 3, x(end), y + 3, color=color)
+        canvas.marker(x(c["difference"]), y, color=color)
+    canvas.line(270, 70, 760, 70)
+    canvas.text(290, 25, "CIDEr difference (score points); zero is not strict superiority", size=10)
+    canvas.save(path)
+
+
 def audit(root):
     revision = clean_source(SOURCE)
     output = root / "coco_availability"
@@ -284,6 +326,11 @@ def packet(root):
     revision = clean_source(SOURCE)
     if read(root / "cpu-tests.json")["status"] != "passed":
         raise ValueError("complete CPU unit suite must pass before closing the packet")
+    corrective_tests = root / "verification/cpu-tests.json"
+    if (root / "analysis_reuse.json").exists() and (
+        not corrective_tests.exists() or read(corrective_tests)["status"] != "passed"
+    ):
+        raise ValueError("corrected report requires its own clean-source CPU verification")
     all_scores, comparisons, activities, descriptive = [], [], [], []
     evidence = {}
     for label, parent in STUDIES.items():
@@ -359,9 +406,11 @@ def packet(root):
     ):
         pd.DataFrame(rows).to_csv(out / f"{name}.csv", index=False)
     # Complete matrices, including every null/negative contrast, are retained.
-    scores.to_latex(out / "development_quality.tex", index=False, float_format="%.4f")
+    scores.to_latex(
+        out / "development_quality.tex", index=False, float_format="%.4f", na_rep="--", escape=True
+    )
     pd.DataFrame(comparisons).to_latex(
-        out / "development_differences.tex", index=False, float_format="%.4f"
+        out / "development_differences.tex", index=False, float_format="%.4f", escape=True
     )
     lines = [
         r"\documentclass{standalone}",
@@ -388,29 +437,7 @@ def packet(root):
     (out / "development_quality_plot.tex").write_text("\n".join(lines) + "\n")
     # Plot differences with their registered simultaneous intervals rather than
     # suggesting that isolated CIDEr point estimates establish superiority.
-    import matplotlib
-
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    chosen = [c for c in comparisons if c["reference"].startswith("prompt_attention_topk/")]
-    fig, axis = plt.subplots(figsize=(9, 6))
-    for i, c in enumerate(chosen):
-        axis.errorbar(
-            c["difference"],
-            i,
-            xerr=[[c["difference"] - c["low"]], [c["high"] - c["difference"]]],
-            fmt="o",
-            color="C0" if c["study"] == "r256" else "C1",
-            capsize=3,
-        )
-    axis.axvline(0, color="black", linewidth=0.8)
-    axis.set_yticks(range(len(chosen)), [f"{c['study']} / {c['candidate']}" for c in chosen])
-    axis.set_xlabel("CIDEr difference versus same-budget Top-K (adjusted 95% interval)")
-    axis.set_title("Consumed development inputs; not independent confirmation")
-    fig.tight_layout()
-    fig.savefig(out / "paired_quality_intervals.pdf")
-    plt.close(fig)
+    interval_plot(comparisons, out / "paired_quality_intervals.pdf")
     availability = read(root / "coco_availability/report.json")
     prefix = read(root / "prefix-summary.json")
     claims = dict(
@@ -499,6 +526,9 @@ def packet(root):
             confirmation_executed=False,
             confirmation_blocker=availability["status"],
             cpu_suite_sha256=sha(root / "cpu-tests.json"),
+            corrective_cpu_suite_sha256=sha(corrective_tests)
+            if corrective_tests.exists()
+            else None,
             artifacts={str(p): sha(p) for p in out.iterdir() if p.is_file()},
         ),
     )
@@ -534,6 +564,7 @@ def prefix_summary(root):
 
 
 def cpu_suite(root):
+    root.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ, HF_HUB_OFFLINE="1", HF_DATASETS_OFFLINE="1")
     command = [
         sys.executable,
@@ -600,12 +631,73 @@ def submit(root):
     print(json.dumps(jobs, sort_keys=True))
 
 
+def reuse_report_inputs(root, parent):
+    """New derived root, verified producer evidence; never relabel its source."""
+    if not parent.is_dir() or root.exists():
+        raise ValueError("require completed parent and a new report root")
+    cpu = read(parent / "cpu-tests.json")
+    if cpu["status"] != "passed" or any(
+        sha(parent / name) != cpu[key]
+        for name, key in (("cpu-tests.log", "log_sha256"), ("cpu-tests.xml", "junit_sha256"))
+    ):
+        raise ValueError("parent CPU evidence changed")
+    files = [
+        "cpu-tests.json",
+        "cpu-tests.log",
+        "cpu-tests.xml",
+        "coco_availability/report.json",
+        "prefix-summary.json",
+    ]
+    for label, original in STUDIES.items():
+        name = f"reproduced/{label}/reproduction_gate.json"
+        gate = read(parent / name)
+        stats = original / f"analysis/{STAGE}/quality_statistics.json"
+        if (
+            gate["status"] != "passed"
+            or not gate["numerically_identical"]
+            or gate["original_statistics_sha256"] != sha(stats)
+            or gate["regenerated_statistics_sha256"] != sha(stats)
+        ):
+            raise ValueError("parent numerical reproduction is missing or changed")
+        files.append(name)
+    audit_record = read(parent / "coco_availability/report.json")
+    bindings = dict(audit_record["bound_files"])
+    prefix_record = read(parent / "prefix-summary.json")
+    bindings[str(PREFIX / "analysis/GATE.json")] = prefix_record["analysis_sha256"]
+    for name in (
+        "native_metrics.parquet",
+        "paired_cross_budget.parquet",
+        "paired_same_budget.parquet",
+    ):
+        entry = prefix_record[name]
+        bindings[entry["path"]] = entry["sha256"]
+    if any(sha(Path(path)) != expected for path, expected in bindings.items()):
+        raise ValueError("a reused immutable input changed")
+    root.mkdir()
+    for name in files:
+        target = root / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(parent / name, target)
+    write_once(
+        root / "analysis_reuse.json",
+        dict(
+            analysis_source_sha=clean_source(SOURCE),
+            parent_root=str(parent),
+            parent_cpu_source_sha=cpu["source_sha"],
+            reused_inputs={str(parent / name): sha(parent / name) for name in files},
+            new_gpu_requests=0,
+            new_bootstrap_replicates=0,
+        ),
+    )
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "mode", choices=["r256", "r16", "audit", "packet", "prefix", "tests", "submit"]
+        "mode", choices=["r256", "r16", "audit", "packet", "prefix", "tests", "submit", "reuse"]
     )
     parser.add_argument("--root", type=Path, required=True)
+    parser.add_argument("--parent", type=Path)
     args = parser.parse_args()
     if not args.root.resolve().is_relative_to(Path("/scratch/djy8hg").resolve()):
         parser.error("scratch-only output")
@@ -621,6 +713,10 @@ if __name__ == "__main__":
             submit(args.root)
         elif args.mode == "tests":
             cpu_suite(args.root)
+        elif args.mode == "reuse":
+            if args.parent is None:
+                parser.error("reuse requires --parent")
+            reuse_report_inputs(args.root, args.parent)
         else:
             prefix_summary(args.root)
     except Exception as exc:

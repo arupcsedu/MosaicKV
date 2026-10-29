@@ -60,3 +60,19 @@ CSV/Parquet, negative-result seals, command/job ledger, actual source hashes,
 claim/evidence restrictions, and the PrefixKV gate. Descriptive quality-run
 timings must not be used as repeated-trial headline latency results. The packet
 is reporting-ready evidence, not a claim that positive paper confirmation passed.
+
+## Report-only recovery
+
+The first writing job failed because `matplotlib` is absent from the common
+lock. The corrected renderer reuses `_PdfCanvas` from the existing ablation
+analyzer, producing vector PDF without installation. TeX tables explicitly
+escape identifiers and render an inapplicable FullKV cap as `--`, not `NaN`.
+
+`reuse --root NEW --parent ORIGINAL` verifies the completed numerical gates,
+statistics hashes, historical bindings, PrefixKV matrices, and CPU artifacts,
+then copies only those small derived producer records into a new immutable
+report root. Original source SHAs remain unchanged. Run `tests --root
+NEW/verification`, then `packet --root NEW`. This requires zero GPU inference
+and zero bootstrap recomputation. The new report binds both the original suite
+and the corrected-source verification; it does not claim that old tests ran at
+the corrective source SHA.
