@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import time
 from dataclasses import asdict
 from pathlib import Path
@@ -336,10 +337,40 @@ def worker(root, expected, index):
         write_once(out / "result.json", result)
 
 
-def analyze(root, expected):
+def analysis_inputs(root, expected):
+    """Allow CPU-only rendering recovery; never relax worker source guards."""
+    if sha(root / "plan.json") != expected:
+        raise ValueError("plan changed")
+    plan = common.read(root / "plan.json")
+    current = clean_source(SOURCE)
+    if current != plan["source_sha"]:
+        allowed = {
+            "mosaickv/scripts/evicastkv_token_eviction_audit.py",
+            "mosaickv/src/mosaickv/evaluation/nll_svg.py",
+            "mosaickv/tests/unit/test_token_eviction_renderer.py",
+        }
+        subprocess.run(
+            ["git", "-C", str(SOURCE), "merge-base", "--is-ancestor", plan["source_sha"], current],
+            check=True,
+        )
+        changed = set(
+            subprocess.check_output(
+                ["git", "-C", str(SOURCE), "diff", "--name-only", plan["source_sha"], current],
+                text=True,
+            ).splitlines()
+        )
+        if not changed <= allowed:
+            raise ValueError("CPU recovery changed files beyond the analysis/rendering allowlist")
+    for path, digest in plan["bound_files"].items():
+        if sha(Path(path)) != digest:
+            raise ValueError("bound evidence changed")
+    return plan, current
+
+
+def analyze(root, expected, analysis_subdir="analysis"):
     import pandas as pd
 
-    plan = common.inputs(root, expected)
+    plan, analysis_source = analysis_inputs(root, expected)
     rows, comparisons, failures, captures = [], [], [], {}
     for job in plan["jobs"]:
         w = root / f"workers/{job['index']}"
@@ -350,6 +381,12 @@ def analyze(root, expected):
         if result["status"] != "completed":
             failures.extend(result["failures"])
             continue
+        if (
+            result["source_sha"] != plan["source_sha"]
+            or result["plan_sha256"] != expected
+            or result["config_sha"] != job["arms"][0]["config_sha"]
+        ):
+            raise ValueError("worker source/plan/config provenance mismatch")
         if (
             sha(w / "per_token.json") != result["per_token_sha256"]
             or sha(Path(result["teacher_trace"])) != result["teacher_trace_sha256"]
@@ -365,9 +402,15 @@ def analyze(root, expected):
         for ref in ("full_kv_reference", "native_prefixkv_reference", "window_topk_control"):
             if ref == role or (task, ref) not in captures:
                 continue
-            compare = compare_nll(detail["records"], captures[task, ref]["records"], EPSILON)
+            compare = compare_nll(
+                detail["records"],
+                captures[task, ref]["records"],
+                plan["per_token_nll_epsilon_nats"],
+            )
             comparisons.append(dict(task=task, role=role, reference=ref, **compare))
-    out = root / "analysis"
+    if Path(analysis_subdir).name != analysis_subdir or analysis_subdir in {".", ".."}:
+        raise ValueError("single new derived-analysis directory name required")
+    out = root / analysis_subdir
     if out.exists():
         raise FileExistsError("immutable derived output required")
     out.mkdir()
@@ -416,46 +459,22 @@ def analyze(root, expected):
         "Differences are descriptive, not statistical quality/superiority evidence. "
         "Native PrefixKV is a separate operating point, not byte matched. "
         "These capture timings are not comparable to the primary systems measurements.\n\n"
-        + table.to_markdown(index=False)
+        + table.astype(object).where(table.notna(), "not_observed").to_markdown(index=False)
         + "\n\n## Reused greedy trajectories\n\n"
-        + display.to_markdown(index=False)
+        + display.astype(object).where(display.notna(), "not_observed").to_markdown(index=False)
         + "\n\n```json\n"
         + json.dumps(gate, indent=2)
         + "\n```\n"
     )
     if len(captures) == 10 and not failures:
-        import matplotlib
+        from mosaickv.evaluation.nll_svg import cumulative_nll_svg
 
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-
-        fig, axes = plt.subplots(1, 2, figsize=(11, 4))
-        for ax, task in zip(axes, ("llava_description", "mmvet_prefixkv"), strict=True):
-            for x in comparisons:
-                if x["task"] == task and x["reference"] == "full_kv_reference":
-                    cumulative, series = 0.0, []
-                    for d in x["per_token_deltas"]:
-                        cumulative += d
-                        series.append(cumulative)
-                    ax.plot(range(1, len(series) + 1), series, label=x["role"])
-            if len(captures[task, "window_topk_control"]["records"]) >= 258:
-                ax.axvline(
-                    258, color="black", linestyle="--", label="FIFO first affected prediction"
-                )
-            ax.axhline(0, color="grey", linewidth=0.5)
-            ax.set(
-                title=task,
-                xlabel="Teacher target position (1-based)",
-                ylabel="Cumulative NLL delta vs FullKV (nats)",
-            )
-            ax.legend(fontsize=6)
-        fig.tight_layout()
-        fig.savefig(out / "cumulative_nll.pdf")
-        plt.close(fig)
+        (out / "cumulative_nll.svg").write_text(cumulative_nll_svg(comparisons))
     write_once(
         out / "manifest.json",
         dict(
             source_sha=plan["source_sha"],
+            analysis_source_sha=analysis_source,
             plan_sha256=expected,
             inputs={str(p): sha(p) for p in (root / "workers").rglob("*.json")},
             outputs={p.name: sha(p) for p in out.iterdir()},
@@ -471,6 +490,7 @@ def main():
     parser.add_argument("--parent", type=Path)
     parser.add_argument("--plan-sha", required=True)
     parser.add_argument("--index", type=int)
+    parser.add_argument("--analysis-subdir", default="analysis")
     a = parser.parse_args()
     if a.mode == "prepare":
         print(prepare(a.root, a.parent, a.plan_sha))
@@ -485,7 +505,7 @@ def main():
     elif a.mode == "worker":
         worker(a.root, a.plan_sha, a.index)
     else:
-        analyze(a.root, a.plan_sha)
+        analyze(a.root, a.plan_sha, a.analysis_subdir)
 
 
 if __name__ == "__main__":
