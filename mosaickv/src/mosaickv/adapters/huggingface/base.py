@@ -412,9 +412,7 @@ class HuggingFaceMultimodalAdapter(ABC):
                 if value is None and config is not None:
                     value = getattr(config, "num_key_value_heads", None)
                 if value is None:
-                    raise RuntimeError(
-                        f"decoder layer {index} has no auditable KV-head geometry"
-                    )
+                    raise RuntimeError(f"decoder layer {index} has no auditable KV-head geometry")
                 counts.append(int(value))
             kv_heads = tuple(counts)
         return AttentionCapture(
@@ -863,6 +861,9 @@ class HuggingFaceMultimodalAdapter(ABC):
         packed_all_valid = state.model_state.get("mosaickv_packed_all_valid") is True
         ragged = state.model_state.get("prefixkv_ragged") is True
         bounded = state.model_state.get("mosaickv_bounded_history") is True
+        incremental_importance = state.model_state.get("mosaickv_history_importance") is True
+        return_attentions = capture_attentions
+        capture_attentions = capture_attentions or incremental_importance
         if (
             state.active_cache_length != state.logical_sequence_length
             and packed_validity is None
@@ -967,12 +968,18 @@ class HuggingFaceMultimodalAdapter(ABC):
         state.logical_sequence_length += 1
         state.next_decode_position += 1
         state.model_state = model_state
+        if incremental_importance:
+            from mosaickv.adapters.huggingface.incremental_history_cache import (
+                update_incremental_importance,
+            )
+
+            update_incremental_importance(state, attention_weights)
         return DecodeOutput(
             logits,
             self._greedy_token(logits),
             state,
             query_vectors,
-            attention_weights,
+            attention_weights if return_attentions else (),
         )
 
     @staticmethod
@@ -1305,9 +1312,7 @@ class HuggingFaceMultimodalAdapter(ABC):
         reallocate storage in undocumented ways and therefore return ``False``.
         """
 
-        if state.model_state.get("mosaickv_decode_cache_storage") != (
-            "preallocated_append_only"
-        ):
+        if state.model_state.get("mosaickv_decode_cache_storage") != ("preallocated_append_only"):
             return False
         layers = getattr(state.past_key_values, "layers", None)
         if not layers or any(

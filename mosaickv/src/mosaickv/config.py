@@ -455,6 +455,49 @@ class DraftExchangeSearchConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class IncrementalHistoryConfig:
+    """Experimental physical growth and causal generated-history retention."""
+
+    chunk_tokens: int = 16
+    recent_tokens: int = 64
+    policy: str = "recent_importance"
+    importance_decay: float = 0.95
+
+    def __post_init__(self) -> None:
+        if type(self.chunk_tokens) is not int or self.chunk_tokens < 1:
+            raise ConfigurationError("incremental_history.chunk_tokens must be an integer >= 1")
+        if type(self.recent_tokens) is not int or self.recent_tokens < 1:
+            raise ConfigurationError("incremental_history.recent_tokens must be an integer >= 1")
+        if not isinstance(self.policy, str) or self.policy not in {
+            "sink_recent",
+            "recent_importance",
+        }:
+            raise ConfigurationError("incremental_history.policy is unsupported")
+        if (
+            isinstance(self.importance_decay, bool)
+            or not isinstance(self.importance_decay, (int, float))
+            or not math.isfinite(self.importance_decay)
+            or not 0 < self.importance_decay <= 1
+        ):
+            raise ConfigurationError("incremental_history.importance_decay must be in (0, 1]")
+
+    @classmethod
+    def from_mapping(cls, value: object) -> IncrementalHistoryConfig:
+        data = _mapping(value, "incremental_history")
+        _reject_unknown(
+            data,
+            {"chunk_tokens", "recent_tokens", "policy", "importance_decay"},
+            "incremental_history",
+        )
+        return cls(
+            _int(data, "chunk_tokens", 16, "incremental_history"),
+            _int(data, "recent_tokens", 64, "incremental_history"),
+            _optional_str(data, "policy", "recent_importance", "incremental_history"),
+            _float(data, "importance_decay", 0.95, "incremental_history"),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class BoundedDecodeConfig:
     """Opt-in shared lifetime-cap controller; every use is a labeled adaptation."""
 
@@ -464,8 +507,13 @@ class BoundedDecodeConfig:
     layer_allocation: str = "uniform"
     draft_guard: DraftAllocationGuardConfig | None = None
     draft_exchange: DraftExchangeSearchConfig | None = None
+    incremental_history: IncrementalHistoryConfig | None = None
 
     def effective_method(self, method: MosaicKVMethod) -> str:
+        if self.incremental_history is not None:
+            name = method.value.removesuffix("_reimpl")
+            suffix = "_reimpl" if method.is_published_reimplementation else ""
+            return f"{name}__incremental_history_{self.incremental_history.policy}_v1{suffix}"
         version = (
             "v1" if self.history_fraction is None and self.layer_allocation == "uniform" else "v2"
         )
@@ -535,6 +583,18 @@ class BoundedDecodeConfig:
             and not isinstance(self.draft_exchange, DraftExchangeSearchConfig)
         ):
             raise ConfigurationError("bounded_decode.draft_exchange is required only for V6")
+        if self.incremental_history is not None:
+            if not isinstance(self.incremental_history, IncrementalHistoryConfig):
+                raise ConfigurationError("bounded_decode.incremental_history must be validated")
+            if self.layer_allocation != "uniform" or self.history_fraction is not None:
+                raise ConfigurationError(
+                    "incremental_history requires explicit generated capacity "
+                    "and unchanged uniform prompt allocation"
+                )
+            if self.sink_tokens + self.incremental_history.recent_tokens >= self.generated_capacity:
+                raise ConfigurationError(
+                    "incremental_history needs capacity beyond protected sinks and recent tokens"
+                )
 
     @classmethod
     def from_mapping(cls, value: object) -> BoundedDecodeConfig:
@@ -548,6 +608,7 @@ class BoundedDecodeConfig:
                 "layer_allocation",
                 "draft_guard",
                 "draft_exchange",
+                "incremental_history",
             },
             "bounded_decode",
         )
@@ -566,6 +627,9 @@ class BoundedDecodeConfig:
             None
             if data.get("draft_exchange") is None
             else DraftExchangeSearchConfig.from_mapping(data["draft_exchange"]),
+            None
+            if data.get("incremental_history") is None
+            else IncrementalHistoryConfig.from_mapping(data["incremental_history"]),
         )
 
 
@@ -3978,6 +4042,16 @@ class RunConfig:
                     "shared-byte selection without other variants"
                 )
         if self.bounded_decode is not None:
+            if self.bounded_decode.incremental_history is not None and (
+                self.method
+                not in {MosaicKVMethod.MOSAICKV_EXACT, MosaicKVMethod.PROMPT_ATTENTION_TOPK}
+                or self.evidence_policy is not None
+                or self.forecasting.draft_steps != 0
+            ):
+                raise ConfigurationError(
+                    "incremental_history first stage supports exact MosaicKV/Prompt Top-K "
+                    "without draft rollouts or additional evidence-policy guards"
+                )
             if not isinstance(self.bounded_decode, BoundedDecodeConfig):
                 raise ConfigurationError("bounded_decode must be a validated configuration")
             if self.cache.retention_ratio not in {1.0, math.nextafter(1.0, 0.0)}:
@@ -4613,6 +4687,8 @@ def canonical_config(config: RunConfig) -> JsonObject:
             bounded.pop("draft_guard", None)
         if config.bounded_decode.draft_exchange is None:
             bounded.pop("draft_exchange", None)
+        if config.bounded_decode.incremental_history is None:
+            bounded.pop("incremental_history", None)
     return payload
 
 

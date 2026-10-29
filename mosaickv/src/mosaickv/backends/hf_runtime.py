@@ -9176,6 +9176,16 @@ class HuggingFaceMosaicKVModel:
         trace_instrumentation_seconds = 0.0
         deferred_trace_builder: Callable[[], JsonObject] | None = None
         cache_lifecycle: CacheLifecycle | None = None
+        ownership_requested = request.generation_kwargs.get("_mosaickv_capture_kv_ownership", False)
+        if type(ownership_requested) is not bool:
+            raise ValueError("KV ownership instrumentation flag must be boolean")
+        request_kv_ownership = None
+        if ownership_requested:
+            from mosaickv.measurements.kv_ownership import KVOwnershipLedger
+
+            request_kv_ownership = KVOwnershipLedger()
+        retired_plan_metadata = None
+        retired_byte_trace = None
         try:
             if self._prefixkv_profile is not None:
                 self._prefixkv_profile.assert_evaluation_disjoint((request.sample_id,))
@@ -9310,6 +9320,12 @@ class HuggingFaceMosaicKVModel:
                 )
             if not bool(torch.isfinite(prefill.logits).all()):
                 raise HuggingFaceRuntimeError("prefill logits contain NaN or infinity")
+            if request_kv_ownership is not None:
+                request_kv_ownership.track(
+                    "original_prefill",
+                    self.adapter._legacy_layers(prefill.state.past_key_values)[0],
+                )
+                request_kv_ownership.observe()
             source_prefill_kv_bytes = _cache_payload_bytes(
                 self.adapter,
                 prefill.state.past_key_values,
@@ -9381,6 +9397,12 @@ class HuggingFaceMosaicKVModel:
             if not is_full_cache and not retention_one_identity:
                 cache_state_started = time.perf_counter()
                 snapshot = self.adapter.extract_past_key_values(prefill.state.past_key_values)
+                if request_kv_ownership is not None:
+                    request_kv_ownership.track(
+                        "source_snapshot",
+                        tuple((layer.key, layer.value) for layer in snapshot.layers),
+                    )
+                    request_kv_ownership.observe()
                 input_ids = prepared.model_inputs["input_ids"]
                 recent_count = (
                     int(prefill.state.logical_sequence_length * self.config.lookm.recent_ratio)
@@ -9452,14 +9474,32 @@ class HuggingFaceMosaicKVModel:
                             prefill.state.past_key_values
                         )[0]
                     )
-                    bounded_budget = bounded_history_budget(
-                        self.config.cache.budget_value,
-                        bytes_per_position,
-                        self.config.bounded_decode.resolved_capacity(
-                            self.config.cache.budget_value, bytes_per_position
-                        ),
-                        planned_decode_updates,
-                    )
+                    if self.config.bounded_decode.incremental_history is not None:
+                        from mosaickv.adapters.huggingface.incremental_history_cache import (
+                            incremental_history_budget,
+                        )
+
+                        bounded_budget = incremental_history_budget(
+                            self.config.cache.budget_value,
+                            tuple(
+                                (k.numel() * k.element_size() + v.numel() * v.element_size())
+                                // k.shape[-2]
+                                for k, v in self.adapter._legacy_layers(
+                                    prefill.state.past_key_values
+                                )[0]
+                            ),
+                            self.config.bounded_decode.generated_capacity,
+                            planned_decode_updates,
+                        )
+                    else:
+                        bounded_budget = bounded_history_budget(
+                            self.config.cache.budget_value,
+                            bytes_per_position,
+                            self.config.bounded_decode.resolved_capacity(
+                                self.config.cache.budget_value, bytes_per_position
+                            ),
+                            planned_decode_updates,
+                        )
                     trace["bounded_decode"] = {
                         "status": "generation_reserve_planned_before_prompt_selection",
                         "budget_reservation": cast("JsonObject", asdict(bounded_budget)),
@@ -10365,6 +10405,15 @@ class HuggingFaceMosaicKVModel:
                             "proposal_only_before_draft_guard_not_final_selection"
                         )
                 state = _state_from_packed(self.adapter, prefill.state, packed)
+                if request_kv_ownership is not None:
+                    request_kv_ownership.track(
+                        "packed_snapshot",
+                        tuple((layer.key, layer.value) for layer in packed.snapshot.layers),
+                    )
+                    request_kv_ownership.track(
+                        "decode_cache", self.adapter._legacy_layers(state.past_key_values)[0]
+                    )
+                    request_kv_ownership.observe()
                 packed_prompt_capacity = packed.prompt_capacity
                 packed_prefill_active_kv_bytes = _cache_payload_bytes(
                     self.adapter,
@@ -10537,6 +10586,8 @@ class HuggingFaceMosaicKVModel:
                         "MosaicKV oracle diagnostics are missing predicted attention"
                     )
 
+                diagnostic_plan = plan
+
                 def run_forecast_diagnostic() -> (
                     ForecastQualityDiagnostics | AttentionSelectionDiagnostics
                 ):
@@ -10548,19 +10599,19 @@ class HuggingFaceMosaicKVModel:
                             future_steps=self.config.diagnostics.forecast_oracle_steps,
                             capture_attentions=True,
                         )
-                    if plan.forecast is None:
+                    if diagnostic_plan.forecast is None:
                         return _selection_quality_from_oracle(
-                            plan.full_state,
+                            diagnostic_plan.full_state,
                             oracle,
                             predicted_token_attention,
-                            plan.construction.exact_node_ids,
+                            diagnostic_plan.construction.exact_node_ids,
                         )
                     return _forecast_quality_from_oracle(
-                        plan.full_state,
-                        plan.forecast,
+                        diagnostic_plan.full_state,
+                        diagnostic_plan.forecast,
                         oracle,
                         predicted_token_attention,
-                        plan.construction.exact_node_ids,
+                        diagnostic_plan.construction.exact_node_ids,
                     )
 
                 forecast_diagnostic, forecast_diagnostic_seconds = _timed(
@@ -10634,9 +10685,19 @@ class HuggingFaceMosaicKVModel:
                 )
 
                 assert self.config.bounded_decode is not None
+                history_installer: Callable[..., Any] = install_bounded_history
+                history_kwargs: dict[str, Any] = {}
+                if self.config.bounded_decode.incremental_history is not None:
+                    from mosaickv.adapters.huggingface.incremental_history_cache import (
+                        install_incremental_history,
+                    )
+
+                    history_installer = install_incremental_history
+                    history_kwargs = {"config": self.config.bounded_decode.incremental_history}
+                    history_kwargs["request_ownership_ledger"] = request_kv_ownership
                 bounded_record, setup_seconds = _timed(
                     prefill.logits,
-                    lambda: install_bounded_history(
+                    lambda: history_installer(
                         self.adapter,
                         state,
                         generated_capacity=bounded_budget.generated_positions,
@@ -10645,6 +10706,7 @@ class HuggingFaceMosaicKVModel:
                             bounded_budget.generated_positions - 1,
                         ),
                         cap_bytes=bounded_budget.cap_bytes,
+                        **history_kwargs,
                     ),
                 )
                 packing_seconds += setup_seconds
@@ -10664,6 +10726,91 @@ class HuggingFaceMosaicKVModel:
                     bounded_decode_trace["budget_reservation"] = cast(
                         "JsonObject", asdict(bounded_budget)
                     )
+
+            if state.model_state.get("mosaickv_incremental_history"):
+                import gc
+                import weakref
+
+                if (
+                    repair_state is not None
+                    or self.config.forecasting.draft_steps != 0
+                    or self.config.diagnostics.enabled
+                ):
+                    raise HuggingFaceRuntimeError(
+                        "incremental source retirement forbids repair/draft/oracle references"
+                    )
+                release_started = time.perf_counter()
+                if deferred_trace_builder is not None:
+                    trace.update(deferred_trace_builder())
+                    deferred_trace_builder = None
+                    _compact_trace_records(trace)
+                release_trace_seconds = time.perf_counter() - release_started
+                trace_instrumentation_seconds += release_trace_seconds
+                retired_plan_metadata = {
+                    name: (0.0 if plan is None else getattr(plan, name))
+                    for name in (
+                        "utility_seconds",
+                        "reservation_seconds",
+                        "selector_seconds",
+                        "stable_routing_seconds",
+                        "similarity_shortlist_seconds",
+                        "planner_mapping_seconds",
+                    )
+                }
+                retired_plan_metadata["active_lengths"] = (
+                    []
+                    if plan is None
+                    else sorted(
+                        {layout.active_cache_length for layout in plan.construction.active_layouts}
+                    )
+                )
+                retired_byte_trace = _byte_budget_materialization_trace(
+                    dense_budget,
+                    self.config,
+                    source_prefill_kv_bytes=source_prefill_kv_bytes,
+                    logical_prefill_active_kv_bytes=logical_prefill_active_kv_bytes,
+                    packed_prefill_active_kv_bytes=packed_prefill_active_kv_bytes,
+                    packed_prompt_capacity=packed_prompt_capacity,
+                    plan=plan,
+                )
+                source_refs = [
+                    weakref.ref(t)
+                    for pair in self.adapter._legacy_layers(prefill.state.past_key_values)[0]
+                    for t in pair
+                ]
+                source_refs += [
+                    weakref.ref(t) for layer in snapshot.layers for t in (layer.key, layer.value)
+                ]
+                if plan is not None and plan.construction.state.exact._compact_bank is not None:
+                    bank = plan.construction.state.exact._compact_bank
+                    source_refs += [weakref.ref(s.tensor) for s in (*bank.keys, *bank.values)]
+                    del bank
+                prefill.state.past_key_values = None
+                rollout = None
+                plan = None
+                baseline_plan = None
+                packed_state = None
+                del full_state
+                snapshot = None
+                packed = None
+                gc.collect()
+                alive = sum(ref() is not None for ref in source_refs)
+                trace["source_KV_retirement"] = {
+                    "registered_tensor_references": len(source_refs),
+                    "remaining_source_tensor_objects": alive,
+                    "selection_trace_materialized_before_release": True,
+                    "storage_not_offloaded_or_quantized": True,
+                }
+                packing_seconds += time.perf_counter() - release_started - release_trace_seconds
+                if alive:
+                    raise HuggingFaceRuntimeError(
+                        "incremental runtime retained registered inactive source KV"
+                    )
+                if request_kv_ownership is not None:
+                    request_kv_ownership.track(
+                        "decode_cache", self.adapter._legacy_layers(state.past_key_values)[0]
+                    )
+                    request_kv_ownership.observe()
 
             # Observe before append-only preallocation so unused backing capacity is not
             # confused with the post-compression byte target. All methods use
@@ -10687,7 +10834,9 @@ class HuggingFaceMosaicKVModel:
             cache_lifecycle.observe(self.adapter._legacy_layers(state.past_key_values)[0])
             trace_instrumentation_seconds += time.perf_counter() - cache_accounting_started
             decode_runtime_policy["kv_growth"] = (
-                "bounded_generated_ring_v1"
+                "incremental_generated_history_v1"
+                if state.model_state.get("mosaickv_incremental_history")
+                else "bounded_generated_ring_v1"
                 if state.model_state.get("mosaickv_bounded_history")
                 else (
                     "preallocated_append_only_views"
@@ -11122,7 +11271,24 @@ class HuggingFaceMosaicKVModel:
                 )
 
                 if state.model_state.get("mosaickv_bounded_history"):
-                    bounded_decode_trace.update(bounded_history_record(state))
+                    if state.model_state.get("mosaickv_incremental_history"):
+                        from mosaickv.adapters.huggingface.incremental_history_cache import (
+                            incremental_history_record,
+                        )
+
+                        bounded_decode_trace.update(incremental_history_record(state))
+                        growth_peak = cast(
+                            "dict[str, Any]",
+                            bounded_decode_trace["owned_decode_KV_including_growth_peak"],
+                        )["peak_storage_bytes"]
+                        cache_lifecycle.peak_storage_bytes = max(
+                            cache_lifecycle.peak_storage_bytes, growth_peak
+                        )
+                        bounded_decode_trace[
+                            "reported_peak_includes_growth_replacement_buffers"
+                        ] = True
+                    else:
+                        bounded_decode_trace.update(bounded_history_record(state))
                     if cache_lifecycle.peak_storage_bytes > self.config.cache.budget_value:
                         raise HuggingFaceRuntimeError(
                             "bounded history exceeded lifetime storage cap"
@@ -11254,6 +11420,14 @@ class HuggingFaceMosaicKVModel:
                 packed_prompt_capacity=packed_prompt_capacity,
                 plan=plan,
             )
+            if retired_byte_trace is not None:
+                byte_budget_materialization = retired_byte_trace
+            if request_kv_ownership is not None:
+                request_kv_ownership.track(
+                    "decode_cache", self.adapter._legacy_layers(state.past_key_values)[0]
+                )
+                request_kv_ownership.observe()
+                trace["request_KV_ownership"] = request_kv_ownership.record()
             trace.update(
                 {
                     "status": "completed",
@@ -11689,6 +11863,31 @@ class HuggingFaceMosaicKVModel:
                     "trace_path": str(trace_path.resolve()),
                 }
             )
+            if retired_plan_metadata is not None:
+                for destination, source in {
+                    "utility": "utility_seconds",
+                    "hard_reservations": "reservation_seconds",
+                    "budgeted_selector": "selector_seconds",
+                    "stable_head_routing": "stable_routing_seconds",
+                    "similarity_shortlist": "similarity_shortlist_seconds",
+                    "planner_source_mapping": "planner_mapping_seconds",
+                }.items():
+                    cast("JsonObject", trace["planner_subphases"])[destination] = (
+                        retired_plan_metadata[source]
+                    )
+                cast("JsonObject", trace["planner_subphases"])["unattributed_preparation"] = max(
+                    0.0,
+                    planner_preparation_seconds
+                    - forecast_attention_projection_seconds
+                    - prompt_routing_evidence_seconds
+                    - head_route_configuration_seconds
+                    - retired_plan_metadata["stable_routing_seconds"]
+                    - retired_plan_metadata["similarity_shortlist_seconds"]
+                    - retired_plan_metadata["planner_mapping_seconds"],
+                )
+                trace["tier_active_cache_lengths"] = cast(
+                    "JsonValue", retired_plan_metadata["active_lengths"]
+                )
             if bounded_budget is not None and bounded_decode_trace is not None:
                 materialization = trace["byte_budget_materialization"]
                 if isinstance(materialization, dict):
@@ -11701,7 +11900,7 @@ class HuggingFaceMosaicKVModel:
                     materialization["accounting_boundary"] = (
                         "prompt_selection_plus_separately_charged_generated_reserve"
                     )
-                if packed.snapshot.independent_layer_lengths:
+                if packed is not None and packed.snapshot.independent_layer_lengths:
                     lengths = [int(layer.key.shape[2]) for layer in packed.snapshot.layers]
                     trace["uniform_anchor_prompt_capacity"] = trace["hard_prompt_capacity"]
                     trace["hard_prompt_capacity"] = None
