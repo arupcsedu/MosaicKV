@@ -29,7 +29,10 @@ def bind_row(bound, path):
         bound[p] = h
 
 
-def prepare(root, parent, expected, equivalence):
+def prepare(root, parent, expected, equivalence, head_pooling="per_head", prior_study=None):
+    if head_pooling not in {"per_head", "shared_heads"}:
+        raise ValueError("unsupported prior pooling")
+    shared = head_pooling == "shared_heads"
     source = clean_source(SOURCE)
     if root.exists():
         raise FileExistsError("immutable consumed-only root required")
@@ -38,7 +41,12 @@ def prepare(root, parent, expected, equivalence):
     gate_path = parent / "analysis/GATE.json"
     gate = common.read(gate_path)
     proof = equivalence / "analysis/GATE.json"
-    if common.read(proof)["status"] != "passed_equivalence_and_owner_reduction":
+    required_proof = (
+        "passed_equivalence_and_allocator_reduction"
+        if shared
+        else "passed_equivalence_and_owner_reduction"
+    )
+    if common.read(proof)["status"] != required_proof:
         raise ValueError("zero-clone numerical verification required first")
     proof_plan = common.read(equivalence / "plan.json")
     if proof_plan["bound_files"].get(str(parent / "plan.json")) != expected:
@@ -53,12 +61,25 @@ def prepare(root, parent, expected, equivalence):
     bound[str(gate_path)] = sha(gate_path)
     bound[str(proof)] = sha(proof)
     bound[str(equivalence / "plan.json")] = sha(equivalence / "plan.json")
+    if shared:
+        if prior_study is None:
+            raise ValueError("V7 negative-result audit required")
+        prior_gate = prior_study / "analysis/GATE.json"
+        prior = common.read(prior_gate)
+        if (
+            prior["status"] != "complete_consumed_diagnostic"
+            or prior["failures"]
+            or prior["point_eligible_configurations"]
+        ):
+            raise ValueError("do not redesign before a complete negative V7 result")
+        bound[str(prior_gate)] = sha(prior_gate)
+        bound[str(prior_study / "plan.json")] = sha(prior_study / "plan.json")
     for p, h in bound.items():
         if sha(Path(p)) != h:
             raise ValueError("bound evidence changed")
     jobs = []
     for job in old["jobs"]:
-        if job["diagnostic_history_capacity"] not in {128, 512}:
+        if job["diagnostic_history_capacity"] not in ({128, 256, 512} if shared else {128, 512}):
             continue
         arm = job["arms"][0]
         cfg = RunConfig.from_mapping(arm["config"])
@@ -73,17 +94,24 @@ def prepare(root, parent, expected, equivalence):
             parent / f"workers/{baseline['index']}/rows/{baseline['arms'][0]['label']}.json"
         )
         bind_row(bound, baseline_path)
-        for weight in WEIGHTS if cfg.method.is_mosaickv else (1.0,):
+        weights = (
+            ((0.5, 1.0) if cfg.method.is_mosaickv else (0.0, 1.0))
+            if shared
+            else (WEIGHTS if cfg.method.is_mosaickv else (1.0,))
+        )
+        for weight in weights:
             candidate = replace(
                 cfg,
                 bounded_decode=replace(
                     cfg.bounded_decode,
                     incremental_history=replace(
-                        cfg.bounded_decode.incremental_history, full_prompt_prior_weight=weight
+                        cfg.bounded_decode.incremental_history,
+                        full_prompt_prior_weight=weight,
+                        full_prompt_prior_head_pooling=head_pooling if weight else "per_head",
                     ),
                 ),
             )
-            label = f"{arm['label']}-full-prior-{weight:g}-v7"
+            label = f"{arm['label']}-full-prior-{weight:g}-" + ("shared-v9" if shared else "v7")
             jobs.append(
                 dict(
                     job,
@@ -99,8 +127,8 @@ def prepare(root, parent, expected, equivalence):
                     ],
                 )
             )
-    if len(jobs) != 16:
-        raise ValueError("bounded study must contain exactly sixteen arms")
+    if len(jobs) != (24 if shared else 16):
+        raise ValueError("unexpected bounded-study arm count")
     write_once(
         root / "plan.json",
         dict(
@@ -108,9 +136,15 @@ def prepare(root, parent, expected, equivalence):
             source_sha=source,
             jobs=jobs,
             bound_files=bound,
-            protocol="multiscale_prompt_prior_v7_consumed_only",
-            prompt_prior_weights=WEIGHTS,
-            history_capacity_grid=[128, 512],
+            protocol=(
+                "shared_prompt_prior_v9_consumed_only"
+                if shared
+                else "multiscale_prompt_prior_v7_consumed_only"
+            ),
+            prompt_prior_weights=(0.5, 1.0) if shared else WEIGHTS,
+            full_prompt_prior_head_pooling=head_pooling,
+            contemporaneous_window_topk_controls=shared,
+            history_capacity_grid=[128, 256, 512] if shared else [128, 512],
             frozen_topk_window_only_controls_reused=True,
             full_prior_topk_rows_are_explicit_ablations_not_window_baseline=True,
             fresh_evaluation_authorized=False,
@@ -143,6 +177,7 @@ def analyze(root, expected):
 
     plan = common.inputs(root, expected)
     rows, checks, failures = [], [], []
+    control_checks = []
     for job in plan["jobs"]:
         w = root / f"workers/{job['index']}"
         raw = w / f"rows/{job['arms'][0]['label']}.json"
@@ -182,10 +217,52 @@ def analyze(root, expected):
                 full_prompt_prior_weight=job["diagnostic_full_prompt_prior_weight"],
             )
         )
+        if (
+            plan.get("contemporaneous_window_topk_controls")
+            and r["method"] == "prompt_attention_topk"
+            and job["diagnostic_full_prompt_prior_weight"] == 0
+        ):
+            old = common.read(job["frozen_topk_control_row"])
+            fields = (
+                "answer",
+                "config_sha",
+                "nll_sum",
+                "evaluated_tokens",
+                "teacher_forced_ppl",
+                "rouge_l_f1",
+            )
+
+            def phase_tokens(row):
+                return {
+                    common.read(p)["execution_phase"]: common.read(p)["generated_token_ids"]
+                    for p in row["traces"]
+                }
+
+            equal = all(r[k] == old[k] for k in fields) and phase_tokens(r) == phase_tokens(old)
+            control_checks.append(dict(worker=job["index"], exact_control_equivalence=equal))
+            if not equal:
+                failures.append(dict(worker=job["index"], error="changed frozen Top-K output"))
         if r["method"] == "mosaickv_exact":
+            baseline = common.read(job["frozen_topk_control_row"])
+            if plan.get("contemporaneous_window_topk_controls"):
+                control = next(
+                    j
+                    for j in plan["jobs"]
+                    if j["task"] == job["task"]
+                    and j["diagnostic_history_capacity"] == job["diagnostic_history_capacity"]
+                    and j["diagnostic_full_prompt_prior_weight"] == 0
+                    and j["arms"][0]["config"]["method"] == "prompt_attention_topk"
+                )
+                cp = root / f"workers/{control['index']}/rows/{control['arms'][0]['label']}.json"
+                if not cp.exists() or common.read(cp)["status"] != "completed":
+                    failures.append(
+                        dict(worker=job["index"], error="missing contemporaneous control")
+                    )
+                    continue
+                baseline = common.read(cp)
             check = point_check(
                 r,
-                common.read(job["frozen_topk_control_row"]),
+                baseline,
                 common.read(job["native_control_row"]),
             )
             checks.append(
@@ -200,8 +277,8 @@ def analyze(root, expected):
                 failures.append(dict(worker=job["index"], error="frozen Top-K bytes not matched"))
     eligible = []
     if len(rows) == len(plan["jobs"]) and not failures:
-        for history in (128, 512):
-            for weight in WEIGHTS:
+        for history in plan.get("history_capacity_grid", (128, 512)):
+            for weight in plan.get("prompt_prior_weights", WEIGHTS):
                 group = [
                     x
                     for x in checks
@@ -228,6 +305,7 @@ def analyze(root, expected):
         else "failed",
         failures=failures,
         checks=checks,
+        contemporaneous_control_checks=control_checks,
         point_eligible_configurations=eligible,
         quality_not_statistically_established=True,
         superiority_established=False,
@@ -240,10 +318,16 @@ def analyze(root, expected):
     (out / "report.md").write_text(
         "# Multiscale prompt-evidence consumed diagnostic\n\n"
         "Not independent confirmation. All attempted configurations are reported. The "
-        "window-only frozen Top-K controls are compared at the exact same physical byte "
+        "window-only Top-K controls are compared at the exact same physical byte "
         "boundary. Full-prior Top-K is a separately labeled scoring ablation. Native "
         "PrefixKV has a different operating point, not byte matched. Timing is descriptive; "
         "PPL and ROUGE-L remain separate.\n\n"
+        + (
+            "Window-only controls were re-executed under the current transport and must "
+            "exactly match frozen quality/token controls before admission.\n\n"
+            if plan.get("contemporaneous_window_topk_controls")
+            else ""
+        )
         + table.to_markdown(index=False)
         + "\n\n```json\n"
         + json.dumps(gate, indent=2)
@@ -269,9 +353,11 @@ def main():
     p.add_argument("--equivalence", type=Path)
     p.add_argument("--plan-sha")
     p.add_argument("--index", type=int)
+    p.add_argument("--head-pooling", choices=("per_head", "shared_heads"), default="per_head")
+    p.add_argument("--prior-study", type=Path)
     a = p.parse_args()
     if a.mode == "prepare":
-        print(prepare(a.root, a.parent, a.plan_sha, a.equivalence))
+        print(prepare(a.root, a.parent, a.plan_sha, a.equivalence, a.head_pooling, a.prior_study))
     elif a.mode == "submit":
         launch.submit(
             a.root,

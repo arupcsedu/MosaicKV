@@ -470,8 +470,18 @@ class IncrementalHistoryConfig:
     layer_profile_sha256: str | None = None
     history_allocation: str = "uniform"
     full_prompt_prior_weight: float = 0.0
+    full_prompt_prior_head_pooling: str = "per_head"
 
     def __post_init__(self) -> None:
+        if not isinstance(self.full_prompt_prior_head_pooling, str) or (
+            self.full_prompt_prior_head_pooling not in {"per_head", "shared_heads"}
+        ):
+            raise ConfigurationError("full_prompt_prior_head_pooling is unsupported")
+        if (
+            self.full_prompt_prior_head_pooling == "shared_heads"
+            and self.full_prompt_prior_weight == 0
+        ):
+            raise ConfigurationError("shared-head prior requires positive prior weight")
         if (
             isinstance(self.full_prompt_prior_weight, bool)
             or not isinstance(self.full_prompt_prior_weight, (int, float))
@@ -544,6 +554,7 @@ class IncrementalHistoryConfig:
                 "layer_profile_sha256",
                 "history_allocation",
                 "full_prompt_prior_weight",
+                "full_prompt_prior_head_pooling",
             },
             "incremental_history",
         )
@@ -563,6 +574,9 @@ class IncrementalHistoryConfig:
             else _required_str(data, "layer_profile_sha256", "incremental_history"),
             _optional_str(data, "history_allocation", "uniform", "incremental_history"),
             _float(data, "full_prompt_prior_weight", 0.0, "incremental_history"),
+            _optional_str(
+                data, "full_prompt_prior_head_pooling", "per_head", "incremental_history"
+            ),
         )
 
 
@@ -596,6 +610,8 @@ class BoundedDecodeConfig:
                 version = "profiled_v3" if history.history_allocation == "uniform" else "joint_v4"
             if history.full_prompt_prior_weight > 0:
                 version += "_full_prompt_prior_v7"
+                if history.full_prompt_prior_head_pooling == "shared_heads":
+                    version += "_shared_heads_v9"
             return f"{name}__incremental_history_{history.policy}_{version}{suffix}"
         version = (
             "v1" if self.history_fraction is None and self.layer_allocation == "uniform" else "v2"
@@ -4782,6 +4798,7 @@ def canonical_config(config: RunConfig) -> JsonObject:
                 ("layer_profile_sha256", None),
                 ("history_allocation", "uniform"),
                 ("full_prompt_prior_weight", 0.0),
+                ("full_prompt_prior_head_pooling", "per_head"),
             ):
                 if history[name] == default:
                     history.pop(name)

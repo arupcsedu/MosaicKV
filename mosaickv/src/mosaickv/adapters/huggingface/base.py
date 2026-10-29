@@ -108,10 +108,16 @@ class AttentionCapture(AbstractContextManager["AttentionCapture"]):
         query_window: int | None = None,
         kv_heads: Sequence[int] | None = None,
         full_prompt_prior_weight: float = 0.0,
+        full_prompt_prior_head_pooling: str = "per_head",
     ) -> None:
         self._attentions = tuple(attentions)
         self._query_window = query_window
         self._full_prompt_prior_weight = full_prompt_prior_weight
+        if not isinstance(
+            full_prompt_prior_head_pooling, str
+        ) or full_prompt_prior_head_pooling not in {"per_head", "shared_heads"}:
+            raise ValueError("unsupported prompt-prior head pooling")
+        self._full_prompt_prior_head_pooling = full_prompt_prior_head_pooling
         if (
             isinstance(full_prompt_prior_weight, bool)
             or not isinstance(full_prompt_prior_weight, (int, float))
@@ -147,11 +153,18 @@ class AttentionCapture(AbstractContextManager["AttentionCapture"]):
                         f"eager attention layer {index} did not expose attention probabilities"
                     )
                 probabilities = output[1]
-                prior = (
-                    probabilities.float().mean(dim=-2, keepdim=True)
-                    if self._full_prompt_prior_weight > 0
-                    else None
-                )
+                prior = None
+                if self._full_prompt_prior_weight > 0:
+                    if self._full_prompt_prior_head_pooling == "shared_heads":
+                        # Pinned PrefixKV order: head mean in incoming dtype,
+                        # then FP32 query reduction; avoid a second QxK cast.
+                        prior = (
+                            probabilities.mean(dim=1, keepdim=True)
+                            .float()
+                            .mean(dim=-2, keepdim=True)
+                        )
+                    else:
+                        prior = probabilities.float().mean(dim=-2, keepdim=True)
                 if self._query_window is not None:
                     probabilities = probabilities[..., -self._query_window :, :]
                 if prior is not None:
@@ -413,6 +426,7 @@ class HuggingFaceMultimodalAdapter(ABC):
         query_window: int | None = None,
         reduce_query_heads: bool = False,
         full_prompt_prior_weight: float = 0.0,
+        full_prompt_prior_head_pooling: str = "per_head",
     ) -> AttentionCapture:
         """Return a context that captures every eager language attention map."""
 
@@ -440,6 +454,7 @@ class HuggingFaceMultimodalAdapter(ABC):
             query_window=query_window,
             kv_heads=kv_heads,
             full_prompt_prior_weight=full_prompt_prior_weight,
+            full_prompt_prior_head_pooling=full_prompt_prior_head_pooling,
         )
 
     def get_profiling_modules(self) -> AdapterProfilingModules:
@@ -786,6 +801,7 @@ class HuggingFaceMultimodalAdapter(ABC):
         attention_query_window: int | None = None,
         reduce_attention_to_kv_heads: bool = False,
         attention_full_prompt_prior_weight: float = 0.0,
+        attention_full_prompt_prior_head_pooling: str = "per_head",
     ) -> PrefillOutput:
         """Run one full prefill without calling GenerationMixin.generate."""
 
@@ -828,12 +844,14 @@ class HuggingFaceMultimodalAdapter(ABC):
                     self.capture_attention_weights(
                         query_window=attention_query_window,
                         full_prompt_prior_weight=attention_full_prompt_prior_weight,
+                        full_prompt_prior_head_pooling=attention_full_prompt_prior_head_pooling,
                     )
                     if not reduce_attention_to_kv_heads
                     else self.capture_attention_weights(
                         query_window=attention_query_window,
                         reduce_query_heads=True,
                         full_prompt_prior_weight=attention_full_prompt_prior_weight,
+                        full_prompt_prior_head_pooling=attention_full_prompt_prior_head_pooling,
                     )
                 )
                 if capture_attentions

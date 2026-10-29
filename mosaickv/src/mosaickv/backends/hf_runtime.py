@@ -9255,7 +9255,7 @@ class HuggingFaceMosaicKVModel:
                 prompt_evidence = map_prompt_evidence(self.adapter, prepared, request.messages)
 
             def run_prefill() -> Any:
-                evidence_kwargs = {}
+                evidence_kwargs: dict[str, Any] = {}
                 if (
                     self.config.bounded_decode is not None
                     and self.config.bounded_decode.incremental_history is not None
@@ -9264,9 +9264,19 @@ class HuggingFaceMosaicKVModel:
                     weight = self.config.bounded_decode.incremental_history.full_prompt_prior_weight
                     if weight > 0:
                         evidence_kwargs["attention_full_prompt_prior_weight"] = weight
+                        pooling = (
+                            self.config.bounded_decode.incremental_history
+                            .full_prompt_prior_head_pooling
+                        )
+                        evidence_kwargs["attention_full_prompt_prior_head_pooling"] = pooling
                         trace["prompt_attention_evidence_basis"] = {
-                            "kind": "per_head_full_prior_and_window_query_mixture_v7",
+                            "kind": (
+                                "shared_head_prior_and_window_query_mixture_v9"
+                                if pooling == "shared_heads"
+                                else "per_head_full_prior_and_window_query_mixture_v7"
+                            ),
                             "full_prompt_prior_weight": weight,
+                            "full_prompt_prior_head_pooling": pooling,
                             "raw_model_attention_probabilities_modified": False,
                             "benchmark_labels_accessed": False,
                         }
