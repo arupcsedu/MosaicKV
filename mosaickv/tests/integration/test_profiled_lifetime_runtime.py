@@ -55,6 +55,10 @@ def test_profiled_layers_are_unpadded_and_identical_across_metric_phases(tmp_pat
     )
     assert a["source_KV_retirement"]["remaining_source_tensor_objects"] == 0
     assert a["evidence_layer_allocation"]["not_official_PrefixKV"] is True
+    reservation = a["bounded_decode"]["budget_reservation"]
+    assert reservation == a["evidence_layer_allocation"]["capacity"]
+    assert reservation["prompt_bytes"] == result.metrics.initial_active_kv_storage_bytes
+    assert "uniform_anchor_metadata_reservation" in a["bounded_decode"]
     runtime.generate(
         EvaluationRequest(
             "profile-ppl",

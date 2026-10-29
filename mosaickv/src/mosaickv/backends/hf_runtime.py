@@ -10845,6 +10845,16 @@ class HuggingFaceMosaicKVModel:
                 bounded_decode_trace["budget_reservation"] = cast(
                     "JsonObject", asdict(bounded_budget)
                 )
+                if profiled_capacity is not None:
+                    bounded_decode_trace["uniform_anchor_metadata_reservation"] = (
+                        bounded_decode_trace["budget_reservation"]
+                    )
+                    bounded_decode_trace["budget_reservation"] = cast(
+                        "JsonObject", asdict(profiled_capacity)
+                    )
+                    bounded_decode_trace["reservation_boundary"] = (
+                        "actual_profiled_prompt_history_and_maximum_layer_growth"
+                    )
                 bounded_decode_trace["setup_seconds"] = setup_seconds
                 trace["bounded_decode"] = bounded_decode_trace
             elif self.config.bounded_decode is not None:
