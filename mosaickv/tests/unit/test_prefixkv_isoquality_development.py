@@ -215,3 +215,106 @@ def test_submission_uses_afterany_and_static_three_gpu_cap(tmp_path, monkeypatch
     development.sbatch(tmp_path, "test-only", mode="analyze", dependency="12345")
     assert "--dependency=afterany:12345" in captured[-1]
     assert "--gres=none" in captured[-1]
+
+
+def test_retry_timing_reserves_five_slots_for_evicast(tmp_path, monkeypatch):
+    protocol = yaml.safe_load(PROTOCOL.read_text())
+    (tmp_path / "plan.json").write_text(
+        json.dumps(dict(protocol=protocol, prefixkv_admission_ceiling=1))
+    )
+    captured = []
+    monkeypatch.setattr(
+        development.subprocess,
+        "check_output",
+        lambda command, **kwargs: captured.append(command) or "12346\n",
+    )
+    development.sbatch(tmp_path, "test-only", mode="timing", indices=[0, 1])
+    assert "--array=0,1%1" in captured[0]
+
+
+def test_imported_workers_keep_their_actual_producer_identity(tmp_path):
+    path = tmp_path / "historical.json"
+    payload = dict(
+        index=2,
+        source_sha="original-sha",
+        plan_sha256="original-plan",
+        status="completed",
+        artifacts={},
+    )
+    path.write_text(json.dumps(payload))
+    plan = dict(
+        source_sha="new-sha",
+        imported_workers={
+            "2": dict(
+                path=str(path),
+                sha256=development.sha(path),
+                source_sha="original-sha",
+                plan_sha256="original-plan",
+            )
+        },
+    )
+    result = development.completed_worker(tmp_path, plan, "new-plan", 2)
+    assert result == payload
+    assert result["source_sha"] != plan["source_sha"]
+    path.write_text(json.dumps(dict(payload, source_sha="forged-sha")))
+    with pytest.raises(ValueError, match="changed"):
+        development.completed_worker(tmp_path, plan, "new-plan", 2)
+
+
+def test_imported_worker_rejects_mismatched_source_even_with_updated_file_hash(tmp_path):
+    path = tmp_path / "historical.json"
+    path.write_text(
+        json.dumps(
+            dict(
+                index=2,
+                source_sha="wrong-sha",
+                plan_sha256="old-plan",
+                status="completed",
+                artifacts={},
+            )
+        )
+    )
+    plan = dict(
+        source_sha="new-sha",
+        imported_workers={
+            "2": dict(
+                path=str(path),
+                sha256=development.sha(path),
+                source_sha="old-sha",
+                plan_sha256="old-plan",
+            )
+        },
+    )
+    with pytest.raises(ValueError, match="source/plan/index"):
+        development.completed_worker(tmp_path, plan, "new-plan", 2)
+
+
+def test_imported_worker_rejects_modified_metric_artifact(tmp_path):
+    artifact = tmp_path / "metric.parquet"
+    artifact.write_bytes(b"synthetic fixture")
+    record = tmp_path / "historical.json"
+    record.write_text(
+        json.dumps(
+            dict(
+                index=2,
+                source_sha="old-sha",
+                plan_sha256="old-plan",
+                status="completed",
+                artifacts={str(artifact): development.sha(artifact)},
+            )
+        )
+    )
+    plan = dict(
+        source_sha="new-sha",
+        imported_workers={
+            "2": dict(
+                path=str(record),
+                sha256=development.sha(record),
+                source_sha="old-sha",
+                plan_sha256="old-plan",
+            )
+        },
+    )
+    artifact.write_bytes(b"modified synthetic fixture")
+    with pytest.raises(ValueError, match="artifact changed"):
+        development.completed_worker(tmp_path, plan, "new-plan", 2)

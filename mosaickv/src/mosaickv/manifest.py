@@ -132,14 +132,28 @@ class EvaluationProvenance:
 
 
 def _run(command: list[str], cwd: Path, *, check: bool = True) -> str:
-    completed = subprocess.run(
-        command,
-        cwd=cwd,
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
+    # Recursive status can transiently exceed 30 s on shared storage under
+    # concurrent GPU workers. Retry the *same* read-only check once with a
+    # larger bound. Never omit untracked/submodule checks or infer cleanliness
+    # from a timeout. Other commands retain their original 30-second limit.
+    timeouts = (30, 120) if command[:2] == ["git", "status"] else (30,)
+    for attempt, timeout in enumerate(timeouts):
+        try:
+            completed = subprocess.run(
+                command,
+                cwd=cwd,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+            break
+        except subprocess.TimeoutExpired as exc:
+            if attempt == len(timeouts) - 1:
+                raise ManifestError(
+                    f"source provenance command timed out after {len(timeouts)} "
+                    f"bounded attempt(s); cleanliness remains unknown: {' '.join(command)}"
+                ) from exc
     if check and completed.returncode != 0:
         detail = completed.stderr.strip() or completed.stdout.strip()
         raise ManifestError(f"command failed ({' '.join(command)}): {detail}")

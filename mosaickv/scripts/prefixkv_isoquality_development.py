@@ -298,6 +298,8 @@ def worker(root, plan_sha, index):
     from mosaickv.measurements.telemetry import capture_gpu_environment
 
     plan = inputs(root, plan_sha)
+    if plan.get("retry") and index not in plan["retry"]["retry_indices"]:
+        raise ValueError("only the explicitly registered failed worker may be rerun")
     job = plan["jobs"][index]
     completion = root / f"workers/{index:02d}.json"
     if completion.exists():
@@ -489,29 +491,50 @@ def paired_metrics(candidate, reference, metric, *, replicates=10000, family=4, 
     )
 
 
+def completed_worker(root, plan, plan_sha, index):
+    """Read original producer records without relabeling their Git/plan SHAs."""
+    imported = plan.get("imported_workers", {}).get(str(index))
+    path = Path(imported["path"]) if imported else root / f"workers/{index:02d}.json"
+    if not path.exists():
+        if imported:
+            raise ValueError("imported completed worker disappeared")
+        return None
+    if imported and sha(path) != imported["sha256"]:
+        raise ValueError("imported worker changed")
+    result = read(path)
+    expected_plan = imported["plan_sha256"] if imported else plan_sha
+    expected_source = imported["source_sha"] if imported else plan["source_sha"]
+    if (
+        result["plan_sha256"] != expected_plan
+        or result["source_sha"] != expected_source
+        or result["index"] != index
+    ):
+        raise ValueError("worker source/plan/index mismatch")
+    if imported and result["status"] != "completed":
+        raise ValueError("only completed workers can be reused")
+    for artifact, expected in result.get("artifacts", {}).items():
+        if sha(Path(artifact)) != expected:
+            raise ValueError("completed metric/trace/manifest artifact changed")
+    return result
+
+
 def analyze(root, plan_sha):
     plan = inputs(root, plan_sha)
     out = root / "analysis"
     records, failed = [], []
     for job in plan["jobs"]:
-        path = root / f"workers/{job['index']:02d}.json"
-        if not path.exists() or read(path).get("status") != "completed":
+        w = completed_worker(root, plan, plan_sha, job["index"])
+        if w is None or w.get("status") != "completed":
             failed.append(
                 dict(
                     index=job["index"],
                     task=job["task"],
                     method=job["method"],
                     sample_ids=job["sample_ids"],
-                    error=read(path).get("error") if path.exists() else "missing_worker",
+                    error=w.get("error") if w else "missing_worker",
                 )
             )
         else:
-            w = read(path)
-            if w["plan_sha256"] != plan_sha or w["source_sha"] != plan["source_sha"]:
-                raise ValueError("worker source/plan mismatch")
-            for artifact, expected in w["artifacts"].items():
-                if sha(Path(artifact)) != expected:
-                    raise ValueError("completed metric/trace/manifest artifact changed")
             records.append((job, w))
     write_once(
         out / "failures.json",
@@ -645,6 +668,8 @@ def analyze(root, plan_sha):
         dict(
             status="completed_development_only",
             source_sha=plan["source_sha"],
+            imported_worker_count=len(plan.get("imported_workers", {})),
+            producer_sources=sorted({w["source_sha"] for _, w in records}),
             measured_byte_matching=bool(exact),
             both_metric_phase_storage_matching=bool(phase_exact),
             tasks=task_gates,
@@ -864,7 +889,11 @@ def analyze_timing(root, plan_sha):
 
 
 def sbatch(root, plan_sha, *, mode, indices=None, dependency=None):
-    r = read(root / "plan.json")["protocol"]["resources"]
+    plan = read(root / "plan.json")
+    r = plan["protocol"]["resources"]
+    ceiling = plan.get("prefixkv_admission_ceiling", 3)
+    if type(ceiling) is not int or not 1 <= ceiling <= 3:
+        raise ValueError("PrefixKV scheduling amendment may only reduce its admission ceiling")
     is_gpu = mode in {"worker", "timing"}
     command = [
         "sbatch",
@@ -881,7 +910,7 @@ def sbatch(root, plan_sha, *, mode, indices=None, dependency=None):
         command += [
             "--gres=gpu:a100:1",
             f"--reservation={r['reservation']}",
-            "--array=" + ",".join(map(str, indices)) + "%3",
+            "--array=" + ",".join(map(str, indices)) + f"%{ceiling}",
         ]
     else:
         command += ["--gres=none"]

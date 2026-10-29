@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 from typing import cast
 
@@ -213,3 +214,81 @@ def test_software_provenance_records_all_installed_backend_versions(
 
     assert software["vllm"] == "0.10.2"
     assert software["sglang"] == "0.5.1.post3"
+
+
+def test_git_status_timeout_retries_identical_complete_command(monkeypatch, tmp_path):
+    command = ["git", "status", "--porcelain=v1", "-z"]
+    calls = []
+
+    def fake_run(actual, **kwargs):
+        calls.append((actual.copy(), kwargs["timeout"]))
+        if len(calls) == 1:
+            raise subprocess.TimeoutExpired(actual, kwargs["timeout"])
+        return subprocess.CompletedProcess(actual, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(manifest_module.subprocess, "run", fake_run)
+    assert manifest_module._run(command, tmp_path) == ""
+    assert calls == [(command, 30), (command, 120)]
+
+
+@pytest.mark.parametrize(
+    "dirty", [" M source.py\n", "?? untracked.py\n", " m third_party/PrefixKV\n"]
+)
+def test_retried_status_still_detects_dirty_worktree(monkeypatch, tmp_path, dirty):
+    statuses = 0
+
+    def fake_run(command, **kwargs):
+        nonlocal statuses
+        if command[:2] == ["git", "status"]:
+            statuses += 1
+            if statuses == 1:
+                raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+            value = dirty
+        else:
+            value = "a" * 40
+        return subprocess.CompletedProcess(command, 0, stdout=value, stderr="")
+
+    monkeypatch.setattr(manifest_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(manifest_module, "_worktree_fingerprint", lambda path: "b" * 64)
+    source = manifest_module._source_provenance(tmp_path)
+    assert source["git_dirty"] is True
+    assert source["canonical_eligible"] is False
+    assert source["patch_sha"] == "b" * 64
+
+
+def test_exhausted_status_timeout_is_never_clean(monkeypatch, tmp_path):
+    calls = []
+
+    def timeout(command, **kwargs):
+        calls.append(kwargs["timeout"])
+        raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+
+    monkeypatch.setattr(manifest_module.subprocess, "run", timeout)
+    with pytest.raises(ManifestError, match="cleanliness remains unknown"):
+        manifest_module._run(["git", "status", "--porcelain=v1"], tmp_path)
+    assert calls == [30, 120]
+
+
+def test_non_status_timeout_does_not_gain_unbounded_retries(monkeypatch, tmp_path):
+    calls = []
+
+    def timeout(command, **kwargs):
+        calls.append(kwargs["timeout"])
+        raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+
+    monkeypatch.setattr(manifest_module.subprocess, "run", timeout)
+    with pytest.raises(ManifestError):
+        manifest_module._run(["git", "diff", "--binary", "HEAD"], tmp_path)
+    assert calls == [30]
+
+
+def test_failed_status_command_is_not_treated_as_clean(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        manifest_module.subprocess,
+        "run",
+        lambda command, **kwargs: subprocess.CompletedProcess(
+            command, 128, stdout="", stderr="fatal"
+        ),
+    )
+    with pytest.raises(ManifestError, match="fatal"):
+        manifest_module._run(["git", "status", "--porcelain=v1"], tmp_path)
