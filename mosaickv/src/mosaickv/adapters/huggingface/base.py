@@ -795,10 +795,27 @@ class HuggingFaceMultimodalAdapter(ABC):
             prepared.logical_sequence_length, device=input_ids.device, dtype=torch.long
         )
         forward_inputs = dict(prepared.model_inputs)
+        # In this pinned implementation LlamaAttention always returns eager
+        # weights to module hooks. The model-level output collector would keep
+        # another complete QxK map per layer although our own capture already
+        # owns the requested window. Do not assume this for other versions or
+        # architectures: retain their original public-output path.
+        import transformers
+
+        hook_only_attention_capture = bool(
+            capture_attentions
+            and transformers.__version__ == "4.55.2"
+            and self._attention_implementation() == "eager"
+            and all(
+                type(layer.self_attn).__module__ == "transformers.models.llama.modeling_llama"
+                and type(layer.self_attn).__name__ == "LlamaAttention"
+                for layer in self._language_layers()
+            )
+        )
         forward_inputs.update(
             use_cache=True,
             return_dict=True,
-            output_attentions=capture_attentions,
+            output_attentions=capture_attentions and not hook_only_attention_capture,
             cache_position=cache_position,
             logits_to_keep=1,
         )
@@ -837,6 +854,11 @@ class HuggingFaceMultimodalAdapter(ABC):
         if attention_mask is None:
             attention_mask = torch.ones_like(input_ids)
         model_state = self._capture_model_state(output)
+        model_state["mosaickv_prefill_attention_collection"] = {
+            "private_module_hooks": capture_attentions,
+            "model_output_collector": capture_attentions and not hook_only_attention_capture,
+            "audited_hook_only_llama_4_55_2": hook_only_attention_capture,
+        }
         # All supported local adapters operate on one unpadded request.  Mark
         # that property once at prefill so decode can omit the dense all-ones
         # model mask without a per-token reduction or host synchronization.

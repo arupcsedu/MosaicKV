@@ -15,14 +15,21 @@ from mosaickv.evaluation.fox_campaign import clean_source, sha, write_once
 SOURCE = Path(__file__).resolve().parents[2]
 
 
-def prepare(root, parent, expected):
+def prepare(root, parent, expected, target="kv_owner"):
+    if target not in {"kv_owner", "cuda_allocator"}:
+        raise ValueError("unsupported equivalence target")
     source = clean_source(SOURCE)
     if root.exists():
         raise FileExistsError("immutable equivalence root required")
     if sha(parent / "plan.json") != expected:
         raise ValueError("parent plan changed")
     gate = common.read(parent / "analysis/GATE.json")
-    if gate["status"] != "complete_consumed_diagnostic" or gate["failures"]:
+    required = (
+        "complete_consumed_diagnostic"
+        if target == "kv_owner"
+        else "passed_equivalence_and_owner_reduction"
+    )
+    if gate["status"] != required or gate["failures"]:
         raise ValueError("equivalence requires complete parent execution")
     old = common.read(parent / "plan.json")
     bound = dict(old["bound_files"])
@@ -52,7 +59,13 @@ def prepare(root, parent, expected):
                 old_job,
                 index=len(jobs),
                 prior_equivalence_row=str(row_path),
-                arms=[dict(arm, label=arm["label"] + "-metadata-only-v6")],
+                arms=[
+                    dict(
+                        arm,
+                        label=arm["label"]
+                        + ("-metadata-only-v6" if target == "kv_owner" else "-hook-collector-v8"),
+                    )
+                ],
             )
         )
     if len(jobs) != 4:
@@ -64,7 +77,12 @@ def prepare(root, parent, expected):
             source_sha=source,
             jobs=jobs,
             bound_files=bound,
-            protocol="zero_step_clone_removal_v6_equivalence_consumed_only",
+            protocol=(
+                "zero_step_clone_removal_v6_equivalence_consumed_only"
+                if target == "kv_owner"
+                else "hook_only_attention_collection_v8_equivalence"
+            ),
+            equivalence_target_metric=target,
             exact_numerical_equivalence_required=True,
             fresh_evaluation_authorized=False,
             paper_campaign_authorized=False,
@@ -73,7 +91,7 @@ def prepare(root, parent, expected):
     return sha(root / "plan.json")
 
 
-def compare_rows(new, old):
+def compare_rows(new, old, target="kv_owner"):
     fields = (
         "answer",
         "nll_sum",
@@ -89,7 +107,7 @@ def compare_rows(new, old):
         and new["audited_decode_transaction_peak_bytes"]
         == old["audited_decode_transaction_peak_bytes"]
     )
-    return dict(
+    result = dict(
         exact_quality_and_config_equivalence=bool(quality),
         exact_live_storage_equivalence=bool(storage),
         registered_owner_peak_reduced=bool(
@@ -100,10 +118,24 @@ def compare_rows(new, old):
         new_end_to_end_seconds=new["metrics"]["end_to_end_time"],
         old_end_to_end_seconds=old["metrics"]["end_to_end_time"],
     )
+    if target == "cuda_allocator":
+        result.update(
+            cuda_allocator_peak_reduced=bool(
+                new["pytorch_request_peak_allocated_bytes"]
+                < old["pytorch_request_peak_allocated_bytes"]
+            ),
+            new_cuda_allocator_peak_bytes=new["pytorch_request_peak_allocated_bytes"],
+            old_cuda_allocator_peak_bytes=old["pytorch_request_peak_allocated_bytes"],
+            registered_owner_peak_unchanged=bool(
+                new["audited_request_owned_peak_bytes"] == old["audited_request_owned_peak_bytes"]
+            ),
+        )
+    return result
 
 
 def analyze(root, expected):
     plan = common.inputs(root, expected)
+    target = plan.get("equivalence_target_metric", "kv_owner")
     checks, failures = [], []
     for job in plan["jobs"]:
         worker = root / f"workers/{job['index']}"
@@ -120,7 +152,7 @@ def analyze(root, expected):
         for p, h in (new["traces"] | new["memory_audit_traces"]).items():
             if sha(Path(p)) != h:
                 raise ValueError("new trace changed")
-        check = compare_rows(new, old)
+        check = compare_rows(new, old, target)
 
         def phases(row):
             return {common.read(p)["execution_phase"]: common.read(p) for p in row["traces"]}
@@ -139,17 +171,25 @@ def analyze(root, expected):
         for key in (
             "exact_quality_and_config_equivalence",
             "exact_live_storage_equivalence",
-            "registered_owner_peak_reduced",
+            "registered_owner_peak_reduced"
+            if target == "kv_owner"
+            else "cuda_allocator_peak_reduced",
             "all_phase_tokens_and_selected_blocks_equal",
         ):
             if not check[key]:
                 failures.append(dict(worker=job["index"], error=key))
+        if target == "cuda_allocator" and not check["registered_owner_peak_unchanged"]:
+            failures.append(dict(worker=job["index"], error="unexpected KV owner change"))
     out = root / "analysis"
     if out.exists():
         raise FileExistsError("write-once analysis")
     out.mkdir()
     gate = dict(
-        status="passed_equivalence_and_owner_reduction"
+        status=(
+            "passed_equivalence_and_owner_reduction"
+            if target == "kv_owner"
+            else "passed_equivalence_and_allocator_reduction"
+        )
         if len(checks) == 4 and not failures
         else "failed",
         checks=checks,
@@ -162,7 +202,7 @@ def analyze(root, expected):
     )
     write_once(out / "GATE.json", gate)
     (out / "report.md").write_text(
-        "# Zero-step snapshot removal verification\n\n"
+        f"# Equivalence and {target} allocation verification\n\n"
         "Consumed-input engineering verification, not a new quality result. All phase "
         "tokens, NLL/counts, selected blocks and live storage must match. Registered "
         "owners and whole-request KV certification are different scopes. Timing is "
@@ -189,9 +229,10 @@ def main():
     parser.add_argument("--parent", type=Path)
     parser.add_argument("--plan-sha")
     parser.add_argument("--index", type=int)
+    parser.add_argument("--target", choices=("kv_owner", "cuda_allocator"), default="kv_owner")
     args = parser.parse_args()
     if args.mode == "prepare":
-        print(prepare(args.root, args.parent, args.plan_sha))
+        print(prepare(args.root, args.parent, args.plan_sha, args.target))
     elif args.mode == "submit":
         launch.submit(
             args.root,

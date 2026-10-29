@@ -9353,6 +9353,9 @@ class HuggingFaceMosaicKVModel:
                 )
             if not bool(torch.isfinite(prefill.logits).all()):
                 raise HuggingFaceRuntimeError("prefill logits contain NaN or infinity")
+            trace["prefill_attention_collection"] = prefill.state.model_state.get(
+                "mosaickv_prefill_attention_collection"
+            )
             if request_kv_ownership is not None:
                 request_kv_ownership.track(
                     "original_prefill",

@@ -1,9 +1,12 @@
 """Synthetic numerical-equivalence gate tests, not experiment measurements."""
 
+import json
 from copy import deepcopy
 
 import evicastkv_zero_draft_clone as module
 import pytest
+
+from mosaickv.evaluation.fox_campaign import sha
 
 
 def fixture():
@@ -44,3 +47,68 @@ def test_quality_change_cannot_be_hidden_by_memory_reduction(field):
     new[field] = "different"
     new["audited_request_owned_peak_bytes"] = 450
     assert not module.compare_rows(new, old)["exact_quality_and_config_equivalence"]
+
+
+def test_allocator_optimization_is_not_called_a_kv_capacity_reduction():
+    old = fixture()
+    new = deepcopy(old)
+    old["pytorch_request_peak_allocated_bytes"] = 1000
+    new["pytorch_request_peak_allocated_bytes"] = 900
+    result = module.compare_rows(new, old, "cuda_allocator")
+    assert result["cuda_allocator_peak_reduced"]
+    assert result["registered_owner_peak_unchanged"]
+    assert not result["registered_owner_peak_reduced"]
+
+
+@pytest.mark.parametrize("missing_ppl", [False, True])
+def test_allocator_analyzer_requires_all_phase_tokens_and_does_not_claim_kv_gain(
+    tmp_path, monkeypatch, missing_ppl
+):
+    jobs = []
+    for index in range(4):
+        worker = tmp_path / f"workers/{index}"
+        (worker / "rows").mkdir(parents=True)
+        traces = {}
+        for phase in ("generation",) if missing_ppl else ("generation", "teacher_forced"):
+            p = worker / f"{phase}.json"
+            p.write_text(
+                json.dumps(
+                    dict(execution_phase=phase, generated_token_ids=[1, 2], selected_blocks=[0])
+                )
+            )
+            traces[str(p)] = sha(p)
+        old = fixture() | dict(
+            status="completed",
+            traces=traces,
+            memory_audit_traces={},
+            pytorch_request_peak_allocated_bytes=1000,
+        )
+        prior = worker / "prior.json"
+        prior.write_text(json.dumps(old))
+        new = deepcopy(old)
+        new["pytorch_request_peak_allocated_bytes"] = 900
+        (worker / "rows/new.json").write_text(json.dumps(new))
+        (worker / "result.json").write_text(json.dumps(dict(failures=[])))
+        jobs.append(
+            dict(
+                index=index,
+                arms=[dict(label="new")],
+                prior_equivalence_row=str(prior),
+                task="fixture",
+                diagnostic_history_capacity=128,
+            )
+        )
+    monkeypatch.setattr(
+        module.common,
+        "inputs",
+        lambda *_: dict(
+            jobs=jobs, source_sha="fixture", equivalence_target_metric="cuda_allocator"
+        ),
+    )
+    module.analyze(tmp_path, "fixture")
+    gate = module.common.read(tmp_path / "analysis/GATE.json")
+    assert gate["status"] == (
+        "failed" if missing_ppl else "passed_equivalence_and_allocator_reduction"
+    )
+    assert all(not c["registered_owner_peak_reduced"] for c in gate["checks"])
+    assert not gate["superiority_established"] and not gate["whole_request_KV_peak_certified"]
