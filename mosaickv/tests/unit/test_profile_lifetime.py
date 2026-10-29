@@ -7,6 +7,42 @@ import pytest
 from mosaickv.selection.profile_lifetime import allocate_profile_lifetime
 
 
+def test_joint_allocation_redistributes_not_increases_total_history():
+    from mosaickv.selection.profile_lifetime import allocate_profile_history
+
+    values = allocate_profile_history([0.1, 0.8, 0.5], 128, 69)
+    assert sum(values) == 384 and min(values) >= 69
+    assert values[0] > values[2] > values[1]
+    plan = allocate_profile_lifetime(
+        [0.1, 0.8, 0.5],
+        [600] * 3,
+        [25] * 3,
+        [16384] * 3,
+        cap_bytes=24 * 2**20,
+        generated_capacity=128,
+        history_allocation="profile_weighted",
+        minimum_history_capacity=69,
+    )
+    assert plan.history_positions == values and plan.history_bytes == 384 * 16384
+    assert plan.charged_ceiling_bytes <= plan.cap_bytes
+
+
+@pytest.mark.parametrize("ratios", [[], [True], [float("nan")], [1], [-0.1], ["bad"]])
+def test_joint_history_rejects_invalid_profiles(ratios):
+    from mosaickv.selection.profile_lifetime import allocate_profile_history
+
+    with pytest.raises(ValueError, match="profile"):
+        allocate_profile_history(ratios, 128, 69)
+
+
+def test_joint_history_accepts_single_pass_iterable():
+    from mosaickv.selection.profile_lifetime import allocate_profile_history
+
+    assert allocate_profile_history(iter([0.1, 0.8]), 128, 69) == allocate_profile_history(
+        [0.1, 0.8], 128, 69
+    )
+
+
 @pytest.mark.parametrize("seed", range(100))
 def test_profiled_capacity_never_exceeds_cap_or_loses_mandatory(seed):
     rng = random.Random(seed)

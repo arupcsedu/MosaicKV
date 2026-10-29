@@ -467,7 +467,9 @@ def worker(root, expected, index):
                         if cfg.bounded_decode is None
                         else (
                             first_eos is None
-                            or first_eos > cfg.bounded_decode.generated_capacity + 1
+                            or first_eos > min(phase["generation"]["bounded_decode"].get(
+                                "generated_capacities_per_layer",
+                                [cfg.bounded_decode.generated_capacity])) + 1
                         )
                     ),
                 )

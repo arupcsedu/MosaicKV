@@ -939,9 +939,24 @@ class HuggingFaceMultimodalAdapter(ABC):
         active_length = self._cache_length(cache)
         expected_active = state.active_cache_length + 1
         if bounded:
-            expected_active = min(
-                expected_active, int(state.model_state["mosaickv_bounded_history_capacity"])
-            )
+            capacities = state.model_state.get("mosaickv_layer_generated_capacities")
+            if capacities is not None:
+                updates = int(state.model_state["mosaickv_history_decode_updates"]) + 1
+                lengths = tuple(
+                    layer.prompt_length + min(updates, g)
+                    for layer, g in zip(cache.layers, capacities, strict=True)
+                )
+                if any(
+                    layer._updates != updates or layer.get_seq_length() != length
+                    for layer, length in zip(cache.layers, lengths, strict=True)
+                ):
+                    raise RuntimeError("layer-local history did not advance exactly once")
+                expected_active = max(lengths)
+                state.model_state["mosaickv_history_decode_updates"] = updates
+            else:
+                expected_active = min(
+                    expected_active, int(state.model_state["mosaickv_bounded_history_capacity"])
+                )
         if active_length != expected_active:
             raise RuntimeError(f"decode cache grew to {active_length}; expected {expected_active}")
         model_state = state.model_state

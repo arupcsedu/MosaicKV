@@ -220,7 +220,8 @@ def analyze(root, expected):
         )
     table = pd.DataFrame(rows)
     checks = []
-    if len(rows) == 10 and not failures:
+    expected_rows = sum(len(j["arms"]) for j in plan["jobs"])
+    if len(rows) == expected_rows and not failures:
         for (task, policy), g in table.groupby(["task", "mandatory_policy"]):
             if policy == "native_control":
                 continue
@@ -264,7 +265,9 @@ def analyze(root, expected):
     out.mkdir()
     table.to_parquet(out / "summary.parquet", index=False)
     gate = dict(
-        status="complete_consumed_diagnostic" if len(rows) == 10 and not failures else "failed",
+        status="complete_consumed_diagnostic"
+        if len(rows) == expected_rows and not failures
+        else "failed",
         failures=failures,
         checks=checks,
         point_eligible_policies=eligible,
@@ -281,7 +284,7 @@ def analyze(root, expected):
     )
     write_once(out / "GATE.json", gate)
     (out / "report.md").write_text(
-        "# Profile-shape lifetime V3 diagnostic\n\n"
+        f"# {plan.get('protocol', 'Profile-shape lifetime diagnostic')}\n\n"
         "Same consumed inputs, not fresh confirmation. The pinned upstream profile's "
         "calibration identities are not certified. This is an EviCastKV/Top-K "
         "profile-resizing adaptation, not official PrefixKV. Matched-policy pairs "

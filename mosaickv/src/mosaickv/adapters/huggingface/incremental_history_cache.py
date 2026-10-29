@@ -285,6 +285,7 @@ def install_incremental_history(
     config,
     ownership_ledger=None,
     request_ownership_ledger=None,
+    layer_generated_capacities=None,
 ):
     import torch
     from transformers import DynamicCache
@@ -302,6 +303,17 @@ def install_incremental_history(
     ):
         raise RuntimeError("incremental history requires an unpadded, exact, private prompt")
     original, _ = adapter._legacy_layers(state.past_key_values)
+    capacities = (
+        (generated_capacity,) * len(original)
+        if layer_generated_capacities is None
+        else tuple(layer_generated_capacities)
+    )
+    if (
+        len(capacities) != len(original)
+        or any(type(g) is not int or g < 1 for g in capacities)
+        or (layer_generated_capacities is not None and config.policy != "sink_recent")
+    ):
+        raise ValueError("invalid layer-local generated history capacities")
     cache = DynamicCache()
     ledger = ownership_ledger or KVOwnershipLedger()
 
@@ -319,13 +331,13 @@ def install_incremental_history(
         IncrementalHistoryLayer(
             k,
             v,
-            generated_capacity=generated_capacity,
-            sink_tokens=sink_tokens,
+            generated_capacity=g,
+            sink_tokens=min(sink_tokens, g - 1),
             next_logical_position=state.next_decode_position,
             config=config,
             transaction_observer=transaction,
         )
-        for k, v in original
+        for (k, v), g in zip(original, capacities, strict=True)
     ]
     if config.importance_refresh_tokens > 1:
         cache._mosaickv_history_scores = torch.zeros(
@@ -338,19 +350,21 @@ def install_incremental_history(
     resident_ceiling = sum(
         (k.numel() * k.element_size() + v.numel() * v.element_size())
         // k.shape[-2]
-        * (k.shape[-2] + generated_capacity)
-        for k, v in original
+        * (k.shape[-2] + g)
+        for (k, v), g in zip(original, capacities, strict=True)
     )
     largest_growth_copy = max(
         (k.numel() * k.element_size() + v.numel() * v.element_size())
         // k.shape[-2]
-        * (k.shape[-2] + generated_capacity)
-        for k, v in original
+        * (k.shape[-2] + g)
+        for (k, v), g in zip(original, capacities, strict=True)
     )
     if resident_ceiling + largest_growth_copy > cap_bytes:
         raise RuntimeError("incremental history was planned without growth scratch capacity")
     cache._mosaickv_bounded_history = True
-    cache._mosaickv_independent_layer_lengths = len({k.shape[-2] for k, v in original}) != 1
+    cache._mosaickv_independent_layer_lengths = (
+        len({(k.shape[-2], g) for (k, v), g in zip(original, capacities, strict=True)}) != 1
+    )
     state.past_key_values = cache
     state.model_state.pop("prefixkv_ragged", None)
     state.model_state.update(
@@ -358,7 +372,7 @@ def install_incremental_history(
             "mosaickv_bounded_history": True,
             "mosaickv_incremental_history": True,
             "mosaickv_history_importance": config.policy == "recent_importance",
-            "mosaickv_bounded_history_capacity": state.active_cache_length + generated_capacity,
+            "mosaickv_bounded_history_capacity": max(x._capacity for x in cache.layers),
             "mosaickv_bounded_history_masks": tuple(
                 torch.zeros((1, 1, 1, x._capacity), dtype=x.keys.dtype, device=x.keys.device)
                 for x in cache.layers
@@ -367,6 +381,9 @@ def install_incremental_history(
             "mosaickv_history_ownership": ledger,
         }
     )
+    if layer_generated_capacities is not None:
+        state.model_state["mosaickv_layer_generated_capacities"] = capacities
+        state.model_state["mosaickv_history_decode_updates"] = 0
     payload, storage = CacheLifecycle.count(tuple((x.keys, x.values) for x in cache.layers))
     ledger.track("active_decode", tuple((x.keys, x.values) for x in cache.layers))
     ledger.observe()
@@ -378,6 +395,7 @@ def install_incremental_history(
         "initial_payload_bytes": payload,
         "initial_storage_bytes": storage,
         "generated_capacity": generated_capacity,
+        "generated_capacities_per_layer": list(capacities),
         "sink_tokens": sink_tokens,
         "history_policy": config.policy,
         "prompt_slots_unchanged": True,

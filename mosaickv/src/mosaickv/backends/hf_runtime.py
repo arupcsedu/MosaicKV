@@ -9575,6 +9575,12 @@ class HuggingFaceMosaicKVModel:
                             ),
                             cap_bytes=self.config.cache.budget_value,
                             generated_capacity=self.config.bounded_decode.generated_capacity,
+                            history_allocation=history_config.history_allocation,
+                            minimum_history_capacity=(
+                                self.config.bounded_decode.sink_tokens
+                                + history_config.recent_tokens
+                                + 1
+                            ),
                         )
                         # The uniform anchor's lattice may leave a whole layer
                         # slot unused. Its read-only selection metadata may be
@@ -10811,6 +10817,15 @@ class HuggingFaceMosaicKVModel:
                     history_installer = install_incremental_history
                     history_kwargs = {"config": self.config.bounded_decode.incremental_history}
                     history_kwargs["request_ownership_ledger"] = request_kv_ownership
+                    if (
+                        profiled_capacity is not None
+                        and self.config.bounded_decode.incremental_history.history_allocation
+                        == "profile_weighted"
+                    ):
+                        history_kwargs["layer_generated_capacities"] = tuple(
+                            min(planned_decode_updates, g)
+                            for g in profiled_capacity.history_positions
+                        )
                 bounded_record, setup_seconds = _timed(
                     prefill.logits,
                     lambda: history_installer(

@@ -1,6 +1,6 @@
-"""CPU-only feasibility study: pinned layer-profile shape under a lifetime cap.
+"""Pinned layer-profile shape under a lifetime cap; no quality guarantee.
 
-No inference integration or quality claim. Profile weights come from the
+Profile weights come from the
 attributed PrefixKV offline allocation, not evaluation answers. The allocator
 preserves mandatory minima, equal lengths within each layer and one layer's
 growth-copy reserve; it never hides padding behind logical byte accounting.
@@ -24,6 +24,37 @@ class ProfileLifetimeCapacity:
     cap_bytes: int
     capacity_shortfall_bytes: int
     largest_single_increment_feasible: bool
+    history_positions: tuple[int, ...] = ()
+
+
+def allocate_profile_history(forget_ratios, mean_capacity, minimum):
+    """Same total slots, explicit sink/recent floor; no target-length input."""
+    forget_ratios = tuple(forget_ratios)
+    if (
+        type(mean_capacity) is not int
+        or type(minimum) is not int
+        or not 0 <= minimum <= mean_capacity
+    ):
+        raise ValueError("invalid history mean/floor")
+    if any(
+        isinstance(r, bool)
+        or not isinstance(r, (int, float))
+        or not math.isfinite(r)
+        or not 0 <= r < 1
+        for r in forget_ratios
+    ):
+        raise ValueError("invalid history profile weights")
+    weights = tuple(1 - r for r in forget_ratios)
+    if not weights or any(not math.isfinite(w) or not 0 < w <= 1 for w in weights):
+        raise ValueError("invalid history profile weights")
+    result = [minimum] * len(weights)
+    queue = [((minimum + 1) / w, i) for i, w in enumerate(weights)]
+    heapq.heapify(queue)
+    for _ in range((mean_capacity - minimum) * len(weights)):
+        _level, i = heapq.heappop(queue)
+        result[i] += 1
+        heapq.heappush(queue, ((result[i] + 1) / weights[i], i))
+    return tuple(result)
 
 
 def allocate_profile_lifetime(
@@ -34,6 +65,8 @@ def allocate_profile_lifetime(
     *,
     cap_bytes,
     generated_capacity,
+    history_allocation="uniform",
+    minimum_history_capacity=0,
 ):
     """Weighted water filling with a physical, maximum-layer scratch cost.
 
@@ -70,10 +103,20 @@ def allocate_profile_lifetime(
         )
     ):
         raise ValueError("invalid label-blind profile/lifetime geometry")
+    if not isinstance(history_allocation, str) or history_allocation not in {
+        "uniform",
+        "profile_weighted",
+    }:
+        raise ValueError("unsupported history allocation")
+    generated = (
+        (generated_capacity,) * n
+        if history_allocation == "uniform"
+        else allocate_profile_history(ratios, generated_capacity, minimum_history_capacity)
+    )
     selected = list(mandatory)
-    history = sum(costs) * generated_capacity
+    history = sum(c * g for c, g in zip(costs, generated, strict=True))
     prompt = sum(p * c for p, c in zip(selected, costs, strict=True))
-    scratch = max((p + generated_capacity) * c for p, c in zip(selected, costs, strict=True))
+    scratch = max((p + g) * c for p, g, c in zip(selected, generated, costs, strict=True))
     if prompt + history + scratch > cap_bytes:
         raise ValueError("mandatory prompt plus history/growth cannot fit the hard cap")
     weights = tuple(1 - r for r in ratios)
@@ -81,7 +124,7 @@ def allocate_profile_lifetime(
     heapq.heapify(queue)
     while queue:
         _level, layer = heapq.heappop(queue)
-        new_scratch = max(scratch, (selected[layer] + 1 + generated_capacity) * costs[layer])
+        new_scratch = max(scratch, (selected[layer] + 1 + generated[layer]) * costs[layer])
         if prompt + costs[layer] + history + new_scratch > cap_bytes:
             continue
         selected[layer] += 1
@@ -91,10 +134,7 @@ def allocate_profile_lifetime(
             heapq.heappush(queue, ((selected[layer] + 1) / weights[layer], layer))
     feasible = any(
         selected[i] < lengths[i]
-        and prompt
-        + costs[i]
-        + history
-        + max(scratch, (selected[i] + 1 + generated_capacity) * costs[i])
+        and prompt + costs[i] + history + max(scratch, (selected[i] + 1 + generated[i]) * costs[i])
         <= cap_bytes
         for i in range(n)
     )
@@ -108,6 +148,7 @@ def allocate_profile_lifetime(
         cap_bytes,
         cap_bytes - prompt - history - scratch,
         feasible,
+        generated,
     )
 
 

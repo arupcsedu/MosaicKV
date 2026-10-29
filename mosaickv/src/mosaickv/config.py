@@ -468,8 +468,15 @@ class IncrementalHistoryConfig:
     importance_refresh_tokens: int = 1
     layer_profile_path: str | None = None
     layer_profile_sha256: str | None = None
+    history_allocation: str = "uniform"
 
     def __post_init__(self) -> None:
+        if not isinstance(self.history_allocation, str) or self.history_allocation not in {
+            "uniform", "profile_weighted"
+        }:
+            raise ConfigurationError("incremental_history.history_allocation is unsupported")
+        if self.history_allocation == "profile_weighted" and self.layer_profile_path is None:
+            raise ConfigurationError("profile-weighted history requires a pinned layer profile")
         if (self.layer_profile_path is None) != (self.layer_profile_sha256 is None):
             raise ConfigurationError("incremental_history layer profile needs path and SHA256")
         if self.layer_profile_path is not None:
@@ -525,6 +532,7 @@ class IncrementalHistoryConfig:
                 "importance_refresh_tokens",
                 "layer_profile_path",
                 "layer_profile_sha256",
+                "history_allocation",
             },
             "incremental_history",
         )
@@ -542,6 +550,7 @@ class IncrementalHistoryConfig:
             None
             if data.get("layer_profile_sha256") is None
             else _required_str(data, "layer_profile_sha256", "incremental_history"),
+            _optional_str(data, "history_allocation", "uniform", "incremental_history"),
         )
 
 
@@ -572,7 +581,7 @@ class BoundedDecodeConfig:
                 else "v1"
             )
             if history.layer_profile_path is not None:
-                version = "profiled_v3"
+                version = "profiled_v3" if history.history_allocation == "uniform" else "joint_v4"
             return f"{name}__incremental_history_{history.policy}_{version}{suffix}"
         version = (
             "v1" if self.history_fraction is None and self.layer_allocation == "uniform" else "v2"
@@ -4757,6 +4766,7 @@ def canonical_config(config: RunConfig) -> JsonObject:
                 ("importance_refresh_tokens", 1),
                 ("layer_profile_path", None),
                 ("layer_profile_sha256", None),
+                ("history_allocation", "uniform"),
             ):
                 if history[name] == default:
                     history.pop(name)
