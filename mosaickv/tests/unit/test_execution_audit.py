@@ -187,3 +187,36 @@ def test_manifest_hash_accepts_serialized_string_paths(tmp_path):
     path = tmp_path / "fixture.json"
     path.write_text("{}")
     assert sha(str(path)) == sha(path)
+
+
+@pytest.mark.parametrize("registration_fails", [False, True])
+def test_launch_registers_recognized_worker_and_preserves_callback_before_tick(
+    tmp_path, monkeypatch, registration_fails
+):
+    import control_a100_schedule
+    import evicastkv_consumed_instrumentation as module
+
+    calls = []
+    monkeypatch.setattr(module, "inputs", lambda *args: {})
+
+    def submit(command, **kwargs):
+        calls.append(command)
+        return "12345\n" if len(calls) == 1 else "12346\n"
+
+    monkeypatch.setattr(module.subprocess, "check_output", submit)
+
+    def tick(*args):
+        assert module.read(tmp_path / "submission.json")["cpu_analysis"] == "12346"
+        if registration_fails:
+            raise ValueError("synthetic registration failure")
+        return {"registered": True}
+
+    monkeypatch.setattr(control_a100_schedule, "tick", tick)
+    if registration_fails:
+        with pytest.raises(ValueError, match="synthetic registration"):
+            module.submit(tmp_path, "fixture")
+    else:
+        module.submit(tmp_path, "fixture")
+    assert "--job-name=mk-evicast-consumed-profile" in calls[0]
+    assert "--dependency=afterany:12345" in calls[1]
+    assert module.read(tmp_path / "submissions/gpu.json")["job_id"] == "12345"

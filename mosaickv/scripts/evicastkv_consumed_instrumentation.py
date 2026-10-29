@@ -508,7 +508,7 @@ def submit(root, expected):
         "sbatch",
         "--parsable",
         "--account=bii_dsc_community",
-        "--job-name=evicast-consumed-profile",
+        "--job-name=mk-evicast-consumed-profile",
         "--partition=bii-gpu",
         "--reservation=bi_fox_dgx",
         "--nodes=1",
@@ -528,27 +528,13 @@ def submit(root, expected):
     ]
     (root / "slurm").mkdir(exist_ok=True)
     gpu = subprocess.check_output(command, text=True, timeout=30).strip().split(";")[0]
-    from control_a100_schedule import tick
-
-    policy = dict(
-        timezone="America/New_York",
-        maximum_worker_minutes=120,
-        maximum_a100s=6,
-        six_a100s_explicitly_authorized=True,
-        arrays=[gpu],
-        per_lane_static_throttle=2,
-        other_lane_reserved_slots=4,
-    )
-    write_once(root / "scheduler/policy.json", policy)
-    write_once(
-        root / "scheduler/registration.json", tick(policy, {}, root / "scheduler/state.json", False)
-    )
+    write_once(root / "submissions/gpu.json", dict(job_id=gpu, command=command))
     callback = [
         "sbatch",
         "--parsable",
         "--account=bii_dsc_community",
         "--partition=bii",
-        "--job-name=evicast-profile-analysis",
+        "--job-name=mk-evicast-profile-analysis",
         "--nodes=1",
         "--ntasks=1",
         "--cpus-per-task=2",
@@ -567,6 +553,23 @@ def submit(root, expected):
     write_once(
         root / "submission.json",
         dict(gpu_array=gpu, cpu_analysis=cpu, command=command, callback=callback),
+    )
+    # Attach/preserve the afterany analyzer before admission registration can
+    # fail, so an orchestration error cannot silently strand completed results.
+    from control_a100_schedule import tick
+
+    policy = dict(
+        timezone="America/New_York",
+        maximum_worker_minutes=120,
+        maximum_a100s=6,
+        six_a100s_explicitly_authorized=True,
+        arrays=[gpu],
+        per_lane_static_throttle=2,
+        other_lane_reserved_slots=4,
+    )
+    write_once(root / "scheduler/policy.json", policy)
+    write_once(
+        root / "scheduler/registration.json", tick(policy, {}, root / "scheduler/state.json", False)
     )
     print(json.dumps(dict(gpu_array=gpu, cpu_analysis=cpu)))
 
