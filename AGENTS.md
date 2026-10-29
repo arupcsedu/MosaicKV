@@ -6,6 +6,11 @@ These instructions apply to the entire MosaicKV repository. They are mandatory f
 
 MosaicKV is a training-free multimodal KV-cache compression system intended for an AAAI 2027 research artifact. Treat scientific correctness, provenance, and reproducibility as release-blocking requirements.
 
+The paper renames MosaicKV to **EviCastKV**. These names identify the same
+system, not competing methods. Use EviCastKV in new paper-facing prose, while
+preserving historical `mosaickv_*` method IDs, configurations, artifact hashes,
+and producer SHAs. Different experimental variants remain explicitly distinct.
+
 ## System contract
 
 MosaicKV consists of all six of the following mechanisms:

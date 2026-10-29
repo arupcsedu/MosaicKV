@@ -1,5 +1,11 @@
 # MosaicKV
 
+**Paper name: EviCastKV.** EviCastKV and MosaicKV are the same system, not
+separate methods. Historical `mosaickv_*` identifiers and immutable artifacts
+are retained for reproducibility; experimental variants remain distinguished.
+See the [CPU mechanism audit](docs/evicastkv_cpu_mechanism_audit_20261029.md)
+for the latest routing, PrefixKV-adaptation, and compression-overhead findings.
+
 MosaicKV is a training-free multimodal KV-cache compression research system for an AAAI 2027 paper. It aims to preserve task-relevant multimodal context under a fixed cache budget by combining:
 
 1. future-query forecasting;
