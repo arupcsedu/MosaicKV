@@ -455,6 +455,18 @@ class DraftExchangeSearchConfig:
         )
 
 
+def _prior_layer_weights(value: object) -> tuple[float, ...]:
+    if not isinstance(value, (tuple, list)) or any(
+        isinstance(x, bool)
+        or not isinstance(x, (int, float))
+        or not math.isfinite(x)
+        or not 0 <= x <= 1
+        for x in value
+    ):
+        raise ConfigurationError("full_prompt_prior_layer_weights must be a sequence in [0,1]")
+    return tuple(float(x) for x in value)
+
+
 @dataclass(frozen=True, slots=True)
 class IncrementalHistoryConfig:
     """Experimental physical growth and causal generated-history retention."""
@@ -471,8 +483,23 @@ class IncrementalHistoryConfig:
     history_allocation: str = "uniform"
     full_prompt_prior_weight: float = 0.0
     full_prompt_prior_head_pooling: str = "per_head"
+    full_prompt_prior_layer_weights: tuple[float, ...] = ()
 
     def __post_init__(self) -> None:
+        weights = self.full_prompt_prior_layer_weights
+        if not isinstance(weights, tuple) or any(
+            isinstance(x, bool)
+            or not isinstance(x, (int, float))
+            or not math.isfinite(x)
+            or not 0 <= x <= 1
+            for x in weights
+        ):
+            raise ConfigurationError("full_prompt_prior_layer_weights must be a tuple in [0,1]")
+        if weights and self.full_prompt_prior_weight <= 0:
+            raise ConfigurationError("layer prior weights require positive prior weight")
+        object.__setattr__(
+            self, "full_prompt_prior_layer_weights", tuple(float(x) for x in weights)
+        )
         if not isinstance(self.full_prompt_prior_head_pooling, str) or (
             self.full_prompt_prior_head_pooling not in {"per_head", "shared_heads"}
         ):
@@ -492,7 +519,8 @@ class IncrementalHistoryConfig:
                 "incremental_history.full_prompt_prior_weight must be in [0,1]"
             )
         if not isinstance(self.history_allocation, str) or self.history_allocation not in {
-            "uniform", "profile_weighted"
+            "uniform",
+            "profile_weighted",
         }:
             raise ConfigurationError("incremental_history.history_allocation is unsupported")
         if self.history_allocation == "profile_weighted" and self.layer_profile_path is None:
@@ -555,6 +583,7 @@ class IncrementalHistoryConfig:
                 "history_allocation",
                 "full_prompt_prior_weight",
                 "full_prompt_prior_head_pooling",
+                "full_prompt_prior_layer_weights",
             },
             "incremental_history",
         )
@@ -577,6 +606,7 @@ class IncrementalHistoryConfig:
             _optional_str(
                 data, "full_prompt_prior_head_pooling", "per_head", "incremental_history"
             ),
+            _prior_layer_weights(data.get("full_prompt_prior_layer_weights", ())),
         )
 
 
@@ -612,6 +642,8 @@ class BoundedDecodeConfig:
                 version += "_full_prompt_prior_v7"
                 if history.full_prompt_prior_head_pooling == "shared_heads":
                     version += "_shared_heads_v9"
+                if history.full_prompt_prior_layer_weights:
+                    version += "_layerwise_v10"
             return f"{name}__incremental_history_{history.policy}_{version}{suffix}"
         version = (
             "v1" if self.history_fraction is None and self.layer_allocation == "uniform" else "v2"
@@ -4799,6 +4831,7 @@ def canonical_config(config: RunConfig) -> JsonObject:
                 ("history_allocation", "uniform"),
                 ("full_prompt_prior_weight", 0.0),
                 ("full_prompt_prior_head_pooling", "per_head"),
+                ("full_prompt_prior_layer_weights", ()),
             ):
                 if history[name] == default:
                     history.pop(name)

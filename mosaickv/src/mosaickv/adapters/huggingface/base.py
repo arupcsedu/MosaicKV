@@ -109,10 +109,21 @@ class AttentionCapture(AbstractContextManager["AttentionCapture"]):
         kv_heads: Sequence[int] | None = None,
         full_prompt_prior_weight: float = 0.0,
         full_prompt_prior_head_pooling: str = "per_head",
+        full_prompt_prior_layer_weights: Sequence[float] = (),
     ) -> None:
         self._attentions = tuple(attentions)
         self._query_window = query_window
         self._full_prompt_prior_weight = full_prompt_prior_weight
+        self._full_prompt_prior_layer_weights = tuple(full_prompt_prior_layer_weights)
+        if self._full_prompt_prior_layer_weights and (
+            len(self._full_prompt_prior_layer_weights) != len(self._attentions)
+            or full_prompt_prior_weight <= 0
+            or any(
+                isinstance(x, bool) or not isinstance(x, (int, float)) or not 0 <= x <= 1
+                for x in self._full_prompt_prior_layer_weights
+            )
+        ):
+            raise ValueError("layer prior weights must cover every layer and be in [0,1]")
         if not isinstance(
             full_prompt_prior_head_pooling, str
         ) or full_prompt_prior_head_pooling not in {"per_head", "shared_heads"}:
@@ -154,7 +165,12 @@ class AttentionCapture(AbstractContextManager["AttentionCapture"]):
                     )
                 probabilities = output[1]
                 prior = None
-                if self._full_prompt_prior_weight > 0:
+                weight = (
+                    self._full_prompt_prior_layer_weights[index]
+                    if self._full_prompt_prior_layer_weights
+                    else self._full_prompt_prior_weight
+                )
+                if weight > 0:
                     if self._full_prompt_prior_head_pooling == "shared_heads":
                         # Pinned PrefixKV order: head mean in incoming dtype,
                         # then FP32 query reduction; avoid a second QxK cast.
@@ -168,9 +184,7 @@ class AttentionCapture(AbstractContextManager["AttentionCapture"]):
                 if self._query_window is not None:
                     probabilities = probabilities[..., -self._query_window :, :]
                 if prior is not None:
-                    probabilities = (
-                        1 - self._full_prompt_prior_weight
-                    ) * probabilities.float() + self._full_prompt_prior_weight * prior
+                    probabilities = (1 - weight) * probabilities.float() + weight * prior
                 if self._kv_heads is not None:
                     batch, query_heads, query_count, key_count = probabilities.shape
                     local_kv_heads = self._kv_heads[index]
@@ -427,6 +441,7 @@ class HuggingFaceMultimodalAdapter(ABC):
         reduce_query_heads: bool = False,
         full_prompt_prior_weight: float = 0.0,
         full_prompt_prior_head_pooling: str = "per_head",
+        full_prompt_prior_layer_weights: Sequence[float] = (),
     ) -> AttentionCapture:
         """Return a context that captures every eager language attention map."""
 
@@ -455,6 +470,7 @@ class HuggingFaceMultimodalAdapter(ABC):
             kv_heads=kv_heads,
             full_prompt_prior_weight=full_prompt_prior_weight,
             full_prompt_prior_head_pooling=full_prompt_prior_head_pooling,
+            full_prompt_prior_layer_weights=full_prompt_prior_layer_weights,
         )
 
     def get_profiling_modules(self) -> AdapterProfilingModules:
@@ -802,6 +818,7 @@ class HuggingFaceMultimodalAdapter(ABC):
         reduce_attention_to_kv_heads: bool = False,
         attention_full_prompt_prior_weight: float = 0.0,
         attention_full_prompt_prior_head_pooling: str = "per_head",
+        attention_full_prompt_prior_layer_weights: Sequence[float] = (),
     ) -> PrefillOutput:
         """Run one full prefill without calling GenerationMixin.generate."""
 
@@ -845,6 +862,7 @@ class HuggingFaceMultimodalAdapter(ABC):
                         query_window=attention_query_window,
                         full_prompt_prior_weight=attention_full_prompt_prior_weight,
                         full_prompt_prior_head_pooling=attention_full_prompt_prior_head_pooling,
+                        full_prompt_prior_layer_weights=attention_full_prompt_prior_layer_weights,
                     )
                     if not reduce_attention_to_kv_heads
                     else self.capture_attention_weights(
@@ -852,6 +870,7 @@ class HuggingFaceMultimodalAdapter(ABC):
                         reduce_query_heads=True,
                         full_prompt_prior_weight=attention_full_prompt_prior_weight,
                         full_prompt_prior_head_pooling=attention_full_prompt_prior_head_pooling,
+                        full_prompt_prior_layer_weights=attention_full_prompt_prior_layer_weights,
                     )
                 )
                 if capture_attentions

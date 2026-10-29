@@ -9264,11 +9264,14 @@ class HuggingFaceMosaicKVModel:
                     weight = self.config.bounded_decode.incremental_history.full_prompt_prior_weight
                     if weight > 0:
                         evidence_kwargs["attention_full_prompt_prior_weight"] = weight
-                        pooling = (
-                            self.config.bounded_decode.incremental_history
-                            .full_prompt_prior_head_pooling
-                        )
+                        history_config = self.config.bounded_decode.incremental_history
+                        pooling = history_config.full_prompt_prior_head_pooling
                         evidence_kwargs["attention_full_prompt_prior_head_pooling"] = pooling
+                        layer_weights = history_config.full_prompt_prior_layer_weights
+                        if layer_weights:
+                            evidence_kwargs["attention_full_prompt_prior_layer_weights"] = (
+                                layer_weights
+                            )
                         trace["prompt_attention_evidence_basis"] = {
                             "kind": (
                                 "shared_head_prior_and_window_query_mixture_v9"
@@ -9280,6 +9283,13 @@ class HuggingFaceMosaicKVModel:
                             "raw_model_attention_probabilities_modified": False,
                             "benchmark_labels_accessed": False,
                         }
+                        if layer_weights:
+                            trace["prompt_attention_evidence_basis"]["kind"] = (
+                                "layerwise_shared_prior_and_window_query_mixture_v10"
+                            )
+                            trace["prompt_attention_evidence_basis"]["layer_weights"] = list(
+                                layer_weights
+                            )
                 return self.adapter.prefill(
                     prepared,
                     capture_queries=(
@@ -10663,6 +10673,17 @@ class HuggingFaceMosaicKVModel:
                                 == "bounded_single_equal_byte_draft_logit_v6"
                                 else "MosaicKV_V5_joint_FullKV_draft_guard_final_selection"
                             )
+                    if (
+                        request.generation_kwargs.get("_mosaickv_capture_selection_fingerprints")
+                        is True
+                    ):
+                        from mosaickv.measurements.selection_fingerprints import (
+                            selection_fingerprints,
+                        )
+
+                        payload["selected_position_fingerprints"] = selection_fingerprints(
+                            packed.slot_records
+                        )
                     return payload
 
                 deferred_trace_builder = build_deferred_cache_trace

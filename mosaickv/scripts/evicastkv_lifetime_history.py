@@ -362,6 +362,9 @@ def worker(root, expected, index):
                             {
                                 "_mosaickv_capture_kv_ownership": True,
                                 "_mosaickv_capture_kv_transactions": True,
+                                "_mosaickv_capture_selection_fingerprints": plan.get(
+                                    "capture_selection_fingerprints", False
+                                ),
                             },
                         )
                     )
