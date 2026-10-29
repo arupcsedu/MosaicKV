@@ -236,10 +236,33 @@ def test_conditional_draft_skips_low_uncertainty_without_cache_clone_or_decode()
     assert forecast.provenance.configured_mode is ForecastMode.HYBRID
     assert forecast.provenance.requested_draft_steps == 3
     assert forecast.provenance.completed_draft_steps == 0
-    assert forecast.provenance.conditional_draft_decision == (
-        "skipped_low_prompt_uncertainty"
-    )
+    assert forecast.provenance.conditional_draft_decision == ("skipped_low_prompt_uncertainty")
     assert forecast.provenance.prompt_uncertainty == pytest.approx(0.0, abs=1e-6)
+
+
+def test_zero_step_prompt_forecast_reads_layout_without_cloning_or_decoding(monkeypatch):
+    adapter = _DraftIsolationAdapter()
+    prefill = _fake_prefill()
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("zero-step rollout must not clone KV")
+
+    monkeypatch.setattr(adapter, "extract_past_key_values", forbidden)
+    before = tuple(layer.key.copy() for layer in prefill.state.past_key_values.layers)
+    forecast, rollout = forecast_with_rollout(
+        adapter,
+        prefill,
+        ForecastingConfig(mode=ForecastMode.PROMPT_WINDOW, prompt_window=4, draft_steps=0),
+    )
+    assert rollout.cache_clone_seconds == 0 and rollout.draft_decode_seconds == 0
+    assert rollout.metadata_seconds >= 0 and rollout.kv_head_counts == (1,)
+    assert adapter.decode_calls == 0 and rollout.original_cache_unchanged
+    assert forecast.timing.cache_clone == 0
+    assert forecast.timing.query_preparation >= rollout.metadata_seconds
+    assert all(
+        np.array_equal(x, layer.key)
+        for x, layer in zip(before, prefill.state.past_key_values.layers, strict=True)
+    )
 
 
 def test_conditional_draft_executes_for_high_prompt_uncertainty() -> None:
@@ -269,9 +292,7 @@ def test_conditional_draft_executes_for_high_prompt_uncertainty() -> None:
     assert np.allclose(rollout.draft_distributions[0].sum(axis=-1), 1.0)
     assert forecast.provenance.mode is ForecastMode.HYBRID
     assert forecast.provenance.completed_draft_steps == 2
-    assert forecast.provenance.conditional_draft_decision == (
-        "executed_high_prompt_uncertainty"
-    )
+    assert forecast.provenance.conditional_draft_decision == ("executed_high_prompt_uncertainty")
     assert forecast.provenance.prompt_uncertainty == pytest.approx(1.0, abs=1e-6)
 
 
@@ -367,8 +388,7 @@ def test_layer_batched_centroids_are_bitwise_per_head_equivalent() -> None:
     rng = np.random.default_rng(31)
     samples = rng.normal(size=(12, 24, 17)).astype(np.float32)
     expected = tuple(
-        _streaming_spherical((samples[head_index],), 4)
-        for head_index in range(samples.shape[0])
+        _streaming_spherical((samples[head_index],), 4) for head_index in range(samples.shape[0])
     )
 
     actual = _batched_numpy_streaming_spherical(samples, 4)
@@ -387,8 +407,7 @@ def test_layer_batched_centroids_fall_back_exactly_for_zero_queries() -> None:
     samples = np.ones((3, 8, 5), dtype=np.float32)
     samples[1, 2] = 0
     expected = tuple(
-        _streaming_spherical((samples[head_index],), 3)
-        for head_index in range(samples.shape[0])
+        _streaming_spherical((samples[head_index],), 3) for head_index in range(samples.shape[0])
     )
 
     actual = _batched_numpy_streaming_spherical(samples, 3)

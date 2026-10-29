@@ -121,13 +121,18 @@ class IsolatedQueryRollout:
     synchronization_calls: int
     timing_backend: str
     original_cache_unchanged: bool
+    metadata_seconds: float = 0.0
 
     def __post_init__(self) -> None:
         if not self.query_layers and self.token_ids:
             raise ValueError("rollout tokens require captured query layers")
         if self.draft_distributions and len(self.draft_distributions) != len(self.token_ids):
             raise ValueError("captured rollout distributions must align with draft token inputs")
-        if self.cache_clone_seconds < 0 or self.draft_decode_seconds < 0:
+        if (
+            self.cache_clone_seconds < 0
+            or self.draft_decode_seconds < 0
+            or self.metadata_seconds < 0
+        ):
             raise ValueError("rollout timings must be nonnegative")
         if not self.kv_head_counts or any(count <= 0 for count in self.kv_head_counts):
             raise ValueError("rollout must record a positive KV-head count for every layer")
@@ -224,21 +229,22 @@ def run_isolated_greedy_query_rollout(
     # its timing exemplar when prompt query capture was deliberately disabled.
     exemplar = prefill.query_vectors.layers[0] if prefill.query_vectors.layers else prefill.logits
     if steps == 0:
-        snapshot, clone_seconds, clone_syncs, backend = _measure(
+        counts, metadata_seconds, metadata_syncs, backend = _measure(
             exemplar,
-            lambda: adapter.extract_past_key_values(prefill.state.past_key_values),
+            lambda: _layout_kv_head_counts(adapter, prefill.state.past_key_values),
         )
         return IsolatedQueryRollout(
             (),
             (),
             (),
             (),
-            _kv_head_counts(snapshot),
-            clone_seconds,
+            counts,
             0.0,
-            clone_syncs,
+            0.0,
+            metadata_syncs,
             backend,
             True,
+            metadata_seconds=metadata_seconds,
         )
 
     def clone_phase() -> tuple[Any, DecodeState, Any, tuple[int, ...]]:
@@ -281,9 +287,7 @@ def run_isolated_greedy_query_rollout(
             if output.logits.__class__.__module__.startswith("torch"):
                 import torch
 
-                draft_distributions.append(
-                    torch.softmax(output.logits.detach().float(), dim=-1)
-                )
+                draft_distributions.append(torch.softmax(output.logits.detach().float(), dim=-1))
             else:
                 import numpy as np
 
@@ -376,9 +380,7 @@ def forecast_with_rollout(
                 forecast.timing,
                 query_preparation=forecast.timing.query_preparation + decision_seconds,
                 total=forecast.timing.total + decision_seconds,
-                synchronization_calls=(
-                    forecast.timing.synchronization_calls + decision_syncs
-                ),
+                synchronization_calls=(forecast.timing.synchronization_calls + decision_syncs),
             )
             provenance = replace(
                 forecast.provenance,
@@ -393,9 +395,7 @@ def forecast_with_rollout(
                 attention_steps=(),
                 token_ids=(),
                 draft_distributions=(),
-                kv_head_counts=_layout_kv_head_counts(
-                    adapter, prefill.state.past_key_values
-                ),
+                kv_head_counts=_layout_kv_head_counts(adapter, prefill.state.past_key_values),
                 cache_clone_seconds=0.0,
                 draft_decode_seconds=0.0,
                 synchronization_calls=0,
@@ -421,21 +421,22 @@ def forecast_with_rollout(
     timing = ForecastTiming(
         cache_clone=rollout.cache_clone_seconds,
         draft_decode=rollout.draft_decode_seconds,
-        query_preparation=forecast.timing.query_preparation + decision_seconds,
+        query_preparation=forecast.timing.query_preparation
+        + decision_seconds
+        + rollout.metadata_seconds,
         prompt_statistics=forecast.timing.prompt_statistics,
         centroid_construction=forecast.timing.centroid_construction,
         total=(
             rollout.cache_clone_seconds
             + rollout.draft_decode_seconds
+            + rollout.metadata_seconds
             + decision_seconds
             + forecast.timing.query_preparation
             + forecast.timing.prompt_statistics
             + forecast.timing.centroid_construction
         ),
         synchronization_calls=(
-            rollout.synchronization_calls
-            + forecast.timing.synchronization_calls
-            + decision_syncs
+            rollout.synchronization_calls + forecast.timing.synchronization_calls + decision_syncs
         ),
         timing_backend=(
             forecast.timing.timing_backend if config.draft_steps == 0 else rollout.timing_backend
