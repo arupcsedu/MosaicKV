@@ -21,6 +21,7 @@ def cache_from_formats(
     shared_workspace: bool = False,
     workspace_graph: bool = False,
     consolidated_history: bool = False,
+    segmented_history: bool = False,
 ) -> ExactCache:
     from mosaickv.evaluation.sealed_history import SealedHistoryLayer
 
@@ -39,6 +40,16 @@ def cache_from_formats(
         )
     if (workspace_graph and not shared_workspace) or (shared_workspace and not source_history):
         raise ValueError("workspace graphs require an explicit shared source-history workspace")
+    if type(segmented_history) is not bool or (
+        segmented_history
+        and (
+            not source_history
+            or source_history_constructor != "direct"
+            or shared_workspace
+            or consolidated_history
+        )
+    ):
+        raise ValueError("segmented history requires only direct source history")
     cache = ExactCache(audit_workspace=audit)
     cls = SealedHistoryLayer if sealed else ExactLayer
     if batched_history:
@@ -54,6 +65,10 @@ def cache_from_formats(
 
         cache = SourceHistoryCache(audit_workspace=audit, constructor=source_history_constructor)
         cls = SourceHistoryLayer
+        if segmented_history:
+            from mosaickv.evaluation.segmented_history import SegmentedSourceLayer
+
+            cls = SegmentedSourceLayer
         if shared_workspace:
             from mosaickv.evaluation.graphed_storage import SharedSourceCache, SharedSourceLayer
 
@@ -103,6 +118,7 @@ def run(
     shared_workspace: bool = False,
     workspace_graph: bool = False,
     consolidated_history: bool = False,
+    segmented_history: bool = False,
 ) -> tuple[Any, dict[str, Any]]:
     import time
 
@@ -117,7 +133,7 @@ def run(
         raise ValueError(
             "bounded 2--128 tokens and complete optional FullKV-generated prefix required"
         )
-    cache = cache_from_formats(
+    cache: Any = cache_from_formats(
         adapter,
         formats,
         updates=tokens,
@@ -129,6 +145,7 @@ def run(
         shared_workspace=shared_workspace,
         workspace_graph=workspace_graph,
         consolidated_history=consolidated_history,
+        segmented_history=segmented_history,
     )
     length = max(f.shape[-2] for f in formats)
     state = DecodeState(
@@ -170,6 +187,10 @@ def run(
                     from mosaickv.evaluation.consolidated_history import consolidate
 
                     consolidate(cache)
+                if segmented_history and sealed_now:
+                    from mosaickv.evaluation.segmented_history import prepare_tables
+
+                    prepare_tables(cache)
             if batched_history:
                 from mosaickv.evaluation.batched_history import seal_full_tails
 
@@ -192,6 +213,10 @@ def run(
     ):
         raise RuntimeError("nonfinite output or changed logical decode positions")
     record = cache.storage_record()
+    record.update(
+        segmented_history=segmented_history,
+        segment_table_builds=getattr(cache, "segment_table_builds", 0),
+    )
     if record["outstanding_layer_leases"] or record["history_updates_per_layer"] != [
         tokens - 1
     ] * len(formats):
@@ -208,6 +233,7 @@ def run(
         shared_workspace=shared_workspace,
         workspace_graph=workspace_graph,
         consolidated_history=consolidated_history,
+        segmented_history=segmented_history,
         batched_history_seals=getattr(cache, "batched_history_seals", 0),
         batched_history_encode_batches=getattr(cache, "batched_history_encode_batches", 0),
         output_tokens=tokens,
