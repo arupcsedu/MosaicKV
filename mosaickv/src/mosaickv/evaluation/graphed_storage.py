@@ -16,6 +16,7 @@ from mosaickv.evaluation.source_history import SourceHistoryCache, SourceHistory
 
 class SharedSourceCache(SourceHistoryCache):
     shared_tensors: tuple[Any, ...]
+    peak_bytes: int
 
     def __init__(self, *, audit_workspace: bool, constructor: str, graphs: bool) -> None:
         super().__init__(audit_workspace=audit_workspace, constructor=constructor)
@@ -25,7 +26,18 @@ class SharedSourceCache(SourceHistoryCache):
         self.graph_captures = 0
         self.graph_replays = 0
         self.graph_private_allocation_bytes = 0
+        self.graph_private_live_bytes = 0
+        self.graph_private_accounting_verified = True
         self.workspace_capacity = 0
+
+    def observe(self, extras: tuple[Any, ...] = ()) -> None:
+        super().observe(extras)
+        current = self.shared_bytes + sum(
+            layer.resident_bytes + layer.lease_bytes for layer in self.layers
+        )
+        self.peak_bytes = max(
+            self.peak_bytes, current + backing_bytes(extras) + self.graph_private_live_bytes
+        )
 
     def acquire(self, layer: Any) -> tuple[Any, ...]:
         if any(other.leased for other in self.layers):
@@ -54,7 +66,21 @@ class SharedSourceCache(SourceHistoryCache):
         if any(layer.leased for layer in self.layers):
             raise RuntimeError("cannot release an active shared workspace lease")
         for layer in self.layers:
-            layer.reconstruction_graph = None
+            graph = layer.reconstruction_graph
+            if graph is not None:
+                before = torch.cuda.memory_allocated()
+                graph.reset()
+                layer.reconstruction_graph = None
+                del graph
+                released = before - torch.cuda.memory_allocated()
+                if released != layer.graph_private_bytes:
+                    self.graph_private_accounting_verified = False
+                    raise RuntimeError(
+                        f"graph private owners released {released} bytes; "
+                        f"expected {layer.graph_private_bytes}"
+                    )
+                self.graph_private_live_bytes -= layer.graph_private_bytes
+                layer.graph_private_bytes = 0
         tensors = self.workspace
         self.shared_tensors = tuple(
             t for t in self.shared_tensors if all(t is not w for w in tensors)
@@ -72,10 +98,13 @@ class SharedSourceCache(SourceHistoryCache):
             graph_captures=self.graph_captures,
             graph_replays=self.graph_replays,
             graph_private_allocation_bytes=self.graph_private_allocation_bytes,
+            graph_private_live_bytes=self.graph_private_live_bytes,
+            graph_private_accounting_verified=self.graph_private_accounting_verified,
             graphs_enabled=self.graphs_enabled,
             active_workspace_bytes=backing_bytes(self.workspace),
             whole_request_peak_certified=False,
         )
+        record["final_active_kv_storage_bytes"] += self.graph_private_live_bytes
         return record
 
 
@@ -89,6 +118,7 @@ class SharedSourceLayer(SourceHistoryLayer):
         super().__init__(*args, **kwargs)
         self.cache = cache
         self.reconstruction_graph: Any = None
+        self.graph_private_bytes = 0
 
     def update(self, key_states: Any, value_states: Any, cache_kwargs: Any = None) -> Any:
         del cache_kwargs
@@ -155,18 +185,25 @@ class SharedSourceLayer(SourceHistoryLayer):
             if mode is not None:
                 self.workspace_operations += mode.operations
             if self.cache.graphs_enabled:
-                graph = torch.cuda.CUDAGraph()
                 before = torch.cuda.memory_allocated()
-                with torch.cuda.graph(graph):
-                    self.fill_immutable()
+                graph = torch.cuda.CUDAGraph()
+                current = torch.cuda.current_stream()
+                stream = torch.cuda.Stream()
+                stream.wait_stream(current)
+                with torch.cuda.stream(stream):
+                    graph.capture_begin(capture_error_mode="thread_local")
+                    try:
+                        self.fill_immutable()
+                    finally:
+                        graph.capture_end()
+                current.wait_stream(stream)
                 additional = max(0, torch.cuda.memory_allocated() - before)
                 self.cache.graph_private_allocation_bytes += additional
-                if additional:
-                    raise RuntimeError(
-                        "unowned graph-private tensor allocation blocks storage certification"
-                    )
+                self.cache.graph_private_live_bytes += additional
+                self.graph_private_bytes = additional
                 self.reconstruction_graph = graph
                 self.cache.graph_captures += 1
+                self.observe()
         elif not self.cache.graphs_enabled:
             self.fill_immutable()
         if self.reconstruction_graph is not None:
@@ -175,3 +212,65 @@ class SharedSourceLayer(SourceHistoryLayer):
         offset = self.prompt_length + 16 * len(self.source_sealed)
         for tail, target in zip(self.history, self.leased, strict=True):
             target[..., offset : offset + self.tail_used, :].copy_(tail[..., : self.tail_used, :])
+
+
+def gpu_controls() -> dict[str, Any]:
+    from types import SimpleNamespace
+
+    from mosaickv.evaluation.exact_storage import ExactFormat, encode
+    from mosaickv.evaluation.storage_runs import cache_from_formats
+
+    modules = [SimpleNamespace(self_attn=torch.nn.Module()) for _ in range(2)]
+    adapter = SimpleNamespace(_language_layers=lambda: modules)
+    formats = tuple(
+        ExactFormat(
+            "kv",
+            (1, 2, n, 128),
+            pair=tuple(
+                encode(torch.full((1, 2, n, 128), i + offset, dtype=torch.bfloat16, device="cuda"))
+                for offset in (0, 10)
+            ),
+        )
+        for i, n in enumerate([3, 5])
+    )
+    cache = cache_from_formats(
+        adapter,
+        formats,
+        updates=128,
+        audit=True,
+        source_history=True,
+        source_history_constructor="direct",
+        shared_workspace=True,
+        workspace_graph=True,
+    )
+    try:
+        for token in range(2):
+            phase = (
+                torch.ones(1, 1, 128, device="cuda", dtype=torch.bfloat16),
+                torch.zeros(1, 1, 128, device="cuda", dtype=torch.bfloat16),
+            )
+            position = torch.tensor([[600 + token]], device="cuda")
+            for i, layer in enumerate(cache.layers):
+                hidden = torch.full((1, 1, 256), i + token, device="cuda", dtype=torch.bfloat16)
+                cache.source_input(i, hidden, phase, position)
+                key = hidden.view(1, 1, 2, 128).transpose(1, 2)
+                pair = layer.update(key, key + 10)
+                if not bool((pair[0][..., : layer.prompt_length, :] == i).all()) or not bool(
+                    (pair[1][..., : layer.prompt_length, :] == i + 10).all()
+                ):
+                    raise RuntimeError("graphed strided workspace changed original prompt bits")
+                layer.release()
+        before = cache.storage_record()
+        cache.release_workspace()
+        after = cache.storage_record()
+        return dict(
+            before=before,
+            after=after,
+            full_private_teardown_verified=True,
+            original_prompt_bits=True,
+            graph_replays=cache.graph_replays,
+        )
+    finally:
+        for layer in cache.layers:
+            layer.release()
+        cache.release_workspace()

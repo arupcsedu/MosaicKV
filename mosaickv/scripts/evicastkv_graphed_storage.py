@@ -8,7 +8,7 @@ import evicastkv_source_history_runtime as runtime
 from mosaickv.evaluation.fox_campaign import sha
 
 base = runtime.base
-ROOT = Path("/scratch/djy8hg/runs/evicastkv/graphed-storage-consumed-20261030-v1")
+ROOT = Path("/scratch/djy8hg/runs/evicastkv/graphed-storage-consumed-20261030-v2")
 VALIDATED = Path(
     "/scratch/djy8hg/runs/evicastkv/source-history-direct-consumed-20261030-v1/comparison"
 )
@@ -56,7 +56,10 @@ def prepare(root, phase):
 def study(adapter, prefill, capture, frozen, job, cfg, full_reference, prepared, out, plan):
     import torch
 
+    from mosaickv.evaluation.graphed_storage import gpu_controls
     from mosaickv.evaluation.storage_runs import run
+
+    runtime.write_once(out / "shared_workspace_gpu_controls.json", gpu_controls())
 
     if plan["stage"] == "canary":
         source, _ = adapter._legacy_layers(prefill.state.past_key_values)

@@ -156,7 +156,8 @@ def study(adapter, prefill, capture, frozen, job, cfg, full_reference, prepared,
             and a[fields[1]] == b[fields[1]]
             and b[fields[2]] <= a[fields[2]] * plan["maximum_workspace_peak_ratio"]
             and b["active_workspace_bytes"] == 0
-            and b["graph_private_allocation_bytes"] == 0
+            and b["graph_private_live_bytes"] == 0
+            and b["graph_private_accounting_verified"]
         )
     if b["source_history_seals"] != 7 or b["source_history_normalized_tail_bytes"] != 4 * 2**20:
         raise RuntimeError("missing source chunk or normalized-tail accounting")

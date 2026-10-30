@@ -99,11 +99,12 @@ def test_shared_workspace_cannot_overlap_or_release_live_lease():
         cache.release_workspace()
 
 
-def test_close_invalidates_every_graph_before_releasing_owners():
+def test_close_invalidates_every_graph_before_releasing_owners(monkeypatch):
+    monkeypatch.setattr(torch.cuda, "memory_allocated", lambda: 0)
     cache = fixture()
     step(cache, 0)
     for layer in cache.layers:
-        layer.reconstruction_graph = object()
+        layer.reconstruction_graph = SimpleNamespace(reset=lambda: None)
     before = cache.storage_record()
     workspace = backing_bytes(cache.workspace)
     cache.release_workspace()
@@ -113,6 +114,43 @@ def test_close_invalidates_every_graph_before_releasing_owners():
         - cache.storage_record()["final_active_kv_storage_bytes"]
         == workspace
     )
+
+
+def test_private_graph_allocations_are_charged_and_teardown_verified(monkeypatch):
+    cache = fixture()
+    step(cache, 0)
+    live = [1024]
+    monkeypatch.setattr(torch.cuda, "memory_allocated", lambda: live[0])
+
+    def reset():
+        live[0] -= 512
+
+    for layer in cache.layers:
+        layer.reconstruction_graph = SimpleNamespace(reset=reset)
+        layer.graph_private_bytes = 512
+    cache.graph_private_live_bytes = 1024
+    before = cache.storage_record()
+    workspace = backing_bytes(cache.workspace)
+    cache.release_workspace()
+    after = cache.storage_record()
+    assert live == [0] and after["graph_private_live_bytes"] == 0
+    assert after["graph_private_accounting_verified"]
+    assert (
+        before["final_active_kv_storage_bytes"] - after["final_active_kv_storage_bytes"]
+        == workspace + 1024
+    )
+
+
+def test_incomplete_private_graph_release_fails_closed(monkeypatch):
+    cache = fixture()
+    step(cache, 0)
+    monkeypatch.setattr(torch.cuda, "memory_allocated", lambda: 512)
+    cache.layers[0].reconstruction_graph = SimpleNamespace(reset=lambda: None)
+    cache.layers[0].graph_private_bytes = 512
+    cache.graph_private_live_bytes = 512
+    with pytest.raises(RuntimeError, match="released 0 bytes; expected 512"):
+        cache.release_workspace()
+    assert not cache.graph_private_accounting_verified
 
 
 def test_graph_replay_fails_explicitly_on_cpu():

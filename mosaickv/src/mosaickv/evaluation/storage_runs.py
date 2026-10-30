@@ -141,6 +141,8 @@ def run(
     from contextlib import ExitStack
 
     with ExitStack() as stack:
+        if shared_workspace:
+            stack.callback(cache.release_workspace)
         stack.enter_context(IsolatedStorageTransport(adapter, cache))
         if source_history:
             from mosaickv.evaluation.source_history import SourceInputTransport

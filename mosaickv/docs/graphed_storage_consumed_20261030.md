@@ -16,8 +16,8 @@ Drop them at request completion. No cross-request graph or storage reuse.
 
 Capture only immutable prompt and sealed-source reconstruction. Raw tails
 copy after replay. Warmup, compilation, capture and recapture costs remain
-inside measured decode time; no amortization is presumed. A graph-private
-PyTorch tensor allocation fails memory certification instead of being omitted.
+inside measured decode time; no amortization is presumed. Graph-private
+allocations must be measured and independently released rather than omitted.
 Whole-request GPU peak remains uncertified, as in the reference diagnostic.
 
 Canary: same two consumed inputs only, full retention128-token legacy,
@@ -35,3 +35,20 @@ establish superiority on independent benchmark examples. A CPU regression
 also fixes a false alias rejection of zero-byte buffers: the null storage
 address is not an actual overlapping mutable data owner; nonempty alias
 checks remain enforced.
+
+## V1 stopped safely; V2 explicitly owns graph-private memory
+
+V1 stopped at its private-allocation guard, without promoting a model result.
+V2 charges each graph's actual allocator delta (conservatively rounded by
+PyTorch) in final/peak storage, then verifies an equal released allocation
+after reset/destruction. A mismatch fails closed. Final equality requires zero
+live private bytes, not an assumption that graph capture allocates nothing.
+Synthetic GPU controls verify copied prompt bits, nonoverlapping workspace,
+replay, and complete private-owner teardown before the model study.
+
+Explicit nondefault-stream capture replaces torch.cuda.graph's Python context,
+which in this pinned version invokes synchronize, gc.collect and empty_cache
+at every entry. Stream dependencies remain explicit. Capture time remains
+included in measured decode; no prebuilt/permanent graph is smuggled outside
+the timing boundary. Error cleanup closes graph/workspace owners after the
+ordinary transport has released its current layer lease.
