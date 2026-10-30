@@ -95,6 +95,7 @@ class PrecisionFormat:
     exact_values: tuple[Any, ...]
     kind: str = "evicastkv_prompt_precision_variant"
     encoded_exact: bool = False
+    corrections: tuple[Any, ...] = ()
 
     def private(self) -> tuple[Any, ...]:
         exact = (
@@ -107,6 +108,7 @@ class PrecisionFormat:
             self.exact_indices,
             self.exact_map,
             *exact,
+            *(t for patch in self.corrections for t in patch.tensors),
         )
 
     def shared(self) -> tuple[Any, ...]:
@@ -152,6 +154,17 @@ class PrecisionFormat:
                     scatter_into(exact, self.exact_indices, target)
                 else:
                     target[..., self.exact_indices, :] = exact
+        if self.corrections:
+            for patch, target in zip(self.corrections, destinations, strict=True):
+                prefix = target[..., : self.shape[-2], :]
+                if target.device.type == "cuda":
+                    from mosaickv.evaluation.dual_projection_kernel import apply_patch
+
+                    apply_patch(patch, prefix)
+                else:
+                    index = patch.indices.long()
+                    n, d = self.shape[-2:]
+                    target[0, index // (n * d), (index // d) % n, index % d] = patch.values
 
 
 def construct(

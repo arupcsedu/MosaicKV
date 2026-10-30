@@ -37,7 +37,9 @@ def load_processor(model: dict[str, Any]) -> tuple[Any, Any, str]:
     return processor, generation, snapshot
 
 
-def derive(root: Path, expected: str, output: Path, *, source: Path) -> None:
+def derive(
+    root: Path, expected: str, output: Path, *, source: Path, reference_root: Path | None = None
+) -> None:
     import json
 
     import pandas as pd  # type: ignore[import-untyped]
@@ -68,6 +70,60 @@ def derive(root: Path, expected: str, output: Path, *, source: Path) -> None:
         inputs[str(path)] = sha(path)
     references = {}
     controls = {}
+    if reference_root is not None:
+        reference_plan_path = reference_root / "plan.json"
+        digest = sha(reference_plan_path)
+        if plan["bound_files"].get(str(reference_plan_path)) != digest:
+            raise ValueError("external FullKV reference plan must be hash-bound")
+        inputs[str(reference_plan_path)] = digest
+        external = json.loads(reference_plan_path.read_text())
+        for ref_job in external["jobs"]:
+            if ref_job["method"] != "full_kv":
+                continue
+            compatible = [
+                j
+                for j in jobs
+                if (j["task"], j["sample_id"]) == (ref_job["task"], ref_job["sample_id"])
+            ]
+            if not compatible:
+                continue
+            ref_cfg = ref_job["arms"][0]["config"]
+            if any(
+                any(
+                    j["arms"][0]["config"][k] != ref_cfg[k]
+                    for k in ("model", "generation", "execution", "dataset")
+                )
+                or sha(Path(j["input"])) != sha(Path(ref_job["input"]))
+                for j in compatible
+            ):
+                raise ValueError("external reference controls or input content differ")
+            folder = reference_root / f"workers/{ref_job['index']}"
+            result_path = folder / "result.json"
+            result = json.loads(result_path.read_text())
+            if plan["bound_files"].get(str(result_path)) != sha(result_path):
+                raise ValueError("external FullKV result must be frozen before execution")
+            if (
+                result["status"] != "completed"
+                or result["failures"]
+                or result["source_sha"] != external["source_sha"]
+                or result["plan_sha256"] != digest
+            ):
+                raise ValueError("invalid external FullKV producer")
+            inputs[str(result_path)] = sha(result_path)
+            for name in ("logits.pt", "manifest.json", "ordinary_parity.json"):
+                path = folder / name
+                if result["outputs"].get(name) != sha(path):
+                    raise ValueError("external FullKV evidence changed")
+                if plan["bound_files"].get(str(path)) != sha(path):
+                    raise ValueError("external FullKV outputs must be frozen before execution")
+                inputs[str(path)] = sha(path)
+            logits = torch.load(folder / "logits.pt", map_location="cpu", weights_only=True)[
+                "reference"
+            ]
+            references[(ref_job["task"], ref_job["sample_id"])] = (
+                logits.argmax(-1).tolist(),
+                sha(folder / "logits.pt"),
+            )
     for job in jobs:
         folder = root / f"workers/{job['index']}"
         path = folder / "result.json"
@@ -127,6 +183,7 @@ def derive(root: Path, expected: str, output: Path, *, source: Path) -> None:
                         backend="hf_eager",
                         method=job["method"],
                         variant=variant,
+                        correction_mode=record.get("correction_mode", "none"),
                         execution_valid=execution_valid,
                         **prediction,
                         implementation_variant=selection.get(

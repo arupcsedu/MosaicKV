@@ -245,6 +245,42 @@ def study(adapter, prefill, capture, frozen, job, cfg, full_reference, prepared,
             )
             for i, (pair, slots) in enumerate(zip(pairs, protected, strict=True))
         )
+        correction_records = []
+        correction_mode = job.get("correction_mode", "none")
+        if correction_mode != "none":
+            from mosaickv.evaluation.precision_corrections import fund_corrections, prompt_weights
+            from mosaickv.evaluation.precision_tier import PrecisionFormat
+
+            corrected = []
+            for i, (fmt, pair) in enumerate(zip(formats, pairs, strict=True)):
+                if not isinstance(fmt, PrecisionFormat):
+                    corrected.append(fmt)
+                    continue
+                weights = (None, None)
+                if correction_mode == "query":
+                    weights = prompt_weights(
+                        adapter._language_layers()[i].self_attn,
+                        capture.records[i],
+                        prefill.attention_weights[i],
+                        memberships[i],
+                        window=plan["correction_prompt_window"],
+                    )
+                elif correction_mode != "mse":
+                    raise ValueError("only registered mse/query correction modes supported")
+                fmt, correction = fund_corrections(
+                    fmt,
+                    pair,
+                    fraction=plan["correction_fraction"],
+                    key_weight=weights[0],
+                    value_weight=weights[1],
+                )
+                corrected.append(fmt)
+                correction_records.append(dict(layer=i, **correction))
+            formats = tuple(corrected)
+        write_once(
+            out / f"precision_{bits}_corrections.json",
+            dict(mode=correction_mode, layers=correction_records),
+        )
         torch.cuda.synchronize()
         construction = time.monotonic() - start
         write_once(
@@ -276,6 +312,17 @@ def study(adapter, prefill, capture, frozen, job, cfg, full_reference, prepared,
                 else construct(pair, bits=bits, protected=slots)
                 for i, (pair, slots) in enumerate(zip(pairs, protected, strict=True))
             )
+            if correction_mode != "none":
+                from dataclasses import replace
+
+                from mosaickv.evaluation.precision_tier import PrecisionFormat
+
+                raw_formats = tuple(
+                    replace(raw, corrections=encoded.corrections)
+                    if isinstance(encoded, PrecisionFormat)
+                    else raw
+                    for raw, encoded in zip(raw_formats, formats, strict=True)
+                )
             raw_logits, raw_exact_record = storage_runs.run(
                 adapter, prefill, raw_formats, audit=True, **common
             )
@@ -344,6 +391,7 @@ def study(adapter, prefill, capture, frozen, job, cfg, full_reference, prepared,
     row = dict(
         method=job["method"],
         result_label=job["method"] + "_prompt_precision_variant",
+        correction_mode=job.get("correction_mode", "none"),
         reference=reference_record,
         controls=controls,
         trials=trials,
@@ -362,6 +410,7 @@ def study(adapter, prefill, capture, frozen, job, cfg, full_reference, prepared,
                         task=job["task"],
                         method=job["method"],
                         variant=name,
+                        correction_mode=job.get("correction_mode", "none"),
                         method_label=(
                             "full_position_lossless_control"
                             if job["method"] == "full_kv" and name == "reference"
@@ -457,7 +506,11 @@ def analyze(root, expected):
 def admit(root, expected):
     plan = base.common.inputs(root, expected)
     script = plan.get("worker_script", "evicastkv_precision_tier.sbatch")
-    if script not in ("evicastkv_precision_tier.sbatch", "evicastkv_precision_threebit.sbatch"):
+    if script not in (
+        "evicastkv_precision_tier.sbatch",
+        "evicastkv_precision_threebit.sbatch",
+        "evicastkv_precision_corrections.sbatch",
+    ):
         raise ValueError("unregistered precision worker script")
     proof = base.common.read(root / "cpu_record.json")
     xml = Path(proof["cpu_xml"])
