@@ -41,3 +41,36 @@ Use two one-A100/12-CPU workers from one clean immutable source, 20-minute
 limits, scratch-only caches and a per-worker compiler cache. Chain finite CPU
 analysis with `afterany`; preserve producer failures. No fresh identities,
 calibration, large campaign, or paper claim is authorized by this protocol.
+
+## Related work and claim boundary
+
+BF16 exponent coding is not an EviCastKV novelty claim.
+[AdaCode (Li et al., EMNLP 2026)](https://aclanthology.org/2026.emnlp-main.269/)
+already describes short exponent codes with explicit outliers. This local
+prototype is not official AdaCode or a validated reproduction of it.
+[ZipFusion (Chen et al., 2026)](https://arxiv.org/abs/2610.33719)
+places decompression within attention; our pair-unpack kernel still writes
+temporary full K/V and then calls unchanged HF eager attention. Its published
+throughput cannot be transferred to this implementation.
+
+The current data support only common storage feasibility. Exact recovery of
+retained values cannot recover evidence lost by selection. Giving a shared
+codec only to EviCastKV would not establish superiority over an equally
+optimized selector. Larger benchmark claims stay blocked by independent
+selection-quality and whole-request accounting evidence, not by a missing
+codec accuracy tolerance.
+
+## Verification update
+
+At producer SHA `ff085d6`, 46 focused CPU tests, Ruff, shell syntax, and diff
+checks passed. V100 integer-only job `22181779` completed in 16 seconds and
+passed original encoder/decoder controls and all 12 fused raw/encoded/history
+combinations. It loaded no model and is not A100 performance evidence.
+A100 array `22181669` and dependent analysis `22181670` remain separate pending
+experiments until their actual artifacts exist. Source snapshots are unchanged.
+
+A subsequent CPU-only typing correction replaces ambiguous NumPy array
+unpacking with scalar quantile calls and types the trial list. It changes no
+GPU execution, representation, numerical guard or registered timing statistic.
+The missing optional pandas stubs are explicitly acknowledged without package
+installation. This follow-up does not mutate the pending producer source.

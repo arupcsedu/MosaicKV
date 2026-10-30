@@ -56,7 +56,8 @@ def summarize_trials(trials: list[Any]) -> list[Any]:
         baseline = np.array([t["decode_cuda_ms"] / 1000 for t in reference])
         ratio = values.mean() / baseline.mean()
         ratios = values[indices].mean(1) / baseline[indices].mean(1)
-        low, high = np.quantile(ratios, [0.025, 0.975]).tolist()
+        low = float(np.quantile(ratios, 0.025))
+        high = float(np.quantile(ratios, 0.975))
         rows.append(
             dict(
                 encoded=encoded,
@@ -78,11 +79,14 @@ def summarize_trials(trials: list[Any]) -> list[Any]:
 
 
 def analyze_timing(root: Path, plan: Any, producer_failures: list[Any]) -> None:
-    import pandas as pd
+    import pandas as pd  # type: ignore[import-untyped]  # Common lock has no pandas-stubs.
 
     out = root / "transport_timing_analysis"
     out.mkdir(exist_ok=False)
-    rows, trials, failures, inputs = [], [], list(producer_failures), {}
+    rows: list[Any] = []
+    trials: list[Any] = []
+    failures = list(producer_failures)
+    inputs: dict[str, str] = {}
     for job in plan["jobs"]:
         folder = root / f"workers/{job['index']}"
         result_path = folder / "result.json"
