@@ -41,3 +41,25 @@ and weighted-sum reductions, then the declared BF16 eager boundaries. The
 same equality gate and original eager error bound remain, and both controls
 are rerun. This is not claimed to be original eager arithmetic. All original
 model-level token/logit gates must still pass before any quality promotion.
+
+V3 passed every numerical control, including raw/encoded arithmetic equality,
+but not the all-length <=1.05 latency gate. The 300-position packet path was
+faster; 604 and 2048 were slower. Preserve those results. V4 parallelizes the
+long-sequence weighted-value reduction into fixed128-position partitions,
+then combines FP64 partials. Its workspace is attention scratch, not a hidden
+persistent K/V allocation, and whole-request peak remains uncertified. Both
+raw/encoded numerical controls and the unchanged original eager fixture bound
+must rerun. No model-level correctness or quality result is inferred.
+
+The bounded model canary is two consumed inputs only. It records 32-token
+retention-one greedy agreement and maximum logit difference <=0.001; selected
+cache runs must retain all greedy tokens and KL<=0.02/logit<=1.0 against the
+ordinary implementation of the identical selection. A real ordinary HF cache
+is the control: its append allocation overlap is instrumented at actual cat
+operations. Encoded headers/checkpoints and raw history are all charged.
+Model attention masks are checked asynchronously once per distinct mask/step,
+never silently ignored; dispatch is request-local via ContextVar. A six-path
+128-token technical comparison is permitted only after both canaries pass;
+it does not authorize fresh evaluation or any paper campaign. Timing includes
+separate constructor and decode phases and their sum, excluding prefill and
+the frozen original selector, identical for every compared path.

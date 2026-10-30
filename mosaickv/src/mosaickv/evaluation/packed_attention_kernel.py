@@ -154,6 +154,61 @@ def _values(
     tl.store(OUTPUT + head * 128 + col, result.to(tl.bfloat16))
 
 
+@triton.jit(do_not_specialize=["PROMPT", "LENGTH", "CAPACITY", "SPLITS"])
+def _partial_values(
+    P,
+    SM,
+    CODES,
+    BASE,
+    OFFSETS,
+    LITERALS,
+    CHECK,
+    HISTORY,
+    PARTIAL,
+    PROMPT,
+    LENGTH,
+    CAPACITY,
+    SPLITS,
+    RAW: tl.constexpr,
+):
+    head, part = tl.program_id(0), tl.program_id(1)
+    tokens = tl.arange(0, 32)
+    result = tl.full((128,), 0, tl.float64)
+    for offset in tl.static_range(4):
+        rows = part * 128 + offset * 32 + tokens
+        value = _sequence(
+            SM,
+            CODES,
+            BASE,
+            OFFSETS,
+            LITERALS,
+            CHECK,
+            HISTORY,
+            head,
+            rows,
+            PROMPT,
+            LENGTH,
+            CAPACITY,
+            RAW,
+        )
+        prob = tl.load(P + head * LENGTH + rows, rows < LENGTH, other=0).to(tl.float64)
+        result += tl.sum(value.to(tl.float64) * prob[:, None], 0)
+    tl.store(PARTIAL + (head * SPLITS + part) * 128 + tl.arange(0, 128), result)
+
+
+@triton.jit(do_not_specialize=["SPLITS"])
+def _reduce_values(PARTIAL, OUTPUT, SPLITS, BLOCK: tl.constexpr):
+    head = tl.program_id(0)
+    part = tl.arange(0, BLOCK)
+    col = tl.arange(0, 128)
+    values = tl.load(
+        PARTIAL + (head * SPLITS + part[:, None]) * 128 + col[None, :],
+        part[:, None] < SPLITS,
+        other=0,
+    )
+    tl.store(OUTPUT + head * 128 + col, tl.sum(values, 0).to(tl.bfloat16))
+
+
 def arguments(packed):
     buffers = packed.payload.buffers
     if packed.payload.raw:
@@ -202,15 +257,31 @@ def attention(query, key, value, history, used, scaling):
     )
     probabilities = torch.softmax(scores, -1, dtype=torch.float32).to(query.dtype)
     output = torch.empty((1, heads, 1, 128), dtype=query.dtype, device=query.device)
-    _values[(heads,)](
-        probabilities,
-        *arguments(value),
-        history[1],
-        output,
-        prompt,
-        length,
-        capacity,
-        RAW=value.payload.raw,
-        TILE=32,
-    )
+    if length < 512:
+        _values[(heads,)](
+            probabilities,
+            *arguments(value),
+            history[1],
+            output,
+            prompt,
+            length,
+            capacity,
+            RAW=value.payload.raw,
+            TILE=32,
+        )
+    else:
+        splits = triton.cdiv(length, 128)
+        partial = torch.empty((heads, splits, 128), dtype=torch.float64, device=query.device)
+        _partial_values[(heads, splits)](
+            probabilities,
+            *arguments(value),
+            history[1],
+            partial,
+            prompt,
+            length,
+            capacity,
+            splits,
+            RAW=value.payload.raw,
+        )
+        _reduce_values[(heads,)](partial, output, splits, BLOCK=triton.next_power_of_2(splits))
     return output.transpose(1, 2).contiguous(), probabilities

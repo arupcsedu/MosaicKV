@@ -35,6 +35,10 @@ class PackedAttentionCache(PromptStorageCache):
 
 
 class PackedAttentionLayer(PromptStorageLayer):
+    history: tuple[Any, ...]
+    history_capacity: int
+    history_bytes: int
+
     def __init__(
         self,
         key: AttentionPacket,
