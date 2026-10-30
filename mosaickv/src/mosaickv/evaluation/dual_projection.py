@@ -20,8 +20,8 @@ def output_slots(union: Any, selected: Any) -> Any:
         or selected.dtype not in (torch.int32, torch.int64)
         or bool((union < 0).any())
         or bool((selected < 0).any())
-        or bool((union >= 2**31).any())
-        or bool((selected >= 2**31).any())
+        or bool((union.long() >= 2**31).any())
+        or bool((selected.long() >= 2**31).any())
     ):
         raise ValueError("uniform int16-addressable per-head capacity required")
     if not union.numel() or not bool((union[1:] > union[:-1]).all()):
