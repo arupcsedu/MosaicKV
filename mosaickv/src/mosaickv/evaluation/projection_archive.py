@@ -148,12 +148,15 @@ def reconstruct_archive(archive: ProjectionArchive, attention: Any) -> tuple[Any
             (1, archive.original_length, width), dtype=torch.bfloat16, device=archive.union.device
         )
         canvas.index_copy_(1, archive.union, decoded.squeeze(1))
+        del decoded
         shape = (1, archive.original_length, heads, dimension)
         key = attention.k_proj(canvas).view(shape).transpose(1, 2)
         value = attention.v_proj(canvas).view(shape).transpose(1, 2)
-        # The public installed routine computes both outputs. Using K as the
-        # unused Q is intentional here: no copied or algebraically rearranged
-        # RoPE expression can mask a numerical parity failure.
-        _, key = apply_rotary_pos_emb(key, key, archive.cos, archive.sin)
+        del canvas
+        # The installed function supports different Q/K head counts (GQA).
+        # Its unused Q result needs only one head; the K branch and its original
+        # shape/phase/arithmetic are unchanged. Do not retain that unused output.
+        unused_q, key = apply_rotary_pos_emb(key[:, :1], key, archive.cos, archive.sin)
+        del unused_q
         index = archive.selected[None, :, :, None].expand(1, heads, kept, dimension)
         return key.gather(2, index), value.gather(2, index)

@@ -43,24 +43,44 @@ class PromptStorageLayer(CacheLayerMixin):
         fused_unpack: bool = False,
         maximum_decode_updates: int = 32,
     ) -> None:
-        import torch
 
         super().__init__()
-        if type(maximum_decode_updates) is not int or not 1 <= maximum_decode_updates <= 4096:
-            raise ValueError("maximum_decode_updates must be an integer in [1, 4096]")
         if key.shape != value.shape or len(key.shape) != 4 or key.shape[0] != 1:
             raise ValueError("same-shape batch-one prompt storage required")
         self.prompt = key, value
-        self.prompt_length = key.shape[-2]
+        self._initialize_storage(
+            key.shape,
+            key.buffers[0].device,
+            key.storage_bytes + value.storage_bytes,
+            observe=observe,
+            fused_unpack=fused_unpack,
+            maximum_decode_updates=maximum_decode_updates,
+        )
+
+    def _initialize_storage(
+        self,
+        shape: tuple[int, ...],
+        device: Any,
+        prefix_bytes: int,
+        *,
+        observe: Any,
+        fused_unpack: bool,
+        maximum_decode_updates: int,
+    ) -> None:
+        import torch
+
+        if type(maximum_decode_updates) is not int or not 1 <= maximum_decode_updates <= 4096:
+            raise ValueError("maximum_decode_updates must be an integer in [1, 4096]")
+        self.prompt_shape = shape
+        self.prompt_length = shape[-2]
         self.history_length = 0
         self.history_capacity = 0
-        shape = (*key.shape[:2], 0, key.shape[-1])
-        device = key.buffers[0].device
+        shape = (*shape[:2], 0, shape[-1])
         self.history = tuple(
             torch.empty(shape, dtype=torch.bfloat16, device=device) for _ in range(2)
         )
         self.leased: tuple[Any, ...] = ()
-        self.resident_bytes = key.storage_bytes + value.storage_bytes
+        self.resident_bytes = prefix_bytes
         self.history_bytes = 0
         self.lease_bytes = 0
         self.observe = observe
@@ -75,7 +95,7 @@ class PromptStorageLayer(CacheLayerMixin):
         import torch
 
         del cache_kwargs
-        expected = (*self.prompt[0].shape[:2], 1, self.prompt[0].shape[-1])
+        expected = (*self.prompt_shape[:2], 1, self.prompt_shape[-1])
         if (
             self.leased
             or key_states.shape != expected
@@ -114,13 +134,16 @@ class PromptStorageLayer(CacheLayerMixin):
         )
         self.lease_bytes = backing_bytes(self.leased)
         self.observe(())
+        self.materialize()
+        return self.leased
+
+    def materialize(self) -> None:
         if self.fused_unpack:
             unpack_pair_into(self.prompt, self.history, self.leased)
         else:
             for body, dest, history in zip(self.prompt, self.leased, self.history, strict=True):
                 unpack_into(body, dest)
                 dest[..., self.prompt_length :, :].copy_(history[..., : self.history_length, :])
-        return self.leased
 
     def release(self) -> None:
         self.leased = ()
@@ -146,21 +169,29 @@ class PromptStorageCache(DynamicCache):
         self.initial_bytes = self.peak_bytes = 0
         self.observations = 0
         self.build_records: list[dict[str, Any]] = []
+        self.shared_tensors: tuple[Any, ...] = ()
+        self.shared_bytes = 0
 
     def observe(self, extras: tuple[Any, ...] = ()) -> None:
-        current = sum(layer.resident_bytes + layer.lease_bytes for layer in self.layers)
+        current = self.shared_bytes + sum(
+            layer.resident_bytes + layer.lease_bytes for layer in self.layers
+        )
         self.peak_bytes = max(self.peak_bytes, current + backing_bytes(extras))
         self.observations += 1
 
     def storage_record(self) -> dict[str, Any]:
         self.observe()
-        actual = backing_bytes(tuple(t for layer in self.layers for t in layer.owned_tensors()))
-        if actual != sum(layer.resident_bytes + layer.lease_bytes for layer in self.layers):
+        actual = backing_bytes(
+            (*self.shared_tensors, *(t for layer in self.layers for t in layer.owned_tensors()))
+        )
+        if actual != self.shared_bytes + sum(
+            layer.resident_bytes + layer.lease_bytes for layer in self.layers
+        ):
             raise RuntimeError("cached accounting differs from independent storage enumeration")
         return dict(
             initial_active_kv_storage_bytes=self.initial_bytes,
             final_active_kv_storage_bytes=backing_bytes(
-                tuple(t for layer in self.layers for t in layer.owned_tensors())
+                (*self.shared_tensors, *(t for layer in self.layers for t in layer.owned_tensors()))
             ),
             peak_active_kv_storage_bytes=self.peak_bytes,
             boundary="post_construction_active_decode_backing_including_layer_materialization",

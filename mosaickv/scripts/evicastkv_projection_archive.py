@@ -23,7 +23,7 @@ PARENT = Path("/scratch/djy8hg/runs/evicastkv/lossless-fused-consumed-20261029-v
 PARENT_SHA = "e538caf12011239a3d218a2620106ec20e9c11b36dedd13341b85c00edabd42d"
 
 
-def prepare(root):
+def prepare(root, *, runtime=False):
     source = clean_source(SOURCE)
     if root.exists() or sha(PARENT / "plan.json") != PARENT_SHA:
         raise ValueError("new immutable root and pinned consumed inputs required")
@@ -54,6 +54,24 @@ def prepare(root):
         paper_campaign_authorized=False,
         shared_format_applied_to_both_selectors=True,
     )
+    if runtime:
+        previous = Path("/scratch/djy8hg/runs/evicastkv/projection-source-feasibility-20261030-v1")
+        gate = common.read(previous / "analysis/GATE.json")
+        if gate["status"] != "complete_consumed_component_diagnostic" or gate["failures"]:
+            raise ValueError("complete retained-bit source reconstruction required")
+        for name in ("plan.json", "analysis/GATE.json", "analysis/manifest.json"):
+            bound[str(previous / name)] = sha(previous / name)
+        plan.update(
+            protocol="isolated_projection_archive_greedy_and_workspace_control_v2",
+            runtime_controls=True,
+            tokens=32,
+            source_layer_bound=8,
+            not_installed_cache_backend=False,
+            experimental_evaluation_transport_only=True,
+            policies=["kv_only", "hybrid", "bounded_sources"],
+            whole_request_peak_certified=False,
+            latency_comparison_authorized=False,
+        )
     write_once(root / "plan.json", plan)
     return sha(root / "plan.json")
 
@@ -115,6 +133,16 @@ def worker(root, expected, index):
         capture.validate()
         pairs, _ = adapter._legacy_layers(prefill.state.past_key_values)
         checksum = source_sha(pairs)
+        if plan.get("runtime_controls"):
+            from mosaickv.evaluation.projection_cache import runtime_controls
+
+            all_positions = [
+                [[p for p in range(k.shape[-2])] for _ in range(k.shape[1])] for k, _ in pairs
+            ]
+            identity = runtime_controls(
+                adapter, prefill, capture, all_positions, policies=("bounded_sources",)
+            )
+            write_once(out / "runtime_retention_one.json", identity)
         folder = Path(job["delimiter_worker"])
         frozen = torch.load(folder / "captures.pt", weights_only=True, map_location="cpu")
         transactions = common.read(folder / "transactions.json")
@@ -133,7 +161,9 @@ def worker(root, expected, index):
                 cuda_runtime=torch.version.cuda,
                 installed_transformers_source=str(source_file),
                 installed_transformers_source_sha256=sha(source_file),
-                measurement_type="consumed_projection_archive_component_feasibility",
+                measurement_type="evaluation_only_projection_archive_runtime_correctness"
+                if plan.get("runtime_controls")
+                else "consumed_projection_archive_component_feasibility",
                 result_category="unified_comparison",
                 result_origin="locally_measured",
                 evaluator_commit=plan["source_sha"],
@@ -231,6 +261,11 @@ def worker(root, expected, index):
                     archive,
                 )
                 settle(adapter)
+            if plan.get("runtime_controls"):
+                from mosaickv.evaluation.projection_cache import runtime_controls
+
+                controls = runtime_controls(adapter, prefill, capture, selections)
+                write_once(out / f"{role}-runtime_controls.json", controls)
         if source_sha(pairs) != checksum:
             raise RuntimeError("archive feasibility mutated original source")
         write_once(out / "measurements.json", rows)
@@ -249,7 +284,7 @@ def analyze(root, expected):
     plan = common.inputs(root, expected)
     out = root / "analysis"
     out.mkdir(exist_ok=False)
-    rows, failures, inputs = [], [], {}
+    rows, failures, inputs, controls = [], [], {}, []
     for job in plan["jobs"]:
         folder = root / f"workers/{job['index']}"
         path = folder / "result.json"
@@ -272,13 +307,37 @@ def analyze(root, expected):
             ):
                 raise ValueError("incomplete bitwise source reconstruction")
             rows.append(dict(task=job["task"], sample_id=job["sample_id"], **record))
+        if plan.get("runtime_controls"):
+            identity = common.read(folder / "runtime_retention_one.json")["bounded_sources"]
+            if not identity["bitwise_logits_equal_reference"] or identity["tokens"] != 32:
+                raise ValueError("source-archive retention-one identity failed")
+            for arm in job["arms"]:
+                for policy, control in common.read(
+                    folder / f"{arm['role']}-runtime_controls.json"
+                ).items():
+                    if (
+                        not control["bitwise_logits_equal_reference"]
+                        or control["tokens"] != 32
+                        or control["maximum_logit_difference"] != 0
+                    ):
+                        raise ValueError("source-archive greedy identity failed")
+                    controls.append(
+                        dict(task=job["task"], role=arm["role"], policy=policy, **control)
+                    )
     gate = dict(
         status="complete_consumed_component_diagnostic"
-        if len(rows) == 8 and not failures
+        if len(rows) == 8
+        and not failures
+        and (not plan.get("runtime_controls") or len(controls) == 12)
         else "failed",
         failures=failures,
         comparisons=rows,
-        not_installed_in_decode=True,
+        not_installed_in_decode=not plan.get("runtime_controls", False),
+        production_backend=False,
+        runtime_controls=controls,
+        runtime_controls_passed=(len(controls) == 12 and not failures)
+        if plan.get("runtime_controls")
+        else None,
         benchmark_quality_measured=False,
         whole_request_peak_certified=False,
         selector_superiority_established=False,
@@ -307,9 +366,10 @@ def main():
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--plan-sha")
     parser.add_argument("--index", type=int)
+    parser.add_argument("--runtime-controls", action="store_true")
     args = parser.parse_args()
     if args.mode == "prepare":
-        print(prepare(args.root))
+        print(prepare(args.root, runtime=args.runtime_controls))
     elif args.mode == "submit":
         launch.submit(
             args.root,
