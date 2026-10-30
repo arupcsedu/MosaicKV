@@ -344,18 +344,21 @@ def analyze(root, expected):
 
     original_analyze(root, expected)
     gate = base.common.read(root / "analysis/GATE.json")
+    plan = base.common.read(root / "plan.json")
+    selected = str(plan.get("comparison_precision_bits", 4))
     complete = not gate["failures"] and len(gate["controls"]) == len(
         base.common.read(root / "plan.json")["jobs"]
     )
     passed = complete and all(
-        r["controls"]["4"]["numerical_gate"] and r["controls"]["4"]["smaller_initial_final_peak"]
+        r["controls"][selected]["numerical_gate"]
+        and r["controls"][selected]["smaller_initial_final_peak"]
         for r in gate["controls"]
     )
     timing = []
     for row in gate["controls"]:
         timed = [t for t in row["trials"] if not t["warmup"]]
         a = {t["trial"]: t["decode_wall_seconds"] for t in timed if t["variant"] == "reference"}
-        b = {t["trial"]: t["decode_wall_seconds"] for t in timed if t["variant"] == "4"}
+        b = {t["trial"]: t["decode_wall_seconds"] for t in timed if t["variant"] == selected}
         if a or b:
             if set(a) != set(range(20)) or set(a) != set(b):
                 raise ValueError("missing paired timing repetitions")
@@ -374,7 +377,9 @@ def analyze(root, expected):
     write_once(
         root / "analysis/precision_decision.json",
         dict(
-            four_bit_canary_passed=passed,
+            four_bit_canary_passed=passed and selected == "4",
+            registered_precision_bits=int(selected),
+            registered_precision_passed=passed,
             complete=complete,
             failures=gate["failures"],
             timing=timing,
@@ -398,6 +403,9 @@ def analyze(root, expected):
 
 def admit(root, expected):
     plan = base.common.inputs(root, expected)
+    script = plan.get("worker_script", "evicastkv_precision_tier.sbatch")
+    if script not in ("evicastkv_precision_tier.sbatch", "evicastkv_precision_threebit.sbatch"):
+        raise ValueError("unregistered precision worker script")
     proof = base.common.read(root / "cpu_record.json")
     xml = Path(proof["cpu_xml"])
     if (
@@ -417,8 +425,12 @@ def admit(root, expected):
         raise ValueError("full CPU suite must pass before GPU admission")
     from control_a100_schedule import ACTIVE, gpu_count, read_queue
 
-    if sum(gpu_count(r["gres"]) for r in read_queue() if r["state"] in ACTIVE) > 4:
-        raise ValueError("two-worker canary would exceed six aggregate A100s")
+    needed = min(6, len(plan["jobs"]))
+    queue = read_queue()
+    if sum(gpu_count(r["gres"]) for r in queue if r["state"] in ACTIVE) + needed > 6 or any(
+        gpu_count(r["gres"]) and r["state"] == "PENDING" for r in queue
+    ):
+        raise ValueError("precision array would exceed or race six aggregate A100s")
     write_once(
         root / "cpu_admission.json",
         dict(source_sha=plan["source_sha"], junit_sha256=sha(xml), tests=count),
@@ -426,7 +438,7 @@ def admit(root, expected):
     base.launch.submit(
         root,
         expected,
-        script_name="evicastkv_precision_tier.sbatch",
+        script_name=script,
         worker_minutes=30,
         memory_gb=24,
     )
