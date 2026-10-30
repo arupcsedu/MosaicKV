@@ -172,6 +172,13 @@ class PromptStorageCache(DynamicCache):
         self.shared_tensors: tuple[Any, ...] = ()
         self.shared_bytes = 0
 
+    def get_mask_sizes(self, cache_position: Any, layer_idx: int) -> tuple[int, int]:
+        # One native eager mask is shared, then sliced to each actual layer.
+        del layer_idx
+        return max(
+            (layer.get_seq_length() for layer in self.layers), default=0
+        ) + cache_position.shape[0], 0
+
     def observe(self, extras: tuple[Any, ...] = ()) -> None:
         current = self.shared_bytes + sum(
             layer.resident_bytes + layer.lease_bytes for layer in self.layers

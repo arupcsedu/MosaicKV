@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import weakref
 from contextlib import nullcontext
-from typing import Any
+from typing import Any, cast
 
 import torch
 from torch.utils._python_dispatch import TorchDispatchMode
@@ -115,10 +115,11 @@ class ProjectionCache(PromptStorageCache):
         super().__init__()
         self.audit_workspace = audit_workspace
 
-    def get_seq_length(self, layer_idx: int | None = None) -> int:
+    def get_seq_length(self, layer_idx: int | None = None, cache_position: Any = None) -> int:
         # Native HF mask construction needs the maximum physical extent, not
         # an assumption that the first layer is always the longest. Explicit
         # layer queries still report their actual unpadded length.
+        del cache_position
         if layer_idx is None:
             return max((layer.get_seq_length() for layer in self.layers), default=0)
         return self.layers[layer_idx].get_seq_length() if layer_idx < len(self.layers) else 0
@@ -217,6 +218,7 @@ def construct_projection_cache(
             or (policy == "hybrid" and source_cost < kv_cost)
             or (policy == "bounded_sources" and layer_index in bounded)
         )
+        layer: PromptStorageLayer
         if chosen:
             layer = ProjectionLayer(
                 archive,
@@ -248,7 +250,11 @@ def construct_projection_cache(
     cache.shared_tensors = tuple(shared)
     cache.shared_bytes = backing_bytes(cache.shared_tensors)
     cache.initial_bytes = backing_bytes(
-        tuple(t for layer in cache.layers for t in layer.owned_tensors())
+        tuple(
+            t
+            for cache_layer in cache.layers
+            for t in cast(PromptStorageLayer, cache_layer).owned_tensors()
+        )
     )
     cache.observe()
     return cache

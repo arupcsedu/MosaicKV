@@ -109,7 +109,12 @@ def build_archive(record: dict[str, Any], positions: Any, *, encoded: bool) -> P
     union = torch.tensor(
         sorted({p for head in positions for p in head}), dtype=torch.int64, device=normalized.device
     )
-    selected = torch.tensor(positions, dtype=torch.int64, device=normalized.device)
+    if all(list(head) == list(positions[0]) for head in positions):
+        # One true owner, not H duplicate maps. Stride-zero head views retain
+        # the same ordinary gather semantics and are charged by backing.
+        selected = union.unsqueeze(0).expand(len(positions), -1)
+    else:
+        selected = torch.tensor(positions, dtype=torch.int64, device=normalized.device)
     hidden = normalized.index_select(1, union).unsqueeze(1).contiguous()
     if encoded:
         if hidden.device.type == "cuda":

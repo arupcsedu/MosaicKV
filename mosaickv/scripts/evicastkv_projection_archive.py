@@ -23,7 +23,9 @@ PARENT = Path("/scratch/djy8hg/runs/evicastkv/lossless-fused-consumed-20261029-v
 PARENT_SHA = "e538caf12011239a3d218a2620106ec20e9c11b36dedd13341b85c00edabd42d"
 
 
-def prepare(root, *, runtime=False):
+def prepare(root, *, runtime=False, union_restore=False):
+    if union_restore and not runtime:
+        raise ValueError("union restoration requires the isolated runtime controls")
     source = clean_source(SOURCE)
     if root.exists() or sha(PARENT / "plan.json") != PARENT_SHA:
         raise ValueError("new immutable root and pinned consumed inputs required")
@@ -71,6 +73,24 @@ def prepare(root, *, runtime=False):
             policies=["kv_only", "hybrid", "bounded_sources"],
             whole_request_peak_certified=False,
             latency_comparison_authorized=False,
+        )
+    if union_restore:
+        previous = Path("/scratch/djy8hg/runs/evicastkv/projection-source-runtime-20261030-v2")
+        gate = common.read(previous / "analysis/GATE.json")
+        if gate["runtime_controls_passed"] is not True or gate["failures"]:
+            raise ValueError("complete source-cache runtime identity required")
+        for name in ("plan.json", "analysis/GATE.json", "analysis/manifest.json"):
+            bound[str(previous / name)] = sha(previous / name)
+        plan.update(
+            protocol="source_union_restoration_consumed_causal_control_v3",
+            union_restore_controls=True,
+            selector_changes_authorized=True,
+            bounded_selector_change="all_heads_receive_union_of_already_archived_rows",
+            no_donor_eviction=True,
+            no_benchmark_label_access=True,
+            same_realized_byte_budget_claim=False,
+            representation_correctness_reference="independent_original_KV_gather_at_expanded_positions",
+            original_guard_unchanged=True,
         )
     write_once(root / "plan.json", plan)
     return sha(root / "plan.json")
@@ -266,6 +286,28 @@ def worker(root, expected, index):
 
                 controls = runtime_controls(adapter, prefill, capture, selections)
                 write_once(out / f"{role}-runtime_controls.json", controls)
+            if plan.get("union_restore_controls"):
+                from mosaickv.config import DraftAllocationGuardConfig
+                from mosaickv.evaluation.union_restoration import evaluate_union
+
+                full = torch.load(
+                    Path(job["parent_worker"]) / "captures.pt",
+                    map_location="cpu",
+                    weights_only=True,
+                )["logits"]["full_kv_reference"]
+                control = evaluate_union(
+                    adapter,
+                    prefill,
+                    capture,
+                    selections,
+                    common.read(job["input"])["fullkv_prefix_tokens"],
+                    full_logits=full,
+                    anchor_logits=frozen[role]["anchor"]["logits"],
+                    guard_config=DraftAllocationGuardConfig.from_mapping(plan["guard"]),
+                    maximum_reference_kl=plan["maximum_reference_kl"],
+                    maximum_logit_difference=plan["maximum_logit_difference"],
+                )
+                write_once(out / f"{role}-union_controls.json", control)
         if source_sha(pairs) != checksum:
             raise RuntimeError("archive feasibility mutated original source")
         write_once(out / "measurements.json", rows)
@@ -284,7 +326,7 @@ def analyze(root, expected):
     plan = common.inputs(root, expected)
     out = root / "analysis"
     out.mkdir(exist_ok=False)
-    rows, failures, inputs, controls = [], [], {}, []
+    rows, failures, inputs, controls, unions = [], [], {}, [], []
     for job in plan["jobs"]:
         folder = root / f"workers/{job['index']}"
         path = folder / "result.json"
@@ -324,6 +366,12 @@ def analyze(root, expected):
                     controls.append(
                         dict(task=job["task"], role=arm["role"], policy=policy, **control)
                     )
+        if plan.get("union_restore_controls"):
+            for arm in job["arms"]:
+                control = common.read(folder / f"{arm['role']}-union_controls.json")
+                if not control["representation_bitwise_equal_original_expanded_KV"]:
+                    raise ValueError("union representation reference failed")
+                unions.append(dict(task=job["task"], role=arm["role"], **control))
     gate = dict(
         status="complete_consumed_component_diagnostic"
         if len(rows) == 8
@@ -334,6 +382,21 @@ def analyze(root, expected):
         comparisons=rows,
         not_installed_in_decode=not plan.get("runtime_controls", False),
         production_backend=False,
+        union_controls=unions,
+        union_relative_guards_passed=(
+            len(unions) == 4
+            and not failures
+            and all(r["unchanged_relative_guard"]["accepted"] for r in unions)
+        )
+        if plan.get("union_restore_controls")
+        else None,
+        union_absolute_limits_passed=(
+            len(unions) == 4
+            and not failures
+            and all(r["absolute_fullkv_limits_passed"] for r in unions)
+        )
+        if plan.get("union_restore_controls")
+        else None,
         runtime_controls=controls,
         runtime_controls_passed=(len(controls) == 12 and not failures)
         if plan.get("runtime_controls")
@@ -367,9 +430,14 @@ def main():
     parser.add_argument("--plan-sha")
     parser.add_argument("--index", type=int)
     parser.add_argument("--runtime-controls", action="store_true")
+    parser.add_argument("--union-restore-controls", action="store_true")
     args = parser.parse_args()
     if args.mode == "prepare":
-        print(prepare(args.root, runtime=args.runtime_controls))
+        print(
+            prepare(
+                args.root, runtime=args.runtime_controls, union_restore=args.union_restore_controls
+            )
+        )
     elif args.mode == "submit":
         launch.submit(
             args.root,
