@@ -18,6 +18,8 @@ def cache_from_formats(
     batched_history: bool = False,
     source_history: bool = False,
     source_history_constructor: str = "reference",
+    shared_workspace: bool = False,
+    workspace_graph: bool = False,
 ) -> ExactCache:
     from mosaickv.evaluation.sealed_history import SealedHistoryLayer
 
@@ -25,6 +27,10 @@ def cache_from_formats(
         not source_history and source_history_constructor != "reference"
     ):
         raise ValueError("explicit source history required for its constructor policy")
+    if type(shared_workspace) is not bool or type(workspace_graph) is not bool:
+        raise ValueError("shared workspace and graph policies must be explicit booleans")
+    if (workspace_graph and not shared_workspace) or (shared_workspace and not source_history):
+        raise ValueError("workspace graphs require an explicit shared source-history workspace")
     cache = ExactCache(audit_workspace=audit)
     cls = SealedHistoryLayer if sealed else ExactLayer
     if batched_history:
@@ -40,6 +46,15 @@ def cache_from_formats(
 
         cache = SourceHistoryCache(audit_workspace=audit, constructor=source_history_constructor)
         cls = SourceHistoryLayer
+        if shared_workspace:
+            from mosaickv.evaluation.graphed_storage import SharedSourceCache, SharedSourceLayer
+
+            cache = SharedSourceCache(
+                audit_workspace=audit,
+                constructor=source_history_constructor,
+                graphs=workspace_graph,
+            )
+            cls = SharedSourceLayer
     shared: list[Any] = []
     for i, format in enumerate(formats):
         shared.extend(format.shared())
@@ -50,6 +65,7 @@ def cache_from_formats(
             direct=True,
             updates=updates,
             audit=audit,
+            **({"cache": cache} if shared_workspace else {}),
         )
         cache.layers.append(layer)
         cache.build_records.append(
@@ -76,6 +92,8 @@ def run(
     batched_history: bool = False,
     source_history: bool = False,
     source_history_constructor: str = "reference",
+    shared_workspace: bool = False,
+    workspace_graph: bool = False,
 ) -> tuple[Any, dict[str, Any]]:
     import time
 
@@ -99,6 +117,8 @@ def run(
         batched_history=batched_history,
         source_history=source_history,
         source_history_constructor=source_history_constructor,
+        shared_workspace=shared_workspace,
+        workspace_graph=workspace_graph,
     )
     length = max(f.shape[-2] for f in formats)
     state = DecodeState(
@@ -131,6 +151,8 @@ def run(
             if source_history:
                 from mosaickv.evaluation.source_history import seal_source_full_tails
 
+                if shared_workspace and any(layer.tail_used == 16 for layer in cache.layers):
+                    cache.release_workspace()
                 seal_source_full_tails(cache)
             if batched_history:
                 from mosaickv.evaluation.batched_history import seal_full_tails
@@ -141,6 +163,8 @@ def run(
             output = adapter.decode_one_token(token, state, capture_queries=False)
             values.append(output.logits.detach().reshape(-1).float())
             token = output.next_token_id
+        if shared_workspace:
+            cache.release_workspace()
         ends.record()
     torch.cuda.synchronize()
     wall = time.monotonic() - started
@@ -165,6 +189,8 @@ def run(
         batched_history=batched_history,
         source_history=source_history,
         source_history_constructor=source_history_constructor,
+        shared_workspace=shared_workspace,
+        workspace_graph=workspace_graph,
         batched_history_seals=getattr(cache, "batched_history_seals", 0),
         batched_history_encode_batches=getattr(cache, "batched_history_encode_batches", 0),
         output_tokens=tokens,

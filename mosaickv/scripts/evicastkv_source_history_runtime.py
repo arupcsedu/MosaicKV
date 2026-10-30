@@ -116,6 +116,7 @@ def study(adapter, prefill, capture, frozen, job, cfg, full_reference, prepared,
         base.choices, base.timing = old_choices, old_timing
     formats = pending["formats"]
     constructor_comparison = plan.get("source_history_comparison_kind") == "constructor"
+    workspace_comparison = plan.get("source_history_comparison_kind") == "workspace"
     reference_policy = (
         dict(source_history=True, source_history_constructor="reference")
         if constructor_comparison
@@ -125,6 +126,9 @@ def study(adapter, prefill, capture, frozen, job, cfg, full_reference, prepared,
         source_history=True,
         source_history_constructor=plan.get("candidate_constructor", "reference"),
     )
+    if workspace_comparison:
+        reference_policy = dict(source_history=True, source_history_constructor="direct")
+        candidate_policy.update(shared_workspace=True, workspace_graph=True)
     reference, old = run(adapter, prefill, formats, tokens=128, audit=True, **reference_policy)
     candidate, new = run(adapter, prefill, formats, tokens=128, audit=True, **candidate_policy)
     if not torch.equal(reference, candidate) or not torch.equal(
@@ -146,6 +150,14 @@ def study(adapter, prefill, capture, frozen, job, cfg, full_reference, prepared,
             and a[fields[1]] == b[fields[1]]
             and b[fields[2]] <= a[fields[2]]
         )
+    if workspace_comparison:
+        memory_pass = (
+            a[fields[0]] == b[fields[0]]
+            and a[fields[1]] == b[fields[1]]
+            and b[fields[2]] <= a[fields[2]] * plan["maximum_workspace_peak_ratio"]
+            and b["active_workspace_bytes"] == 0
+            and b["graph_private_allocation_bytes"] == 0
+        )
     if b["source_history_seals"] != 7 or b["source_history_normalized_tail_bytes"] != 4 * 2**20:
         raise RuntimeError("missing source chunk or normalized-tail accounting")
     torch.save(dict(reference=reference, candidate=candidate), out / "128-token-logits.pt")
@@ -158,7 +170,13 @@ def study(adapter, prefill, capture, frozen, job, cfg, full_reference, prepared,
         initial_final_peak_memory_gate=memory_pass,
         whole_request_peak_certified=False,
         no_quality_superiority_claim=True,
-        source_history_comparison_kind="constructor" if constructor_comparison else "KV_vs_source",
+        source_history_comparison_kind=(
+            "workspace"
+            if workspace_comparison
+            else "constructor"
+            if constructor_comparison
+            else "KV_vs_source"
+        ),
     )
     write_once(out / "source_history_controls.json", row)
     trials = []

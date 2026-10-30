@@ -262,7 +262,9 @@ def seal_source_full_tails(cache: SourceHistoryCache) -> bool:
         for layer in layers:
             builder = build_chunk_direct if cache.source_constructor == "direct" else build_chunk
             format = builder(layer, cos, sin)
-            if any(identity(t) in excluded for t in format.private()):
+            if any(
+                t.untyped_storage().nbytes() and identity(t) in excluded for t in format.private()
+            ):
                 raise RuntimeError("immutable source history aliases a mutable existing owner")
             formats.append(format)
             pending.extend(format.tensors())
