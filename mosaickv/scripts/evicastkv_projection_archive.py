@@ -23,11 +23,13 @@ PARENT = Path("/scratch/djy8hg/runs/evicastkv/lossless-fused-consumed-20261029-v
 PARENT_SHA = "e538caf12011239a3d218a2620106ec20e9c11b36dedd13341b85c00edabd42d"
 
 
-def prepare(root, *, runtime=False, union_restore=False, source_timing=False):
+def prepare(root, *, runtime=False, union_restore=False, source_timing=False, source_profile=False):
     if union_restore and not runtime:
         raise ValueError("union restoration requires the isolated runtime controls")
     if source_timing and (not runtime or union_restore):
         raise ValueError("timing requires original-selection runtime controls, not rejected union")
+    if source_profile and (not runtime or union_restore or source_timing):
+        raise ValueError("profiling is a separate original-selection runtime diagnostic")
     source = clean_source(SOURCE)
     if root.exists() or sha(PARENT / "plan.json") != PARENT_SHA:
         raise ValueError("new immutable root and pinned consumed inputs required")
@@ -118,6 +120,25 @@ def prepare(root, *, runtime=False, union_restore=False, source_timing=False):
             transport_timing_comparison_authorized=True,
             memory_evidence="separate_instrumented_runtime_controls_not_timed_peak",
             causal_union_remains_negative=True,
+            no_fresh_or_quality_campaign_promotion=True,
+        )
+    if source_profile:
+        previous = Path(
+            "/scratch/djy8hg/runs/evicastkv/projection-source-paired-timing-20261030-v4"
+        )
+        gate = common.read(previous / "analysis/GATE.json")
+        if gate["source_timing_complete"] is not True or gate["failures"]:
+            raise ValueError("complete paired timing required before operator diagnosis")
+        for name in ("plan.json", "analysis/GATE.json", "analysis/manifest.json"):
+            bound[str(previous / name)] = sha(previous / name)
+        plan.update(
+            protocol="source_reconstruction_consumed_operator_profile_v5",
+            source_profile_controls=True,
+            selector_changes_authorized=False,
+            profiled_formats=["encoded_KV", "hybrid_source"],
+            profile_warmups=5,
+            profiled_decode_updates=4,
+            profiles_are_not_latency_or_quality_evidence=True,
             no_fresh_or_quality_campaign_promotion=True,
         )
     write_once(root / "plan.json", plan)
@@ -324,6 +345,11 @@ def worker(root, expected, index):
                     adapter, prefill, capture, selections, seed=plan["source_timing"]["seed"]
                 )
                 write_once(out / f"{role}-source_timing.json", trials)
+            if plan.get("source_profile_controls"):
+                from mosaickv.evaluation.projection_profile import profile
+
+                profiles = profile(adapter, prefill, capture, selections, out, role)
+                write_once(out / f"{role}-profile_summary.json", profiles)
             if plan.get("union_restore_controls"):
                 from mosaickv.config import DraftAllocationGuardConfig
                 from mosaickv.evaluation.union_restoration import evaluate_union
@@ -366,6 +392,7 @@ def analyze(root, expected):
     out.mkdir(exist_ok=False)
     rows, failures, inputs, controls, unions = [], [], {}, [], []
     timing_trials, timing_summary = [], []
+    profiles = []
     for job in plan["jobs"]:
         folder = root / f"workers/{job['index']}"
         path = folder / "result.json"
@@ -420,12 +447,19 @@ def analyze(root, expected):
                 timing_summary.extend(
                     dict(t, task=job["task"], role=arm["role"]) for t in summarize(data)
                 )
+        if plan.get("source_profile_controls"):
+            for arm in job["arms"]:
+                records = common.read(folder / f"{arm['role']}-profile_summary.json")
+                if len(records) != 2 or not all(r["bitwise_reference_parity"] for r in records):
+                    raise ValueError("incomplete operator profile or changed logits")
+                profiles.extend(dict(t, task=job["task"]) for t in records)
     gate = dict(
         status="complete_consumed_component_diagnostic"
         if len(rows) == 8
         and not failures
         and (not plan.get("runtime_controls") or len(controls) == 12)
         and (not plan.get("source_timing_controls") or len(timing_summary) == 12)
+        and (not plan.get("source_profile_controls") or len(profiles) == 8)
         else "failed",
         failures=failures,
         comparisons=rows,
@@ -448,6 +482,10 @@ def analyze(root, expected):
         else None,
         runtime_controls=controls,
         source_timing_summary=timing_summary,
+        operator_profiles=profiles,
+        source_profile_complete=(len(profiles) == 8 and not failures)
+        if plan.get("source_profile_controls")
+        else None,
         source_timing_complete=(len(timing_summary) == 12 and not failures)
         if plan.get("source_timing_controls")
         else None,
@@ -490,6 +528,7 @@ def main():
     parser.add_argument("--runtime-controls", action="store_true")
     parser.add_argument("--union-restore-controls", action="store_true")
     parser.add_argument("--source-timing-controls", action="store_true")
+    parser.add_argument("--source-profile-controls", action="store_true")
     args = parser.parse_args()
     if args.mode == "prepare":
         print(
@@ -498,6 +537,7 @@ def main():
                 runtime=args.runtime_controls,
                 union_restore=args.union_restore_controls,
                 source_timing=args.source_timing_controls,
+                source_profile=args.source_profile_controls,
             )
         )
     elif args.mode == "submit":
