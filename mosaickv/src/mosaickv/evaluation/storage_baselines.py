@@ -162,6 +162,10 @@ def baseline_payload(
             else cap,
             final_injected_cap_unchanged=True,
             actual_source_slot_bytes=actual,
+            selected_source_positions_by_layer=[
+                [list(h.selected_physical_positions) for h in selected if h.layer == layer]
+                for layer in range(layer_count)
+            ],
         )
         return None, pairs, proof
     else:
