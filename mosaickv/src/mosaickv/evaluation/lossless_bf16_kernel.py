@@ -4,7 +4,7 @@ import triton
 import triton.language as tl
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["COUNT", "PROMPT", "LENGTH"])
 def _decode(
     SM,
     CODES,
@@ -12,9 +12,9 @@ def _decode(
     OFFSETS,
     LITERALS,
     OUTPUT,
-    COUNT: tl.constexpr,
-    PROMPT: tl.constexpr,
-    LENGTH: tl.constexpr,
+    COUNT,
+    PROMPT,
+    LENGTH,
     DIM: tl.constexpr,
     BLOCK: tl.constexpr,
 ):

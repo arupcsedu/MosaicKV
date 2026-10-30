@@ -24,7 +24,7 @@ PARENT_SHA = "da8cd788ff54844cdcf9c26b41f05c1eabd504ce79e6721a28dcccc6541d4b42"
 MODES = ("raw_control", "lossless_storage")
 
 
-def prepare(root):
+def prepare(root, *, retry_from=None):
     source = clean_source(SOURCE)
     if root.exists() or sha(PARENT / "plan.json") != PARENT_SHA:
         raise ValueError("new immutable root and pinned consumed parent required")
@@ -67,6 +67,53 @@ def prepare(root):
         construction_peak_certified=False,
         whole_request_peak_certified=False,
     )
+    if retry_from is not None:
+        old_plan = common.read(retry_from / "plan.json")
+        if (
+            old_plan["source_sha"] != "686750bb6bab8485a76f78b404fbcd0c9a6ef355"
+            or old_plan["codec"] != plan["codec"]
+            or old_plan["jobs"] != plan["jobs"]
+        ):
+            raise ValueError("retry requires the exact original codec/input/selection plan")
+        bound[str(retry_from / "plan.json")] = sha(retry_from / "plan.json")
+        # The integer decoder's specialization/cache handling changed, not
+        # its recovered values or measured storage implementation. Preserve
+        # actual producer SHAs; this reuse is correctness evidence only.
+        old_source = Path("/scratch/djy8hg/worktrees/evicastkv-lossless-storage-20261029")
+        for name in ("lossless_bf16.py", "lossless_prompt_cache.py"):
+            path = Path("mosaickv/src/mosaickv/evaluation") / name
+            if sha(SOURCE / path) != sha(old_source / path):
+                raise ValueError("cannot reuse rows after storage/constructor semantics change")
+            bound[str(old_source / path)] = sha(old_source / path)
+        for job in plan["jobs"]:
+            folder = retry_from / f"workers/{job['index']}"
+            result = common.read(folder / "result.json")
+            bound[str(folder / "result.json")] = sha(folder / "result.json")
+            if result["status"] == "completed" and not result["failures"]:
+                for name, digest in result["outputs"].items():
+                    if sha(folder / name) != digest:
+                        raise ValueError("completed worker output changed")
+                    bound[str(folder / name)] = digest
+                job.update(
+                    reused_worker=str(folder),
+                    producer_source_sha=result["source_sha"],
+                    producer_plan_sha256=result["plan_sha256"],
+                )
+        plan["retry_history"] = [
+            dict(
+                worker=j["index"],
+                previous_result=str(retry_from / f"workers/{j['index']}/result.json"),
+                previous_status=common.read(retry_from / f"workers/{j['index']}/result.json")[
+                    "status"
+                ],
+                reused="reused_worker" in j,
+            )
+            for j in plan["jobs"]
+        ]
+        plan["reuse_scope"] = (
+            "per-producer correctness/storage only; no cross-producer latency pooling"
+        )
+        plan["retry_from"] = str(retry_from)
     write_once(root / "plan.json", plan)
     return sha(root / "plan.json")
 
@@ -118,6 +165,8 @@ def worker(root, expected, index):
 
     plan = common.inputs(root, expected)
     job = plan["jobs"][index]
+    if "reused_worker" in job:
+        raise ValueError("completed immutable worker is reused, not executable again")
     out = root / f"workers/{index}"
     out.mkdir(parents=True, exist_ok=False)
     result = dict(
@@ -306,7 +355,7 @@ def analyze(root, expected):
     out.mkdir(exist_ok=False)
     rows, failures = [], []
     for job in plan["jobs"]:
-        folder = root / f"workers/{job['index']}"
+        folder = Path(job.get("reused_worker", root / f"workers/{job['index']}"))
         if not (folder / "result.json").exists():
             failures.append(dict(worker=job["index"], error="missing worker result"))
             continue
@@ -314,7 +363,8 @@ def analyze(root, expected):
         if result["status"] != "completed" or result["failures"]:
             failures.append(dict(worker=job["index"], errors=result["failures"]))
             continue
-        assert result["source_sha"] == plan["source_sha"] and result["plan_sha256"] == expected
+        assert result["source_sha"] == job.get("producer_source_sha", plan["source_sha"])
+        assert result["plan_sha256"] == job.get("producer_plan_sha256", expected)
         for name, digest in result["outputs"].items():
             assert sha(folder / name) == digest
         measurements = common.read(folder / "measurements.json")
@@ -335,6 +385,9 @@ def analyze(root, expected):
             row = dict(
                 task=job["task"],
                 role=role,
+                producer_source_sha=result["source_sha"],
+                reused_correctness_row="reused_worker" in job,
+                diagnostic_timing_may_include_cold_JIT=True,
                 bitwise_logits_equal_anchor=True,
                 unchanged_relative_guard_passed=guard["accepted"],
                 base_selection_absolute_limits_passed=all(
@@ -378,6 +431,8 @@ def analyze(root, expected):
         calibration_authorized=False,
         paper_campaign_authorized=False,
         common_optimization_applied_to_both_methods=True,
+        reused_worker_count=sum("reused_worker" in j for j in plan["jobs"]),
+        retry_history=plan.get("retry_history", []),
     )
     write_once(out / "GATE.json", gate)
     text = (
@@ -400,6 +455,9 @@ def analyze(root, expected):
         "can still fail. No benchmark scores or independent quality claim are produced. "
         "Both Top-K and EviCastKV get this common optimization; its savings cannot establish "
         "EviCastKV selection-policy superiority over an equally optimized competitor.\n"
+        "Compatible completed workers may be reused only with their actual producer source/plan "
+        "identities and hashed outputs. Source identities are in every row, historical failures "
+        "remain in the retry ledger, and cold compiler timings are never pooled across producers.\n"
     )
     (out / "report.md").write_text(text)
     write_once(
@@ -407,7 +465,14 @@ def analyze(root, expected):
         dict(
             source_sha=plan["source_sha"],
             plan_sha256=expected,
-            inputs={str(p): sha(p) for p in (root / "workers").rglob("result.json")},
+            inputs={
+                str(p): sha(p)
+                for p in (
+                    Path(j.get("reused_worker", root / f"workers/{j['index']}")) / "result.json"
+                    for j in plan["jobs"]
+                )
+                if p.exists()
+            },
             outputs={p.name: sha(p) for p in out.iterdir()},
         ),
     )
@@ -429,9 +494,10 @@ def main():
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--plan-sha")
     parser.add_argument("--index", type=int)
+    parser.add_argument("--retry-from", type=Path)
     a = parser.parse_args()
     if a.mode == "prepare":
-        print(prepare(a.root))
+        print(prepare(a.root, retry_from=a.retry_from))
     elif a.mode == "submit":
         launch.submit(
             a.root,
@@ -439,6 +505,11 @@ def main():
             script_name="evicastkv_lossless_storage.sbatch",
             worker_minutes=20,
             memory_gb=16,
+            worker_indices=[
+                j["index"]
+                for j in common.inputs(a.root, a.plan_sha)["jobs"]
+                if "reused_worker" not in j
+            ],
         )
     elif a.mode == "worker":
         worker(a.root, a.plan_sha, a.index)

@@ -86,3 +86,23 @@ tests caught a CPU integer-promotion mismatch, an unsupported cache constructor
 keyword, and an incorrectly ordered incompressibility fixture; each was fixed
 before submission. Ruff, shell syntax and targeted MyPy for the codec passed.
 The real-model GPU result remains separate from these synthetic controls.
+
+## Selective compiler-cache recovery
+
+Attempt `22178401` completed Description but MM-Vet failed opening a shared
+Triton intermediate file; both passed the GPU bit-pattern and raw-transport
+controls first. Preserve the completed Description output and the MM-Vet
+failure. The corrective decoder makes count/prompt/live-length ordinary runtime
+scalars rather than creating a compiled variant for every decode length. Each
+Slurm worker also receives a separate scratch-only Triton cache directory.
+The encoded format, source selection and exact reconstructed bits are unchanged.
+
+Retry preparation verifies the identical codec and jobs and the hashes of the
+unchanged constructor/accounting modules. It binds successful old worker
+outputs and retains their actual producer SHA/plan; only failed indices are
+executable. The analyzer displays producer SHAs, preserves retry history and
+does not pool cold compiler timings across producers. This is reused
+correctness/storage evidence, not a mixed-source performance campaign.
+Twenty-four focused CPU tests passed after this correction, including explicit
+subset submission, invalid-index rejection, source-aware reuse in analysis and
+a regression excluding sequence lengths from Triton constexpr specialization.

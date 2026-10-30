@@ -4,13 +4,17 @@ import json
 from dataclasses import asdict
 
 import evicastkv_lossless_storage as runner
+import pytest
 import torch
 
 from mosaickv.config import DraftAllocationGuardConfig
 from mosaickv.evaluation.fox_campaign import sha
 
 
-def test_lossless_analysis_keeps_common_storage_distinct_from_selector_claim(tmp_path, monkeypatch):
+@pytest.mark.parametrize("reuse", [False, True])
+def test_lossless_analysis_keeps_common_storage_distinct_from_selector_claim(
+    tmp_path, monkeypatch, reuse
+):
     jobs = []
     for index in range(2):
         worker, old, full = (tmp_path / f"{kind}/{index}" for kind in ("workers", "old", "full"))
@@ -40,8 +44,8 @@ def test_lossless_analysis_keeps_common_storage_distinct_from_selector_claim(tmp
                 dict(
                     status="completed",
                     failures=[],
-                    source_sha="a" * 40,
-                    plan_sha256="b" * 64,
+                    source_sha="c" * 40 if reuse and index == 0 else "a" * 40,
+                    plan_sha256="d" * 64 if reuse and index == 0 else "b" * 64,
                     outputs={
                         name: sha(worker / name) for name in ("logits.pt", "measurements.json")
                     },
@@ -56,6 +60,12 @@ def test_lossless_analysis_keeps_common_storage_distinct_from_selector_claim(tmp
                 parent_worker=str(full),
             )
         )
+        if reuse and index == 0:
+            jobs[-1].update(
+                reused_worker=str(worker),
+                producer_source_sha="c" * 40,
+                producer_plan_sha256="d" * 64,
+            )
     plan = dict(
         jobs=jobs,
         source_sha="a" * 40,
@@ -70,3 +80,4 @@ def test_lossless_analysis_keeps_common_storage_distinct_from_selector_claim(tmp
     assert gate["common_optimization_applied_to_both_methods"]
     assert not gate["selector_superiority_established"]
     assert not gate["paper_campaign_authorized"]
+    assert gate["reused_worker_count"] == int(reuse)

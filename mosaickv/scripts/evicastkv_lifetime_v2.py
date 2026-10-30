@@ -460,11 +460,29 @@ def prepare_followup(parent_root, parent_sha, label, child):
 
 
 def submit(
-    root, expected, *, script_name="evicastkv_lifetime_v2.sbatch", worker_minutes=120, memory_gb=64
+    root,
+    expected,
+    *,
+    script_name="evicastkv_lifetime_v2.sbatch",
+    worker_minutes=120,
+    memory_gb=64,
+    worker_indices=None,
 ):
     if type(worker_minutes) is not int or not 1 <= worker_minutes <= 120:
         raise ValueError("worker duration must be within the registered two-hour maximum")
     plan = previous.inputs(root, expected)
+    if worker_indices is None:
+        selected = list(range(len(plan["jobs"])))
+        array_spec = f"0-{len(selected) - 1}"
+    else:
+        selected = list(worker_indices)
+        if (
+            not selected
+            or len(set(selected)) != len(selected)
+            or any(type(i) is not int or not 0 <= i < len(plan["jobs"]) for i in selected)
+        ):
+            raise ValueError("nonempty unique in-range worker indices required")
+        array_spec = ",".join(str(i) for i in sorted(selected))
     (root / "slurm").mkdir()
     script = str(SOURCE / "mosaickv/slurm" / script_name)
     args = [str(SOURCE), str(root), expected]
@@ -483,7 +501,7 @@ def submit(
                 "--cpus-per-task=12",
                 f"--mem={memory_gb}G",
                 f"--time={worker_minutes // 60:02d}:{worker_minutes % 60:02d}:00",
-                f"--array=0-{len(plan['jobs']) - 1}%{min(6, len(plan['jobs']))}",
+                f"--array={array_spec}%{min(6, len(selected))}",
                 f"--output={root}/slurm/gpu-%A_%a.out",
                 f"--error={root}/slurm/gpu-%A_%a.err",
                 script,
@@ -527,8 +545,8 @@ def submit(
         maximum_a100s=6,
         six_a100s_explicitly_authorized=True,
         arrays=[gpu],
-        per_lane_static_throttle=min(6, len(plan["jobs"])),
-        other_lane_reserved_slots=max(0, 6 - len(plan["jobs"])),
+        per_lane_static_throttle=min(6, len(selected)),
+        other_lane_reserved_slots=max(0, 6 - len(selected)),
     )
     write_once(root / "scheduler/policy.json", policy)
     write_once(

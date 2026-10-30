@@ -2,6 +2,8 @@
 set -euo pipefail
 cd "$1"
 source mosaickv/scripts/cache_env.sh
+export TRITON_CACHE_DIR="${MOSAICKV_CACHE_ROOT}/triton/lossless-${SLURM_JOB_ID:?}-${SLURM_ARRAY_TASK_ID:-analysis}"
+mkdir -p "$TRITON_CACHE_DIR"
 export PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 CUBLAS_WORKSPACE_CONFIG=:4096:8
 export PYTHONPATH="$PWD/mosaickv/src:$PWD/mosaickv/scripts"
 export OMP_NUM_THREADS=12 OPENBLAS_NUM_THREADS=12 MKL_NUM_THREADS=12
