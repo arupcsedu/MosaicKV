@@ -28,6 +28,7 @@ def benchmark(
     *,
     seed: int,
     compact_projection: bool = False,
+    streamed_projection: bool = False,
 ) -> list[Any]:
     import torch
 
@@ -56,6 +57,7 @@ def benchmark(
                     policy="hybrid",
                     audit_workspace=False,
                     compact_projection=compact_projection,
+                    streamed_projection=streamed_projection,
                 )
             else:
                 encoded = variant == "encoded_KV"
@@ -114,6 +116,7 @@ def benchmark(
                     variant=variant,
                     seed=seed,
                     compact_projection=compact_projection,
+                    streamed_projection=streamed_projection,
                     construction_seconds=constructor,
                     decode_wall_seconds=wall,
                     decode_cuda_ms=elapsed,

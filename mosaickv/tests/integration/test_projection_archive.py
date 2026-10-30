@@ -10,14 +10,15 @@ from mosaickv.evaluation.projection_archive import (
     build_archive,
     reconstruct_archive,
     reconstruct_compact_archive,
+    reconstruct_streamed_archive,
 )
 
 
 @pytest.mark.parametrize("encoded", [False, True])
 @pytest.mark.parametrize("coherent", [False, True])
-@pytest.mark.parametrize("compact", [False, True])
+@pytest.mark.parametrize("execution", ["original", "compact", "streamed"])
 def test_shared_normalized_source_reconstructs_exact_selected_post_rope_KV(
-    encoded, coherent, compact
+    encoded, coherent, execution
 ):
     torch.manual_seed(33)
     adapter = _llava(kv_heads=2)
@@ -30,7 +31,11 @@ def test_shared_normalized_source_reconstructs_exact_selected_post_rope_KV(
     selections = ((0, 3), (0, 3)) if coherent else ((0, 2), (1, 3))
     for index, (key, value) in enumerate(pairs):
         archive = build_archive(capture.records[index], selections, encoded=encoded)
-        reconstruct = reconstruct_compact_archive if compact else reconstruct_archive
+        reconstruct = {
+            "original": reconstruct_archive,
+            "compact": reconstruct_compact_archive,
+            "streamed": reconstruct_streamed_archive,
+        }[execution]
         reconstructed = reconstruct(archive, adapter._language_layers()[index].self_attn)
         selected = torch.tensor(selections)[None, :, :, None].expand(1, 2, 2, 8)
         for original, actual in zip((key, value), reconstructed, strict=True):

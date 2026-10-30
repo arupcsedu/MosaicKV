@@ -31,6 +31,7 @@ def prepare(
     source_timing=False,
     source_profile=False,
     compact_source=False,
+    streamed_source=False,
 ):
     if union_restore and not runtime:
         raise ValueError("union restoration requires the isolated runtime controls")
@@ -40,6 +41,8 @@ def prepare(
         raise ValueError("profiling is a separate original-selection runtime diagnostic")
     if compact_source and (not runtime or union_restore or source_profile):
         raise ValueError("compact source requires original-selection runtime controls")
+    if streamed_source and (not runtime or compact_source or union_restore or source_profile):
+        raise ValueError("streamed source requires isolated original-shape runtime controls")
     source = clean_source(SOURCE)
     if root.exists() or sha(PARENT / "plan.json") != PARENT_SHA:
         raise ValueError("new immutable root and pinned consumed inputs required")
@@ -184,6 +187,41 @@ def prepare(
             original_positions_and_RoPE_preserved=True,
             no_tolerance_relaxation=True,
         )
+    if streamed_source:
+        previous = Path("/scratch/djy8hg/runs/evicastkv/compact-source-correctness-20261030-v6")
+        stopped = common.read(previous / "controller/decision.json")
+        if stopped["status"] != "stopped_numerical_or_completeness_gate" or stopped["submitted"]:
+            raise ValueError("compact failure must be sealed without timing promotion")
+        for name in (
+            "plan.json",
+            "analysis/GATE.json",
+            "analysis/manifest.json",
+            "controller/decision.json",
+        ):
+            bound[str(previous / name)] = sha(previous / name)
+        if source_timing:
+            previous = Path(
+                "/scratch/djy8hg/runs/evicastkv/streamed-source-correctness-20261030-v8"
+            )
+            gate = common.read(previous / "analysis/GATE.json")
+            if (
+                gate["streamed_static_controls_passed"] is not True
+                or gate["runtime_controls_passed"] is not True
+                or gate["failures"]
+            ):
+                raise ValueError("streamed per-layer/32-token bitwise proof required before timing")
+            for name in ("plan.json", "analysis/GATE.json", "analysis/manifest.json"):
+                bound[str(previous / name)] = sha(previous / name)
+        plan.update(
+            protocol="streamed_source_paired_timing_v9"
+            if source_timing
+            else "original_shape_streamed_source_bitwise_control_v8",
+            streamed_source_controls=True,
+            intervention="original_GEMM_shape_serial_projection_fused_staged_BF16_RoPE_gather",
+            selector_changes_authorized=False,
+            no_tolerance_relaxation=True,
+            original_positions_and_RoPE_preserved=True,
+        )
     write_once(root / "plan.json", plan)
     return sha(root / "plan.json")
 
@@ -203,6 +241,7 @@ def worker(root, expected, index):
         build_archive,
         reconstruct_archive,
         reconstruct_compact_archive,
+        reconstruct_streamed_archive,
     )
     from mosaickv.evaluation.worker_support import settle
     from mosaickv.hf_cli import _model_kwargs
@@ -228,6 +267,10 @@ def worker(root, expected, index):
             raise ValueError("deterministic workspace missing")
         torch.set_num_threads(12)
         torch.use_deterministic_algorithms(True)
+        if plan.get("streamed_source_controls"):
+            from mosaickv.evaluation.projection_rope_kernel import gpu_control
+
+            write_once(out / "rope_kernel_control.json", gpu_control())
         cfg = RunConfig.from_mapping(job["arms"][0]["config"])
         torch.manual_seed(cfg.execution.seed)
         adapter = load_hf_adapter(
@@ -259,6 +302,7 @@ def worker(root, expected, index):
                 all_positions,
                 policies=("bounded_sources",),
                 compact_projection=bool(plan.get("compact_source_controls")),
+                streamed_projection=bool(plan.get("streamed_source_controls")),
             )
             write_once(out / "runtime_retention_one.json", identity)
         folder = Path(job["delimiter_worker"])
@@ -315,8 +359,16 @@ def worker(root, expected, index):
                         1, key.shape[1], len(positions[0]), key.shape[-1]
                     )
                     reference = (key.gather(2, indices), value.gather(2, indices))
-                    if encoded and plan.get("compact_source_controls"):
-                        compact = reconstruct_compact_archive(
+                    if encoded and (
+                        plan.get("compact_source_controls") or plan.get("streamed_source_controls")
+                    ):
+                        streamed = bool(plan.get("streamed_source_controls"))
+                        execution = (
+                            reconstruct_streamed_archive
+                            if streamed
+                            else reconstruct_compact_archive
+                        )
+                        compact = execution(
                             archive, adapter._language_layers()[layer_index].self_attn
                         )
                         checks = [
@@ -329,14 +381,21 @@ def worker(root, expected, index):
                                 bitwise_K=checks[0],
                                 bitwise_V=checks[1],
                                 original_rows=archive.original_length,
-                                compact_rows=int(archive.union.numel()),
+                                archived_rows=int(archive.union.numel()),
+                                projection_rows=archive.original_length
+                                if streamed
+                                else int(archive.union.numel()),
+                                execution="streamed_original_shape"
+                                if streamed
+                                else "compact_shape",
                             )
                         )
                         del compact
                         if not all(checks):
-                            write_once(out / f"{role}-compact_static.json", compact_records)
+                            kind = "streamed" if streamed else "compact"
+                            write_once(out / f"{role}-{kind}_static.json", compact_records)
                             raise RuntimeError(
-                                f"compact GEMM changed original K/V at layer {layer_index}"
+                                f"{kind} projection changed original K/V at layer {layer_index}"
                             )
                     expected_payload += backing_bytes(reference)
                     baseline_bodies = tuple(encode(t) for t in reference)
@@ -411,12 +470,15 @@ def worker(root, expected, index):
 
                 if plan.get("compact_source_controls"):
                     write_once(out / f"{role}-compact_static.json", compact_records)
+                if plan.get("streamed_source_controls"):
+                    write_once(out / f"{role}-streamed_static.json", compact_records)
                 controls = runtime_controls(
                     adapter,
                     prefill,
                     capture,
                     selections,
                     compact_projection=bool(plan.get("compact_source_controls")),
+                    streamed_projection=bool(plan.get("streamed_source_controls")),
                 )
                 write_once(out / f"{role}-runtime_controls.json", controls)
             if plan.get("source_timing_controls"):
@@ -429,6 +491,7 @@ def worker(root, expected, index):
                     selections,
                     seed=plan["source_timing"]["seed"],
                     compact_projection=bool(plan.get("compact_source_controls")),
+                    streamed_projection=bool(plan.get("streamed_source_controls")),
                 )
                 write_once(out / f"{role}-source_timing.json", trials)
             if plan.get("source_profile_controls"):
@@ -481,6 +544,7 @@ def analyze(root, expected):
     timing_trials, timing_summary = [], []
     profiles = []
     compact_controls = []
+    streamed_controls = []
     for job in plan["jobs"]:
         folder = root / f"workers/{job['index']}"
         path = folder / "result.json"
@@ -555,6 +619,19 @@ def analyze(root, expected):
                 ):
                     raise ValueError("compact GEMM lacks complete original-KV bitwise proof")
                 compact_controls.append(dict(task=job["task"], role=arm["role"], layers=records))
+        if plan.get("streamed_source_controls"):
+            kernel_controls = common.read(folder / "rope_kernel_control.json")
+            if len(kernel_controls) != 2 or not all(r["bitwise_equal"] for r in kernel_controls):
+                raise ValueError("incomplete staged BF16 kernel control")
+            for arm in job["arms"]:
+                records = common.read(folder / f"{arm['role']}-streamed_static.json")
+                if len(records) != 32 or not all(
+                    r["bitwise_K"] and r["bitwise_V"] for r in records
+                ):
+                    raise ValueError(
+                        "streamed projection lacks all-layer original-KV bitwise proof"
+                    )
+                streamed_controls.append(dict(task=job["task"], role=arm["role"], layers=records))
     gate = dict(
         status="complete_consumed_component_diagnostic"
         if len(rows) == 8
@@ -563,6 +640,7 @@ def analyze(root, expected):
         and (not plan.get("source_timing_controls") or len(timing_summary) == 12)
         and (not plan.get("source_profile_controls") or len(profiles) == 8)
         and (not plan.get("compact_source_controls") or len(compact_controls) == 4)
+        and (not plan.get("streamed_source_controls") or len(streamed_controls) == 4)
         else "failed",
         failures=failures,
         comparisons=rows,
@@ -587,6 +665,10 @@ def analyze(root, expected):
         source_timing_summary=timing_summary,
         operator_profiles=profiles,
         compact_static_controls=compact_controls,
+        streamed_static_controls=streamed_controls,
+        streamed_static_controls_passed=(len(streamed_controls) == 4 and not failures)
+        if plan.get("streamed_source_controls")
+        else None,
         compact_static_controls_passed=(len(compact_controls) == 4 and not failures)
         if plan.get("compact_source_controls")
         else None,
@@ -637,6 +719,7 @@ def main():
     parser.add_argument("--source-timing-controls", action="store_true")
     parser.add_argument("--source-profile-controls", action="store_true")
     parser.add_argument("--compact-source-controls", action="store_true")
+    parser.add_argument("--streamed-source-controls", action="store_true")
     args = parser.parse_args()
     if args.mode == "prepare":
         print(
@@ -647,6 +730,7 @@ def main():
                 source_timing=args.source_timing_controls,
                 source_profile=args.source_profile_controls,
                 compact_source=args.compact_source_controls,
+                streamed_source=args.streamed_source_controls,
             )
         )
     elif args.mode == "submit":

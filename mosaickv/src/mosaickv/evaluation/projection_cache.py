@@ -26,6 +26,7 @@ from mosaickv.evaluation.projection_archive import (
     build_archive,
     reconstruct_archive,
     reconstruct_compact_archive,
+    reconstruct_streamed_archive,
 )
 
 
@@ -76,11 +77,13 @@ class ProjectionLayer(PromptStorageLayer):
         maximum_decode_updates: int,
         audit_workspace: bool,
         compact_projection: bool = False,
+        streamed_projection: bool = False,
     ) -> None:
         CacheLayerMixin.__init__(self)
         self.archive, self.attention = archive, attention
         self.audit_workspace = audit_workspace
         self.compact_projection = compact_projection
+        self.streamed_projection = streamed_projection
         self.workspace_operations = 0
         self.excluded_weights = {identity(t) for t in attention.parameters()}
         heads, length = archive.selected.shape
@@ -98,14 +101,16 @@ class ProjectionLayer(PromptStorageLayer):
         return (*self.archive.storage_tensors(), *self.history, *self.leased)
 
     def materialize(self) -> None:
-        excluded = self.excluded_weights | {identity(t) for t in self.owned_tensors()}
-        mode = (
-            ScratchAudit(excluded=excluded, observe=self.observe) if self.audit_workspace else None
-        )
+        mode = None
+        if self.audit_workspace:
+            excluded = self.excluded_weights | {identity(t) for t in self.owned_tensors()}
+            mode = ScratchAudit(excluded=excluded, observe=self.observe)
         with mode if mode is not None else nullcontext():
-            reconstruct = (
-                reconstruct_compact_archive if self.compact_projection else reconstruct_archive
-            )
+            reconstruct = reconstruct_archive
+            if self.streamed_projection:
+                reconstruct = reconstruct_streamed_archive
+            elif self.compact_projection:
+                reconstruct = reconstruct_compact_archive
             prompts = reconstruct(self.archive, self.attention)
         if mode is not None:
             self.workspace_operations += mode.operations
@@ -181,7 +186,10 @@ def construct_projection_cache(
     maximum_decode_updates: int = 32,
     maximum_source_layers: int = 8,
     compact_projection: bool = False,
+    streamed_projection: bool = False,
 ) -> ProjectionCache:
+    if compact_projection and streamed_projection:
+        raise ValueError("compact and original-shape streamed projection are distinct controls")
     if policy not in ("hybrid", "source_all", "kv_only", "bounded_sources"):
         raise ValueError("explicit hybrid, source_all, kv_only or bounded_sources policy required")
     source, _ = adapter._legacy_layers(prefill.state.past_key_values)
@@ -234,6 +242,7 @@ def construct_projection_cache(
                 maximum_decode_updates=maximum_decode_updates,
                 audit_workspace=audit_workspace,
                 compact_projection=compact_projection,
+                streamed_projection=streamed_projection,
             )
             shared.extend((archive.cos, archive.sin))
         else:
@@ -276,6 +285,7 @@ def runtime_controls(
     *,
     policies: tuple[str, ...] = ("kv_only", "hybrid", "bounded_sources"),
     compact_projection: bool = False,
+    streamed_projection: bool = False,
 ) -> dict[str, Any]:
     """32-token memory-audited own-greedy control, NOT a latency benchmark."""
     import hashlib
@@ -309,6 +319,7 @@ def runtime_controls(
                 maximum_source_layers=8,
                 audit_workspace=True,
                 compact_projection=compact_projection,
+                streamed_projection=streamed_projection,
             )
         length = max(len(h[0]) for h in positions)
         state = DecodeState(
@@ -350,6 +361,7 @@ def runtime_controls(
         rows[policy] = dict(
             bitwise_logits_equal_reference=True,
             compact_projection=compact_projection,
+            streamed_projection=streamed_projection,
             maximum_logit_difference=0.0,
             used_fullkv_fallback=False,
             original_selected_positions_unchanged=True,

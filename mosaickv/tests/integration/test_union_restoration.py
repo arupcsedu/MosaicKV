@@ -82,7 +82,7 @@ def test_union_covering_full_source_passes_unchanged_guard_without_accessing_lab
     assert result["no_donor_eviction"]
 
 
-def test_disabling_workspace_audit_does_not_change_source_decode_or_claim_peak():
+def test_disabling_workspace_audit_does_not_change_source_decode_or_claim_peak(monkeypatch):
     adapter = _llava(kv_heads=2)
     adapter.model.to(torch.bfloat16)
     with ProjectionCapture(adapter) as capture:
@@ -93,7 +93,14 @@ def test_disabling_workspace_audit_does_not_change_source_decode_or_claim_peak()
         cache = construct_projection_cache(
             adapter, prefill, capture, selections, policy="source_all", audit_workspace=audit
         )
-        logits, record = forced_prefix(adapter, prefill, cache, [3 + i % 5 for i in range(32)])
+        with monkeypatch.context() as scoped:
+            if not audit:
+
+                def forbidden_identity(_tensor):
+                    raise AssertionError("disabled audit must not scan tensor identities")
+
+                scoped.setattr("mosaickv.evaluation.projection_cache.identity", forbidden_identity)
+            logits, record = forced_prefix(adapter, prefill, cache, [3 + i % 5 for i in range(32)])
         assert record["reconstruction_tensor_results_observed"] == audit
         assert bool(record["reconstruction_operator_observations"]) == audit
         values.append(logits)

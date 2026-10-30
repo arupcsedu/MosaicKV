@@ -200,3 +200,50 @@ def reconstruct_compact_archive(archive: ProjectionArchive, attention: Any) -> t
         local = torch.searchsorted(archive.union, archive.selected.contiguous())
         index = local[None, :, :, None].expand(1, heads, kept, dimension)
         return key.gather(2, index), value.gather(2, index)
+
+
+def reconstruct_streamed_archive(archive: ProjectionArchive, attention: Any) -> tuple[Any, Any]:
+    """Keep original GEMM shape; release full K before computing full V.
+
+    CUDA RoPE/gather has explicit intermediate BF16 rounding. This experimental
+    path requires all-layer original-KV bitwise preflight before installed use.
+    """
+    import torch
+    from transformers.models.llama.modeling_llama import apply_rotary_pos_emb
+
+    heads, kept = archive.selected.shape
+    width, dimension = archive.source.shape[-1], attention.head_dim
+    if (
+        width != heads * dimension
+        or attention.k_proj.out_features != width
+        or attention.v_proj.out_features != width
+    ):
+        raise NotImplementedError("streamed source requires original full MHA")
+    with torch.inference_mode():
+        decoded = torch.empty(
+            archive.source.shape, dtype=torch.bfloat16, device=archive.union.device
+        )
+        unpack_into(archive.source, decoded)
+        canvas = torch.zeros(
+            (1, archive.original_length, width), dtype=torch.bfloat16, device=archive.union.device
+        )
+        canvas.index_copy_(1, archive.union, decoded.squeeze(1))
+        del decoded
+        shape = (1, archive.original_length, heads, dimension)
+        full_key = attention.k_proj(canvas).view(shape).transpose(1, 2)
+        index = archive.selected[None, :, :, None].expand(1, heads, kept, dimension)
+        if canvas.device.type == "cuda":
+            from mosaickv.evaluation.projection_rope_kernel import rope_gather
+
+            key = rope_gather(full_key, archive.cos, archive.sin, archive.selected)
+        else:
+            unused_q, rotated = apply_rotary_pos_emb(
+                full_key[:, :1], full_key, archive.cos, archive.sin
+            )
+            key = rotated.gather(2, index)
+            del unused_q, rotated
+        del full_key
+        full_value = attention.v_proj(canvas).view(shape).transpose(1, 2)
+        del canvas
+        value = full_value.gather(2, index)
+        return key, value
