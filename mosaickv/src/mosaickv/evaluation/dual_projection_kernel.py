@@ -10,7 +10,7 @@ import triton
 import triton.language as tl
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["ROWS", "MAP_STRIDE", "HEAD_OUT"])
 def _project(
     X,
     WK,
@@ -21,10 +21,10 @@ def _project(
     SIN,
     OK,
     OV,
-    ROWS: tl.constexpr,
+    ROWS,
     WIDTH: tl.constexpr,
-    MAP_STRIDE: tl.constexpr,
-    HEAD_OUT: tl.constexpr,
+    MAP_STRIDE,
+    HEAD_OUT,
     DIM: tl.constexpr,
     BM: tl.constexpr,
     BK: tl.constexpr,
@@ -70,14 +70,14 @@ def _project(
         tl.store(OV + pointer, av.to(tl.bfloat16), mask)
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["COUNT", "HEAD_OUT"])
 def _patch(
     INDICES,
     VALUES,
     OUTPUT,
-    COUNT: tl.constexpr,
+    COUNT,
     KEPT: tl.constexpr,
-    HEAD_OUT: tl.constexpr,
+    HEAD_OUT,
     DIM: tl.constexpr,
     BLOCK: tl.constexpr,
 ):

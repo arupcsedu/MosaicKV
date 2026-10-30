@@ -7,7 +7,7 @@ import evicastkv_storage_successor as base
 
 from mosaickv.evaluation.fox_campaign import sha
 
-BASE = Path("/scratch/djy8hg/runs/evicastkv/dual-projection-consumed-20261030-v1-retry2")
+BASE = Path("/scratch/djy8hg/runs/evicastkv/dual-projection-consumed-20261030-v1-retry3")
 original_prepare = base.prepare
 original_choices = base.choices
 

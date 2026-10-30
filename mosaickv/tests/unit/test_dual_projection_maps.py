@@ -49,3 +49,16 @@ def test_uncorrected_constructor_measurement_precedes_two_patch_application(monk
 
     replace(f, patches=("key", "value")).fill(None, targets, direct=True)
     assert seen == ["key", "value"]
+
+
+def test_decode_stride_and_source_rows_never_specialize_the_jit():
+    import mosaickv.evaluation.dual_projection_kernel as kernel
+
+    for function, names in (
+        (kernel._project, ("HEAD_OUT", "ROWS", "MAP_STRIDE")),
+        (kernel._patch, ("HEAD_OUT", "COUNT")),
+    ):
+        parameters = {p.name: p for p in function.params}
+        for name in names:
+            assert parameters[name].do_not_specialize
+            assert not parameters[name].is_constexpr
