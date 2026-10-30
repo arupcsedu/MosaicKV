@@ -16,6 +16,7 @@ def cache_from_formats(
     audit: bool,
     sealed: bool = True,
     batched_history: bool = False,
+    source_history: bool = False,
 ) -> ExactCache:
     from mosaickv.evaluation.sealed_history import SealedHistoryLayer
 
@@ -27,6 +28,13 @@ def cache_from_formats(
         from mosaickv.evaluation.batched_history import BatchedHistoryLayer
 
         cls = BatchedHistoryLayer
+    if source_history:
+        if not sealed or batched_history or updates != 128:
+            raise ValueError("source history requires its explicit sealed 128-token diagnostic")
+        from mosaickv.evaluation.source_history import SourceHistoryCache, SourceHistoryLayer
+
+        cache = SourceHistoryCache(audit_workspace=audit)
+        cls = SourceHistoryLayer
     shared: list[Any] = []
     for i, format in enumerate(formats):
         shared.extend(format.shared())
@@ -61,6 +69,7 @@ def run(
     audit: bool = True,
     sealed: bool = True,
     batched_history: bool = False,
+    source_history: bool = False,
 ) -> tuple[Any, dict[str, Any]]:
     import time
 
@@ -82,6 +91,7 @@ def run(
         audit=audit,
         sealed=sealed,
         batched_history=batched_history,
+        source_history=source_history,
     )
     length = max(f.shape[-2] for f in formats)
     state = DecodeState(
@@ -101,9 +111,20 @@ def run(
     starts, ends = event(enable_timing=True), event(enable_timing=True)
     torch.cuda.synchronize()
     started = time.monotonic()
-    with IsolatedStorageTransport(adapter, cache):
+    from contextlib import ExitStack
+
+    with ExitStack() as stack:
+        stack.enter_context(IsolatedStorageTransport(adapter, cache))
+        if source_history:
+            from mosaickv.evaluation.source_history import SourceInputTransport
+
+            stack.enter_context(SourceInputTransport(adapter, cache))
         starts.record()
         for step in range(tokens - 1):
+            if source_history:
+                from mosaickv.evaluation.source_history import seal_source_full_tails
+
+                seal_source_full_tails(cache)
             if batched_history:
                 from mosaickv.evaluation.batched_history import seal_full_tails
 
@@ -135,6 +156,7 @@ def run(
         audit_enabled=audit,
         sealed_history=sealed,
         batched_history=batched_history,
+        source_history=source_history,
         batched_history_seals=getattr(cache, "batched_history_seals", 0),
         batched_history_encode_batches=getattr(cache, "batched_history_encode_batches", 0),
         output_tokens=tokens,
