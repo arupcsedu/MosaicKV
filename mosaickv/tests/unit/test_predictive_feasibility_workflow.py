@@ -5,6 +5,7 @@ import pytest
 import torch
 
 from mosaickv.evaluation.lossless_bf16 import pack_cpu
+from mosaickv.types import BudgetUnit
 
 
 def fixture_root(tmp_path, monkeypatch):
@@ -27,6 +28,7 @@ def fixture_root(tmp_path, monkeypatch):
             size = sum(t.untyped_storage().nbytes() for t in packet.buffers)
             artifact = dict(
                 method=method,
+                selection=dict(budget_unit=BudgetUnit.BYTES),
                 bodies=[
                     dict(
                         layer=0,
@@ -60,6 +62,7 @@ def fixture_root(tmp_path, monkeypatch):
 
 
 def test_cpu_worker_and_afterany_aggregation_keep_all_methods_and_exact_bits(tmp_path, monkeypatch):
+    allowed_before = set(torch.serialization.get_safe_globals())
     fixture_root(tmp_path, monkeypatch)
     for index in range(2):
         module.codec_worker(tmp_path, "fixture-plan", index)
@@ -74,6 +77,7 @@ def test_cpu_worker_and_afterany_aggregation_keep_all_methods_and_exact_bits(tmp
         <= row["original_measured_GPU_initial_bytes"]
         for row in gate["rows"]
     )
+    assert set(torch.serialization.get_safe_globals()) == allowed_before
 
 
 def test_changed_capture_is_rejected_with_structured_worker_failure(tmp_path, monkeypatch):
@@ -85,3 +89,18 @@ def test_changed_capture_is_rejected_with_structured_worker_failure(tmp_path, mo
     result = json.loads((tmp_path / "codec_workers/0/result.json").read_text())
     assert result["status"] == "failed"
     assert result["failures"]
+
+
+def test_cpu_launcher_never_requests_a_GPU(tmp_path, monkeypatch):
+    fixture_root(tmp_path, monkeypatch)
+    calls = []
+
+    def submit(args, **kwargs):
+        calls.append(args)
+        return str(100 + len(calls))
+
+    monkeypatch.setattr(module.subprocess, "check_output", submit)
+    module.launch_cpu(tmp_path, "fixture-plan")
+    assert len(calls) == 2
+    assert all(not any("--gres" in arg or "bii-gpu" in arg for arg in args) for args in calls)
+    assert "--dependency=afterany:101" in calls[1]

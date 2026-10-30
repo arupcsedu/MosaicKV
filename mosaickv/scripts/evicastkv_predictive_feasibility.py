@@ -2,6 +2,7 @@
 """Consumed tensor capture -> two bounded CPU codec studies -> no GPU promotion."""
 
 import argparse
+import json
 import subprocess
 import sys
 import time
@@ -9,7 +10,7 @@ from pathlib import Path
 
 import evicastkv_paired_storage_baselines as paired
 
-from mosaickv.evaluation.fox_campaign import sha, write_once
+from mosaickv.evaluation.fox_campaign import clean_source, sha, write_once
 
 base = paired.base
 ROOT = Path("/scratch/djy8hg/runs/evicastkv/predictive-storage-consumed-20261030-v1")
@@ -106,7 +107,7 @@ def capture(adapter, prefill, captured, frozen, job, cfg, full_reference, prepar
             raise RuntimeError("prompt payload ownership is not independently additive")
         artifact = dict(
             method=method,
-            selection=selection,
+            selection=json.loads(json.dumps(selection)),
             bodies=tensors,
             original_GPU_initial_component_bytes=actual,
             original_GPU_payload_bytes=payload,
@@ -144,6 +145,13 @@ def advance(root, expected):
     gate = base.common.read(root / "analysis/GATE.json")
     if gate["failures"]:
         return
+    launch_cpu(root, expected)
+
+
+def launch_cpu(root, expected):
+    base.common.inputs(root, expected)
+    (root / "slurm").mkdir(exist_ok=True)
+    (root / "analysis").mkdir(exist_ok=True)
     script = str(base.SOURCE / "mosaickv/slurm/evicastkv_predictive_feasibility.sbatch")
     args = [str(base.SOURCE), str(root), expected]
     cpu = (
@@ -207,6 +215,48 @@ def advance(root, expected):
     )
 
 
+def prepare_cpu_retry(root):
+    parent = ROOT
+    if root.exists():
+        raise FileExistsError("new immutable CPU-only retry root required")
+    gate = base.common.read(parent / "codec_analysis/GATE.json")
+    if not gate["failures"] or any(
+        "mosaickv.types.BudgetUnit" not in " ".join(f.get("errors", [])) for f in gate["failures"]
+    ):
+        raise ValueError("retry only the observed metadata-enum load boundary")
+    original = base.common.read(parent / "plan.json")
+    bound = dict(original["bound_files"])
+    for name in (
+        "plan.json",
+        "analysis/GATE.json",
+        "codec_analysis/GATE.json",
+        "codec_analysis/manifest.json",
+    ):
+        bound[str(parent / name)] = sha(parent / name)
+    for job in original["jobs"]:
+        folder = parent / f"workers/{job['index']}"
+        path = folder / "result.json"
+        result = base.common.read(path)
+        if result["status"] != "completed" or result["failures"]:
+            raise ValueError("retry requires completed unchanged GPU captures")
+        bound[str(path)] = sha(path)
+        for name, digest in result["outputs"].items():
+            bound[str(folder / name)] = digest
+    original.update(
+        source_sha=clean_source(base.SOURCE),
+        bound_files=bound,
+        capture_root=str(parent),
+        capture_source_sha=original["source_sha"],
+        capture_plan_sha256=sha(parent / "plan.json"),
+        CPU_only_retry=True,
+        automatic_gpu_decoder_authorized=False,
+        model_inference_authorized=False,
+        protocol="CPU_only_enum_metadata_repair_no_new_capture_v1",
+    )
+    write_once(root / "plan.json", original)
+    return sha(root / "plan.json")
+
+
 def codec_worker(root, expected, index):
     import torch
 
@@ -220,13 +270,13 @@ def codec_worker(root, expected, index):
 
     plan = base.common.inputs(root, expected)
     job = plan["jobs"][index]
-    parent = root / f"workers/{index}"
+    parent = Path(plan.get("capture_root", root)) / f"workers/{index}"
     manifest = base.common.read(parent / "result.json")
     if (
         manifest["status"] != "completed"
         or manifest["failures"]
-        or manifest["source_sha"] != plan["source_sha"]
-        or manifest["plan_sha256"] != expected
+        or manifest["source_sha"] != plan.get("capture_source_sha", plan["source_sha"])
+        or manifest["plan_sha256"] != plan.get("capture_plan_sha256", expected)
     ):
         raise ValueError("complete source-matched GPU capture required")
     out = root / f"codec_workers/{index}"
@@ -247,7 +297,12 @@ def codec_worker(root, expected, index):
             path = parent / f"{method}-codec-input.pt"
             if sha(path) != manifest["outputs"][path.name]:
                 raise ValueError("captured prompt tensor changed")
-            artifact = torch.load(path, map_location="cpu", weights_only=True)
+            from mosaickv.types import BudgetUnit
+
+            # Only this repository enum is allowlisted, only inside this
+            # hash-verified load. Never switch to unrestricted pickle loading.
+            with torch.serialization.safe_globals([BudgetUnit]):
+                artifact = torch.load(path, map_location="cpu", weights_only=True)
             rows = []
             for j, body in enumerate(artifact["bodies"]):
                 packed = PackedBF16(tuple(body["shape"]), body["raw"], tuple(body["buffers"]))
@@ -401,18 +456,34 @@ def main():
     base.BASE = ROOT
     base.SCRIPT_NAME = "evicastkv_predictive_feasibility.sbatch"
     base.prepare, base.baseline_study, base.analyze = prepare, capture, advance
-    if len(sys.argv) > 1 and sys.argv[1] in ("codec_worker", "codec_aggregate"):
+    if len(sys.argv) > 1 and sys.argv[1] in (
+        "codec_worker",
+        "codec_aggregate",
+        "prepare_cpu_retry",
+        "submit_cpu_retry",
+    ):
         parser = argparse.ArgumentParser()
         parser.add_argument("mode")
         parser.add_argument("--root", type=Path, required=True)
-        parser.add_argument("--plan-sha", required=True)
+        parser.add_argument("--plan-sha")
         parser.add_argument("--index", type=int)
         args = parser.parse_args()
-        if args.mode == "codec_worker":
+        if args.mode == "prepare_cpu_retry":
+            print(prepare_cpu_retry(args.root))
+        elif args.mode == "submit_cpu_retry":
+            plan = base.common.inputs(args.root, args.plan_sha)
+            if not plan.get("CPU_only_retry"):
+                raise ValueError("CPU-only retry scope required")
+            launch_cpu(args.root, args.plan_sha)
+        elif args.mode == "codec_worker":
             codec_worker(args.root, args.plan_sha, args.index)
         else:
             aggregate(args.root, args.plan_sha)
     else:
+        if len(sys.argv) > 1 and sys.argv[1] == "submit" and "--root" in sys.argv:
+            root = Path(sys.argv[sys.argv.index("--root") + 1])
+            if base.common.read(root / "plan.json").get("CPU_only_retry"):
+                raise ValueError("CPU-only retry forbids GPU submission")
         base.main()
 
 

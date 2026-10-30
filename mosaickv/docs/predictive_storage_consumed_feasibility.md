@@ -35,3 +35,11 @@ No fresh cohort, calibration, or paper campaign is authorized.
 This continues the repository's lossless/source-storage study. Generic
 reconstruction and lossless coding are established ideas; these simple
 predictors are engineering candidates, not a novelty or superiority claim.
+
+The first tensor captures are reusable. Their selection metadata contains the
+repository's BudgetUnit enum. A hash-verified, weights-only load may narrowly
+allowlist that class inside a temporary safe_globals context; unrestricted
+pickle loading remains forbidden. Future exports normalize selection metadata
+to JSON primitives. A new CPU-only retry plan binds both the old capture SHA
+and the repaired analysis SHA, never copies or regenerates the GPU captures,
+and explicitly rejects GPU submission under the retry root.
