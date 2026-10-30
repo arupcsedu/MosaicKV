@@ -11,7 +11,7 @@ import evicastkv_consolidated_history as previous
 from mosaickv.evaluation.fox_campaign import sha, write_once
 
 runtime, base = previous.runtime, previous.base
-ROOT = Path("/scratch/djy8hg/runs/evicastkv/segmented-history-consumed-20261030-v1")
+ROOT = Path("/scratch/djy8hg/runs/evicastkv/segmented-history-consumed-20261030-v2")
 
 
 def prepare(root, phase):
@@ -30,7 +30,10 @@ def prepare(root, phase):
                 same_projection_and_rope_arithmetic=True,
                 pointer_table_and_duplicate_patch_bytes_charged=True,
                 reference_constructor="direct_consolidated",
-                candidate_constructor="direct",
+                candidate_constructor="direct_batched_checks",
+                batched_check_ablation=True,
+                original_bit_check_comparisons_per_layer=6,
+                original_bit_verification_syncs_per_seal=1,
                 maximum_segmented_final_ratio=1.01,
                 maximum_segmented_peak_ratio=1.01,
                 no_quantization=True,
@@ -138,8 +141,15 @@ def study(adapter, prefill, capture, frozen, job, cfg, full_reference, prepared,
         formats = next(iter(variants.values()))
         outputs, records = {}, {}
         for name, kwargs in (
-            ("consolidated", dict(consolidated_history=True)),
-            ("segmented", dict(segmented_history=True)),
+            ("consolidated", dict(consolidated_history=True, source_history_constructor="direct")),
+            (
+                "checks_only",
+                dict(consolidated_history=True, source_history_constructor="direct_batched_checks"),
+            ),
+            (
+                "segmented",
+                dict(segmented_history=True, source_history_constructor="direct_batched_checks"),
+            ),
         ):
             outputs[name], records[name] = run(
                 adapter,
@@ -148,12 +158,11 @@ def study(adapter, prefill, capture, frozen, job, cfg, full_reference, prepared,
                 tokens=128,
                 audit=True,
                 source_history=True,
-                source_history_constructor="direct",
                 **kwargs,
             )
-        passed = torch.equal(outputs["consolidated"], outputs["segmented"]) and torch.equal(
-            outputs["segmented"][:32], full_reference
-        )
+        passed = all(
+            torch.equal(outputs["consolidated"], x) for x in outputs.values()
+        ) and torch.equal(outputs["segmented"][:32], full_reference)
         write_once(
             out / "full_retention_segmented.json", dict(bitwise_128_logits=passed, records=records)
         )
@@ -179,7 +188,7 @@ def admit(root, expected):
     suites = list(doc.iter("testsuite"))
     count = sum(int(s.get("tests", "0")) for s in suites)
     if (
-        count < 2703
+        count < 2709
         or count != len(list(doc.iter("testcase")))
         or any(int(s.get(k, "0")) for s in suites for k in ("errors", "failures", "skipped"))
     ):

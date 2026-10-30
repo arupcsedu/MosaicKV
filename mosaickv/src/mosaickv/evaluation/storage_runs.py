@@ -25,7 +25,7 @@ def cache_from_formats(
 ) -> ExactCache:
     from mosaickv.evaluation.sealed_history import SealedHistoryLayer
 
-    if source_history_constructor not in ("reference", "direct") or (
+    if source_history_constructor not in ("reference", "direct", "direct_batched_checks") or (
         not source_history and source_history_constructor != "reference"
     ):
         raise ValueError("explicit source history required for its constructor policy")
@@ -33,7 +33,11 @@ def cache_from_formats(
         raise ValueError("shared workspace and graph policies must be explicit booleans")
     if type(consolidated_history) is not bool or (
         consolidated_history
-        and (not source_history or shared_workspace or source_history_constructor != "direct")
+        and (
+            not source_history
+            or shared_workspace
+            or source_history_constructor not in ("direct", "direct_batched_checks")
+        )
     ):
         raise ValueError(
             "consolidation requires explicit direct source history without workspace graphs"
@@ -44,7 +48,7 @@ def cache_from_formats(
         segmented_history
         and (
             not source_history
-            or source_history_constructor != "direct"
+            or source_history_constructor not in ("direct", "direct_batched_checks")
             or shared_workspace
             or consolidated_history
         )
@@ -216,6 +220,8 @@ def run(
     record.update(
         segmented_history=segmented_history,
         segment_table_builds=getattr(cache, "segment_table_builds", 0),
+        source_check_flags_checked=getattr(cache, "source_check_flags_checked", 0),
+        source_check_syncs=getattr(cache, "source_check_syncs", 0),
     )
     if record["outstanding_layer_leases"] or record["history_updates_per_layer"] != [
         tokens - 1

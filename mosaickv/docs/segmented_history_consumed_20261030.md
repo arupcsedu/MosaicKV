@@ -22,3 +22,12 @@ compression win. CPU suite precedes two canaries; only a positive canary release
 twelve finite method/input comparisons with five warmups and twenty randomized
 paired trials. At most six aggregate A100s, one GPU/12CPUs/30minutes per worker.
 No fresh, calibration or paper campaign is automatically authorized.
+
+The unsubmitted V1 plan remains immutable. V2 additionally batches the existing
+three K and three V original-bit checks across layers. It does not remove any
+comparison: 1,344 GPU boolean results are verified before seven atomic seals,
+with seven host synchronization points instead of one per comparison. Failed
+checks leave every layer's raw history unchanged and block the request. All
+flags, comparison temporaries and old/new metadata overlap are charged. Include
+a checks-only consolidation ablation to distinguish validation scheduling from
+pointer-table batching, with the same numerical thresholds and bitwise outputs.

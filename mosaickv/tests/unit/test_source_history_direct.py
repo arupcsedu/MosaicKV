@@ -21,7 +21,8 @@ def test_constructor_cannot_be_silently_enabled_without_source_history():
 
 
 @pytest.mark.parametrize("corrupt", [False, True])
-def test_direct_builder_keeps_three_final_original_bit_checks(monkeypatch, corrupt):
+@pytest.mark.parametrize("deferred", [False, True])
+def test_direct_builder_keeps_three_final_original_bit_checks(monkeypatch, corrupt, deferred):
     import mosaickv.evaluation.encoded_projection as formats
     import mosaickv.evaluation.encoded_projection_kernel as kernels
 
@@ -54,7 +55,13 @@ def test_direct_builder_keeps_three_final_original_bit_checks(monkeypatch, corru
         attention=None,
     )
     phase = torch.ones(1, 16, 128, dtype=torch.bfloat16)
-    if corrupt:
+    if deferred:
+        flags = []
+        result = build_chunk_direct(layer, phase, phase, bit_flags=flags)
+        assert calls == [False, True, True, True]
+        assert len(flags) == 6
+        assert bool(torch.stack(flags).all()) == (not corrupt)
+    elif corrupt:
         with pytest.raises(RuntimeError, match="original K/V bits"):
             build_chunk_direct(layer, phase, phase)
         assert calls == [False, True]

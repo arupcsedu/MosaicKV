@@ -90,3 +90,10 @@ def test_segmented_requires_direct_source_history():
             cache_from_formats(
                 SimpleNamespace(), (), updates=128, audit=False, segmented_history=True, **kw
             )
+
+
+def test_growing_history_stride_does_not_trigger_compilation():
+    from mosaickv.evaluation.segmented_history_kernel import _project
+
+    p = next(p for p in _project.params if p.name == "HEAD_OUT")
+    assert not p.is_constexpr and p.do_not_specialize

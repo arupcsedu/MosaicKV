@@ -6,10 +6,8 @@ import triton.language as tl
 from mosaickv.evaluation.encoded_projection_kernel import _read
 
 
-@triton.jit
-def _project(
-    TABLE, RAW, WK, WV, OK, OV, HEAD_OUT: tl.constexpr, WIDTH: tl.constexpr, DIM: tl.constexpr
-):
+@triton.jit(do_not_specialize=["HEAD_OUT"])
+def _project(TABLE, RAW, WK, WV, OK, OV, HEAD_OUT, WIDTH: tl.constexpr, DIM: tl.constexpr):
     chunk, head = tl.program_id(0), tl.program_id(1)
     row, col, reduction = tl.arange(0, 16), tl.arange(0, DIM), tl.arange(0, 64)
     address = TABLE + chunk * 8

@@ -4,7 +4,7 @@ import triton
 import triton.language as tl
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["N", "SH", "PROTECTED"])
 def _decode(
     CODES,
     MINIMUM,
@@ -12,15 +12,15 @@ def _decode(
     EXACT_IDX,
     EXACT,
     OUT,
-    N: tl.constexpr,
+    N,
     D: tl.constexpr,
     H: tl.constexpr,
     GROUP: tl.constexpr,
     BITS: tl.constexpr,
     AXIS: tl.constexpr,
-    SH: tl.constexpr,
+    SH,
     SN: tl.constexpr,
-    PROTECTED: tl.constexpr,
+    PROTECTED,
     BLOCK: tl.constexpr,
 ):
     i = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
