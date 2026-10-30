@@ -104,9 +104,9 @@ def _scores(
     )
     query = tl.load(Q + head * 128 + col)
     # Explicit BF16 boundaries match eager's matmul, then scalar multiply.
-    matrix = tl.broadcast_to(query[None, :], (16, 128))
-    dots = tl.dot(matrix, tl.trans(key))
-    product = tl.sum(tl.where(tl.arange(0, 16)[:, None] == 0, dots, 0), 0).to(tl.bfloat16)
+    # BF16 products/sums use stable FP64 intermediates in this separately
+    # labeled variant: raw/codec layout must not change rounding order.
+    product = tl.sum(key.to(tl.float64) * query[None, :].to(tl.float64), 1).to(tl.bfloat16)
     scaled = (product.to(tl.float32) * SCALE).to(tl.bfloat16)
     tl.store(SCORES + head * LENGTH + tokens, scaled, tokens < LENGTH)
 
@@ -131,7 +131,7 @@ def _values(
     head = tl.program_id(0)
     tokens = tl.arange(0, TILE)
     col = tl.arange(0, 128)
-    result = tl.full((16, 128), 0, tl.float32)
+    result = tl.full((128,), 0, tl.float64)
     for offset in range(tl.cdiv(LENGTH, TILE)):
         rows = offset * TILE + tokens
         value = _sequence(
@@ -149,10 +149,9 @@ def _values(
             CAPACITY,
             RAW,
         )
-        prob = tl.load(P + head * LENGTH + rows, rows < LENGTH, other=0)
-        result = tl.dot(tl.broadcast_to(prob[None, :], (16, TILE)), value, result)
-    first = tl.sum(tl.where(tl.arange(0, 16)[:, None] == 0, result, 0), 0)
-    tl.store(OUTPUT + head * 128 + col, first.to(tl.bfloat16))
+        prob = tl.load(P + head * LENGTH + rows, rows < LENGTH, other=0).to(tl.float64)
+        result += tl.sum(value.to(tl.float64) * prob[:, None], 0)
+    tl.store(OUTPUT + head * 128 + col, result.to(tl.bfloat16))
 
 
 def arguments(packed):

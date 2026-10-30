@@ -26,3 +26,18 @@ baseline alone must not become a selection-policy superiority claim.
 No current result is claimed. No published algorithm is reproduced by this
 kernel, and no benchmark annotations enter format/proposal decisions. All
 negative earlier selection and source-history results remain preserved.
+
+## Preserved initial failures and stable-accumulation successor
+
+V1 failed raw/encoded arithmetic equality at 300 positions; V2's common
+tensor-core reduction passed that case but failed at 2048. V2's independent
+reader matched all 65,536 BF16 patterns and each fixture's original K/V bits.
+Its largest raw/encoded probability difference on the failing case was
+4.76837158203125e-7; output difference was 0.0001220703125. This separates
+floating reduction/layout differences from a codec corruption claim.
+
+The separately labeled V3 kernel uses FP64 intermediates for its small dot
+and weighted-sum reductions, then the declared BF16 eager boundaries. The
+same equality gate and original eager error bound remain, and both controls
+are rerun. This is not claimed to be original eager arithmetic. All original
+model-level token/logit gates must still pass before any quality promotion.
