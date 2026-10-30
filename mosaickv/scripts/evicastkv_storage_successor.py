@@ -245,6 +245,12 @@ def worker(root, expected, index):
             from mosaickv.evaluation.batched_history import gpu_controls as history_controls
 
             write_once(out / "batched_history_cuda_controls.json", history_controls())
+        if plan.get("encoded_source_controls"):
+            from mosaickv.evaluation.encoded_projection_kernel import (
+                gpu_controls as encoded_controls,
+            )
+
+            write_once(out / "encoded_source_cuda_controls.json", encoded_controls())
         cfg = RunConfig.from_mapping(job["arms"][0]["config"])
         torch.manual_seed(cfg.execution.seed)
         adapter = load_hf_adapter(
@@ -370,6 +376,16 @@ def worker(root, expected, index):
                     torch.save(actual, out / f"{role}-{name}-logits.pt")
                     if not torch.equal(actual, reference):
                         raise RuntimeError(f"{role}/{name} changed original greedy logits")
+                    if (
+                        plan.get("encoded_source_controls")
+                        and name == "encoded"
+                        and role == "uniform_0.5_control"
+                        and row["storage"]["peak_active_kv_storage_bytes"]
+                        > plan["evicast_peak_cap_bytes"]
+                    ):
+                        raise RuntimeError(
+                            "encoded source exceeded unchanged decode-owned peak cap"
+                        )
                     rows.append(dict(role=role, format=name, bitwise_logits=True, **row))
             else:
                 trials = timing(adapter, prefill, representations, reference, role, plan)
