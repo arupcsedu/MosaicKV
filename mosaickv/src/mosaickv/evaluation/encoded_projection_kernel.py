@@ -7,7 +7,7 @@ import triton.language as tl
 
 
 @triton.jit(do_not_specialize=["COUNT"])
-def _checkpoints(CODES, OUT, COUNT, BLOCK: tl.constexpr):
+def _checkpoints(CODES, OUT, COUNT, BLOCK: tl.constexpr, PACK_COUNTS: tl.constexpr = False):
     local = tl.arange(0, BLOCK)
     bit = local * 3
     byte = bit // 8
@@ -17,6 +17,14 @@ def _checkpoints(CODES, OUT, COUNT, BLOCK: tl.constexpr):
     escaped = (code == 7) & (tl.program_id(0) * BLOCK + local < COUNT)
     counts = tl.sum(tl.reshape(escaped.to(tl.int32), (8, 128)), 1)
     prefix = tl.cumsum(counts) - counts
+    if PACK_COUNTS:
+        groups = tl.arange(0, 8)
+        halves = tl.sum(tl.reshape(escaped.to(tl.int32), (16, 64)), 1)
+        first = tl.gather(halves, groups * 2, 0)
+        # Group zero's prefix is always zero. Reuse its ten free low bits
+        # for the eight 64-escape overflow flags. No metadata is added.
+        overflow = tl.sum((first == 64).to(tl.int32) << groups, 0)
+        prefix = tl.where(groups == 0, overflow, prefix) | ((first & 63) << 10)
     tl.store(OUT + tl.program_id(0) * 8 + tl.arange(0, 8), prefix.to(tl.int16))
 
 
@@ -44,6 +52,7 @@ def _read(
     ROWS,
     WIDTH: tl.constexpr,
     RAW: tl.constexpr,
+    PACK_COUNTS: tl.constexpr = False,
 ):
     col = tl.arange(0, 64)
     begin = row * WIDTH + start
@@ -55,12 +64,17 @@ def _read(
         code = _codes(CODES, index, valid)
         escaped = (code == 7) & valid
         rank = tl.cumsum(escaped.to(tl.int32), 1) - 1
-        previous = _codes(CODES, index - 64, valid & ((start % 128) >= 64))
-        extra = tl.sum((previous == 7).to(tl.int32), 1)
         block = begin // 1024
-        prefix = tl.load(CHECK + block * 8 + (begin % 1024) // 128, row < ROWS, other=0).to(
-            tl.int32
-        )
+        group = (begin % 1024) // 128
+        prefix = tl.load(CHECK + block * 8 + group, row < ROWS, other=0).to(tl.int32)
+        if PACK_COUNTS:
+            flags = tl.load(CHECK + block * 8, row < ROWS, other=0).to(tl.int32) & 255
+            extra = ((prefix >> 10) & 63) + (((flags >> group) & 1) << 6)
+            extra = tl.where((start % 128) >= 64, extra, 0)
+            prefix = tl.where(group == 0, 0, prefix & 1023)
+        else:
+            previous = _codes(CODES, index - 64, valid & ((start % 128) >= 64))
+            extra = tl.sum((previous == 7).to(tl.int32), 1)
         offset = tl.load(OFFSETS + block, row < ROWS, other=0) + prefix + extra
         literal = tl.load(LITERALS + offset[:, None] + rank, escaped, other=0).to(tl.int32)
         base = tl.load(BASE + block, row < ROWS, other=0).to(tl.int32)
@@ -91,6 +105,7 @@ def _project(
     WIDTH: tl.constexpr,
     DIM: tl.constexpr,
     RAW: tl.constexpr,
+    PACK_COUNTS: tl.constexpr = False,
 ):
     row = tl.program_id(0) * 16 + tl.arange(0, 16)
     head = tl.program_id(1)
@@ -102,7 +117,18 @@ def _project(
         av = tl.full((16, DIM), 0, tl.float32)
         for start in range(WIDTH // 64):
             x = _read(
-                SM, CODES, BASE, OFFSETS, LITERALS, CHECK, row, start * 64, ROWS, WIDTH, RAW
+                SM,
+                CODES,
+                BASE,
+                OFFSETS,
+                LITERALS,
+                CHECK,
+                row,
+                start * 64,
+                ROWS,
+                WIDTH,
+                RAW,
+                PACK_COUNTS,
             ).to(tl.bfloat16, bitcast=True)
             k = start * 64 + reduction
             wk = tl.load(WK + (head * DIM + col[None, :]) * WIDTH + k[:, None])
@@ -129,16 +155,28 @@ def _project(
 
 @triton.jit(do_not_specialize=["ROWS"])
 def _materialize(
-    SM, CODES, BASE, OFFSETS, LITERALS, CHECK, OUT, ROWS, WIDTH: tl.constexpr, RAW: tl.constexpr
+    SM,
+    CODES,
+    BASE,
+    OFFSETS,
+    LITERALS,
+    CHECK,
+    OUT,
+    ROWS,
+    WIDTH: tl.constexpr,
+    RAW: tl.constexpr,
+    PACK_COUNTS: tl.constexpr = False,
 ):
     row = tl.program_id(0) * 16 + tl.arange(0, 16)
     start = tl.program_id(1) * 64
-    words = _read(SM, CODES, BASE, OFFSETS, LITERALS, CHECK, row, start, ROWS, WIDTH, RAW)
+    words = _read(
+        SM, CODES, BASE, OFFSETS, LITERALS, CHECK, row, start, ROWS, WIDTH, RAW, PACK_COUNTS
+    )
     index = row[:, None] * WIDTH + start + tl.arange(0, 64)[None, :]
     tl.store(OUT + index, words, row[:, None] < ROWS)
 
 
-def checkpoints(body: Any) -> Any:
+def checkpoints(body: Any, *, packed_counts: bool = False) -> Any:
     import torch
 
     count = 1
@@ -150,7 +188,9 @@ def checkpoints(body: Any) -> Any:
         dtype=torch.int16,
     )
     if not body.raw:
-        _checkpoints[(triton.cdiv(count, 1024),)](body.buffers[1], result, count, BLOCK=1024)
+        _checkpoints[(triton.cdiv(count, 1024),)](
+            body.buffers[1], result, count, BLOCK=1024, PACK_COUNTS=packed_counts
+        )
     return result
 
 
@@ -160,7 +200,16 @@ def pointers(body: Any) -> tuple[Any, ...]:
     return (body.buffers[0].view(torch.uint16),) * 5 if body.raw else body.buffers
 
 
-def project(body: Any, check: Any, attention: Any, archive: Any, slots: Any, targets: Any) -> None:
+def project(
+    body: Any,
+    check: Any,
+    attention: Any,
+    archive: Any,
+    slots: Any,
+    targets: Any,
+    *,
+    packed_counts: bool = False,
+) -> None:
     import torch
 
     heads, kept = archive.selected.shape
@@ -209,6 +258,7 @@ def project(body: Any, check: Any, attention: Any, archive: Any, slots: Any, tar
         WIDTH=width,
         DIM=128,
         RAW=body.raw,
+        PACK_COUNTS=packed_counts,
         num_warps=4,
         enable_fp_fusion=False,
     )
@@ -229,14 +279,61 @@ def gpu_controls() -> list[dict[str, Any]]:
             if raw
             else encode(tensor, raw_fallback=False)
         )
-        check = checkpoints(body)
-        output = torch.empty_like(tensor)
-        _materialize[(16, 4)](
-            *pointers(body), check, output.view(torch.uint16), 256, WIDTH=256, RAW=raw
+        for packed_counts in (False, True):
+            check = checkpoints(body, packed_counts=packed_counts)
+            output = torch.empty_like(tensor)
+            _materialize[(16, 4)](
+                *pointers(body),
+                check,
+                output.view(torch.uint16),
+                256,
+                WIDTH=256,
+                RAW=raw,
+                PACK_COUNTS=packed_counts,
+            )
+            if not torch.equal(output.view(torch.int16), tensor.view(torch.int16)):
+                raise RuntimeError("encoded-source read changed a BF16 pattern")
+            results.append(
+                dict(
+                    raw=raw,
+                    packed_counts=packed_counts,
+                    all_65536_BF16_patterns_bitwise=True,
+                    checkpoint_bytes=check.numel() * 2,
+                )
+            )
+    # All-literal blocks exercise the 64-escape overflow in every half,
+    # including group-zero flag ownership and prefixes up to 896.
+    count = tensor.numel()
+    bits = tensor.view(torch.int16).flatten().to(torch.int32) & 65535
+    body = PackedBF16(
+        tuple(tensor.shape),
+        False,
+        (
+            ((bits & 127) | ((bits >> 8) & 128)).to(torch.uint8),
+            torch.full((count // 8 * 3,), 255, dtype=torch.uint8, device="cuda"),
+            torch.zeros(count // 1024, dtype=torch.uint8, device="cuda"),
+            torch.arange(0, count + 1, 1024, dtype=torch.int32, device="cuda"),
+            ((bits >> 7) & 255).to(torch.uint8),
+        ),
+    )
+    check = checkpoints(body, packed_counts=True)
+    output = torch.empty_like(tensor)
+    _materialize[(16, 4)](
+        *pointers(body),
+        check,
+        output.view(torch.uint16),
+        256,
+        WIDTH=256,
+        RAW=False,
+        PACK_COUNTS=True,
+    )
+    if not torch.equal(output.view(torch.int16), tensor.view(torch.int16)):
+        raise RuntimeError("packed checkpoint overflow changed a BF16 pattern")
+    results.append(
+        dict(
+            all_literal_overflow_bitwise=True,
+            packed_counts=True,
+            checkpoint_bytes=check.numel() * 2,
         )
-        if not torch.equal(output.view(torch.int16), tensor.view(torch.int16)):
-            raise RuntimeError("encoded-source read changed a BF16 pattern")
-        results.append(
-            dict(raw=raw, all_65536_BF16_patterns_bitwise=True, checkpoint_bytes=check.numel() * 2)
-        )
+    )
     return results
