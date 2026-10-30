@@ -115,8 +115,18 @@ def study(adapter, prefill, capture, frozen, job, cfg, full_reference, prepared,
     finally:
         base.choices, base.timing = old_choices, old_timing
     formats = pending["formats"]
-    reference, old = run(adapter, prefill, formats, tokens=128, audit=True, batched_history=True)
-    candidate, new = run(adapter, prefill, formats, tokens=128, audit=True, source_history=True)
+    constructor_comparison = plan.get("source_history_comparison_kind") == "constructor"
+    reference_policy = (
+        dict(source_history=True, source_history_constructor="reference")
+        if constructor_comparison
+        else dict(batched_history=True)
+    )
+    candidate_policy = dict(
+        source_history=True,
+        source_history_constructor=plan.get("candidate_constructor", "reference"),
+    )
+    reference, old = run(adapter, prefill, formats, tokens=128, audit=True, **reference_policy)
+    candidate, new = run(adapter, prefill, formats, tokens=128, audit=True, **candidate_policy)
     if not torch.equal(reference, candidate) or not torch.equal(
         reference[:32], pending.get("reference32", full_reference)
     ):
@@ -130,6 +140,12 @@ def study(adapter, prefill, capture, frozen, job, cfg, full_reference, prepared,
     memory_pass = (
         a[fields[0]] == b[fields[0]] and b[fields[1]] < a[fields[1]] and b[fields[2]] < a[fields[2]]
     )
+    if constructor_comparison:
+        memory_pass = (
+            a[fields[0]] == b[fields[0]]
+            and a[fields[1]] == b[fields[1]]
+            and b[fields[2]] <= a[fields[2]]
+        )
     if b["source_history_seals"] != 7 or b["source_history_normalized_tail_bytes"] != 4 * 2**20:
         raise RuntimeError("missing source chunk or normalized-tail accounting")
     torch.save(dict(reference=reference, candidate=candidate), out / "128-token-logits.pt")
@@ -142,12 +158,13 @@ def study(adapter, prefill, capture, frozen, job, cfg, full_reference, prepared,
         initial_final_peak_memory_gate=memory_pass,
         whole_request_peak_certified=False,
         no_quality_superiority_claim=True,
+        source_history_comparison_kind="constructor" if constructor_comparison else "KV_vs_source",
     )
     write_once(out / "source_history_controls.json", row)
     trials = []
     if plan["stage"] == "comparison" and job["method"] != "full_kv":
         rng = random.Random(plan["timing_seed"])
-        variants = {"ordinary": dict(batched_history=True), "source": dict(source_history=True)}
+        variants = {"ordinary": reference_policy, "source": candidate_policy}
         for trial in range(-plan["warmups"], plan["timed_repetitions"]):
             order = list(variants)
             rng.shuffle(order)

@@ -50,8 +50,11 @@ class SourceHistoryLayer(SealedHistoryLayer):
 
 
 class SourceHistoryCache(ExactCache):
-    def __init__(self, *, audit_workspace: bool) -> None:
+    def __init__(self, *, audit_workspace: bool, constructor: str = "reference") -> None:
+        if constructor not in ("reference", "direct"):
+            raise ValueError("explicit reference or direct source-history constructor required")
         super().__init__(audit_workspace=audit_workspace)
+        self.source_constructor = constructor
         self.shared_tensors: tuple[Any, ...] = ()
         self.source_history_seals = 0
         self.phase_tail: Any = None
@@ -107,6 +110,7 @@ class SourceHistoryCache(ExactCache):
         record = super().storage_record()
         record.update(
             source_history=True,
+            source_history_constructor=self.source_constructor,
             source_history_seals=self.source_history_seals,
             source_history_normalized_tail_bytes=backing_bytes(
                 tuple(
@@ -187,6 +191,43 @@ def build_chunk(layer: Any, cos: Any, sin: Any) -> Any:
     return candidate
 
 
+def build_chunk_direct(layer: Any, cos: Any, sin: Any) -> Any:
+    """Four projections instead of nine; three final original-bit checks remain."""
+    from dataclasses import replace
+
+    from mosaickv.evaluation.dual_projection import output_slots
+    from mosaickv.evaluation.encoded_projection import EncodedFormat
+    from mosaickv.evaluation.encoded_projection_kernel import checkpoints
+    from mosaickv.evaluation.exact_storage import SparseBitPatch, encode
+    from mosaickv.evaluation.projection_archive import ProjectionArchive
+
+    union = torch.arange(16, device=cos.device, dtype=torch.int32)
+    selected = union[None].expand(layer.prompt_shape[1], -1)
+    source = encode(layer.normalized_tail[:, None].contiguous())
+    archive = ProjectionArchive(source, union, selected, 16, cos, sin)
+    candidate = EncodedFormat(
+        "encoded_projection",
+        tuple(layer.history[0].shape),
+        archive=archive,
+        output_slots=output_slots(union, selected),
+        literal_checkpoints=checkpoints(source),
+    )
+    actual = candidate.materialize(layer.attention)
+    patches = tuple(
+        SparseBitPatch.build(reference, value)
+        for reference, value in zip(layer.history, actual, strict=True)
+    )
+    candidate = replace(candidate, patches=patches)
+    for _ in range(3):
+        actual = candidate.materialize(layer.attention)
+        if not all(
+            torch.equal(reference.view(torch.int16), value.view(torch.int16))
+            for reference, value in zip(layer.history, actual, strict=True)
+        ):
+            raise RuntimeError("direct history constructor changed original K/V bits")
+    return candidate
+
+
 def seal_source_full_tails(cache: SourceHistoryCache) -> bool:
     layers = cache.layers
     if (
@@ -219,7 +260,8 @@ def seal_source_full_tails(cache: SourceHistoryCache) -> bool:
             raise ValueError("original logical history positions must remain consecutive")
         pending.extend((cos, sin, positions))
         for layer in layers:
-            format = build_chunk(layer, cos, sin)
+            builder = build_chunk_direct if cache.source_constructor == "direct" else build_chunk
+            format = builder(layer, cos, sin)
             if any(identity(t) in excluded for t in format.private()):
                 raise RuntimeError("immutable source history aliases a mutable existing owner")
             formats.append(format)

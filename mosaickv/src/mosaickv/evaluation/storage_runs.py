@@ -17,9 +17,14 @@ def cache_from_formats(
     sealed: bool = True,
     batched_history: bool = False,
     source_history: bool = False,
+    source_history_constructor: str = "reference",
 ) -> ExactCache:
     from mosaickv.evaluation.sealed_history import SealedHistoryLayer
 
+    if source_history_constructor not in ("reference", "direct") or (
+        not source_history and source_history_constructor != "reference"
+    ):
+        raise ValueError("explicit source history required for its constructor policy")
     cache = ExactCache(audit_workspace=audit)
     cls = SealedHistoryLayer if sealed else ExactLayer
     if batched_history:
@@ -33,7 +38,7 @@ def cache_from_formats(
             raise ValueError("source history requires its explicit sealed 128-token diagnostic")
         from mosaickv.evaluation.source_history import SourceHistoryCache, SourceHistoryLayer
 
-        cache = SourceHistoryCache(audit_workspace=audit)
+        cache = SourceHistoryCache(audit_workspace=audit, constructor=source_history_constructor)
         cls = SourceHistoryLayer
     shared: list[Any] = []
     for i, format in enumerate(formats):
@@ -70,6 +75,7 @@ def run(
     sealed: bool = True,
     batched_history: bool = False,
     source_history: bool = False,
+    source_history_constructor: str = "reference",
 ) -> tuple[Any, dict[str, Any]]:
     import time
 
@@ -92,6 +98,7 @@ def run(
         sealed=sealed,
         batched_history=batched_history,
         source_history=source_history,
+        source_history_constructor=source_history_constructor,
     )
     length = max(f.shape[-2] for f in formats)
     state = DecodeState(
@@ -157,6 +164,7 @@ def run(
         sealed_history=sealed,
         batched_history=batched_history,
         source_history=source_history,
+        source_history_constructor=source_history_constructor,
         batched_history_seals=getattr(cache, "batched_history_seals", 0),
         batched_history_encode_batches=getattr(cache, "batched_history_encode_batches", 0),
         output_tokens=tokens,
