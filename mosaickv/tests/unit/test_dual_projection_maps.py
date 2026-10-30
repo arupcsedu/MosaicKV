@@ -27,3 +27,25 @@ def test_shared_map_has_one_true_owner():
 def test_rejects_ambiguous_maps(union, selected):
     with pytest.raises(ValueError):
         output_slots(torch.tensor(union), torch.tensor(selected))
+
+
+def test_uncorrected_constructor_measurement_precedes_two_patch_application(monkeypatch):
+    from types import SimpleNamespace
+
+    import mosaickv.evaluation.dual_projection as module
+    import mosaickv.evaluation.dual_projection_kernel as kernel
+
+    monkeypatch.setattr(module, "decoded", lambda _: torch.zeros(1, 1, 3, 256))
+    monkeypatch.setattr(kernel, "project", lambda *args: [t.fill_(2) for t in args[-1]])
+    seen = []
+    monkeypatch.setattr(kernel, "apply_patch", lambda patch, target: seen.append(patch))
+    archive = SimpleNamespace(source=None)
+    f = module.DualFormat("dual_projection", (1, 2, 3, 128), archive=archive, output_slots=True)
+    targets = tuple(torch.zeros(f.shape) for _ in range(2))
+    f.fill(None, targets, direct=True)
+    assert all(bool((t == 2).all()) for t in targets)
+    assert not seen
+    from dataclasses import replace
+
+    replace(f, patches=("key", "value")).fill(None, targets, direct=True)
+    assert seen == ["key", "value"]

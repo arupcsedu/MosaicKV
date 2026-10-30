@@ -65,8 +65,11 @@ class DualFormat(ExactFormat):
             project(source, attention, self.archive, self.output_slots, targets)
             del source
             CompactFormat.overlay(self, targets)
-            for patch, target in zip(self.patches, targets, strict=True):
-                apply_patch(patch, target)
+            # The constructor first measures the uncorrected result. Only the
+            # completed, corrected format is eligible for cache transport.
+            if self.patches:
+                for patch, target in zip(self.patches, targets, strict=True):
+                    apply_patch(patch, target)
 
 
 def build_dual(
