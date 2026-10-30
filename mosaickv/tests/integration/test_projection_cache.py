@@ -21,7 +21,8 @@ from mosaickv.evaluation.projection_cache import (
 
 
 @pytest.mark.parametrize("policy", ["source_all", "hybrid", "kv_only", "bounded_sources"])
-def test_archive_runtime_matches_original_exact_greedy_and_audits_shared_backing(policy):
+@pytest.mark.parametrize("compact", [False, True])
+def test_archive_runtime_matches_original_exact_greedy_and_audits_shared_backing(policy, compact):
     torch.manual_seed(34)
     adapter = _llava(kv_heads=2)
     adapter.model.to(torch.bfloat16)
@@ -32,7 +33,9 @@ def test_archive_runtime_matches_original_exact_greedy_and_audits_shared_backing
     before = source_sha(pairs)
     positions = (((0, 3), (0, 3)),) * 2
     reference = standard_greedy_reference(adapter, prefill, positions)
-    cache = construct_projection_cache(adapter, prefill, capture, positions, policy=policy)
+    cache = construct_projection_cache(
+        adapter, prefill, capture, positions, policy=policy, compact_projection=compact
+    )
     state = DecodeState(
         cache,
         torch.ones(1, 2, dtype=torch.long),

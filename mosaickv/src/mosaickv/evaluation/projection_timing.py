@@ -20,7 +20,15 @@ def orders(seed: int) -> list[tuple[int, list[str]]]:
     return result
 
 
-def benchmark(adapter: Any, prefill: Any, capture: Any, positions: Any, *, seed: int) -> list[Any]:
+def benchmark(
+    adapter: Any,
+    prefill: Any,
+    capture: Any,
+    positions: Any,
+    *,
+    seed: int,
+    compact_projection: bool = False,
+) -> list[Any]:
     import torch
 
     from mosaickv.adapters.huggingface.types import DecodeState
@@ -41,7 +49,13 @@ def benchmark(adapter: Any, prefill: Any, capture: Any, positions: Any, *, seed:
             cache: PromptStorageCache
             if variant == "hybrid_source":
                 cache = construct_projection_cache(
-                    adapter, prefill, capture, positions, policy="hybrid", audit_workspace=False
+                    adapter,
+                    prefill,
+                    capture,
+                    positions,
+                    policy="hybrid",
+                    audit_workspace=False,
+                    compact_projection=compact_projection,
                 )
             else:
                 encoded = variant == "encoded_KV"
@@ -99,6 +113,7 @@ def benchmark(adapter: Any, prefill: Any, capture: Any, positions: Any, *, seed:
                     order=order_index,
                     variant=variant,
                     seed=seed,
+                    compact_projection=compact_projection,
                     construction_seconds=constructor,
                     decode_wall_seconds=wall,
                     decode_cuda_ms=elapsed,

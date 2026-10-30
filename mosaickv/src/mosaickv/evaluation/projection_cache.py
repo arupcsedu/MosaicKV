@@ -25,6 +25,7 @@ from mosaickv.evaluation.projection_archive import (
     ProjectionArchive,
     build_archive,
     reconstruct_archive,
+    reconstruct_compact_archive,
 )
 
 
@@ -74,10 +75,12 @@ class ProjectionLayer(PromptStorageLayer):
         observe: Any,
         maximum_decode_updates: int,
         audit_workspace: bool,
+        compact_projection: bool = False,
     ) -> None:
         CacheLayerMixin.__init__(self)
         self.archive, self.attention = archive, attention
         self.audit_workspace = audit_workspace
+        self.compact_projection = compact_projection
         self.workspace_operations = 0
         self.excluded_weights = {identity(t) for t in attention.parameters()}
         heads, length = archive.selected.shape
@@ -100,7 +103,10 @@ class ProjectionLayer(PromptStorageLayer):
             ScratchAudit(excluded=excluded, observe=self.observe) if self.audit_workspace else None
         )
         with mode if mode is not None else nullcontext():
-            prompts = reconstruct_archive(self.archive, self.attention)
+            reconstruct = (
+                reconstruct_compact_archive if self.compact_projection else reconstruct_archive
+            )
+            prompts = reconstruct(self.archive, self.attention)
         if mode is not None:
             self.workspace_operations += mode.operations
         self.observe(prompts)
@@ -174,6 +180,7 @@ def construct_projection_cache(
     audit_workspace: bool = True,
     maximum_decode_updates: int = 32,
     maximum_source_layers: int = 8,
+    compact_projection: bool = False,
 ) -> ProjectionCache:
     if policy not in ("hybrid", "source_all", "kv_only", "bounded_sources"):
         raise ValueError("explicit hybrid, source_all, kv_only or bounded_sources policy required")
@@ -226,6 +233,7 @@ def construct_projection_cache(
                 observe=cache.observe,
                 maximum_decode_updates=maximum_decode_updates,
                 audit_workspace=audit_workspace,
+                compact_projection=compact_projection,
             )
             shared.extend((archive.cos, archive.sin))
         else:
@@ -267,6 +275,7 @@ def runtime_controls(
     positions: Any,
     *,
     policies: tuple[str, ...] = ("kv_only", "hybrid", "bounded_sources"),
+    compact_projection: bool = False,
 ) -> dict[str, Any]:
     """32-token memory-audited own-greedy control, NOT a latency benchmark."""
     import hashlib
@@ -299,6 +308,7 @@ def runtime_controls(
                 policy=policy,
                 maximum_source_layers=8,
                 audit_workspace=True,
+                compact_projection=compact_projection,
             )
         length = max(len(h[0]) for h in positions)
         state = DecodeState(
@@ -339,6 +349,7 @@ def runtime_controls(
             raise RuntimeError("incomplete or leaked archive decode state")
         rows[policy] = dict(
             bitwise_logits_equal_reference=True,
+            compact_projection=compact_projection,
             maximum_logit_difference=0.0,
             used_fullkv_fallback=False,
             original_selected_positions_unchanged=True,

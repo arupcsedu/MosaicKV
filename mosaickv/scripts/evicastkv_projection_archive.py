@@ -23,13 +23,23 @@ PARENT = Path("/scratch/djy8hg/runs/evicastkv/lossless-fused-consumed-20261029-v
 PARENT_SHA = "e538caf12011239a3d218a2620106ec20e9c11b36dedd13341b85c00edabd42d"
 
 
-def prepare(root, *, runtime=False, union_restore=False, source_timing=False, source_profile=False):
+def prepare(
+    root,
+    *,
+    runtime=False,
+    union_restore=False,
+    source_timing=False,
+    source_profile=False,
+    compact_source=False,
+):
     if union_restore and not runtime:
         raise ValueError("union restoration requires the isolated runtime controls")
     if source_timing and (not runtime or union_restore):
         raise ValueError("timing requires original-selection runtime controls, not rejected union")
     if source_profile and (not runtime or union_restore or source_timing):
         raise ValueError("profiling is a separate original-selection runtime diagnostic")
+    if compact_source and (not runtime or union_restore or source_profile):
+        raise ValueError("compact source requires original-selection runtime controls")
     source = clean_source(SOURCE)
     if root.exists() or sha(PARENT / "plan.json") != PARENT_SHA:
         raise ValueError("new immutable root and pinned consumed inputs required")
@@ -141,6 +151,39 @@ def prepare(root, *, runtime=False, union_restore=False, source_timing=False, so
             profiles_are_not_latency_or_quality_evidence=True,
             no_fresh_or_quality_campaign_promotion=True,
         )
+    if compact_source:
+        previous = Path(
+            "/scratch/djy8hg/runs/evicastkv/projection-source-operator-profile-20261030-v5"
+        )
+        gate = common.read(previous / "analysis/GATE.json")
+        if gate["source_profile_complete"] is not True or gate["failures"]:
+            raise ValueError("completed operator diagnosis required")
+        for name in ("plan.json", "analysis/GATE.json", "analysis/manifest.json"):
+            bound[str(previous / name)] = sha(previous / name)
+        if source_timing:
+            previous = Path("/scratch/djy8hg/runs/evicastkv/compact-source-correctness-20261030-v6")
+            gate = common.read(previous / "analysis/GATE.json")
+            if (
+                gate["compact_static_controls_passed"] is not True
+                or gate["runtime_controls_passed"] is not True
+                or gate["failures"]
+            ):
+                raise ValueError(
+                    "compact per-layer and 32-token bitwise proof required before timing"
+                )
+            for name in ("plan.json", "analysis/GATE.json", "analysis/manifest.json"):
+                bound[str(previous / name)] = sha(previous / name)
+        plan.update(
+            protocol="compact_projection_source_paired_timing_v7"
+            if source_timing
+            else "compact_projection_source_bitwise_correctness_v6",
+            compact_source_controls=True,
+            intervention="compact_archived_rows_original_KV_projections_and_original_RoPE_positions",
+            selector_changes_authorized=False,
+            per_layer_original_KV_bitwise_gate_before_compact_decode=True,
+            original_positions_and_RoPE_preserved=True,
+            no_tolerance_relaxation=True,
+        )
     write_once(root / "plan.json", plan)
     return sha(root / "plan.json")
 
@@ -159,6 +202,7 @@ def worker(root, expected, index):
         ProjectionCapture,
         build_archive,
         reconstruct_archive,
+        reconstruct_compact_archive,
     )
     from mosaickv.evaluation.worker_support import settle
     from mosaickv.hf_cli import _model_kwargs
@@ -209,7 +253,12 @@ def worker(root, expected, index):
                 [[p for p in range(k.shape[-2])] for _ in range(k.shape[1])] for k, _ in pairs
             ]
             identity = runtime_controls(
-                adapter, prefill, capture, all_positions, policies=("bounded_sources",)
+                adapter,
+                prefill,
+                capture,
+                all_positions,
+                policies=("bounded_sources",),
+                compact_projection=bool(plan.get("compact_source_controls")),
             )
             write_once(out / "runtime_retention_one.json", identity)
         folder = Path(job["delimiter_worker"])
@@ -252,6 +301,7 @@ def worker(root, expected, index):
             if checksum != transactions[role]["null_repack"]["transaction"]["source_KV_sha256"]:
                 raise ValueError("original source KV changed")
             selections = frozen[role]["anchor"]["positions"]
+            compact_records = []
             for encoded in (False, True):
                 owners, hybrid_owners, records, expected_payload = [], [], [], 0
                 for layer_index, ((key, value), positions) in enumerate(
@@ -265,6 +315,29 @@ def worker(root, expected, index):
                         1, key.shape[1], len(positions[0]), key.shape[-1]
                     )
                     reference = (key.gather(2, indices), value.gather(2, indices))
+                    if encoded and plan.get("compact_source_controls"):
+                        compact = reconstruct_compact_archive(
+                            archive, adapter._language_layers()[layer_index].self_attn
+                        )
+                        checks = [
+                            torch.equal(a.view(torch.int16), b.view(torch.int16))
+                            for a, b in zip(reference, compact, strict=True)
+                        ]
+                        compact_records.append(
+                            dict(
+                                layer=layer_index,
+                                bitwise_K=checks[0],
+                                bitwise_V=checks[1],
+                                original_rows=archive.original_length,
+                                compact_rows=int(archive.union.numel()),
+                            )
+                        )
+                        del compact
+                        if not all(checks):
+                            write_once(out / f"{role}-compact_static.json", compact_records)
+                            raise RuntimeError(
+                                f"compact GEMM changed original K/V at layer {layer_index}"
+                            )
                     expected_payload += backing_bytes(reference)
                     baseline_bodies = tuple(encode(t) for t in reference)
                     baseline_owners = tuple(t for b in baseline_bodies for t in b.buffers)
@@ -336,13 +409,26 @@ def worker(root, expected, index):
             if plan.get("runtime_controls"):
                 from mosaickv.evaluation.projection_cache import runtime_controls
 
-                controls = runtime_controls(adapter, prefill, capture, selections)
+                if plan.get("compact_source_controls"):
+                    write_once(out / f"{role}-compact_static.json", compact_records)
+                controls = runtime_controls(
+                    adapter,
+                    prefill,
+                    capture,
+                    selections,
+                    compact_projection=bool(plan.get("compact_source_controls")),
+                )
                 write_once(out / f"{role}-runtime_controls.json", controls)
             if plan.get("source_timing_controls"):
                 from mosaickv.evaluation.projection_timing import benchmark
 
                 trials = benchmark(
-                    adapter, prefill, capture, selections, seed=plan["source_timing"]["seed"]
+                    adapter,
+                    prefill,
+                    capture,
+                    selections,
+                    seed=plan["source_timing"]["seed"],
+                    compact_projection=bool(plan.get("compact_source_controls")),
                 )
                 write_once(out / f"{role}-source_timing.json", trials)
             if plan.get("source_profile_controls"):
@@ -383,6 +469,7 @@ def worker(root, expected, index):
         raise
     finally:
         result["wall_seconds"] = time.monotonic() - started
+        result["outputs"] = {p.name: sha(p) for p in out.iterdir() if p.is_file()}
         write_once(out / "result.json", result)
 
 
@@ -393,6 +480,7 @@ def analyze(root, expected):
     rows, failures, inputs, controls, unions = [], [], {}, [], []
     timing_trials, timing_summary = [], []
     profiles = []
+    compact_controls = []
     for job in plan["jobs"]:
         folder = root / f"workers/{job['index']}"
         path = folder / "result.json"
@@ -403,12 +491,18 @@ def analyze(root, expected):
         inputs[str(path)] = sha(path)
         if result["source_sha"] != plan["source_sha"] or result["plan_sha256"] != expected:
             raise ValueError("producer source/plan changed")
-        if result["status"] != "completed" or result["failures"]:
-            failures.append(dict(worker=job["index"], errors=result["failures"]))
-            continue
         for name, digest in result["outputs"].items():
             if sha(folder / name) != digest:
                 raise ValueError("worker output changed")
+        if result["status"] != "completed" or result["failures"]:
+            failures.append(
+                dict(
+                    worker=job["index"],
+                    errors=result["failures"],
+                    partial_output_hashes=result["outputs"],
+                )
+            )
+            continue
         for record in common.read(folder / "measurements.json"):
             if len(record["layers"]) != 32 or not all(
                 r["bitwise_K"] and r["bitwise_V"] for r in record["layers"]
@@ -453,6 +547,14 @@ def analyze(root, expected):
                 if len(records) != 2 or not all(r["bitwise_reference_parity"] for r in records):
                     raise ValueError("incomplete operator profile or changed logits")
                 profiles.extend(dict(t, task=job["task"]) for t in records)
+        if plan.get("compact_source_controls"):
+            for arm in job["arms"]:
+                records = common.read(folder / f"{arm['role']}-compact_static.json")
+                if len(records) != 32 or not all(
+                    r["bitwise_K"] and r["bitwise_V"] for r in records
+                ):
+                    raise ValueError("compact GEMM lacks complete original-KV bitwise proof")
+                compact_controls.append(dict(task=job["task"], role=arm["role"], layers=records))
     gate = dict(
         status="complete_consumed_component_diagnostic"
         if len(rows) == 8
@@ -460,6 +562,7 @@ def analyze(root, expected):
         and (not plan.get("runtime_controls") or len(controls) == 12)
         and (not plan.get("source_timing_controls") or len(timing_summary) == 12)
         and (not plan.get("source_profile_controls") or len(profiles) == 8)
+        and (not plan.get("compact_source_controls") or len(compact_controls) == 4)
         else "failed",
         failures=failures,
         comparisons=rows,
@@ -483,6 +586,10 @@ def analyze(root, expected):
         runtime_controls=controls,
         source_timing_summary=timing_summary,
         operator_profiles=profiles,
+        compact_static_controls=compact_controls,
+        compact_static_controls_passed=(len(compact_controls) == 4 and not failures)
+        if plan.get("compact_source_controls")
+        else None,
         source_profile_complete=(len(profiles) == 8 and not failures)
         if plan.get("source_profile_controls")
         else None,
@@ -529,6 +636,7 @@ def main():
     parser.add_argument("--union-restore-controls", action="store_true")
     parser.add_argument("--source-timing-controls", action="store_true")
     parser.add_argument("--source-profile-controls", action="store_true")
+    parser.add_argument("--compact-source-controls", action="store_true")
     args = parser.parse_args()
     if args.mode == "prepare":
         print(
@@ -538,6 +646,7 @@ def main():
                 union_restore=args.union_restore_controls,
                 source_timing=args.source_timing_controls,
                 source_profile=args.source_profile_controls,
+                compact_source=args.compact_source_controls,
             )
         )
     elif args.mode == "submit":

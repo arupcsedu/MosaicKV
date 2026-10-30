@@ -165,3 +165,38 @@ def reconstruct_archive(archive: ProjectionArchive, attention: Any) -> tuple[Any
         del unused_q
         index = archive.selected[None, :, :, None].expand(1, heads, kept, dimension)
         return key.gather(2, index), value.gather(2, index)
+
+
+def reconstruct_compact_archive(archive: ProjectionArchive, attention: Any) -> tuple[Any, Any]:
+    """Opt-in compact-GEMM candidate; must pass original-KV bitwise preflight.
+
+    Algebraic equality alone is insufficient: changing GEMM shape can change
+    numerical reduction. Never enable from a tolerance-based approximation.
+    """
+    import torch
+    from transformers.models.llama.modeling_llama import apply_rotary_pos_emb
+
+    heads, kept = archive.selected.shape
+    width, dimension = archive.source.shape[-1], attention.head_dim
+    if (
+        width != heads * dimension
+        or attention.k_proj.out_features != width
+        or attention.v_proj.out_features != width
+    ):
+        raise NotImplementedError("compact source candidate requires full MHA")
+    with torch.inference_mode():
+        decoded = torch.empty(
+            archive.source.shape, dtype=torch.bfloat16, device=archive.union.device
+        )
+        unpack_into(archive.source, decoded)
+        shape = (1, archive.union.numel(), heads, dimension)
+        key = attention.k_proj(decoded.squeeze(1)).view(shape).transpose(1, 2)
+        value = attention.v_proj(decoded.squeeze(1)).view(shape).transpose(1, 2)
+        del decoded
+        cos = archive.cos.index_select(1, archive.union)
+        sin = archive.sin.index_select(1, archive.union)
+        unused_q, key = apply_rotary_pos_emb(key[:, :1], key, cos, sin)
+        del unused_q, cos, sin
+        local = torch.searchsorted(archive.union, archive.selected.contiguous())
+        index = local[None, :, :, None].expand(1, heads, kept, dimension)
+        return key.gather(2, index), value.gather(2, index)
