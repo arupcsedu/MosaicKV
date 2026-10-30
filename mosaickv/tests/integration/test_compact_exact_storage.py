@@ -25,6 +25,10 @@ def test_compact_hybrid_restores_original_bits_without_changing_positions(reduce
     reference = tuple(t.gather(2, index) for t in source[0])
     original_flag = torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction
     compact, proof = build_compact(base, attention, reference, reduced_precision=reduced)
+    assert compact.slots.dtype == torch.int32
+    assert compact.slots.shape == (2, 2)
+    assert compact.source_map.dtype == torch.int32
+    assert compact.source_map.tolist() == [0, -1, -1, 1]
     assert proof["repeated_original_KV_bitwise"]
     backing = tuple(torch.full((1, 2, 7, 8), -71, dtype=torch.bfloat16) for _ in range(2))
     compact.fill(attention, backing, direct=True)

@@ -12,7 +12,10 @@ from mosaickv.types import MosaicKVMethod
 
 
 @pytest.mark.parametrize("method", ["prefixkv_reimpl", "vl_cache_reimpl", "lookm_reimpl"])
-def test_published_adaptations_spend_exact_source_slots_and_keep_merged_values(tmp_path, method):
+@pytest.mark.parametrize("uneven", [False, True])
+def test_published_adaptations_spend_exact_source_slots_and_keep_merged_values(
+    tmp_path, method, uneven
+):
     torch.manual_seed(14)
     adapter = _llava(kv_heads=2)
     adapter.model.to(torch.bfloat16)
@@ -33,6 +36,8 @@ def test_published_adaptations_spend_exact_source_slots_and_keep_merged_values(t
     profile = tmp_path / "profile.json"
     profile.write_text("[0.5,0.5]")
     positions = (((0, 3), (1, 3)),) * 2
+    if uneven:
+        positions = (((0, 1, 3), (0, 2, 3)), positions[1])
     frozen = {
         r: {"anchor": {"positions": positions}}
         for r in ("window_topk_control", "uniform_0.5_control")

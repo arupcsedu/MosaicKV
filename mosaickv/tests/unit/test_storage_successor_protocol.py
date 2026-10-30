@@ -19,6 +19,14 @@ def test_preparation_cannot_inherit_old_timing_or_fresh_authorizations(tmp_path,
     )
     (parent / "analysis/manifest.json").write_text("{}")
     monkeypatch.setattr(study, "PARENT", parent)
+    compact = tmp_path / "prior_compact"
+    (compact / "analysis").mkdir(parents=True)
+    (compact / "analysis/GATE.json").write_text(
+        json.dumps(dict(status="complete_consumed_engineering_diagnostic", failures=[]))
+    )
+    (compact / "plan.json").write_text("{}")
+    (compact / "analysis/manifest.json").write_text("{}")
+    monkeypatch.setattr(study, "COMPACT_PARENT", compact)
     monkeypatch.setattr(study, "clean_source", lambda _: "a" * 40)
     root = tmp_path / "compact"
     study.prepare(root, "compact")

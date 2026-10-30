@@ -61,9 +61,30 @@ def compact_replay(format: ExactFormat, attention: Any, reduced_precision: bool)
 class CompactFormat(ExactFormat):
     corrections: tuple[ProjectionDelta, ...] = ()
     reduced_precision: bool = True
+    source_map: Any = None
 
     def private(self) -> tuple[Any, ...]:
-        return (*super().private(), *(t for p in self.corrections for t in p.buffers))
+        return (
+            *super().private(),
+            *(t for p in self.corrections for t in p.buffers),
+            *((self.source_map,) if self.source_map is not None else ()),
+        )
+
+    def overlay(self, outputs: tuple[Any, ...]) -> None:
+        if self.slots is None or self.slots.numel() == 0:
+            return
+        if self.slots.ndim != 2 or self.slots.shape[0] != 2:
+            raise ValueError("compact format requires int32 head/position coordinates")
+        for body, target in zip(self.pair, outputs, strict=True):
+            if target.device.type == "cuda":
+                from mosaickv.evaluation.compact_direct_kernel import scatter
+
+                scatter(body, self.slots, target)
+            else:
+                with torch.inference_mode():
+                    target[0, self.slots[0], self.slots[1], :] = decoded(body).reshape(
+                        -1, self.shape[-1]
+                    )
 
     def materialize(self, attention: Any) -> tuple[Any, ...]:
         outputs = compact_replay(self, attention, self.reduced_precision)
@@ -72,11 +93,33 @@ class CompactFormat(ExactFormat):
         return outputs
 
     def fill(self, attention: Any, destinations: tuple[Any, ...], *, direct: bool) -> None:
-        # A direct fused variant may be considered only after this reference passes.
-        del direct
+        if direct and destinations[0].device.type == "cuda":
+            self.fill_direct(attention, destinations)
+            return
         outputs = self.materialize(attention)
         for value, target in zip(outputs, destinations, strict=True):
             target[..., : self.shape[-2], :].copy_(value)
+
+    def fill_direct(self, attention: Any, destinations: tuple[Any, ...]) -> None:
+        from mosaickv.evaluation.compact_direct_kernel import gather
+
+        archive = self.archive
+        if archive is None or self.source_map is None:
+            raise ValueError("compact direct fill requires original source map")
+        heads, kept = archive.selected.shape
+        targets = tuple(t[..., :kept, :] for t in destinations)
+        with torch.inference_mode(), projection_policy(self.reduced_precision):
+            source = decoded(archive.source).squeeze(1)
+            shape = (1, archive.union.numel(), heads, attention.head_dim)
+            key = attention.k_proj(source).view(shape).transpose(1, 2)
+            gather(key, archive, self.source_map, targets[0], key=True)
+            del key
+            value = attention.v_proj(source).view(shape).transpose(1, 2)
+            gather(value, archive, self.source_map, targets[1], key=False)
+            del value, source
+            self.overlay(targets)
+            for patch, target in zip(self.corrections, targets, strict=True):
+                patch.apply(target)
 
 
 def build_compact(
@@ -94,15 +137,29 @@ def build_compact(
     candidate = compact_replay(format, attention, reduced_precision)
     patches = tuple(ProjectionDelta.build(a, b) for a, b in zip(references, candidate, strict=True))
     kind = "compact_delta_token" if format.slots is not None else "compact_delta_source"
+    coordinates = (
+        torch.stack((format.slots // format.shape[-2], format.slots % format.shape[-2])).to(
+            torch.int32
+        )
+        if format.slots is not None
+        else None
+    )
+    mapping = torch.full(
+        (format.archive.original_length,), -1, device=format.archive.union.device, dtype=torch.int32
+    )
+    mapping[format.archive.union] = torch.arange(
+        format.archive.union.numel(), device=mapping.device, dtype=torch.int32
+    )
     result = CompactFormat(
         kind,
         format.shape,
         format.pair,
         format.archive,
-        format.slots,
+        coordinates,
         (),
         patches,
         reduced_precision,
+        mapping,
     )
     for _ in range(repeats):
         actual = result.materialize(attention)

@@ -125,7 +125,11 @@ def baseline_payload(
         )
         high = (
             build_lookm_reimpl_plan(
-                full, prefill.attention_weights, look, cache, physical_prompt_capacity=lower + 1
+                full,
+                prefill.attention_weights,
+                look,
+                replace(cache, budget_value=(lower + 1) * layer_count * position_bytes),
+                physical_prompt_capacity=lower + 1,
             )
             if extra
             else low
@@ -153,6 +157,10 @@ def baseline_payload(
             source_regeneration_eligible=False,
             ineligibility_reason="merged_KV_are_not_original_projection_outputs",
             layer_capacities=[lower + int(layer < extra) for layer in range(layer_count)],
+            temporary_upper_planning_cap=(lower + 1) * layer_count * position_bytes
+            if extra
+            else cap,
+            final_injected_cap_unchanged=True,
             actual_source_slot_bytes=actual,
         )
         return None, pairs, proof

@@ -21,8 +21,9 @@ from mosaickv.evaluation.fox_campaign import clean_source, sha, write_once
 
 SOURCE = Path(__file__).resolve().parents[2]
 PARENT = Path("/scratch/djy8hg/runs/evicastkv/exact-storage-stages-20261030-v1-retry1/stage-4")
-BASE = Path("/scratch/djy8hg/runs/evicastkv/quality-latency-consumed-20261030-v1")
-PHASES = ("compact", "timing", "evidence", "baselines")
+COMPACT_PARENT = Path("/scratch/djy8hg/runs/evicastkv/quality-latency-consumed-20261030-v1/compact")
+BASE = Path("/scratch/djy8hg/runs/evicastkv/quality-latency-compact-direct-20261030-v2")
+PHASES = ("compact", "timing", "layer_addition")
 METHODS = (
     "full_kv",
     "prompt_attention_topk",
@@ -44,6 +45,12 @@ def prepare(root, phase):
     if gate["status"] != "complete_exact_storage_diagnostic" or gate["failures"]:
         raise ValueError("completed exact-storage controls required")
     bound = dict(previous["bound_files"])
+    compact_parent = COMPACT_PARENT
+    prior_gate = common.read(compact_parent / "analysis/GATE.json")
+    if prior_gate["status"] != "complete_consumed_engineering_diagnostic" or prior_gate["failures"]:
+        raise ValueError("original compact replay must pass before fused replay")
+    for name in ("plan.json", "analysis/GATE.json", "analysis/manifest.json"):
+        bound[str(compact_parent / name)] = sha(compact_parent / name)
     for name in ("plan.json", "analysis/GATE.json", "analysis/manifest.json"):
         bound[str(PARENT / name)] = sha(PARENT / name)
     offset = PHASES.index(phase)
@@ -66,7 +73,14 @@ def prepare(root, phase):
         bound_files=bound,
         jobs=jobs,
         phase=phase,
-        protocol="consumed_storage_quality_latency_successor_v1",
+        protocol="compact_direct_shared_bit_transport_v2",
+        same_memberships=phase != "layer_addition",
+        selector_changes_authorized=phase == "layer_addition",
+        bounded_selection_scope="one_layer_restore_only" if phase == "layer_addition" else None,
+        fused_compact_direct=True,
+        layer_addition_draft_steps=4,
+        layer_addition_maximum_plans=8,
+        layer_addition_no_donor_removal=True,
         requested_workers=len(jobs),
         maximum_a100s=6,
         cpus_per_worker=12,
@@ -152,11 +166,40 @@ def choices(adapter, prefill, capture, positions, *, compact):
     return {name: tuple(values) for name, values in variants.items()}, proofs
 
 
+def prepare_lookm_retry(root):
+    parent = Path("/scratch/djy8hg/runs/evicastkv/quality-latency-consumed-20261030-v1/baselines")
+    source = clean_source(SOURCE)
+    if root.exists():
+        raise ValueError("LOOK-M retry root must be new")
+    original = common.read(parent / "plan.json")
+    gate = common.read(parent / "analysis/GATE.json")
+    if gate["status"] != "failed" or {f["index"] for f in gate["failures"]} != {4, 12}:
+        raise ValueError("retry only the two explicitly failed LOOK-M workers")
+    jobs = [job for job in original["jobs"] if job["method"] == "lookm_reimpl"]
+    if [j["index"] for j in jobs] != [4, 12]:
+        raise ValueError("unexpected LOOK-M identities")
+    bound = dict(original["bound_files"])
+    for name in ("plan.json", "analysis/GATE.json", "analysis/manifest.json"):
+        bound[str(parent / name)] = sha(parent / name)
+    original.update(
+        source_sha=source,
+        bound_files=bound,
+        requested_workers=2,
+        protocol="lookm_balanced_cap_planning_repair_retry_only_v1",
+        jobs=[dict(job, index=i, parent_index=job["index"]) for i, job in enumerate(jobs)],
+        finite_next_phase_authorized=False,
+        retry_scope="only_failed_LOOKM_indices_4_12_original_inputs_and_settings",
+    )
+    write_once(root / "plan.json", original)
+    return sha(root / "plan.json")
+
+
 def worker(root, expected, index):
     import torch
 
     from mosaickv.adapters.huggingface import load_hf_adapter
     from mosaickv.adapters.huggingface.parity import compare_with_generate
+    from mosaickv.evaluation.compact_direct_kernel import gpu_controls as compact_direct_controls
     from mosaickv.evaluation.delimiter_control import source_sha
     from mosaickv.evaluation.exact_storage import gpu_controls
     from mosaickv.evaluation.lossless_lifetime import standard_greedy_reference
@@ -191,6 +234,8 @@ def worker(root, expected, index):
             out / "synthetic_cuda_controls.json",
             dict(strided=gpu_controls(), delta=delta_controls()),
         )
+        if plan["phase"] != "baselines":
+            write_once(out / "compact_direct_cuda_controls.json", compact_direct_controls())
         cfg = RunConfig.from_mapping(job["arms"][0]["config"])
         torch.manual_seed(cfg.execution.seed)
         adapter = load_hf_adapter(
@@ -279,6 +324,13 @@ def worker(root, expected, index):
         for arm in job["arms"]:
             role = arm["role"]
             positions = frozen[role]["anchor"]["positions"]
+            if plan["phase"] == "layer_addition":
+                rows.append(
+                    layer_addition(
+                        adapter, prefill, capture, positions, full_reference, role, out, plan
+                    )
+                )
+                continue
             if plan["phase"] == "evidence":
                 rows.extend(
                     evidence(
@@ -430,6 +482,84 @@ def standard_reference(adapter, prefill, positions):
     from mosaickv.evaluation.lossless_lifetime import standard_greedy_reference
 
     return standard_greedy_reference(adapter, prefill, positions)
+
+
+def layer_addition(adapter, prefill, capture, positions, full_reference, role, out, plan):
+    import torch
+
+    from mosaickv.backends.hf_allocation_guard import decide_draft_stability
+    from mosaickv.config import DraftAllocationGuardConfig
+    from mosaickv.evaluation.delimiter_control import compare_prefix_logits
+    from mosaickv.evaluation.draft_addition import collect_draft_gains, layer_addition_plans
+    from mosaickv.evaluation.storage_runs import run
+
+    gains, draft = collect_draft_gains(adapter, prefill, positions, steps=4)
+    proposals = layer_addition_plans(positions, gains, maximum=8)
+    torch.save(tuple(g.cpu() for g in gains), out / f"{role}-prospective-draft-gains.pt")
+    layer_scores = [
+        dict(layer=i, head_maxima=g.max(-1).values.cpu().tolist()) for i, g in enumerate(gains)
+    ]
+    write_once(out / f"{role}-prospective-layer-scores.json", layer_scores)
+    forced = tuple(full_reference.argmax(-1).tolist())
+    formats, _ = choices(adapter, prefill, capture, positions, compact=True)
+    anchor, anchor_record = run(adapter, prefill, formats["compact"], forced=forced, audit=True)
+    torch.save(anchor, out / f"{role}-layer-addition-anchor.pt")
+    records = []
+    for i, proposal in enumerate(proposals):
+        formats, format_proof = choices(
+            adapter, prefill, capture, proposal["positions"], compact=True
+        )
+        actual, record = run(adapter, prefill, formats["compact"], forced=forced, audit=True)
+        ordinary = standard_reference(adapter, prefill, proposal["positions"])
+        own, own_record = run(adapter, prefill, formats["compact"], audit=True)
+        if not torch.equal(own, ordinary):
+            raise RuntimeError("single-layer addition changed ordinary selected-cache logits")
+        torch.save(
+            dict(forced_logits=actual, own_logits=own), out / f"{role}-layer-addition-{i}.pt"
+        )
+        per_prefix = compare_prefix_logits(full_reference, anchor, actual)
+        verdict = decide_draft_stability(
+            per_prefix, DraftAllocationGuardConfig.from_mapping(plan["guard"])
+        )
+        safe = all(
+            r["candidate"]["logit_kl"] <= 0.02 and r["candidate"]["maximum_logit_difference"] <= 1.0
+            for r in per_prefix
+        )
+        storage = record["storage"]
+        fits = (
+            storage["initial_active_kv_storage_bytes"] <= 62 * 2**20
+            and storage["peak_active_kv_storage_bytes"] <= 96 * 2**20
+        )
+        improved = any(
+            r["candidate"]["logit_kl"] < r["anchor"]["logit_kl"] - 1e-7 for r in per_prefix
+        )
+        row = dict(
+            proposal_index=i,
+            **{k: v for k, v in proposal.items() if k != "positions"},
+            per_prefix=per_prefix,
+            guard=verdict,
+            absolute_limits_passed=safe,
+            memory_cap_passed=fits,
+            bitwise_transport=True,
+            **record,
+            own_greedy_storage=own_record["storage"],
+            own_token_ids=own.argmax(-1).tolist(),
+            diagnostic_accepted=bool(verdict["accepted"] and safe and fits and improved),
+            format_proof=format_proof,
+        )
+        write_once(out / f"{role}-layer-addition-{i}.json", row)
+        records.append(row)
+    return dict(
+        role=role,
+        draft_provenance=draft,
+        anchor=anchor_record,
+        proposals=records,
+        complete_plans=len(records),
+        benchmark_labels_used=False,
+        diagnostic_accepted=bool(records and records[0]["diagnostic_accepted"]),
+        prospective_policy="top1_signed_draft_gain_no_32_prefix_selection",
+        oracle_any_diagnostic_pass=any(r["diagnostic_accepted"] for r in records),
+    )
 
 
 def baseline_study(
@@ -585,7 +715,9 @@ def analyze(root, expected):
             for r in common.read(folder / "controls.json")
         )
     expected_count = (
-        len(plan["jobs"])
+        4
+        if plan["phase"] == "layer_addition"
+        else len(plan["jobs"])
         if plan["phase"] == "baselines"
         else 300
         if plan["phase"] == "timing"
@@ -623,7 +755,7 @@ def analyze(root, expected):
                         )
                     )
     accepted = [
-        dict(task=r["task"], role=r["role"], extra_slots=r["extra_slots"])
+        dict(task=r["task"], role=r["role"], extra_slots=r.get("extra_slots", "single_layer_slot"))
         for r in rows
         if r.get("diagnostic_accepted")
     ]
@@ -653,8 +785,8 @@ def analyze(root, expected):
         ),
     )
     print(json.dumps(dict(status=gate["status"], failures=failures, accepted=accepted)))
-    offset = PHASES.index(plan["phase"])
     if complete and plan["finite_next_phase_authorized"]:
+        offset = PHASES.index(plan["phase"])
         child = root.parent / PHASES[offset + 1]
         digest = prepare(child, PHASES[offset + 1])
         launch.submit(
