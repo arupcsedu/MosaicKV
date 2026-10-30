@@ -19,13 +19,19 @@ class PackedBF16:
     shape: tuple[int, ...]
     raw: bool
     buffers: tuple[Any, ...]
+    shared_literal_window: bool = False
 
     @property
     def storage_bytes(self) -> int:
         return sum(int(t.untyped_storage().nbytes()) for t in self.buffers)
 
     def to(self, device: Any) -> PackedBF16:
-        return PackedBF16(self.shape, self.raw, tuple(t.to(device) for t in self.buffers))
+        return PackedBF16(
+            self.shape,
+            self.raw,
+            tuple(t.to(device) for t in self.buffers),
+            self.shared_literal_window,
+        )
 
 
 def pack_cpu(tensor: Any, *, raw_fallback: bool = True) -> PackedBF16:
@@ -86,9 +92,20 @@ def unpack_cpu(packed: PackedBF16) -> Any:
     ]
     exponents = bases.repeat_interleave(BLOCK)[: sm.numel()].to(torch.int32) + codes
     escaped = codes == 7
-    if int(escaped.sum()) != literals.numel() or int(offsets[-1]) != literals.numel():
-        raise ValueError("invalid literal-exponent accounting")
-    exponents[escaped] = literals.to(torch.int32)
+    if packed.shared_literal_window:
+        start, end = int(offsets[0]), int(offsets[-1])
+        if not 0 <= start <= end <= literals.numel() or int(escaped.sum()) != end - start:
+            raise ValueError("invalid shared literal-exponent window")
+        block_ids = torch.arange(sm.numel()) // BLOCK
+        counts = torch.bincount(block_ids[escaped], minlength=bases.numel())
+        if not torch.equal(offsets[1:].long() - offsets[:-1].long(), counts):
+            raise ValueError("invalid shared literal-exponent offsets")
+        literal_values = literals[start:end]
+    else:
+        if int(escaped.sum()) != literals.numel() or int(offsets[-1]) != literals.numel():
+            raise ValueError("invalid literal-exponent accounting")
+        literal_values = literals
+    exponents[escaped] = literal_values.to(torch.int32)
     result = (sm.to(torch.int32) & 127) | ((sm.to(torch.int32) & 128) << 8) | (exponents << 7)
     return result.to(torch.int16).view(torch.bfloat16).reshape(packed.shape)
 

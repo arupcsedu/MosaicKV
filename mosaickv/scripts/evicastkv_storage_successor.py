@@ -241,6 +241,10 @@ def worker(root, expected, index):
             from mosaickv.evaluation.dual_projection import gpu_controls as dual_controls
 
             write_once(out / "dual_cuda_controls.json", dual_controls())
+        if plan.get("batched_history_controls"):
+            from mosaickv.evaluation.batched_history import gpu_controls as history_controls
+
+            write_once(out / "batched_history_cuda_controls.json", history_controls())
         cfg = RunConfig.from_mapping(job["arms"][0]["config"])
         torch.manual_seed(cfg.execution.seed)
         adapter = load_hf_adapter(

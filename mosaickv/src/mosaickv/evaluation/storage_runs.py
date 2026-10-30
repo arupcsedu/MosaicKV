@@ -9,12 +9,24 @@ from mosaickv.evaluation.lossless_prompt_cache import backing_bytes
 
 
 def cache_from_formats(
-    adapter: Any, formats: Any, *, updates: int, audit: bool, sealed: bool = True
+    adapter: Any,
+    formats: Any,
+    *,
+    updates: int,
+    audit: bool,
+    sealed: bool = True,
+    batched_history: bool = False,
 ) -> ExactCache:
     from mosaickv.evaluation.sealed_history import SealedHistoryLayer
 
     cache = ExactCache(audit_workspace=audit)
     cls = SealedHistoryLayer if sealed else ExactLayer
+    if batched_history:
+        if not sealed:
+            raise ValueError("batched history requires lossless sealed storage")
+        from mosaickv.evaluation.batched_history import BatchedHistoryLayer
+
+        cls = BatchedHistoryLayer
     shared: list[Any] = []
     for i, format in enumerate(formats):
         shared.extend(format.shared())
@@ -48,6 +60,7 @@ def run(
     forced: tuple[int, ...] | None = None,
     audit: bool = True,
     sealed: bool = True,
+    batched_history: bool = False,
 ) -> tuple[Any, dict[str, Any]]:
     import time
 
@@ -62,7 +75,14 @@ def run(
         raise ValueError(
             "bounded 2--128 tokens and complete optional FullKV-generated prefix required"
         )
-    cache = cache_from_formats(adapter, formats, updates=tokens, audit=audit, sealed=sealed)
+    cache = cache_from_formats(
+        adapter,
+        formats,
+        updates=tokens,
+        audit=audit,
+        sealed=sealed,
+        batched_history=batched_history,
+    )
     length = max(f.shape[-2] for f in formats)
     state = DecodeState(
         cache,
@@ -84,6 +104,10 @@ def run(
     with IsolatedStorageTransport(adapter, cache):
         starts.record()
         for step in range(tokens - 1):
+            if batched_history:
+                from mosaickv.evaluation.batched_history import seal_full_tails
+
+                seal_full_tails(cache)
             if forced is not None:
                 token = torch.tensor([[forced[step]]], device=adapter.device, dtype=torch.long)
             output = adapter.decode_one_token(token, state, capture_queries=False)
@@ -110,6 +134,9 @@ def run(
         decode_cuda_ms=milliseconds,
         audit_enabled=audit,
         sealed_history=sealed,
+        batched_history=batched_history,
+        batched_history_seals=getattr(cache, "batched_history_seals", 0),
+        batched_history_encode_batches=getattr(cache, "batched_history_encode_batches", 0),
         output_tokens=tokens,
         fixed_reference_prefix=forced is not None,
         used_fullkv_fallback=False,
