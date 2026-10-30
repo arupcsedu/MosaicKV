@@ -44,6 +44,9 @@ class PromptStorageLayer(CacheLayerMixin):
             torch.empty(shape, dtype=torch.bfloat16, device=device) for _ in range(2)
         )
         self.leased: tuple[Any, ...] = ()
+        self.resident_bytes = key.storage_bytes + value.storage_bytes
+        self.history_bytes = 0
+        self.lease_bytes = 0
         self.observe = observe
         self.eviction_count = 0
 
@@ -77,6 +80,9 @@ class PromptStorageLayer(CacheLayerMixin):
             for dest, source in zip(newer, self.history, strict=True):
                 dest[..., : self.history_length, :].copy_(source[..., : self.history_length, :])
             self.history, self.history_capacity = newer, capacity
+            newer_bytes = backing_bytes(newer)
+            self.resident_bytes += newer_bytes - self.history_bytes
+            self.history_bytes = newer_bytes
         for dest, source in zip(self.history, (key_states, value_states), strict=True):
             dest[..., self.history_length : self.history_length + 1, :].copy_(source)
         self.history_length += 1
@@ -84,6 +90,7 @@ class PromptStorageLayer(CacheLayerMixin):
         self.leased = tuple(
             torch.empty(shape, dtype=key_states.dtype, device=key_states.device) for _ in range(2)
         )
+        self.lease_bytes = backing_bytes(self.leased)
         self.observe(())
         for body, dest, history in zip(self.prompt, self.leased, self.history, strict=True):
             unpack_into(body, dest)
@@ -92,6 +99,7 @@ class PromptStorageLayer(CacheLayerMixin):
 
     def release(self) -> None:
         self.leased = ()
+        self.lease_bytes = 0
 
     def get_seq_length(self, cache_position: Any = None) -> int:
         del cache_position
@@ -115,12 +123,15 @@ class PromptStorageCache(DynamicCache):
         self.build_records: list[dict[str, Any]] = []
 
     def observe(self, extras: tuple[Any, ...] = ()) -> None:
-        tensors = tuple(t for layer in self.layers for t in layer.owned_tensors())
-        self.peak_bytes = max(self.peak_bytes, backing_bytes((*tensors, *extras)))
+        current = sum(layer.resident_bytes + layer.lease_bytes for layer in self.layers)
+        self.peak_bytes = max(self.peak_bytes, current + backing_bytes(extras))
         self.observations += 1
 
     def storage_record(self) -> dict[str, Any]:
         self.observe()
+        actual = backing_bytes(tuple(t for layer in self.layers for t in layer.owned_tensors()))
+        if actual != sum(layer.resident_bytes + layer.lease_bytes for layer in self.layers):
+            raise RuntimeError("cached accounting differs from independent storage enumeration")
         return dict(
             initial_active_kv_storage_bytes=self.initial_bytes,
             final_active_kv_storage_bytes=backing_bytes(
@@ -141,7 +152,7 @@ class PromptStorageCache(DynamicCache):
 
 
 def construct_cache(
-    adapter: Any, source_cache: Any, positions: Any, *, encode: bool
+    adapter: Any, source_cache: Any, positions: Any, *, encode: bool, gpu_encoder: bool = False
 ) -> PromptStorageCache:
     """Gather and encode ONE source layer at a time; never change source values."""
     import torch
@@ -175,11 +186,16 @@ def construct_cache(
         bodies = []
         for tensor in gathered:
             if encode:
-                cpu = tensor.cpu()
-                packed = pack_cpu(cpu)
-                if not torch.equal(unpack_cpu(packed).view(torch.int16), cpu.view(torch.int16)):
-                    raise RuntimeError("CPU codec changed a source bit")
-                body = packed.to(tensor.device)
+                if gpu_encoder:
+                    from mosaickv.evaluation.lossless_bf16_kernel import encode as pack_gpu
+
+                    body = pack_gpu(tensor)
+                else:
+                    cpu = tensor.cpu()
+                    packed = pack_cpu(cpu)
+                    if not torch.equal(unpack_cpu(packed).view(torch.int16), cpu.view(torch.int16)):
+                        raise RuntimeError("CPU codec changed a source bit")
+                    body = packed.to(tensor.device)
             else:
                 body = PackedBF16(tuple(tensor.shape), True, (tensor,))
             bodies.append(body)
@@ -190,7 +206,8 @@ def construct_cache(
                 original_prompt_bytes=sum(t.numel() * t.element_size() for t in gathered),
                 stored_prompt_bytes=sum(b.storage_bytes for b in bodies),
                 raw_fallback_tensors=sum(b.raw for b in bodies),
-                cpu_roundtrip_bitwise=True,
+                cpu_roundtrip_bitwise=not gpu_encoder,
+                constructor="gpu_integer_v1" if gpu_encoder else "cpu_reference_v1",
             )
         )
     cache.initial_bytes = backing_bytes(

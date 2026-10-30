@@ -24,7 +24,7 @@ PARENT_SHA = "da8cd788ff54844cdcf9c26b41f05c1eabd504ce79e6721a28dcccc6541d4b42"
 MODES = ("raw_control", "lossless_storage")
 
 
-def prepare(root, *, retry_from=None):
+def prepare(root, *, retry_from=None, greedy=False):
     source = clean_source(SOURCE)
     if root.exists() or sha(PARENT / "plan.json") != PARENT_SHA:
         raise ValueError("new immutable root and pinned consumed parent required")
@@ -67,6 +67,21 @@ def prepare(root, *, retry_from=None):
         construction_peak_certified=False,
         whole_request_peak_certified=False,
     )
+    if greedy:
+        strict = Path("/scratch/djy8hg/runs/evicastkv/lossless-storage-consumed-20261029-v1-retry1")
+        strict_gate = common.read(strict / "analysis/GATE.json")
+        if not strict_gate["storage_feasibility_passed"]:
+            raise ValueError("prior forced-prefix storage/parity evidence required")
+        for name in ("plan.json", "analysis/GATE.json", "analysis/manifest.json"):
+            bound[str(strict / name)] = sha(strict / name)
+        plan.update(
+            protocol="shared_lossless_gpu_constructor_greedy_identity_v2",
+            trajectory="own_greedy_32_tokens_compared_to_standard_exact_cache",
+            gpu_constructor=True,
+            strict_prefix_guard_reference=str(strict / "analysis/GATE.json"),
+            constructor_or_selection_tuning=False,
+            timing_excludes_prefill_selection_and_standard_reference=True,
+        )
     if retry_from is not None:
         old_plan = common.read(retry_from / "plan.json")
         if (
@@ -123,15 +138,24 @@ def kernel_control():
     import torch
 
     from mosaickv.evaluation.lossless_bf16 import pack_cpu, unpack_into
+    from mosaickv.evaluation.lossless_bf16_kernel import encode
 
     torch.manual_seed(0)
+    all_bits = torch.arange(65536).to(torch.int16).view(torch.bfloat16)
     fixtures = (
-        torch.arange(65536).to(torch.int16).view(torch.bfloat16).reshape(1, 1, 512, 128),
-        torch.randn(1, 3, 257, 17).bfloat16(),
+        (all_bits.reshape(1, 1, 512, 128), False),
+        (torch.randn(1, 3, 257, 17).bfloat16(), False),
+        (all_bits[torch.randperm(65536)].reshape(1, 2, 256, 128), True),
     )
     rows = []
-    for tensor in fixtures:
-        encoded = pack_cpu(tensor, raw_fallback=False).to("cuda")
+    for tensor, fallback in fixtures:
+        cpu = pack_cpu(tensor, raw_fallback=fallback)
+        encoded = encode(tensor.cuda(), raw_fallback=fallback)
+        if cpu.raw != encoded.raw or any(
+            not torch.equal(a.cpu().view(torch.uint8), b.view(torch.uint8))
+            for a, b in zip(encoded.buffers, cpu.buffers, strict=True)
+        ):
+            raise RuntimeError("GPU encoder differs from canonical CPU encoded bytes")
         target = torch.full(
             (*tensor.shape[:2], tensor.shape[-2] + 3, tensor.shape[-1]),
             -99,
@@ -144,8 +168,70 @@ def kernel_control():
             target[..., : tensor.shape[-2], :].cpu().view(torch.int16), tensor.view(torch.int16)
         ), "GPU codec changed source bits"
         assert bool((target[..., tensor.shape[-2] :, :] == -99).all()), "history overwritten"
-        rows.append(dict(shape=list(tensor.shape), bitwise=True, history_unchanged=True))
+        rows.append(
+            dict(
+                shape=list(tensor.shape),
+                bitwise=True,
+                history_unchanged=True,
+                gpu_encoder_matches_cpu_bytes=True,
+                raw_storage_fallback=encoded.raw,
+            )
+        )
     return rows
+
+
+def standard_greedy_reference(adapter, prefill, positions):
+    """Own-token decode with the ordinary unmodified exact DynamicCache."""
+    import torch
+
+    from mosaickv.adapters.huggingface.layer_local_cache import gather_layer_local_snapshot
+    from mosaickv.backends.hf_runtime import PackedRuntimeCache, _state_from_packed
+
+    snapshot = gather_layer_local_snapshot(
+        adapter,
+        prefill.state.past_key_values,
+        tuple(tuple(tuple(head) for head in layer) for layer in positions),
+    )
+    choice = PackedRuntimeCache(snapshot, (), snapshot.active_sequence_length, True, (), (), ())
+    state = _state_from_packed(adapter, prefill.state, choice)
+    logits, token = [prefill.logits.detach().reshape(-1).float().cpu()], prefill.next_token_id
+    for _step in range(31):
+        output = adapter.decode_one_token(token, state, capture_queries=False)
+        logits.append(output.logits.detach().reshape(-1).float().cpu())
+        token = output.next_token_id
+    return torch.stack(logits)
+
+
+def encoded_greedy_control(adapter, prefill, positions):
+    """Full-retention control; no pruning and no source cache mutation."""
+    import torch
+
+    from mosaickv.adapters.huggingface.types import DecodeState
+    from mosaickv.evaluation.lossless_prompt_cache import IsolatedStorageTransport, construct_cache
+
+    use_gpu = adapter.device.type == "cuda"
+    cache = construct_cache(
+        adapter, prefill.state.past_key_values, positions, encode=True, gpu_encoder=use_gpu
+    )
+    length = max(len(heads[0]) for heads in positions)
+    state = DecodeState(
+        cache,
+        torch.ones((1, length), dtype=torch.long, device=adapter.device),
+        length,
+        prefill.state.logical_sequence_length,
+        prefill.state.next_decode_position,
+        prefill.state.modality_map,
+        dict(
+            prefill.state.model_state, mosaickv_packed_all_valid=True, mosaickv_cache_all_valid=True
+        ),
+    )
+    values, token = [prefill.logits.detach().reshape(-1).float().cpu()], prefill.next_token_id
+    with IsolatedStorageTransport(adapter, cache):
+        for _step in range(31):
+            output = adapter.decode_one_token(token, state, capture_queries=False)
+            values.append(output.logits.detach().reshape(-1).float().cpu())
+            token = output.next_token_id
+    return torch.stack(values)
 
 
 def worker(root, expected, index):
@@ -241,6 +327,28 @@ def worker(root, expected, index):
         prefill = adapter.prefill(adapter.prepare_inputs(messages))
         pairs, _ = adapter._legacy_layers(prefill.state.past_key_values)
         source_checksum = source_sha(pairs)
+        if plan.get("gpu_constructor"):
+            all_positions = [
+                [[p for p in range(k.shape[-2])] for _ in range(k.shape[1])] for k, _v in pairs
+            ]
+            control_reference = standard_greedy_reference(adapter, prefill, all_positions)
+            settle(adapter)
+            control_candidate = encoded_greedy_control(adapter, prefill, all_positions)
+            if not torch.equal(control_reference, control_candidate):
+                raise RuntimeError("lossless full-retention greedy control changed logits")
+            write_once(
+                out / "lossless_retention_one.json",
+                dict(
+                    tokens=32,
+                    token_agreement=1.0,
+                    maximum_logit_difference=0.0,
+                    bitwise=True,
+                    no_pruning_merging_quantization_offload_or_repair=True,
+                    measurement_type="lossless_storage_retention_one_correctness_control",
+                ),
+            )
+            del control_reference, control_candidate
+            settle(adapter)
         for arm in job["arms"]:
             role = arm["role"]
             positions = original[role]["anchor"]["positions"]
@@ -249,14 +357,25 @@ def worker(root, expected, index):
                 == transactions[role]["null_repack"]["transaction"]["source_KV_sha256"]
             )
             captured[role], rows[role] = {}, {}
+            greedy = (
+                plan.get("trajectory") == "own_greedy_32_tokens_compared_to_standard_exact_cache"
+            )
+            reference = original[role]["anchor"]["logits"]
+            if greedy:
+                reference = standard_greedy_reference(adapter, prefill, positions)
+                captured[role]["standard_exact"] = reference
+                settle(adapter)
             for mode in MODES:
+                torch.cuda.synchronize()
                 before = time.monotonic()
                 cache = construct_cache(
                     adapter,
                     prefill.state.past_key_values,
                     positions,
                     encode=mode == "lossless_storage",
+                    gpu_encoder=plan.get("gpu_constructor", False) and mode == "lossless_storage",
                 )
+                torch.cuda.synchronize()
                 construction_seconds = time.monotonic() - before
                 state = DecodeState(
                     cache,
@@ -284,20 +403,22 @@ def worker(root, expected, index):
                     torch.cuda.Event(enable_timing=True),
                 )
                 begin.record()
+                own_token = prefill.next_token_id
                 with IsolatedStorageTransport(adapter, cache):
                     for token in targets[:-1]:
                         output = adapter.decode_one_token(
-                            torch.tensor([[token]], device=adapter.device),
+                            own_token if greedy else torch.tensor([[token]], device=adapter.device),
                             state,
                             capture_queries=False,
                         )
                         values.append(output.logits.detach().reshape(-1).float().cpu())
+                        own_token = output.next_token_id
                 end.record()
                 torch.cuda.synchronize()
                 logits = torch.stack(values)
                 storage = cache.storage_record()
-                if not torch.equal(logits, original[role]["anchor"]["logits"]):
-                    difference = (logits - original[role]["anchor"]["logits"]).abs()
+                if not torch.equal(logits, reference):
+                    difference = (logits - reference).abs()
                     raise RuntimeError(
                         f"{role}/{mode} changed saved anchor logits: max={float(difference.max())}"
                     )
@@ -314,7 +435,9 @@ def worker(root, expected, index):
                     diagnostic_decode_cuda_ms=begin.elapsed_time(end),
                     diagnostic_cuda_max_memory_allocated=torch.cuda.max_memory_allocated(),
                     diagnostic_cuda_max_memory_reserved=torch.cuda.max_memory_reserved(),
-                    bitwise_logits_equal_saved_anchor=True,
+                    bitwise_logits_equal_saved_anchor=not greedy,
+                    bitwise_logits_equal_standard_greedy_reference=greedy,
+                    generated_token_ids=logits.argmax(-1).tolist() if greedy else None,
                     source_prompt_checksum=source_checksum,
                     no_selection_change=True,
                     no_mandatory_eviction=True,
@@ -368,6 +491,14 @@ def analyze(root, expected):
         for name, digest in result["outputs"].items():
             assert sha(folder / name) == digest
         measurements = common.read(folder / "measurements.json")
+        if plan.get("gpu_constructor"):
+            identity = common.read(folder / "lossless_retention_one.json")
+            if (
+                identity["tokens"] != 32
+                or not identity["bitwise"]
+                or identity["maximum_logit_difference"] != 0
+            ):
+                raise ValueError("full-retention identity control missing or failed")
         old = common.read(Path(job["delimiter_worker"]) / "transactions.json")
         captured = torch.load(folder / "logits.pt", map_location="cpu", weights_only=True)
         full = torch.load(
@@ -376,12 +507,37 @@ def analyze(root, expected):
         for role, modes in measurements.items():
             raw, encoded = (modes[m] for m in MODES)
             assert torch.equal(captured[role]["raw_control"], captured[role]["lossless_storage"])
-            guard_rows = compare_prefix_logits(
-                full, captured[role]["raw_control"], captured[role]["lossless_storage"]
+            greedy = (
+                plan.get("trajectory") == "own_greedy_32_tokens_compared_to_standard_exact_cache"
             )
-            guard = decide_draft_stability(
-                guard_rows, DraftAllocationGuardConfig.from_mapping(plan["guard"])
-            )
+            if greedy:
+                if not torch.equal(
+                    captured[role]["standard_exact"], captured[role]["lossless_storage"]
+                ):
+                    raise ValueError(
+                        "free greedy decode differs from standard exact-cache reference"
+                    )
+                previous = common.read(Path(plan["strict_prefix_guard_reference"]))
+                prior_check = next(
+                    c
+                    for c in previous["comparisons"]
+                    if c["task"] == job["task"] and c["role"] == role
+                )
+                guard = dict(accepted=prior_check["unchanged_relative_guard_passed"])
+                absolute_passed = prior_check["base_selection_absolute_limits_passed"]
+            else:
+                guard_rows = compare_prefix_logits(
+                    full, captured[role]["raw_control"], captured[role]["lossless_storage"]
+                )
+                guard = decide_draft_stability(
+                    guard_rows, DraftAllocationGuardConfig.from_mapping(plan["guard"])
+                )
+                absolute_passed = all(
+                    r["candidate"]["logit_kl"] <= plan["maximum_reference_kl"]
+                    and r["candidate"]["maximum_logit_difference"]
+                    <= plan["maximum_logit_difference"]
+                    for r in guard_rows
+                )
             row = dict(
                 task=job["task"],
                 role=role,
@@ -390,12 +546,11 @@ def analyze(root, expected):
                 diagnostic_timing_may_include_cold_JIT=True,
                 bitwise_logits_equal_anchor=True,
                 unchanged_relative_guard_passed=guard["accepted"],
-                base_selection_absolute_limits_passed=all(
-                    r["candidate"]["logit_kl"] <= plan["maximum_reference_kl"]
-                    and r["candidate"]["maximum_logit_difference"]
-                    <= plan["maximum_logit_difference"]
-                    for r in guard_rows
-                ),
+                prefix_guard_evidence="hash_bound_prior_forced_prefix_gate"
+                if greedy
+                else "this_run",
+                free_greedy_32_token_and_logit_parity=greedy,
+                base_selection_absolute_limits_passed=absolute_passed,
                 construction_seconds=encoded["construction_seconds"],
                 diagnostic_decode_wall_seconds=encoded["diagnostic_decode_wall_seconds"],
                 raw_control_diagnostic_decode_wall_seconds=raw["diagnostic_decode_wall_seconds"],
@@ -458,6 +613,11 @@ def analyze(root, expected):
         "Compatible completed workers may be reused only with their actual producer source/plan "
         "identities and hashed outputs. Source identities are in every row, historical failures "
         "remain in the retry ledger, and cold compiler timings are never pooled across producers.\n"
+        "The V2 greedy stage additionally compares actual own-token trajectories against ordinary "
+        "exact DynamicCache and verifies lossless full-retention equality over "
+        "32 generated tokens. "
+        "The prior FullKV-prefix guard is hash-bound separately, not recomputed on a mismatched "
+        "trajectory or waived by greedy parity.\n"
     )
     (out / "report.md").write_text(text)
     write_once(
@@ -495,9 +655,10 @@ def main():
     parser.add_argument("--plan-sha")
     parser.add_argument("--index", type=int)
     parser.add_argument("--retry-from", type=Path)
+    parser.add_argument("--greedy", action="store_true")
     a = parser.parse_args()
     if a.mode == "prepare":
-        print(prepare(a.root, retry_from=a.retry_from))
+        print(prepare(a.root, retry_from=a.retry_from, greedy=a.greedy))
     elif a.mode == "submit":
         launch.submit(
             a.root,

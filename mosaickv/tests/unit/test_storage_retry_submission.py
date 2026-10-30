@@ -39,6 +39,8 @@ def test_bad_retry_indices_fail_before_submission(tmp_path, monkeypatch, indices
 
 
 def test_sequence_length_does_not_create_constexpr_variants():
-    from mosaickv.evaluation.lossless_bf16_kernel import _decode
+    from mosaickv.evaluation.lossless_bf16_kernel import _decode, _encode_headers, _encode_literals
 
     assert {_decode.arg_names[i] for i in _decode.constexprs} == {"DIM", "BLOCK"}
+    for function in (_encode_headers, _encode_literals):
+        assert {function.arg_names[i] for i in function.constexprs} == {"BLOCK"}

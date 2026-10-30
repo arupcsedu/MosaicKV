@@ -14,7 +14,8 @@ from mosaickv.evaluation.lossless_prompt_cache import (
 )
 
 
-def test_raw_and_encoded_transport_match_standard_exact_cache_for_32_prefixes():
+@pytest.mark.parametrize("greedy", [False, True])
+def test_raw_and_encoded_transport_match_standard_exact_cache_for_32_prefixes(greedy):
     torch.manual_seed(9)
     adapter = _llava()
     adapter.model.to(torch.bfloat16)
@@ -49,12 +50,16 @@ def test_raw_and_encoded_transport_match_standard_exact_cache_for_32_prefixes():
             context = IsolatedStorageTransport(adapter, cache)
         original_length = adapter._cache_length
         logits = []
+        token = prefill.next_token_id
         with context:
             for step in range(31):
                 out = adapter.decode_one_token(
-                    torch.tensor([[3 + step % 5]]), state, capture_queries=False
+                    token if greedy else torch.tensor([[3 + step % 5]]),
+                    state,
+                    capture_queries=False,
                 )
                 logits.append(out.logits.clone())
+                token = out.next_token_id
             assert state.logical_sequence_length == state.next_decode_position == 35
             if mode != "standard":
                 record = cache.storage_record()
@@ -105,3 +110,46 @@ def test_transport_releases_temporary_buffers_and_restores_dispatch_on_failure()
         raise RuntimeError("synthetic failure")
     assert adapter._cache_length == original
     assert not any(layer.leased for layer in cache.layers)
+
+
+def test_cached_accounting_matches_independent_owner_scan_at_every_boundary():
+    from mosaickv.evaluation.lossless_prompt_cache import backing_bytes
+
+    adapter = _llava()
+    adapter.model.to(torch.bfloat16)
+    prefill = adapter.prefill(adapter.prepare_inputs(_runtime_request("audit").messages))
+    cache = construct_cache(
+        adapter, prefill.state.past_key_values, (((0, 3),), ((0, 3),)), encode=True
+    )
+    observed = [cache.initial_bytes]
+    original = cache.observe
+
+    def audit(extras=()):
+        actual = backing_bytes(
+            tuple(t for layer in cache.layers for t in layer.owned_tensors()) + extras
+        )
+        observed.append(actual)
+        original(extras)
+        assert cache.peak_bytes == max(observed)
+
+    for layer in cache.layers:
+        layer.observe = audit
+    for _step in range(31):
+        for layer in cache.layers:
+            key = torch.ones((1, 1, 1, 8), dtype=torch.bfloat16)
+            layer.update(key, key)
+            layer.release()
+    assert cache.storage_record()["peak_active_kv_storage_bytes"] == max(observed)
+
+
+def test_full_retention_greedy_helper_matches_standard_cache():
+    import evicastkv_lossless_storage as runner
+
+    torch.manual_seed(19)
+    adapter = _llava()
+    adapter.model.to(torch.bfloat16)
+    prefill = adapter.prefill(adapter.prepare_inputs(_runtime_request("identity").messages))
+    positions = (((0, 1, 2, 3),), ((0, 1, 2, 3),))
+    reference = runner.standard_greedy_reference(adapter, prefill, positions)
+    candidate = runner.encoded_greedy_control(adapter, prefill, positions)
+    assert torch.equal(reference, candidate)

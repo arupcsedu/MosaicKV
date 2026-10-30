@@ -106,3 +106,35 @@ correctness/storage evidence, not a mixed-source performance campaign.
 Twenty-four focused CPU tests passed after this correction, including explicit
 subset submission, invalid-index rejection, source-aware reuse in analysis and
 a regression excluding sequence lengths from Triton constexpr specialization.
+
+## V2 bounded engineering check
+
+After complete forced-prefix correctness/storage evidence, keep the same two
+consumed identities and saved selections. Replace the CPU constructor with an
+integer-only GPU encoder producing exactly the same five component buffers.
+Use integer histograms, lowest-base tie breaking, stable literal offsets and
+the same raw fallback. No learned values, labels or output-driven format choice
+is introduced. Check GPU/CPU encoded-byte equality on every BF16 pattern,
+irregular shapes and a deliberately incompressible raw-fallback fixture before
+loading the model.
+
+Replace the repeated scan over all tensor storages at every layer with cached
+per-layer resident/lease byte totals; history-growth overlap still counts both
+old and new backing. An independent owner enumeration validates final counts,
+and a CPU regression compares every transaction boundary with full enumeration.
+Apply this accounting optimization equally to raw and encoded controls.
+
+This V2 test additionally uses actual autoregressive greedy decoding, not only
+the FullKV forced prefix. Compare raw and encoded transports to the ordinary
+exact DynamicCache over 32 tokens, and test full-retention lossless parity over
+32 tokens. Keep the original forced-prefix guard as a separately hash-bound
+artifact; do not compare different trajectories or let the new parity control
+waive a prior absolute-fidelity failure. These are correctness controls, not
+official task scores. No fresh cohort or statistical superiority claim follows.
+
+Constructor timing synchronizes CUDA before and after construction; decode has
+its own synchronized CUDA events. Both remain shared-prefill diagnostics that
+exclude selection, prefill, reference construction and request warmups/repeats.
+Construction/whole-request memory peaks remain uncertified. Twenty-eight
+focused CPU tests passed before V2 GPU submission; GPU encoder/greedy controls
+are unmeasured until the immutable workers complete.
