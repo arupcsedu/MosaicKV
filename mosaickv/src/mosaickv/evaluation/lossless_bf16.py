@@ -102,12 +102,15 @@ def unpack_into(packed: PackedBF16, destination: Any) -> None:
         or packed.shape[0] != 1
         or destination.ndim != 4
         or destination.dtype != torch.bfloat16
-        or not destination.is_contiguous()
+        or destination.stride(-1) != 1
+        or destination.stride(-2) != destination.shape[-1]
+        or destination.stride(-3) < destination.shape[-2] * destination.shape[-1]
+        or destination.stride(-3) % destination.shape[-1] != 0
         or tuple(destination.shape[:2]) != packed.shape[:2]
         or destination.shape[-1] != packed.shape[-1]
         or destination.shape[-2] < packed.shape[-2]
     ):
-        raise ValueError("matching contiguous batch-one BHSD destination required")
+        raise ValueError("matching nonoverlapping batch-one BHSD destination required")
     if packed.raw:
         destination[..., : packed.shape[-2], :].copy_(packed.buffers[0])
     elif destination.device.type == "cpu":

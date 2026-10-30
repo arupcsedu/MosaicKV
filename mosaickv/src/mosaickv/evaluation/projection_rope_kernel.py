@@ -6,13 +6,14 @@ import triton
 import triton.language as tl
 
 
-@triton.jit(do_not_specialize=["COUNT", "KEPT"])
+@triton.jit(do_not_specialize=["COUNT", "KEPT", "OUTPUT_HEAD_STRIDE"])
 def _rope_gather(
     KEY,
     COS,
     SIN,
     POSITIONS,
     OUTPUT,
+    OUTPUT_HEAD_STRIDE,
     COUNT,
     KEPT,
     HEAD_STRIDE: tl.constexpr,
@@ -38,10 +39,10 @@ def _rope_gather(
     # Match the two separate PyTorch BF16 multiplies followed by BF16 addition.
     first = (key * cos).to(tl.bfloat16).to(tl.float32)
     second = (rotated * sin).to(tl.bfloat16).to(tl.float32)
-    tl.store(OUTPUT + offset, first + second, mask=valid)
+    tl.store(OUTPUT + head * OUTPUT_HEAD_STRIDE + slot * DIM + dim, first + second, mask=valid)
 
 
-def rope_gather(key: Any, cos: Any, sin: Any, positions: Any) -> Any:
+def rope_gather(key: Any, cos: Any, sin: Any, positions: Any, destination: Any = None) -> Any:
     import torch
 
     if (
@@ -65,13 +66,25 @@ def rope_gather(key: Any, cos: Any, sin: Any, positions: Any) -> Any:
     ):
         raise ValueError("batch-one CUDA BF16 MHA with contiguous head dimensions required")
     heads, kept = positions.shape
-    result = torch.empty((1, heads, kept, key.shape[-1]), device=key.device, dtype=key.dtype)
+    result = destination
+    if result is None:
+        result = torch.empty((1, heads, kept, key.shape[-1]), device=key.device, dtype=key.dtype)
+    if (
+        tuple(result.shape) != (1, heads, kept, key.shape[-1])
+        or result.device != key.device
+        or result.dtype != key.dtype
+        or result.stride(-1) != 1
+        or result.stride(-2) != key.shape[-1]
+        or result.stride(1) < kept * key.shape[-1]
+    ):
+        raise ValueError("matching nonoverlapping BF16 destination required")
     _rope_gather[(triton.cdiv(result.numel(), 256),)](
         key,
         cos,
         sin,
         positions,
         result,
+        result.stride(1),
         result.numel(),
         kept,
         HEAD_STRIDE=key.stride(1),
@@ -108,13 +121,29 @@ def gpu_control() -> list[Any]:
         reference = rotated.gather(2, positions[None, :, :, None].expand(1, 3, 5, 16))
         actual = rope_gather(key, cos, sin, positions)
         equal = torch.equal(actual.view(torch.int16), reference.view(torch.int16))
+        backing = torch.full((1, 3, 19, 16), -71, device=key.device, dtype=key.dtype)
+        window = backing[..., 4:9, :]
+        returned = rope_gather(key, cos, sin, positions, window)
+        direct_equal = torch.equal(window.view(torch.int16), reference.view(torch.int16))
+        sentinels = bool((backing[..., :4, :] == -71).all()) and bool(
+            (backing[..., 9:, :] == -71).all()
+        )
         results.append(
             dict(
                 stride_zero_positions=shared,
                 bitwise_equal=equal,
+                direct_strided_bitwise_equal=direct_equal,
+                same_destination=returned is window,
+                surrounding_sentinels_unchanged=sentinels,
                 maximum_absolute_difference=float((actual.float() - reference.float()).abs().max()),
             )
         )
-    if not all(r["bitwise_equal"] for r in results):
+    if not all(
+        r["bitwise_equal"]
+        and r["direct_strided_bitwise_equal"]
+        and r["same_destination"]
+        and r["surrounding_sentinels_unchanged"]
+        for r in results
+    ):
         raise RuntimeError(f"fused BF16 RoPE control failed: {results}")
     return results

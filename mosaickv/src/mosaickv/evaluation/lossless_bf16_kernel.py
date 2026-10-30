@@ -51,7 +51,7 @@ def decode(packed, destination):
         destination.view(torch.uint16),
         COUNT=count,
         PROMPT=packed.shape[-2],
-        LENGTH=destination.shape[-2],
+        LENGTH=destination.stride(-3) // destination.shape[-1],
         DIM=packed.shape[-1],
         BLOCK=1024,
     )
