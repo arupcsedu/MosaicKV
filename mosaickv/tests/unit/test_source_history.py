@@ -149,3 +149,31 @@ def test_wrong_request_cache_fails_closed_and_all_hooks_are_removed():
             position_embeddings=(torch.ones(1, 1, 128, dtype=torch.bfloat16),) * 2,
         )
     assert not attention._forward_pre_hooks
+
+
+@pytest.mark.parametrize("corrupt", [False, True])
+def test_batched_checks_commit_only_after_every_layer_passes(monkeypatch, corrupt):
+    import mosaickv.evaluation.source_history as module
+
+    cache = cache_fixture()
+    cache.source_constructor = "direct_batched_checks"
+    for token in range(16):
+        step(cache, token)
+    calls = []
+
+    def builder(layer, cos, sin, *, bit_flags):
+        calls.append(layer)
+        bit_flags.extend(torch.tensor(not (corrupt and len(calls) == 2)) for _ in range(6))
+        return exact_cpu_factory(layer, cos, sin)
+
+    monkeypatch.setattr(module, "build_chunk_direct", builder)
+    if corrupt:
+        with pytest.raises(RuntimeError, match="no history sealed"):
+            seal_source_full_tails(cache)
+        assert all(layer.tail_used == 16 and not layer.source_sealed for layer in cache.layers)
+        assert cache.source_history_seals == cache.source_check_syncs == 0
+    else:
+        assert seal_source_full_tails(cache)
+        assert cache.source_check_syncs == 1 and cache.source_check_flags_checked == 12
+        assert all(layer.tail_used == 0 and len(layer.source_sealed) == 1 for layer in cache.layers)
+        cache.storage_record()

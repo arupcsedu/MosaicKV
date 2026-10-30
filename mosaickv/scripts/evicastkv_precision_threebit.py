@@ -10,16 +10,21 @@ import evicastkv_precision_tier as previous
 from mosaickv.evaluation.fox_campaign import clean_source, sha, write_once
 
 base = previous.base
-ROOT = Path("/scratch/djy8hg/runs/evicastkv/precision-threebit-consumed-20261030-v1")
+ROOT = Path("/scratch/djy8hg/runs/evicastkv/precision-threebit-consumed-20261030-v2")
 PARENT = Path("/scratch/djy8hg/runs/evicastkv/precision-tier-consumed-20261030-v2")
 
 
 def prepare(root, phase):
-    if phase != "baselines" or root.exists() or root.name != "comparison":
+    if phase != "baselines" or root.exists() or root.name not in ("canary", "comparison"):
         raise ValueError("only a new finite consumed comparison permitted")
     canary = base.common.read(PARENT / "canary/plan.json")
     original = base.common.read(PARENT / "comparison/plan.json")
     bound = dict(original["bound_files"])
+    if root.name == "comparison":
+        path = root.parent / "canary/analysis/precision_decision.json"
+        if not base.common.read(path)["registered_precision_passed"]:
+            raise ValueError("encoded-exact-overlay model and memory canaries must pass")
+        bound[str(path)] = sha(path)
     for name in (
         "canary/plan.json",
         "comparison/plan.json",
@@ -47,11 +52,27 @@ def prepare(root, phase):
         controls = base.common.read(folder / "precision_controls.json")["controls"]["3"]
         if not controls["numerical_gate"] or not controls["smaller_initial_final_peak"]:
             raise ValueError("both registered 3-bit model and storage canaries must pass")
+    selected_jobs = [
+        j for j in original["jobs"] if root.name == "comparison" or j["method"] == "mosaickv_exact"
+    ]
     plan = dict(
         original,
         source_sha=clean_source(base.SOURCE),
         bound_files=bound,
-        protocol="three_bit_common_baseline_controls_consumed_only_v1",
+        protocol="three_bit_common_lossless_protected_controls_consumed_only_v2",
+        stage=root.name,
+        jobs=[dict(j, index=i) for i, j in enumerate(selected_jobs)],
+        requested_workers=2 if root.name == "canary" else 12,
+        encode_protected_exact=True,
+        segmented_history_enabled=False,
+        workspace_graph_enabled=False,
+        prototype_enabled=False,
+        residual_repair_enabled=False,
+        residual_cpu_bytes=0,
+        replays_consumed_frozen_memberships=True,
+        common_history_consolidated=True,
+        strict_protected_encoding_128_parity=True,
+        time_all_transport_valid_methods=True,
         comparison_precision_bits=3,
         precision_bits=[3],
         worker_script="evicastkv_precision_threebit.sbatch",
@@ -72,11 +93,12 @@ def analyze(root, expected):
     from mosaickv.evaluation.precision_quality import derive
 
     previous.analyze(root, expected)
-    if not base.common.read(root / "analysis/GATE.json")["failures"]:
+    if root.name == "comparison" and not base.common.read(root / "analysis/GATE.json")["failures"]:
         derive(root, expected, root / "analysis/quality_prefixes", source=base.SOURCE)
 
 
 if __name__ == "__main__":
+    previous.prepare = prepare
     base.BASE = ROOT
     base.__dict__["PHASES"] = ("baselines",)
     base.SCRIPT_NAME = "evicastkv_precision_threebit.sbatch"

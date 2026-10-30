@@ -26,29 +26,46 @@ def answer_prefix(
     )
 
 
+def load_processor(model: dict[str, Any]) -> tuple[Any, Any, str]:
+    from transformers import AutoProcessor, GenerationConfig
+
+    from mosaickv.adapters.huggingface.registry import _resolve_model_source
+
+    snapshot = _resolve_model_source(model["id"], model["revision"], local_files_only=True)
+    processor = AutoProcessor.from_pretrained(snapshot, local_files_only=True)
+    generation = GenerationConfig.from_pretrained(snapshot, local_files_only=True)
+    return processor, generation, snapshot
+
+
 def derive(root: Path, expected: str, output: Path, *, source: Path) -> None:
     import json
 
     import pandas as pd  # type: ignore[import-untyped]
     import torch
-    from transformers import AutoProcessor, GenerationConfig
 
     if output.exists() or sha(root / "plan.json") != expected:
         raise ValueError("new derived root and immutable parent plan required")
     plan = json.loads((root / "plan.json").read_text())
     jobs = plan["jobs"]
     model = jobs[0]["arms"][0]["config"]["model"]
-    processor = AutoProcessor.from_pretrained(
-        model["id"], revision=model["revision"], local_files_only=True
-    )
-    generation = GenerationConfig.from_pretrained(
-        model["id"], revision=model["revision"], local_files_only=True
-    )
+    processor, generation, snapshot = load_processor(model)
     eos = generation.eos_token_id
     eos = (eos,) if type(eos) is int else tuple(eos)
+
     def decode(ids):
         return processor.tokenizer.decode(ids, skip_special_tokens=True)
+
     inputs = {str(root / "plan.json"): expected}
+    for name in (
+        "preprocessor_config.json",
+        "tokenizer_config.json",
+        "tokenizer.json",
+        "generation_config.json",
+    ):
+        path = Path(snapshot) / name
+        if not path.is_file():
+            raise ValueError("complete pinned processor/reference-scoring files required")
+        inputs[str(path)] = sha(path)
     references = {}
     controls = {}
     for job in jobs:
@@ -87,6 +104,10 @@ def derive(root: Path, expected: str, output: Path, *, source: Path) -> None:
             if len(ids) != 128 or len(full_ids) != 128:
                 raise ValueError("complete fixed128 model trajectories required")
             record = controls[job["index"]]
+            execution_valid = variant == "reference" or (
+                record["controls"][variant]["clone_repack_bitwise"]
+                and record["controls"][variant].get("lossless_exact_codec_128_bitwise", True)
+            )
             storage = (
                 record["reference"]["storage"]
                 if variant == "reference"
@@ -106,6 +127,7 @@ def derive(root: Path, expected: str, output: Path, *, source: Path) -> None:
                         backend="hf_eager",
                         method=job["method"],
                         variant=variant,
+                        execution_valid=execution_valid,
                         **prediction,
                         implementation_variant=selection.get(
                             "variant", selection.get("selection", job["method"])

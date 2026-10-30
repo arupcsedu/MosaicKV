@@ -94,13 +94,19 @@ class PrecisionFormat:
     exact_map: Any
     exact_values: tuple[Any, ...]
     kind: str = "evicastkv_prompt_precision_variant"
+    encoded_exact: bool = False
 
     def private(self) -> tuple[Any, ...]:
+        exact = (
+            tuple(t for b in self.exact_values for t in b.buffers)
+            if self.encoded_exact
+            else self.exact_values
+        )
         return (
             *(t for b in self.pair for t in b.tensors()),
             self.exact_indices,
             self.exact_map,
-            *self.exact_values,
+            *exact,
         )
 
     def shared(self) -> tuple[Any, ...]:
@@ -127,17 +133,38 @@ class PrecisionFormat:
             if b.codes.device.type == "cuda":
                 from mosaickv.evaluation.precision_tier_kernel import decode
 
-                decode(b, target, self.exact_map, exact)
+                decode(
+                    b,
+                    target,
+                    self.exact_map,
+                    b.codes if self.encoded_exact else exact,
+                    overlay=not self.encoded_exact,
+                )
+                if self.encoded_exact:
+                    from mosaickv.evaluation.protected_exact import scatter_into
+
+                    scatter_into(exact, self.exact_indices, target)
             else:
                 target[..., : self.shape[-2], :].copy_(unpack_cpu(b))
-                target[..., self.exact_indices, :] = exact
+                if self.encoded_exact:
+                    from mosaickv.evaluation.protected_exact import scatter_into
+
+                    scatter_into(exact, self.exact_indices, target)
+                else:
+                    target[..., self.exact_indices, :] = exact
 
 
 def construct(
-    pair: tuple[Any, ...], *, bits: int = 4, protected: tuple[int, ...] = ()
+    pair: tuple[Any, ...],
+    *,
+    bits: int = 4,
+    protected: tuple[int, ...] = (),
+    encoded_exact: bool = False,
 ) -> PrecisionFormat:
     if len(pair) != 2 or pair[0].shape != pair[1].shape:
         raise ValueError("same-shape key/value pair required")
+    if type(encoded_exact) is not bool:
+        raise ValueError("encoded_exact must be an explicit boolean")
     length = pair[0].shape[-2]
     if any(type(i) is not int or not 0 <= i < length for i in protected):
         raise ValueError("protected original selected positions must be in bounds")
@@ -148,10 +175,16 @@ def construct(
     mapping = torch.full((length,), -1, device=pair[0].device, dtype=torch.int32)
     mapping[indices.long()] = torch.arange(len(positions), device=pair[0].device, dtype=torch.int32)
     exact = tuple(t.index_select(2, indices.long()).clone() for t in pair)
+    if encoded_exact:
+        from mosaickv.evaluation.exact_storage import encode
+
+        exact = tuple(encode(t) for t in exact)
+        mapping = torch.empty(0, device=pair[0].device, dtype=torch.int32)
     return PrecisionFormat(
         tuple(pair[0].shape),
         (pack(pair[0], bits=bits, axis=2), pack(pair[1], bits=bits, axis=3)),
         indices,
         mapping,
         exact,
+        encoded_exact=encoded_exact,
     )

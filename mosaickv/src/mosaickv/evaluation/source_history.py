@@ -5,7 +5,7 @@ phases are additional, explicitly charged storage, not free capture tensors.
 """
 
 from contextlib import ExitStack, nullcontext
-from typing import Any
+from typing import Any, cast
 
 import torch
 
@@ -51,10 +51,12 @@ class SourceHistoryLayer(SealedHistoryLayer):
 
 class SourceHistoryCache(ExactCache):
     def __init__(self, *, audit_workspace: bool, constructor: str = "reference") -> None:
-        if constructor not in ("reference", "direct"):
+        if constructor not in ("reference", "direct", "direct_batched_checks"):
             raise ValueError("explicit reference or direct source-history constructor required")
         super().__init__(audit_workspace=audit_workspace)
         self.source_constructor = constructor
+        self.source_check_flags_checked = 0
+        self.source_check_syncs = 0
         self.shared_tensors: tuple[Any, ...] = ()
         self.source_history_seals = 0
         self.phase_tail: Any = None
@@ -111,6 +113,7 @@ class SourceHistoryCache(ExactCache):
         self.observe()
 
     def storage_record(self) -> dict[str, Any]:
+        layers = cast(list[SourceHistoryLayer], self.layers)
         record = super().storage_record()
         record.update(
             source_history=True,
@@ -118,14 +121,12 @@ class SourceHistoryCache(ExactCache):
             source_history_seals=self.source_history_seals,
             source_history_normalized_tail_bytes=backing_bytes(
                 tuple(
-                    layer.normalized_tail
-                    for layer in self.layers
-                    if layer.normalized_tail is not None
+                    layer.normalized_tail for layer in layers if layer.normalized_tail is not None
                 )
             ),
             generated_history_storage=[
                 dict(sealed_chunks=len(layer.source_sealed), raw_tail_used=layer.tail_used)
-                for layer in self.layers
+                for layer in layers
             ],
             source_history_original_positions=[t.tolist() for t in self.history_position_chunks],
             source_history_constructor_tensor_results_observed=self.audit_workspace,
@@ -197,7 +198,9 @@ def build_chunk(layer: Any, cos: Any, sin: Any) -> Any:
     return candidate
 
 
-def build_chunk_direct(layer: Any, cos: Any, sin: Any) -> Any:
+def build_chunk_direct(
+    layer: Any, cos: Any, sin: Any, *, bit_flags: list[Any] | None = None
+) -> Any:
     """Four projections instead of nine; three final original-bit checks remain."""
     from dataclasses import replace
 
@@ -226,6 +229,12 @@ def build_chunk_direct(layer: Any, cos: Any, sin: Any) -> Any:
     candidate = replace(candidate, patches=patches)
     for _ in range(3):
         actual = candidate.materialize(layer.attention)
+        if bit_flags is not None:
+            bit_flags.extend(
+                (reference.view(torch.int16) == value.view(torch.int16)).all()
+                for reference, value in zip(layer.history, actual, strict=True)
+            )
+            continue
         if not all(
             torch.equal(reference.view(torch.int16), value.view(torch.int16))
             for reference, value in zip(layer.history, actual, strict=True)
@@ -235,7 +244,7 @@ def build_chunk_direct(layer: Any, cos: Any, sin: Any) -> Any:
 
 
 def seal_source_full_tails(cache: SourceHistoryCache) -> bool:
-    layers = cache.layers
+    layers = cast(list[SourceHistoryLayer], cache.layers)
     if (
         not layers
         or not all(isinstance(layer, SourceHistoryLayer) for layer in layers)
@@ -257,6 +266,9 @@ def seal_source_full_tails(cache: SourceHistoryCache) -> bool:
 
     mode = ScratchAudit(excluded=excluded, observe=observe) if cache.audit_workspace else None
     formats = []
+    bit_flags: list[Any] | None = (
+        [] if cache.source_constructor == "direct_batched_checks" else None
+    )
     with mode if mode is not None else nullcontext():
         cos, sin, positions = tuple(t.clone() for t in cache.phase_tail)
         if not torch.equal(positions[1:], positions[:-1] + 1) or (
@@ -266,8 +278,19 @@ def seal_source_full_tails(cache: SourceHistoryCache) -> bool:
             raise ValueError("original logical history positions must remain consecutive")
         pending.extend((cos, sin, positions))
         for layer in layers:
-            builder = build_chunk_direct if cache.source_constructor == "direct" else build_chunk
-            format = builder(layer, cos, sin)
+            builder = (
+                build_chunk_direct
+                if cache.source_constructor in ("direct", "direct_batched_checks")
+                else build_chunk
+            )
+            previous_flags = len(bit_flags) if bit_flags is not None else 0
+            format = (
+                build_chunk_direct(layer, cos, sin, bit_flags=bit_flags)
+                if bit_flags is not None
+                else builder(layer, cos, sin)
+            )
+            if bit_flags is not None:
+                pending.extend(bit_flags[previous_flags:])
             if any(
                 t.untyped_storage().nbytes() and identity(t) in excluded for t in format.private()
             ):
@@ -275,6 +298,16 @@ def seal_source_full_tails(cache: SourceHistoryCache) -> bool:
             formats.append(format)
             pending.extend(format.tensors())
             observe()
+        if bit_flags is not None:
+            if len(bit_flags) != 6 * len(layers):
+                raise RuntimeError("every layer must provide three K and three V bit checks")
+            passed = torch.stack(bit_flags).all()
+            pending.append(passed)
+            observe()
+            if not bool(passed):
+                raise RuntimeError(
+                    "batched original K/V bit verification failed; no history sealed"
+                )
     # Only commit after every layer's original K/V reconstruction has passed.
     cache.shared_tensors = (*cache.shared_tensors, cos, sin, positions)
     cache.shared_bytes = backing_bytes(cache.shared_tensors)
@@ -285,6 +318,9 @@ def seal_source_full_tails(cache: SourceHistoryCache) -> bool:
         layer.resident_bytes += backing_bytes(format.private())
         layer.tail_used = 0
     cache.source_history_seals += 1
+    if bit_flags is not None:
+        cache.source_check_flags_checked += len(bit_flags)
+        cache.source_check_syncs += 1
     if mode is not None:
         layers[0].workspace_operations += mode.operations
     pending.clear()

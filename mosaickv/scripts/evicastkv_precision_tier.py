@@ -141,6 +141,17 @@ def gpu_controls():
             records.append(
                 dict(bits=bits, n=n, cpu_gpu_bits_equal=True, strided_history_preserved=True)
             )
+            encoded = construct(pair, bits=bits, encoded_exact=True)
+            alternate = tuple(torch.full_like(t, -5) for t in actual)
+            encoded.fill(None, alternate, direct=True)
+            if not all(
+                torch.equal(a.view(torch.int16), b.view(torch.int16))
+                for a, b in zip(actual, alternate, strict=True)
+            ):
+                raise RuntimeError("lossless exact-overlay coding changed precision output bits")
+    from mosaickv.evaluation.protected_exact import gpu_controls as exact_controls
+
+    records.extend(exact_controls())
     return records
 
 
@@ -190,6 +201,8 @@ def study(adapter, prefill, capture, frozen, job, cfg, full_reference, prepared,
         variants, _ = fused_choices(adapter, prefill, capture, positions, compact=True)
         reference_formats = next(iter(variants.values()))
     common = dict(tokens=128, source_history=True, source_history_constructor="direct")
+    if plan.get("common_history_consolidated"):
+        common["consolidated_history"] = True
     reference, reference_record = storage_runs.run(
         adapter, prefill, reference_formats, audit=True, **common
     )
@@ -224,7 +237,12 @@ def study(adapter, prefill, capture, frozen, job, cfg, full_reference, prepared,
         formats = tuple(
             reference_formats[i]
             if i < 2 or i >= len(pairs) - 2
-            else construct(pair, bits=bits, protected=slots)
+            else construct(
+                pair,
+                bits=bits,
+                protected=slots,
+                encoded_exact=plan.get("encode_protected_exact", False),
+            )
             for i, (pair, slots) in enumerate(zip(pairs, protected, strict=True))
         )
         torch.cuda.synchronize()
@@ -247,7 +265,23 @@ def study(adapter, prefill, capture, frozen, job, cfg, full_reference, prepared,
             prompt_precision_lossy=True,
             prompt_bits=bits,
             all_selected_text_slots_exact=True,
+            protected_text_lossless_codec=plan.get("encode_protected_exact", False),
         )
+        exact_codec_pass = True
+        raw_exact_record = None
+        if plan.get("encode_protected_exact"):
+            raw_formats = tuple(
+                reference_formats[i]
+                if i < 2 or i >= len(pairs) - 2
+                else construct(pair, bits=bits, protected=slots)
+                for i, (pair, slots) in enumerate(zip(pairs, protected, strict=True))
+            )
+            raw_logits, raw_exact_record = storage_runs.run(
+                adapter, prefill, raw_formats, audit=True, **common
+            )
+            exact_codec_pass = torch.equal(raw_logits, actual)
+            torch.save(raw_logits, out / f"precision_{bits}_raw_exact_control.pt")
+            del raw_formats, raw_logits
         # Repacking the dequantized values must preserve the exact model arithmetic.
         dequantized = tuple(
             ExactFormat(
@@ -261,6 +295,7 @@ def study(adapter, prefill, capture, frozen, job, cfg, full_reference, prepared,
         comparison = differences(reference[:32], actual[:32])
         numerical = (
             clone_pass
+            and exact_codec_pass
             and comparison["token_agreement"] == 1
             and comparison["maximum_logit_KL"] <= 0.02
             and comparison["maximum_logit_difference"] <= 1.0
@@ -275,13 +310,18 @@ def study(adapter, prefill, capture, frozen, job, cfg, full_reference, prepared,
             comparison=comparison,
             exploratory_128_token_comparison=differences(reference, actual),
             clone_repack_bitwise=clone_pass,
+            lossless_exact_codec_128_bitwise=exact_codec_pass,
+            raw_exact_control=raw_exact_record,
             numerical_gate=numerical,
             smaller_initial_final_peak=memory,
             constructor_seconds=construction,
             candidate=record,
         )
         outputs[str(bits)] = actual
-        if plan["stage"] == "comparison" and numerical and memory and job["method"] != "full_kv":
+        timing_eligible = (numerical and memory) or (
+            plan.get("time_all_transport_valid_methods", False) and clone_pass and exact_codec_pass
+        )
+        if plan["stage"] == "comparison" and timing_eligible and job["method"] != "full_kv":
             rng = random.Random(plan["timing_seed"])
             for trial in range(-5, 20):
                 order = [("reference", reference_formats), (str(bits), formats)]
@@ -322,6 +362,19 @@ def study(adapter, prefill, capture, frozen, job, cfg, full_reference, prepared,
                         task=job["task"],
                         method=job["method"],
                         variant=name,
+                        method_label=(
+                            "full_position_lossless_control"
+                            if job["method"] == "full_kv" and name == "reference"
+                            else job["method"]
+                            + (
+                                "_common_lossless_transport"
+                                if name == "reference"
+                                else "_prompt_precision_variant"
+                            )
+                        ),
+                        cache_precision_bits=None if name == "reference" else int(name),
+                        fixed_output_length_for_timing=128,
+                        requires_eos_aware_quality_reduction=True,
                         generated_token_ids=logits.argmax(-1).tolist(),
                         answer=adapter.processor.tokenizer.decode(
                             logits.argmax(-1).tolist(), skip_special_tokens=True
@@ -395,7 +448,7 @@ def analyze(root, expected):
         base.launch.submit(
             child,
             digest,
-            script_name="evicastkv_precision_tier.sbatch",
+            script_name=base.SCRIPT_NAME,
             worker_minutes=30,
             memory_gb=24,
         )

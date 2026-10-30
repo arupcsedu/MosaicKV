@@ -118,6 +118,7 @@ def study(adapter, prefill, capture, frozen, job, cfg, full_reference, prepared,
     constructor_comparison = plan.get("source_history_comparison_kind") == "constructor"
     workspace_comparison = plan.get("source_history_comparison_kind") == "workspace"
     consolidation_comparison = plan.get("source_history_comparison_kind") == "consolidated"
+    segmented_comparison = plan.get("source_history_comparison_kind") == "segmented"
     reference_policy = (
         dict(source_history=True, source_history_constructor="reference")
         if constructor_comparison
@@ -133,6 +134,18 @@ def study(adapter, prefill, capture, frozen, job, cfg, full_reference, prepared,
     if consolidation_comparison:
         reference_policy = dict(source_history=True, source_history_constructor="direct")
         candidate_policy.update(consolidated_history=True)
+    if segmented_comparison:
+        reference_policy = dict(
+            source_history=True, source_history_constructor="direct", consolidated_history=True
+        )
+        candidate_policy.update(segmented_history=True)
+    checks_only_policy = None
+    if plan.get("batched_check_ablation"):
+        checks_only_policy = dict(
+            source_history=True,
+            source_history_constructor="direct_batched_checks",
+            consolidated_history=True,
+        )
     reference, old = run(adapter, prefill, formats, tokens=128, audit=True, **reference_policy)
     candidate, new = run(adapter, prefill, formats, tokens=128, audit=True, **candidate_policy)
     if not torch.equal(reference, candidate) or not torch.equal(
@@ -173,6 +186,22 @@ def study(adapter, prefill, capture, frozen, job, cfg, full_reference, prepared,
         )
     if b["source_history_seals"] != 7 or b["source_history_normalized_tail_bytes"] != 4 * 2**20:
         raise RuntimeError("missing source chunk or normalized-tail accounting")
+    if segmented_comparison:
+        memory_pass = (
+            a[fields[0]] == b[fields[0]]
+            and b[fields[1]] <= a[fields[1]] * plan["maximum_segmented_final_ratio"]
+            and b[fields[2]] <= a[fields[2]] * plan["maximum_segmented_peak_ratio"]
+            and b["segment_table_builds"] == 6 * len(formats)
+        )
+    checks_record = None
+    if checks_only_policy is not None:
+        checks_logits, checks_record = run(
+            adapter, prefill, formats, tokens=128, audit=True, **checks_only_policy
+        )
+        if not torch.equal(checks_logits, reference):
+            raise RuntimeError("batched original-bit checks changed model logits")
+        if b["source_check_syncs"] != 7 or b["source_check_flags_checked"] != 42 * len(formats):
+            raise RuntimeError("missing original bit checks or unexpected synchronization count")
     torch.save(dict(reference=reference, candidate=candidate), out / "128-token-logits.pt")
     row = dict(
         method=job["method"],
@@ -180,11 +209,14 @@ def study(adapter, prefill, capture, frozen, job, cfg, full_reference, prepared,
         original_32_token_prefix_bitwise=True,
         ordinary_history=old,
         source_history=new,
+        checks_only_history=checks_record,
         initial_final_peak_memory_gate=memory_pass,
         whole_request_peak_certified=False,
         no_quality_superiority_claim=True,
         source_history_comparison_kind=(
-            "consolidated"
+            "segmented"
+            if segmented_comparison
+            else "consolidated"
             if consolidation_comparison
             else "workspace"
             if workspace_comparison
@@ -198,6 +230,8 @@ def study(adapter, prefill, capture, frozen, job, cfg, full_reference, prepared,
     if plan["stage"] == "comparison" and job["method"] != "full_kv":
         rng = random.Random(plan["timing_seed"])
         variants = {"ordinary": reference_policy, "source": candidate_policy}
+        if checks_only_policy is not None:
+            variants["checks_only"] = checks_only_policy
         for trial in range(-plan["warmups"], plan["timed_repetitions"]):
             order = list(variants)
             rng.shuffle(order)
@@ -247,21 +281,25 @@ def analyze(root, expected):
         if row["method"] == "full_kv" or not trials:
             continue
         old = {r["trial"]: r["decode_wall_seconds"] for r in trials if r["variant"] == "ordinary"}
-        new = {r["trial"]: r["decode_wall_seconds"] for r in trials if r["variant"] == "source"}
-        if set(old) != set(new) or len(old) != 20:
-            raise ValueError("twenty complete paired timing blocks required")
-        ratio = np.array([new[i] / old[i] for i in sorted(old)])
-        boot = np.median(ratio[np.random.default_rng(20261030).integers(0, 20, (10000, 20))], 1)
-        timings.append(
-            dict(
-                task=row["task"],
-                method=row["method"],
-                paired_ratio=float(np.median(ratio)),
-                ratio_ci95=np.percentile(boot, [2.5, 97.5]).tolist(),
-                ordinary_median_seconds=float(np.median(list(old.values()))),
-                source_median_seconds=float(np.median(list(new.values()))),
+        for variant in (
+            ("source", "checks_only") if plan.get("batched_check_ablation") else ("source",)
+        ):
+            new = {r["trial"]: r["decode_wall_seconds"] for r in trials if r["variant"] == variant}
+            if set(old) != set(new) or len(old) != 20:
+                raise ValueError("twenty complete paired timing blocks required")
+            ratio = np.array([new[i] / old[i] for i in sorted(old)])
+            boot = np.median(ratio[np.random.default_rng(20261030).integers(0, 20, (10000, 20))], 1)
+            timings.append(
+                dict(
+                    task=row["task"],
+                    method=row["method"],
+                    variant=variant,
+                    paired_ratio=float(np.median(ratio)),
+                    ratio_ci95=np.percentile(boot, [2.5, 97.5]).tolist(),
+                    ordinary_median_seconds=float(np.median(list(old.values()))),
+                    source_median_seconds=float(np.median(list(new.values()))),
+                )
             )
-        )
     write_once(
         root / "analysis/source_history_decision.json",
         dict(

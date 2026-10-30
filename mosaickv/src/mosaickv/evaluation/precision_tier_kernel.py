@@ -22,6 +22,7 @@ def _decode(
     SN: tl.constexpr,
     PROTECTED,
     BLOCK: tl.constexpr,
+    OVERLAY: tl.constexpr,
 ):
     i = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
     valid = i < H * N * D
@@ -41,13 +42,14 @@ def _decode(
     minimum = tl.load(MINIMUM + group, mask=valid, other=0)
     value = q.to(tl.float32) * scale + minimum
     # Exact overlays included in the same launch; no dense temporary allocation.
-    slot = tl.load(EXACT_IDX + n, mask=valid, other=-1)
-    exact = tl.load(EXACT + (h * PROTECTED + slot) * D + d, mask=valid & (slot >= 0), other=0)
-    value = tl.where(slot >= 0, exact.to(tl.float32), value)
+    if OVERLAY:
+        slot = tl.load(EXACT_IDX + n, mask=valid, other=-1)
+        exact = tl.load(EXACT + (h * PROTECTED + slot) * D + d, mask=valid & (slot >= 0), other=0)
+        value = tl.where(slot >= 0, exact.to(tl.float32), value)
     tl.store(OUT + h * SH + n * SN + d, value, mask=valid)
 
 
-def decode(body, destination, indices, exact):
+def decode(body, destination, indices, exact, *, overlay=True):
     n, d, h = body.shape[-2], body.shape[-1], body.shape[1]
     if (
         destination.shape[:2] != body.shape[:2]
@@ -71,7 +73,8 @@ def decode(body, destination, indices, exact):
         AXIS=body.axis,
         SH=destination.stride(1),
         SN=destination.stride(2),
-        PROTECTED=exact.shape[-2],
+        PROTECTED=exact.shape[-2] if overlay else 0,
         BLOCK=512,
+        OVERLAY=overlay,
         enable_fp_fusion=False,
     )
