@@ -80,3 +80,21 @@ def test_union_covering_full_source_passes_unchanged_guard_without_accessing_lab
     assert result["absolute_fullkv_limits_passed"]
     assert result["expanded_head_positions"] == 8
     assert result["no_donor_eviction"]
+
+
+def test_disabling_workspace_audit_does_not_change_source_decode_or_claim_peak():
+    adapter = _llava(kv_heads=2)
+    adapter.model.to(torch.bfloat16)
+    with ProjectionCapture(adapter) as capture:
+        prefill = adapter.prefill(adapter.prepare_inputs(_runtime_request("timed-source").messages))
+    selections = (((0, 2), (1, 3)),) * 2
+    values = []
+    for audit in (True, False):
+        cache = construct_projection_cache(
+            adapter, prefill, capture, selections, policy="source_all", audit_workspace=audit
+        )
+        logits, record = forced_prefix(adapter, prefill, cache, [3 + i % 5 for i in range(32)])
+        assert record["reconstruction_tensor_results_observed"] == audit
+        assert bool(record["reconstruction_operator_observations"]) == audit
+        values.append(logits)
+    assert torch.equal(*values)

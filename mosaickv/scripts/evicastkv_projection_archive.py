@@ -23,9 +23,11 @@ PARENT = Path("/scratch/djy8hg/runs/evicastkv/lossless-fused-consumed-20261029-v
 PARENT_SHA = "e538caf12011239a3d218a2620106ec20e9c11b36dedd13341b85c00edabd42d"
 
 
-def prepare(root, *, runtime=False, union_restore=False):
+def prepare(root, *, runtime=False, union_restore=False, source_timing=False):
     if union_restore and not runtime:
         raise ValueError("union restoration requires the isolated runtime controls")
+    if source_timing and (not runtime or union_restore):
+        raise ValueError("timing requires original-selection runtime controls, not rejected union")
     source = clean_source(SOURCE)
     if root.exists() or sha(PARENT / "plan.json") != PARENT_SHA:
         raise ValueError("new immutable root and pinned consumed inputs required")
@@ -91,6 +93,32 @@ def prepare(root, *, runtime=False, union_restore=False):
             same_realized_byte_budget_claim=False,
             representation_correctness_reference="independent_original_KV_gather_at_expanded_positions",
             original_guard_unchanged=True,
+        )
+    if source_timing:
+        previous = Path("/scratch/djy8hg/runs/evicastkv/source-union-restoration-20261030-v3")
+        gate = common.read(previous / "analysis/GATE.json")
+        if gate["status"] != "complete_consumed_component_diagnostic" or gate["failures"]:
+            raise ValueError("completed consumed causal diagnostic required")
+        for name in ("plan.json", "analysis/GATE.json", "analysis/manifest.json"):
+            bound[str(previous / name)] = sha(previous / name)
+        plan.update(
+            protocol="original_selection_projection_source_paired_timing_v4",
+            source_timing_controls=True,
+            selector_changes_authorized=False,
+            source_timing=dict(
+                warmups=5,
+                timed_repetitions=20,
+                tokens=32,
+                variants=["raw_separate", "encoded_KV", "hybrid_source"],
+                seed=20261030,
+                randomized_within_paired_block=True,
+                workspace_instrumentation_disabled_inside_timing=True,
+            ),
+            timing_boundary="same_selection_shared_prefill_constructor_and_decode_not_request",
+            transport_timing_comparison_authorized=True,
+            memory_evidence="separate_instrumented_runtime_controls_not_timed_peak",
+            causal_union_remains_negative=True,
+            no_fresh_or_quality_campaign_promotion=True,
         )
     write_once(root / "plan.json", plan)
     return sha(root / "plan.json")
@@ -191,7 +219,10 @@ def worker(root, expected, index):
                 environment_lock_sha256=sha(SOURCE / "mosaickv/env/common/requirements.lock"),
                 reference_output_sha256=sha(folder / "captures.pt"),
                 annotation_targets_used=False,
-                not_live_cache_or_request_latency_measurement=True,
+                experimental_live_decode_storage=bool(plan.get("runtime_controls")),
+                not_production_cache_backend=True,
+                not_request_latency_measurement=True,
+                paired_source_transport_timing=bool(plan.get("source_timing_controls")),
             ),
         )
         rows = []
@@ -286,6 +317,13 @@ def worker(root, expected, index):
 
                 controls = runtime_controls(adapter, prefill, capture, selections)
                 write_once(out / f"{role}-runtime_controls.json", controls)
+            if plan.get("source_timing_controls"):
+                from mosaickv.evaluation.projection_timing import benchmark
+
+                trials = benchmark(
+                    adapter, prefill, capture, selections, seed=plan["source_timing"]["seed"]
+                )
+                write_once(out / f"{role}-source_timing.json", trials)
             if plan.get("union_restore_controls"):
                 from mosaickv.config import DraftAllocationGuardConfig
                 from mosaickv.evaluation.union_restoration import evaluate_union
@@ -327,6 +365,7 @@ def analyze(root, expected):
     out = root / "analysis"
     out.mkdir(exist_ok=False)
     rows, failures, inputs, controls, unions = [], [], {}, [], []
+    timing_trials, timing_summary = [], []
     for job in plan["jobs"]:
         folder = root / f"workers/{job['index']}"
         path = folder / "result.json"
@@ -372,11 +411,21 @@ def analyze(root, expected):
                 if not control["representation_bitwise_equal_original_expanded_KV"]:
                     raise ValueError("union representation reference failed")
                 unions.append(dict(task=job["task"], role=arm["role"], **control))
+        if plan.get("source_timing_controls"):
+            from mosaickv.evaluation.projection_timing import summarize
+
+            for arm in job["arms"]:
+                data = common.read(folder / f"{arm['role']}-source_timing.json")
+                timing_trials.extend(dict(t, task=job["task"], role=arm["role"]) for t in data)
+                timing_summary.extend(
+                    dict(t, task=job["task"], role=arm["role"]) for t in summarize(data)
+                )
     gate = dict(
         status="complete_consumed_component_diagnostic"
         if len(rows) == 8
         and not failures
         and (not plan.get("runtime_controls") or len(controls) == 12)
+        and (not plan.get("source_timing_controls") or len(timing_summary) == 12)
         else "failed",
         failures=failures,
         comparisons=rows,
@@ -398,6 +447,10 @@ def analyze(root, expected):
         if plan.get("union_restore_controls")
         else None,
         runtime_controls=controls,
+        source_timing_summary=timing_summary,
+        source_timing_complete=(len(timing_summary) == 12 and not failures)
+        if plan.get("source_timing_controls")
+        else None,
         runtime_controls_passed=(len(controls) == 12 and not failures)
         if plan.get("runtime_controls")
         else None,
@@ -409,6 +462,11 @@ def analyze(root, expected):
         paper_campaign_authorized=False,
     )
     write_once(out / "GATE.json", gate)
+    if plan.get("source_timing_controls"):
+        import pandas as pd
+
+        pd.DataFrame(timing_trials).to_parquet(out / "timing_trials.parquet", index=False)
+        pd.DataFrame(timing_summary).to_parquet(out / "timing_summary.parquet", index=False)
     write_once(
         out / "manifest.json",
         dict(
@@ -431,11 +489,15 @@ def main():
     parser.add_argument("--index", type=int)
     parser.add_argument("--runtime-controls", action="store_true")
     parser.add_argument("--union-restore-controls", action="store_true")
+    parser.add_argument("--source-timing-controls", action="store_true")
     args = parser.parse_args()
     if args.mode == "prepare":
         print(
             prepare(
-                args.root, runtime=args.runtime_controls, union_restore=args.union_restore_controls
+                args.root,
+                runtime=args.runtime_controls,
+                union_restore=args.union_restore_controls,
+                source_timing=args.source_timing_controls,
             )
         )
     elif args.mode == "submit":
@@ -443,7 +505,9 @@ def main():
             args.root,
             args.plan_sha,
             script_name="evicastkv_projection_archive.sbatch",
-            worker_minutes=10,
+            worker_minutes=20
+            if common.read(args.root / "plan.json").get("source_timing_controls")
+            else 10,
             memory_gb=16,
         )
     elif args.mode == "worker":
