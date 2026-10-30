@@ -9,7 +9,7 @@ from mosaickv.evaluation.fox_campaign import sha
 
 base = encoded.base
 ROOT = Path("/scratch/djy8hg/runs/evicastkv/packed-checkpoint-baselines-consumed-20261030-v1")
-VALIDATED = Path("/scratch/djy8hg/runs/evicastkv/packed-checkpoint-consumed-20261030-v1")
+VALIDATED = Path("/scratch/djy8hg/runs/evicastkv/packed-checkpoint-consumed-20261030-v1-retry1")
 
 
 def prepare(root, phase):
