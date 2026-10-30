@@ -104,7 +104,9 @@ def _scores(
     )
     query = tl.load(Q + head * 128 + col)
     # Explicit BF16 boundaries match eager's matmul, then scalar multiply.
-    product = tl.sum(key.to(tl.float32) * query[None, :].to(tl.float32), 1).to(tl.bfloat16)
+    matrix = tl.broadcast_to(query[None, :], (16, 128))
+    dots = tl.dot(matrix, tl.trans(key))
+    product = tl.sum(tl.where(tl.arange(0, 16)[:, None] == 0, dots, 0), 0).to(tl.bfloat16)
     scaled = (product.to(tl.float32) * SCALE).to(tl.bfloat16)
     tl.store(SCORES + head * LENGTH + tokens, scaled, tokens < LENGTH)
 
@@ -129,7 +131,7 @@ def _values(
     head = tl.program_id(0)
     tokens = tl.arange(0, TILE)
     col = tl.arange(0, 128)
-    result = tl.full((128,), 0, tl.float32)
+    result = tl.full((16, 128), 0, tl.float32)
     for offset in range(tl.cdiv(LENGTH, TILE)):
         rows = offset * TILE + tokens
         value = _sequence(
@@ -147,9 +149,10 @@ def _values(
             CAPACITY,
             RAW,
         )
-        prob = tl.load(P + head * LENGTH + rows, rows < LENGTH, other=0).to(tl.float32)
-        result += tl.sum(value.to(tl.float32) * prob[:, None], 0)
-    tl.store(OUTPUT + head * 128 + col, result.to(tl.bfloat16))
+        prob = tl.load(P + head * LENGTH + rows, rows < LENGTH, other=0)
+        result = tl.dot(tl.broadcast_to(prob[None, :], (16, TILE)), value, result)
+    first = tl.sum(tl.where(tl.arange(0, 16)[:, None] == 0, result, 0), 0)
+    tl.store(OUTPUT + head * 128 + col, first.to(tl.bfloat16))
 
 
 def arguments(packed):
@@ -157,6 +160,26 @@ def arguments(packed):
     if packed.payload.raw:
         return (buffers[0],) * 5 + (packed.checkpoints,)
     return (*buffers, packed.checkpoints)
+
+
+@triton.jit(do_not_specialize=["ROWS"])
+def _decode_test(SM, CODES, BASE, OFFSETS, LITERALS, CHECK, OUTPUT, ROWS, RAW: tl.constexpr):
+    rows = tl.program_id(0) * 32 + tl.arange(0, 32)
+    values = _rows(SM, CODES, BASE, OFFSETS, LITERALS, CHECK, rows, rows < ROWS, RAW)
+    tl.store(
+        OUTPUT + rows[:, None] * 128 + tl.arange(0, 128)[None, :], values, rows[:, None] < ROWS
+    )
+
+
+def decode_for_control(packed):
+    import torch
+
+    output = torch.empty(
+        packed.payload.shape, dtype=torch.bfloat16, device=packed.payload.buffers[0].device
+    )
+    rows = output.numel() // 128
+    _decode_test[(triton.cdiv(rows, 32),)](*arguments(packed), output, rows, RAW=packed.payload.raw)
+    return output
 
 
 def attention(query, key, value, history, used, scaling):

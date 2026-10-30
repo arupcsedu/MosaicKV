@@ -21,6 +21,7 @@ def worker(root: Path) -> None:
     from mosaickv.evaluation.lossless_bf16 import PackedBF16
     from mosaickv.evaluation.lossless_bf16_kernel import encode
     from mosaickv.evaluation.packed_attention import attend, packet
+    from mosaickv.evaluation.packed_attention_kernel import decode_for_control
 
     source_sha = clean_source(SOURCE)
     root.mkdir(parents=True, exist_ok=False)
@@ -81,6 +82,11 @@ def worker(root: Path) -> None:
     order = random.Random(seed)
     rows, trials = [], []
     try:
+        patterns = torch.arange(65536, dtype=torch.int32, device="cuda").to(torch.int16)
+        patterns = patterns.view(torch.bfloat16).reshape(1, 1, 512, 128)
+        all_patterns = decode_for_control(packet(encode(patterns, raw_fallback=False)))
+        if not torch.equal(patterns.view(torch.int16), all_patterns.view(torch.int16)):
+            raise RuntimeError("all-BF16-bit-pattern reader parity failed")
         for length in config["lengths"]:
             shape = (1, 32, length, 128)
             raw = [
@@ -92,6 +98,11 @@ def worker(root: Path) -> None:
                 for _ in range(2)
             )
             encoded = tuple(packet(encode(t)) for t in raw)
+            if not all(
+                torch.equal(t.view(torch.int16), decode_for_control(p).view(torch.int16))
+                for t, p in zip(raw, encoded, strict=True)
+            ):
+                raise RuntimeError("packet reader changed original K/V bits")
             unpacked = tuple(packet(PackedBF16(shape, True, (t,))) for t in raw)
             used = 5
             k, v = (torch.cat((t, h[..., :used, :]), -2) for t, h in zip(raw, history, strict=True))
@@ -121,6 +132,15 @@ def worker(root: Path) -> None:
                 length=length,
                 raw_encoded_kernel_bitwise=exact,
                 eager_max_abs_error=error,
+                raw_eager_max_abs_error=float(
+                    (raw_output[0].float() - reference[0].float()).abs().max()
+                ),
+                raw_encoded_output_max_abs_error=float(
+                    (actual[0].float() - raw_output[0].float()).abs().max()
+                ),
+                raw_encoded_probability_max_abs_error=float(
+                    (actual[1].float() - raw_output[1].float()).abs().max()
+                ),
                 raw_prompt_bytes=sum(t.untyped_storage().nbytes() for t in raw),
                 packed_prompt_bytes=sum(t.storage_bytes for t in encoded),
                 metadata_counted=True,
@@ -129,6 +149,17 @@ def worker(root: Path) -> None:
             )
             rows.append(row)
             if not exact or error > config["numerical_max_attention_output_abs"]:
+                torch.save(
+                    dict(
+                        query=query,
+                        raw=raw,
+                        history=history,
+                        eager=reference,
+                        packed=actual,
+                        raw_kernel=raw_output,
+                    ),
+                    root / "failure_tensors.pt",
+                )
                 raise RuntimeError(f"attention numerical control failed: {row}")
             for trial in range(-5, 20):
                 names = list(functions)
