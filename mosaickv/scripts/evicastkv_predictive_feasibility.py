@@ -17,6 +17,21 @@ ROOT = Path("/scratch/djy8hg/runs/evicastkv/predictive-storage-consumed-20261030
 original_writer = paired.write_once
 
 
+def load_verified_tensor_capture(path):
+    import torch
+
+    from mosaickv.types import BudgetUnit, PrefixKVProfileMode
+
+    reviewed = {
+        f"{kind.__module__}.{kind.__name__}": kind for kind in (BudgetUnit, PrefixKVProfileMode)
+    }
+    unexpected = set(torch.serialization.get_unsafe_globals_in_checkpoint(path)) - reviewed.keys()
+    if unexpected:
+        raise ValueError(f"unreviewed tensor-capture globals: {sorted(unexpected)}")
+    with torch.serialization.safe_globals(list(reviewed.values())):
+        return torch.load(path, map_location="cpu", weights_only=True)
+
+
 def prepare(root, phase):
     passed = Path("/scratch/djy8hg/runs/evicastkv/direct-constructor-consumed-20261030-v1")
     gate = base.common.read(passed / "analysis/GATE.json")
@@ -226,6 +241,12 @@ def prepare_cpu_retry(root):
         raise ValueError("retry only the observed metadata-enum load boundary")
     original = base.common.read(parent / "plan.json")
     bound = dict(original["bound_files"])
+    reuse = Path(str(parent) + "-cpu-retry1")
+    if not (reuse / "codec_analysis/GATE.json").exists():
+        raise ValueError("reviewed partial CPU analysis required")
+    reuse_plan = base.common.read(reuse / "plan.json")
+    for name in ("plan.json", "codec_analysis/GATE.json", "codec_analysis/manifest.json"):
+        bound[str(reuse / name)] = sha(reuse / name)
     for name in (
         "plan.json",
         "analysis/GATE.json",
@@ -242,6 +263,15 @@ def prepare_cpu_retry(root):
         bound[str(path)] = sha(path)
         for name, digest in result["outputs"].items():
             bound[str(folder / name)] = digest
+        prior_folder = reuse / f"codec_workers/{job['index']}"
+        prior_result = base.common.read(prior_folder / "result.json")
+        if prior_result["source_sha"] != reuse_plan["source_sha"] or prior_result[
+            "plan_sha256"
+        ] != sha(reuse / "plan.json"):
+            raise ValueError("partial CPU producer provenance changed")
+        bound[str(prior_folder / "result.json")] = sha(prior_folder / "result.json")
+        for name, digest in prior_result["outputs"].items():
+            bound[str(prior_folder / name)] = digest
     original.update(
         source_sha=clean_source(base.SOURCE),
         bound_files=bound,
@@ -249,6 +279,7 @@ def prepare_cpu_retry(root):
         capture_source_sha=original["source_sha"],
         capture_plan_sha256=sha(parent / "plan.json"),
         CPU_only_retry=True,
+        reuse_cpu_root=str(reuse),
         automatic_gpu_decoder_authorized=False,
         model_inference_authorized=False,
         protocol="CPU_only_enum_metadata_repair_no_new_capture_v1",
@@ -293,16 +324,32 @@ def codec_worker(root, expected, index):
     started = time.monotonic()
     try:
         torch.set_num_threads(4)
+        reused = {}
+        if plan.get("reuse_cpu_root"):
+            prior = Path(plan["reuse_cpu_root"]) / f"codec_workers/{index}"
+            prior_result = base.common.read(prior / "result.json")
+            for name, digest in prior_result["outputs"].items():
+                if sha(prior / name) != digest:
+                    raise ValueError("partial CPU evidence changed")
+            reused = {r["method"]: r for r in prior_result["methods"]}
+            if set(reused) - set(paired.METHODS):
+                raise ValueError("unregistered reused CPU method")
+            write_once(
+                out / "reused_methods.json",
+                dict(
+                    methods=list(reused),
+                    source_result=str(prior / "result.json"),
+                    source_sha256=sha(prior / "result.json"),
+                ),
+            )
         for method in paired.METHODS:
+            if method in reused:
+                result["methods"].append(reused[method])
+                continue
             path = parent / f"{method}-codec-input.pt"
             if sha(path) != manifest["outputs"][path.name]:
                 raise ValueError("captured prompt tensor changed")
-            from mosaickv.types import BudgetUnit
-
-            # Only this repository enum is allowlisted, only inside this
-            # hash-verified load. Never switch to unrestricted pickle loading.
-            with torch.serialization.safe_globals([BudgetUnit]):
-                artifact = torch.load(path, map_location="cpu", weights_only=True)
+            artifact = load_verified_tensor_capture(path)
             rows = []
             for j, body in enumerate(artifact["bodies"]):
                 packed = PackedBF16(tuple(body["shape"]), body["raw"], tuple(body["buffers"]))

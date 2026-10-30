@@ -38,8 +38,11 @@ predictors are engineering candidates, not a novelty or superiority claim.
 
 The first tensor captures are reusable. Their selection metadata contains the
 repository's BudgetUnit enum. A hash-verified, weights-only load may narrowly
-allowlist that class inside a temporary safe_globals context; unrestricted
+allowlist BudgetUnit and PrefixKVProfileMode inside a temporary safe_globals
+context, after a static checkpoint scan rejects every other unreviewed global; unrestricted
 pickle loading remains forbidden. Future exports normalize selection metadata
 to JSON primitives. A new CPU-only retry plan binds both the old capture SHA
 and the repaired analysis SHA, never copies or regenerates the GPU captures,
 and explicitly rejects GPU submission under the retry root.
+Completed, hash-verified method studies from the partial CPU run are reused;
+only the methods not completed before the metadata boundary are recomputed.

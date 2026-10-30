@@ -5,7 +5,7 @@ import pytest
 import torch
 
 from mosaickv.evaluation.lossless_bf16 import pack_cpu
-from mosaickv.types import BudgetUnit
+from mosaickv.types import BudgetUnit, PrefixKVProfileMode
 
 
 def fixture_root(tmp_path, monkeypatch):
@@ -28,7 +28,9 @@ def fixture_root(tmp_path, monkeypatch):
             size = sum(t.untyped_storage().nbytes() for t in packet.buffers)
             artifact = dict(
                 method=method,
-                selection=dict(budget_unit=BudgetUnit.BYTES),
+                selection=dict(
+                    budget_unit=BudgetUnit.BYTES, profile_mode=next(iter(PrefixKVProfileMode))
+                ),
                 bodies=[
                     dict(
                         layer=0,
@@ -104,3 +106,41 @@ def test_cpu_launcher_never_requests_a_GPU(tmp_path, monkeypatch):
     assert len(calls) == 2
     assert all(not any("--gres" in arg or "bii-gpu" in arg for arg in args) for args in calls)
     assert "--dependency=afterany:101" in calls[1]
+
+
+def test_static_scan_rejects_every_unreviewed_pickle_global(tmp_path):
+    from pathlib import Path
+
+    path = tmp_path / "unknown.pt"
+    torch.save(dict(unexpected=Path("/scratch/example")), path)
+    with pytest.raises(ValueError, match="unreviewed"):
+        module.load_verified_tensor_capture(path)
+
+
+def test_retry_reuses_only_completed_method_summaries(tmp_path, monkeypatch):
+    original = tmp_path / "original"
+    plan = fixture_root(original, monkeypatch)
+    module.codec_worker(original, "fixture-plan", 0)
+    path = original / "codec_workers/0/result.json"
+    partial = json.loads(path.read_text())
+    partial["methods"] = partial["methods"][:2]
+    partial["status"] = "failed"
+    path.write_text(json.dumps(partial))
+    plan.update(capture_root=str(original), reuse_cpu_root=str(original))
+    loaded = []
+    original_loader = module.load_verified_tensor_capture
+
+    def load(path):
+        loaded.append(path.name)
+        return original_loader(path)
+
+    monkeypatch.setattr(module, "load_verified_tensor_capture", load)
+    retry = tmp_path / "retry"
+    module.codec_worker(retry, "fixture-plan", 0)
+    assert len(loaded) == 4
+    assert not any(
+        p.startswith("full_kv-") or p.startswith("prompt_attention_topk-") for p in loaded
+    )
+    result = json.loads((retry / "codec_workers/0/result.json").read_text())
+    assert len(result["methods"]) == 6
+    assert result["methods"][:2] == partial["methods"]
