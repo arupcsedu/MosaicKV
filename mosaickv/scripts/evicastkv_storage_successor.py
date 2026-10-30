@@ -24,6 +24,7 @@ PARENT = Path("/scratch/djy8hg/runs/evicastkv/exact-storage-stages-20261030-v1-r
 COMPACT_PARENT = Path("/scratch/djy8hg/runs/evicastkv/quality-latency-consumed-20261030-v1/compact")
 BASE = Path("/scratch/djy8hg/runs/evicastkv/quality-latency-compact-direct-20261030-v2")
 PHASES = ("compact", "timing", "layer_addition")
+SCRIPT_NAME = "evicastkv_storage_successor.sbatch"
 METHODS = (
     "full_kv",
     "prompt_attention_topk",
@@ -236,6 +237,10 @@ def worker(root, expected, index):
         )
         if plan["phase"] != "baselines":
             write_once(out / "compact_direct_cuda_controls.json", compact_direct_controls())
+        if plan.get("retention_one_format") == "dual":
+            from mosaickv.evaluation.dual_projection import gpu_controls as dual_controls
+
+            write_once(out / "dual_cuda_controls.json", dual_controls())
         cfg = RunConfig.from_mapping(job["arms"][0]["config"])
         torch.manual_seed(cfg.execution.seed)
         adapter = load_hf_adapter(
@@ -312,7 +317,12 @@ def worker(root, expected, index):
             identity_formats, identity_proof = choices(
                 adapter, prefill, capture, full_positions, compact=True
             )
-            actual, identity_record = run(adapter, prefill, identity_formats["compact"], audit=True)
+            actual, identity_record = run(
+                adapter,
+                prefill,
+                identity_formats[plan.get("retention_one_format", "compact")],
+                audit=True,
+            )
             if not torch.equal(actual, full_reference):
                 raise RuntimeError("retention-1 compact replay changed ordinary FullKV logits")
             write_once(
@@ -733,7 +743,7 @@ def analyze(root, expected):
                 table = [
                     r for r in rows if r["task"] == task and r["role"] == role and not r["warmup"]
                 ]
-                for name in ("kv", "token", "compact"):
+                for name in sorted({r["format"] for r in table}):
                     values = [r["decode_wall_seconds"] for r in table if r["format"] == name]
                     base = {
                         r["trial"]: r["decode_wall_seconds"] for r in table if r["format"] == "kv"
@@ -792,7 +802,7 @@ def analyze(root, expected):
         launch.submit(
             child,
             digest,
-            script_name="evicastkv_storage_successor.sbatch",
+            script_name=SCRIPT_NAME,
             worker_minutes=30,
             memory_gb=24,
         )
@@ -816,7 +826,7 @@ def main():
         launch.submit(
             args.root,
             args.plan_sha,
-            script_name="evicastkv_storage_successor.sbatch",
+            script_name=SCRIPT_NAME,
             worker_minutes=30,
             memory_gb=24,
         )
