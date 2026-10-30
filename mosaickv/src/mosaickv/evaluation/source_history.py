@@ -60,6 +60,10 @@ class SourceHistoryCache(ExactCache):
         self.phase_tail: Any = None
         self.phase_identity: Any = None
         self.history_position_chunks: list[Any] = []
+        self.history_rotary_chunks: list[Any] = []
+        self.consolidated_phase_versions: list[Any] = []
+        self.source_consolidation_layers = 0
+        self.source_consolidation_epochs = 0
 
     def source_input(self, index: int, hidden: Any, rotary: Any, positions: Any) -> None:
         layer = self.layers[index]
@@ -126,6 +130,8 @@ class SourceHistoryCache(ExactCache):
             source_history_original_positions=[t.tolist() for t in self.history_position_chunks],
             source_history_constructor_tensor_results_observed=self.audit_workspace,
             whole_request_peak_certified=False,
+            source_consolidation_layers=self.source_consolidation_layers,
+            source_consolidation_epochs=self.source_consolidation_epochs,
         )
         return record
 
@@ -273,6 +279,7 @@ def seal_source_full_tails(cache: SourceHistoryCache) -> bool:
     cache.shared_tensors = (*cache.shared_tensors, cos, sin, positions)
     cache.shared_bytes = backing_bytes(cache.shared_tensors)
     cache.history_position_chunks.append(positions)
+    cache.history_rotary_chunks.append((cos, sin))
     for layer, format in zip(layers, formats, strict=True):
         layer.source_sealed.append(format)
         layer.resident_bytes += backing_bytes(format.private())

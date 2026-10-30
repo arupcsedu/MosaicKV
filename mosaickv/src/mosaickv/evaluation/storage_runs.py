@@ -20,6 +20,7 @@ def cache_from_formats(
     source_history_constructor: str = "reference",
     shared_workspace: bool = False,
     workspace_graph: bool = False,
+    consolidated_history: bool = False,
 ) -> ExactCache:
     from mosaickv.evaluation.sealed_history import SealedHistoryLayer
 
@@ -29,6 +30,13 @@ def cache_from_formats(
         raise ValueError("explicit source history required for its constructor policy")
     if type(shared_workspace) is not bool or type(workspace_graph) is not bool:
         raise ValueError("shared workspace and graph policies must be explicit booleans")
+    if type(consolidated_history) is not bool or (
+        consolidated_history
+        and (not source_history or shared_workspace or source_history_constructor != "direct")
+    ):
+        raise ValueError(
+            "consolidation requires explicit direct source history without workspace graphs"
+        )
     if (workspace_graph and not shared_workspace) or (shared_workspace and not source_history):
         raise ValueError("workspace graphs require an explicit shared source-history workspace")
     cache = ExactCache(audit_workspace=audit)
@@ -94,6 +102,7 @@ def run(
     source_history_constructor: str = "reference",
     shared_workspace: bool = False,
     workspace_graph: bool = False,
+    consolidated_history: bool = False,
 ) -> tuple[Any, dict[str, Any]]:
     import time
 
@@ -119,6 +128,7 @@ def run(
         source_history_constructor=source_history_constructor,
         shared_workspace=shared_workspace,
         workspace_graph=workspace_graph,
+        consolidated_history=consolidated_history,
     )
     length = max(f.shape[-2] for f in formats)
     state = DecodeState(
@@ -155,7 +165,11 @@ def run(
 
                 if shared_workspace and any(layer.tail_used == 16 for layer in cache.layers):
                     cache.release_workspace()
-                seal_source_full_tails(cache)
+                sealed_now = seal_source_full_tails(cache)
+                if consolidated_history and sealed_now:
+                    from mosaickv.evaluation.consolidated_history import consolidate
+
+                    consolidate(cache)
             if batched_history:
                 from mosaickv.evaluation.batched_history import seal_full_tails
 
@@ -193,6 +207,7 @@ def run(
         source_history_constructor=source_history_constructor,
         shared_workspace=shared_workspace,
         workspace_graph=workspace_graph,
+        consolidated_history=consolidated_history,
         batched_history_seals=getattr(cache, "batched_history_seals", 0),
         batched_history_encode_batches=getattr(cache, "batched_history_encode_batches", 0),
         output_tokens=tokens,

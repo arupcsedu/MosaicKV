@@ -117,6 +117,7 @@ def study(adapter, prefill, capture, frozen, job, cfg, full_reference, prepared,
     formats = pending["formats"]
     constructor_comparison = plan.get("source_history_comparison_kind") == "constructor"
     workspace_comparison = plan.get("source_history_comparison_kind") == "workspace"
+    consolidation_comparison = plan.get("source_history_comparison_kind") == "consolidated"
     reference_policy = (
         dict(source_history=True, source_history_constructor="reference")
         if constructor_comparison
@@ -129,6 +130,9 @@ def study(adapter, prefill, capture, frozen, job, cfg, full_reference, prepared,
     if workspace_comparison:
         reference_policy = dict(source_history=True, source_history_constructor="direct")
         candidate_policy.update(shared_workspace=True, workspace_graph=True)
+    if consolidation_comparison:
+        reference_policy = dict(source_history=True, source_history_constructor="direct")
+        candidate_policy.update(consolidated_history=True)
     reference, old = run(adapter, prefill, formats, tokens=128, audit=True, **reference_policy)
     candidate, new = run(adapter, prefill, formats, tokens=128, audit=True, **candidate_policy)
     if not torch.equal(reference, candidate) or not torch.equal(
@@ -159,6 +163,14 @@ def study(adapter, prefill, capture, frozen, job, cfg, full_reference, prepared,
             and b["graph_private_live_bytes"] == 0
             and b["graph_private_accounting_verified"]
         )
+    if consolidation_comparison:
+        memory_pass = (
+            a[fields[0]] == b[fields[0]]
+            and b[fields[1]] <= a[fields[1]] * plan["maximum_consolidation_final_ratio"]
+            and b[fields[2]] <= a[fields[2]] * plan["maximum_consolidation_peak_ratio"]
+            and b["source_consolidation_epochs"] == 6
+            and b["source_consolidation_layers"] == 6 * len(formats)
+        )
     if b["source_history_seals"] != 7 or b["source_history_normalized_tail_bytes"] != 4 * 2**20:
         raise RuntimeError("missing source chunk or normalized-tail accounting")
     torch.save(dict(reference=reference, candidate=candidate), out / "128-token-logits.pt")
@@ -172,7 +184,9 @@ def study(adapter, prefill, capture, frozen, job, cfg, full_reference, prepared,
         whole_request_peak_certified=False,
         no_quality_superiority_claim=True,
         source_history_comparison_kind=(
-            "workspace"
+            "consolidated"
+            if consolidation_comparison
+            else "workspace"
             if workspace_comparison
             else "constructor"
             if constructor_comparison
