@@ -6,6 +6,14 @@ import evicastkv_exact_storage as study
 import pytest
 
 
+def test_decimal_selector_evidence_paths_are_unique_and_preserve_the_whole_stem(tmp_path):
+    stems = [tmp_path / f"uniform_0.5_control-32-{mode}-0-0" for mode in ("kv", "token")]
+    paths = [study.evidence_path(stem, ".construction.json") for stem in stems]
+    assert len(set(paths)) == 2
+    assert all(p.name.startswith("uniform_0.5_control-32-") for p in paths)
+    assert paths[0].name == "uniform_0.5_control-32-kv-0-0.construction.json"
+
+
 def fixtures(tmp_path, monkeypatch):
     parent = tmp_path / "parent"
     (parent / "analysis").mkdir(parents=True)

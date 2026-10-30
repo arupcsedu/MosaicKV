@@ -32,6 +32,11 @@ STAGES = {
 }
 
 
+def evidence_path(stem, suffix):
+    # Selector IDs contain decimal points; with_suffix would truncate the ID.
+    return stem.parent / (stem.name + suffix)
+
+
 def variants_for(stage):
     if stage == 1:
         return [("kv", False, False), ("token", False, False)]
@@ -133,7 +138,7 @@ def control(
     torch.cuda.synchronize()
     construction = time.monotonic() - started
     write_once(
-        evidence.with_suffix(".construction.json"),
+        evidence_path(evidence, ".construction.json"),
         dict(
             storage=cache.storage_record(),
             construction_seconds=construction,
@@ -172,10 +177,10 @@ def control(
     if not torch.isfinite(logits).all() or not torch.equal(logits, reference):
         torch.save(
             dict(actual_logits=logits, ordinary_reference_logits=reference),
-            evidence.with_suffix(".failure.pt"),
+            evidence_path(evidence, ".failure.pt"),
         )
         write_once(
-            evidence.with_suffix(".failure.json"),
+            evidence_path(evidence, ".failure.json"),
             dict(
                 storage=cache.storage_record(),
                 maximum_logit_difference=float((logits - reference).abs().max()),
