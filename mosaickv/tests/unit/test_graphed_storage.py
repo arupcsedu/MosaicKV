@@ -153,6 +153,25 @@ def test_incomplete_private_graph_release_fails_closed(monkeypatch):
     assert not cache.graph_private_accounting_verified
 
 
+def test_shared_generator_owner_is_released_only_after_last_graph(monkeypatch):
+    cache = fixture()
+    step(cache, 0)
+    live = [1024]
+    monkeypatch.setattr(torch.cuda, "memory_allocated", lambda: live[0])
+    cache.layers[0].reconstruction_graph = SimpleNamespace(reset=lambda: None)
+
+    def release_last():
+        live[0] -= 1024
+
+    cache.layers[1].reconstruction_graph = SimpleNamespace(reset=release_last)
+    cache.layers[0].graph_private_bytes = 1024
+    cache.layers[1].graph_private_bytes = 0
+    cache.graph_private_live_bytes = 1024
+    cache.release_workspace()
+    assert cache.graph_private_live_bytes == 0 and live == [0]
+    assert cache.graph_private_accounting_verified
+
+
 def test_graph_replay_fails_explicitly_on_cpu():
     cache = fixture(graphs=True)
     with pytest.raises(NotImplementedError, match="CUDA"):

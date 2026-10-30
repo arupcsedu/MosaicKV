@@ -65,21 +65,23 @@ class SharedSourceCache(SourceHistoryCache):
     def release_workspace(self) -> None:
         if any(layer.leased for layer in self.layers):
             raise RuntimeError("cannot release an active shared workspace lease")
-        for layer in self.layers:
-            graph = layer.reconstruction_graph
-            if graph is not None:
-                before = torch.cuda.memory_allocated()
-                graph.reset()
-                layer.reconstruction_graph = None
-                del graph
-                released = before - torch.cuda.memory_allocated()
-                if released != layer.graph_private_bytes:
-                    self.graph_private_accounting_verified = False
-                    raise RuntimeError(
-                        f"graph private owners released {released} bytes; "
-                        f"expected {layer.graph_private_bytes}"
-                    )
-                self.graph_private_live_bytes -= layer.graph_private_bytes
+        if any(layer.reconstruction_graph is not None for layer in self.layers):
+            before = torch.cuda.memory_allocated()
+            for layer in self.layers:
+                graph = layer.reconstruction_graph
+                if graph is not None:
+                    graph.reset()
+                    layer.reconstruction_graph = None
+                    del graph
+            released = before - torch.cuda.memory_allocated()
+            if released != self.graph_private_live_bytes:
+                self.graph_private_accounting_verified = False
+                raise RuntimeError(
+                    f"shared graph owners released {released} bytes; "
+                    f"expected {self.graph_private_live_bytes}"
+                )
+            self.graph_private_live_bytes = 0
+            for layer in self.layers:
                 layer.graph_private_bytes = 0
         tensors = self.workspace
         self.shared_tensors = tuple(
@@ -197,7 +199,9 @@ class SharedSourceLayer(SourceHistoryLayer):
                     finally:
                         graph.capture_end()
                 current.wait_stream(stream)
-                additional = max(0, torch.cuda.memory_allocated() - before)
+                additional = torch.cuda.memory_allocated() - before
+                if additional < 0:
+                    raise RuntimeError("unexpected allocation release during graph capture")
                 self.cache.graph_private_allocation_bytes += additional
                 self.cache.graph_private_live_bytes += additional
                 self.graph_private_bytes = additional

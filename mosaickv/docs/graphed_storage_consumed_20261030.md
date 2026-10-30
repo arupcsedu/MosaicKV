@@ -52,3 +52,12 @@ at every entry. Stream dependencies remain explicit. Capture time remains
 included in measured decode; no prebuilt/permanent graph is smuggled outside
 the timing boundary. Error cleanup closes graph/workspace owners after the
 ordinary transport has released its current layer lease.
+
+V2's teardown test exposed shared private RNG ownership, not a new tensor
+corruption: the first graph released zero bytes and the last released1024.
+Installed `ATen/cuda/CUDAGeneratorImpl.h:CUDAGeneratorState` explicitly stores
+`registered_graphs_`, `seed_extragraph_`, and `offset_extragraph_`; graphs can
+share this state. V3 preserves the capture-delta charges, but checks the
+aggregate release only after all cache graphs are destroyed. A CPU regression
+models exactly the first-zero/last1024 case. The total storage and fidelity
+thresholds are unchanged. V2 remains failed, not retrospectively relabeled.

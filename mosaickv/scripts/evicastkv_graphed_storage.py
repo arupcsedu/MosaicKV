@@ -8,7 +8,7 @@ import evicastkv_source_history_runtime as runtime
 from mosaickv.evaluation.fox_campaign import sha
 
 base = runtime.base
-ROOT = Path("/scratch/djy8hg/runs/evicastkv/graphed-storage-consumed-20261030-v2")
+ROOT = Path("/scratch/djy8hg/runs/evicastkv/graphed-storage-consumed-20261030-v3")
 VALIDATED = Path(
     "/scratch/djy8hg/runs/evicastkv/source-history-direct-consumed-20261030-v1/comparison"
 )
