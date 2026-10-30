@@ -24,7 +24,9 @@ PARENT_SHA = "da8cd788ff54844cdcf9c26b41f05c1eabd504ce79e6721a28dcccc6541d4b42"
 MODES = ("raw_control", "lossless_storage")
 
 
-def prepare(root, *, retry_from=None, greedy=False):
+def prepare(root, *, retry_from=None, greedy=False, fused_benchmark=False):
+    if fused_benchmark and (not greedy or retry_from is not None):
+        raise ValueError("fused benchmark requires the greedy stage and no historical worker reuse")
     source = clean_source(SOURCE)
     if root.exists() or sha(PARENT / "plan.json") != PARENT_SHA:
         raise ValueError("new immutable root and pinned consumed parent required")
@@ -129,6 +131,26 @@ def prepare(root, *, retry_from=None, greedy=False):
             "per-producer correctness/storage only; no cross-producer latency pooling"
         )
         plan["retry_from"] = str(retry_from)
+    if fused_benchmark:
+        parent = Path("/scratch/djy8hg/runs/evicastkv/lossless-storage-greedy-consumed-20261029-v2")
+        for name in ("plan.json", "analysis/GATE.json", "analysis/manifest.json"):
+            bound[str(parent / name)] = sha(parent / name)
+        if not common.read(parent / "analysis/GATE.json")["storage_feasibility_passed"]:
+            raise ValueError("completed previous storage/greedy gate required")
+        plan.update(
+            protocol="shared_lossless_fused_pair_transport_timing_v3",
+            fused_unpack=True,
+            paired_transport_benchmark=dict(
+                warmups=5,
+                repetitions=20,
+                variants=["raw_separate", "raw_fused", "encoded_separate", "encoded_fused"],
+                randomized_order=True,
+                seed=20261029,
+                same_consumed_inputs_only=True,
+                bitwise_check_every_trial=True,
+                whole_request_peak_certified=False,
+            ),
+        )
     write_once(root / "plan.json", plan)
     return sha(root / "plan.json")
 
@@ -180,6 +202,38 @@ def kernel_control():
     return rows
 
 
+def pair_kernel_control():
+    """All raw/encoded combinations, partial blocks, NaN payloads and history growth."""
+    import torch
+
+    from mosaickv.evaluation.lossless_bf16 import PackedBF16, pack_cpu, unpack_pair_into
+
+    words = torch.arange(65536).to(torch.int16).view(torch.bfloat16)
+    sources = (words[:65520].reshape(1, 3, 1680, 13), words.flip(0)[:65520].reshape(1, 3, 1680, 13))
+    rows = []
+    for raw_key, raw_value in ((False, False), (False, True), (True, False), (True, True)):
+        bodies = tuple(
+            PackedBF16(tuple(s.shape), True, (s.cuda(),))
+            if raw
+            else pack_cpu(s, raw_fallback=False).to("cuda")
+            for s, raw in zip(sources, (raw_key, raw_value), strict=True)
+        )
+        histories = tuple(torch.randn(1, 3, 32, 13, device="cuda").bfloat16() for _ in range(2))
+        for used in (1, 16, 31):
+            targets = tuple(
+                torch.empty(1, 3, 1680 + used, 13, dtype=torch.bfloat16, device="cuda")
+                for _ in range(2)
+            )
+            unpack_pair_into(bodies, histories, targets)
+            torch.cuda.synchronize()
+            for source, history, target in zip(sources, histories, targets, strict=True):
+                expected = torch.cat((source.cuda(), history[..., :used, :]), 2)
+                if not torch.equal(target.view(torch.int16), expected.view(torch.int16)):
+                    raise RuntimeError("fused pair changed original BF16 bits or history")
+            rows.append(dict(raw_key=raw_key, raw_value=raw_value, used_history=used, bitwise=True))
+    return rows
+
+
 def standard_greedy_reference(adapter, prefill, positions):
     """Own-token decode with the ordinary unmodified exact DynamicCache."""
     import torch
@@ -202,7 +256,7 @@ def standard_greedy_reference(adapter, prefill, positions):
     return torch.stack(logits)
 
 
-def encoded_greedy_control(adapter, prefill, positions):
+def encoded_greedy_control(adapter, prefill, positions, *, fused_unpack=False):
     """Full-retention control; no pruning and no source cache mutation."""
     import torch
 
@@ -211,7 +265,12 @@ def encoded_greedy_control(adapter, prefill, positions):
 
     use_gpu = adapter.device.type == "cuda"
     cache = construct_cache(
-        adapter, prefill.state.past_key_values, positions, encode=True, gpu_encoder=use_gpu
+        adapter,
+        prefill.state.past_key_values,
+        positions,
+        encode=True,
+        gpu_encoder=use_gpu,
+        fused_unpack=fused_unpack,
     )
     length = max(len(heads[0]) for heads in positions)
     state = DecodeState(
@@ -272,6 +331,8 @@ def worker(root, expected, index):
         torch.set_num_threads(12)
         torch.use_deterministic_algorithms(True)
         write_once(out / "kernel_controls.json", dict(checks=kernel_control()))
+        if plan.get("fused_unpack"):
+            write_once(out / "pair_kernel_controls.json", dict(checks=pair_kernel_control()))
         cfg = RunConfig.from_mapping(job["arms"][0]["config"])
         torch.manual_seed(cfg.execution.seed)
         adapter = load_hf_adapter(
@@ -333,7 +394,9 @@ def worker(root, expected, index):
             ]
             control_reference = standard_greedy_reference(adapter, prefill, all_positions)
             settle(adapter)
-            control_candidate = encoded_greedy_control(adapter, prefill, all_positions)
+            control_candidate = encoded_greedy_control(
+                adapter, prefill, all_positions, fused_unpack=plan.get("fused_unpack", False)
+            )
             if not torch.equal(control_reference, control_candidate):
                 raise RuntimeError("lossless full-retention greedy control changed logits")
             write_once(
@@ -374,6 +437,7 @@ def worker(root, expected, index):
                     positions,
                     encode=mode == "lossless_storage",
                     gpu_encoder=plan.get("gpu_constructor", False) and mode == "lossless_storage",
+                    fused_unpack=plan.get("fused_unpack", False),
                 )
                 torch.cuda.synchronize()
                 construction_seconds = time.monotonic() - before
@@ -447,6 +511,18 @@ def worker(root, expected, index):
                 )
                 write_once(out / f"{role}-{mode}.json", rows[role][mode])
                 del output, state, cache
+                settle(adapter)
+            if plan.get("paired_transport_benchmark"):
+                from mosaickv.evaluation.lossless_storage_benchmark import benchmark
+
+                trials = benchmark(
+                    adapter,
+                    prefill,
+                    positions,
+                    reference,
+                    seed=plan["paired_transport_benchmark"]["seed"],
+                )
+                write_once(out / f"{role}-timing_trials.json", trials)
                 settle(adapter)
         if source_sha(pairs) != source_checksum:
             raise RuntimeError("source prefill cache was modified")
@@ -645,6 +721,10 @@ def analyze(root, expected):
             construction_peak_audit_required=True,
         ),
     )
+    if plan.get("paired_transport_benchmark"):
+        from mosaickv.evaluation.lossless_storage_analysis import analyze_timing
+
+        analyze_timing(root, plan, failures)
     print(json.dumps(gate))
 
 
@@ -656,9 +736,14 @@ def main():
     parser.add_argument("--index", type=int)
     parser.add_argument("--retry-from", type=Path)
     parser.add_argument("--greedy", action="store_true")
+    parser.add_argument("--fused-benchmark", action="store_true")
     a = parser.parse_args()
     if a.mode == "prepare":
-        print(prepare(a.root, retry_from=a.retry_from, greedy=a.greedy))
+        print(
+            prepare(
+                a.root, retry_from=a.retry_from, greedy=a.greedy, fused_benchmark=a.fused_benchmark
+            )
+        )
     elif a.mode == "submit":
         launch.submit(
             a.root,

@@ -15,7 +15,8 @@ from mosaickv.evaluation.lossless_prompt_cache import (
 
 
 @pytest.mark.parametrize("greedy", [False, True])
-def test_raw_and_encoded_transport_match_standard_exact_cache_for_32_prefixes(greedy):
+@pytest.mark.parametrize("fused", [False, True])
+def test_raw_and_encoded_transport_match_standard_exact_cache_for_32_prefixes(greedy, fused):
     torch.manual_seed(9)
     adapter = _llava()
     adapter.model.to(torch.bfloat16)
@@ -36,7 +37,11 @@ def test_raw_and_encoded_transport_match_standard_exact_cache_for_32_prefixes(gr
             context = nullcontext()
         else:
             cache = construct_cache(
-                adapter, prefill.state.past_key_values, positions, encode=mode == "lossless"
+                adapter,
+                prefill.state.past_key_values,
+                positions,
+                encode=mode == "lossless",
+                fused_unpack=fused,
             )
             state = DecodeState(
                 cache,

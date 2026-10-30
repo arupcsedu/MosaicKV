@@ -13,7 +13,13 @@ from unittest.mock import patch
 
 from transformers.cache_utils import CacheLayerMixin, DynamicCache
 
-from mosaickv.evaluation.lossless_bf16 import PackedBF16, pack_cpu, unpack_cpu, unpack_into
+from mosaickv.evaluation.lossless_bf16 import (
+    PackedBF16,
+    pack_cpu,
+    unpack_cpu,
+    unpack_into,
+    unpack_pair_into,
+)
 
 
 def backing_bytes(tensors: tuple[Any, ...]) -> int:
@@ -28,7 +34,9 @@ def backing_bytes(tensors: tuple[Any, ...]) -> int:
 class PromptStorageLayer(CacheLayerMixin):
     is_sliding = False
 
-    def __init__(self, key: PackedBF16, value: PackedBF16, *, observe: Any) -> None:
+    def __init__(
+        self, key: PackedBF16, value: PackedBF16, *, observe: Any, fused_unpack: bool = False
+    ) -> None:
         import torch
 
         super().__init__()
@@ -49,6 +57,7 @@ class PromptStorageLayer(CacheLayerMixin):
         self.lease_bytes = 0
         self.observe = observe
         self.eviction_count = 0
+        self.fused_unpack = fused_unpack
 
     def owned_tensors(self) -> tuple[Any, ...]:
         return (*self.prompt[0].buffers, *self.prompt[1].buffers, *self.history, *self.leased)
@@ -92,9 +101,12 @@ class PromptStorageLayer(CacheLayerMixin):
         )
         self.lease_bytes = backing_bytes(self.leased)
         self.observe(())
-        for body, dest, history in zip(self.prompt, self.leased, self.history, strict=True):
-            unpack_into(body, dest)
-            dest[..., self.prompt_length :, :].copy_(history[..., : self.history_length, :])
+        if self.fused_unpack:
+            unpack_pair_into(self.prompt, self.history, self.leased)
+        else:
+            for body, dest, history in zip(self.prompt, self.leased, self.history, strict=True):
+                unpack_into(body, dest)
+                dest[..., self.prompt_length :, :].copy_(history[..., : self.history_length, :])
         return self.leased
 
     def release(self) -> None:
@@ -152,7 +164,13 @@ class PromptStorageCache(DynamicCache):
 
 
 def construct_cache(
-    adapter: Any, source_cache: Any, positions: Any, *, encode: bool, gpu_encoder: bool = False
+    adapter: Any,
+    source_cache: Any,
+    positions: Any,
+    *,
+    encode: bool,
+    gpu_encoder: bool = False,
+    fused_unpack: bool = False,
 ) -> PromptStorageCache:
     """Gather and encode ONE source layer at a time; never change source values."""
     import torch
@@ -199,7 +217,9 @@ def construct_cache(
             else:
                 body = PackedBF16(tuple(tensor.shape), True, (tensor,))
             bodies.append(body)
-        cache.layers.append(PromptStorageLayer(*bodies, observe=cache.observe))
+        cache.layers.append(
+            PromptStorageLayer(*bodies, observe=cache.observe, fused_unpack=fused_unpack)
+        )
         cache.build_records.append(
             dict(
                 layer=layer_index,

@@ -131,3 +131,166 @@ def encode(tensor, *, raw_fallback=True):
         tensor.view(torch.uint16), bases, offsets, literals, count, BLOCK=1024
     )
     return PackedBF16(tuple(tensor.shape), False, (sm, codes, bases, offsets, literals))
+
+
+@triton.jit
+def _materialize_component(
+    SM,
+    CODES,
+    BASE,
+    OFFSETS,
+    LITERALS,
+    HISTORY,
+    OUTPUT,
+    COUNT,
+    PROMPT,
+    LENGTH,
+    HISTORY_CAPACITY,
+    HISTORY_USED,
+    HEADS,
+    DIM: tl.constexpr,
+    RAW: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    block = tl.program_id(0)
+    local = tl.arange(0, BLOCK)
+    index = block * BLOCK + local
+    valid = index < COUNT
+    if RAW:
+        bits = tl.load(SM + index, mask=valid, other=0)
+    else:
+        bit = local * 3
+        byte, shift = bit // 8, bit % 8
+        first = tl.load(
+            CODES + block * (BLOCK * 3 // 8) + byte, mask=block * BLOCK < COUNT, other=0
+        )
+        second = tl.load(
+            CODES + block * (BLOCK * 3 // 8) + byte + 1,
+            mask=(block * BLOCK < COUNT) & (byte + 1 < BLOCK * 3 // 8),
+            other=0,
+        )
+        code = ((first.to(tl.int32) >> shift) | (second.to(tl.int32) << (8 - shift))) & 7
+        escaped = (code == 7) & valid
+        rank = tl.cumsum(escaped.to(tl.int32)) - 1
+        offset = tl.load(OFFSETS + block, mask=block * BLOCK < COUNT, other=0)
+        literal = tl.load(LITERALS + offset + rank, mask=escaped, other=0).to(tl.int32)
+        base = tl.load(BASE + block, mask=block * BLOCK < COUNT, other=0).to(tl.int32)
+        exponent = tl.where(escaped, literal, base + code)
+        sm = tl.load(SM + index, mask=valid, other=0).to(tl.int32)
+        bits = ((sm & 127) | ((sm & 128) << 8) | (exponent << 7)).to(tl.uint16)
+    head = index // (PROMPT * DIM)
+    destination = head * LENGTH * DIM + index % (PROMPT * DIM)
+    tl.store(OUTPUT + destination, bits, mask=valid)
+    # The same launch copies the used history suffix. Unused allocated slots
+    # are neither read nor written; prompt and history destinations are disjoint.
+    valid_history = index < HEADS * HISTORY_USED * DIM
+    history_head = index // (HISTORY_USED * DIM)
+    within = index % (HISTORY_USED * DIM)
+    history = tl.load(
+        HISTORY + history_head * HISTORY_CAPACITY * DIM + within, mask=valid_history, other=0
+    )
+    tl.store(
+        OUTPUT + history_head * LENGTH * DIM + PROMPT * DIM + within, history, mask=valid_history
+    )
+
+
+@triton.jit(
+    do_not_specialize=["COUNT", "PROMPT", "LENGTH", "HISTORY_CAPACITY", "HISTORY_USED", "HEADS"]
+)
+def _decode_pair(
+    K0,
+    K1,
+    K2,
+    K3,
+    K4,
+    V0,
+    V1,
+    V2,
+    V3,
+    V4,
+    HK,
+    HV,
+    OK,
+    OV,
+    COUNT,
+    PROMPT,
+    LENGTH,
+    HISTORY_CAPACITY,
+    HISTORY_USED,
+    HEADS,
+    DIM: tl.constexpr,
+    K_RAW: tl.constexpr,
+    V_RAW: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    if tl.program_id(1) == 0:
+        _materialize_component(
+            K0,
+            K1,
+            K2,
+            K3,
+            K4,
+            HK,
+            OK,
+            COUNT,
+            PROMPT,
+            LENGTH,
+            HISTORY_CAPACITY,
+            HISTORY_USED,
+            HEADS,
+            DIM,
+            K_RAW,
+            BLOCK,
+        )
+    else:
+        _materialize_component(
+            V0,
+            V1,
+            V2,
+            V3,
+            V4,
+            HV,
+            OV,
+            COUNT,
+            PROMPT,
+            LENGTH,
+            HISTORY_CAPACITY,
+            HISTORY_USED,
+            HEADS,
+            DIM,
+            V_RAW,
+            BLOCK,
+        )
+
+
+def decode_pair(prompt, history, destination):
+    """One integer-only launch for K, V and both used append-only suffixes."""
+    import torch
+
+    def pointers(body):
+        if body.raw:
+            word = body.buffers[0].view(torch.uint16)
+            return (word,) * 5  # Compile-time raw branch never reads codec headers.
+        return body.buffers
+
+    shape = prompt[0].shape
+    count = 1
+    for dimension in shape:
+        count *= dimension
+    used = destination[0].shape[-2] - shape[-2]
+    _decode_pair[(triton.cdiv(max(count, shape[1] * used * shape[-1]), 1024), 2)](
+        *pointers(prompt[0]),
+        *pointers(prompt[1]),
+        *(tensor.view(torch.uint16) for tensor in history),
+        *(tensor.view(torch.uint16) for tensor in destination),
+        COUNT=count,
+        PROMPT=shape[-2],
+        LENGTH=destination[0].shape[-2],
+        HISTORY_CAPACITY=history[0].shape[-2],
+        HISTORY_USED=used,
+        HEADS=shape[1],
+        DIM=shape[-1],
+        K_RAW=prompt[0].raw,
+        V_RAW=prompt[1].raw,
+        BLOCK=1024,
+    )

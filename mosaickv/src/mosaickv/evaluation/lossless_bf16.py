@@ -118,3 +118,43 @@ def unpack_into(packed: PackedBF16, destination: Any) -> None:
         from mosaickv.evaluation.lossless_bf16_kernel import decode
 
         decode(packed, destination)
+
+
+def unpack_pair_into(prompt: Any, history: Any, destination: Any) -> None:
+    """Validate a complete pair transaction before fused CUDA or reference CPU copy."""
+    import torch
+
+    if len(prompt) != 2 or len(history) != 2 or len(destination) != 2:
+        raise ValueError("exactly two prompt, history and destination components required")
+    shape = prompt[0].shape
+    if len(shape) != 4 or shape[0] != 1 or prompt[1].shape != shape:
+        raise ValueError("same-shape batch-one BHSD prompts required")
+    device = destination[0].device
+    length = destination[0].shape[-2]
+    used = length - shape[-2]
+    if used <= 0:
+        raise ValueError("nonempty generated suffix required")
+    for body, suffix, target in zip(prompt, history, destination, strict=True):
+        if (
+            target.shape != destination[0].shape
+            or target.shape[:2] != shape[:2]
+            or target.shape[-1] != shape[-1]
+            or suffix.ndim != 4
+            or suffix.shape[:2] != shape[:2]
+            or suffix.shape[-1] != shape[-1]
+            or suffix.shape[-2] < used
+            or suffix.shape != history[0].shape
+            or any(t.device != device for t in (*body.buffers, suffix, target))
+            or any(t.dtype != torch.bfloat16 for t in (suffix, target))
+            or not suffix.is_contiguous()
+            or not target.is_contiguous()
+        ):
+            raise ValueError("compatible contiguous same-device BHSD pair required")
+    if device.type == "cuda":
+        from mosaickv.evaluation.lossless_bf16_kernel import decode_pair
+
+        decode_pair(prompt, history, destination)
+    else:
+        for body, suffix, target in zip(prompt, history, destination, strict=True):
+            unpack_into(body, target)
+            target[..., shape[-2] :, :].copy_(suffix[..., :used, :])
