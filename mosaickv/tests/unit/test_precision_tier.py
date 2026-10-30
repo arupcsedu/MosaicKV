@@ -62,3 +62,12 @@ def test_additional_text_rows_exact_and_map_charged():
         assert torch.equal(a[..., (9, 64, 100), :], b[..., (9, 64, 100), :])
     with pytest.raises(ValueError, match="in bounds"):
         construct(pair, protected=(141,))
+
+
+def test_decode_length_and_growing_stride_never_specialize():
+    from mosaickv.evaluation.precision_tier_kernel import _decode
+
+    parameters = {p.name: p for p in _decode.params}
+    for name in ("N", "SH", "PROTECTED"):
+        assert not parameters[name].is_constexpr
+        assert parameters[name].do_not_specialize

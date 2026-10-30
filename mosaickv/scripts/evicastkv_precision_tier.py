@@ -17,7 +17,7 @@ from evicastkv_packed_attention_consumed import differences, gathered
 from mosaickv.config import RunConfig, canonical_config, config_sha256
 from mosaickv.evaluation.fox_campaign import clean_source, sha, write_once
 
-ROOT = Path("/scratch/djy8hg/runs/evicastkv/precision-tier-consumed-20261030-v1")
+ROOT = Path("/scratch/djy8hg/runs/evicastkv/precision-tier-consumed-20261030-v2")
 PARENT = Path("/scratch/djy8hg/runs/evicastkv/consolidated-history-consumed-20261030-v1/canary")
 METHODS = (
     "full_kv",
@@ -61,7 +61,7 @@ def prepare(root, phase):
         source_sha=clean_source(base.SOURCE),
         bound_files=bound,
         jobs=jobs,
-        protocol="lossy_prompt_precision_consumed_v1",
+        protocol="lossy_prompt_precision_consumed_v2_dynamic_decode_geometry",
         original_KV_bits_required=False,
         strict_bitwise_original_logits_required=False,
         strict_bitwise_required_for_identity_and_repack_only=True,
@@ -229,7 +229,19 @@ def study(adapter, prefill, capture, frozen, job, cfg, full_reference, prepared,
         )
         torch.cuda.synchronize()
         construction = time.monotonic() - start
+        write_once(
+            out / f"precision_{bits}_construction.json",
+            dict(
+                construction_seconds=construction,
+                format_count=len(formats),
+                no_per_token_stride_specialization=True,
+            ),
+        )
         actual, record = storage_runs.run(adapter, prefill, formats, audit=True, **common)
+        write_once(
+            out / f"precision_{bits}_decode.json",
+            dict(record=record, comparison32=differences(reference[:32], actual[:32])),
+        )
         record["storage"].update(
             includes="lossy_prompt_codes_FP32_scales_minima,exact_protected_text_rows,lossless_generated_source_history,temporary_BF16_layer_leases,observed_workspace",
             prompt_precision_lossy=True,
@@ -398,7 +410,7 @@ def admit(root, expected):
     suites = list(document.iter("testsuite"))
     count = sum(int(s.get("tests", "0")) for s in suites)
     if (
-        count < 2698
+        count < 2699
         or count != len(list(document.iter("testcase")))
         or any(int(s.get(k, "0")) for s in suites for k in ("failures", "errors", "skipped"))
     ):

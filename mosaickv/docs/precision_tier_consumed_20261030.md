@@ -28,3 +28,10 @@ These are not statistically independent benchmark-quality evidence or a common
 realized-byte selection comparison. Whole-request HBM peak remains uncertified.
 Raw model output, failures, manifests and all storage parameters are retained.
 No fresh cohort, calibration or paper campaign is automatically authorized.
+
+V1's two workers were canceled solely for a kernel-specialization defect:
+marking the growing head stride as constexpr caused decode-time recompilation.
+Preserve their incomplete artifacts and afterany analysis. V2 marks cache length,
+head stride and protected-row count dynamic, with a CPU JIT-signature regression.
+All scientific settings, identities and numerical gates are unchanged. Emit
+per-arm construction and decode completion records for bounded diagnosis.
