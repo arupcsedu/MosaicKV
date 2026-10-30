@@ -157,7 +157,7 @@ def _materialize_component(
     index = block * BLOCK + local
     valid = index < COUNT
     if RAW:
-        bits = tl.load(SM + index, mask=valid, other=0)
+        bits = tl.load(SM + index, mask=valid, other=0).to(tl.uint16, bitcast=True)
     else:
         bit = local * 3
         byte, shift = bit // 8, bit % 8
@@ -180,7 +180,7 @@ def _materialize_component(
         bits = ((sm & 127) | ((sm & 128) << 8) | (exponent << 7)).to(tl.uint16)
     head = index // (PROMPT * DIM)
     destination = head * LENGTH * DIM + index % (PROMPT * DIM)
-    tl.store(OUTPUT + destination, bits, mask=valid)
+    tl.store(OUTPUT + destination, bits.to(tl.bfloat16, bitcast=True), mask=valid)
     # The same launch copies the used history suffix. Unused allocated slots
     # are neither read nor written; prompt and history destinations are disjoint.
     valid_history = index < HEADS * HISTORY_USED * DIM
@@ -265,12 +265,10 @@ def _decode_pair(
 
 def decode_pair(prompt, history, destination):
     """One integer-only launch for K, V and both used append-only suffixes."""
-    import torch
 
     def pointers(body):
         if body.raw:
-            word = body.buffers[0].view(torch.uint16)
-            return (word,) * 5  # Compile-time raw branch never reads codec headers.
+            return (body.buffers[0],) * 5  # Only the raw branch reads this BF16 pointer.
         return body.buffers
 
     shape = prompt[0].shape
@@ -281,8 +279,8 @@ def decode_pair(prompt, history, destination):
     _decode_pair[(triton.cdiv(max(count, shape[1] * used * shape[-1]), 1024), 2)](
         *pointers(prompt[0]),
         *pointers(prompt[1]),
-        *(tensor.view(torch.uint16) for tensor in history),
-        *(tensor.view(torch.uint16) for tensor in destination),
+        *history,
+        *destination,
         COUNT=count,
         PROMPT=shape[-2],
         LENGTH=destination[0].shape[-2],

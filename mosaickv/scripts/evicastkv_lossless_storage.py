@@ -24,7 +24,9 @@ PARENT_SHA = "da8cd788ff54844cdcf9c26b41f05c1eabd504ce79e6721a28dcccc6541d4b42"
 MODES = ("raw_control", "lossless_storage")
 
 
-def prepare(root, *, retry_from=None, greedy=False, fused_benchmark=False):
+def prepare(root, *, retry_from=None, greedy=False, fused_benchmark=False, long_controls=False):
+    if long_controls and not fused_benchmark:
+        raise ValueError("long controls require the repeated fused-transport stage")
     if fused_benchmark and (not greedy or retry_from is not None):
         raise ValueError("fused benchmark requires the greedy stage and no historical worker reuse")
     source = clean_source(SOURCE)
@@ -151,6 +153,29 @@ def prepare(root, *, retry_from=None, greedy=False, fused_benchmark=False):
                 whole_request_peak_certified=False,
             ),
         )
+    if long_controls:
+        previous = Path("/scratch/djy8hg/runs/evicastkv/lossless-fused-consumed-20261029-v3")
+        if not common.read(previous / "transport_timing_analysis/GATE.json")[
+            "representation_overhead_gate_passed"
+        ]:
+            raise ValueError("previous complete bitwise/repeated-timing gate required")
+        for name in (
+            "plan.json",
+            "analysis/GATE.json",
+            "transport_timing_analysis/GATE.json",
+            "transport_timing_analysis/manifest.json",
+        ):
+            bound[str(previous / name)] = sha(previous / name)
+        plan.update(
+            protocol="shared_lossless_direct_BF16_pointer_and_lifetime_v4",
+            long_controls=dict(
+                tokens=128,
+                maximum_decode_updates=128,
+                whole_request_peak_certified=False,
+                static_history_codec_measurement_only=True,
+            ),
+            raw_separate_path_is_additional_fast_baseline=True,
+        )
     write_once(root / "plan.json", plan)
     return sha(root / "plan.json")
 
@@ -218,7 +243,13 @@ def pair_kernel_control():
             else pack_cpu(s, raw_fallback=False).to("cuda")
             for s, raw in zip(sources, (raw_key, raw_value), strict=True)
         )
-        histories = tuple(torch.randn(1, 3, 32, 13, device="cuda").bfloat16() for _ in range(2))
+        history_bits = torch.arange(3 * 32 * 13).to(torch.int16)
+        history_bits[:8] = torch.tensor(
+            [0, -32768, 32640, -128, 32705, -63, 1, -32767], dtype=torch.int16
+        )
+        histories = tuple(
+            history_bits.view(torch.bfloat16).reshape(1, 3, 32, 13).cuda().clone() for _ in range(2)
+        )
         for used in (1, 16, 31):
             targets = tuple(
                 torch.empty(1, 3, 1680 + used, 13, dtype=torch.bfloat16, device="cuda")
@@ -234,26 +265,11 @@ def pair_kernel_control():
     return rows
 
 
-def standard_greedy_reference(adapter, prefill, positions):
+def standard_greedy_reference(adapter, prefill, positions, *, tokens=32):
     """Own-token decode with the ordinary unmodified exact DynamicCache."""
-    import torch
+    from mosaickv.evaluation.lossless_lifetime import standard_greedy_reference as reference
 
-    from mosaickv.adapters.huggingface.layer_local_cache import gather_layer_local_snapshot
-    from mosaickv.backends.hf_runtime import PackedRuntimeCache, _state_from_packed
-
-    snapshot = gather_layer_local_snapshot(
-        adapter,
-        prefill.state.past_key_values,
-        tuple(tuple(tuple(head) for head in layer) for layer in positions),
-    )
-    choice = PackedRuntimeCache(snapshot, (), snapshot.active_sequence_length, True, (), (), ())
-    state = _state_from_packed(adapter, prefill.state, choice)
-    logits, token = [prefill.logits.detach().reshape(-1).float().cpu()], prefill.next_token_id
-    for _step in range(31):
-        output = adapter.decode_one_token(token, state, capture_queries=False)
-        logits.append(output.logits.detach().reshape(-1).float().cpu())
-        token = output.next_token_id
-    return torch.stack(logits)
+    return reference(adapter, prefill, positions, tokens=tokens)
 
 
 def encoded_greedy_control(adapter, prefill, positions, *, fused_unpack=False):
@@ -524,6 +540,14 @@ def worker(root, expected, index):
                 )
                 write_once(out / f"{role}-timing_trials.json", trials)
                 settle(adapter)
+            if plan.get("long_controls"):
+                from mosaickv.evaluation.lossless_lifetime import long_control
+
+                control = long_control(
+                    adapter, prefill, positions, tokens=plan["long_controls"]["tokens"]
+                )
+                write_once(out / f"{role}-long_controls.json", control)
+                settle(adapter)
         if source_sha(pairs) != source_checksum:
             raise RuntimeError("source prefill cache was modified")
         torch.save(captured, out / "logits.pt")
@@ -737,11 +761,16 @@ def main():
     parser.add_argument("--retry-from", type=Path)
     parser.add_argument("--greedy", action="store_true")
     parser.add_argument("--fused-benchmark", action="store_true")
+    parser.add_argument("--long-controls", action="store_true")
     a = parser.parse_args()
     if a.mode == "prepare":
         print(
             prepare(
-                a.root, retry_from=a.retry_from, greedy=a.greedy, fused_benchmark=a.fused_benchmark
+                a.root,
+                retry_from=a.retry_from,
+                greedy=a.greedy,
+                fused_benchmark=a.fused_benchmark,
+                long_controls=a.long_controls,
             )
         )
     elif a.mode == "submit":

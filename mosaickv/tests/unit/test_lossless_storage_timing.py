@@ -38,12 +38,24 @@ def test_timing_analysis_requires_paired_complete_finite_records_and_equal_stora
     rows = summarize_trials(fixtures())
     assert len(rows) == 4
     assert all(r["decode_ratio_ci95"] == [1.0, 1.0] for r in rows)
+    assert all(r["raw_separate_ratio_ci95"] == [1.0, 1.0] for r in rows)
     with pytest.raises(ValueError, match="complete"):
         summarize_trials(fixtures()[:-1])
     records = fixtures()
     records[0]["decode_cuda_ms"] = float("nan")
     with pytest.raises(ValueError, match="finite"):
         summarize_trials(records)
+
+
+def test_fast_raw_comparator_cannot_be_hidden_by_slower_fused_raw_control():
+    records = fixtures()
+    for row in records:
+        if row["fused"]:
+            row["decode_cuda_ms"] *= 1.2
+    rows = summarize_trials(records)
+    encoded_fused = next(r for r in rows if r["encoded"] and r["fused"])
+    assert encoded_fused["within_1_05_transport_overhead"]
+    assert not encoded_fused["within_1_05_raw_separate_overhead"]
     records = fixtures()
     for row in records:
         if row["fused"]:

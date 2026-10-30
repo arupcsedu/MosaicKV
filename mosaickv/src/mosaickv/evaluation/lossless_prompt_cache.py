@@ -35,11 +35,19 @@ class PromptStorageLayer(CacheLayerMixin):
     is_sliding = False
 
     def __init__(
-        self, key: PackedBF16, value: PackedBF16, *, observe: Any, fused_unpack: bool = False
+        self,
+        key: PackedBF16,
+        value: PackedBF16,
+        *,
+        observe: Any,
+        fused_unpack: bool = False,
+        maximum_decode_updates: int = 32,
     ) -> None:
         import torch
 
         super().__init__()
+        if type(maximum_decode_updates) is not int or not 1 <= maximum_decode_updates <= 4096:
+            raise ValueError("maximum_decode_updates must be an integer in [1, 4096]")
         if key.shape != value.shape or len(key.shape) != 4 or key.shape[0] != 1:
             raise ValueError("same-shape batch-one prompt storage required")
         self.prompt = key, value
@@ -58,6 +66,7 @@ class PromptStorageLayer(CacheLayerMixin):
         self.observe = observe
         self.eviction_count = 0
         self.fused_unpack = fused_unpack
+        self.maximum_decode_updates = maximum_decode_updates
 
     def owned_tensors(self) -> tuple[Any, ...]:
         return (*self.prompt[0].buffers, *self.prompt[1].buffers, *self.history, *self.leased)
@@ -75,11 +84,11 @@ class PromptStorageLayer(CacheLayerMixin):
             or value_states.dtype != torch.bfloat16
         ):
             raise ValueError("one BF16 token and released previous materialization required")
-        if self.history_length >= 32:
-            raise ValueError("this feasibility transport is restricted to 32 decode updates")
+        if self.history_length >= self.maximum_decode_updates:
+            raise ValueError("this feasibility transport reached its maximum decode updates")
         needed = self.history_length + 1
         if needed > self.history_capacity:
-            capacity = min(32, ((needed + 15) // 16) * 16)
+            capacity = min(self.maximum_decode_updates, ((needed + 15) // 16) * 16)
             shape = (*key_states.shape[:2], capacity, key_states.shape[-1])
             newer = tuple(
                 torch.empty(shape, dtype=key_states.dtype, device=key_states.device)
@@ -88,6 +97,10 @@ class PromptStorageLayer(CacheLayerMixin):
             self.observe(newer)  # old and new history coexist during growth
             for dest, source in zip(newer, self.history, strict=True):
                 dest[..., : self.history_length, :].copy_(source[..., : self.history_length, :])
+            # Python loop variables otherwise keep the old V allocation alive
+            # across the subsequent full-layer lease. End the growth transaction
+            # before replacing its explicitly observed owner boundary.
+            del dest, source
             self.history, self.history_capacity = newer, capacity
             newer_bytes = backing_bytes(newer)
             self.resident_bytes += newer_bytes - self.history_bytes
@@ -171,6 +184,7 @@ def construct_cache(
     encode: bool,
     gpu_encoder: bool = False,
     fused_unpack: bool = False,
+    maximum_decode_updates: int = 32,
 ) -> PromptStorageCache:
     """Gather and encode ONE source layer at a time; never change source values."""
     import torch
@@ -218,7 +232,12 @@ def construct_cache(
                 body = PackedBF16(tuple(tensor.shape), True, (tensor,))
             bodies.append(body)
         cache.layers.append(
-            PromptStorageLayer(*bodies, observe=cache.observe, fused_unpack=fused_unpack)
+            PromptStorageLayer(
+                *bodies,
+                observe=cache.observe,
+                fused_unpack=fused_unpack,
+                maximum_decode_updates=maximum_decode_updates,
+            )
         )
         cache.build_records.append(
             dict(

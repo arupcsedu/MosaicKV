@@ -117,14 +117,19 @@ def test_transport_releases_temporary_buffers_and_restores_dispatch_on_failure()
     assert not any(layer.leased for layer in cache.layers)
 
 
-def test_cached_accounting_matches_independent_owner_scan_at_every_boundary():
+@pytest.mark.parametrize("updates", [31, 127])
+def test_cached_accounting_matches_independent_owner_scan_at_every_boundary(updates):
     from mosaickv.evaluation.lossless_prompt_cache import backing_bytes
 
     adapter = _llava()
     adapter.model.to(torch.bfloat16)
     prefill = adapter.prefill(adapter.prepare_inputs(_runtime_request("audit").messages))
     cache = construct_cache(
-        adapter, prefill.state.past_key_values, (((0, 3),), ((0, 3),)), encode=True
+        adapter,
+        prefill.state.past_key_values,
+        (((0, 3),), ((0, 3),)),
+        encode=True,
+        maximum_decode_updates=128,
     )
     observed = [cache.initial_bytes]
     original = cache.observe
@@ -139,7 +144,7 @@ def test_cached_accounting_matches_independent_owner_scan_at_every_boundary():
 
     for layer in cache.layers:
         layer.observe = audit
-    for _step in range(31):
+    for _step in range(updates):
         for layer in cache.layers:
             key = torch.ones((1, 1, 1, 8), dtype=torch.bfloat16)
             layer.update(key, key)
@@ -158,3 +163,81 @@ def test_full_retention_greedy_helper_matches_standard_cache():
     reference = runner.standard_greedy_reference(adapter, prefill, positions)
     candidate = runner.encoded_greedy_control(adapter, prefill, positions)
     assert torch.equal(reference, candidate)
+
+
+def test_explicit_long_transport_reproduces_128_token_reference_without_history_eviction():
+    from mosaickv.evaluation.lossless_lifetime import long_control
+
+    torch.manual_seed(22)
+    adapter = _llava()
+    adapter.model.to(torch.bfloat16)
+    prefill = adapter.prefill(adapter.prepare_inputs(_runtime_request("long").messages))
+    pairs, _ = adapter._legacy_layers(prefill.state.past_key_values)
+    before = source_sha(pairs)
+    report = long_control(adapter, prefill, (((0, 3),), ((0, 3),)), tokens=128)
+    assert source_sha(pairs) == before
+    for mode in report["modes"].values():
+        assert mode["bitwise_logits_equal_reference"]
+        assert len(mode["generated_token_ids"]) == 128
+        assert mode["storage"]["history_updates_per_layer"] == [127, 127]
+    assert report["history_codec_measurement"]["not_installed_in_decode"]
+
+
+@pytest.mark.parametrize("bound", [0, True, 4097, 2.5])
+def test_explicit_history_bound_is_strict(bound):
+    from mosaickv.evaluation.lossless_bf16 import pack_cpu
+    from mosaickv.evaluation.lossless_prompt_cache import PromptStorageLayer
+
+    body = pack_cpu(torch.ones(1, 1, 2, 8, dtype=torch.bfloat16))
+    with pytest.raises(ValueError, match="maximum_decode_updates"):
+        PromptStorageLayer(body, body, observe=lambda *_: None, maximum_decode_updates=bound)
+
+
+def test_non_multiple_history_limit_counts_real_backing_and_fails_without_mutation():
+    from mosaickv.evaluation.lossless_bf16 import pack_cpu
+    from mosaickv.evaluation.lossless_prompt_cache import PromptStorageLayer
+
+    body = pack_cpu(torch.ones(1, 1, 2, 8, dtype=torch.bfloat16))
+    layer = PromptStorageLayer(
+        body, body, observe=lambda *_: None, maximum_decode_updates=33, fused_unpack=True
+    )
+    token = torch.ones(1, 1, 1, 8, dtype=torch.bfloat16)
+    for step in range(33):
+        layer.update(token, token)
+        assert layer.history_length == step + 1
+        assert layer.history_capacity in (16, 32, 33)
+        layer.release()
+    before = tuple(t.clone() for t in layer.history)
+    with pytest.raises(ValueError, match="maximum decode updates"):
+        layer.update(token, token)
+    assert layer.history_length == 33
+    assert layer.history_bytes == 33 * 8 * 2 * 2
+    assert all(torch.equal(a, b) for a, b in zip(before, layer.history, strict=True))
+
+
+def test_history_growth_releases_old_owners_before_full_layer_lease(monkeypatch):
+    import weakref
+
+    from mosaickv.evaluation.lossless_bf16 import pack_cpu
+    from mosaickv.evaluation.lossless_prompt_cache import PromptStorageLayer
+
+    body = pack_cpu(torch.ones(1, 1, 2, 8, dtype=torch.bfloat16))
+    layer = PromptStorageLayer(body, body, observe=lambda *_: None, maximum_decode_updates=128)
+    token = torch.ones(1, 1, 1, 8, dtype=torch.bfloat16)
+    for _ in range(16):
+        layer.update(token, token)
+        layer.release()
+    previous = tuple(weakref.ref(t) for t in layer.history)
+    original_empty = torch.empty
+    checked = []
+
+    def allocate(shape, *args, **kwargs):
+        if tuple(shape) == (1, 1, 19, 8):
+            assert all(ref() is None for ref in previous)
+            checked.append(True)
+        return original_empty(shape, *args, **kwargs)
+
+    monkeypatch.setattr(torch, "empty", allocate)
+    layer.update(token, token)
+    assert len(checked) == 2
+    layer.release()
