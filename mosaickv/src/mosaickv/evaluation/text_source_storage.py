@@ -76,7 +76,9 @@ def text_slots(positions, text):
         not positions
         or len({len(h) for h in positions}) != 1
         or tuple(sorted(set(text))) != tuple(text)
-        or any(tuple(sorted(set(h))) != tuple(h) for h in positions)
+        or any(
+            len(set(h)) != len(h) or any(type(p) is not int or p < 0 for p in h) for h in positions
+        )
     ):
         raise ValueError("sorted text IDs and uniform unique head positions required")
     return tuple(tuple({p: j for j, p in enumerate(h)}.get(t, -1) for t in text) for h in positions)
