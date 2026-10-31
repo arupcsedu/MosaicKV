@@ -83,3 +83,17 @@ ceiling six A100s, followed by a finite dependent CPU analysis. No larger or
 fresh cohort is authorized. Advance only after meaningful model improvement,
 smaller measured storage and correct mask/state/position controls; otherwise
 preserve the negative result without retuning thresholds or inspected labels.
+
+## Driver-only retry
+
+The first execution incorrectly applied whole-output identity to the completion
+arm, after successfully computing it. That assertion belongs only to the
+lossless source-only arm; completion intentionally adds evidence. Preserve
+the original failed run. The corrective source package is byte-identical to
+9988fd0. Acceptance/rejection unit fixtures cover this exact branch boundary.
+Reuse the four successful EviCastKV anchor/source rows and logits with their
+original source/config/manifest fields and immutable hashes. Rebuild packets
+for the current proposal, but do not rerun those four generation trajectories.
+Run only the 26 failed/unattempted inference rows. Save computed tensor pairs
+before semantic postconditions, so later analysis bugs cannot discard expensive
+inference again. No algorithm, threshold, selector or numerical tolerance changes.

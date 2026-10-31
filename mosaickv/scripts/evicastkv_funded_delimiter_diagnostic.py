@@ -20,6 +20,7 @@ SOURCE = Path(__file__).resolve().parents[2]
 ANCHOR_REFERENCE = Path(
     "/scratch/djy8hg/runs/evicastkv/isolated-draft-evidence-consumed-20261031-v1"
 )
+RETRY_PARENT = Path("/scratch/djy8hg/runs/evicastkv/funded-delimiter-consumed-20261031-v1")
 METHODS = (
     "mosaickv_exact",
     "lookm_reimpl",
@@ -44,6 +45,16 @@ def scored_text(tokenizer, ids, eos_ids):
         first_terminal_index=end if end < len(ids) else None,
         terminal_ids=sorted(eos_ids),
     )
+
+
+def validate_source_identity(representation, fixed, greedy, fixed_anchor, greedy_anchor, changed):
+    """Completion is a changed context, not a lossless whole-output identity arm."""
+    if representation not in ("anchor", "source", "completion"):
+        raise ValueError("unregistered representation")
+    if representation == "source" and (
+        changed or not fixed.equal(fixed_anchor) or not greedy.equal(greedy_anchor)
+    ):
+        raise RuntimeError("lossless source transport changed cache values or 128-token logits")
 
 
 def materialize_packets(packets, adapter):
@@ -71,6 +82,10 @@ def checkpoint_variant(out, row, fixed, greedy):
 def prepare(root):
     if root.exists():
         raise ValueError("new immutable diagnostic root required")
+    if subprocess.check_output(
+        ["git", "diff", "9988fd0", "HEAD", "--", "mosaickv/src"], cwd=SOURCE, text=True
+    ):
+        raise ValueError("driver retry must preserve the complete algorithm and transport package")
     changed = subprocess.check_output(
         ["git", "diff", "--name-only", "04d411e", "HEAD", "--", "mosaickv/src"],
         cwd=SOURCE,
@@ -91,6 +106,28 @@ def prepare(root):
     if sha(parent / "plan.json") != causal.parent.PARENT_SHA:
         raise ValueError("consumed parent changed")
     bound = dict(old["bound_files"])
+    retry_results = []
+    for index in range(2):
+        folder = RETRY_PARENT / f"workers/{index}"
+        result = previous.read(folder / "result.json")
+        bound[str(folder / "result.json")] = sha(folder / "result.json")
+        for name, digest in result["outputs"].items():
+            if sha(folder / name) != digest:
+                raise ValueError("retry producer changed")
+            bound[str(folder / name)] = digest
+        completed = [
+            json.loads(line)
+            for line in (folder / "raw.jsonl").read_text().splitlines()
+            if json.loads(line)["status"] == "completed"
+        ]
+        if {r["variant"] for r in completed} != {
+            "mosaickv_exact--anchor",
+            "mosaickv_exact--source",
+        }:
+            raise ValueError(
+                "exactly the four compatible completed EviCastKV controls must be reused"
+            )
+        retry_results.append(completed)
     source_root = Path("/scratch/djy8hg/runs/evicastkv/text-source-consumed-20261031-v2")
     decision = previous.read(source_root / "analysis/decision.json")
     if not decision["complete"] or decision["failures"] or len(decision["rows"]) != 20:
@@ -149,6 +186,11 @@ def prepare(root):
             whole_request_kv_peak_not_certified=True,
             source_only_bitwise_128_logits_required=True,
             completion_requires_unchanged_32_token_guard=True,
+            retry_parent=str(RETRY_PARENT),
+            reused_completed_rows=retry_results,
+            algorithm_package_identical_to="9988fd0810c75a619dd47dd2cffdb41ff77dc80b",
+            reused_rows_expected=4,
+            new_inference_rows_expected=26,
         ),
     )
     print(sha(root / "plan.json"))
@@ -241,6 +283,8 @@ def worker(root, expected, index):
             full_three_tier_runtime_used=False,
             residual_repair=False,
             no_benchmark_reference_input_to_constructor=True,
+            compatible_control_reuse_parent=plan["retry_parent"],
+            original_reused_source_config_manifest_fields_preserved=True,
             environment=environment(),
             gpu=asdict(capture_gpu_environment(torch)),
             cuda_runtime=torch.version.cuda,
@@ -329,6 +373,7 @@ def worker(root, expected, index):
         del raw_formats, zero_formats, cloned, zero
         rows, saved, anchors, anchor_keys, anchor_values = [], {}, {}, {}, {}
         built, greedy_anchors, build_seconds = {}, {}, {}
+        reused = {r["variant"]: r for r in plan["reused_completed_rows"][index]}
         for name, (method, representation) in VARIANTS.items():
             policy = "head3_boundary8"
             steps = 0
@@ -434,18 +479,38 @@ def worker(root, expected, index):
                     for (_, v), a in zip(decoded, anchor_values[method], strict=True)
                 )
                 del decoded
-            fixed, _ = storage_runs.run(
-                adapter,
-                prefill,
-                packets[policy],
-                tokens=33,
-                forced=forced,
-                sealed=False,
-                audit=False,
-            )
-            greedy, storage = storage_runs.run(
-                adapter, prefill, packets[policy], tokens=128, sealed=False, audit=False
-            )
+            if name in reused:
+                previous_logits = torch.load(
+                    Path(plan["retry_parent"]) / f"workers/{index}/{name}-logits.pt",
+                    weights_only=True,
+                    map_location="cpu",
+                )
+                fixed, greedy = previous_logits["fixed"], previous_logits["greedy"]
+                old_row = reused[name]
+                storage = dict(
+                    storage=old_row["storage"],
+                    decode_wall_seconds=old_row["decode_wall_seconds"],
+                    decode_cuda_ms=old_row["decode_cuda_ms"],
+                )
+            else:
+                fixed, _ = storage_runs.run(
+                    adapter,
+                    prefill,
+                    packets[policy],
+                    tokens=33,
+                    forced=forced,
+                    sealed=False,
+                    audit=False,
+                )
+                greedy, storage = storage_runs.run(
+                    adapter, prefill, packets[policy], tokens=128, sealed=False, audit=False
+                )
+            # Preserve computed tensors BEFORE any semantic postcondition can
+            # reject a row, so post-processing failures never force inference.
+            computed = out / (name + "-computed.pt")
+            if computed.exists():
+                raise FileExistsError(computed)
+            torch.save(dict(fixed=fixed, greedy=greedy), computed)
             if representation == "completion" and (
                 storage["storage"]["initial_active_kv_storage_bytes"]
                 != proof["funded_completion"]["final_physical_bytes"]
@@ -465,14 +530,20 @@ def worker(root, expected, index):
                 anchors[method] = fixed
             if representation == "anchor":
                 greedy_anchors[method] = greedy
-            elif (
-                changed_scalars
-                or not torch.equal(fixed, anchors[method])
-                or not torch.equal(greedy, greedy_anchors[method])
-            ):
-                raise RuntimeError(
-                    "lossless source transport changed cache values or 128-token logits"
+            else:
+                validate_source_identity(
+                    representation,
+                    fixed,
+                    greedy,
+                    anchors[method],
+                    greedy_anchors[method],
+                    changed_scalars,
                 )
+            if name in reused:
+                rows.append(reused[name])
+                saved[name + ":fixed"], saved[name + ":greedy"] = fixed, greedy
+                checkpoint_variant(out, reused[name], fixed, greedy)
+                continue
             row = dict(
                 variant=name,
                 policy=policy,
