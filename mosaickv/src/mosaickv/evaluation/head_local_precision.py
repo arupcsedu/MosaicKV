@@ -13,9 +13,13 @@ from typing import Any
 import torch
 
 from mosaickv.evaluation import request_precision
-from mosaickv.evaluation.exact_storage import ExactFormat, decoded, encode
+from mosaickv.evaluation.exact_storage import ExactFormat, SparseBitPatch, decoded, encode
 from mosaickv.evaluation.lossless_prompt_cache import backing_bytes
-from mosaickv.evaluation.precision_corrections import fund_corrections, prompt_weights
+from mosaickv.evaluation.precision_corrections import (
+    fund_corrections,
+    prompt_weights,
+    stable_largest,
+)
 from mosaickv.evaluation.precision_tier import PrecisionFormat, construct, pack
 from mosaickv.evaluation.storage_baselines import baseline_payload
 
@@ -25,6 +29,8 @@ POLICIES = {
     "head3k2v": (3, 2),
     "head2k3v": (2, 3),
     "head2": (2, 2),
+    "head3k2v_refit": (3, 2),
+    "head3k2v_headwise": (3, 2),
 }
 
 
@@ -123,8 +129,17 @@ def bundle(
     method: str,
     profile_path: str,
     ratio: float,
+    *,
+    policies: tuple[str, ...] | None = None,
 ) -> tuple[Any, dict[str, Any]]:
     """Compute original selection/merge once; build all registered packets."""
+    requested = tuple(POLICIES) if policies is None else policies
+    if (
+        not requested
+        or len(set(requested)) != len(requested)
+        or any(p not in POLICIES for p in requested)
+    ):
+        raise ValueError("unique registered precision policies required")
     frozen, online = request_precision.online_frozen(
         prefill,
         tuple(json.loads(Path(profile_path).read_text())),
@@ -151,7 +166,7 @@ def bundle(
         if span.modality == "text"
         for p in range(span.start, span.end)
     }
-    formats: dict[str, list[Any]] = {p: [] for p in POLICIES}
+    formats: dict[str, list[Any]] = {p: [] for p in requested}
     records = []
     for i, ((key, value), heads) in enumerate(zip(source, memberships, strict=True)):
         if transformed is not None:
@@ -178,7 +193,8 @@ def bundle(
         fmt, corrections = fund_corrections(
             fmt, pair, fraction=0.005, key_weight=kw, value_weight=vw
         )
-        formats["union3"].append(fmt)
+        if "union3" in formats:
+            formats["union3"].append(fmt)
         row = dict(
             layer=i,
             corrections=corrections,
@@ -193,10 +209,19 @@ def bundle(
             ),
             component_bytes={"union3": fmt.component_bytes},
         )
-        for policy in POLICIES:
+        for policy in requested:
             if policy == "union3":
                 continue
             localized = localize(fmt, pair, heads, text, policy=policy)
+            if policy in ("head3k2v_refit", "head3k2v_headwise"):
+                localized, audit = refit_corrections(
+                    localized,
+                    pair,
+                    key_weight=kw,
+                    value_weight=vw,
+                    per_head=policy == "head3k2v_headwise",
+                )
+                row.setdefault("refit", {})[policy] = audit
             formats[policy].append(localized)
             row["component_bytes"][policy] = localized.component_bytes
         records.append(row)
@@ -207,6 +232,78 @@ def bundle(
         source_memberships=memberships,
         same_source_cap_not_encoded_byte_matching=True,
         only_storage_precision_and_protection_changes=True,
+    )
+
+
+def refit_corrections(
+    packet: HeadLocalFormat,
+    original: Any,
+    *,
+    key_weight: Any = None,
+    value_weight: Any = None,
+    per_head: bool = False,
+) -> tuple[HeadLocalFormat, dict[str, Any]]:
+    """Re-rank actual low-bit errors with exactly the old exception allowance."""
+    old = packet.base.corrections
+    if len(old) != 2 or type(per_head) is not bool:
+        raise ValueError("two funded component budgets and explicit head policy required")
+    uncorrected = replace(packet, base=replace(packet.base, corrections=()))
+    decoded_ = uncorrected.materialize()
+    previous = packet.materialize()
+    h, n, d = packet.shape[1:]
+    patches, records = [], []
+    for reference, approximate, prior, budget, weight in zip(
+        original, decoded_, previous, old, (key_weight, value_weight), strict=True
+    ):
+        if (
+            tuple(reference.shape) != packet.shape
+            or reference.dtype != torch.bfloat16
+            or reference.device != approximate.device
+        ):
+            raise ValueError("same-shape original BF16 payload required")
+        error = (reference.float() - approximate.float()).abs()
+        score = error if weight is None else error * weight
+        count = int(budget.indices.numel())
+        if per_head:
+            lower, remainder = divmod(count, h)
+            indices = (
+                torch.cat(
+                    tuple(
+                        stable_largest(score[0, head].flatten(), lower + int(head < remainder))
+                        + head * n * d
+                        for head in range(h)
+                    )
+                )
+                .sort()
+                .values
+            )
+        else:
+            indices = stable_largest(score.flatten(), count)
+        values = reference.contiguous().flatten().index_select(0, indices.long()).clone()
+        patches.append(SparseBitPatch(indices, values))
+        after = score.square().flatten()
+        after[indices.long()] = 0
+        prior_error = (reference.float() - prior.float()).abs()
+        if weight is not None:
+            prior_error = prior_error * weight
+        records.append(
+            dict(
+                reference_exception_count=count,
+                actual_exception_count=indices.numel(),
+                weighted_error_old=float(prior_error.square().sum()),
+                weighted_error_refit=float(after.sum()),
+            )
+        )
+    result = replace(packet, base=replace(packet.base, corrections=tuple(patches)))
+    if result.component_bytes > packet.component_bytes:
+        raise RuntimeError("precision-specific corrections exceeded the same exception bytes")
+    return result, dict(
+        per_head=per_head,
+        components=records,
+        original_component_bytes=packet.component_bytes,
+        refit_component_bytes=result.component_bytes,
+        no_extra_exception_bytes=True,
+        no_label_or_output_logit_access=True,
     )
 
 
@@ -252,11 +349,16 @@ def gpu_controls() -> list[dict[str, Any]]:
     union = tuple(sorted({j for head in heads for j, p in enumerate(head) if p in text}))
     device_pair = tuple(t.cuda() for t in pair)
     gpu = construct(device_pair, bits=3, protected=union, encoded_exact=True)
+    gpu, _ = fund_corrections(gpu, device_pair, fraction=0.005)
     records = []
     for policy in POLICIES:
         if policy == "union3":
             continue
         candidate = localize(gpu, device_pair, heads, text, policy=policy)
+        if policy in ("head3k2v_refit", "head3k2v_headwise"):
+            candidate, _ = refit_corrections(
+                candidate, device_pair, per_head=policy == "head3k2v_headwise"
+            )
         # CPU/CUDA min-max division can round half-bin ties to different codes.
         # Decoder parity requires the SAME encoded packet, not two quantizers.
         reference = cpu_packet(candidate).materialize()

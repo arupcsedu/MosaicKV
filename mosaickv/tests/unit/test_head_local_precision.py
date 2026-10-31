@@ -1,7 +1,12 @@
 import pytest
 import torch
 
-from mosaickv.evaluation.head_local_precision import POLICIES, cpu_packet, localize
+from mosaickv.evaluation.head_local_precision import (
+    POLICIES,
+    cpu_packet,
+    localize,
+    refit_corrections,
+)
 from mosaickv.evaluation.lossless_prompt_cache import backing_bytes
 from mosaickv.evaluation.precision_tier import construct
 
@@ -91,3 +96,35 @@ def test_cpu_oracle_copies_identical_encoded_packet_without_requantization(polic
         torch.equal(a.view(torch.int16), b.view(torch.int16))
         for a, b in zip(packet.materialize(), copied.materialize(), strict=True)
     )
+
+
+@pytest.mark.parametrize("per_head", [False, True])
+def test_refit_uses_actual_low_bit_errors_without_more_exception_bytes(per_head):
+    from mosaickv.evaluation.precision_corrections import fund_corrections
+
+    pair, heads, text, fmt = fixture()
+    fmt, _ = fund_corrections(fmt, pair, fraction=0.005)
+    packet = localize(fmt, pair, heads, text, policy="head3k2v")
+    original = tuple(t.clone() for t in pair)
+    revised, audit = refit_corrections(packet, pair, per_head=per_head)
+    repeated, _ = refit_corrections(packet, pair, per_head=per_head)
+    assert revised.component_bytes <= packet.component_bytes
+    assert all(
+        torch.equal(a.indices, b.indices)
+        for a, b in zip(revised.base.corrections, repeated.base.corrections, strict=True)
+    )
+    for row in audit["components"]:
+        assert row["actual_exception_count"] <= row["reference_exception_count"]
+        if not per_head:
+            assert row["weighted_error_refit"] <= row["weighted_error_old"]
+    for a, b in zip(revised.materialize(), pair, strict=True):
+        for h, head in enumerate(heads):
+            slots = [j for j, p in enumerate(head) if p in text]
+            assert torch.equal(a[0, h, slots].view(torch.int16), b[0, h, slots].view(torch.int16))
+    assert all(torch.equal(a, b) for a, b in zip(pair, original, strict=True))
+
+
+def test_refit_without_existing_funded_budget_rejected():
+    pair, heads, text, fmt = fixture()
+    with pytest.raises(ValueError, match="funded"):
+        refit_corrections(localize(fmt, pair, heads, text, policy="head3k2v"), pair)

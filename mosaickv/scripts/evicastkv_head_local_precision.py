@@ -23,6 +23,7 @@ GROUPS = (
     ("lookm_reimpl",),
     ("vl_cache_reimpl", "prefixkv_reimpl"),
 )
+EXECUTED_POLICIES = ("union3", "head3k2v_refit", "head3k2v_headwise")
 
 
 def prepare(root):
@@ -55,14 +56,18 @@ def prepare(root):
     )
     if superseded.exists():
         bound[str(superseded)] = sha(superseded)
+    prior_study = Path(
+        "/scratch/djy8hg/runs/evicastkv/head-local-precision-consumed-20261031-v2/analysis/decision.json"
+    )
+    bound[str(prior_study)] = sha(prior_study)
     plan = dict(
         old,
         jobs=jobs,
         source_sha=clean_source(SOURCE),
         bound_files=bound,
         parent=str(causal.parent.PARENT),
-        stage="consumed_head_local_precision_diagnostic",
-        precision_policies=POLICIES,
+        stage="consumed_precision_specific_corrections_diagnostic",
+        precision_policies={p: POLICIES[p] for p in EXECUTED_POLICIES},
         warmups=0,
         timed_repetitions=1,
         automatic_bounded_cohort_after_correctness=False,
@@ -165,12 +170,13 @@ def worker(root, expected, index):
                     method,
                     plan["profile_path"],
                     plan["ratio"],
+                    policies=tuple(plan["precision_policies"]),
                 )
                 write_once(out / f"{method}-construction.json", proof)
                 fixed = {}
                 greedy = {}
                 records = {}
-                policies = list(POLICIES)
+                policies = list(plan["precision_policies"])
                 random.Random(plan["seed"] + index).shuffle(policies)
                 for policy in policies:
                     row = dict(
@@ -222,10 +228,10 @@ def worker(root, expected, index):
                     summaries.append(row)
                     stream.write(json.dumps(row, allow_nan=False) + "\n")
                     stream.flush()
-                if len(greedy) == len(POLICIES):
+                if len(greedy) == len(plan["precision_policies"]):
                     control = comparison(old[f"0-{method}-query3"], greedy["union3"])
                     comparisons = []
-                    for policy in POLICIES:
+                    for policy in plan["precision_policies"]:
                         c = comparison(fixed["union3"][1:], fixed[policy][1:])
                         own = comparison(greedy["union3"], greedy[policy])
                         comparisons.append(
@@ -290,7 +296,7 @@ def analyze(root, expected):
                 dict(index=job["index"], method=method, isolation=isolation, **comparison_)
             )
     eligible = []
-    for policy in POLICIES:
+    for policy in plan["precision_policies"]:
         if policy == "union3":
             continue
         rows = [next(p for p in s["policies"] if p["policy"] == policy) for s in summaries]

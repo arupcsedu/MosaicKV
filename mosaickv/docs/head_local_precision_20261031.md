@@ -87,3 +87,27 @@ reconstruction from those identical bytes. It does not relax a tolerance or
 change the CUDA quantizer. The saved model-logit transport check remains .001,
 and all quality guards are unchanged. Test this correction on one GPU before
 retrying model workers under a new immutable root.
+
+## Precision-specific correction follow-up
+
+The corrected first study completed all 50 rows, but no policy met every
+unchanged same-prefix/greedy-identity gate. Head-local protection saved less
+than one percent; low-bit variants saved about 7--14 percent but generally
+changed later output. Preserve this as a negative consumed-input diagnostic.
+
+The next bounded study retains only three executed policies: unchanged union3,
+head-local 3-bit K / 2-bit V with global correction reranking, and the same
+format with deterministic per-head correction quotas. Keep the exception
+allowance identical to the original funded patches; do not increase its bytes.
+Rank scalar errors using the actual lower-bit reconstruction and the existing
+prompt-query/value-demand weights, not errors left over from the 3-bit packet.
+No draft outputs, future answers, benchmark labels, or weight updates are used.
+Global reranking minimizes weighted squared scalar error for that same count;
+this is not a guarantee of logit or benchmark improvement. Per-head quotas are
+a separately labeled ablation and have no global-error optimality guarantee.
+
+Apply both variants to every selector, use the same consumed inputs and all
+unchanged guards, preserve baseline merges, and bind the previous negative
+decision by hash. Old low-bit arms are not rerun. No fresh cohort or larger
+campaign follows automatically. Numerical decoder controls now also cover the
+new correction patches using identical encoded CPU/GPU bytes.
