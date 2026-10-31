@@ -1,9 +1,8 @@
 import inspect
 
+import evicastkv_funded_delimiter_diagnostic as diagnostic
 import pytest
 import torch
-
-import evicastkv_funded_delimiter_diagnostic as diagnostic
 
 
 def test_all_methods_receive_the_same_registered_options():
