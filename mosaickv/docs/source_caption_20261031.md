@@ -43,3 +43,9 @@ Before composing the transports, fix validity-mask cleanup to remove only its
 own temporary mask, preserving rotary owners appended by source history during
 attention. Regression tests cover both normal and exceptional cleanup and
 preservation of static prompt phases through repeated history consolidation.
+
+The first launch used a copied historical nonuniform-codec wrapper and failed
+closed on the new policy labels before candidate construction. Preserve v1 as
+an execution-negative artifact; no quality conclusion follows. The driver-only
+retry resolves its wrapper from its own filename and regression-checks that
+binding. Its algorithm package, consumed identities, and thresholds are unchanged.

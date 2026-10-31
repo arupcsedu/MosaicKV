@@ -23,3 +23,15 @@ def test_unchanged_union_control_never_constructs_text_sources():
         actual = study.construct(*args, policy="union3")
     assert actual == (packets, proof)
     assert bundle.call_args.kwargs["allocation_mode"] == "profile"
+
+
+def test_launcher_is_bound_to_this_driver_not_copied_historical_driver():
+    import inspect
+    from pathlib import Path
+
+    submit_source = inspect.getsource(study.submit)
+    assert 'Path(__file__).stem + ".sbatch"' in submit_source
+    script = study.SOURCE / "mosaickv/slurm" / (Path(study.__file__).stem + ".sbatch")
+    assert script.exists()
+    assert "evicastkv_source_caption_study.py" in script.read_text()
+    assert "evicastkv_nonuniform_value_study" not in submit_source

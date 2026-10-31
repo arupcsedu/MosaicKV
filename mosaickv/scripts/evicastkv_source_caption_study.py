@@ -249,7 +249,7 @@ def submit(root, expected, *, remaining=False):
     )
     if any("gpu" in line.lower() for line in queue.splitlines()):
         raise ValueError("admit no extra GPU work until previous arrays finish")
-    script = str(SOURCE / "mosaickv/slurm/evicastkv_nonuniform_value_study.sbatch")
+    script = str(SOURCE / "mosaickv/slurm" / (Path(__file__).stem + ".sbatch"))
     args = [str(SOURCE), str(root), expected]
     (root / "slurm").mkdir(exist_ok=True)
     gpu = subprocess.check_output(
