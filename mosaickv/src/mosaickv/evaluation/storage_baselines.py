@@ -11,7 +11,15 @@ import torch
 
 
 def baseline_payload(
-    adapter: Any, prepared: Any, prefill: Any, cfg: Any, method: str, frozen: Any, profile_path: str
+    adapter: Any,
+    prepared: Any,
+    prefill: Any,
+    cfg: Any,
+    method: str,
+    frozen: Any,
+    profile_path: str,
+    *,
+    borrow_source: bool = False,
 ) -> tuple[Any, Any, dict[str, Any]]:
     """Return original per-head membership or actual transformed pairs and provenance."""
     from mosaickv.cache_state import FullKVState
@@ -55,7 +63,14 @@ def baseline_payload(
             common_source_capacity_not_encoded_byte_matching=False,
         )
         return positions, None, proof
-    snapshot = adapter.extract_past_key_values(prefill.state.past_key_values)
+    if type(borrow_source) is not bool:
+        raise ValueError("borrow_source must be an explicit boolean")
+    snapshot = (
+        adapter.borrow_past_key_values(prefill.state.past_key_values)
+        if borrow_source
+        else adapter.extract_past_key_values(prefill.state.past_key_values)
+    )
+    proof["read_only_source_views_no_redundant_snapshot_copy"] = borrow_source
     full = FullKVState.from_cache_snapshot(
         snapshot,
         modality_spans=prepared.modality_map,

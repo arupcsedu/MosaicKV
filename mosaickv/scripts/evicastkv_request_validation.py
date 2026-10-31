@@ -22,10 +22,10 @@ import evicastkv_lifetime_v2 as launch
 from evicastkv_campaign import environment
 
 from mosaickv.evaluation.fox_campaign import clean_source, sha, write_once
-from mosaickv.evaluation.request_precision import METHODS
+from mosaickv.evaluation.request_precision import METHODS, REQUEST_POLICY
 
 SOURCE = Path(__file__).resolve().parents[2]
-BASE = Path("/scratch/djy8hg/runs/evicastkv/request-validation-20261030-v1")
+BASE = Path("/scratch/djy8hg/runs/evicastkv/request-validation-20261030-v2-unprofiled")
 PARENT = Path(
     "/scratch/djy8hg/runs/evicastkv/precision-corrections-consumed-20261030-v1/diagnostic"
 )
@@ -86,7 +86,7 @@ def prepare_canary(root):
         profile_path=profile,
         arms=ARMS,
         stage="canary",
-        protocol="complete_request_profiled_query_precision_v1",
+        protocol="complete_request_profiled_query_precision_v2_unprofiled",
         ratio=0.5,
         output_tokens=128,
         seed=SEED,
@@ -106,6 +106,12 @@ def prepare_canary(root):
         shared_encoded_byte_budget_claim=False,
         paper_campaign_authorized=False,
         no_label_tuning=True,
+        request_policy=REQUEST_POLICY,
+        numerical_guard=dict(
+            horizon=32, maximum_logit_KL=0.02, maximum_logit_difference=1.0, token_agreement=1.0
+        ),
+        request_tensor_auditing_enabled=False,
+        allocator_peak_counters_remain_enabled=True,
     )
     write_once(root / "plan.json", plan)
     return sha(root / "plan.json")
@@ -127,6 +133,20 @@ def load_messages(payload):
     return build_multimodal_messages(payload["prompt"], tuple(media))
 
 
+def resolved_mapping(plan, job):
+    mapping = dict(job.get("config", plan["config"]))
+    mapping["execution"] = dict(mapping["execution"], seed=plan["seed"])
+    return mapping
+
+
+def balanced_pair_orders(arms, repetitions, seed):
+    if len(arms) != 2 or repetitions < 2 or repetitions % 2:
+        raise ValueError("two arms and an even paired repetition count required")
+    flips = [i % 2 for i in range(repetitions)]
+    random.Random(seed).shuffle(flips)
+    return [list(reversed(arms)) if flip else list(arms) for flip in flips]
+
+
 def worker(root, expected, index):
     import torch
 
@@ -135,12 +155,14 @@ def worker(root, expected, index):
         compare_cache_reinjection,
         compare_with_generate,
     )
-    from mosaickv.config import RunConfig
+    from mosaickv.config import RunConfig, canonical_config, config_sha256
     from mosaickv.evaluation.request_precision import complete_request
     from mosaickv.hf_cli import _model_kwargs
     from mosaickv.measurements.telemetry import capture_gpu_environment
 
     plan = common.inputs(root, expected)
+    if plan.get("request_policy") != REQUEST_POLICY:
+        raise ValueError("resolved request policy drifted from immutable source")
     job = plan["jobs"][index]
     out = root / f"workers/{index}"
     out.mkdir(parents=True, exist_ok=False)
@@ -160,7 +182,16 @@ def worker(root, expected, index):
         torch.set_num_threads(12)
         torch.manual_seed(plan["seed"])
         torch.use_deterministic_algorithms(True)
-        cfg = RunConfig.from_mapping(job.get("config", plan["config"]))
+        cfg = RunConfig.from_mapping(resolved_mapping(plan, job))
+        if (
+            cfg.model.id != "llava-hf/llava-1.5-7b-hf"
+            or cfg.model.revision != "b234b804b114d9e37bb655e11cbbb5f5e971b7a9"
+            or cfg.model.precision.value != "bf16"
+            or cfg.execution.attention_implementation != "eager"
+        ):
+            raise ValueError(
+                "request variant supports only its pinned LLaVA/BF16/HF-eager combination"
+            )
         adapter = load_hf_adapter(
             cfg.model.id,
             revision=cfg.model.revision,
@@ -193,7 +224,11 @@ def worker(root, expected, index):
             dict(
                 source_sha=plan["source_sha"],
                 source_dirty=False,
-                config_sha256=expected,
+                config_sha256=config_sha256(cfg),
+                plan_sha256=expected,
+                base_loader_and_legacy_baseline_config=canonical_config(cfg),
+                request_policy=plan["request_policy"],
+                source_slot_ratio=plan["ratio"],
                 model=asdict(cfg.model),
                 execution=asdict(cfg.execution),
                 dataset=asdict(cfg.dataset)
@@ -223,6 +258,11 @@ def worker(root, expected, index):
             ),
         )
         rng = random.Random(plan["seed"] + index)
+        paired_orders = (
+            balanced_pair_orders(plan["arms"], plan["timed_repetitions"], plan["seed"] + index)
+            if plan["stage"] == "timing"
+            else None
+        )
         logits_saved = {}
         deterministic_hashes = {}
         with (out / "raw.jsonl").open("x") as stream:
@@ -232,7 +272,10 @@ def worker(root, expected, index):
                 for rep in range(
                     -plan["warmups"] if local_index == 0 else 0, plan.get("timed_repetitions", 1)
                 ):
-                    rng.shuffle(arms)
+                    if paired_orders is not None and rep >= 0:
+                        arms = paired_orders[rep]
+                    else:
+                        rng.shuffle(arms)
                     for order, (method, precision) in enumerate(arms):
                         row = dict(
                             task=payload["task"],
@@ -256,7 +299,7 @@ def worker(root, expected, index):
                                 precision=precision,
                                 profile_path=plan["profile_path"],
                                 ratio=plan["ratio"],
-                                audit=rep == 0,
+                                audit=False,
                             )
                             row.update(measured, status="completed")
                             # Catalog serialization is artifact work, outside
@@ -275,6 +318,24 @@ def worker(root, expected, index):
                                 if method == "mosaickv_exact"
                                 else method + "_common_" + precision
                             )
+                            row["config_sha256"] = hashlib.sha256(
+                                json.dumps(
+                                    dict(
+                                        base_config_sha256=config_sha256(cfg),
+                                        request_policy=plan["request_policy"],
+                                        actual_method=method,
+                                        actual_precision=precision,
+                                        source_slot_ratio=plan["ratio"],
+                                        resolved_cache_geometry=selection.get("cache_config", {}),
+                                        baseline_parameters=selection.get(
+                                            "baseline_parameters", {}
+                                        ),
+                                        profile_sha256=plan["bound_files"][plan["profile_path"]],
+                                    ),
+                                    sort_keys=True,
+                                    separators=(",", ":"),
+                                ).encode()
+                            ).hexdigest()
                             row["greedy_ids"] = logits.argmax(-1).tolist()
                             digest = hashlib.sha256(logits.numpy().tobytes()).hexdigest()
                             identity = (payload["sample_id"], method, precision)
@@ -339,7 +400,7 @@ def worker(root, expected, index):
                 precision="query3",
                 profile_path=plan["profile_path"],
                 ratio=1.0,
-                audit=True,
+                audit=False,
             )
             if not torch.equal(identity, logits_saved["0-full_kv-ordinary"]):
                 raise RuntimeError("128-token retention-one identity failed")
@@ -525,12 +586,16 @@ def analyze(root, expected):
     keys = {(r["sample_id"], r["method"], r["precision"], r["trial"]) for r in scored}
     complete = len(keys) == expected_rows and len(scored) == expected_rows and not failures
     quality_guard = []
+    if any(r.get("audit_enabled") is True for r in scored):
+        complete = False
+        failures.append("tensor-workspace auditing contaminated an unprofiled timing request")
     if complete and any(
         r["status"] != "completed"
         or len(r["greedy_ids"]) != 128
         or not math.isfinite(r["end_to_end_seconds"])
         or r["end_to_end_seconds"] <= 0
         or not r["whole_request_allocator_peak_certified"]
+        or (r["method"] != "full_kv" and r.get("audit_enabled") is not False)
         or (r["method"] != "full_kv" and not r["source_KV_owner_retired_before_decode"])
         for r in scored
     ):
@@ -810,9 +875,62 @@ def admit(root, expected):
     launch.submit(root, expected, script_name="evicastkv_request_validation.sbatch", memory_gb=48)
 
 
+def seal_profiled(root, expected):
+    if sha(root / "plan.json") != expected:
+        raise ValueError("profiled parent plan changed")
+    parent = read(root / "plan.json")
+    if parent["protocol"] != "complete_request_profiled_query_precision_v1":
+        raise ValueError("only the superseded tensor-audited parent may be sealed")
+    records, hashes = [], {str(root / "plan.json"): expected}
+    for job in parent["jobs"]:
+        folder = root / f"workers/{job['index']}"
+        path = folder / "result.json"
+        if not path.exists():
+            records.append(
+                dict(worker=job["index"], status="missing_result", error="incomplete producer")
+            )
+            continue
+        result = read(path)
+        if result["source_sha"] != parent["source_sha"] or result["plan_sha256"] != expected:
+            raise ValueError("parent source binding changed")
+        hashes[str(path)] = sha(path)
+        for name, digest in result["outputs"].items():
+            if sha(folder / name) != digest:
+                raise ValueError("parent evidence changed")
+            hashes[str(folder / name)] = digest
+        rows = [json.loads(line) for line in (folder / "raw.jsonl").read_text().splitlines()]
+        records.append(
+            dict(
+                worker=job["index"],
+                status=result["status"],
+                failures=result["failures"],
+                attempted_rows=len(rows),
+                scored_rows=sum(r["status"] == "completed" for r in rows),
+                tensor_audited_rows=sum(r.get("audit_enabled") is True for r in rows),
+            )
+        )
+    write_once(
+        root / "derived_measurement_seal/decision.json",
+        dict(
+            source_sha=clean_source(SOURCE),
+            producer_sha=parent["source_sha"],
+            inputs=hashes,
+            records=records,
+            classification="preserved_profiled_correctness_diagnostic_not_unprofiled_performance",
+            comparative_latency_admissible=False,
+            automatic_cohort_launcher_cancelled="22207828",
+            reason="TorchDispatch workspace observation overhead was inside the measured requests",
+            replacement_protocol="complete_request_profiled_query_precision_v2_unprofiled",
+            superiority_established=False,
+        ),
+    )
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("prepare", "submit", "worker", "analyze", "cpu", "admit"))
+    parser.add_argument(
+        "mode", choices=("prepare", "submit", "worker", "analyze", "cpu", "admit", "seal-profiled")
+    )
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--plan-sha")
     parser.add_argument("--index", type=int)
@@ -823,6 +941,8 @@ if __name__ == "__main__":
         admit(args.root, args.plan_sha)
     elif args.mode == "cpu":
         cpu(args.root, args.plan_sha)
+    elif args.mode == "seal-profiled":
+        seal_profiled(args.root, args.plan_sha)
     elif args.mode == "worker":
         worker(
             args.root,

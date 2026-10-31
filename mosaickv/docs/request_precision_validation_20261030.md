@@ -1,4 +1,4 @@
-# Complete-request and broader-cohort validation, version 1
+# Complete-request and broader-cohort validation, version 2 (unprofiled)
 
 The user's October 30 request authorizes this separately versioned, bounded
 implementation and validation. Preserve all prior artifacts. Never rewrite the
@@ -36,6 +36,10 @@ stores the exact shared-head full-prompt prior. Those statistics are reduced
 inside read-only eager hooks without retaining complete QxK tensors. Other
 baseline implementations retain the complete maps they currently consume.
 Each method runs only its own selector, not both Top-K and EviCastKV selectors.
+All published-method local planners borrow validated read-only source views
+instead of making a redundant full-KV snapshot copy. CPU parity tests require
+identical selected positions and actual LOOK-M merged values, and unchanged
+original source tensors. The legacy diagnostic default still clones snapshots.
 
 ## Measurement contract
 
@@ -47,6 +51,11 @@ The allocator peak includes weights, original prefill, activations, capture,
 construction and decode. It is NOT an exact KV-only whole-request peak and NOT
 an NVML-certified total process-HBM high-water mark. Never relabel it as either.
 Request boundaries synchronize CUDA; CUDA Events accompany monotonic wall time.
+TorchDispatch tensor-workspace auditing MUST be disabled for all measured
+requests: its overhead made the first canary unsuitable for latency claims.
+Independent storage enumeration and source ownership checks remain enabled,
+as do CUDA allocator peaks and numerical identity controls. The first canary
+is preserved as a profiled diagnostic, never reused as unprofiled timing.
 FullKV collects no unused query/attention/projection capture, performs no
 compression, and remains excluded from compressed-method latency claims.
 

@@ -42,6 +42,8 @@ def test_canary_keeps_dataset_configs_and_strips_all_saved_prefixes(tmp_path, mo
     assert [j["config"]["dataset"]["id"] for j in plan["jobs"]] == ["description", "mmvet"]
     assert all("fullkv_prefix_tokens" not in module.read(j["inputs"][0]) for j in plan["jobs"])
     assert len(plan["arms"]) == 11 and plan["cohort_size"] == 128
+    assert plan["request_policy"] == module.REQUEST_POLICY
+    assert plan["request_tensor_auditing_enabled"] is False
     assert plan["paper_campaign_authorized"] is False
     with pytest.raises(ValueError, match="new bounded"):
         module.prepare_canary(root)
@@ -66,3 +68,65 @@ def test_media_identity_ignores_png_container_but_not_pixels(tmp_path):
     image.putpixel((0, 0), (11, 20, 30))
     image.save(b)
     assert module.rgb_identity(a) != module.rgb_identity(b)
+
+
+def test_runtime_seed_and_manifest_execution_seed_match_without_mutating_template():
+    base = dict(execution=dict(seed=7, attention_implementation="eager"), model=dict(id="pinned"))
+    plan = dict(config=base, seed=31)
+    resolved = module.resolved_mapping(plan, {})
+    assert resolved["execution"]["seed"] == 31
+    assert base["execution"]["seed"] == 7
+    assert module.resolved_mapping(plan, dict(config=base)) == resolved
+
+
+def test_paired_timing_orders_are_balanced_randomized_and_deterministic():
+    arms = [("candidate", "query3"), ("baseline", "lossless")]
+    a = module.balanced_pair_orders(arms, 20, 7)
+    assert a == module.balanced_pair_orders(arms, 20, 7)
+    assert sum(order[0] == arms[0] for order in a) == 10
+    assert a != [arms] * 20
+    with pytest.raises(ValueError, match="even"):
+        module.balanced_pair_orders(arms, 19, 7)
+
+
+def test_analyzer_rejects_profiled_rows_before_any_automatic_gpu_followup(tmp_path, monkeypatch):
+    root = tmp_path / "canary"
+    folder = root / "workers/0"
+    folder.mkdir(parents=True)
+    plan = dict(
+        stage="canary",
+        source_sha="a" * 40,
+        jobs=[dict(index=0, inputs=["fixture"])],
+        arms=[["prefixkv_reimpl", "query3"]],
+    )
+    row = dict(
+        sample_id="fixture",
+        method="prefixkv_reimpl",
+        precision="query3",
+        trial=0,
+        warmup=False,
+        status="completed",
+        greedy_ids=[0] * 128,
+        end_to_end_seconds=1.0,
+        whole_request_allocator_peak_certified=True,
+        source_KV_owner_retired_before_decode=True,
+        audit_enabled=True,
+    )
+    raw = folder / "raw.jsonl"
+    raw.write_text(json.dumps(row) + "\n")
+    (folder / "result.json").write_text(
+        json.dumps(
+            dict(
+                source_sha=plan["source_sha"],
+                plan_sha256="bound",
+                failures=[],
+                outputs={"raw.jsonl": module.sha(raw)},
+            )
+        )
+    )
+    monkeypatch.setattr(module.common, "inputs", lambda root, expected: plan)
+    monkeypatch.setattr(module, "materialize_cohort", lambda *args: pytest.fail("must not expand"))
+    module.analyze(root, "bound")
+    gate = module.read(root / "analysis/GATE.json")
+    assert gate["complete"] is False
+    assert any("auditing contaminated" in str(f) for f in gate["failures"])

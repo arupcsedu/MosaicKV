@@ -17,6 +17,28 @@ METHODS = (
     "lookm_reimpl",
     "mosaickv_exact",
 )
+REQUEST_POLICY: dict[str, Any] = dict(
+    variant="online_profiled_shared_prior_precision_v1",
+    prompt_bits=3,
+    quant_group=128,
+    prompt_window=16,
+    shared_prior_weight=0.5,
+    correction_fraction=0.005,
+    exact_boundary_layers=2,
+    exact_first_selected=4,
+    exact_last_selected=8,
+    protect_all_selected_text=True,
+    normalized_capture_window=16,
+    generated_history_lossless=True,
+    source_history_constructor="direct",
+    consolidate_history=True,
+    output_predictions=128,
+    block_size=1,
+    mandatory_policy="last_token",
+    source_KV_must_be_retired=True,
+    common_codec_offered_to_every_baseline=True,
+    tensor_workspace_auditing_for_timing=False,
+)
 
 
 def ranked_positions(
@@ -67,7 +89,7 @@ def online_frozen(
             topk.append(placeholder)
             mixed.append(placeholder)
             continue
-        window = probabilities_[0, :, -16:, :].float().mean(-2)
+        window = probabilities_[0, :, -REQUEST_POLICY["prompt_window"] :, :].float().mean(-2)
         # Keep the pinned BF16 head-mean -> FP32 query-mean reduction order.
         last = (probabilities_.shape[-1] - 1,)
         topk.append(
@@ -79,7 +101,8 @@ def online_frozen(
                 if priors is not None
                 else probabilities_.mean(1, keepdim=True).float().mean(-2)[0]
             )
-            mixed.append(ranked_positions(0.5 * window + 0.5 * prior, count, last))
+            weight = REQUEST_POLICY["shared_prior_weight"]
+            mixed.append(ranked_positions((1 - weight) * window + weight * prior, count, last))
         else:
             mixed.append(placeholder)
     return {
@@ -181,7 +204,7 @@ def construct_request_formats(
         priors=capture.priors if capture is not None and capture.summaries else None,
     )
     positions, transformed, proof = baseline_payload(
-        adapter, prepared, prefill, cfg, method, frozen, profile_path
+        adapter, prepared, prefill, cfg, method, frozen, profile_path, borrow_source=True
     )
     memberships = (
         positions if positions is not None else proof["selected_source_positions_by_layer"]
@@ -203,22 +226,32 @@ def construct_request_formats(
                 1, key.shape[1], len(heads[0]), key.shape[-1]
             )
             pair = key.gather(2, index), value.gather(2, index)
-        if precision == "lossless" or i < 2 or i >= len(source) - 2:
+        if (
+            precision == "lossless"
+            or i < REQUEST_POLICY["exact_boundary_layers"]
+            or i >= len(source) - REQUEST_POLICY["exact_boundary_layers"]
+        ):
             fmt = ExactFormat("kv", tuple(pair[0].shape), pair=tuple(encode(t) for t in pair))
         else:
             protected = tuple(
                 sorted({j for head in heads for j, p in enumerate(head) if p in text})
             )
-            fmt = construct(pair, bits=3, protected=protected, encoded_exact=True)
+            fmt = construct(
+                pair, bits=REQUEST_POLICY["prompt_bits"], protected=protected, encoded_exact=True
+            )
             weights = prompt_weights(
                 adapter._language_layers()[i].self_attn,
                 capture.records[i],
                 prefill.attention_weights[i],
                 heads,
-                window=16,
+                window=REQUEST_POLICY["prompt_window"],
             )
             fmt, record = fund_corrections(
-                fmt, pair, fraction=0.005, key_weight=weights[0], value_weight=weights[1]
+                fmt,
+                pair,
+                fraction=REQUEST_POLICY["correction_fraction"],
+                key_weight=weights[0],
+                value_weight=weights[1],
             )
             records.append(dict(layer=i, **record))
         formats.append(fmt)
@@ -258,6 +291,10 @@ def complete_request(
 
     if method != "full_kv" and method not in METHODS:
         raise ValueError("unregistered method")
+    if type(ratio) not in (int, float) or not 0 < ratio <= 1:
+        raise ValueError("finite source ratio in (0,1] required")
+    if precision not in (("ordinary",) if method == "full_kv" else ("lossless", "query3")):
+        raise ValueError("unsupported method/precision combination")
     if ratio == 1 and method != "full_kv":
         logits, identity = complete_request(
             adapter,
@@ -322,6 +359,7 @@ def complete_request(
         prefill = replace(
             prefill, attention_weights=tuple(cap.windows[i] for i in range(len(cap.windows)))
         )
+    first_logit_ready = time.monotonic() - started
     record: dict[str, Any]
     if method == "full_kv":
 
@@ -441,6 +479,9 @@ def complete_request(
         online_variant=proof,
         phase_wall_seconds=phases,
         end_to_end_seconds=elapsed,
+        first_logit_ready_seconds=first_logit_ready,
+        output_streamed=False,
+        first_complete_output_ready_seconds=elapsed,
         end_to_end_cuda_ms=whole_start.elapsed_time(whole_end),
         **memory,
         source_KV_owner_retired_before_decode=retired,

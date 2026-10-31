@@ -201,3 +201,20 @@ def test_bounded_summaries_reproduce_full_attention_selection_without_retaining_
     )
     assert full["window_topk_control"] == topk["window_topk_control"]
     assert len(attention._forward_hooks) == len(attention._forward_pre_hooks) == 0
+
+
+@pytest.mark.parametrize("ratio", [True, 0, -1, float("nan"), float("inf"), 1.1])
+def test_invalid_request_ratio_rejected_before_any_cuda_call(ratio):
+    from mosaickv.evaluation.request_precision import complete_request
+
+    with pytest.raises(ValueError, match="source ratio"):
+        complete_request(
+            None,
+            None,
+            None,
+            method="mosaickv_exact",
+            precision="query3",
+            profile_path="not_opened",
+            ratio=ratio,
+            audit=False,
+        )
