@@ -65,6 +65,7 @@ def online_frozen(
     method: str | None = None,
     priors: Any = None,
     allocation_mode: str = "profile",
+    draft_attention: Any = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     from mosaickv.selection.profile_lifetime import allocate_profile_lifetime
 
@@ -73,6 +74,10 @@ def online_frozen(
     probabilities = prefill.attention_weights
     if not probabilities or len(probabilities) != len(profile):
         raise ValueError("complete eager prompt attention and pinned layer profile required")
+    if draft_attention is not None and (
+        method != "mosaickv_exact" or len(draft_attention) != len(profile)
+    ):
+        raise ValueError("draft evidence is an explicit EviCastKV-only selection variant")
     lengths = tuple(int(p.shape[-1]) for p in probabilities)
     costs = tuple(int(p.shape[1]) * 128 * 2 * 2 for p in probabilities)
     # This is a source-slot capacity control, NOT an encoded-physical-byte match.
@@ -111,7 +116,21 @@ def online_frozen(
                 else probabilities_.mean(1, keepdim=True).float().mean(-2)[0]
             )
             weight = REQUEST_POLICY["shared_prior_weight"]
-            mixed.append(ranked_positions((1 - weight) * window + weight * prior, count, last))
+            score = (1 - weight) * window + weight * prior
+            if draft_attention is not None:
+                draft = draft_attention[i]
+                if (
+                    draft.shape != window.shape
+                    or draft.device != window.device
+                    or not bool(torch.isfinite(draft).all())
+                    or bool((draft < 0).any())
+                    or not torch.allclose(
+                        draft.sum(-1), torch.ones_like(draft.sum(-1)), atol=1e-5, rtol=1e-5
+                    )
+                ):
+                    raise ValueError("normalized, finite per-head draft prompt demand required")
+                score = 0.5 * score + 0.5 * draft
+            mixed.append(ranked_positions(score, count, last))
         else:
             mixed.append(placeholder)
     return {
@@ -132,6 +151,8 @@ def online_frozen(
         encoded_byte_matching=False,
         profile_source="pinned_PrefixKV_profile_shape_not_official_PrefixKV_selection",
         labels_or_reference_outputs_used=False,
+        draft_attention_enabled=draft_attention is not None,
+        prompt_to_draft_weight=0.5 if draft_attention is not None else 0.0,
     )
 
 

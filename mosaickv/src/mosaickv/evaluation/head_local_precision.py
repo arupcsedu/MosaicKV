@@ -152,6 +152,7 @@ def bundle(
     *,
     policies: tuple[str, ...] | None = None,
     allocation_mode: str = "profile",
+    future_steps: int = 0,
 ) -> tuple[Any, dict[str, Any]]:
     """Compute original selection/merge once; build all registered packets."""
     requested = tuple(POLICIES) if policies is None else policies
@@ -161,6 +162,17 @@ def bundle(
         or any(p not in POLICIES for p in requested)
     ):
         raise ValueError("unique registered precision policies required")
+    if (
+        type(future_steps) is not int
+        or future_steps not in (0, 4)
+        or (future_steps and method != "mosaickv_exact")
+    ):
+        raise ValueError("only explicit zero/four-step EviCastKV forecasting supported")
+    forecast, forecast_proof = None, None
+    if future_steps:
+        from mosaickv.evaluation.draft_prompt_evidence import collect
+
+        forecast, forecast_proof = collect(adapter, prefill)
     frozen, online = request_precision.online_frozen(
         prefill,
         tuple(json.loads(Path(profile_path).read_text())),
@@ -168,6 +180,7 @@ def bundle(
         method=method,
         priors=capture.priors if getattr(capture, "summaries", False) else None,
         **({"allocation_mode": allocation_mode} if allocation_mode != "profile" else {}),
+        **({"draft_attention": forecast} if forecast is not None else {}),
     )
     positions, transformed, proof = baseline_payload(
         adapter,
@@ -304,7 +317,8 @@ def bundle(
         layers=records,
         source_memberships=memberships,
         same_source_cap_not_encoded_byte_matching=True,
-        only_storage_precision_and_protection_changes=True,
+        only_storage_precision_and_protection_changes=not bool(future_steps),
+        isolated_future_attention=forecast_proof,
     )
 
 
