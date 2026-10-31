@@ -19,17 +19,14 @@ SOURCE = Path(__file__).resolve().parents[2]
 OLD = Path("/scratch/djy8hg/runs/evicastkv/precision-rate-distortion-20261031-v2")
 ROW = Path("/scratch/djy8hg/runs/evicastkv/value-row-precision-consumed-20261031-v1")
 POLICY = "head3k2v_rows_text"
-STUDY_POLICIES = ("head3k2v_mse", "head3_boundary8")
-TEXT = Path("/scratch/djy8hg/runs/evicastkv/text-value-row-study-20261031-v1")
+STUDY_POLICIES = ("balanced_union3", "balanced_boundary8")
+TEXT = Path("/scratch/djy8hg/runs/evicastkv/precision-combined-task-study-20261031-v1")
 DIAGNOSTICS = (
     Path("/scratch/djy8hg/runs/evicastkv/mse-value-precision-consumed-20261031-v1"),
     Path("/scratch/djy8hg/runs/evicastkv/boundary-precision-consumed-20261031-v1"),
 )
 METHODS = (
     "mosaickv_exact",
-    "lookm_reimpl",
-    "vl_cache_reimpl",
-    "prefixkv_reimpl",
     "prompt_attention_topk",
 )
 
@@ -71,12 +68,21 @@ def construct(*args, policy, **kwargs):
 
     if args[-1] != "query3" or policy not in ("union3", POLICY, *STUDY_POLICIES):
         raise ValueError("registered text-row precision required")
-    formats, proof = bundle(*args[:-1], policies=(policy,), **kwargs)
-    return formats[policy], dict(
+    codec = {"balanced_union3": "union3", "balanced_boundary8": "head3_boundary8"}.get(
+        policy, policy
+    )
+    allocation = "balanced" if policy in STUDY_POLICIES else "profile"
+    extra = dict(allocation_mode=allocation) if allocation != "profile" else {}
+    formats, proof = bundle(*args[:-1], policies=(codec,), **extra, **kwargs)
+    return formats[codec], dict(
         proof,
         precision=policy,
         generated_history="lossless_consolidated_source_append_only",
         explicit_precision_variant_not_graph_exact_paper_method=True,
+        allocation_mode=allocation,
+        algorithm_change="balanced_layer_allocation_only"
+        if allocation == "balanced"
+        else "unchanged_profile",
     )
 
 
@@ -203,6 +209,7 @@ def prepare(root):
         ROW / "analysis/decision.json",
         SOURCE / "mosaickv/docs/text_value_row_study_20261031.md",
         SOURCE / "mosaickv/docs/precision_combined_task_study_20261031.md",
+        SOURCE / "mosaickv/docs/balanced_demand_study_20261031.md",
     ):
         bound[str(path)] = sha(path)
     # Bind every original producer artifact before deriving reused rows.
@@ -250,23 +257,26 @@ def prepare(root):
         jobs=jobs,
         precision_policies=list(STUDY_POLICIES),
         reused_rows=str(root / "reused_summary.json"),
-        stage="range_fit_and_eight_bit_boundary_consumed_development",
+        stage="balanced_layer_allocation_consumed_development",
         arms=[],
         reused_worker_zero=None,
-        new_expected_rows=160,
-        total_expected_rows=400,
+        new_expected_rows=64,
+        total_expected_rows=464,
         no_fresh_or_paper_promotion=True,
         paper_campaign_authorized=False,
         independent_quality_N=0,
-        bootstrap_comparisons=48,
+        bootstrap_comparisons=56,
         explicit_per_policy_overrides={
-            "head3_boundary8": dict(
+            "balanced_boundary8": dict(
                 first_last_two_layers_KV_bits=8,
                 middle_layers_KV_bits=3,
                 boundary_layers_are_not_fully_exact=True,
+                layer_allocation="balanced_same_total_source_slots",
             ),
-            "head3k2v_mse": dict(
-                value_range_fit="fixed_cache_local_MSE", no_extra_packet_bytes=True
+            "balanced_union3": dict(
+                boundary_layers_exact=True,
+                middle_layers_KV_bits=3,
+                layer_allocation="balanced_same_total_source_slots",
             ),
         },
     )
@@ -513,7 +523,7 @@ def submit(root, expected, *, remaining=False):
             "--cpus-per-task=12",
             "--mem=48G",
             "--time=00:30:00",
-            "--array=1-19%6" if remaining else "--array=0",
+            f"--array=1-{len(plan['jobs']) - 1}%6" if remaining else "--array=0",
             "--job-name=mk-text-rows",
             f"--output={root}/slurm/gpu-%A_%a.out",
             f"--error={root}/slurm/gpu-%A_%a.err",

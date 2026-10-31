@@ -151,6 +151,7 @@ def bundle(
     ratio: float,
     *,
     policies: tuple[str, ...] | None = None,
+    allocation_mode: str = "profile",
 ) -> tuple[Any, dict[str, Any]]:
     """Compute original selection/merge once; build all registered packets."""
     requested = tuple(POLICIES) if policies is None else policies
@@ -166,6 +167,7 @@ def bundle(
         ratio,
         method=method,
         priors=capture.priors if getattr(capture, "summaries", False) else None,
+        **({"allocation_mode": allocation_mode} if allocation_mode != "profile" else {}),
     )
     positions, transformed, proof = baseline_payload(
         adapter,

@@ -64,6 +64,7 @@ def online_frozen(
     *,
     method: str | None = None,
     priors: Any = None,
+    allocation_mode: str = "profile",
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     from mosaickv.selection.profile_lifetime import allocate_profile_lifetime
 
@@ -80,10 +81,18 @@ def online_frozen(
     capacity = allocator(
         profile, lengths, (1,) * len(profile), costs, cap_bytes=cap, generated_capacity=0
     )
+    counts = capacity.prompt_positions
+    if allocation_mode == "balanced":
+        if len(set(lengths)) != 1 or len(set(costs)) != 1:
+            raise ValueError("balanced source allocation requires equal layer geometry")
+        lower, extra = divmod(sum(counts), len(counts))
+        counts = tuple(lower + int(i < extra) for i in range(len(counts)))
+        if not all(1 <= c <= lengths[i] for i, c in enumerate(counts)):
+            raise ValueError("balanced allocation exceeds source or mandatory capacity")
+    elif allocation_mode != "profile":
+        raise ValueError("registered profile or balanced allocation required")
     topk, mixed = [], []
-    for i, (probabilities_, count) in enumerate(
-        zip(probabilities, capacity.prompt_positions, strict=True)
-    ):
+    for i, (probabilities_, count) in enumerate(zip(probabilities, counts, strict=True)):
         placeholder = tuple(tuple(range(count)) for _ in range(probabilities_.shape[1]))
         if method is not None and method not in ("prompt_attention_topk", "mosaickv_exact"):
             topk.append(placeholder)
@@ -114,10 +123,11 @@ def online_frozen(
         full_prompt_shared_prior_weight=0.5,
         mandatory_policy="last_token",
         block_size=1,
-        actual_source_slot_cap=sum(
-            capacity.prompt_positions[i] * costs[i] for i in range(len(costs))
-        ),
-        per_layer_capacity=capacity.prompt_positions,
+        actual_source_slot_cap=sum(counts[i] * costs[i] for i in range(len(costs))),
+        per_layer_capacity=counts,
+        allocation_mode=allocation_mode,
+        original_profile_capacity=capacity.prompt_positions,
+        same_total_source_slots=sum(counts) == sum(capacity.prompt_positions),
         nominal_source_ratio=ratio,
         encoded_byte_matching=False,
         profile_source="pinned_PrefixKV_profile_shape_not_official_PrefixKV_selection",
