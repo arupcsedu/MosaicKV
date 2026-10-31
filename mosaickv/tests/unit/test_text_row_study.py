@@ -4,6 +4,45 @@ import evicastkv_text_row_study as driver
 import pytest
 
 
+def test_compact_derivation_preserves_measurements_failures_and_original_catalogs():
+    original = dict(
+        sample_id="id",
+        task="coco",
+        method="mosaickv_exact",
+        precision="p",
+        status="completed",
+        warmup=False,
+        source_sha="sha",
+        plan_sha256="config",
+        manifest_path="manifest",
+        logits_sha256="logits",
+        scored_answer={"answer": "unchanged"},
+        end_to_end_seconds=2.5,
+        storage={
+            "initial_active_kv_storage_bytes": 100,
+            "final_active_kv_storage_bytes": 200,
+            "peak_active_kv_storage_bytes": 300,
+            "catalog": [1, 2],
+        },
+        online_variant={"source_memberships": [1, 2, 3]},
+    )
+    compact = driver.compact_row(original)
+    assert compact["scored_answer"] == original["scored_answer"]
+    assert compact["storage"] == {
+        "initial_active_kv_storage_bytes": 100,
+        "final_active_kv_storage_bytes": 200,
+        "peak_active_kv_storage_bytes": 300,
+    }
+    assert compact["end_to_end_seconds"] == 2.5 and compact["source_sha"] == "sha"
+    assert "online_variant" not in compact and original["online_variant"]["source_memberships"] == [
+        1,
+        2,
+        3,
+    ]
+    failure = dict(status="failed", error="original exception", sample_id="id")
+    assert driver.compact_row(failure) == failure
+
+
 def test_canary_requires_complete_rows_and_unchanged_control():
     result = dict(status="completed", failures=[])
     rows = [
@@ -21,6 +60,27 @@ def test_canary_requires_complete_rows_and_unchanged_control():
     assert not driver.canary_valid(result, rows, dict(bitwise_logit_hash_match=False))
     assert not driver.canary_valid(
         dict(status="failed", failures=["error"]), rows, dict(bitwise_logit_hash_match=True)
+    )
+
+
+def test_multiarm_canary_rejects_duplicate_rows_or_unregistered_fallback():
+    result = dict(status="completed", failures=[])
+    policies = driver.STUDY_POLICIES
+    rows = [
+        dict(
+            sample_id=str(i), method="mosaickv_exact", precision=p, warmup=False, status="completed"
+        )
+        for i in range(4)
+        for p in policies
+    ]
+    assert driver.canary_valid(result, rows, dict(bitwise_logit_hash_match=True), policies=policies)
+    rows[-1] = dict(rows[-2])
+    assert not driver.canary_valid(
+        result, rows, dict(bitwise_logit_hash_match=True), policies=policies
+    )
+    rows[-1] = dict(rows[-1], precision="unregistered_fallback")
+    assert not driver.canary_valid(
+        result, rows, dict(bitwise_logit_hash_match=True), policies=policies
     )
 
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bounded consumed-COCO text-query value precision ablation; never paper evidence."""
+"""Bounded consumed-COCO precision ablations; never independent paper evidence."""
 
 import argparse
 import hashlib
@@ -19,6 +19,12 @@ SOURCE = Path(__file__).resolve().parents[2]
 OLD = Path("/scratch/djy8hg/runs/evicastkv/precision-rate-distortion-20261031-v2")
 ROW = Path("/scratch/djy8hg/runs/evicastkv/value-row-precision-consumed-20261031-v1")
 POLICY = "head3k2v_rows_text"
+STUDY_POLICIES = ("head3k2v_mse", "head3_boundary8")
+TEXT = Path("/scratch/djy8hg/runs/evicastkv/text-value-row-study-20261031-v1")
+DIAGNOSTICS = (
+    Path("/scratch/djy8hg/runs/evicastkv/mse-value-precision-consumed-20261031-v1"),
+    Path("/scratch/djy8hg/runs/evicastkv/boundary-precision-consumed-20261031-v1"),
+)
 METHODS = (
     "mosaickv_exact",
     "lookm_reimpl",
@@ -28,10 +34,42 @@ METHODS = (
 )
 
 
+def compact_row(row):
+    """Derived scalar/answer view; full catalogs remain in hash-bound raw traces."""
+    fields = (
+        "sample_id",
+        "task",
+        "method",
+        "precision",
+        "warmup",
+        "status",
+        "source_sha",
+        "plan_sha256",
+        "manifest_path",
+        "scored_answer",
+        "logits_sha256",
+        "end_to_end_seconds",
+        "used_fullkv_fallback",
+        "error",
+    )
+    result = {k: row[k] for k in fields if k in row}
+    if "storage" in row:
+        result["storage"] = {
+            k: row["storage"][k]
+            for k in (
+                "initial_active_kv_storage_bytes",
+                "final_active_kv_storage_bytes",
+                "peak_active_kv_storage_bytes",
+            )
+            if k in row["storage"]
+        }
+    return result
+
+
 def construct(*args, policy, **kwargs):
     from mosaickv.evaluation.head_local_precision import bundle
 
-    if args[-1] != "query3" or policy not in ("union3", POLICY):
+    if args[-1] != "query3" or policy not in ("union3", POLICY, *STUDY_POLICIES):
         raise ValueError("registered text-row precision required")
     formats, proof = bundle(*args[:-1], policies=(policy,), **kwargs)
     return formats[policy], dict(
@@ -97,7 +135,7 @@ def worker(root, expected, index):
 
     with (
         patch.object(request_precision, "complete_request", invoke),
-        patch.object(rate, "POLICIES", (POLICY,)),
+        patch.object(rate, "POLICIES", tuple(plan["precision_policies"])),
         patch.object(rate, "construct_policy", construct),
     ):
         rate.worker(root, expected, index)
@@ -118,12 +156,53 @@ def prepare(root):
     ):
         raise ValueError("complete previous diagnostic evidence required")
     bound = dict(old["bound_files"])
+    text_plan = previous.read(TEXT / "plan.json")
+    text_gate = previous.read(TEXT / "analysis/GATE.json")
+    if not text_gate["complete"] or text_gate["failures"]:
+        raise ValueError("complete text-row transport study required")
+    for field in (
+        "request_policy",
+        "ratio",
+        "seed",
+        "profile_path",
+        "references",
+        "selected_inputs",
+    ):
+        if text_plan[field] != old[field]:
+            raise ValueError("incompatible reused execution controls")
+    bound.update(text_plan["bound_files"])
+    for path in (TEXT / "plan.json", TEXT / "analysis/GATE.json", TEXT / "analysis/rows.json"):
+        bound[str(path)] = sha(path)
+    reused = previous.read(TEXT / "analysis/rows.json")
+    compact = [compact_row(r) for r in reused["rows"]]
+    reused_provenance = reused["original_producer_hashes"]
+    del reused
+    for path, digest in reused_provenance.items():
+        if sha(Path(path)) != digest:
+            raise ValueError("text-row producer changed")
+        bound[path] = digest
+        if Path(path).name == "result.json":
+            for name, artifact_sha in previous.read(path)["outputs"].items():
+                artifact = Path(path).parent / name
+                if sha(artifact) != artifact_sha:
+                    raise ValueError("text-row artifact changed")
+                bound[str(artifact)] = artifact_sha
+    for diagnostic in DIAGNOSTICS:
+        decision = previous.read(diagnostic / "analysis/decision.json")
+        if not decision["complete"] or decision["failures"]:
+            raise ValueError(
+                "complete numerical execution required; quality failures remain negative"
+            )
+        bound[str(diagnostic / "analysis/decision.json")] = sha(
+            diagnostic / "analysis/decision.json"
+        )
     for path in (
         OLD / "plan.json",
         OLD / "analysis/GATE.json",
         OLD / "derived/normalized_raw.json",
         ROW / "analysis/decision.json",
         SOURCE / "mosaickv/docs/text_value_row_study_20261031.md",
+        SOURCE / "mosaickv/docs/precision_combined_task_study_20261031.md",
     ):
         bound[str(path)] = sha(path)
     # Bind every original producer artifact before deriving reused rows.
@@ -141,44 +220,75 @@ def prepare(root):
     chosen = old["selected_inputs"]
     if len(chosen) != 16 or len(set(chosen)) != 16:
         raise ValueError("only the same sixteen consumed inputs permitted")
-    jobs = [
-        dict(index=i, inputs=chosen[start : start + 4], method_arms=[[method, POLICY]])
-        for i, (method, start) in enumerate((m, s) for m in METHODS for s in range(0, 16, 4))
+    work = [("mosaickv_exact", 0)] + [
+        (m, s)
+        for m in (*METHODS[1:], METHODS[0])
+        for s in range(0, 16, 4)
+        if (m, s) != ("mosaickv_exact", 0)
     ]
+    jobs = [
+        dict(
+            index=i,
+            inputs=chosen[start : start + 4],
+            method_arms=[[method, p] for p in STUDY_POLICIES],
+        )
+        for i, (method, start) in enumerate(work)
+    ]
+    write_once(
+        root / "reused_summary.json",
+        dict(
+            rows=compact,
+            original_artifact_sha256=sha(TEXT / "analysis/rows.json"),
+            omitted_catalogs_remain_in_hash_bound_raw=True,
+        ),
+    )
+    bound[str(root / "reused_summary.json")] = sha(root / "reused_summary.json")
     plan = dict(
         old,
         source_sha=clean_source(SOURCE),
         bound_files=bound,
         jobs=jobs,
-        precision_policies=[POLICY],
-        reused_rows=str(OLD / "derived/normalized_raw.json"),
-        stage="text_query_row_precision_consumed_development",
+        precision_policies=list(STUDY_POLICIES),
+        reused_rows=str(root / "reused_summary.json"),
+        stage="range_fit_and_eight_bit_boundary_consumed_development",
         arms=[],
         reused_worker_zero=None,
-        new_expected_rows=80,
-        total_expected_rows=240,
+        new_expected_rows=160,
+        total_expected_rows=400,
         no_fresh_or_paper_promotion=True,
         paper_campaign_authorized=False,
         independent_quality_N=0,
-        bootstrap_comparisons=14,
+        bootstrap_comparisons=48,
+        explicit_per_policy_overrides={
+            "head3_boundary8": dict(
+                first_last_two_layers_KV_bits=8,
+                middle_layers_KV_bits=3,
+                boundary_layers_are_not_fully_exact=True,
+            ),
+            "head3k2v_mse": dict(
+                value_range_fit="fixed_cache_local_MSE", no_extra_packet_bytes=True
+            ),
+        },
     )
     write_once(root / "plan.json", plan)
     print(sha(root / "plan.json"))
 
 
-def canary_valid(result, rows, control):
+def canary_valid(result, rows, control, *, policies=(POLICY,)):
     scored = [r for r in rows if not r["warmup"]]
     return (
         result["status"] == "completed"
         and not result["failures"]
-        and len(scored) == 4
+        and len(scored) == 4 * len(policies)
         and len({r["sample_id"] for r in scored}) == 4
         and all(
             r["status"] == "completed"
-            and r["precision"] == POLICY
+            and r["precision"] in policies
             and r["method"] == "mosaickv_exact"
             for r in scored
         )
+        and {(r["sample_id"], r["precision"]) for r in scored}
+        == {(r["sample_id"], p) for r in scored for p in policies}
         and control["bitwise_logit_hash_match"]
     )
 
@@ -193,7 +303,12 @@ def promote(root, expected):
             if sha(out / name) != digest:
                 raise ValueError("canary artifact changed")
         rows = [json.loads(line) for line in (out / "raw.jsonl").read_text().splitlines()]
-        passed = canary_valid(result, rows, previous.read(root / "union_controls/0.json"))
+        passed = canary_valid(
+            result,
+            rows,
+            previous.read(root / "union_controls/0.json"),
+            policies=tuple(plan["precision_policies"]),
+        )
     write_once(
         root / "canary_decision.json",
         dict(
@@ -250,11 +365,11 @@ def analyze(root, expected):
                 for line in (out / "raw.jsonl").read_text().splitlines()
                 if not json.loads(line)["warmup"]
             )
-    rows += new
+    rows += [compact_row(r) for r in new]
     keys = {(r["sample_id"], r["method"], r["precision"]) for r in rows}
     complete = (
-        len(new) == 80
-        and len(rows) == len(keys) == 240
+        len(new) == plan["new_expected_rows"]
+        and len(rows) == len(keys) == plan["total_expected_rows"]
         and not failures
         and all(r["status"] == "completed" for r in rows)
     )
@@ -307,7 +422,6 @@ def analyze(root, expected):
         values = scorer.score(counts, batch_size=16)
         error = scorer.validate_official(counts[:4], values[:4])
         metrics, comparisons = [], []
-        candidate = scorer.points.index(("mosaickv_exact:" + POLICY, 0.5))
         for i, point in enumerate(scorer.points):
             group = [r for r in rows if r["method"] + ":" + r["precision"] == point[0]]
             item = dict(
@@ -331,12 +445,21 @@ def analyze(root, expected):
                 ):
                     item[field] = float(np.mean([r["storage"][field] for r in group]))
             metrics.append(item)
-            if i != candidate and point[0] != "full_kv:ordinary":
+        for policy in plan["precision_policies"]:
+            candidate = scorer.points.index(("mosaickv_exact:" + policy, 0.5))
+            for i, point in enumerate(scorer.points):
+                if i == candidate or point[0] == "full_kv:ordinary":
+                    continue
                 lo, hi = np.quantile(
-                    values[1:, candidate] - values[1:, i], [0.05 / 28, 1 - 0.05 / 28]
+                    values[1:, candidate] - values[1:, i],
+                    [
+                        0.05 / (2 * plan["bootstrap_comparisons"]),
+                        1 - 0.05 / (2 * plan["bootstrap_comparisons"]),
+                    ],
                 )
                 comparisons.append(
                     dict(
+                        candidate="mosaickv_exact:" + policy,
                         baseline=point[0],
                         cider_difference=float(values[0, candidate] - values[0, i]),
                         simultaneous_ci95_bonferroni=[float(lo), float(hi)],
@@ -441,12 +564,17 @@ def submit(root, expected, *, remaining=False):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "mode", choices=("prepare", "cpu", "submit", "worker", "promote", "analyze")
+        "mode", choices=("prepare", "bootstrap", "cpu", "submit", "worker", "promote", "analyze")
     )
     parser.add_argument("--root", required=True, type=Path)
     parser.add_argument("--plan-sha")
     args = parser.parse_args()
-    if args.mode == "prepare":
+    if args.mode == "bootstrap":
+        prepare(args.root)
+        digest = sha(args.root / "plan.json")
+        previous.cpu(args.root, digest)
+        submit(args.root, digest)
+    elif args.mode == "prepare":
         prepare(args.root)
     elif args.mode == "cpu":
         previous.cpu(args.root, args.plan_sha)
