@@ -36,8 +36,9 @@ POLICIES = {
     "head3k2v_mse": (3, 2),
     "head3_boundary8": (3, 3),
     "head3k2v_refit_boundary8": (3, 2),
+    "head3k2v_nonuniform_boundary8": (3, 2),
 }
-BOUNDARY_POLICIES = ("head3_boundary8", "head3k2v_refit_boundary8")
+BOUNDARY_POLICIES = ("head3_boundary8", "head3k2v_refit_boundary8", "head3k2v_nonuniform_boundary8")
 
 
 @dataclass(frozen=True)
@@ -127,9 +128,12 @@ def localize(
         else ()
     )
     from mosaickv.evaluation.mse_value_precision import pack_mse_values
+    from mosaickv.evaluation.nonuniform_values import pack_nonuniform_values
 
     bodies = tuple(
-        pack_mse_values(t)
+        pack_nonuniform_values(t)
+        if policy == "head3k2v_nonuniform_boundary8" and b.axis == 3 and not boundary_override
+        else pack_mse_values(t)
         if policy == "head3k2v_mse" and b.axis == 3
         else b
         if b.bits == bits
@@ -283,6 +287,7 @@ def bundle(
             if policy in (
                 "head3k2v_refit",
                 "head3k2v_refit_boundary8",
+                "head3k2v_nonuniform_boundary8",
                 "head3k2v_headwise",
                 "head3k2v_rows",
                 "head3k2v_rows_text",
@@ -412,7 +417,13 @@ def cpu_packet(packet: HeadLocalFormat) -> HeadLocalFormat:
         base=replace(
             base,
             pair=tuple(
-                replace(b, codes=copied(b.codes), minimum=copied(b.minimum), scale=copied(b.scale))
+                replace(
+                    b,
+                    codes=copied(b.codes),
+                    minimum=copied(b.minimum),
+                    scale=copied(b.scale),
+                    codebook=None if b.codebook is None else copied(b.codebook),
+                )
                 for b in base.pair
             ),
             exact_indices=copied(base.exact_indices),
@@ -448,6 +459,7 @@ def gpu_controls() -> list[dict[str, Any]]:
         if policy in (
             "head3k2v_refit",
             "head3k2v_refit_boundary8",
+            "head3k2v_nonuniform_boundary8",
             "head3k2v_headwise",
             "head3k2v_rows",
             "head3k2v_rows_text",

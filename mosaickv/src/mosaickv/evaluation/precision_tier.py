@@ -22,9 +22,15 @@ class QuantizedBody:
     codes: Any
     minimum: Any
     scale: Any
+    codebook: Any = None
 
     def tensors(self) -> tuple[Any, ...]:
-        return self.codes, self.minimum, self.scale
+        return (
+            self.codes,
+            self.minimum,
+            self.scale,
+            *(() if self.codebook is None else (self.codebook,)),
+        )
 
 
 def pack(values: Any, *, bits: int, axis: int, group: int = 128) -> QuantizedBody:
@@ -80,6 +86,11 @@ def unpack_cpu(body: QuantizedBody) -> Any:
     length = layout.pop(body.axis)
     layout.append(length)
     quantized = quantized.reshape(layout)
+    if body.codebook is not None:
+        if body.bits != 2 or body.axis != 3 or body.shape[-1] != 128:
+            raise ValueError("two-bit per-value-row codebook required")
+        centers = body.codebook.reshape(*body.shape[:-1], 4)
+        return centers.gather(-1, quantized.long()).contiguous()
     scale = body.scale.repeat_interleave(body.group, -1)[..., :length]
     minimum = body.minimum.repeat_interleave(body.group, -1)[..., :length]
     result = quantized * scale + minimum

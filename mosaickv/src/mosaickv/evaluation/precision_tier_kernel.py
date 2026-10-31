@@ -9,6 +9,7 @@ def _decode(
     CODES,
     MINIMUM,
     SCALE,
+    CODEBOOK,
     EXACT_IDX,
     EXACT,
     OUT,
@@ -23,6 +24,7 @@ def _decode(
     PROTECTED,
     BLOCK: tl.constexpr,
     OVERLAY: tl.constexpr,
+    NONUNIFORM: tl.constexpr,
 ):
     i = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
     valid = i < H * N * D
@@ -41,9 +43,12 @@ def _decode(
         for j in tl.static_range(BITS):
             packed |= tl.load(CODES + word * BITS + j, mask=valid, other=0).to(tl.int32) << (j * 8)
         q = (packed >> shift) & ((1 << BITS) - 1)
-    scale = tl.load(SCALE + group, mask=valid, other=1)
-    minimum = tl.load(MINIMUM + group, mask=valid, other=0)
-    value = q.to(tl.float32) * scale + minimum
+    if NONUNIFORM:
+        value = tl.load(CODEBOOK + (h * N + n) * 4 + q, mask=valid, other=0).to(tl.float32)
+    else:
+        scale = tl.load(SCALE + group, mask=valid, other=1)
+        minimum = tl.load(MINIMUM + group, mask=valid, other=0)
+        value = q.to(tl.float32) * scale + minimum
     # Exact overlays included in the same launch; no dense temporary allocation.
     if OVERLAY:
         slot = tl.load(EXACT_IDX + n, mask=valid, other=-1)
@@ -61,10 +66,15 @@ def decode(body, destination, indices, exact, *, overlay=True):
         or destination.stride(-1) != 1
     ):
         raise ValueError("compatible feature-contiguous full-layer lease required")
+    if body.codebook is not None and (
+        body.bits != 2 or body.axis != 3 or d != 128 or body.codebook.shape != (1, h, n, 4)
+    ):
+        raise ValueError("two-bit per-row BF16 codebook required")
     _decode[(triton.cdiv(h * n * d, 512),)](
         body.codes,
         body.minimum,
         body.scale,
+        body.codes if body.codebook is None else body.codebook,
         indices,
         exact,
         destination,
@@ -79,5 +89,6 @@ def decode(body, destination, indices, exact, *, overlay=True):
         PROTECTED=exact.shape[-2] if overlay else 0,
         BLOCK=512,
         OVERLAY=overlay,
+        NONUNIFORM=body.codebook is not None,
         enable_fp_fusion=False,
     )
