@@ -33,11 +33,14 @@ def _decode(
     else:
         transformed = (h * N + n) * D + d
         group = (h * N + n) * tl.cdiv(D, GROUP) + d // GROUP
-    word, shift = transformed // 8, (transformed % 8) * BITS
-    packed = tl.full((BLOCK,), 0, tl.int32)
-    for j in tl.static_range(BITS):
-        packed |= tl.load(CODES + word * BITS + j, mask=valid, other=0).to(tl.int32) << (j * 8)
-    q = (packed >> shift) & ((1 << BITS) - 1)
+    if BITS == 8:
+        q = tl.load(CODES + transformed, mask=valid, other=0).to(tl.int32)
+    else:
+        word, shift = transformed // 8, (transformed % 8) * BITS
+        packed = tl.full((BLOCK,), 0, tl.int32)
+        for j in tl.static_range(BITS):
+            packed |= tl.load(CODES + word * BITS + j, mask=valid, other=0).to(tl.int32) << (j * 8)
+        q = (packed >> shift) & ((1 << BITS) - 1)
     scale = tl.load(SCALE + group, mask=valid, other=1)
     minimum = tl.load(MINIMUM + group, mask=valid, other=0)
     value = q.to(tl.float32) * scale + minimum

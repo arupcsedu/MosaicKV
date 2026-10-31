@@ -158,3 +158,25 @@ check bitwise reconstruction, including a strided generated-history sentinel.
 CPU monotonic-error tests are local tensor claims, NOT task-quality guarantees.
 Run only these same two consumed inputs after the text-row COCO study releases
 all GPUs. Do not automatically promote to a fresh, large or paper campaign.
+
+## Eight-bit boundary-layer ablation
+
+Saved physical-storage traces show the four lossless boundary layers account
+for approximately 19 MiB in a representative 51 MiB prompt packet. The next
+separately labeled arm, `head3_boundary8`, keeps middle-layer three-bit K/V and
+uses eight-bit K/V in the first two and last two layers. Boundary text and
+first4/last8 selected rows remain lossless, with the same funded 0.005 scalar
+exception count. The original exact boundary packets remain controls, not a
+hidden transformation of old results. The resolved plan explicitly overrides
+the legacy exact-boundary setting for this variant only. Retention 1 remains
+the ordinary FullKV path. No selected token or logical position changes.
+
+The eight-bit decoder has a dedicated byte-load branch; lower-bit paths remain
+unchanged. Same-packet CPU/CUDA reconstruction and history sentinels must pass.
+This ablation preserves higher precision in the boundary layers than the
+middle layers, but neither that choice nor protected text guarantees output
+identity. Run all five selectors at the same source capacity on the same two
+consumed inputs, with unchanged 32-token guards and complete 128-token output
+recording. Actual storage differs and is NOT called byte matched. Keep latency
+descriptive and decode-only. At most six aggregate A100s; wait for the preceding
+studies before admission. No fresh, large or paper campaign is authorized.

@@ -23,7 +23,7 @@ GROUPS = (
     ("lookm_reimpl",),
     ("vl_cache_reimpl", "prefixkv_reimpl"),
 )
-EXECUTED_POLICIES = ("union3", "head3k2v_refit", "head3k2v_mse")
+EXECUTED_POLICIES = ("union3", "head3k2v_refit", "head3_boundary8")
 
 
 def prepare(root):
@@ -66,7 +66,15 @@ def prepare(root):
         source_sha=clean_source(SOURCE),
         bound_files=bound,
         parent=str(causal.parent.PARENT),
-        stage="consumed_value_MSE_range_diagnostic",
+        stage="consumed_eight_bit_boundary_diagnostic",
+        explicit_per_policy_overrides={
+            "head3_boundary8": dict(
+                first_and_last_two_layers_KV_bits=8,
+                middle_layers_KV_bits=3,
+                boundary_layers_are_not_fully_exact=True,
+                text_and_first4_last8_rows_still_lossless=True,
+            )
+        },
         precision_policies={p: POLICIES[p] for p in EXECUTED_POLICIES},
         warmups=0,
         timed_repetitions=1,

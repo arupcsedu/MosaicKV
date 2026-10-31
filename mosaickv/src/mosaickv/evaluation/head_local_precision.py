@@ -34,6 +34,7 @@ POLICIES = {
     "head3k2v_rows": (3, 2),
     "head3k2v_rows_text": (3, 2),
     "head3k2v_mse": (3, 2),
+    "head3_boundary8": (3, 3),
 }
 
 
@@ -89,10 +90,18 @@ class HeadLocalFormat:
 
 
 def localize(
-    fmt: PrecisionFormat, pair: Any, heads: Any, text: set[int], *, policy: str
+    fmt: PrecisionFormat,
+    pair: Any,
+    heads: Any,
+    text: set[int],
+    *,
+    policy: str,
+    boundary_override: bool = False,
 ) -> HeadLocalFormat:
     if policy not in POLICIES or policy == "union3" or not fmt.encoded_exact:
         raise ValueError("registered head-local policy and encoded exact reference required")
+    if boundary_override and policy != "head3_boundary8":
+        raise ValueError("eight-bit boundary override requires its explicit policy")
     h, n, d = fmt.shape[1:]
     if len(heads) != h or any(len(row) != n for row in heads):
         raise ValueError("selected per-head membership must match packet shape")
@@ -123,7 +132,9 @@ def localize(
         else b
         if b.bits == bits
         else pack(t, bits=bits, axis=b.axis)
-        for b, t, bits in zip(fmt.pair, pair, POLICIES[policy], strict=True)
+        for b, t, bits in zip(
+            fmt.pair, pair, (8, 8) if boundary_override else POLICIES[policy], strict=True
+        )
     )
     base = replace(fmt, pair=bodies, exact_indices=indices, exact_values=base_exact)
     return HeadLocalFormat(base, flat, protected)
@@ -188,8 +199,37 @@ def bundle(
             pair = key.gather(2, index), value.gather(2, index)
         if i < 2 or i >= len(source) - 2:
             exact = ExactFormat("kv", tuple(pair[0].shape), pair=tuple(encode(t) for t in pair))
-            for packets in formats.values():
-                packets.append(exact)
+            for policy, packets in formats.items():
+                if policy != "head3_boundary8":
+                    packets.append(exact)
+                    continue
+                union = tuple(
+                    sorted({j for head in heads for j, p in enumerate(head) if p in text})
+                )
+                fmt = construct(pair, bits=8, protected=union, encoded_exact=True)
+                kw, vw = prompt_weights(
+                    adapter._language_layers()[i].self_attn,
+                    capture.records[i],
+                    prefill.attention_weights[i],
+                    heads,
+                    window=16,
+                )
+                fmt, _ = fund_corrections(fmt, pair, fraction=0.005, key_weight=kw, value_weight=vw)
+                localized = localize(fmt, pair, heads, text, policy=policy, boundary_override=True)
+                localized, audit = refit_corrections(
+                    localized, pair, key_weight=kw, value_weight=vw
+                )
+                packets.append(localized)
+                records.append(
+                    dict(
+                        layer=i,
+                        boundary_override_bits=8,
+                        boundary_not_exact_for_explicit_variant_only=True,
+                        original_exact_bytes=exact.component_bytes,
+                        component_bytes={policy: localized.component_bytes},
+                        refit={policy: audit},
+                    )
+                )
             continue
         union = tuple(sorted({j for row in heads for j, p in enumerate(row) if p in text}))
         fmt = construct(pair, bits=3, protected=union, encoded_exact=True)
@@ -436,4 +476,23 @@ def gpu_controls() -> list[dict[str, Any]]:
     if not bool((target[..., 256:, :] == -7).all()):
         raise RuntimeError("flat protected scatter overwrote generated history")
     records.append(dict(all_65536_BF16_patterns_bitwise=True, history_sentinel=True))
+    # Explicit boundary precision path, including byte values above 127 and
+    # strided destinations. Old 2/3/4-bit decoder behavior is unchanged.
+    boundary = construct(device_pair, bits=8, protected=union, encoded_exact=True)
+    boundary, _ = fund_corrections(boundary, device_pair, fraction=0.005)
+    candidate = localize(
+        boundary, device_pair, heads, text, policy="head3_boundary8", boundary_override=True
+    )
+    oracle = cpu_packet(candidate).materialize()
+    destination = tuple(
+        torch.full((1, 3, 151, 128), -7, device="cuda", dtype=torch.bfloat16) for _ in range(2)
+    )
+    candidate.fill(None, destination, direct=True)
+    if not all(
+        torch.equal(a[..., :141, :].cpu().view(torch.int16), b.view(torch.int16))
+        and bool((a[..., 141:, :] == -7).all())
+        for a, b in zip(destination, oracle, strict=True)
+    ):
+        raise RuntimeError("eight-bit boundary CPU/CUDA decoder parity failed")
+    records.append(dict(boundary8_bitwise_CPU_oracle=True, history_sentinel=True))
     return records
