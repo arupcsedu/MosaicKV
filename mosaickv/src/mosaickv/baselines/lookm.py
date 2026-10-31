@@ -404,6 +404,7 @@ def build_lookm_reimpl_plan(
     cache_config: CacheConfig,
     *,
     physical_prompt_capacity: int | None = None,
+    physical_layer_capacities: tuple[int, ...] | None = None,
 ) -> LookMCompressionPlan:
     """Apply paper text-prior selection and the configured merge equation."""
 
@@ -417,35 +418,44 @@ def build_lookm_reimpl_plan(
         raise LookMReimplementationError(
             "LOOK-M attention layer count does not match the source cache"
         )
+    if physical_layer_capacities is not None:
+        if physical_prompt_capacity is not None:
+            raise LookMReimplementationError("choose global or per-layer capacity, not both")
+        if len(physical_layer_capacities) != len(full_state.layers) or any(
+            type(capacity) is not int or capacity < 1
+            for capacity in physical_layer_capacities
+        ):
+            raise LookMReimplementationError("positive integer capacity required for every layer")
     length = full_state.active_sequence_length
-    recent_count, important_count = _selection_counts(
-        length,
-        lookm_config,
-        physical_prompt_capacity,
-    )
-    if recent_count + important_count < 1:
-        raise LookMReimplementationError(
-            "LOOK-M ratios retain zero positions for this prompt; use a longer prompt or ratio"
-        )
-    prefix_length = length - recent_count
-    if important_count > prefix_length:
-        raise LookMReimplementationError("LOOK-M important count exceeds non-recent prefix")
     modalities = _modality_by_physical(full_state)
-    recent_positions = tuple(range(prefix_length, length))
-    mandatory_prefix = tuple(
-        position
-        for position in range(prefix_length)
-        if full_state.logical_positions.logical_for_physical(position)
-        in full_state.mandatory_logical_positions
-    )
-    if len(mandatory_prefix) > important_count:
-        raise LookMReimplementationError(
-            "LOOK-M physical budget cannot fit mandatory tokens and its recent reservation"
-        )
     head_states: list[LookMHeadState] = []
     for layer_index, (layer, raw_attention) in enumerate(
         zip(full_state.layers, attention_weights, strict=True)
     ):
+        capacity = (
+            physical_layer_capacities[layer_index]
+            if physical_layer_capacities is not None
+            else physical_prompt_capacity
+        )
+        recent_count, important_count = _selection_counts(length, lookm_config, capacity)
+        if recent_count + important_count < 1:
+            raise LookMReimplementationError(
+                "LOOK-M ratios retain zero positions for this prompt; use a longer prompt or ratio"
+            )
+        prefix_length = length - recent_count
+        if important_count > prefix_length:
+            raise LookMReimplementationError("LOOK-M important count exceeds non-recent prefix")
+        recent_positions = tuple(range(prefix_length, length))
+        mandatory_prefix = tuple(
+            position
+            for position in range(prefix_length)
+            if full_state.logical_positions.logical_for_physical(position)
+            in full_state.mandatory_logical_positions
+        )
+        if len(mandatory_prefix) > important_count:
+            raise LookMReimplementationError(
+                "LOOK-M physical budget cannot fit mandatory tokens and its recent reservation"
+            )
         attention = _to_numpy(raw_attention)
         if attention.ndim != 4 or attention.shape[0] != 1:
             raise LookMReimplementationError(

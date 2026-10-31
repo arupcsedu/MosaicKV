@@ -135,26 +135,16 @@ def baseline_payload(
         layer_count = len(original)
         lower, extra = divmod(sum(capacities), layer_count)
         look = LookMConfig(enabled=True)
-        low = build_lookm_reimpl_plan(
-            full, prefill.attention_weights, look, cache, physical_prompt_capacity=lower
+        look_plan = build_lookm_reimpl_plan(
+            full,
+            prefill.attention_weights,
+            look,
+            cache,
+            physical_layer_capacities=tuple(
+                lower + int(layer < extra) for layer in range(layer_count)
+            ),
         )
-        high = (
-            build_lookm_reimpl_plan(
-                full,
-                prefill.attention_weights,
-                look,
-                replace(cache, budget_value=(lower + 1) * layer_count * position_bytes),
-                physical_prompt_capacity=lower + 1,
-            )
-            if extra
-            else low
-        )
-        selected = [
-            head
-            for layer in range(layer_count)
-            for head in (high.heads if layer < extra else low.heads)
-            if head.layer == layer
-        ]
+        selected = list(look_plan.heads)
         pairs = tuple(
             (
                 torch.cat([h.key for h in selected if h.layer == layer], dim=1),
@@ -172,9 +162,8 @@ def baseline_payload(
             source_regeneration_eligible=False,
             ineligibility_reason="merged_KV_are_not_original_projection_outputs",
             layer_capacities=[lower + int(layer < extra) for layer in range(layer_count)],
-            temporary_upper_planning_cap=(lower + 1) * layer_count * position_bytes
-            if extra
-            else cap,
+            single_pass_layer_capacity_construction=True,
+            temporary_upper_planning_cap=cap,
             final_injected_cap_unchanged=True,
             actual_source_slot_bytes=actual,
             selected_source_positions_by_layer=[
