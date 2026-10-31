@@ -70,7 +70,11 @@ class CompletionMaskTransport:
 
     def restore(self, index):
         if index in self.active:
-            self.cache.shared_tensors, self.cache.shared_bytes = self.active.pop(index)
+            mask = self.active.pop(index)
+            # Other scoped transports may append persistent source-history
+            # owners during attention. Remove only our temporary mask.
+            self.cache.shared_tensors = tuple(t for t in self.cache.shared_tensors if t is not mask)
+            self.cache.shared_bytes = backing_bytes(self.cache.shared_tensors)
 
     def __enter__(self):
         try:
@@ -97,7 +101,7 @@ class CompletionMaskTransport:
                         hidden.dtype if old is None else old.dtype,
                         old,
                     )
-                    self.active[index] = self.cache.shared_tensors, self.cache.shared_bytes
+                    self.active[index] = mask
                     self.cache.shared_tensors = (*self.cache.shared_tensors, mask)
                     self.cache.shared_bytes = backing_bytes(self.cache.shared_tensors)
                     self.cache.observe()

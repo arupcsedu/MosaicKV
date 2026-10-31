@@ -168,3 +168,24 @@ def test_late_failure_keeps_every_committed_and_original_layer_semantically_vali
 def test_incompatible_policy_fails_closed():
     with pytest.raises(ValueError, match="consolidation requires"):
         cache_from_formats(None, (), updates=128, audit=False, consolidated_history=True)
+
+
+def test_consolidation_preserves_nonhistory_prompt_phase_owners(monkeypatch):
+    import mosaickv.evaluation.consolidated_history as module
+    import mosaickv.evaluation.source_history as history
+
+    monkeypatch.setattr(history, "build_chunk_direct", fake_seal)
+    monkeypatch.setattr(module, "build_consolidated", fake_join)
+    cache = fixture()
+    prompt_phase = torch.ones(1, 27, 128, dtype=torch.bfloat16)
+    cache.shared_tensors = (*cache.shared_tensors, prompt_phase)
+    from mosaickv.evaluation.lossless_prompt_cache import backing_bytes
+
+    cache.shared_bytes = backing_bytes(cache.shared_tensors)
+    for token in range(50):
+        if seal_source_full_tails(cache):
+            consolidate(cache)
+        step(cache, token)
+        assert any(t is prompt_phase for t in cache.shared_tensors)
+        assert cache.shared_bytes == backing_bytes(cache.shared_tensors)
+    assert cache.source_consolidation_epochs == 2

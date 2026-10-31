@@ -221,6 +221,12 @@ def run(
     ):
         raise RuntimeError("nonfinite output or changed logical decode positions")
     record = cache.storage_record()
+    if any(hasattr(f, "valid_prompt_counts") for f in formats):
+        record.update(
+            unchanged_original_selected_memberships=False,
+            padded_completion_membership_variant=True,
+            original_selected_values_preserved_but_membership_extended=True,
+        )
     record.update(
         segmented_history=segmented_history,
         segment_table_builds=getattr(cache, "segment_table_builds", 0),

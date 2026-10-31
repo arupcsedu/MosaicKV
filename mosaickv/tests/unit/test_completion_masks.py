@@ -65,3 +65,50 @@ def test_request_cleanup_and_mask_backing_accounted(fail):
     assert cache.observed == [24]
     assert cache.shared_bytes == 0 and cache.shared_tensors == ()
     assert not attention._forward_hooks and not attention._forward_pre_hooks
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_cleanup_preserves_persistent_owners_added_by_history_transport(fail):
+    from mosaickv.evaluation.lossless_prompt_cache import backing_bytes
+
+    original = torch.ones(1, dtype=torch.bfloat16)
+    phase = torch.ones(1, 1, 128, dtype=torch.bfloat16)
+
+    class Attention(torch.nn.Module):
+        config = SimpleNamespace(_attn_implementation="eager")
+
+        def forward(self, hidden_states, attention_mask, past_key_value):
+            past_key_value.shared_tensors = (*past_key_value.shared_tensors, phase)
+            if fail:
+                raise RuntimeError("later history failure")
+            return hidden_states
+
+    attention = Attention()
+    cache = SimpleNamespace(
+        layers=[
+            SimpleNamespace(
+                representation=SimpleNamespace(
+                    shape=(1, 2, 4, 128),
+                    valid_prompt_counts=torch.tensor([3, 4], dtype=torch.int16),
+                ),
+                get_seq_length=lambda: 5,
+            )
+        ],
+        shared_tensors=(original,),
+        shared_bytes=2,
+        observe=lambda: None,
+    )
+    adapter = SimpleNamespace(_language_layers=lambda: [SimpleNamespace(self_attn=attention)])
+    try:
+        with CompletionMaskTransport(adapter, cache):
+            attention(
+                hidden_states=torch.ones(1, 1, 4).bfloat16(),
+                attention_mask=None,
+                past_key_value=cache,
+            )
+    except RuntimeError:
+        assert fail
+    assert len(cache.shared_tensors) == 2
+    assert cache.shared_tensors[0] is original and cache.shared_tensors[1] is phase
+    assert cache.shared_bytes == backing_bytes((original, phase))
+    assert not attention._forward_hooks and not attention._forward_pre_hooks

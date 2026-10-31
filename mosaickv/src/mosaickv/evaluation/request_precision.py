@@ -4,7 +4,7 @@ Not the frozen graph-based paper method, official PrefixKV, or official KIVI.
 No saved selections, prefills, draft tokens, or annotation answers are inputs.
 """
 
-from contextlib import ExitStack, nullcontext
+from contextlib import ExitStack
 from dataclasses import replace
 from typing import Any
 
@@ -307,6 +307,7 @@ def complete_request(
     profile_path: str,
     ratio: float,
     audit: bool,
+    capture_text_sources: bool = False,
 ) -> tuple[Any, dict[str, Any]]:
     """Timer starts before processor; end is synchronized CPU logits export.
 
@@ -322,6 +323,8 @@ def complete_request(
 
     if method != "full_kv" and method not in METHODS:
         raise ValueError("unregistered method")
+    if type(capture_text_sources) is not bool:
+        raise ValueError("capture_text_sources must be boolean")
     if type(ratio) not in (int, float) or not 0 < ratio <= 1:
         raise ValueError("finite source ratio in (0,1] required")
     if precision not in (("ordinary",) if method == "full_kv" else ("lossless", "query3")):
@@ -376,7 +379,15 @@ def complete_request(
         if method != "full_kv" and (precision == "query3" or summary_method)
         else None
     )
-    with cap if cap is not None else nullcontext():
+    with ExitStack() as captures:
+        if cap is not None:
+            captures.enter_context(cap)
+        if capture_text_sources and method != "full_kv":
+            from mosaickv.evaluation.text_source_storage import TextSourceCapture
+
+            if cap is None:
+                raise ValueError("text source capture requires a prompt-query capture")
+            cap.text_sources = captures.enter_context(TextSourceCapture(adapter, prepared))
         prefill = boundary(
             "prefill",
             lambda: adapter.prefill(
@@ -453,6 +464,10 @@ def complete_request(
                 cap.records.clear()
                 cap.windows.clear()
                 cap.priors.clear()
+                if hasattr(cap, "text_sources"):
+                    cap.text_sources.records.clear()
+                    cap.text_sources.phases = None
+                    del cap.text_sources
             prepared, cap = None, None
             if owner() is not None or any(r() is not None for r in original_refs):
                 gc.collect()
