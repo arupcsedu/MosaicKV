@@ -164,6 +164,8 @@ def worker(root, expected, index):
     if plan.get("request_policy") != REQUEST_POLICY:
         raise ValueError("resolved request policy drifted from immutable source")
     job = plan["jobs"][index]
+    if "method_arms" in job:
+        plan = dict(plan, arms=job["method_arms"])
     out = root / f"workers/{index}"
     out.mkdir(parents=True, exist_ok=False)
     result = dict(
@@ -365,12 +367,15 @@ def worker(root, expected, index):
                 # All methods ran on this GPU in counterbalanced order. A-B-A
                 # control recomputes the first source input, never reuses cache.
                 if local_index == 0 and not result["failures"] and plan["stage"] != "timing":
+                    control_method, control_precision = (
+                        plan["arms"][0] if "method_arms" in job else ("mosaickv_exact", "query3")
+                    )
                     logits, _ = complete_request(
                         adapter,
                         lambda payload=payload: load_messages(payload),
                         cfg,
-                        method="mosaickv_exact",
-                        precision="query3",
+                        method=control_method,
+                        precision=control_precision,
                         profile_path=plan["profile_path"],
                         ratio=plan["ratio"],
                         audit=False,
@@ -378,7 +383,9 @@ def worker(root, expected, index):
                     digest = hashlib.sha256(logits.numpy().tobytes()).hexdigest()
                     if (
                         digest
-                        != deterministic_hashes[(payload["sample_id"], "mosaickv_exact", "query3")]
+                        != deterministic_hashes[
+                            (payload["sample_id"], control_method, control_precision)
+                        ]
                     ):
                         raise RuntimeError("A-B-A logits isolation failed")
                     write_once(

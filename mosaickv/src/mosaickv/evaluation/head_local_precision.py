@@ -145,6 +145,7 @@ def bundle(
         tuple(json.loads(Path(profile_path).read_text())),
         ratio,
         method=method,
+        priors=capture.priors if getattr(capture, "summaries", False) else None,
     )
     positions, transformed, proof = baseline_payload(
         adapter,
