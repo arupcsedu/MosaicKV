@@ -113,3 +113,24 @@ def test_canary_rejects_missing_rows_and_changed_union_hash():
     assert not driver.canary_valid(result, rows[:-1], old)
     rows[0]["logits_sha256"] = "changed"
     assert not driver.canary_valid(result, rows, old)
+
+
+def test_label_recovery_requires_three_consistent_fields_and_preserves_original():
+    old = dict(
+        precision="query3",
+        development_precision_policy="head3k2v_refit",
+        online_variant=dict(precision="head3k2v_refit"),
+        method_label="lookm_reimpl_common_head3k2v_refit",
+        status="completed",
+    )
+    new = driver.normalize_precision_row(old)
+    assert old["precision"] == "query3" and new["precision"] == "head3k2v_refit"
+    assert new["derived_label_only_recovery"]
+    for changed in (
+        dict(old, precision="arbitrary"),
+        dict(old, online_variant=dict(precision="union3")),
+    ):
+        with pytest.raises(ValueError):
+            driver.normalize_precision_row(changed)
+    failed = dict(status="failed", precision="union3", error="preserved")
+    assert driver.normalize_precision_row(failed) == failed

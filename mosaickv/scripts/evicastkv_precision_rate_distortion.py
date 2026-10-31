@@ -59,6 +59,7 @@ def worker(root, expected, index):
         with patch.object(request_precision, "construct_request_formats", construct):
             logits, record = original(*args, **kwargs)
         record["development_precision_policy"] = policy
+        record["precision"] = policy
         return logits, record
 
     # Worker process is explicitly single-request-at-a-time. Recursive FullKV
@@ -79,6 +80,29 @@ def prepare(root):
     bound = dict(old["bound_files"])
     bound[str(PARENT / "plan.json")] = sha(PARENT / "plan.json")
     bound[str(CONSUMED)] = sha(CONSUMED)
+    reuse = Path("/scratch/djy8hg/runs/evicastkv/precision-rate-distortion-20261031-v1/workers/0")
+    reused_result = previous.read(reuse / "result.json")
+    if reused_result["status"] != "completed" or reused_result["failures"]:
+        raise ValueError("only the completed label-affected canary may be reused")
+    # Numerical code is unchanged; only wrapper output labels and CPU recovery
+    # differ from the original producer. Preserve that original producer SHA.
+    for relative in (
+        "mosaickv/src/mosaickv/evaluation/head_local_precision.py",
+        "mosaickv/src/mosaickv/evaluation/request_precision.py",
+        "mosaickv/scripts/evicastkv_request_validation.py",
+    ):
+        previous_content = subprocess.check_output(
+            ["git", "show", f"{reused_result['source_sha']}:{relative}"], cwd=SOURCE
+        )
+        import hashlib
+
+        if sha(SOURCE / relative) != hashlib.sha256(previous_content).hexdigest():
+            raise ValueError("cannot reuse canary after numerical or worker changes")
+    bound[str(reuse / "result.json")] = sha(reuse / "result.json")
+    for name, digest in reused_result["outputs"].items():
+        if sha(reuse / name) != digest:
+            raise ValueError("reused canary artifact changed")
+        bound[str(reuse / name)] = digest
     chosen = [p for j in old["jobs"][:2] for p in j["inputs"]]
     if len(chosen) != 16 or len(set(chosen)) != 16:
         raise ValueError("exactly the first sixteen already-consumed ledger inputs required")
@@ -135,9 +159,34 @@ def prepare(root):
         no_shared_encoded_byte_matching_claim=True,
         no_unchanged_128_token_or_FullKV_quality_preservation_claim=True,
         preserved_negative_guard_result=str(CONSUMED),
+        reused_worker_zero=dict(
+            root=str(reuse),
+            source_sha=reused_result["source_sha"],
+            plan_sha256=reused_result["plan_sha256"],
+        ),
     )
     write_once(root / "plan.json", plan)
     print(sha(root / "plan.json"))
+
+
+def normalize_precision_row(row):
+    """Derived label recovery only; original immutable raw records are retained."""
+    if row.get("status") == "failed" and row.get("precision") in POLICIES:
+        return row
+    policy = row.get("development_precision_policy")
+    if (
+        policy not in POLICIES
+        or row.get("online_variant", {}).get("precision") != policy
+        or not row.get("method_label", "").endswith("_" + policy)
+    ):
+        raise ValueError("ambiguous or conflicting precision provenance")
+    if row["precision"] == policy:
+        return row
+    if row["precision"] != "query3":
+        raise ValueError("unregistered precision label cannot be recovered")
+    return dict(
+        row, precision=policy, original_precision_field="query3", derived_label_only_recovery=True
+    )
 
 
 def analyze(root, expected):
@@ -150,12 +199,15 @@ def analyze(root, expected):
     plan = previous.common.inputs(root, expected)
     failures, rows, hashes = [], [], {}
     for job in plan["jobs"]:
-        out = root / f"workers/{job['index']}"
+        reuse = plan.get("reused_worker_zero") if job["index"] == 0 else None
+        out = Path(reuse["root"]) if reuse else root / f"workers/{job['index']}"
         if not (out / "result.json").exists():
             failures.append(dict(index=job["index"], error="missing producer"))
             continue
         result = previous.read(out / "result.json")
-        if result["source_sha"] != plan["source_sha"] or result["plan_sha256"] != expected:
+        if result["source_sha"] != (reuse["source_sha"] if reuse else plan["source_sha"]) or result[
+            "plan_sha256"
+        ] != (reuse["plan_sha256"] if reuse else expected):
             raise ValueError("producer provenance mismatch")
         hashes[str(out / "result.json")] = sha(out / "result.json")
         for name, digest in result["outputs"].items():
@@ -163,8 +215,22 @@ def analyze(root, expected):
                 raise ValueError("raw artifact changed")
         failures.extend(result["failures"])
         if (out / "raw.jsonl").exists():
-            rows.extend(json.loads(line) for line in (out / "raw.jsonl").read_text().splitlines())
+            rows.extend(
+                normalize_precision_row(json.loads(line))
+                for line in (out / "raw.jsonl").read_text().splitlines()
+            )
     scored = [r for r in rows if not r["warmup"]]
+    write_once(
+        root / "derived/normalized_raw.json",
+        dict(
+            source_sha=plan["source_sha"],
+            original_artifact_hashes=hashes,
+            transformation=(
+                "precision label only; no outputs, numbers, or producer identities modified"
+            ),
+            rows=rows,
+        ),
+    )
     keys = [(r["sample_id"], r["method"], r["precision"]) for r in scored]
     complete = (
         len(scored) == 160
@@ -233,7 +299,18 @@ def analyze(root, expected):
         metrics = []
         for i, point in enumerate(scorer.points):
             group = [r for r in scored if (r["method"] + ":" + r["precision"]) == point[0]]
-            item = dict(point=point[0], cider=float(values[0, i]), sample_count=16)
+            item = dict(
+                point=point[0],
+                cider=float(values[0, i]),
+                sample_count=16,
+                evaluator_commit=plan["source_sha"],
+                plan_sha256=expected,
+                reference_artifact_sha256=sha(Path(plan["references"])),
+                result_category="unified_comparison",
+                result_origin="locally_measured",
+                measurement_type="derived",
+                quality_reference_only=not group,
+            )
             if group:
                 item.update(
                     mean_e2e_seconds=float(np.mean([r["end_to_end_seconds"] for r in group])),
@@ -285,11 +362,15 @@ def canary_valid(result, rows, old_rows):
         for r in old_rows
         if not r["warmup"] and r["precision"] == "query3"
     }
+    ids = {r["sample_id"] for r in scored}
     return (
         result["status"] == "completed"
         and not result["failures"]
         and len(scored) == 8
-        and len({(r["sample_id"], r["precision"]) for r in scored}) == 8
+        and len(ids) == 4
+        and {(r["sample_id"], r["precision"]) for r in scored}
+        == {(i, p) for i in ids for p in POLICIES}
+        and {r["method"] for r in scored} == {"lookm_reimpl"}
         and all(r["status"] == "completed" for r in scored)
         and all(
             r["logits_sha256"] == old[(r["sample_id"], r["method"])]["logits_sha256"]
@@ -333,6 +414,30 @@ def promote(root, expected):
 
 def submit(root, expected, *, remaining=False):
     plan = previous.common.inputs(root, expected)
+    if plan.get("reused_worker_zero") and not remaining:
+        reused = Path(plan["reused_worker_zero"]["root"])
+        recovered = [
+            normalize_precision_row(json.loads(line))
+            for line in (reused / "raw.jsonl").read_text().splitlines()
+        ]
+        old = [
+            json.loads(line) for line in (PARENT / "workers/0/raw.jsonl").read_text().splitlines()
+        ]
+        if not canary_valid(previous.read(reused / "result.json"), recovered, old):
+            raise ValueError("recovered canary did not pass unchanged execution/hash checks")
+        write_once(
+            root / "canary_decision.json",
+            dict(
+                passed=True,
+                reused_completed_canary=True,
+                original_result_sha256=sha(reused / "result.json"),
+                original_producer_sha=plan["reused_worker_zero"]["source_sha"],
+                source_sha=plan["source_sha"],
+                label_only_recovery=True,
+                no_quality_success_claim=True,
+            ),
+        )
+        remaining = True
     cpu = previous.read(root / "cpu.json")
     if (
         cpu["source_sha"] != plan["source_sha"]

@@ -52,3 +52,21 @@ Submit worker 0 alone first. An afterany CPU check releases workers 1--19 only
 after all eight canary rows complete and every unchanged-union hash matches
 the parent. Failed canaries generate a completeness report without releasing
 the remaining jobs.
+
+## Label-only canary recovery
+
+The first canary completed all eight rows, ordinary parity, deterministic
+repeats, and A-B-A isolation. Its release check correctly rejected duplicate
+`precision=query3` fields: the wrapper's returned record overwrote the outer
+policy label. The actual policy remains independently recorded in
+`development_precision_policy`, `online_variant.precision`, the method label,
+and configuration hash. Do not edit original raw files or rerun inference.
+
+A corrective producer sets the returned precision label. A new immutable plan
+reuses worker zero only if all original hashes verify and the numerical module
+and worker contents are unchanged from its producer SHA. CPU recovery requires
+the three policy identifiers to agree, rejects unknown/conflicting labels,
+and writes a separately derived normalized artifact retaining original producer
+identities and the overwritten field. The old negative release decision stays
+unchanged. Release workers 1--19 only after recovered union hashes match all
+four parent references; aggregate the reused eight plus the new 152 rows.
