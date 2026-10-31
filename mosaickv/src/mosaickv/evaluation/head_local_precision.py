@@ -210,6 +210,37 @@ def bundle(
     )
 
 
+def cpu_packet(packet: HeadLocalFormat) -> HeadLocalFormat:
+    """Copy identical encoded bytes; do not requantize at CPU rounding ties."""
+
+    def copied(tensor: Any) -> Any:
+        return tensor.detach().cpu().clone()
+
+    def body_cpu(body: Any) -> Any:
+        return replace(body, buffers=tuple(copied(t) for t in body.buffers))
+
+    base = packet.base
+    return replace(
+        packet,
+        base=replace(
+            base,
+            pair=tuple(
+                replace(b, codes=copied(b.codes), minimum=copied(b.minimum), scale=copied(b.scale))
+                for b in base.pair
+            ),
+            exact_indices=copied(base.exact_indices),
+            exact_map=copied(base.exact_map),
+            exact_values=tuple(body_cpu(b) for b in base.exact_values),
+            corrections=tuple(
+                replace(p, indices=copied(p.indices), values=copied(p.values))
+                for p in base.corrections
+            ),
+        ),
+        flat_tokens=copied(packet.flat_tokens),
+        protected=tuple(body_cpu(b) for b in packet.protected),
+    )
+
+
 def gpu_controls() -> list[dict[str, Any]]:
     """CPU oracle for 2/3-bit decoding plus bitwise flat-scatter sentinels."""
     from mosaickv.evaluation.head_local_precision_kernel import scatter
@@ -219,15 +250,16 @@ def gpu_controls() -> list[dict[str, Any]]:
     heads = tuple(tuple(range(h, h + 141)) for h in range(3))
     text = {40, 72, 99}
     union = tuple(sorted({j for head in heads for j, p in enumerate(head) if p in text}))
-    cpu = construct(pair, bits=3, protected=union, encoded_exact=True)
     device_pair = tuple(t.cuda() for t in pair)
     gpu = construct(device_pair, bits=3, protected=union, encoded_exact=True)
     records = []
     for policy in POLICIES:
         if policy == "union3":
             continue
-        reference = localize(cpu, pair, heads, text, policy=policy).materialize()
         candidate = localize(gpu, device_pair, heads, text, policy=policy)
+        # CPU/CUDA min-max division can round half-bin ties to different codes.
+        # Decoder parity requires the SAME encoded packet, not two quantizers.
+        reference = cpu_packet(candidate).materialize()
         destination = tuple(
             torch.full((1, 3, 151, 128), -7, device="cuda", dtype=torch.bfloat16) for _ in range(2)
         )

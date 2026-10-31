@@ -50,6 +50,11 @@ def prepare(root):
             )
     protocol = SOURCE / "mosaickv/docs/head_local_precision_20261031.md"
     bound[str(protocol)] = sha(protocol)
+    superseded = Path(
+        "/scratch/djy8hg/runs/evicastkv/head-local-precision-consumed-20261031-v1/analysis/decision.json"
+    )
+    if superseded.exists():
+        bound[str(superseded)] = sha(superseded)
     plan = dict(
         old,
         jobs=jobs,

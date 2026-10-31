@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from mosaickv.evaluation.head_local_precision import POLICIES, localize
+from mosaickv.evaluation.head_local_precision import POLICIES, cpu_packet, localize
 from mosaickv.evaluation.lossless_prompt_cache import backing_bytes
 from mosaickv.evaluation.precision_tier import construct
 
@@ -75,4 +75,19 @@ def test_geometry_does_not_specialize_per_decode_token():
     assert all(
         not parameters[n].is_constexpr and parameters[n].do_not_specialize
         for n in ("COUNT", "N", "HEAD_OUT")
+    )
+
+
+@pytest.mark.parametrize("policy", [p for p in POLICIES if p != "union3"])
+def test_cpu_oracle_copies_identical_encoded_packet_without_requantization(policy):
+    pair, heads, text, fmt = fixture()
+    packet = localize(fmt, pair, heads, text, policy=policy)
+    copied = cpu_packet(packet)
+    for original, clone in zip(packet.private(), copied.private(), strict=True):
+        assert torch.equal(original.view(torch.uint8), clone.view(torch.uint8))
+        if original.numel():
+            assert original.data_ptr() != clone.data_ptr()
+    assert all(
+        torch.equal(a.view(torch.int16), b.view(torch.int16))
+        for a, b in zip(packet.materialize(), copied.materialize(), strict=True)
     )

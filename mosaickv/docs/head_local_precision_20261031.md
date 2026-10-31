@@ -72,3 +72,18 @@ when no other owned GPU work exists. A finite afterany CPU reducer checks all
 artifact hashes. All caches stay under scratch and dependencies stay in the
 existing common environment. If a policy fails, do not relax thresholds or
 increase cohort size to conceal the failure.
+
+## Decoder-oracle correction (before model execution)
+
+The first array (22216180) stopped before any model load: its oracle constructed
+two independent quantized packets on CPU and CUDA. A one-GPU diagnostic showed
+the unchanged union packet also differed: CPU/CUDA division at half-bin ties
+can select adjacent quantization codes. This is not evidence of a new scatter
+failure. Preserve that negative initialization result.
+
+The corrected decoder oracle copies the exact CUDA-encoded codes, minima,
+scales, protected values and indices to CPU, then requires bitwise identical
+reconstruction from those identical bytes. It does not relax a tolerance or
+change the CUDA quantizer. The saved model-logit transport check remains .001,
+and all quality guards are unchanged. Test this correction on one GPU before
+retrying model workers under a new immutable root.
