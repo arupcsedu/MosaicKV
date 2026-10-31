@@ -60,3 +60,31 @@ def test_negative_or_missing_query_evidence_is_rejected():
     demand[0, 0, 0, 0] = -1
     with pytest.raises(ValueError, match="nonnegative"):
         upgrade_rows(packet, pair, demand, heads)
+
+
+def test_all_true_filter_is_identical_and_query_demand_remains_individual():
+    pair, heads, packet, demand = fixture()
+    unfiltered, _ = upgrade_rows(packet, pair, demand, heads)
+    filtered, audit = upgrade_rows(
+        packet, pair, demand, heads, query_mask=torch.ones(16, dtype=torch.bool)
+    )
+    assert torch.equal(unfiltered.positions, filtered.positions)
+    assert audit["prompt_queries_considered"] == 16
+    # Deliberately opposing visual/text queries; the filter, not averaging,
+    # decides which original value row receives the funded exact upgrade.
+    demand.zero_()
+    demand[..., :8, 45] = 1
+    demand[..., 8:, 88] = 1
+    text, _ = upgrade_rows(packet, pair, demand, heads, query_mask=torch.arange(16) >= 8)
+    visual, _ = upgrade_rows(packet, pair, demand, heads, query_mask=torch.arange(16) < 8)
+    assert set((text.positions.long() % 141).tolist()) == {88, 87, 86}
+    assert set((visual.positions.long() % 141).tolist()) == {45, 44, 43}
+
+
+@pytest.mark.parametrize(
+    "mask", [torch.zeros(16, dtype=torch.bool), torch.ones(15, dtype=torch.bool), torch.ones(16)]
+)
+def test_invalid_query_masks_fail_closed(mask):
+    pair, heads, packet, demand = fixture()
+    with pytest.raises(ValueError, match="nonempty boolean query mask"):
+        upgrade_rows(packet, pair, demand, heads, query_mask=mask)

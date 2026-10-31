@@ -70,6 +70,8 @@ def upgrade_rows(
     pair: Any,
     probabilities: Any,
     memberships: Any,
+    *,
+    query_mask: Any = None,
 ) -> tuple[ValueRowFormat, dict[str, Any]]:
     """Spend the old scalar-V patch bytes on prompt-demanded original V rows.
 
@@ -96,11 +98,17 @@ def upgrade_rows(
     ):
         raise ValueError("finite nonnegative per-query eager attention required")
     index = torch.tensor(memberships, device=reference.device, dtype=torch.long)[None, :, None, :]
-    demand = (
-        probabilities[..., -16:, :]
-        .float()
-        .gather(-1, index.expand(1, h, min(16, probabilities.shape[-2]), n))
-    )
+    window = probabilities[..., -16:, :]
+    if query_mask is not None:
+        if (
+            query_mask.dtype != torch.bool
+            or query_mask.device != window.device
+            or query_mask.shape != (window.shape[-2],)
+            or not bool(query_mask.any())
+        ):
+            raise ValueError("a nonempty boolean query mask matching the prompt window is required")
+        window = window[..., query_mask, :]
+    demand = window.float().gather(-1, index.expand(1, h, window.shape[-2], n))
     demand = demand / demand.sum(-1, keepdim=True).clamp_min(1e-20)
     score = demand.square().amax(-2) * error
     ranking = torch.argsort(score.flatten(), descending=True, stable=True)
@@ -145,6 +153,8 @@ def upgrade_rows(
         no_key_or_source_position_changes=True,
         score="max_individual_prompt_query_demand_squared_times_value_error_norm_squared",
         target_or_reference_answers_used=False,
+        prompt_queries_considered=window.shape[-2],
+        text_query_filter_enabled=query_mask is not None,
     )
 
 

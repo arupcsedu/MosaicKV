@@ -1,0 +1,457 @@
+#!/usr/bin/env python3
+"""Bounded consumed-COCO text-query value precision ablation; never paper evidence."""
+
+import argparse
+import hashlib
+import json
+import os
+import subprocess
+from pathlib import Path
+from unittest.mock import patch
+
+import evicastkv_precision_rate_distortion as rate
+import evicastkv_request_validation as previous
+
+from mosaickv.evaluation import request_precision
+from mosaickv.evaluation.fox_campaign import clean_source, sha, write_once
+
+SOURCE = Path(__file__).resolve().parents[2]
+OLD = Path("/scratch/djy8hg/runs/evicastkv/precision-rate-distortion-20261031-v2")
+ROW = Path("/scratch/djy8hg/runs/evicastkv/value-row-precision-consumed-20261031-v1")
+POLICY = "head3k2v_rows_text"
+METHODS = (
+    "mosaickv_exact",
+    "lookm_reimpl",
+    "vl_cache_reimpl",
+    "prefixkv_reimpl",
+    "prompt_attention_topk",
+)
+
+
+def construct(*args, policy, **kwargs):
+    from mosaickv.evaluation.head_local_precision import bundle
+
+    if args[-1] != "query3" or policy not in ("union3", POLICY):
+        raise ValueError("registered text-row precision required")
+    formats, proof = bundle(*args[:-1], policies=(policy,), **kwargs)
+    return formats[policy], dict(
+        proof,
+        precision=policy,
+        generated_history="lossless_consolidated_source_append_only",
+        explicit_precision_variant_not_graph_exact_paper_method=True,
+    )
+
+
+def worker(root, expected, index):
+    from mosaickv.evaluation.head_local_precision import gpu_controls
+
+    plan = previous.common.inputs(root, expected)
+    controls = gpu_controls()
+    write_once(
+        root / f"numerical/{index}.json", dict(source_sha=plan["source_sha"], controls=controls)
+    )
+    original = request_precision.complete_request
+    baseline = json.loads(Path(plan["reused_rows"]).read_text())["rows"]
+    reference = {
+        (r["sample_id"], r["method"]): r
+        for r in baseline
+        if not r["warmup"] and r["precision"] == "union3"
+    }
+    checked = False
+
+    def invoke(*args, **kwargs):
+        nonlocal checked
+        if (
+            not checked
+            and kwargs.get("precision") == "query3"
+            and kwargs.get("method") != "full_kv"
+        ):
+            # An unchanged packet control is outside the measured request.
+            with patch.object(
+                request_precision,
+                "construct_request_formats",
+                lambda *a, **k: construct(*a, policy="union3", **k),
+            ):
+                logits, record = original(*args, **kwargs)
+            sample_id = previous.read(plan["jobs"][index]["inputs"][0])["sample_id"]
+            old = reference[(sample_id, kwargs["method"])]
+            digest = hashlib.sha256(logits.numpy().tobytes()).hexdigest()
+            passed = digest == old["logits_sha256"]
+            write_once(
+                root / f"union_controls/{index}.json",
+                dict(
+                    source_sha=plan["source_sha"],
+                    sample_id=sample_id,
+                    method=kwargs["method"],
+                    old_logits_sha256=old["logits_sha256"],
+                    new_logits_sha256=digest,
+                    bitwise_logit_hash_match=passed,
+                    outside_measured_request=True,
+                ),
+            )
+            del logits, record
+            if not passed:
+                raise RuntimeError("unchanged union3 transport drift")
+            checked = True
+        return original(*args, **kwargs)
+
+    with (
+        patch.object(request_precision, "complete_request", invoke),
+        patch.object(rate, "POLICIES", (POLICY,)),
+        patch.object(rate, "construct_policy", construct),
+    ):
+        rate.worker(root, expected, index)
+
+
+def prepare(root):
+    if root.exists():
+        raise ValueError("new write-once output root required")
+    old = previous.read(OLD / "plan.json")
+    gate = previous.read(OLD / "analysis/GATE.json")
+    row = previous.read(ROW / "analysis/decision.json")
+    if (
+        not gate["complete"]
+        or gate["failures"]
+        or gate["unchanged_union_transport_drift"]
+        or not row["complete"]
+        or row["failures"]
+    ):
+        raise ValueError("complete previous diagnostic evidence required")
+    bound = dict(old["bound_files"])
+    for path in (
+        OLD / "plan.json",
+        OLD / "analysis/GATE.json",
+        OLD / "derived/normalized_raw.json",
+        ROW / "analysis/decision.json",
+        SOURCE / "mosaickv/docs/text_value_row_study_20261031.md",
+    ):
+        bound[str(path)] = sha(path)
+    # Bind every original producer artifact before deriving reused rows.
+    for path, digest in previous.read(OLD / "derived/normalized_raw.json")[
+        "original_artifact_hashes"
+    ].items():
+        if sha(Path(path)) != digest:
+            raise ValueError("reused producer changed")
+        bound[path] = digest
+        for name, artifact_sha in previous.read(path)["outputs"].items():
+            artifact = Path(path).parent / name
+            if sha(artifact) != artifact_sha:
+                raise ValueError("reused artifact changed")
+            bound[str(artifact)] = artifact_sha
+    chosen = old["selected_inputs"]
+    if len(chosen) != 16 or len(set(chosen)) != 16:
+        raise ValueError("only the same sixteen consumed inputs permitted")
+    jobs = [
+        dict(index=i, inputs=chosen[start : start + 4], method_arms=[[method, POLICY]])
+        for i, (method, start) in enumerate((m, s) for m in METHODS for s in range(0, 16, 4))
+    ]
+    plan = dict(
+        old,
+        source_sha=clean_source(SOURCE),
+        bound_files=bound,
+        jobs=jobs,
+        precision_policies=[POLICY],
+        reused_rows=str(OLD / "derived/normalized_raw.json"),
+        stage="text_query_row_precision_consumed_development",
+        arms=[],
+        reused_worker_zero=None,
+        new_expected_rows=80,
+        total_expected_rows=240,
+        no_fresh_or_paper_promotion=True,
+        paper_campaign_authorized=False,
+        independent_quality_N=0,
+        bootstrap_comparisons=14,
+    )
+    write_once(root / "plan.json", plan)
+    print(sha(root / "plan.json"))
+
+
+def canary_valid(result, rows, control):
+    scored = [r for r in rows if not r["warmup"]]
+    return (
+        result["status"] == "completed"
+        and not result["failures"]
+        and len(scored) == 4
+        and len({r["sample_id"] for r in scored}) == 4
+        and all(
+            r["status"] == "completed"
+            and r["precision"] == POLICY
+            and r["method"] == "mosaickv_exact"
+            for r in scored
+        )
+        and control["bitwise_logit_hash_match"]
+    )
+
+
+def promote(root, expected):
+    plan = previous.common.inputs(root, expected)
+    out = root / "workers/0"
+    passed = False
+    if (out / "result.json").exists() and (root / "union_controls/0.json").exists():
+        result = previous.read(out / "result.json")
+        for name, digest in result["outputs"].items():
+            if sha(out / name) != digest:
+                raise ValueError("canary artifact changed")
+        rows = [json.loads(line) for line in (out / "raw.jsonl").read_text().splitlines()]
+        passed = canary_valid(result, rows, previous.read(root / "union_controls/0.json"))
+    write_once(
+        root / "canary_decision.json",
+        dict(
+            passed=passed,
+            source_sha=plan["source_sha"],
+            execution_control_only=True,
+            no_quality_pass_claim=True,
+        ),
+    )
+    if passed:
+        submit(root, expected, remaining=True)
+    else:
+        analyze(root, expected)
+
+
+def analyze(root, expected):
+    import numpy as np
+    import pandas as pd
+
+    from mosaickv.evaluation.cider_resampling import ResampledCider, paired_draw_counts
+    from mosaickv.evaluation.metrics.types import MetricSample
+
+    plan = previous.common.inputs(root, expected)
+    rows = [r for r in previous.read(plan["reused_rows"])["rows"] if not r["warmup"]]
+    failures, provenance = [], {}
+    new = []
+    for job in plan["jobs"]:
+        out = root / f"workers/{job['index']}"
+        if not (out / "result.json").exists():
+            failures.append(dict(index=job["index"], error="missing producer"))
+            continue
+        result = previous.read(out / "result.json")
+        if result["source_sha"] != plan["source_sha"] or result["plan_sha256"] != expected:
+            raise ValueError("producer source mismatch")
+        provenance[str(out / "result.json")] = sha(out / "result.json")
+        for name, digest in result["outputs"].items():
+            if sha(out / name) != digest:
+                raise ValueError("producer artifact changed")
+        failures.extend(result["failures"])
+        for kind in ("numerical", "union_controls"):
+            path = root / f"{kind}/{job['index']}.json"
+            if not path.exists():
+                failures.append(dict(index=job["index"], error=f"missing {kind}"))
+            else:
+                control = previous.read(path)
+                provenance[str(path)] = sha(path)
+                if control["source_sha"] != plan["source_sha"] or (
+                    kind == "union_controls" and not control["bitwise_logit_hash_match"]
+                ):
+                    failures.append(dict(index=job["index"], error=f"failed {kind}"))
+        if (out / "raw.jsonl").exists():
+            new.extend(
+                json.loads(line)
+                for line in (out / "raw.jsonl").read_text().splitlines()
+                if not json.loads(line)["warmup"]
+            )
+    rows += new
+    keys = {(r["sample_id"], r["method"], r["precision"]) for r in rows}
+    complete = (
+        len(new) == 80
+        and len(rows) == len(keys) == 240
+        and not failures
+        and all(r["status"] == "completed" for r in rows)
+    )
+    output = root / "analysis"
+    write_once(
+        output / "rows.json",
+        dict(rows=rows, original_producer_hashes=provenance, no_original_artifact_changes=True),
+    )
+    gate = dict(
+        complete=complete,
+        failures=failures,
+        new_rows=len(new),
+        total_rows=len(rows),
+        independent_quality_N=0,
+        development_sample_count=16,
+        source_sha=plan["source_sha"],
+        plan_sha256=expected,
+        no_paper_promotion=True,
+        superiority_established=False,
+    )
+    if complete:
+        references = {
+            s["sample_id"]: tuple(s["references"])
+            for s in previous.read(plan["references"])["samples"]
+        }
+        groups = {}
+        for r in rows:
+            groups.setdefault((r["method"] + ":" + r["precision"], 0.5), []).append(
+                MetricSample(
+                    r["sample_id"], r["scored_answer"]["answer"], references[r["sample_id"]]
+                )
+            )
+        ids = {r["sample_id"] for r in rows}
+        for index in (0, 1):
+            for line in (rate.PARENT / f"workers/{index}/raw.jsonl").read_text().splitlines():
+                r = json.loads(line)
+                if not r["warmup"] and r["method"] == "full_kv" and r["sample_id"] in ids:
+                    groups.setdefault(("full_kv:ordinary", 0.5), []).append(
+                        MetricSample(
+                            r["sample_id"], r["scored_answer"]["answer"], references[r["sample_id"]]
+                        )
+                    )
+        scorer = ResampledCider(groups)
+        counts = np.vstack(
+            (
+                np.ones((1, 16), dtype=np.int64),
+                paired_draw_counts(16, 10000, plan["bootstrap_seed"]),
+            )
+        )
+        values = scorer.score(counts, batch_size=16)
+        error = scorer.validate_official(counts[:4], values[:4])
+        metrics, comparisons = [], []
+        candidate = scorer.points.index(("mosaickv_exact:" + POLICY, 0.5))
+        for i, point in enumerate(scorer.points):
+            group = [r for r in rows if r["method"] + ":" + r["precision"] == point[0]]
+            item = dict(
+                point=point[0],
+                cider=float(values[0, i]),
+                sample_count=16,
+                result_category="unified_comparison",
+                result_origin="locally_measured",
+                measurement_type="derived",
+                reference_artifact_sha256=sha(Path(plan["references"])),
+                evaluator_commit=plan["source_sha"],
+                plan_sha256=expected,
+            )
+            if group:
+                item["producer_source_shas"] = sorted({r["source_sha"] for r in group})
+                item["mean_e2e_seconds"] = float(np.mean([r["end_to_end_seconds"] for r in group]))
+                for field in (
+                    "initial_active_kv_storage_bytes",
+                    "final_active_kv_storage_bytes",
+                    "peak_active_kv_storage_bytes",
+                ):
+                    item[field] = float(np.mean([r["storage"][field] for r in group]))
+            metrics.append(item)
+            if i != candidate and point[0] != "full_kv:ordinary":
+                lo, hi = np.quantile(
+                    values[1:, candidate] - values[1:, i], [0.05 / 28, 1 - 0.05 / 28]
+                )
+                comparisons.append(
+                    dict(
+                        baseline=point[0],
+                        cider_difference=float(values[0, candidate] - values[0, i]),
+                        simultaneous_ci95_bonferroni=[float(lo), float(hi)],
+                    )
+                )
+        pd.DataFrame(metrics).to_parquet(output / "metrics.parquet", index=False)
+        write_once(
+            output / "comparisons.json",
+            dict(
+                metrics=metrics,
+                comparisons=comparisons,
+                official_reducer_max_error=error,
+                corpus_recomputed_inside_every_bootstrap=True,
+                not_byte_matched=True,
+                same_consumed_development_inputs=True,
+            ),
+        )
+    write_once(output / "GATE.json", gate)
+    print(json.dumps(gate))
+
+
+def submit(root, expected, *, remaining=False):
+    plan = previous.common.inputs(root, expected)
+    cpu = previous.read(root / "cpu.json")
+    if (
+        cpu["source_sha"] != plan["source_sha"]
+        or cpu["returncode"]
+        or cpu["failed_or_skipped"]
+        or cpu["test_count"] < 2860
+        or cpu["xml_sha256"] != sha(root / "cpu.xml")
+    ):
+        raise ValueError("clean complete CPU suite proof required")
+    queue = subprocess.check_output(
+        ["squeue", "-h", "-r", "-u", os.environ["USER"], "-o", "%i|%b"], text=True
+    )
+    if any("gpu" in line.lower() for line in queue.splitlines()):
+        raise ValueError("six-slot admission requires other owned GPU work complete")
+    (root / "slurm").mkdir(exist_ok=True)
+    script = str(SOURCE / "mosaickv/slurm/evicastkv_text_row_study.sbatch")
+    args = [str(SOURCE), str(root), expected]
+    gpu = subprocess.check_output(
+        [
+            "sbatch",
+            "--parsable",
+            "--partition=bii-gpu",
+            "--account=bii_dsc_community",
+            "--reservation=bi_fox_dgx",
+            "--gres=gpu:a100:1",
+            "--nodes=1",
+            "--ntasks=1",
+            "--cpus-per-task=12",
+            "--mem=48G",
+            "--time=00:30:00",
+            "--array=1-19%6" if remaining else "--array=0",
+            "--job-name=mk-text-rows",
+            f"--output={root}/slurm/gpu-%A_%a.out",
+            f"--error={root}/slurm/gpu-%A_%a.err",
+            script,
+            *args,
+            "worker",
+        ],
+        text=True,
+    ).strip()
+    analysis = subprocess.check_output(
+        [
+            "sbatch",
+            "--parsable",
+            "--partition=bii",
+            "--account=bii_dsc_community",
+            "--cpus-per-task=2",
+            "--mem=16G",
+            "--time=00:10:00",
+            "--job-name=mk-text-analysis",
+            f"--dependency=afterany:{gpu}",
+            f"--output={root}/slurm/analysis-%j.out",
+            f"--error={root}/slurm/analysis-%j.err",
+            script,
+            *args,
+            "analyze" if remaining else "promote",
+        ],
+        text=True,
+    ).strip()
+    from control_a100_schedule import tick
+
+    policy = dict(
+        timezone="America/New_York",
+        maximum_worker_minutes=30,
+        maximum_a100s=6,
+        six_a100s_explicitly_authorized=True,
+        arrays=[gpu],
+    )
+    scheduler = root / "scheduler" / ("remaining" if remaining else "canary")
+    write_once(scheduler / "policy.json", policy)
+    write_once(scheduler / "registration.json", tick(policy, {}, scheduler / "state.json", False))
+    write_once(
+        root / ("submission.json" if remaining else "canary_submission.json"),
+        dict(gpu_array=gpu, cpu_analysis=analysis),
+    )
+    print(json.dumps(dict(gpu_array=gpu, cpu_analysis=analysis)))
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "mode", choices=("prepare", "cpu", "submit", "worker", "promote", "analyze")
+    )
+    parser.add_argument("--root", required=True, type=Path)
+    parser.add_argument("--plan-sha")
+    args = parser.parse_args()
+    if args.mode == "prepare":
+        prepare(args.root)
+    elif args.mode == "cpu":
+        previous.cpu(args.root, args.plan_sha)
+        submit(args.root, args.plan_sha)
+    elif args.mode == "worker":
+        worker(args.root, args.plan_sha, int(os.environ["SLURM_ARRAY_TASK_ID"]))
+    else:
+        globals()[args.mode](args.root, args.plan_sha)

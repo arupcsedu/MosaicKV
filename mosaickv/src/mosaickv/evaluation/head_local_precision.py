@@ -32,6 +32,7 @@ POLICIES = {
     "head3k2v_refit": (3, 2),
     "head3k2v_headwise": (3, 2),
     "head3k2v_rows": (3, 2),
+    "head3k2v_rows_text": (3, 2),
 }
 
 
@@ -215,7 +216,12 @@ def bundle(
             if policy == "union3":
                 continue
             localized: Any = localize(fmt, pair, heads, text, policy=policy)
-            if policy in ("head3k2v_refit", "head3k2v_headwise", "head3k2v_rows"):
+            if policy in (
+                "head3k2v_refit",
+                "head3k2v_headwise",
+                "head3k2v_rows",
+                "head3k2v_rows_text",
+            ):
                 localized, audit = refit_corrections(
                     localized,
                     pair,
@@ -224,11 +230,19 @@ def bundle(
                     per_head=policy == "head3k2v_headwise",
                 )
                 row.setdefault("refit", {})[policy] = audit
-            if policy == "head3k2v_rows":
+            if policy in ("head3k2v_rows", "head3k2v_rows_text"):
                 from mosaickv.evaluation.value_row_precision import upgrade_rows
 
+                mask = None
+                if policy == "head3k2v_rows_text":
+                    window = min(16, prefill.attention_weights[i].shape[-2])
+                    mask = torch.tensor(
+                        [p in text for p in range(key.shape[-2] - window, key.shape[-2])],
+                        dtype=torch.bool,
+                        device=key.device,
+                    )
                 localized, audit = upgrade_rows(
-                    localized, pair, prefill.attention_weights[i], heads
+                    localized, pair, prefill.attention_weights[i], heads, query_mask=mask
                 )
                 row.setdefault("row_upgrades", {})[policy] = audit
             formats[policy].append(localized)
@@ -364,17 +378,23 @@ def gpu_controls() -> list[dict[str, Any]]:
         if policy == "union3":
             continue
         candidate: Any = localize(gpu, device_pair, heads, text, policy=policy)
-        if policy in ("head3k2v_refit", "head3k2v_headwise", "head3k2v_rows"):
+        if policy in ("head3k2v_refit", "head3k2v_headwise", "head3k2v_rows", "head3k2v_rows_text"):
             candidate, _ = refit_corrections(
                 candidate, device_pair, per_head=policy == "head3k2v_headwise"
             )
         # CPU/CUDA min-max division can round half-bin ties to different codes.
         # Decoder parity requires the SAME encoded packet, not two quantizers.
-        if policy == "head3k2v_rows":
+        if policy in ("head3k2v_rows", "head3k2v_rows_text"):
             from mosaickv.evaluation.value_row_precision import cpu_row_packet, upgrade_rows
 
             candidate, _ = upgrade_rows(
-                candidate, device_pair, torch.full((1, 3, 16, 143), 1 / 143, device="cuda"), heads
+                candidate,
+                device_pair,
+                torch.full((1, 3, 16, 143), 1 / 143, device="cuda"),
+                heads,
+                query_mask=(torch.arange(16, device="cuda") >= 8)
+                if policy == "head3k2v_rows_text"
+                else None,
             )
             reference = cpu_row_packet(candidate).materialize()
         else:

@@ -393,7 +393,10 @@ def worker(root, expected, index):
                         dict(
                             recomputed_request=True,
                             source_retired=True,
-                            unrelated_methods_between_requests=True,
+                            unrelated_methods_between_requests=len({a[0] for a in plan["arms"]})
+                            > 1,
+                            distinct_policies_between_requests=len({a[1] for a in plan["arms"]})
+                            > 1,
                             checked_bitwise_logits=True,
                         ),
                     )
