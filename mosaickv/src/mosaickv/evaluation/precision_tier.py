@@ -30,7 +30,7 @@ class QuantizedBody:
 def pack(values: Any, *, bits: int, axis: int, group: int = 128) -> QuantizedBody:
     if (
         type(bits) is not int
-        or bits not in (3, 4)
+        or bits not in (2, 3, 4)
         or axis not in (2, 3)
         or type(group) is not int
         or group != 128
@@ -40,7 +40,7 @@ def pack(values: Any, *, bits: int, axis: int, group: int = 128) -> QuantizedBod
         or not all(values.shape)
         or not bool(torch.isfinite(values).all())
     ):
-        raise ValueError("finite nonempty batch-one BF16, 3/4 bits and group128 required")
+        raise ValueError("finite nonempty batch-one BF16, 2/3/4 bits and group128 required")
     transformed = values.float().movedim(axis, -1).contiguous()
     length = transformed.shape[-1]
     pad = (-length) % group

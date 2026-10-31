@@ -4,7 +4,7 @@ import torch
 from mosaickv.evaluation.precision_tier import construct, pack, unpack_cpu
 
 
-@pytest.mark.parametrize("bits", [3, 4])
+@pytest.mark.parametrize("bits", [2, 3, 4])
 @pytest.mark.parametrize("n", [1, 9, 129, 300])
 def test_precision_roundtrip_bounds_and_originals(bits, n):
     generator = torch.Generator().manual_seed(42)
@@ -40,9 +40,9 @@ def test_strided_destination_and_protected_rows():
     assert all(torch.equal(t[..., :19, :], r) for t, r in zip(dest, f.materialize(), strict=True))
 
 
-@pytest.mark.parametrize("bad", [0, 2, 5, True])
+@pytest.mark.parametrize("bad", [0, 1, 5, True])
 def test_invalid_bits_rejected(bad):
-    with pytest.raises(ValueError, match="3/4 bits"):
+    with pytest.raises(ValueError, match="2/3/4 bits"):
         pack(torch.ones(1, 2, 32, 128, dtype=torch.bfloat16), bits=bad, axis=2)
 
 
