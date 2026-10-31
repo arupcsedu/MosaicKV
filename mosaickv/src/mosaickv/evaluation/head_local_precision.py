@@ -33,6 +33,7 @@ POLICIES = {
     "head3k2v_headwise": (3, 2),
     "head3k2v_rows": (3, 2),
     "head3k2v_rows_text": (3, 2),
+    "head3k2v_mse": (3, 2),
 }
 
 
@@ -114,8 +115,14 @@ def localize(
         if extra
         else ()
     )
+    from mosaickv.evaluation.mse_value_precision import pack_mse_values
+
     bodies = tuple(
-        b if b.bits == bits else pack(t, bits=bits, axis=b.axis)
+        pack_mse_values(t)
+        if policy == "head3k2v_mse" and b.axis == 3
+        else b
+        if b.bits == bits
+        else pack(t, bits=bits, axis=b.axis)
         for b, t, bits in zip(fmt.pair, pair, POLICIES[policy], strict=True)
     )
     base = replace(fmt, pair=bodies, exact_indices=indices, exact_values=base_exact)
@@ -221,6 +228,7 @@ def bundle(
                 "head3k2v_headwise",
                 "head3k2v_rows",
                 "head3k2v_rows_text",
+                "head3k2v_mse",
             ):
                 localized, audit = refit_corrections(
                     localized,
@@ -378,7 +386,13 @@ def gpu_controls() -> list[dict[str, Any]]:
         if policy == "union3":
             continue
         candidate: Any = localize(gpu, device_pair, heads, text, policy=policy)
-        if policy in ("head3k2v_refit", "head3k2v_headwise", "head3k2v_rows", "head3k2v_rows_text"):
+        if policy in (
+            "head3k2v_refit",
+            "head3k2v_headwise",
+            "head3k2v_rows",
+            "head3k2v_rows_text",
+            "head3k2v_mse",
+        ):
             candidate, _ = refit_corrections(
                 candidate, device_pair, per_head=policy == "head3k2v_headwise"
             )

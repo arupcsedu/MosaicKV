@@ -23,7 +23,7 @@ GROUPS = (
     ("lookm_reimpl",),
     ("vl_cache_reimpl", "prefixkv_reimpl"),
 )
-EXECUTED_POLICIES = ("union3", "head3k2v_refit", "head3k2v_rows")
+EXECUTED_POLICIES = ("union3", "head3k2v_refit", "head3k2v_mse")
 
 
 def prepare(root):
@@ -66,7 +66,7 @@ def prepare(root):
         source_sha=clean_source(SOURCE),
         bound_files=bound,
         parent=str(causal.parent.PARENT),
-        stage="consumed_per_query_whole_value_row_diagnostic",
+        stage="consumed_value_MSE_range_diagnostic",
         precision_policies={p: POLICIES[p] for p in EXECUTED_POLICIES},
         warmups=0,
         timed_repetitions=1,
@@ -408,12 +408,16 @@ def submit(root, expected):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("prepare", "cpu", "submit", "worker", "analyze"))
+    parser.add_argument(
+        "mode", choices=("prepare", "cpu", "cpu_only", "submit", "worker", "analyze")
+    )
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--plan-sha")
     args = parser.parse_args()
     if args.mode == "prepare":
         prepare(args.root)
+    elif args.mode == "cpu_only":
+        previous.cpu(args.root, args.plan_sha)
     elif args.mode == "cpu":
         previous.cpu(args.root, args.plan_sha)
         submit(args.root, args.plan_sha)

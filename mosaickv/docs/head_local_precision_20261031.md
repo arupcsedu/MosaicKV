@@ -135,3 +135,26 @@ guard remain. Every baseline receives the option. Run only after the active
 COCO array/analysis finishes, so aggregate use never exceeds six A100s. No
 COCO answers or failure identities inform this constructor, and no fresh
 evaluation or larger campaign is enabled by this diagnostic.
+
+## Value-range MSE follow-up
+
+The whole-row result was mixed, not a quality-preservation pass. A separate
+bounded diagnostic keeps union3/global-refit controls and adds
+`head3k2v_mse`: same three-bit K, two-bit V and scalar-exception byte allowance,
+but choose the V affine quantization range using cache-local reconstruction
+MSE. Test fixed radii 0.5/0.625/0.75/0.875 around each group's mean and two fixed
+least-squares affine updates. Always keep the original min/max candidate;
+accept an update only if actual BF16 row reconstruction error decreases.
+Constant groups retain the original packet. This is deterministic per-request
+quantizer fitting, not parameter training, nor a novel general quantization
+principle. No benchmark answer, future token or label enters the fit.
+
+The code/minimum/scale shapes, byte counts and existing Triton decoder remain
+identical. Protected text and boundary rows remain lossless; original source
+positions, baseline merges and generated history stay fixed. Refit the same
+funded scalar exceptions to the actual new packet. Every selector receives
+this same option. Numerical controls copy identical encoded bytes to CPU and
+check bitwise reconstruction, including a strided generated-history sentinel.
+CPU monotonic-error tests are local tensor claims, NOT task-quality guarantees.
+Run only these same two consumed inputs after the text-row COCO study releases
+all GPUs. Do not automatically promote to a fresh, large or paper campaign.
