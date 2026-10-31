@@ -35,7 +35,9 @@ POLICIES = {
     "head3k2v_rows_text": (3, 2),
     "head3k2v_mse": (3, 2),
     "head3_boundary8": (3, 3),
+    "head3k2v_refit_boundary8": (3, 2),
 }
+BOUNDARY_POLICIES = ("head3_boundary8", "head3k2v_refit_boundary8")
 
 
 @dataclass(frozen=True)
@@ -100,7 +102,7 @@ def localize(
 ) -> HeadLocalFormat:
     if policy not in POLICIES or policy == "union3" or not fmt.encoded_exact:
         raise ValueError("registered head-local policy and encoded exact reference required")
-    if boundary_override and policy != "head3_boundary8":
+    if boundary_override and policy not in BOUNDARY_POLICIES:
         raise ValueError("eight-bit boundary override requires its explicit policy")
     h, n, d = fmt.shape[1:]
     if len(heads) != h or any(len(row) != n for row in heads):
@@ -215,7 +217,7 @@ def bundle(
         if i < 2 or i >= len(source) - 2:
             exact = ExactFormat("kv", tuple(pair[0].shape), pair=tuple(encode(t) for t in pair))
             for policy, packets in formats.items():
-                if policy != "head3_boundary8":
+                if policy not in BOUNDARY_POLICIES:
                     packets.append(exact)
                     continue
                 union = tuple(
@@ -280,6 +282,7 @@ def bundle(
             localized: Any = localize(fmt, pair, heads, text, policy=policy)
             if policy in (
                 "head3k2v_refit",
+                "head3k2v_refit_boundary8",
                 "head3k2v_headwise",
                 "head3k2v_rows",
                 "head3k2v_rows_text",
@@ -444,6 +447,7 @@ def gpu_controls() -> list[dict[str, Any]]:
         candidate: Any = localize(gpu, device_pair, heads, text, policy=policy)
         if policy in (
             "head3k2v_refit",
+            "head3k2v_refit_boundary8",
             "head3k2v_headwise",
             "head3k2v_rows",
             "head3k2v_rows_text",

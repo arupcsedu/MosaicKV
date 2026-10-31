@@ -327,6 +327,9 @@ def worker(root, expected, index):
                                         request_policy=plan["request_policy"],
                                         actual_method=method,
                                         actual_precision=precision,
+                                        resolved_online_policy=plan.get(
+                                            "explicit_per_policy_overrides", {}
+                                        ).get(precision, {}),
                                         source_slot_ratio=plan["ratio"],
                                         resolved_cache_geometry=selection.get("cache_config", {}),
                                         baseline_parameters=selection.get(
@@ -338,6 +341,9 @@ def worker(root, expected, index):
                                     separators=(",", ":"),
                                 ).encode()
                             ).hexdigest()
+                            row["resolved_online_policy"] = plan.get(
+                                "explicit_per_policy_overrides", {}
+                            ).get(precision, {})
                             row["greedy_ids"] = logits.argmax(-1).tolist()
                             digest = hashlib.sha256(logits.numpy().tobytes()).hexdigest()
                             identity = (payload["sample_id"], method, precision)
