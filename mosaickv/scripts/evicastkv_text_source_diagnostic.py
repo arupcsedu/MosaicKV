@@ -46,9 +46,12 @@ def scored_text(tokenizer, ids, eos_ids):
     )
 
 
-def materialize_packets(packets):
-    """Exact boundary packets require the otherwise-optional argument."""
-    return tuple(packet.materialize(None) for packet in packets)
+def materialize_packets(packets, adapter):
+    """Projection-backed packets require the actual layer's frozen weights."""
+    return tuple(
+        packet.materialize(block.self_attn)
+        for packet, block in zip(packets, adapter._language_layers(), strict=True)
+    )
 
 
 def checkpoint_variant(out, row, fixed, greedy):
@@ -324,7 +327,7 @@ def worker(root, expected, index):
             ):
                 raise RuntimeError("isolated FullKV draft differs from ordinary reference")
             write_once(out / f"{name}-construction.json", proof)
-            decoded = materialize_packets(packets[policy])
+            decoded = materialize_packets(packets[policy], adapter)
             if representation == "anchor":
                 anchor_keys[method] = tuple(pair[0] for pair in decoded)
                 anchor_values[method] = tuple(pair[1] for pair in decoded)

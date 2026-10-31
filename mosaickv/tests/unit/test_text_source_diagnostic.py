@@ -1,4 +1,5 @@
 import inspect
+from types import SimpleNamespace
 
 import evicastkv_text_source_diagnostic as diagnostic
 
@@ -23,3 +24,19 @@ def test_finite_analysis_and_no_fresh_promotion():
     assert '"--array=0-1%2"' in text and "--dependency=afterany:" in text
     assert '"--time=00:30:00"' in text
     assert "independent_quality_N=0" in inspect.getsource(diagnostic.analyze)
+
+
+def test_packet_inspection_receives_correct_layer_attention():
+    weights = [object(), object()]
+    packets = []
+    for weight in weights:
+
+        def materialize(attention, *, expected=weight):
+            assert attention is expected
+            return attention
+
+        packets.append(SimpleNamespace(materialize=materialize))
+    adapter = SimpleNamespace(
+        _language_layers=lambda: [SimpleNamespace(self_attn=w) for w in weights]
+    )
+    assert diagnostic.materialize_packets(packets, adapter) == tuple(weights)
