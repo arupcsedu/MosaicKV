@@ -23,7 +23,7 @@ GROUPS = (
     ("lookm_reimpl",),
     ("vl_cache_reimpl", "prefixkv_reimpl"),
 )
-EXECUTED_POLICIES = ("union3", "head3k2v_refit", "head3k2v_headwise")
+EXECUTED_POLICIES = ("union3", "head3k2v_refit", "head3k2v_rows")
 
 
 def prepare(root):
@@ -66,7 +66,7 @@ def prepare(root):
         source_sha=clean_source(SOURCE),
         bound_files=bound,
         parent=str(causal.parent.PARENT),
-        stage="consumed_precision_specific_corrections_diagnostic",
+        stage="consumed_per_query_whole_value_row_diagnostic",
         precision_policies={p: POLICIES[p] for p in EXECUTED_POLICIES},
         warmups=0,
         timed_repetitions=1,

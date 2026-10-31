@@ -31,6 +31,7 @@ POLICIES = {
     "head2": (2, 2),
     "head3k2v_refit": (3, 2),
     "head3k2v_headwise": (3, 2),
+    "head3k2v_rows": (3, 2),
 }
 
 
@@ -213,8 +214,8 @@ def bundle(
         for policy in requested:
             if policy == "union3":
                 continue
-            localized = localize(fmt, pair, heads, text, policy=policy)
-            if policy in ("head3k2v_refit", "head3k2v_headwise"):
+            localized: Any = localize(fmt, pair, heads, text, policy=policy)
+            if policy in ("head3k2v_refit", "head3k2v_headwise", "head3k2v_rows"):
                 localized, audit = refit_corrections(
                     localized,
                     pair,
@@ -223,6 +224,13 @@ def bundle(
                     per_head=policy == "head3k2v_headwise",
                 )
                 row.setdefault("refit", {})[policy] = audit
+            if policy == "head3k2v_rows":
+                from mosaickv.evaluation.value_row_precision import upgrade_rows
+
+                localized, audit = upgrade_rows(
+                    localized, pair, prefill.attention_weights[i], heads
+                )
+                row.setdefault("row_upgrades", {})[policy] = audit
             formats[policy].append(localized)
             row["component_bytes"][policy] = localized.component_bytes
         records.append(row)
@@ -355,14 +363,22 @@ def gpu_controls() -> list[dict[str, Any]]:
     for policy in POLICIES:
         if policy == "union3":
             continue
-        candidate = localize(gpu, device_pair, heads, text, policy=policy)
-        if policy in ("head3k2v_refit", "head3k2v_headwise"):
+        candidate: Any = localize(gpu, device_pair, heads, text, policy=policy)
+        if policy in ("head3k2v_refit", "head3k2v_headwise", "head3k2v_rows"):
             candidate, _ = refit_corrections(
                 candidate, device_pair, per_head=policy == "head3k2v_headwise"
             )
         # CPU/CUDA min-max division can round half-bin ties to different codes.
         # Decoder parity requires the SAME encoded packet, not two quantizers.
-        reference = cpu_packet(candidate).materialize()
+        if policy == "head3k2v_rows":
+            from mosaickv.evaluation.value_row_precision import cpu_row_packet, upgrade_rows
+
+            candidate, _ = upgrade_rows(
+                candidate, device_pair, torch.full((1, 3, 16, 143), 1 / 143, device="cuda"), heads
+            )
+            reference = cpu_row_packet(candidate).materialize()
+        else:
+            reference = cpu_packet(candidate).materialize()
         destination = tuple(
             torch.full((1, 3, 151, 128), -7, device="cuda", dtype=torch.bfloat16) for _ in range(2)
         )

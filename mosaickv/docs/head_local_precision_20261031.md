@@ -111,3 +111,27 @@ unchanged guards, preserve baseline merges, and bind the previous negative
 decision by hash. Old low-bit arms are not rerun. No fresh cohort or larger
 campaign follows automatically. Numerical decoder controls now also cover the
 new correction patches using identical encoded CPU/GPU bytes.
+
+## Whole-value-row follow-up, frozen before COCO diagnostic results
+
+Keep union3 and global scalar refitting as controls; add one whole-value-row
+variant on the SAME two consumed inputs. Remove the V scalar patches and spend
+no more than their actual bytes on losslessly encoded complete V rows. Keep
+the K scalar corrections unchanged. Rank rows by maximum individual prompt
+query's retained attention squared times that row's quantization-error norm
+squared. Queries are not pooled before the maximum. This can preserve a
+coherent high-demand value vector rather than scattered scalar entries, but
+neither the score nor additional exact coverage guarantees task improvement.
+
+The lossless packet and its flat head/token map count. Search actual encoded
+prefix costs for the largest affordable ranked prefix; do not increase the
+reference exception-byte allowance or cache capacity. The number of exact
+scalar values can increase, and that changed coverage is explicitly recorded;
+the old 0.005 scalar fraction defines only the reference byte allowance here.
+Both packet sizes are monotone for
+append-only ranked prefixes, including raw fallback. All original positions,
+text/boundary protection, LOOK-M merged values, history, and unchanged 32-token
+guard remain. Every baseline receives the option. Run only after the active
+COCO array/analysis finishes, so aggregate use never exceeds six A100s. No
+COCO answers or failure identities inform this constructor, and no fresh
+evaluation or larger campaign is enabled by this diagnostic.
