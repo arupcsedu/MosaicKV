@@ -69,11 +69,17 @@ class HistoryRepairTransport:
             raise ValueError("reference and request geometry differ")
         if device.type == "cuda" and not r.kv.is_pinned():
             raise ValueError("GPU history reference must be pinned CPU memory")
-        self.stage = torch.zeros(r.kv.shape[1:], device=device, dtype=torch.bfloat16)
-        self.cache.shared_tensors = (*self.cache.shared_tensors, self.stage)
-        self.cache.shared_bytes = backing_bytes(self.cache.shared_tensors)
-        self.cache.initial_bytes += backing_bytes((self.stage,))
-        self.cache.observe()
+        # Use only fresh model-projected CURRENT K/V destinations. A separate
+        # all-layer staging owner exceeded one baseline's unchanged hard cap.
+        protected = {
+            t.untyped_storage().data_ptr()
+            for layer in self.cache.layers
+            for t in (*layer.representation.tensors(), *layer.attention.parameters())
+            if t.numel()
+        }
+        model = getattr(self.adapter, "model", None)
+        if model is not None:
+            protected.update(t.untyped_storage().data_ptr() for t in model.parameters())
         original = self.adapter.decode_one_token
 
         def decode(token, state, **kwargs):
@@ -89,14 +95,6 @@ class HistoryRepairTransport:
                     self.first_input_mismatch = self.steps
                 self.matched = self.matched and equal
                 self.current = self.enabled and self.matched
-                if self.current:
-                    if device.type == "cuda":
-                        start, end = (torch.cuda.Event(enable_timing=True) for _ in range(2))
-                        start.record()
-                    self.stage.copy_(r.kv[self.steps], non_blocking=device.type == "cuda")
-                    if device.type == "cuda":
-                        end.record()
-                        self.events.append((start, end))
             try:
                 output = original(token, state, **kwargs)
                 if self.seen != set(range(len(self.cache.layers))):
@@ -118,11 +116,43 @@ class HistoryRepairTransport:
                         raise RuntimeError("out-of-order history repair update")
                     self.seen.add(index)
                     if self.current:
-                        expected = (1, *self.stage[index, 0].shape)
-                        if key.shape != expected or value.shape != expected:
+                        expected = (1, *r.kv[self.steps, index, 0].shape)
+                        if (
+                            key.shape != expected
+                            or value.shape != expected
+                            or key.dtype != torch.bfloat16
+                            or value.dtype != torch.bfloat16
+                            or key.requires_grad
+                            or value.requires_grad
+                        ):
                             raise RuntimeError("generated reference K/V shape changed")
-                        key = self.stage[index, 0][None]
-                        value = self.stage[index, 1][None]
+                        owners = {
+                            key.untyped_storage().data_ptr(),
+                            value.untyped_storage().data_ptr(),
+                        }
+                        history = {
+                            t.untyped_storage().data_ptr() for t in target.history if t.numel()
+                        }
+                        if len(owners) != 2 or owners & (protected | history):
+                            raise RuntimeError(
+                                "history repair destination aliases protected storage"
+                            )
+                        if not key.is_contiguous() or not value.is_contiguous():
+                            raise RuntimeError(
+                                "current K/V direct-copy destinations must be contiguous"
+                            )
+                        if device.type == "cuda":
+                            start, end = (torch.cuda.Event(enable_timing=True) for _ in range(2))
+                            start.record()
+                        key.copy_(
+                            r.kv[self.steps, index, 0][None], non_blocking=device.type == "cuda"
+                        )
+                        value.copy_(
+                            r.kv[self.steps, index, 1][None], non_blocking=device.type == "cuda"
+                        )
+                        if device.type == "cuda":
+                            end.record()
+                            self.events.append((start, end))
                     return fn(key, value, cache_kwargs)
 
                 self.stack.enter_context(patch.object(layer, "update", replace))
@@ -137,12 +167,16 @@ class HistoryRepairTransport:
             enabled=self.enabled,
             online_reference_horizon=len(self.reference.tokens),
             cpu_residual_storage_bytes=self.reference.cpu_bytes,
-            gpu_staging_storage_bytes=backing_bytes((self.stage,)),
+            gpu_staging_storage_bytes=0,
+            transfer_destination="fresh_current_model_KV_only_no_additional_owner",
+            protected_source_history_and_weight_aliases_rejected=True,
             repaired_token_steps=self.repaired_steps,
             repaired_layer_head_blocks=self.repaired_steps
             * self.reference.kv.shape[1]
             * self.reference.kv.shape[3],
-            repaired_bytes=self.repaired_steps * self.stage.numel() * self.stage.element_size(),
+            repaired_bytes=self.repaired_steps
+            * self.reference.kv[0].numel()
+            * self.reference.kv.element_size(),
             first_input_prefix_mismatch=self.first_input_mismatch,
             stopped_permanently_after_prefix_mismatch=True,
             transfer_cuda_ms=sum(a.elapsed_time(b) for a, b in self.events),

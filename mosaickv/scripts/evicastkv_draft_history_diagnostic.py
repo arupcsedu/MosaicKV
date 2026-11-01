@@ -25,6 +25,7 @@ METHODS = (
     "vl_cache_reimpl",
     "prefixkv_reimpl",
 )
+RETRY = Path("/scratch/djy8hg/runs/evicastkv/draft-history-consumed-20261031-v1")
 VARIANTS = {
     method + "--" + variant: (method, variant == "repair")
     for method in METHODS
@@ -57,6 +58,18 @@ def prepare(root):
     if not outcome["complete"] or outcome["failures"]:
         raise ValueError("completed prior causal diagnostic required")
     bound[str(negative)] = sha(negative)
+    for i in range(2):
+        folder = RETRY / f"workers/{i}"
+        result = previous.read(folder / "result.json")
+        if result["failures"] != [
+            "RuntimeError: source and staging exceed original own source cap"
+        ]:
+            raise ValueError("only the recorded staging-cap failure may be retried")
+        bound[str(folder / "result.json")] = sha(folder / "result.json")
+        for name, digest in result["outputs"].items():
+            if sha(folder / name) != digest:
+                raise ValueError("partial producer changed")
+            bound[str(folder / name)] = digest
     write_once(
         root / "plan.json",
         dict(
@@ -67,6 +80,8 @@ def prepare(root):
             variants=VARIANTS,
             future_draft_steps=32,
             explicit_cpu_history_residual=True,
+            retry_transport="fresh_current_KV_direct_copy_zero_added_GPU_staging",
+            original_caps_unchanged=True,
             common_history_policy_for_all_five_methods=True,
             greedy_predictions=128,
             no_donor_removal=True,
@@ -206,6 +221,13 @@ def worker(root, expected, index):
         ):
             raise RuntimeError("shared-prefix isolated FullKV forecast control failed")
         reference = HistoryReference(history, tokens, logical_start)
+        old_reference = torch.load(
+            RETRY / f"workers/{index}/online-full-history.pt", map_location="cpu", weights_only=True
+        )
+        if not torch.equal(old_reference["kv"], history) or not torch.equal(
+            old_reference["tokens"], tokens
+        ):
+            raise RuntimeError("direct-buffer retry changed online FullKV forecast")
         torch.save(
             dict(kv=history, tokens=tokens, logical_start=reference.logical_start),
             out / "online-full-history.pt",
@@ -264,6 +286,13 @@ def worker(root, expected, index):
             ],
             selection_variant="frozen_shared_prior_not_full_graph_compressor",
             history_repair_experimental_not_main_adapter_capability=True,
+            actual_timing_protocol=dict(
+                warmups=0,
+                timed_repetitions=1,
+                fixed_method_order=METHODS,
+                diagnostic_only_no_statistical_latency_claim=True,
+            ),
+            actual_generation=dict(greedy=True, predictions=128, score_through_first_EOS=True),
             whole_request_KV_peak_certified=False,
         )
         write_once(out / "manifest.json", manifest)
@@ -351,6 +380,15 @@ def worker(root, expected, index):
                     history_repair_enabled=enabled,
                 )
                 torch.save(dict(fixed=fixed, greedy=greedy), out / (name + "-logits.pt"))
+                prior_file = RETRY / f"workers/{index}" / (name + "-logits.pt")
+                if prior_file.exists():
+                    prior = torch.load(prior_file, map_location="cpu", weights_only=True)
+                    if not torch.equal(prior["fixed"], fixed) or not torch.equal(
+                        prior["greedy"], greedy
+                    ):
+                        raise RuntimeError(
+                            "direct-buffer retry changed completed forecast-history logits"
+                        )
                 if not enabled and (
                     not torch.equal(fixed, old_native["fixed"])
                     or not torch.equal(greedy, old_native["greedy"])
@@ -404,6 +442,7 @@ def worker(root, expected, index):
                     metrics_are_consumed_diagnostics_not_official_MM_Vet_or_PPL=True,
                     different_encoded_memory_points_not_byte_matched=True,
                     whole_request_peak_certified=False,
+                    timing_is_single_trial_diagnostic_not_paper_latency=True,
                     no_independent_quality_or_superiority_claim=True,
                 )
                 if not row["original_source_unchanged"]:

@@ -69,7 +69,7 @@ def test_private_repair_prefix_stop_state_restoration_and_exact_accounting(enabl
     record = transport.record()
     assert record["repaired_token_steps"] == int(enabled)
     assert record["first_input_prefix_mismatch"] == 1
-    assert cache.initial_bytes == initial + transport.stage.numel() * 2
+    assert cache.initial_bytes == initial and record["gpu_staging_storage_bytes"] == 0
     assert record["cpu_residual_storage_bytes"] == reference.kv.numel() * 2 + 3 * 8
     cache.storage_record()
 
@@ -84,3 +84,23 @@ def test_foreign_request_fails_closed_and_reference_requires_real_positions():
     assert "decode_one_token" not in adapter.__dict__
     with pytest.raises(ValueError):
         HistoryReference(reference.kv, reference.tokens, 0)
+
+
+def test_direct_copy_rejects_immutable_prompt_alias_before_any_write():
+    adapter, cache, reference = fixture()
+    source = cache.layers[0].representation.private()[0]
+    before = source.clone()
+
+    def bad_decode(token, state, **kwargs):
+        target = source[:, :, :1]
+        cache.layers[0].update(target, torch.zeros_like(target))
+
+    adapter.decode_one_token = bad_decode
+    with (
+        pytest.raises(RuntimeError, match="protected storage"),
+        HistoryRepairTransport(adapter, cache, reference, enabled=True),
+    ):
+        adapter.decode_one_token(
+            torch.tensor([[7]]), SimpleNamespace(past_key_values=cache, next_decode_position=9)
+        )
+    assert torch.equal(source, before)
