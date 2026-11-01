@@ -84,6 +84,8 @@ def cache_from_formats(
             cls = SharedSourceLayer
     shared: list[Any] = []
     for i, format in enumerate(formats):
+        if hasattr(format, "fork_for_decode"):
+            format = format.fork_for_decode(updates)
         shared.extend(format.shared())
         layer = cls(
             format,
@@ -175,6 +177,11 @@ def run(
         if shared_workspace:
             stack.callback(cache.release_workspace)
         stack.enter_context(IsolatedStorageTransport(adapter, cache))
+        from mosaickv.evaluation.exact_head_bypass import ExactHeadTransport, HeadBypassFormat
+
+        bypass = None
+        if any(isinstance(layer.representation, HeadBypassFormat) for layer in cache.layers):
+            bypass = stack.enter_context(ExactHeadTransport(adapter, cache))
         if any(hasattr(f, "valid_prompt_counts") for f in formats):
             from mosaickv.evaluation.completion_masks import CompletionMaskTransport
 
@@ -221,6 +228,14 @@ def run(
     ):
         raise RuntimeError("nonfinite output or changed logical decode positions")
     record = cache.storage_record()
+    if bypass is not None:
+        record.update(
+            exact_head_bypass_recomputed_heads=bypass.recomputed_heads,
+            exact_head_bypass_private_state=True,
+            full_head_history_reservation_charged_from_initial_boundary=True,
+            main_selected_KV_unchanged_virtual_head_context_added=True,
+            inactive_duplicate_main_head_storage_still_charged=True,
+        )
     if any(hasattr(f, "valid_prompt_counts") for f in formats):
         record.update(
             unchanged_original_selected_memberships=False,
