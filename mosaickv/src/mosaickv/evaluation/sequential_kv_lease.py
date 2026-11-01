@@ -22,6 +22,11 @@ from mosaickv.evaluation.text_source_storage import TextSourceFormat
 def fill_component(packet, attention, component, destination, *, source_workspace=None):
     if type(component) is not int or component not in (0, 1):
         raise ValueError("key or value component required")
+    from mosaickv.evaluation.layer_code_delta import BoundDeltaFormat
+
+    if isinstance(packet, BoundDeltaFormat):
+        packet.fill_component(attention, component, destination)
+        return
     n = packet.shape[-2]
     prefix = destination[..., :n, :]
     from mosaickv.evaluation.encoded_projection import EncodedFormat

@@ -126,6 +126,9 @@ def cache_from_formats(
             )
             cls = SharedSourceLayer
     shared: list[Any] = []
+    from mosaickv.evaluation.layer_code_delta import bind
+
+    formats = bind(formats)
     for i, format in enumerate(formats):
         if hasattr(format, "fork_for_decode"):
             format = format.fork_for_decode(updates)
