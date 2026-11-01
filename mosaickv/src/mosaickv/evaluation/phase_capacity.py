@@ -185,13 +185,28 @@ class PhaseFormat:
 
 
 @torch.inference_mode()
-def recode(packet, original_pair, positions, phases, *, key_bits, value_bits, pre_rotary):
+def recode(
+    packet,
+    original_pair,
+    positions,
+    phases,
+    *,
+    key_bits,
+    value_bits,
+    pre_rotary,
+    exclude_exact_rows=False,
+):
     """Same selected/merged ACTUAL K/V; original exact protections stay intact.
 
     Retention-1 must bypass this function and use the original raw format.
     A TextSourceFormat continues to apply its actual post-RoPE text last.
     """
-    if type(pre_rotary) is not bool or key_bits not in (2, 3) or value_bits not in (2, 3):
+    if (
+        type(pre_rotary) is not bool
+        or type(exclude_exact_rows) is not bool
+        or key_bits not in (2, 3)
+        or value_bits not in (2, 3)
+    ):
         raise ValueError("explicit registered two/three-bit diagnostic required")
     outer = packet if isinstance(packet, TextSourceFormat) else None
     local = outer.base if outer is not None else packet
@@ -203,7 +218,16 @@ def recode(packet, original_pair, positions, phases, *, key_bits, value_bits, pr
     if any(tuple(t.shape) != local.shape or t.dtype != torch.bfloat16 for t in original_pair):
         raise ValueError("actual same-shape BF16 selected/merged K/V required")
     key = inverse_phase(original_pair[0], ids, cos, sin) if pre_rotary else original_pair[0]
-    bodies = (pack(key, bits=key_bits, axis=2), pack(original_pair[1], bits=value_bits, axis=3))
+    if exclude_exact_rows:
+        from mosaickv.evaluation.conditional_precision import exact_rows, pack_unprotected
+
+        rows = exact_rows(packet)
+        bodies = (
+            pack_unprotected(key, rows, bits=key_bits, axis=2),
+            pack_unprotected(original_pair[1], rows, bits=value_bits, axis=3),
+        )
+    else:
+        bodies = (pack(key, bits=key_bits, axis=2), pack(original_pair[1], bits=value_bits, axis=3))
     rewritten = replace(local, base=replace(local.base, pair=bodies))
     result = PhaseFormat(rewritten, ids, cos, sin) if pre_rotary else rewritten
     return replace(outer, base=result) if outer is not None else result

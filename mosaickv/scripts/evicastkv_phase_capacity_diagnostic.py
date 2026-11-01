@@ -25,7 +25,7 @@ RATIOS = (0.5, 0.6, 0.65, 0.7)
 VARIANTS = {m + "--" + a for m in METHODS for a in ARMS}
 
 
-def prepare(root):
+def prepare(root, *, exclude_exact_rows=False):
     if root.exists():
         raise ValueError("new immutable diagnostic root required")
     old = previous.read(OLD / "plan.json")
@@ -47,7 +47,31 @@ def prepare(root):
     if not status["complete"] or status["model_level_diagnostic_pass"]:
         raise ValueError("preserve completed negative history diagnostic")
     bound[str(decision)] = sha(decision)
-    protocol = SOURCE / "mosaickv/docs/phase_capacity_diagnostic_20261031.md"
+    if exclude_exact_rows:
+        prior = Path("/scratch/djy8hg/runs/evicastkv/phase-capacity-consumed-20261031-v1")
+        status = previous.read(prior / "analysis/decision.json")
+        if not status["complete"] or status["failures"] or status["model_level_diagnostic_pass"]:
+            raise ValueError("completed negative unconditional phase study required")
+        bound[str(prior / "analysis/decision.json")] = sha(prior / "analysis/decision.json")
+        for index in range(2):
+            folder = prior / f"workers/{index}"
+            record = previous.read(folder / "result.json")
+            if record["status"] != "completed" or record["failures"]:
+                raise ValueError("complete unconditional byte/trajectory controls required")
+            bound[str(folder / "result.json")] = sha(folder / "result.json")
+            for name, digest in record["outputs"].items():
+                if sha(folder / name) != digest:
+                    raise ValueError("unconditional control changed")
+                bound[str(folder / name)] = digest
+    protocol = (
+        SOURCE
+        / "mosaickv/docs"
+        / (
+            "conditional_precision_diagnostic_20261101.md"
+            if exclude_exact_rows
+            else "phase_capacity_diagnostic_20261031.md"
+        )
+    )
     bound[str(protocol)] = sha(protocol)
     write_once(
         root / "plan.json",
@@ -56,6 +80,7 @@ def prepare(root):
             source_sha=clean_source(SOURCE),
             bound_files=bound,
             stage="consumed_inverse_phase_capacity_diagnostic",
+            exclude_exact_rows_from_body_ranges=exclude_exact_rows,
             variants=sorted(VARIANTS),
             capacity_ratios=RATIOS,
             choose_ratio_by_backing_bytes_only=True,
@@ -191,6 +216,9 @@ def worker(root, expected, index):
                 warmups=0, repetitions=1, order="fixed", paper_latency_claim=False
             ),
             whole_request_peak_certified=False,
+            exclude_exact_rows_from_body_ranges=plan.get(
+                "exclude_exact_rows_from_body_ranges", False
+            ),
         )
         write_once(out / "manifest.json", manifest)
         raw = tuple(
@@ -280,6 +308,9 @@ def worker(root, expected, index):
                             key_bits=kb,
                             value_bits=vb,
                             pre_rotary=rotary,
+                            exclude_exact_rows=plan.get(
+                                "exclude_exact_rows_from_body_ranges", False
+                            ),
                         )
                         for i, packet in enumerate(optimized)
                     )
@@ -307,6 +338,9 @@ def worker(root, expected, index):
                                     key_bits=2,
                                     value_bits=2,
                                     pre_rotary=False,
+                                    exclude_exact_rows=plan.get(
+                                        "exclude_exact_rows_from_body_ranges", False
+                                    ),
                                 )
                                 for i, packet in enumerate(optimized)
                             )
@@ -340,6 +374,8 @@ def worker(root, expected, index):
                     different_measured_points_not_byte_matched=True,
                     whole_request_peak_certified=False,
                     independent_quality_N=0,
+                    exclude_exact_rows_from_body_ranges=arm != "shadow"
+                    and plan.get("exclude_exact_rows_from_body_ranges", False),
                 )
                 if arm not in feasible:
                     row = dict(
@@ -441,6 +477,33 @@ def analyze(root, expected):
             )
         except (OSError, ValueError) as exc:
             failures.append(str(exc))
+    if plan.get("exclude_exact_rows_from_body_ranges", False):
+        prior = Path("/scratch/djy8hg/runs/evicastkv/phase-capacity-consumed-20261031-v1")
+        previous_rows = {}
+        for index in range(2):
+            for line in (prior / f"workers/{index}/raw.jsonl").read_text().splitlines():
+                old = json.loads(line)
+                previous_rows[(old.get("sample_id"), old.get("variant"))] = old
+        for row in rows:
+            old = previous_rows.get((row.get("sample_id"), row.get("variant")))
+            matched = old is not None and row["status"] == old["status"]
+            if matched and row["status"] == "completed":
+                matched = row["source_membership_sha256"] == old[
+                    "source_membership_sha256"
+                ] and all(
+                    row["storage"][field] == old["storage"][field]
+                    for field in (
+                        "initial_active_kv_storage_bytes",
+                        "final_active_kv_storage_bytes",
+                        "peak_active_kv_storage_bytes",
+                    )
+                )
+            row["same_bytes_and_memberships_as_unconditional_control"] = matched
+            if not matched:
+                failures.append(
+                    "conditional arm differs in membership/storage/status: "
+                    + str(row.get("variant"))
+                )
     opportunities = []
     for arm in ARMS[1:]:
         decisions = []
@@ -508,12 +571,16 @@ def submit(root, expected):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("prepare", "cpu", "submit", "worker", "analyze"))
+    parser.add_argument(
+        "mode", choices=("prepare", "prepare_exclusion", "cpu", "submit", "worker", "analyze")
+    )
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--plan-sha")
     args = parser.parse_args()
     if args.mode == "prepare":
         prepare(args.root)
+    elif args.mode == "prepare_exclusion":
+        prepare(args.root, exclude_exact_rows=True)
     elif args.mode == "cpu":
         previous.cpu(args.root, args.plan_sha)
     elif args.mode == "worker":
