@@ -129,13 +129,16 @@ class PromptStorageLayer(CacheLayerMixin):
             dest[..., self.history_length : self.history_length + 1, :].copy_(source)
         self.history_length += 1
         shape = (*key_states.shape[:2], self.get_seq_length(), key_states.shape[-1])
-        self.leased = tuple(
-            torch.empty(shape, dtype=key_states.dtype, device=key_states.device) for _ in range(2)
-        )
+        self.leased = self._new_lease(shape, key_states)
         self.lease_bytes = backing_bytes(self.leased)
         self.observe(())
         self.materialize()
         return self.leased
+
+    def _new_lease(self, shape: tuple[int, ...], source: Any) -> tuple[Any, ...]:
+        import torch
+
+        return tuple(torch.empty(shape, dtype=source.dtype, device=source.device) for _ in range(2))
 
     def materialize(self) -> None:
         if self.fused_unpack:

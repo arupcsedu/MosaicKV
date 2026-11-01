@@ -40,6 +40,7 @@ def _project(
     WIDTH: tl.constexpr,
     DIM: tl.constexpr,
     BITS: tl.constexpr,
+    COMPONENT: tl.constexpr = -1,
 ):
     row = tl.program_id(0) * 16 + tl.arange(0, 16)
     head = tl.program_id(1)
@@ -50,26 +51,32 @@ def _project(
     for start in range(WIDTH // 64):
         x = _read(CODES, MINIMUM, SCALE, row, start * 64, ROWS, WIDTH, BITS)
         k = start * 64 + reduction
-        wk = tl.load(WK + (head * DIM + col[None, :]) * WIDTH + k[:, None])
-        wv = tl.load(WV + (head * DIM + col[None, :]) * WIDTH + k[:, None])
-        ak = tl.dot(x, wk, ak)
-        av = tl.dot(x, wv, av)
-    key = ak.to(tl.bfloat16).to(tl.float32)
-    rotated = tl.gather(key, tl.broadcast_to(((col + DIM // 2) % DIM)[None, :], (16, DIM)), 1)
-    rotated = tl.where(col[None, :] < DIM // 2, -rotated, rotated)
+        if COMPONENT != 1:
+            wk = tl.load(WK + (head * DIM + col[None, :]) * WIDTH + k[:, None])
+            ak = tl.dot(x, wk, ak)
+        if COMPONENT != 0:
+            wv = tl.load(WV + (head * DIM + col[None, :]) * WIDTH + k[:, None])
+            av = tl.dot(x, wv, av)
     valid = row[:, None] < ROWS
-    cos = tl.load(COS + row[:, None] * DIM + col[None, :], valid, other=0).to(tl.float32)
-    sin = tl.load(SIN + row[:, None] * DIM + col[None, :], valid, other=0).to(tl.float32)
-    first = (key * cos).to(tl.bfloat16).to(tl.float32)
-    second = (rotated * sin).to(tl.bfloat16).to(tl.float32)
     pointer = head * HEAD_OUT + row[:, None] * DIM + col[None, :]
-    tl.store(OK + pointer, first + second, valid)
-    tl.store(OV + pointer, av.to(tl.bfloat16), valid)
+    if COMPONENT != 1:
+        key = ak.to(tl.bfloat16).to(tl.float32)
+        rotated = tl.gather(key, tl.broadcast_to(((col + DIM // 2) % DIM)[None, :], (16, DIM)), 1)
+        rotated = tl.where(col[None, :] < DIM // 2, -rotated, rotated)
+        cos = tl.load(COS + row[:, None] * DIM + col[None, :], valid, other=0).to(tl.float32)
+        sin = tl.load(SIN + row[:, None] * DIM + col[None, :], valid, other=0).to(tl.float32)
+        first = (key * cos).to(tl.bfloat16).to(tl.float32)
+        second = (rotated * sin).to(tl.bfloat16).to(tl.float32)
+        tl.store(OK + pointer, first + second, valid)
+    if COMPONENT != 0:
+        tl.store(OV + pointer, av.to(tl.bfloat16), valid)
 
 
-def project(packet, attention, targets):
+def project(packet, attention, targets, *, component=-1):
     import torch
 
+    if type(component) is not int or component not in (-1, 0, 1):
+        raise ValueError("explicit both/key/value projection component required")
     h, n, d = packet.shape[1:]
     body = packet.source
     width = body.shape[-1]
@@ -106,5 +113,6 @@ def project(packet, attention, targets):
         WIDTH=width,
         DIM=d,
         BITS=3,
+        COMPONENT=component,
         enable_fp_fusion=False,
     )

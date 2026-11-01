@@ -23,7 +23,7 @@ STUDY = Path("/scratch/djy8hg/runs/evicastkv/protected-source-cpu-20261101-v2")
 ARMS = ("shadow", "source3_full_prompt", "source3_exclude_global_exact")
 
 
-def prepare(root):
+def prepare(root, *, sequential_shadow=False):
     if root.exists():
         raise ValueError("new immutable source-runtime root required")
     old = previous.read(OLD / "plan.json")
@@ -46,22 +46,28 @@ def prepare(root):
             bound[str(folder / name)] = digest
     protocol = SOURCE / "mosaickv/docs/shared_source_runtime_20261101.md"
     bound[str(protocol)] = sha(protocol)
+    if sequential_shadow:
+        protocol = SOURCE / "mosaickv/docs/sequential_kv_lease_20261101.md"
+        bound[str(protocol)] = sha(protocol)
     write_once(
         root / "plan.json",
         dict(
             old,
             source_sha=clean_source(SOURCE),
             bound_files=bound,
-            stage="consumed_full_prompt_shared_projection_source_precision",
-            variants=ARMS,
+            stage="common_sequential_lease_consumed_control"
+            if sequential_shadow
+            else "consumed_full_prompt_shared_projection_source_precision",
+            variants=("shadow",) if sequential_shadow else ARMS,
+            sequential_shadow=sequential_shadow,
             original_caps_unchanged=True,
             one_prefill=True,
             retire_original_source_before_decode=True,
             original_retention_one_bypasses_all_lossy_formats=True,
-            source_position_fraction=1.0,
+            source_position_fraction=0.5 if sequential_shadow else 1.0,
             source_codec_bits=3,
             source_codec_axis=2,
-            source_scalar_KV_patches_disabled=True,
+            source_scalar_KV_patches_disabled=not sequential_shadow,
             independent_quality_N=0,
             no_fresh_or_large_campaign_authorized=True,
             paper_campaign_authorized=False,
@@ -76,9 +82,7 @@ def digest_tensors(tensors):
     digest = hashlib.sha256()
     for tensor in tensors:
         digest.update(str((tuple(tensor.shape), str(tensor.dtype))).encode())
-        digest.update(
-            tensor.detach().contiguous().view(torch.uint8).cpu().numpy().tobytes()
-        )
+        digest.update(tensor.detach().contiguous().view(torch.uint8).cpu().numpy().tobytes())
     return digest.hexdigest()
 
 
@@ -94,6 +98,7 @@ def build(
     plan,
     full,
     out,
+    execute=None,
 ):
     import torch
 
@@ -107,6 +112,8 @@ def build(
     from mosaickv.evaluation.shared_source_format import construct
     from mosaickv.evaluation.text_source_storage import optimize
 
+    execute = storage_runs.run if execute is None else execute
+
     source, _ = adapter._legacy_layers(prefill.state.past_key_values)
     before = parent.causal.tensor_hash(source)
     source_bytes = backing_bytes(tuple(t for pair in source for t in pair))
@@ -118,9 +125,7 @@ def build(
         )
         for k, v in source
     )
-    ordinary, ordinary_info = storage_runs.run(
-        adapter, prefill, raw, tokens=128, sealed=False, audit=False
-    )
+    ordinary, ordinary_info = execute(adapter, prefill, raw, tokens=128, sealed=False, audit=False)
     control = comparison(full, ordinary)
     if control["maximum_logit_difference"] > 0.001 or control["token_agreement"] != 1:
         raise RuntimeError("retention-one raw FullKV 128-token parity failed")
@@ -162,7 +167,7 @@ def build(
     )
     formats = {"shadow": shadow}
     construction_checks = {}
-    for arm in ARMS[1:]:
+    for arm in plan["variants"][1:]:
         torch.cuda.synchronize()
         begun = time.monotonic()
         trial = tuple(
@@ -270,6 +275,12 @@ def worker(root, expected, index):
     from mosaickv.measurements.telemetry import capture_gpu_environment
 
     plan = previous.common.inputs(root, expected)
+    arms = tuple(plan["variants"])
+    execute = storage_runs.run
+    if plan.get("sequential_shadow", False):
+        from mosaickv.evaluation.sequential_kv_lease import paired_run
+
+        execute = paired_run
     job = plan["jobs"][index]
     out = root / f"workers/{index}"
     out.mkdir(parents=True, exist_ok=False)
@@ -333,6 +344,7 @@ def worker(root, expected, index):
                 plan,
                 full,
                 out,
+                execute=execute,
             )
         write_once(out / "construction.json", proof)
         runtime = replace(
@@ -381,7 +393,9 @@ def worker(root, expected, index):
             measurement_type="ablation_measured",
             diagnostic_only=True,
             independent_quality_N=0,
-            variant="full_prompt_shared_source_precision_not_mosaickv_exact",
+            variant="common_sequential_lease_unchanged_source_shadow"
+            if plan.get("sequential_shadow", False)
+            else "full_prompt_shared_source_precision_not_mosaickv_exact",
             disabled_components=[
                 "future_query_forecast",
                 "evidence_graph",
@@ -390,9 +404,11 @@ def worker(root, expected, index):
                 "prototype",
                 "residual_repair",
             ],
-            old_scalar_KV_patch_policy_replaced_by_source_codec=True,
+            old_scalar_KV_patch_policy_replaced_by_source_codec=not plan.get(
+                "sequential_shadow", False
+            ),
             retention_one_uses_raw_no_quantization=True,
-            source_position_fraction=1.0,
+            source_position_fraction=plan["source_position_fraction"],
             retention_ratio="not_applicable_for_lossy_byte_compressed_variant",
             cpu_residual_bytes=0,
             no_superiority_or_byte_matched_claim=True,
@@ -415,7 +431,7 @@ def worker(root, expected, index):
         all_format_bytes = backing_bytes(
             tuple(t for f in formats.values() for p in f for t in p.tensors())
         )
-        for arm in ARMS:
+        for arm in arms:
             common = dict(
                 variant=arm,
                 task=payload["task"],
@@ -436,13 +452,13 @@ def worker(root, expected, index):
                 packet = formats[arm]
                 gc.collect()
                 torch.cuda.synchronize()
-                fixed, _ = storage_runs.run(
+                fixed, _ = execute(
                     adapter, runtime, packet, tokens=33, forced=forced, sealed=False, audit=False
                 )
                 gc.collect()
                 torch.cuda.synchronize()
                 torch.cuda.reset_peak_memory_stats()
-                greedy, details = storage_runs.run(
+                greedy, details = execute(
                     adapter, runtime, packet, tokens=128, sealed=False, audit=False
                 )
                 allocated, reserved = (
@@ -498,19 +514,20 @@ def worker(root, expected, index):
                 )
             with (out / "raw.jsonl").open("a") as stream:
                 stream.write(json.dumps(row, allow_nan=False) + "\n")
-        if ARMS[1] in formats:
+        isolation_arm = "shadow" if plan.get("sequential_shadow", False) else ARMS[1]
+        if isolation_arm in formats:
             gc.collect()
-            again, _ = storage_runs.run(
+            again, _ = execute(
                 adapter,
                 runtime,
-                formats[ARMS[1]],
+                formats[isolation_arm],
                 tokens=33,
                 forced=forced,
                 sealed=False,
                 audit=False,
             )
             prior = torch.load(
-                out / (ARMS[1] + "-logits.pt"), map_location="cpu", weights_only=True
+                out / (isolation_arm + "-logits.pt"), map_location="cpu", weights_only=True
             )["fixed"]
             if not torch.equal(again, prior):
                 raise RuntimeError("A-B-A source request isolation failed")
@@ -559,7 +576,7 @@ def analyze(root, expected):
         except (ValueError, OSError) as exc:
             failures.append(str(exc))
     gates = []
-    for arm in ARMS[1:]:
+    for arm in plan["variants"][1:]:
         per_input = []
         for job in plan["jobs"]:
             sample = previous.read(job["inputs"][0])["sample_id"]
@@ -596,13 +613,22 @@ def analyze(root, expected):
                 and all(all(v > 0 for v in p["storage_reductions"].values()) for p in per_input),
             )
         )
+    transport_gate = plan.get("sequential_shadow", False) and len(rows) == 2 and not failures
+    if transport_gate:
+        transport_gate = all(
+            r["status"] == "completed"
+            and r["storage"]["sequential_lease_control"]["logits_bitwise_equal"]
+            and r["storage"]["sequential_lease_control"]["persistent_storage_identical"]
+            for r in rows
+        )
     write_once(
         root / "analysis/decision.json",
         dict(
-            complete=len(rows) == 6 and not failures,
+            complete=len(rows) == 2 * len(plan["variants"]) and not failures,
             failures=failures,
             rows=rows,
             gates=gates,
+            common_sequential_transport_gate=transport_gate,
             source_sha=plan["source_sha"],
             plan_sha256=expected,
             independent_quality_N=0,
@@ -631,12 +657,16 @@ def submit(root, expected):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("prepare", "cpu", "submit", "worker", "analyze"))
+    parser.add_argument(
+        "mode", choices=("prepare", "prepare_sequential", "cpu", "submit", "worker", "analyze")
+    )
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--plan-sha")
     args = parser.parse_args()
     if args.mode == "prepare":
         prepare(args.root)
+    elif args.mode == "prepare_sequential":
+        prepare(args.root, sequential_shadow=True)
     elif args.mode == "cpu":
         previous.cpu(args.root, args.plan_sha)
     elif args.mode == "worker":

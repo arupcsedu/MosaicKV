@@ -106,6 +106,7 @@ def _project(
     DIM: tl.constexpr,
     RAW: tl.constexpr,
     PACK_COUNTS: tl.constexpr = False,
+    COMPONENT: tl.constexpr = -1,
 ):
     row = tl.program_id(0) * 16 + tl.arange(0, 16)
     head = tl.program_id(1)
@@ -131,10 +132,12 @@ def _project(
                 PACK_COUNTS,
             ).to(tl.bfloat16, bitcast=True)
             k = start * 64 + reduction
-            wk = tl.load(WK + (head * DIM + col[None, :]) * WIDTH + k[:, None])
-            wv = tl.load(WV + (head * DIM + col[None, :]) * WIDTH + k[:, None])
-            ak = tl.dot(x, wk, ak)
-            av = tl.dot(x, wv, av)
+            if COMPONENT != 1:
+                wk = tl.load(WK + (head * DIM + col[None, :]) * WIDTH + k[:, None])
+                ak = tl.dot(x, wk, ak)
+            if COMPONENT != 0:
+                wv = tl.load(WV + (head * DIM + col[None, :]) * WIDTH + k[:, None])
+                av = tl.dot(x, wv, av)
         key = ak.to(tl.bfloat16).to(tl.float32)
         rotated = tl.gather(key, tl.broadcast_to(((col + DIM // 2) % DIM)[None, :], (16, DIM)), 1)
         rotated = tl.where(col[None, :] < DIM // 2, -rotated, rotated)
@@ -149,8 +152,10 @@ def _project(
         second = (rotated * sin).to(tl.bfloat16).to(tl.float32)
         pointer = head * HEAD_OUT + slot[:, None] * DIM + col[None, :]
         mask = (row[:, None] < ROWS) & (slot[:, None] >= 0)
-        tl.store(OK + pointer, (first + second).to(tl.bfloat16), mask)
-        tl.store(OV + pointer, av.to(tl.bfloat16), mask)
+        if COMPONENT != 1:
+            tl.store(OK + pointer, (first + second).to(tl.bfloat16), mask)
+        if COMPONENT != 0:
+            tl.store(OV + pointer, av.to(tl.bfloat16), mask)
 
 
 @triton.jit(do_not_specialize=["ROWS"])
@@ -209,9 +214,12 @@ def project(
     targets: Any,
     *,
     packed_counts: bool = False,
+    component: int = -1,
 ) -> None:
     import torch
 
+    if type(component) is not int or component not in (-1, 0, 1):
+        raise ValueError("explicit both/key/value projection component required")
     heads, kept = archive.selected.shape
     width = body.shape[-1]
     if (
@@ -259,6 +267,7 @@ def project(
         DIM=128,
         RAW=body.raw,
         PACK_COUNTS=packed_counts,
+        COMPONENT=component,
         num_warps=4,
         enable_fp_fusion=False,
     )

@@ -22,6 +22,7 @@ def cache_from_formats(
     workspace_graph: bool = False,
     consolidated_history: bool = False,
     segmented_history: bool = False,
+    sequential_lease: bool = False,
 ) -> ExactCache:
     from mosaickv.evaluation.sealed_history import SealedHistoryLayer
 
@@ -54,8 +55,24 @@ def cache_from_formats(
         )
     ):
         raise ValueError("segmented history requires only direct source history")
+    if type(sequential_lease) is not bool or (
+        sequential_lease
+        and (
+            sealed
+            or batched_history
+            or source_history
+            or shared_workspace
+            or consolidated_history
+            or segmented_history
+        )
+    ):
+        raise ValueError("sequential lease requires explicit raw append-only history")
     cache = ExactCache(audit_workspace=audit)
     cls = SealedHistoryLayer if sealed else ExactLayer
+    if sequential_lease:
+        from mosaickv.evaluation.sequential_kv_lease import SequentialLayer
+
+        cls = SequentialLayer
     if batched_history:
         if not sealed:
             raise ValueError("batched history requires lossless sealed storage")
@@ -127,6 +144,7 @@ def run(
     segmented_history: bool = False,
     history_reference: Any = None,
     history_repair_enabled: bool = True,
+    sequential_lease: bool = False,
 ) -> tuple[Any, dict[str, Any]]:
     import time
 
@@ -158,6 +176,7 @@ def run(
         workspace_graph=workspace_graph,
         consolidated_history=consolidated_history,
         segmented_history=segmented_history,
+        sequential_lease=sequential_lease,
     )
     length = max(f.shape[-2] for f in formats)
     state = DecodeState(
@@ -192,6 +211,10 @@ def run(
         if shared_workspace:
             stack.callback(cache.release_workspace)
         stack.enter_context(IsolatedStorageTransport(adapter, cache))
+        if sequential_lease:
+            from mosaickv.evaluation.sequential_kv_lease import SequentialAttentionTransport
+
+            stack.enter_context(SequentialAttentionTransport(adapter, cache))
         from mosaickv.evaluation.exact_head_bypass import ExactHeadTransport, HeadBypassFormat
 
         bypass = None
@@ -262,6 +285,8 @@ def run(
             original_selected_values_preserved_but_membership_extended=True,
         )
     record.update(
+        sequential_kv_lease=sequential_lease,
+        sequential_component_fills=[getattr(layer, "component_fills", 0) for layer in cache.layers],
         segmented_history=segmented_history,
         segment_table_builds=getattr(cache, "segment_table_builds", 0),
         source_check_flags_checked=getattr(cache, "source_check_flags_checked", 0),
