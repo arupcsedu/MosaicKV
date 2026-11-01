@@ -29,6 +29,31 @@ def precision_header_label(arm):
     return "fp16" if "fp16" in arm else "fp32"
 
 
+def history_method_jobs(jobs, variants, *, seed=0):
+    """One method/input per bounded worker; immutable parent input remains explicit."""
+    if len(jobs) != 2 or len(set(variants)) != len(variants) or not variants:
+        raise ValueError("two consumed inputs and unique registered variants required")
+    import random
+
+    result = []
+    for i, job in enumerate(jobs):
+        order = list(variants)
+        random.Random(seed + i).shuffle(order)
+        start = len(result)
+        result.extend(
+            dict(job, index=start + j, input_index=i, evaluation_variant=variant)
+            for j, variant in enumerate(order)
+        )
+    return result
+
+
+def expected_row_count(plan):
+    return sum(
+        1 if "evaluation_variant" in job else len(plan.get("evaluation_variants", plan["variants"]))
+        for job in plan["jobs"]
+    )
+
+
 def prepare(
     root,
     *,
@@ -43,6 +68,7 @@ def prepare(
     sparse_exceptions=False,
     coherent_channels=False,
     sequential_history=False,
+    common_history=False,
 ):
     if root.exists():
         raise ValueError("new immutable source-runtime root required")
@@ -292,6 +318,34 @@ def prepare(
                 if sha(folder / name) != digest:
                     raise ValueError("frozen prompt controls changed")
                 bound[str(folder / name)] = digest
+    if common_history:
+        if not sequential_history:
+            raise ValueError("common history timing requires the validated exact history mode")
+        canary = Path(
+            "/scratch/djy8hg/runs/evicastkv/sequential-source-history-consumed-20261101-v1"
+        )
+        decision = previous.read(canary / "analysis/decision.json")
+        if (
+            not decision["complete"]
+            or decision["failures"]
+            or not decision["common_exact_history_transport_gate"]
+            or not decision["audited_history_memory_gate"]
+        ):
+            raise ValueError("complete generation/teacher bit identity and memory gates required")
+        for path in (canary / "plan.json", canary / "analysis/decision.json"):
+            bound[str(path)] = sha(path)
+        for i in range(2):
+            folder = canary / f"workers/{i}"
+            record = previous.read(folder / "result.json")
+            if record["status"] != "completed" or record["failures"]:
+                raise ValueError("positive history producer evidence required")
+            bound[str(folder / "result.json")] = sha(folder / "result.json")
+            for name, digest in record["outputs"].items():
+                if sha(folder / name) != digest:
+                    raise ValueError("history canary artifact changed")
+                bound[str(folder / name)] = digest
+        path = SOURCE / "mosaickv/docs/common_exact_history_timing_20261101.md"
+        bound[str(path)] = sha(path)
     variants = ("shadow",) if sequential_shadow else ARMS
     if corrected_source:
         variants = ("shadow", "source3_exclude_global_exact", "source3_exact_text_source")
@@ -364,11 +418,16 @@ def prepare(
             *(f"baseline_{method}__fp32" for method in METHODS if method != "mosaickv_exact"),
         )
     if sequential_history:
-        evaluation_variants = ("source3_direct_fp32", "baseline_prompt_attention_topk__fp32")
+        evaluation_variants = (
+            "source3_direct_fp32",
+            *(f"baseline_{method}__fp32" for method in METHODS if method != "mosaickv_exact"),
+        ) if common_history else ("source3_direct_fp32", "baseline_prompt_attention_topk__fp32")
     write_once(
         root / "plan.json",
         dict(
             old,
+            jobs=history_method_jobs(old["jobs"], evaluation_variants, seed=old["seed"])
+            if common_history else old["jobs"],
             source_sha=clean_source(SOURCE),
             bound_files=bound,
             stage="common_sequential_lease_consumed_control"
@@ -393,12 +452,20 @@ def prepare(
             coherent_channels=coherent_channels,
             sequential_source_history=sequential_history,
             history_audit=True if sequential_history else None,
-            maximum_worker_minutes=60 if sequential_history else 30,
+            maximum_worker_minutes=90 if common_history else 60 if sequential_history else 30,
+            maximum_simultaneous_workers=6 if common_history else 2,
+            one_method_per_worker=common_history,
+            common_history=common_history,
+            paired_history_timing=common_history,
+            history_timing_warmups=5 if common_history else 0,
+            history_timing_repetitions=20 if common_history else 0,
+            randomized_method_and_history_order=common_history,
             history_reference_root=str(proof_root) if sequential_history else None,
             no_prompt_codec_or_selection_change=sequential_history,
             same_history_optimization_for_every_baseline=sequential_history,
             coherent_column_allowance_bytes=2**20 if coherent_channels else 0,
-            baseline_comparison_admissible=not coherent_channels,
+            baseline_comparison_admissible=not (coherent_channels or sequential_history),
+            common_storage_controls_not_byte_matched_algorithm_evidence=sequential_history,
             coherent_column_phase="source_transport_and_own_parent_diagnostic_not_comparative_claim"
             if coherent_channels
             else None,
@@ -1075,7 +1142,17 @@ def worker(root, expected, index):
     from mosaickv.measurements.telemetry import capture_gpu_environment
 
     plan = previous.common.inputs(root, expected)
-    arms = tuple(plan.get("evaluation_variants", plan["variants"]))
+    job = plan["jobs"][index]
+    input_index = job.get("input_index", index)
+    arms = (job["evaluation_variant"],) if "evaluation_variant" in job else tuple(
+        plan.get("evaluation_variants", plan["variants"])
+    )
+    if plan.get("common_history", False):
+        import random
+
+        arms = list(arms)
+        random.Random(plan["seed"] + input_index).shuffle(arms)
+        arms = tuple(arms)
     execute = storage_runs.run
     if plan.get("sequential_transport", plan.get("sequential_shadow", False)):
         from mosaickv.evaluation.sequential_kv_lease import paired_run
@@ -1139,7 +1216,7 @@ def worker(root, expected, index):
             model_kwargs=_model_kwargs(cfg, local_files_only=True),
             processor_kwargs={"local_files_only": True},
         )
-        folder = Path(plan["parent"]) / f"workers/{index}"
+        folder = Path(plan["parent"]) / f"workers/{input_index}"
         full = torch.load(folder / "logits.pt", map_location="cpu", weights_only=True)[
             "0-full_kv-ordinary"
         ]
@@ -1308,17 +1385,19 @@ def worker(root, expected, index):
             no_superiority_or_byte_matched_claim=True,
             whole_request_peak_certified=False,
             actual_timing_protocol=dict(
-                warmups=0,
+                warmups=5 if plan.get("paired_history_timing", False) else 0,
                 preceding_fixed_prefix_control=True,
-                repetitions=1,
-                order="fixed",
+                repetitions=20 if plan.get("paired_history_timing", False) else 1,
+                order="randomized_method_blocks_and_within_pair_history_order"
+                if plan.get("paired_history_timing", False)
+                else "fixed",
                 not_paper_latency=True,
             ),
         )
         write_once(out / "manifest.json", manifest)
         forced = tuple(full.argmax(-1)[:33].tolist())
         original = torch.load(
-            OLD / f"workers/{index}/mosaickv_exact--source-logits.pt",
+            OLD / f"workers/{input_index}/mosaickv_exact--source-logits.pt",
             map_location="cpu",
             weights_only=True,
         )
@@ -1368,7 +1447,7 @@ def worker(root, expected, index):
                     previous_arm = plan["minimum_controls"][arm]
                     values = torch.load(
                         Path(plan["minimum_control_root"])
-                        / f"workers/{index}"
+                        / f"workers/{input_index}"
                         / (previous_arm + "-logits.pt"),
                         map_location="cpu",
                         weights_only=True,
@@ -1385,7 +1464,7 @@ def worker(root, expected, index):
                 if arm.startswith("baseline_") and arm.endswith("__fp32"):
                     method = arm.removeprefix("baseline_").split("__")[0]
                     values = torch.load(
-                        OLD / f"workers/{index}/{method}--source-logits.pt",
+                        OLD / f"workers/{input_index}/{method}--source-logits.pt",
                         map_location="cpu",
                         weights_only=True,
                     )
@@ -1410,7 +1489,7 @@ def worker(root, expected, index):
                     if plan.get("query_affine", False):
                         reference_path = (
                             Path(plan["query_reference_root"])
-                            / f"workers/{index}/source3_fp32_tiled_text-logits.pt"
+                            / f"workers/{input_index}/source3_fp32_tiled_text-logits.pt"
                         )
                     values = torch.load(
                         reference_path,
@@ -1425,7 +1504,7 @@ def worker(root, expected, index):
                     reference_path = (
                         (
                             Path(plan["history_reference_root"])
-                            / f"workers/{index}/source3_direct_fp32-logits.pt"
+                            / f"workers/{input_index}/source3_direct_fp32-logits.pt"
                         )
                         if plan.get("sequential_source_history", False)
                         else out / "source3_fp32_tiled_text-logits.pt"
@@ -1588,7 +1667,10 @@ def worker(root, expected, index):
                     teacher["encoded_formats_immutable_after_complete_target"] = True
                     if arm == "source3_direct_fp32":
                         reference_rows = (
-                            (Path(plan["history_reference_root"]) / f"workers/{index}/raw.jsonl")
+                            (
+                                Path(plan["history_reference_root"])
+                                / f"workers/{input_index}/raw.jsonl"
+                            )
                             if plan.get("sequential_source_history", False)
                             else out / "raw.jsonl"
                         )
@@ -1620,7 +1702,8 @@ def worker(root, expected, index):
                         prior_rows = [
                             json.loads(line)
                             for line in (
-                                Path(plan["minimum_control_root"]) / f"workers/{index}/raw.jsonl"
+                                Path(plan["minimum_control_root"])
+                                / f"workers/{input_index}/raw.jsonl"
                             )
                             .read_text()
                             .splitlines()
@@ -1651,9 +1734,46 @@ def worker(root, expected, index):
                         not_official_MM_Vet_or_PPL=True,
                         local_two_input_PPL_not_paper_reproduction=True,
                     )
+                if plan.get("paired_history_timing", False):
+                    from mosaickv.evaluation.exact_history_timing import measure, summarize
+
+                    trial_path = out / (arm + "-timing.jsonl")
+                    trial_path.touch(exist_ok=False)
+
+                    def save_trial(value, path=trial_path, provenance=common):
+                        with path.open("a") as stream:
+                            stream.write(
+                                json.dumps(
+                                    dict(
+                                        provenance,
+                                        **value,
+                                        method_variant=provenance["variant"],
+                                        seed=plan["seed"] + input_index,
+                                    ),
+                                    allow_nan=False,
+                                ) + "\n"
+                            )
+
+                    trials = measure(
+                        adapter,
+                        runtime,
+                        packet,
+                        greedy,
+                        seed=plan["seed"] + input_index,
+                        record=save_trial,
+                    )
+                    row["paired_history_timing"] = summarize(
+                        trials, seed=plan["seed"] + input_index
+                    )
+                    row["paired_history_trials"] = str(trial_path)
+                    row["paired_history_trials_sha256"] = sha(trial_path)
+                    if digest_tensors(tuple(t for p in packet for t in p.tensors())) != hashes[arm]:
+                        raise RuntimeError("timed history mutated encoded prompt formats")
             with (out / "raw.jsonl").open("a") as stream:
                 stream.write(json.dumps(row, allow_nan=False) + "\n")
-        isolation_arm = "shadow" if plan.get("sequential_shadow", False) else arms[1]
+        isolation_arm = (
+            "shadow" if plan.get("sequential_shadow", False) else arms[min(1, len(arms) - 1)]
+        )
         if isolation_arm in formats:
             gc.collect()
             again, _ = execute(
@@ -1703,7 +1823,8 @@ def analyze(root, expected):
 
     plan = previous.common.inputs(root, expected)
     rows, failures = [], []
-    for i in range(2):
+    for job in plan["jobs"]:
+        i = job["index"]
         folder = root / f"workers/{i}"
         try:
             record = previous.read(folder / "result.json")
@@ -1788,7 +1909,10 @@ def analyze(root, expected):
         )
     teacher_summary = []
     if plan.get("teacher_metrics", False):
-        for i in range(2):
+        representatives = {}
+        for job in plan["jobs"]:
+            representatives.setdefault(job.get("input_index", job["index"]), job["index"])
+        for i in representatives.values():
             try:
                 control = previous.read(root / f"workers/{i}/teacher_control.json")
                 full_teacher = control["ordinary"]
@@ -1840,7 +1964,7 @@ def analyze(root, expected):
                 failures.append("teacher metric analysis: " + str(exc))
     history_gate = (
         plan.get("sequential_source_history", False)
-        and len(rows) == 2 * len(plan["evaluation_variants"])
+        and len(rows) == expected_row_count(plan)
         and not failures
     )
     history_memory = []
@@ -1887,7 +2011,7 @@ def analyze(root, expected):
     write_once(
         root / "analysis/decision.json",
         dict(
-            complete=len(rows) == 2 * len(plan.get("evaluation_variants", plan["variants"]))
+            complete=len(rows) == expected_row_count(plan)
             and not failures,
             failures=failures,
             rows=rows,
@@ -1904,6 +2028,15 @@ def analyze(root, expected):
                     for key in ("final_active_kv_storage_bytes", "peak_active_kv_storage_bytes")
                 )
                 for r in history_memory
+            ),
+            paired_history_timing_complete=plan.get("paired_history_timing", False)
+            and not failures
+            and len(rows) == expected_row_count(plan)
+            and all(
+                r.get("paired_history_timing", {}).get("timed_pairs") == 20
+                and r.get("paired_history_timing", {}).get("warmup_pairs") == 5
+                and sha(Path(r["paired_history_trials"])) == r["paired_history_trials_sha256"]
+                for r in rows
             ),
             lossless_minimum_gate=plan.get("minimum_headers", False)
             and len(rows) == 10
@@ -2040,6 +2173,7 @@ if __name__ == "__main__":
             "prepare_sparse_exceptions",
             "prepare_coherent_columns",
             "prepare_sequential_history",
+            "prepare_common_history",
             "cpu",
             "submit",
             "worker",
@@ -2106,7 +2240,7 @@ if __name__ == "__main__":
             hybrid_forecast=True,
             coherent_channels=True,
         )
-    elif args.mode == "prepare_sequential_history":
+    elif args.mode in ("prepare_sequential_history", "prepare_common_history"):
         prepare(
             args.root,
             corrected_source=True,
@@ -2114,6 +2248,7 @@ if __name__ == "__main__":
             teacher_metrics=True,
             query_affine=True,
             sequential_history=True,
+            common_history=args.mode == "prepare_common_history",
         )
     elif args.mode == "cpu":
         previous.cpu(args.root, args.plan_sha)
