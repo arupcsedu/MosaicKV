@@ -10,6 +10,19 @@ from mosaickv.evaluation.sequential_kv_lease import fill_component
 from mosaickv.evaluation.sparse_original_exceptions import construct, formats
 
 
+def test_header_provenance_distinguishes_lossless_encoding_from_lossy_fp16():
+    from evicastkv_shared_source_runtime import precision_header_label
+
+    for name in (
+        "source3_exact_exceptions",
+        "baseline_lookm_reimpl__exact_exceptions",
+        "minimum__source3_fp32_tiled_text",
+    ):
+        assert precision_header_label(name) == "lossless_bf16_minimum_fp32_scale"
+    assert precision_header_label("baseline_prefixkv_reimpl__fp16") == "fp16"
+    assert precision_header_label("source3_fp32_tiled_text") == "fp32"
+
+
 def fixture():
     original = tuple(torch.arange(64).reshape(1, 2, 4, 8).bfloat16() + i for i in (0, 4))
     actual = tuple(t + 1 for t in original)

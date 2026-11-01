@@ -23,6 +23,12 @@ STUDY = Path("/scratch/djy8hg/runs/evicastkv/protected-source-cpu-20261101-v2")
 ARMS = ("shadow", "source3_full_prompt", "source3_exclude_global_exact")
 
 
+def precision_header_label(arm):
+    if arm.startswith("minimum__") or arm.endswith("exact_exceptions"):
+        return "lossless_bf16_minimum_fp32_scale"
+    return "fp16" if "fp16" in arm else "fp32"
+
+
 def prepare(
     root,
     *,
@@ -1307,11 +1313,7 @@ def worker(root, expected, index):
                     ]
                     if arm.endswith(("query_affine_hybrid", "exact_exceptions"))
                     else 0.0,
-                    quantization_header_dtype="lossless_bf16_minimum_fp32_scale"
-                    if arm.startswith("minimum__")
-                    else "fp16"
-                    if "fp16" in arm
-                    else "fp32",
+                    quantization_header_dtype=precision_header_label(arm),
                     torch_peak_allocated=allocated,
                     torch_peak_reserved=reserved,
                     inactive_diagnostic_format_bytes=all_format_bytes
