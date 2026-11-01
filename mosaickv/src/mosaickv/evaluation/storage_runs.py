@@ -125,6 +125,8 @@ def run(
     workspace_graph: bool = False,
     consolidated_history: bool = False,
     segmented_history: bool = False,
+    history_reference: Any = None,
+    history_repair_enabled: bool = True,
 ) -> tuple[Any, dict[str, Any]]:
     import time
 
@@ -139,6 +141,10 @@ def run(
         raise ValueError(
             "bounded 2--128 tokens and complete optional FullKV-generated prefix required"
         )
+    if type(history_repair_enabled) is not bool or (
+        history_reference is not None and (sealed or source_history or batched_history)
+    ):
+        raise ValueError("draft history diagnostic requires explicit raw append-only history")
     cache: Any = cache_from_formats(
         adapter,
         formats,
@@ -174,6 +180,15 @@ def run(
     from contextlib import ExitStack
 
     with ExitStack() as stack:
+        history_repair = None
+        if history_reference is not None:
+            from mosaickv.evaluation.draft_history_causal import HistoryRepairTransport
+
+            history_repair = stack.enter_context(
+                HistoryRepairTransport(
+                    adapter, cache, history_reference, enabled=history_repair_enabled
+                )
+            )
         if shared_workspace:
             stack.callback(cache.release_workspace)
         stack.enter_context(IsolatedStorageTransport(adapter, cache))
@@ -228,6 +243,8 @@ def run(
     ):
         raise RuntimeError("nonfinite output or changed logical decode positions")
     record = cache.storage_record()
+    if history_repair is not None:
+        record["draft_history_repair"] = history_repair.record()
     if bypass is not None:
         record.update(
             exact_head_bypass_recomputed_heads=bypass.recomputed_heads,
