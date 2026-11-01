@@ -245,11 +245,13 @@ def apply_transport_patch(patch, target, *, prompt_length):
         target[0, ids // (prompt_length * d), ids // d % prompt_length, ids % d] = patch.values
 
 
-def transport_corrections(reference, actual, protected_rows):
+def transport_corrections(reference, actual, protected_rows, *, chunk_scalars=None):
     """Fix only violations of the FROZEN construction envelope, not task logits."""
     from mosaickv.evaluation.exact_storage import SparseBitPatch
 
     patches = []
+    if chunk_scalars is not None and (type(chunk_scalars) is not int or chunk_scalars < 1):
+        raise ValueError("positive explicit scalar chunk required")
     d = reference[0].shape[-1]
     for expected, output in zip(reference, actual, strict=True):
         if (
@@ -259,8 +261,19 @@ def transport_corrections(reference, actual, protected_rows):
             or not torch.isfinite(output).all()
         ):
             raise ValueError("finite compatible BF16 construction pair required")
-        bad = ~torch.isclose(expected.float(), output.float(), rtol=0.01, atol=2**-6)
-        indices = bad.flatten().nonzero().flatten()
+        if chunk_scalars is None:
+            bad = ~torch.isclose(expected.float(), output.float(), rtol=0.01, atol=2**-6)
+            indices = bad.flatten().nonzero().flatten()
+        else:
+            left, right = expected.flatten(), output.flatten()
+            parts = []
+            for start in range(0, left.numel(), chunk_scalars):
+                stop = start + chunk_scalars
+                bad = ~torch.isclose(
+                    left[start:stop].float(), right[start:stop].float(), rtol=0.01, atol=2**-6
+                )
+                parts.append(bad.nonzero().flatten() + start)
+            indices = torch.cat(parts)
         if torch.isin(indices // d, protected_rows.long()).any():
             raise RuntimeError("protected K/V mismatch may not be hidden by a numerical patch")
         patches.append(
@@ -270,6 +283,24 @@ def transport_corrections(reference, actual, protected_rows):
             )
         )
     return tuple(patches)
+
+
+def assert_transport_close(output, expected, *, chunk_scalars=524288):
+    """Original assert_close on every scalar, without full-component scratch.
+
+    Chunking does not alter elementwise math, tolerances or the pass predicate;
+    only a failing assertion's diagnostic index becomes chunk-local.
+    """
+    if type(chunk_scalars) is not int or chunk_scalars < 1 or output.shape != expected.shape:
+        raise ValueError("same shape and positive explicit verification chunk required")
+    left, right = output.flatten(), expected.flatten()
+    for start in range(0, left.numel(), chunk_scalars):
+        torch.testing.assert_close(
+            left[start : start + chunk_scalars],
+            right[start : start + chunk_scalars],
+            rtol=0.01,
+            atol=2**-6,
+        )
 
 
 @torch.inference_mode()
@@ -360,14 +391,16 @@ def fit_transport_components(packet, attention):
         reference[0, head, position] = decoded(packet.exact[component])[0, 0]
         actual = torch.empty_like(reference)
         fill_component(packet, attention, component, actual)
-        patch = transport_corrections((reference,), (actual,), packet.row_positions)[0]
+        patch = transport_corrections(
+            (reference,), (actual,), packet.row_positions, chunk_scalars=524288
+        )[0]
         del actual
         temporary = replace(
             packet, transport_patches=tuple(patch if j == component else dummy for j in range(2))
         )
         verified = torch.empty_like(reference)
         fill_component(temporary, attention, component, verified)
-        torch.testing.assert_close(verified, reference, rtol=0.01, atol=2**-6)
+        assert_transport_close(verified, reference)
         patches.append(patch)
         del reference, verified, temporary
     result = replace(packet, transport_patches=tuple(patches))
@@ -379,4 +412,5 @@ def fit_transport_components(packet, attention):
         construction_has_temporary_decoded_source_and_native_projection=True,
         componentwise_reference_and_independent_verification=True,
         private_BF16_RoPE_operations_not_fused=True,
+        bounded_verification_chunk_scalars=524288,
     )

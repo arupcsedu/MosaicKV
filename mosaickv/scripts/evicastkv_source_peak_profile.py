@@ -87,12 +87,13 @@ def prepare(root, *, components=False, all_methods=False, compact_ranges=False):
         if not all_methods or not proof["complete"] or proof["failures"]:
             raise ValueError("complete all-method compact-quantizer proof required")
         source_cases = [case for case in proof["cases"] if case["case"] in (0, 8)]
-        if len(source_cases) != 2 or any(
-            case["dominant_peak"]["phase"][-1]
-            != "mosaickv.evaluation.shared_source_format.pack_unprotected"
-            for case in source_cases
-        ):
-            raise ValueError("observed range-preparation peak must justify this follow-up")
+        if len(source_cases) != 2 or {
+            case["dominant_peak"]["phase"][-1] for case in source_cases
+        } != {
+            "mosaickv.evaluation.shared_source_format.pack_unprotected",
+            "mosaickv.evaluation.shared_source_format.fit_transport",
+        }:
+            raise ValueError("observed range/fitting peaks must justify this follow-up")
         for p in (
             previous_profile / "plan.json",
             previous_profile / "analysis/decision.json",
@@ -233,6 +234,8 @@ def worker(root, expected, index):
                 (text_source_storage, "optimize"),
                 (shared_source_format, "pack_unprotected"),
                 (conditional_precision, "pack"),
+                (shared_source_format, "transport_corrections"),
+                (shared_source_format, "assert_transport_close"),
             ):
                 original = getattr(module, key)
                 if (
