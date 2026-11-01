@@ -29,8 +29,50 @@ def exact_rows(packet):
     return rows
 
 
+def _token_group_preparation(values, rows):
+    """Same BF16 extrema, without transposing/padding the full source or mask.
+
+    Repeating the last element cannot change a finite nonzero minimum. Empty
+    protected groups still use positive zero. Ambiguous zero extrema return
+    None so the unchanged FP32 reference handles signed-zero ties.
+    """
+    n = values.shape[2]
+    full, tail = divmod(n, 128)
+    pieces = []
+    if full:
+        window = values[:, :, : full * 128].unfold(2, 128, 128)
+        mask = rows[:, : full * 128].unfold(1, 128, 128)[None, :, :, None, :]
+        pieces.append(window.masked_fill(mask, float("inf")).amin(-1).movedim(2, -1))
+    if tail:
+        window = values[:, :, full * 128 :].movedim(2, -1)
+        mask = rows[:, full * 128 :][None, :, None, :]
+        pieces.append(window.masked_fill(mask, float("inf")).amin(-1)[..., None])
+    minimum = torch.cat(pieces, -1) if len(pieces) > 1 else pieces[0]
+    if bool(((minimum == 0) & torch.isfinite(minimum)).any()):
+        return None
+    minimum = torch.where(torch.isfinite(minimum), minimum, torch.zeros_like(minimum))
+    # Exactly one private BF16 output. No expanded full mask, padded source,
+    # or padded torch.where output overlaps this allocation.
+    prepared = torch.empty_like(values, memory_format=torch.contiguous_format)
+    if full:
+        torch.where(
+            rows[:, : full * 128].unfold(1, 128, 128)[None, :, :, None, :],
+            minimum[..., :full].movedim(-1, 2)[..., None],
+            values[:, :, : full * 128].unfold(2, 128, 128),
+            out=prepared[:, :, : full * 128].unfold(2, 128, 128),
+        )
+    if tail:
+        torch.where(
+            rows[:, full * 128 :][None, :, None, :],
+            minimum[..., -1, None],
+            values[:, :, full * 128 :].movedim(2, -1),
+            out=prepared[:, :, full * 128 :].movedim(2, -1),
+        )
+    return prepared
+
+
 @torch.inference_mode()
-def pack_unprotected(values, rows, *, bits, axis, bf16_prepare=True):
+def pack_unprotected(values, rows, *, bits, axis, bf16_prepare=True, compact_ranges=True):
     if (
         values.ndim != 4
         or values.shape[0] != 1
@@ -44,11 +86,22 @@ def pack_unprotected(values, rows, *, bits, axis, bf16_prepare=True):
         raise ValueError("finite BF16 values and exact same-device per-head row mask required")
     if type(bf16_prepare) is not bool:
         raise ValueError("explicit BF16 range-preparation flag required")
+    if type(compact_ranges) is not bool:
+        raise ValueError("explicit compact range workspace flag required")
     if bf16_prepare:
         words = values.view(torch.int16)
         if bool((((words & 0x7F80) == 0) & ((words & 0x7F) != 0)).any()):
             # Do not depend on device-specific subnormal reduction behavior.
             return pack_unprotected(values, rows, bits=bits, axis=axis, bf16_prepare=False)
+        if compact_ranges and axis == 2:
+            prepared = _token_group_preparation(values, rows)
+            if prepared is None:
+                return pack_unprotected(values, rows, bits=bits, axis=axis, bf16_prepare=False)
+            return pack(prepared, bits=bits, axis=axis)
+        if compact_ranges and axis == 3:
+            # Each entire feature group belongs to just one token. Protected
+            # groups become +0; every unprotected input scalar is unchanged.
+            return pack(values.masked_fill(rows[None, :, :, None], 0), bits=bits, axis=axis)
     # Min and masked substitution perform no arithmetic: a nonzero extremum
     # has exactly the same representation in BF16 and FP32. Quantization below
     # still uses the ORIGINAL FP32 pack(), including scale and rounding.

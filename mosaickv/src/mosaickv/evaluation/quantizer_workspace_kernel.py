@@ -81,6 +81,7 @@ def serialize(quantized, *, bits, length, value_count):
 
 
 def gpu_controls():
+    from mosaickv.evaluation.conditional_precision import pack_unprotected
     from mosaickv.evaluation.precision_tier import pack
 
     generator = torch.Generator(device="cuda").manual_seed(2441)
@@ -99,4 +100,21 @@ def gpu_controls():
             ) or not torch.equal(snapshot.view(torch.int16), values.view(torch.int16)):
                 raise RuntimeError("compact quantizer changed an original header/code/input bit")
             rows.append(dict(bits=bits, axis=axis, all_bits_identical=True, odd_length=33))
+    for bits in (2, 3, 4, 8):
+        for axis in (2, 3):
+            values = torch.randn((1, 2, 129, 128), device="cuda", generator=generator).bfloat16()
+            protected = torch.zeros((2, 129), device="cuda", dtype=torch.bool)
+            protected[0, :128] = True
+            protected[1, ::4] = True
+            snapshot = values.clone()
+            old = pack_unprotected(values, protected, bits=bits, axis=axis, bf16_prepare=False)
+            actual = pack_unprotected(values, protected, bits=bits, axis=axis)
+            if not all(
+                torch.equal(a.view(torch.uint8), b.view(torch.uint8))
+                for a, b in zip(old.tensors(), actual.tensors(), strict=True)
+            ) or not torch.equal(snapshot.view(torch.int16), values.view(torch.int16)):
+                raise RuntimeError("compact ranges changed an original header/code/input bit")
+            rows.append(
+                dict(bits=bits, axis=axis, compact_ranges_bitwise=True, partial_group_length=129)
+            )
     return rows

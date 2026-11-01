@@ -19,7 +19,7 @@ PARENT = Path(
 )
 
 
-def prepare(root, *, components=False, all_methods=False):
+def prepare(root, *, components=False, all_methods=False, compact_ranges=False):
     if root.exists():
         raise FileExistsError("new immutable profile root required")
     plan = previous.previous.read(PARENT / "plan.json")
@@ -81,6 +81,24 @@ def prepare(root, *, components=False, all_methods=False):
                 != "mosaickv.evaluation.conditional_precision.pack"
             ):
                 raise ValueError("measured quantizer workspace must justify the next optimization")
+    if compact_ranges:
+        previous_profile = PARENT.parent / "compact-quantizer-workspace-consumed-20261101-v1"
+        proof = previous.previous.read(previous_profile / "analysis/decision.json")
+        if not all_methods or not proof["complete"] or proof["failures"]:
+            raise ValueError("complete all-method compact-quantizer proof required")
+        source_cases = [case for case in proof["cases"] if case["case"] in (0, 8)]
+        if len(source_cases) != 2 or any(
+            case["dominant_peak"]["phase"][-1]
+            != "mosaickv.evaluation.shared_source_format.pack_unprotected"
+            for case in source_cases
+        ):
+            raise ValueError("observed range-preparation peak must justify this follow-up")
+        for p in (
+            previous_profile / "plan.json",
+            previous_profile / "analysis/decision.json",
+            SOURCE / "mosaickv/docs/compact_range_workspace_20261101.md",
+        ):
+            bound[str(p)] = sha(p)
     for p in (PARENT / "plan.json", SOURCE / "mosaickv/docs/source_peak_profile_20261101.md"):
         bound[str(p)] = sha(p)
     write_once(
@@ -98,6 +116,7 @@ def prepare(root, *, components=False, all_methods=False):
             common_BF16_range_preparation_with_signed_zero_fallback=True,
             all_five_methods_profiled=all_methods,
             compact_quantizer_workspace=True,
+            compact_range_workspace=compact_ranges,
         ),
     )
     print(sha(root / "plan.json"))
@@ -320,6 +339,7 @@ if __name__ == "__main__":
             "prepare",
             "prepare_components",
             "prepare_common_ranges",
+            "prepare_compact_ranges",
             "cpu",
             "submit",
             "worker",
@@ -329,11 +349,17 @@ if __name__ == "__main__":
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--plan-sha")
     args = parser.parse_args()
-    if args.mode in ("prepare", "prepare_components", "prepare_common_ranges"):
+    if args.mode in (
+        "prepare",
+        "prepare_components",
+        "prepare_common_ranges",
+        "prepare_compact_ranges",
+    ):
         prepare(
             args.root,
             components=args.mode != "prepare",
-            all_methods=args.mode == "prepare_common_ranges",
+            all_methods=args.mode in ("prepare_common_ranges", "prepare_compact_ranges"),
+            compact_ranges=args.mode == "prepare_compact_ranges",
         )
     elif args.mode == "cpu":
         previous.previous.cpu(args.root, args.plan_sha)
