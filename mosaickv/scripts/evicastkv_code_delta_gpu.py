@@ -98,6 +98,9 @@ def prepare(root, *, lifetimes=False, repair=False):
             GPU_consumed_diagnostic_authorized=True,
             exact_minimum_only=True,
             identical_128_logits_and_complete_teacher_logits_required=True,
+            primary_generation_tensor_audit=True,
+            teacher_forcing_tensor_audit=True,
+            timing_tensor_audit=False,
             code_replay_microbenchmark_warmups=5,
             code_replay_microbenchmark_repetitions=20,
             source_decode_pair_warmups=5 if repair or not lifetimes else 0,
@@ -197,7 +200,7 @@ def construct(adapter, messages, profile, method, *, audit=False):
     return runtime, packets, memory
 
 
-def decode_run(adapter, runtime, packets):
+def decode_run(adapter, runtime, packets, *, audit=False):
     from mosaickv.evaluation.storage_runs import run
 
     return run(
@@ -205,7 +208,7 @@ def decode_run(adapter, runtime, packets):
         runtime,
         packets,
         tokens=128,
-        audit=False,
+        audit=audit,
         sealed=True,
         sequential_lease=True,
         source_history=True,
@@ -385,7 +388,7 @@ def worker(root, expected, index):
                 del a, b, view
             del bound
             write_once(output / f"{method}-construction.json", construction)
-            values, details = decode_run(adapter, runtime, encoded)
+            values, details = decode_run(adapter, runtime, encoded, audit=True)
             if not torch.equal(values, expected_logits):
                 raise RuntimeError("lossless replay changed frozen 128-token vocabulary logits")
             targets, provenance = load_targets(plan, payload, adapter.processor.tokenizer)
@@ -396,7 +399,7 @@ def worker(root, expected, index):
                 targets,
                 maximum=1024,
                 sequential_source_history=True,
-                audit_history=False,
+                audit_history=True,
                 return_logits=True,
             )
             original_teacher = prior["teacher_forced"]
@@ -440,6 +443,7 @@ def worker(root, expected, index):
                 parent_prefill_storage=prior["prefill_storage"],
                 original_control_packets_simultaneously_resident=True,
                 whole_request_GPU_peak_certified=False,
+                generation_peak_compared_with_identical_tensor_audit=True,
                 independent_quality_N=0,
             )
             with (output / "raw.jsonl").open("a") as stream:

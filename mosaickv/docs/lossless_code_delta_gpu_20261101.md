@@ -80,3 +80,8 @@ before and after updates. The retry includes the common lifetime optimization,
 audited prefill storage, per-method partial construction records, explicit
 parent baseline manifests, and the original five/twenty paired decode schedule.
 Incomplete workers or missing timing records cannot pass its final analysis.
+Primary generation and teacher-forcing measurements enable the same tensor
+result auditing as the frozen parent. Only the separately labeled timed trials
+disable that instrumentation. Do not compare an unaudited decode peak with the
+parent's audited peak. The first repair's GPU admission was canceled while still
+pending to enforce this measurement-boundary correction before any GPU inference.

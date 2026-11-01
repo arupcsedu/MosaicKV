@@ -69,3 +69,16 @@ def test_complete_rows_require_all_methods_identities_bits_and_accounting():
         broken = [dict(r) for r in rows]
         broken[0][key] = value
         assert not rows_complete(broken)
+
+
+def test_memory_audit_and_timing_policies_remain_separate(monkeypatch):
+    from evicastkv_code_delta_gpu import decode_run
+
+    calls = []
+    monkeypatch.setattr(
+        "mosaickv.evaluation.storage_runs.run", lambda *args, **kwargs: calls.append(kwargs)
+    )
+    decode_run(None, None, (), audit=True)
+    decode_run(None, None, ())
+    assert [r["audit"] for r in calls] == [True, False]
+    assert all(r["tokens"] == 128 and r["sequential_source_history"] for r in calls)
