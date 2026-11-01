@@ -273,7 +273,7 @@ def transport_corrections(reference, actual, protected_rows):
 
 
 @torch.inference_mode()
-def fit_transport(packet, attention):
+def fit_transport(packet, attention, *, componentwise=False):
     """Native projection of the SAME encoded source; no FullKV/answer targets."""
     from dataclasses import replace
 
@@ -281,6 +281,10 @@ def fit_transport(packet, attention):
 
     if packet.transport_patches or packet.input_overlay is not None:
         raise ValueError("numerical transport fitting is a single immutable construction")
+    if type(componentwise) is not bool:
+        raise ValueError("explicit componentwise construction flag required")
+    if componentwise:
+        return fit_transport_components(packet, attention)
     x = decode_source_for_construction(packet)
     n, h, d = packet.shape[2], packet.shape[1], packet.shape[3]
     k = attention.k_proj(x).reshape(1, n, h, d).transpose(1, 2)
@@ -311,4 +315,68 @@ def fit_transport(packet, attention):
         frozen_construction_tolerance_pass=True,
         no_task_or_fullkv_target_for_unprotected=True,
         construction_has_temporary_decoded_source_and_native_projection=True,
+    )
+
+
+@torch.inference_mode()
+def fit_transport_components(packet, attention):
+    """Same native reference/checks, one private K/V component at a time.
+
+    The paired constructor remains the default. This opt-in VARIANT must
+    reproduce its complete frozen packet in GPU tests. BF16 operations remain
+    separate ATen multiplications/addition, not fused addcmul or altered RoPE.
+    """
+    from dataclasses import replace
+
+    from mosaickv.evaluation.exact_storage import SparseBitPatch
+    from mosaickv.evaluation.sequential_kv_lease import fill_component
+    from mosaickv.evaluation.shared_source_kernel import decode_source_for_construction
+
+    if packet.transport_patches or packet.input_overlay is not None:
+        raise ValueError("numerical transport fitting is a single immutable construction")
+    n, h, d = packet.shape[2], packet.shape[1], packet.shape[3]
+    if d != 128:
+        raise NotImplementedError("audited full-MHA head dimension 128 required")
+    dummy = SparseBitPatch(
+        torch.empty(0, dtype=torch.int32, device=packet.cos.device),
+        torch.empty(0, dtype=torch.bfloat16, device=packet.cos.device),
+    )
+    ids = packet.row_positions.long()
+    head, position = ids // n, ids % n
+    patches = []
+    for component in range(2):
+        x = decode_source_for_construction(packet)
+        projection = attention.k_proj if component == 0 else attention.v_proj
+        native = projection(x).reshape(1, n, h, d).transpose(1, 2)
+        del x
+        if component == 0:
+            rotated = torch.cat((-native[..., 64:], native[..., :64]), -1)
+            native.mul_(packet.cos[:, None])
+            rotated.mul_(packet.sin[:, None])
+            native.add_(rotated)
+            del rotated
+        reference = native.contiguous()
+        del native
+        reference[0, head, position] = decoded(packet.exact[component])[0, 0]
+        actual = torch.empty_like(reference)
+        fill_component(packet, attention, component, actual)
+        patch = transport_corrections((reference,), (actual,), packet.row_positions)[0]
+        del actual
+        temporary = replace(
+            packet, transport_patches=tuple(patch if j == component else dummy for j in range(2))
+        )
+        verified = torch.empty_like(reference)
+        fill_component(temporary, attention, component, verified)
+        torch.testing.assert_close(verified, reference, rtol=0.01, atol=2**-6)
+        patches.append(patch)
+        del reference, verified, temporary
+    result = replace(packet, transport_patches=tuple(patches))
+    return result, dict(
+        patch_scalars=[p.indices.numel() for p in patches],
+        persistent_patch_bytes=backing_bytes(tuple(t for p in patches for t in p.tensors)),
+        frozen_construction_tolerance_pass=True,
+        no_task_or_fullkv_target_for_unprotected=True,
+        construction_has_temporary_decoded_source_and_native_projection=True,
+        componentwise_reference_and_independent_verification=True,
+        private_BF16_RoPE_operations_not_fused=True,
     )

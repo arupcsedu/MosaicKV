@@ -5,6 +5,7 @@ import argparse
 import os
 from contextlib import ExitStack
 from dataclasses import asdict
+from functools import partial
 from pathlib import Path
 from unittest.mock import patch
 
@@ -18,7 +19,7 @@ PARENT = Path(
 )
 
 
-def prepare(root):
+def prepare(root, *, components=False):
     if root.exists():
         raise FileExistsError("new immutable profile root required")
     plan = previous.previous.read(PARENT / "plan.json")
@@ -29,6 +30,21 @@ def prepare(root):
         )
     ]
     bound = dict(plan["bound_files"])
+    if components:
+        profile_root = PARENT.parent / "source-peak-profile-consumed-20261101-v1"
+        proof = previous.previous.read(profile_root / "analysis/decision.json")
+        if (
+            not proof["complete"]
+            or proof["failures"]
+            or any(
+                case["dominant_peak"]["phase"][-1]
+                != "mosaickv.evaluation.shared_source_format.fit_transport"
+                for case in proof["cases"]
+            )
+        ):
+            raise ValueError("observed transport-fitting peak must justify this follow-up")
+        for p in (profile_root / "plan.json", profile_root / "analysis/decision.json"):
+            bound[str(p)] = sha(p)
     for p in (PARENT / "plan.json", SOURCE / "mosaickv/docs/source_peak_profile_20261101.md"):
         bound[str(p)] = sha(p)
     write_once(
@@ -42,6 +58,7 @@ def prepare(root):
             maximum_simultaneous_workers=2,
             maximum_worker_minutes=10,
             profile_only_no_decode_or_new_quality_measurement=True,
+            componentwise_transport_fitting=components,
         ),
     )
     print(sha(root / "plan.json"))
@@ -129,6 +146,7 @@ def worker(root, expected, index):
             independent_quality_N=0,
             whole_request_peak_certified=False,
             configuration_is_unchanged_common_source_precision_variant=True,
+            componentwise_transport_fitting=plan.get("componentwise_transport_fitting", False),
         )
         write_once(output / "manifest.json", manifest)
         adapter = load_hf_adapter(
@@ -149,11 +167,18 @@ def worker(root, expected, index):
                 (shared_source_format, "pack_unprotected"),
                 (conditional_precision, "pack"),
             ):
+                original = getattr(module, key)
+                if (
+                    module is shared_source_format
+                    and key == "fit_transport"
+                    and plan.get("componentwise_transport_fitting", False)
+                ):
+                    original = partial(original, componentwise=True)
                 stack.enter_context(
                     patch.object(
                         module,
                         key,
-                        wrap_phase(f"{module.__name__}.{key}", getattr(module, key), instances),
+                        wrap_phase(f"{module.__name__}.{key}", original, instances),
                     )
                 )
             runtime, packets, memory = previous.construct(
@@ -171,6 +196,8 @@ def worker(root, expected, index):
             != reference["payload_sha256"]
         ):
             raise RuntimeError("phase probe changed a frozen payload bit")
+        if memory["final_prefill_cache_bytes"] != reference["physical_bytes"]:
+            raise RuntimeError("constructor changed physical packet backing storage")
         logits = torch.load(
             previous.REFERENCE / f"workers/{job['reference_worker']}/greedy_logits.pt",
             weights_only=True,
@@ -184,6 +211,7 @@ def worker(root, expected, index):
                 memory=memory,
                 peak_events=instances[0].peak_events,
                 payload_bitwise=True,
+                physical_packet_bytes_identical=True,
                 prefill_logits_bitwise=True,
                 no_decode_performed=True,
                 unchanged_model_positions_and_quantization=True,
@@ -238,12 +266,14 @@ def analyze(root, expected):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("prepare", "cpu", "submit", "worker", "analyze"))
+    parser.add_argument(
+        "mode", choices=("prepare", "prepare_components", "cpu", "submit", "worker", "analyze")
+    )
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--plan-sha")
     args = parser.parse_args()
-    if args.mode == "prepare":
-        prepare(args.root)
+    if args.mode in ("prepare", "prepare_components"):
+        prepare(args.root, components=args.mode == "prepare_components")
     elif args.mode == "cpu":
         previous.previous.cpu(args.root, args.plan_sha)
     elif args.mode == "worker":

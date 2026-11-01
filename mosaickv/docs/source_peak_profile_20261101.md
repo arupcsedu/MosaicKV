@@ -19,3 +19,19 @@ phase records. Require identical frozen packet hashes and prefill logits.
 This locates the dominant remaining encoder/cache peak before another memory
 rewrite. It does not certify whole-request GPU peak, task quality, latency or
 superiority. Finite afterany analysis preserves producer errors.
+
+## Componentwise fitting follow-up
+
+Both measured cases identified `shared_source_format.fit_transport` as the
+remaining peak. The separately gated `prepare_components` diagnostic therefore
+constructs and verifies K and V one at a time. Keep the native BF16 projections,
+original RoPE phases, exact overlays, numerical correction rule and independent
+checks. The key rotation uses separate in-place BF16 multiply/multiply/add on a
+PRIVATE fresh projection output, never fused arithmetic or the original cache.
+No model weight, selection, cache dtype, source code or tolerance is changed.
+
+The legacy paired constructor stays the default. Only this opt-in consumed-input
+diagnostic enables the new flag. Require byte-identical complete packets against
+the frozen GPU producer, plus prefill-logit parity, before reusing its proven
+decode/teacher results. Failure to match blocks any promotion. No extra answer
+generation, fresh cohort or paper claim is authorized by this memory test.
