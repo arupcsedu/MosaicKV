@@ -34,6 +34,7 @@ def prepare(
     minimum_headers=False,
     query_affine=False,
     hybrid_forecast=False,
+    sparse_exceptions=False,
 ):
     if root.exists():
         raise ValueError("new immutable source-runtime root required")
@@ -218,6 +219,19 @@ def prepare(
                 if sha(folder / name) != digest:
                     raise ValueError("negative prompt-only evidence changed")
                 bound[str(folder / name)] = digest
+    if sparse_exceptions:
+        if not hybrid_forecast:
+            raise ValueError("common online evidence required for exact exceptions")
+        path = Path(
+            "/scratch/djy8hg/runs/evicastkv/hybrid-query-affine-gpu-consumed-20261101-v1/analysis/decision.json"
+        )
+        result = previous.read(path)
+        if not result["complete"] or result["failures"]:
+            raise ValueError(
+                "complete hybrid diagnostic required before separately versioned exceptions"
+            )
+        for evidence in (path, SOURCE / "mosaickv/docs/sparse_original_exceptions_20261101.md"):
+            bound[str(evidence)] = sha(evidence)
     variants = ("shadow",) if sequential_shadow else ARMS
     if corrected_source:
         variants = ("shadow", "source3_exclude_global_exact", "source3_exact_text_source")
@@ -253,6 +267,8 @@ def prepare(
         variants = (*variants, *minimum_controls)
     if query_affine:
         affine_suffix = "query_affine_hybrid" if hybrid_forecast else "query_affine"
+        if sparse_exceptions:
+            affine_suffix = "exact_exceptions"
         variants = (
             *variants,
             f"source3_{affine_suffix}",
@@ -298,10 +314,12 @@ def prepare(
             evaluation_variants=evaluation_variants,
             query_affine=query_affine,
             hybrid_forecast=hybrid_forecast,
+            sparse_exceptions=sparse_exceptions,
+            maximum_exact_exception_bytes=2**20 if sparse_exceptions else 0,
             draft_tokens=4 if hybrid_forecast else 0,
             forecast_family_weights=[0.5, 0.5] if hybrid_forecast else None,
             query_reference_root=str(parent_metrics) if query_affine else None,
-            affine_steps=2 if query_affine else None,
+            affine_steps=0 if sparse_exceptions else 2 if query_affine else None,
             sequential_transport=sequential_shadow or corrected_source,
             original_caps_unchanged=True,
             one_prefill=True,
@@ -310,7 +328,7 @@ def prepare(
             source_position_fraction=0.5 if sequential_shadow else 1.0,
             source_codec_bits=3,
             source_codec_axis=2,
-            source_scalar_KV_patches_disabled=not sequential_shadow,
+            source_scalar_KV_patches_disabled=not sequential_shadow and not sparse_exceptions,
             independent_quality_N=0,
             no_fresh_or_large_campaign_authorized=True,
             paper_campaign_authorized=False,
@@ -434,6 +452,50 @@ def build(
     for arm in plan["variants"][1:]:
         torch.cuda.synchronize()
         begun = time.monotonic()
+        if arm.endswith("exact_exceptions"):
+            from mosaickv.evaluation.sparse_original_exceptions import formats as add_exceptions
+
+            if arm.startswith("source3_"):
+                prior_arm = "source3_fp32_tiled_text"
+                originals = source
+                positions = [(tuple(range(n)),) * h] * len(source)
+                own_cap = cap
+            else:
+                method = arm.removeprefix("baseline_").split("__")[0]
+                prior_arm = f"baseline_{method}__fp32"
+                originals = observed_pairs[method]
+                positions = observed_memberships[method]
+                own_cap = caps_by_arm[prior_arm]
+            trial, checks = add_exceptions(
+                adapter,
+                prefill,
+                capture,
+                formats[prior_arm],
+                originals,
+                positions,
+                forecast,
+                cap_bytes=own_cap,
+                maximum_extra_bytes=plan["maximum_exact_exception_bytes"],
+            )
+            torch.cuda.synchronize()
+            times[arm] = (
+                time.monotonic()
+                - begun
+                + times[prior_arm]
+                + forecast_proof["wall_seconds_excludes_integrity_hashes"]
+            )
+            formats[arm] = trial
+            caps_by_arm[arm] = own_cap
+            construction_checks[arm] = dict(
+                status="constructed",
+                initial_bytes=backing_bytes(tuple(t for f in trial for t in f.tensors())),
+                cap_bytes=own_cap,
+                fit=checks,
+                original_encoded_body_unchanged=True,
+                actual_CUDA_verification=True,
+                no_benchmark_label_or_reference_logit_access=True,
+            )
+            continue
         if "query_affine" in arm:
             from mosaickv.evaluation.query_affine_formats import baseline_formats, source_formats
 
@@ -1238,11 +1300,12 @@ def worker(root, expected, index):
                     else "three_bit_shared_normalized_source",
                     local_precision_variant_not_unmodified_published_baseline=baseline_arm,
                     query_weighted_affine_refit="query_affine" in arm,
-                    draft_forecast_used=arm.endswith("query_affine_hybrid"),
+                    sparse_original_precision_exceptions=arm.endswith("exact_exceptions"),
+                    draft_forecast_used=arm.endswith(("query_affine_hybrid", "exact_exceptions")),
                     forecast_overhead_seconds=proof["forecast"][
                         "wall_seconds_excludes_integrity_hashes"
                     ]
-                    if arm.endswith("query_affine_hybrid")
+                    if arm.endswith(("query_affine_hybrid", "exact_exceptions"))
                     else 0.0,
                     quantization_header_dtype="lossless_bf16_minimum_fp32_scale"
                     if arm.startswith("minimum__")
@@ -1634,6 +1697,7 @@ if __name__ == "__main__":
             "auto_minimum",
             "prepare_query_affine",
             "prepare_hybrid_query_affine",
+            "prepare_sparse_exceptions",
             "cpu",
             "submit",
             "worker",
@@ -1679,6 +1743,16 @@ if __name__ == "__main__":
             teacher_metrics=True,
             query_affine=True,
             hybrid_forecast=True,
+        )
+    elif args.mode == "prepare_sparse_exceptions":
+        prepare(
+            args.root,
+            corrected_source=True,
+            fp32_tiling=True,
+            teacher_metrics=True,
+            query_affine=True,
+            hybrid_forecast=True,
+            sparse_exceptions=True,
         )
     elif args.mode == "cpu":
         previous.cpu(args.root, args.plan_sha)

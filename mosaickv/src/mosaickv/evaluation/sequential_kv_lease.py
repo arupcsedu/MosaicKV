@@ -24,6 +24,16 @@ def fill_component(packet, attention, component, destination, *, source_workspac
         raise ValueError("key or value component required")
     n = packet.shape[-2]
     prefix = destination[..., :n, :]
+    from mosaickv.evaluation.sparse_original_exceptions import ExceptionFormat
+
+    if isinstance(packet, ExceptionFormat):
+        from mosaickv.evaluation.shared_source_format import apply_transport_patch
+
+        fill_component(
+            packet.base, attention, component, destination, source_workspace=source_workspace
+        )
+        apply_transport_patch(packet.patches[component], destination, prompt_length=n)
+        return
     if isinstance(packet, TextSourceFormat):
         fill_component(
             packet.base, attention, component, destination, source_workspace=source_workspace
