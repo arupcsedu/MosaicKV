@@ -94,6 +94,7 @@ class SelectedRetiringCache(RetiringPrefillCache):
                 raise RuntimeError("selected archive aliases decoded temporary source")
             self.observe((*original, *packet.tensors()))
         layer.packet = packet
+        self.owners_changed()
         self.observe(original)
 
 
@@ -159,7 +160,7 @@ def selected_pair(original, heads):
 
 def encode_layer(index, count, attention, pair, heads, text_positions, record, probabilities, text):
     """Exact operation order of head3_boundary8 then text-source optimize."""
-    from mosaickv.evaluation.head_local_precision import localize
+    from mosaickv.evaluation.head_local_precision import localize, refit_corrections
     from mosaickv.evaluation.precision_corrections import fund_corrections, prompt_weights
     from mosaickv.evaluation.precision_tier import construct
     from mosaickv.evaluation.text_source_storage import optimize
@@ -177,6 +178,9 @@ def encode_layer(index, count, attention, pair, heads, text_positions, record, p
         policy="head3_boundary8",
         boundary_override=boundary,
     )
+    if boundary:
+        # The frozen boundary branch refits AFTER head-local exact overlays.
+        packet, _ = refit_corrections(packet, pair, key_weight=kw, value_weight=vw)
     packet, _ = optimize(packet, text, heads, text_positions, attention)
     return packet
 
@@ -230,7 +234,7 @@ def lookm_layer(pair, probabilities, prepared, capacity):
 class StreamingBaseline:
     """A one-request, label-blind encoder for explicitly frozen local variants."""
 
-    def __init__(self, prepared, cache, profile, method):
+    def __init__(self, prepared, cache, profile, method, *, minimum_only=False):
         from mosaickv.evaluation.text_source_storage import TextSourceCapture
 
         if method not in (
@@ -240,6 +244,9 @@ class StreamingBaseline:
             "lookm_reimpl",
         ):
             raise ValueError("registered four baseline precision variants only")
+        if type(minimum_only) is not bool:
+            raise ValueError("explicit lossless-minimum storage flag required")
+        self.minimum_only = minimum_only
         self.prepared, self.cache, self.method = prepared, cache, method
         self.text_positions = TextSourceCapture(None, prepared).positions
         self.length, self.count = prepared.logical_sequence_length, len(profile)
@@ -297,6 +304,14 @@ class StreamingBaseline:
             )
         return heads, selected_pair(original, heads)
 
+    def _encode(self, *args):
+        packet = encode_layer(*args)
+        if self.minimum_only:
+            from mosaickv.evaluation.exact_minimum_metadata import compact_format
+
+            packet = compact_format(packet)
+        return packet
+
     def __call__(self, index, attention, original, args, kwargs, output):
         from mosaickv.evaluation.streaming_prefill import lossless_kv_encoder
 
@@ -350,7 +365,7 @@ class StreamingBaseline:
             self.memberships.append(None)
             return lossless_kv_encoder(index, attention, original, args, kwargs, output)
         heads, pair = self._heads_pair(index, original, probabilities)
-        packet = encode_layer(
+        packet = self._encode(
             index,
             self.count,
             attention,
@@ -382,7 +397,7 @@ class StreamingBaseline:
                     text=text,
                 ):
                     heads, pair = self._heads_pair(index, original, probabilities)
-                    packet = encode_layer(
+                    packet = self._encode(
                         index,
                         self.count,
                         block.self_attn,

@@ -17,7 +17,7 @@ from mosaickv.evaluation.fox_campaign import clean_source, sha, write_once
 
 SOURCE = Path(__file__).resolve().parents[2]
 REFERENCE = Path("/scratch/djy8hg/runs/evicastkv/common-exact-history-consumed-20261101-v2")
-AUDIT = Path("/scratch/djy8hg/runs/evicastkv/common-streaming-prefill-consumed-20261101-v1")
+AUDIT = Path("/scratch/djy8hg/runs/evicastkv/exact-minimum-streaming-consumed-20261101-v1")
 previous = control.previous
 
 
@@ -62,7 +62,7 @@ def row_is_complete(row):
     )
 
 
-def prepare(root, *, timing=False):
+def prepare(root, *, timing=False, exact_minimum=False):
     if root.exists():
         raise FileExistsError("new immutable common-streaming diagnostic root required")
     old = previous.read(REFERENCE / "plan.json")
@@ -92,6 +92,15 @@ def prepare(root, *, timing=False):
                 raise ValueError("frozen original result changed")
             bound[str(folder / name)] = digest
     jobs = old["jobs"]
+    if exact_minimum:
+        diagnostic = Path(
+            "/scratch/djy8hg/runs/evicastkv/streaming-packet-diagnostic-consumed-20261101-v1/analysis/decision.json"
+        )
+        status = previous.read(diagnostic)
+        if not status["complete"] or status["failures"]:
+            raise ValueError("complete consumed boundary-refit localization required")
+        for path in (diagnostic, SOURCE / "mosaickv/docs/exact_minimum_streaming_20261101.md"):
+            bound[str(path)] = sha(path)
     if timing:
         audit = previous.read(AUDIT / "analysis/decision.json")
         if (
@@ -120,6 +129,7 @@ def prepare(root, *, timing=False):
             dict(job, reference_worker=job["index"], index=i)
             for i, job in enumerate(j for j in jobs if method_of(j) == "mosaickv_exact")
         ]
+        exact_minimum = previous.read(AUDIT / "plan.json").get("exact_minimum_only", False)
     write_once(
         root / "plan.json",
         dict(
@@ -134,6 +144,7 @@ def prepare(root, *, timing=False):
             maximum_simultaneous_workers=2 if timing else 6,
             maximum_worker_minutes=75 if timing else 45,
             paired_common_streaming_timing=timing,
+            exact_minimum_only=exact_minimum,
             timing_warmups=5 if timing else 0,
             timing_repetitions=20 if timing else 0,
             baseline_comparison_admissible=False,
@@ -224,7 +235,7 @@ def worker(root, expected, index):
     from mosaickv.measurements.telemetry import capture_gpu_environment
 
     plan = previous.common.inputs(root, expected)
-    job, cache = plan["jobs"][index], None
+    job, cache, timing_context = plan["jobs"][index], None, {}
     payload, method = previous.read(job["inputs"][0]), method_of(job)
     out = root / f"workers/{index}"
     out.mkdir(parents=True, exist_ok=False)
@@ -260,7 +271,7 @@ def worker(root, expected, index):
             processor_kwargs={"local_files_only": True},
         )
         if plan.get("paired_common_streaming_timing", False):
-            timing_worker(root, expected, index, adapter, plan, job, payload)
+            timing_worker(root, expected, index, adapter, plan, job, payload, timing_context)
             result["status"] = "completed"
             return
         prepared = adapter.prepare_inputs(previous.load_messages(payload))
@@ -281,11 +292,23 @@ def worker(root, expected, index):
         packet_bytes = backing_bytes(tuple(t for p in packets for t in p.tensors()))
         if packet_bytes != prior["storage"]["initial_active_kv_storage_bytes"]:
             raise RuntimeError("offline reference changed original encoded cache bytes")
+        original_packet_bytes = packet_bytes
+        minimum_proof = None
+        if plan.get("exact_minimum_only", False):
+            from mosaickv.evaluation.exact_minimum_metadata import prove_and_compact
+
+            packets, minimum_proof = prove_and_compact(adapter, packets)
+            packet_hash = control.digest_tensors(tuple(t for p in packets for t in p.tensors()))
+            packet_bytes = backing_bytes(tuple(t for p in packets for t in p.tensors()))
+            if packet_bytes >= original_packet_bytes:
+                raise RuntimeError("lossless-minimum variant did not reduce persistent bytes")
         write_once(
             out / "offline_payload.json",
             dict(
                 payload_sha256=packet_hash,
                 physical_bytes=packet_bytes,
+                original_FP32_minimum_packet_bytes=original_packet_bytes,
+                exact_minimum_proof=minimum_proof,
                 memberships=memberships,
                 original_prefill_KV_lower_bound=len(profile)
                 * prepared.logical_sequence_length
@@ -313,6 +336,7 @@ def worker(root, expected, index):
             method=method,
             evaluation_variant=job["evaluation_variant"],
             representation_adaptation_not_official_method=True,
+            exact_minimum_only=plan.get("exact_minimum_only", False),
             instrumentation_not_production_latency=True,
             independent_quality_N=0,
         )
@@ -324,9 +348,17 @@ def worker(root, expected, index):
             else SelectedRetiringCache(len(profile), audit=True)
         )
         encoder = (
-            StreamingDirectSource(adapter, prepared, cache, profile)
+            StreamingDirectSource(
+                adapter,
+                prepared,
+                cache,
+                profile,
+                minimum_only=plan.get("exact_minimum_only", False),
+            )
             if method == "mosaickv_exact"
-            else StreamingBaseline(prepared, cache, profile, method)
+            else StreamingBaseline(
+                prepared, cache, profile, method, minimum_only=plan.get("exact_minimum_only", False)
+            )
         )
         fresh = replace(prepared, model_inputs=dict(prepared.model_inputs, past_key_values=cache))
         started = time.monotonic()
@@ -411,6 +443,11 @@ def worker(root, expected, index):
             manifest_path=str(out / "manifest.json"),
             measurement_type="ablation_measured",
             payload_and_memberships_identical=True,
+            payload_identity_reference="losslessly_compacted_frozen_parent"
+            if minimum_proof
+            else "frozen_parent",
+            exact_minimum_only=plan.get("exact_minimum_only", False),
+            original_FP32_minimum_packet_bytes=original_packet_bytes,
             generation_128_logits_bitwise=True,
             complete_teacher_logits_bitwise=True,
             prefill_logits_bitwise=True,
@@ -443,7 +480,8 @@ def worker(root, expected, index):
                         partial_cache=None
                         if cache is None
                         else cache.record(require_complete=False),
-                    ),
+                    )
+                    | timing_context,
                     allow_nan=False,
                 )
                 + "\n"
@@ -454,7 +492,7 @@ def worker(root, expected, index):
         write_once(out / "result.json", result)
 
 
-def timing_worker(root, expected, index, adapter, plan, job, payload):
+def timing_worker(root, expected, index, adapter, plan, job, payload, timing_context):
     import torch
 
     from mosaickv.evaluation.common_streaming_timing import METHODS, order, request, summarize
@@ -506,11 +544,14 @@ def timing_worker(root, expected, index, adapter, plan, job, payload):
     messages = previous.load_messages(payload)
     rows, seen = [], set()
     for entry in order(plan["seed"] + index):
+        timing_context.update(entry)
         gc.collect()
         torch.cuda.synchronize()
         torch.cuda.reset_peak_memory_stats()
         method = entry["method"]
-        values, packets, measured = request(adapter, messages, profile, method)
+        values, packets, measured = request(
+            adapter, messages, profile, method, minimum_only=plan.get("exact_minimum_only", False)
+        )
         reference = references[method]
         if not torch.equal(values, reference["logits"]):
             raise RuntimeError("timed request changed frozen 128-token vocabulary logits")
@@ -542,6 +583,7 @@ def timing_worker(root, expected, index, adapter, plan, job, payload):
             stream.write(json.dumps(row, allow_nan=False) + "\n")
         rows.append(row)
         del values, packets, measured, row
+    timing_context.clear()
     write_once(out / "timing_summary.json", summarize(rows, plan["seed"] + index))
 
 
@@ -633,18 +675,103 @@ def submit(root, expected):
 
     with patch.object(control.parent.subprocess, "check_output", scoped):
         control.parent.submit(root, expected)
+    plan = previous.common.inputs(root, expected)
+    if plan.get("exact_minimum_only") and not plan.get("paired_common_streaming_timing"):
+        launched = previous.read(root / "submission.json")
+        followup = original(
+            [
+                "sbatch",
+                "--parsable",
+                "--partition=bii",
+                "--account=bii_dsc_community",
+                "--cpus-per-task=2",
+                "--mem=8G",
+                "--time=00:10:00",
+                f"--dependency=afterany:{launched['cpu_analysis']}",
+                "--job-name=mk-minimum-advance",
+                f"--output={root}/slurm/advance-%j.out",
+                f"--error={root}/slurm/advance-%j.err",
+                str(SOURCE / "mosaickv/slurm/evicastkv_common_streaming.sbatch"),
+                str(SOURCE),
+                str(root),
+                expected,
+                "advance",
+            ],
+            text=True,
+        ).strip()
+        write_once(
+            root / "registered_followup.json",
+            dict(
+                job_id=followup,
+                scope="conditional_same_consumed_inputs_timing_only",
+                paper_campaign_authorized=False,
+            ),
+        )
+
+
+def advance(root, expected):
+    plan = previous.common.inputs(root, expected)
+    decision = previous.read(root / "analysis/decision.json")
+    if (
+        not plan.get("exact_minimum_only")
+        or not decision["complete"]
+        or decision["failures"]
+        or not decision["all_five_methods_streaming_identity_gate"]
+    ):
+        write_once(
+            root / "timing_promotion.json",
+            dict(
+                authorized=False,
+                reason="common exact-minimum identity gate did not pass",
+                paper_campaign_authorized=False,
+            ),
+        )
+        return
+    target = root.parent / "exact-minimum-streaming-timing-consumed-20261101-v1"
+    prepare(target, timing=True)
+    for name in ("cpu.json", "cpu.xml"):
+        os.link(root / name, target / name)
+    write_once(
+        target / "cpu_reuse.json",
+        dict(
+            source_sha=plan["source_sha"],
+            producer_root=str(root),
+            cpu_json_sha256=sha(root / "cpu.json"),
+            cpu_xml_sha256=sha(root / "cpu.xml"),
+            same_complete_suite_same_immutable_source=True,
+        ),
+    )
+    write_once(
+        root / "timing_promotion.json",
+        dict(authorized=True, target=str(target), paper_campaign_authorized=False),
+    )
+    submit(target, sha(target / "plan.json"))
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "mode", choices=("prepare", "prepare_timing", "cpu", "submit", "worker", "analyze")
+        "mode",
+        choices=(
+            "prepare",
+            "prepare_timing",
+            "prepare_exact_minimum",
+            "cpu",
+            "submit",
+            "worker",
+            "analyze",
+            "advance",
+        ),
     )
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--plan-sha")
     args = parser.parse_args()
-    if args.mode in ("prepare", "prepare_timing"):
-        prepare(args.root, timing=args.mode == "prepare_timing")
+    if args.mode in ("prepare", "prepare_timing", "prepare_exact_minimum"):
+        prepare(
+            args.root,
+            timing=args.mode == "prepare_timing",
+            exact_minimum=args.mode == "prepare_exact_minimum",
+        )
     elif args.mode == "cpu":
         previous.cpu(args.root, args.plan_sha)
     elif args.mode == "worker":

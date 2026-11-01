@@ -59,17 +59,29 @@ def pack(values: Any, *, bits: int, axis: int, group: int = 128) -> QuantizedBod
     minimum, maximum = shaped.amin(-1), shaped.amax(-1)
     scale = (maximum - minimum) / ((1 << bits) - 1)
     scale = torch.where(scale == 0, torch.ones_like(scale), scale)
+    # Only the packed integer arithmetic changes, never the FP32 quantization
+    # or stored headers. Up to four bits need at most a 32-bit word; eight-bit
+    # values already ARE their serialized bytes and need no word accumulator.
+    integer_dtype = torch.uint8 if bits == 8 else torch.int32
     quantized = (
-        ((shaped - minimum[..., None]) / scale[..., None]).round().clamp(0, (1 << bits) - 1).long()
+        ((shaped - minimum[..., None]) / scale[..., None])
+        .round()
+        .clamp(0, (1 << bits) - 1)
+        .to(integer_dtype)
     )
     # Group padding affects extrema only, never the physical code payload.
     quantized = quantized.flatten(-2)[..., :length].contiguous()
-    chunks = quantized.reshape(-1, 8)
-    shifts = torch.arange(8, device=values.device, dtype=torch.long) * bits
-    words = (chunks << shifts).sum(-1)
-    codes = torch.stack(
-        tuple(((words >> (8 * i)) & 255).to(torch.uint8) for i in range(bits)), -1
-    ).flatten()
+    if bits == 8:
+        codes = quantized.flatten()
+    else:
+        chunks = quantized.reshape(-1, 8)
+        shifts = torch.arange(8, device=values.device, dtype=torch.int32) * bits
+        # Four-bit all-15 words wrap modulo 2**32. Masking each shifted byte
+        # reproduces the old nonnegative int64 serialization exactly.
+        words = (chunks << shifts).sum(-1, dtype=torch.int32)
+        codes = torch.stack(
+            tuple(((words >> (8 * i)) & 255).to(torch.uint8) for i in range(bits)), -1
+        ).flatten()
     return QuantizedBody(
         tuple(values.shape), bits, axis, group, codes, minimum.contiguous(), scale.contiguous()
     )

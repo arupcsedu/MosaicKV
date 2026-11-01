@@ -63,3 +63,28 @@ def test_complete_transport_requires_numerical_and_byte_evidence():
         row["prefill_storage"][key] = value
         assert not row_is_complete(row)
     assert not row_is_complete(dict(status="failed"))
+
+
+def test_negative_identity_gate_cannot_promote_to_timing_or_more_examples(monkeypatch, tmp_path):
+    import evicastkv_common_streaming as module
+
+    records = []
+    monkeypatch.setattr(module.previous.common, "inputs", lambda *a: {"exact_minimum_only": True})
+    monkeypatch.setattr(
+        module.previous, "read", lambda *a: {"complete": False, "failures": ["bit mismatch"]}
+    )
+    monkeypatch.setattr(module, "write_once", lambda path, value: records.append(value))
+    monkeypatch.setattr(
+        module, "prepare", lambda *a, **k: pytest.fail("negative gate prepared a followup")
+    )
+    monkeypatch.setattr(
+        module, "submit", lambda *a, **k: pytest.fail("negative gate submitted GPU work")
+    )
+    module.advance(tmp_path, "fake")
+    assert records == [
+        dict(
+            authorized=False,
+            reason="common exact-minimum identity gate did not pass",
+            paper_campaign_authorized=False,
+        )
+    ]

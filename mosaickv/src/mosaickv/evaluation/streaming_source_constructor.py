@@ -8,9 +8,13 @@ import torch
 
 
 class StreamingDirectSource:
-    def __init__(self, adapter, prepared, cache, profile):
+    def __init__(self, adapter, prepared, cache, profile, *, minimum_only=False):
         from mosaickv.evaluation.text_source_storage import TextSourceCapture
         from mosaickv.selection.profile_lifetime import allocate_profile_lifetime
+
+        if type(minimum_only) is not bool:
+            raise ValueError("explicit lossless-minimum storage flag required")
+        self.minimum_only = minimum_only
 
         self.positions = TextSourceCapture(adapter, prepared).positions
         self.length, self.cache = prepared.logical_sequence_length, cache
@@ -85,6 +89,10 @@ class StreamingDirectSource:
         )
         packet, _ = optimize(packet, text, (tuple(range(n)),) * h, self.positions, attention)
         packet = retile(packet, 4)
+        if self.minimum_only:
+            from mosaickv.evaluation.exact_minimum_metadata import compact_format
+
+            packet = compact_format(packet)
         self.memberships.append(positions)
         return packet
 

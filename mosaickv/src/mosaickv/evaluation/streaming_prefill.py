@@ -49,6 +49,7 @@ class RetiringLayer(DynamicLayer):
                 self.owner.original_refs.append(weakref.ref(tensor))
                 tensor = tensor._base
         self.length = key_states.shape[-2]
+        self.owner.owners_changed()
         self.owner.observe()
         return self.keys, self.values
 
@@ -70,9 +71,24 @@ class RetiringPrefillCache(Cache):
         self.layers = [RetiringLayer() for _ in range(layer_count)]
         self.num_hidden_layers = layer_count
         self.next_layer, self.peak_bytes, self.audit, self.observations = 0, 0, audit, 0
-        self.original_refs, self.extra_tensors = [], ()
+        self.original_refs, self._extra_tensors, self._owned_storage = [], (), None
+        self._owned_device_bytes, self.peak_device_bytes = {}, {}
         for index, layer in enumerate(self.layers):
             layer.owner, layer.index = self, index
+
+    @property
+    def extra_tensors(self):
+        return self._extra_tensors
+
+    @extra_tensors.setter
+    def extra_tensors(self, tensors):
+        self._extra_tensors = tuple(tensors)
+        self.owners_changed()
+
+    def owners_changed(self):
+        # Sealed packets are immutable. Cache only storage IDENTITIES/byte
+        # counts, not tensors: a per-operation audit must not pin dead buffers.
+        self._owned_storage = None
 
     def owned_tensors(self):
         return (
@@ -88,7 +104,22 @@ class RetiringPrefillCache(Cache):
         )
 
     def observe(self, extra=()):
-        self.peak_bytes = max(self.peak_bytes, backing_bytes((*self.owned_tensors(), *extra)))
+        if self._owned_storage is None:
+            self._owned_storage = {identity(t): identity(t)[2] for t in self.owned_tensors()}
+            self._owned_device_bytes = {}
+            for owner, size in self._owned_storage.items():
+                self._owned_device_bytes[owner[0]] = (
+                    self._owned_device_bytes.get(owner[0], 0) + size
+                )
+        temporary = {identity(t): identity(t)[2] for t in extra}
+        current = dict(self._owned_device_bytes)
+        for owner, size in temporary.items():
+            if owner not in self._owned_storage:
+                current[owner[0]] = current.get(owner[0], 0) + size
+        measured = sum(current.values())
+        for device, size in current.items():
+            self.peak_device_bytes[device] = max(self.peak_device_bytes.get(device, 0), size)
+        self.peak_bytes = max(self.peak_bytes, measured)
         self.observations += 1
 
     def seal(self, index, attention, encoder, args=(), kwargs=None, output=None):
@@ -113,6 +144,7 @@ class RetiringPrefillCache(Cache):
         layer.packet = packet
         layer.keys = layer.values = None
         self.next_layer += 1
+        self.owners_changed()
         self.observe(original)
 
     def validate_encoding(self, index, packet, original):
@@ -134,14 +166,25 @@ class RetiringPrefillCache(Cache):
             boundary="prefill_owned_KV_encoded_payload_and_observed_encoder_overlap",
             final_prefill_cache_bytes=backing_bytes(self.owned_tensors()),
             observed_prefill_cache_peak_bytes=self.peak_bytes,
-            original_native_layers_remaining=0,
+            observed_prefill_peak_bytes_by_device=dict(self.peak_device_bytes),
+            observed_prefill_cuda_peak_bytes=max(
+                (
+                    size
+                    for device, size in self.peak_device_bytes.items()
+                    if device.startswith("cuda")
+                ),
+                default=0,
+            ),
+            observed_prefill_cpu_peak_bytes=self.peak_device_bytes.get("cpu", 0),
+            combined_peak_includes_CPU_encoder_tensor_temporaries=True,
+            original_native_layers_remaining=sum(layer.keys is not None for layer in self.layers),
             logical_lengths=[x.length for x in self.layers],
             observations=self.observations,
             tensor_results_observed=self.audit,
             whole_request_gpu_peak_certified=False,
             CPU_offload_or_residual_bytes=0,
             original_KV_tensor_objects_alive=sum(r() is not None for r in self.original_refs),
-            excludes="weights,media_encoder,model_activations_outside_encoder,opaque_GPU_workspace",
+            excludes="weights,media_encoder,model_activations_outside_encoder,opaque_GPU_workspace,unobserved_NumPy_or_Python_workspace",
         )
 
 

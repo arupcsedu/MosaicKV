@@ -18,7 +18,7 @@ SOURCE, previous = common.SOURCE, common.previous
 def prepare(root):
     if root.exists():
         raise FileExistsError("new diagnostic root required")
-    parent = common.AUDIT
+    parent = Path("/scratch/djy8hg/runs/evicastkv/common-streaming-prefill-consumed-20261101-v1")
     old = previous.read(parent / "plan.json")
     jobs, bound = [], dict(old["bound_files"])
     bound[str(parent / "plan.json")] = sha(parent / "plan.json")

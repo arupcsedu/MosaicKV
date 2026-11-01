@@ -24,9 +24,9 @@ from mosaickv.evaluation.streaming_prefill import lossless_kv_encoder
 from mosaickv.types import BudgetUnit, Precision
 
 
-def fixture(tmp_path):
+def fixture(tmp_path, *, length=48):
     torch.manual_seed(913)
-    count, n, heads, dim = 6, 48, 2, 128
+    count, n, heads, dim = 6, length, 2, 128
     pairs = tuple(
         tuple(torch.randn(1, heads, n, dim).bfloat16() for _ in range(2)) for _ in range(count)
     )
@@ -41,8 +41,8 @@ def fixture(tmp_path):
         model_inputs={"input_ids": torch.arange(n)[None]},
         modality_map=(
             ModalitySpan(0, 3, "text"),
-            ModalitySpan(3, 35, "image"),
-            ModalitySpan(35, n, "text"),
+            ModalitySpan(3, n - 13, "image"),
+            ModalitySpan(n - 13, n, "text"),
         ),
     )
     snapshot = CacheSnapshot(
@@ -199,7 +199,11 @@ def test_original_global_bundle_and_local_encoder_payloads_are_identical(tmp_pat
     from mosaickv.evaluation.head_local_precision import bundle
     from mosaickv.evaluation.text_source_storage import optimize
 
-    profile, path, pairs, probabilities, prepared, adapter, pref, cfg = fixture(tmp_path)
+    # The 48-token fixture protects almost all selected slots. This longer
+    # fixture leaves nonzero boundary exceptions and catches a missing refit.
+    profile, path, pairs, probabilities, prepared, adapter, pref, cfg = fixture(
+        tmp_path, length=128
+    )
     modules = [
         SimpleNamespace(
             head_dim=128,
@@ -210,8 +214,8 @@ def test_original_global_bundle_and_local_encoder_payloads_are_identical(tmp_pat
         for _ in pairs
     ]
     adapter._language_layers = lambda: tuple(SimpleNamespace(self_attn=a) for a in modules)
-    hidden = tuple(torch.randn(1, 48, 256).bfloat16() for _ in pairs)
-    phase = (torch.ones(1, 48, 128).bfloat16(), torch.zeros(1, 48, 128).bfloat16())
+    hidden = tuple(torch.randn(1, 128, 256).bfloat16() for _ in pairs)
+    phase = (torch.ones(1, 128, 128).bfloat16(), torch.zeros(1, 128, 128).bfloat16())
     capture = SimpleNamespace(
         records={
             i: dict(
@@ -225,10 +229,10 @@ def test_original_global_bundle_and_local_encoder_payloads_are_identical(tmp_pat
     encoder = StreamingBaseline(prepared, SimpleNamespace(extra_tensors=()), profile, method)
     if method == "vl_cache_reimpl":
         encoder.statistics = [
-            post_vision_attention_statistics((p,), kv_heads_by_layer=(2,), post_vision_start=35)
+            post_vision_attention_statistics((p,), kv_heads_by_layer=(2,), post_vision_start=115)
             for p in probabilities
         ]
-        encoder.capacities = vl_capacities(encoder.statistics, 48, encoder.target)
+        encoder.capacities = vl_capacities(encoder.statistics, 128, encoder.target)
     text = encoder.text_positions
     with torch.inference_mode():
         old, proof = bundle(

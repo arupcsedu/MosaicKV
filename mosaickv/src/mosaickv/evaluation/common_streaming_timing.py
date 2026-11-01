@@ -32,7 +32,7 @@ def order(seed):
 
 
 @torch.inference_mode()
-def request(adapter, messages, profile, method):
+def request(adapter, messages, profile, method, *, minimum_only=False):
     from mosaickv.evaluation.lossless_prompt_cache import backing_bytes
     from mosaickv.evaluation.storage_runs import run
     from mosaickv.evaluation.streaming_baselines import SelectedRetiringCache, StreamingBaseline
@@ -53,9 +53,9 @@ def request(adapter, messages, profile, method):
         else SelectedRetiringCache(len(profile), audit=False)
     )
     encoder = (
-        StreamingDirectSource(adapter, prepared, cache, profile)
+        StreamingDirectSource(adapter, prepared, cache, profile, minimum_only=minimum_only)
         if method == "mosaickv_exact"
-        else StreamingBaseline(prepared, cache, profile, method)
+        else StreamingBaseline(prepared, cache, profile, method, minimum_only=minimum_only)
     )
     fresh = replace(prepared, model_inputs=dict(prepared.model_inputs, past_key_values=cache))
     with SealAfterAttention(adapter, cache, encoder):
