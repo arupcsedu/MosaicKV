@@ -19,13 +19,15 @@ from mosaickv.evaluation.shared_source_format import SharedSourceFormat
 from mosaickv.evaluation.text_source_storage import TextSourceFormat
 
 
-def fill_component(packet, attention, component, destination):
+def fill_component(packet, attention, component, destination, *, source_workspace=None):
     if type(component) is not int or component not in (0, 1):
         raise ValueError("key or value component required")
     n = packet.shape[-2]
     prefix = destination[..., :n, :]
     if isinstance(packet, TextSourceFormat):
-        fill_component(packet.base, attention, component, destination)
+        fill_component(
+            packet.base, attention, component, destination, source_workspace=source_workspace
+        )
         projection = packet.projection
         if destination.device.type == "cuda":
             from mosaickv.evaluation.encoded_projection_kernel import project
@@ -78,7 +80,14 @@ def fill_component(packet, attention, component, destination):
             from mosaickv.evaluation.head_local_precision_kernel import scatter
             from mosaickv.evaluation.shared_source_kernel import project
 
-            project(packet, attention, (destination, destination), component=component)
+            if packet.projection_backend == "native_bmm_256":
+                from mosaickv.evaluation.native_source_chunks import project_component
+
+                if source_workspace is None:
+                    raise RuntimeError("owned native source workspace required")
+                project_component(packet, attention, component, destination, source_workspace)
+            else:
+                project(packet, attention, (destination, destination), component=component)
             scatter(packet.exact[component], packet.row_positions, destination, prompt_length=n)
             if packet.transport_patches:
                 from mosaickv.evaluation.shared_source_format import apply_transport_patch
@@ -95,6 +104,14 @@ def fill_component(packet, attention, component, destination):
 
 
 class SequentialLayer(ExactLayer):
+    def owned_tensors(self):
+        source = getattr(self, "source_workspace", None)
+        return (*super().owned_tensors(), *((source,) if source is not None else ()))
+
+    def release(self):
+        self.source_workspace = None
+        super().release()
+
     def _new_lease(self, shape, source):
         lease = torch.empty(shape, dtype=source.dtype, device=source.device)
         return lease, lease
@@ -105,12 +122,33 @@ class SequentialLayer(ExactLayer):
     def materialize_component(self, component):
         if not self.leased:
             raise RuntimeError("private active layer lease required")
-        fill_component(self.representation, self.attention, component, self.leased[0])
+        from mosaickv.evaluation.native_source_chunks import new_workspace, source_packet
+
+        native = source_packet(self.representation)
+        if native is not None and component == 0:
+            self.source_workspace = new_workspace(native)
+            from mosaickv.evaluation.lossless_prompt_cache import backing_bytes
+
+            self.lease_bytes = backing_bytes((*self.leased, self.source_workspace))
+            self.observe(())
+        fill_component(
+            self.representation,
+            self.attention,
+            component,
+            self.leased[0],
+            source_workspace=getattr(self, "source_workspace", None),
+        )
         self.leased[0][..., self.prompt_length :, :].copy_(
             self.history[component][..., : self.history_length, :]
         )
         self.current_component = component
         self.component_fills = getattr(self, "component_fills", 0) + 1
+        if native is not None and component == 1:
+            from mosaickv.evaluation.lossless_prompt_cache import backing_bytes
+
+            self.source_workspace = None
+            self.lease_bytes = backing_bytes(self.leased)
+            self.observe(())
 
 
 class SequentialAttentionTransport:

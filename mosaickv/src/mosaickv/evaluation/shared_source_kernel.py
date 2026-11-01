@@ -41,13 +41,14 @@ def _project(
     DIM: tl.constexpr,
     BITS: tl.constexpr,
     COMPONENT: tl.constexpr = -1,
+    HEAD_GROUP: tl.constexpr = 1,
 ):
     row = tl.program_id(0) * 16 + tl.arange(0, 16)
-    head = tl.program_id(1)
-    col = tl.arange(0, DIM)
+    head = tl.program_id(1) * HEAD_GROUP
+    col = tl.arange(0, DIM * HEAD_GROUP)
     reduction = tl.arange(0, 64)
-    ak = tl.full((16, DIM), 0, tl.float32)
-    av = tl.full((16, DIM), 0, tl.float32)
+    ak = tl.full((16, DIM * HEAD_GROUP), 0, tl.float32)
+    av = tl.full((16, DIM * HEAD_GROUP), 0, tl.float32)
     for start in range(WIDTH // 64):
         x = _read(CODES, MINIMUM, SCALE, row, start * 64, ROWS, WIDTH, BITS)
         k = start * 64 + reduction
@@ -58,13 +59,14 @@ def _project(
             wv = tl.load(WV + (head * DIM + col[None, :]) * WIDTH + k[:, None])
             av = tl.dot(x, wv, av)
     valid = row[:, None] < ROWS
-    pointer = head * HEAD_OUT + row[:, None] * DIM + col[None, :]
+    pointer = (head + col[None, :] // DIM) * HEAD_OUT + row[:, None] * DIM + col[None, :] % DIM
     if COMPONENT != 1:
         key = ak.to(tl.bfloat16).to(tl.float32)
-        rotated = tl.gather(key, tl.broadcast_to(((col + DIM // 2) % DIM)[None, :], (16, DIM)), 1)
-        rotated = tl.where(col[None, :] < DIM // 2, -rotated, rotated)
-        cos = tl.load(COS + row[:, None] * DIM + col[None, :], valid, other=0).to(tl.float32)
-        sin = tl.load(SIN + row[:, None] * DIM + col[None, :], valid, other=0).to(tl.float32)
+        rotate_index = col // DIM * DIM + (col + DIM // 2) % DIM
+        rotated = tl.gather(key, tl.broadcast_to(rotate_index[None, :], (16, DIM * HEAD_GROUP)), 1)
+        rotated = tl.where(col[None, :] % DIM < DIM // 2, -rotated, rotated)
+        cos = tl.load(COS + row[:, None] * DIM + col[None, :] % DIM, valid, other=0).to(tl.float32)
+        sin = tl.load(SIN + row[:, None] * DIM + col[None, :] % DIM, valid, other=0).to(tl.float32)
         first = (key * cos).to(tl.bfloat16).to(tl.float32)
         second = (rotated * sin).to(tl.bfloat16).to(tl.float32)
         tl.store(OK + pointer, first + second, valid)
@@ -78,6 +80,9 @@ def project(packet, attention, targets, *, component=-1):
     if type(component) is not int or component not in (-1, 0, 1):
         raise ValueError("explicit both/key/value projection component required")
     h, n, d = packet.shape[1:]
+    head_group = getattr(packet, "source_head_group", 1)
+    if type(head_group) is not int or head_group not in (1, 2, 4) or h % head_group:
+        raise ValueError("divisible audited head group of one, two or four required")
     body = packet.source
     width = body.shape[-1]
     if body.bits != 3 or body.axis != 2 or body.group != 128 or width != h * d or d != 128:
@@ -99,7 +104,7 @@ def project(packet, attention, targets, *, component=-1):
         )
     ):
         raise ValueError("unchanged contiguous bias-free native projection weights required")
-    _project[(triton.cdiv(n, 16), h)](
+    _project[(triton.cdiv(n, 16), h // head_group)](
         body.codes,
         body.minimum,
         body.scale,
@@ -114,6 +119,9 @@ def project(packet, attention, targets, *, component=-1):
         DIM=d,
         BITS=3,
         COMPONENT=component,
+        HEAD_GROUP=head_group,
+        num_warps=8 if head_group == 4 else 4,
+        num_stages={1: 3, 2: 2, 4: 1}[head_group],
         enable_fp_fusion=False,
     )
 
@@ -143,3 +151,58 @@ def decode_source_for_construction(packet):
         enable_fp_fusion=False,
     )
     return out
+
+
+@triton.jit(do_not_specialize=["ROWS", "FIRST", "TAKE"])
+def _decode_chunk(CODES, MINIMUM, SCALE, OUT, ROWS, FIRST, TAKE, WIDTH: tl.constexpr):
+    local = tl.program_id(0) * 16 + tl.arange(0, 16)
+    start = tl.program_id(1) * 64
+    values = _read(CODES, MINIMUM, SCALE, FIRST + local, start, ROWS, WIDTH, 3)
+    offset = local[:, None] * WIDTH + start + tl.arange(0, 64)[None, :]
+    tl.store(OUT + offset, values, local[:, None] < TAKE)
+
+
+def decode_chunk(packet, target, first):
+    n, width = packet.source.shape[2:]
+    take = target.shape[1]
+    if not 0 <= first < first + take <= n or not target.is_contiguous():
+        raise ValueError("bounded contiguous source chunk required")
+    _decode_chunk[(triton.cdiv(take, 16), width // 64)](
+        packet.source.codes,
+        packet.source.minimum,
+        packet.source.scale,
+        target,
+        n,
+        first,
+        take,
+        WIDTH=width,
+        enable_fp_fusion=False,
+    )
+
+
+@triton.jit(do_not_specialize=["ROWS", "FIRST", "TAKE", "HEAD_OUT"])
+def _rotate_native(KEY, COS, SIN, ROWS, FIRST, TAKE, HEAD_OUT, COUNT, BLOCK: tl.constexpr):
+    index = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    valid = index < COUNT
+    head = index // (TAKE * 64)
+    row = index // 64 % TAKE + FIRST
+    col = index % 64
+    ptr = head * HEAD_OUT + row * 128 + col
+    left = tl.load(KEY + ptr, valid, other=0).to(tl.float32)
+    right = tl.load(KEY + ptr + 64, valid, other=0).to(tl.float32)
+    cos = tl.load(COS + row * 128 + col, valid, other=0).to(tl.float32)
+    sin = tl.load(SIN + row * 128 + col, valid, other=0).to(tl.float32)
+    a = (left * cos).to(tl.bfloat16).to(tl.float32)
+    b = (-right * sin).to(tl.bfloat16).to(tl.float32)
+    c = (right * cos).to(tl.bfloat16).to(tl.float32)
+    d = (left * sin).to(tl.bfloat16).to(tl.float32)
+    tl.store(KEY + ptr, a + b, valid)
+    tl.store(KEY + ptr + 64, c + d, valid)
+
+
+def rotate_native(target, cos, sin, first, take):
+    n = cos.shape[1]
+    count = target.shape[1] * take * 64
+    _rotate_native[(triton.cdiv(count, 256),)](
+        target, cos, sin, n, first, take, target.stride(1), count, BLOCK=256, enable_fp_fusion=False
+    )

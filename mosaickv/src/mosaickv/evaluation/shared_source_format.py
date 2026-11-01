@@ -61,6 +61,8 @@ class SharedSourceFormat:
     union: object
     slots: object
     transport_patches: tuple = ()
+    projection_backend: str = "fused"
+    source_head_group: int = 1
     kind: str = "evicastkv_full_prompt_shared_source_precision_variant"
 
     def private(self):
@@ -82,9 +84,17 @@ class SharedSourceFormat:
         return backing_bytes(self.tensors())
 
     @torch.inference_mode()
-    def fill(self, attention, targets, *, direct):
+    def fill(self, attention, targets, *, direct, workspace_observer=None):
         del direct
+        if self.projection_backend not in ("fused", "native_bmm_256"):
+            raise NotImplementedError("unregistered source projection backend")
         n, h, d = self.shape[2], self.shape[1], self.shape[3]
+        if (
+            type(self.source_head_group) is not int
+            or self.source_head_group not in (1, 2, 4)
+            or h % self.source_head_group
+        ):
+            raise ValueError("divisible explicit head group required")
         if (
             attention is None
             or len(targets) != 2
@@ -100,9 +110,23 @@ class SharedSourceFormat:
         ):
             raise ValueError("actual frozen attention and complete layer lease required")
         if targets[0].device.type == "cuda":
-            from mosaickv.evaluation.shared_source_kernel import project
+            if self.projection_backend == "native_bmm_256":
+                from mosaickv.evaluation.native_source_chunks import (
+                    new_workspace,
+                    project_component,
+                )
 
-            project(self, attention, targets)
+                workspace = new_workspace(self)
+                if workspace_observer is not None:
+                    workspace_observer((workspace,))
+                for component, target in enumerate(targets):
+                    project_component(self, attention, component, target, workspace)
+            elif self.projection_backend == "fused":
+                from mosaickv.evaluation.shared_source_kernel import project
+
+                project(self, attention, targets)
+            else:
+                raise NotImplementedError("unregistered source projection backend")
             from mosaickv.evaluation.head_local_precision_kernel import scatter
 
             for body, target in zip(self.exact, targets, strict=True):

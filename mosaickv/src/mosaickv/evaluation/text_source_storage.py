@@ -215,8 +215,15 @@ class TextSourceFormat:
     def component_bytes(self):
         return backing_bytes(self.tensors())
 
-    def fill(self, attention, destinations, *, direct):
-        self.base.fill(attention, destinations, direct=direct)
+    def fill(self, attention, destinations, *, direct, workspace_observer=None):
+        from mosaickv.evaluation.native_source_chunks import source_packet
+
+        if source_packet(self.base) is not None:
+            self.base.fill(
+                attention, destinations, direct=direct, workspace_observer=workspace_observer
+            )
+        else:
+            self.base.fill(attention, destinations, direct=direct)
         self.projection.fill(attention, destinations)
 
     def materialize(self, attention):

@@ -327,7 +327,14 @@ class ExactLayer(PromptStorageLayer):
             else None
         )
         with mode if mode is not None else nullcontext():
-            self.representation.fill(self.attention, self.leased, direct=self.direct)
+            from mosaickv.evaluation.native_source_chunks import source_packet
+
+            if source_packet(self.representation) is not None:
+                self.representation.fill(
+                    self.attention, self.leased, direct=self.direct, workspace_observer=self.observe
+                )
+            else:
+                self.representation.fill(self.attention, self.leased, direct=self.direct)
             self.fill_history()
         if mode is not None:
             self.workspace_operations += mode.operations
