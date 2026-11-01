@@ -23,7 +23,14 @@ STUDY = Path("/scratch/djy8hg/runs/evicastkv/protected-source-cpu-20261101-v2")
 ARMS = ("shadow", "source3_full_prompt", "source3_exclude_global_exact")
 
 
-def prepare(root, *, sequential_shadow=False, corrected_source=False, optimized_source=False):
+def prepare(
+    root,
+    *,
+    sequential_shadow=False,
+    corrected_source=False,
+    optimized_source=False,
+    fp32_tiling=False,
+):
     if root.exists():
         raise ValueError("new immutable source-runtime root required")
     old = previous.read(OLD / "plan.json")
@@ -89,6 +96,18 @@ def prepare(root, *, sequential_shadow=False, corrected_source=False, optimized_
             raise ValueError("complete bitwise two-head operator gate required")
         for path in (micro, SOURCE / "mosaickv/docs/source_input_fusion_20261101.md"):
             bound[str(path)] = sha(path)
+    selected_head_group = None
+    if fp32_tiling:
+        micro = Path(
+            "/scratch/djy8hg/runs/evicastkv/fp32-source-operator-consumed-20261101-v1/analysis/decision.json"
+        )
+        data = previous.read(micro)
+        selected = data["operator_selection"]["chosen_grouped_operator"]
+        if not data["complete"] or data["failures"] or selected not in ("fused_h2", "fused_h4"):
+            raise ValueError("positive bitwise FP32 grouped operator gate required")
+        selected_head_group = int(selected.removeprefix("fused_h"))
+        for path in (micro, SOURCE / "mosaickv/docs/fp32_source_tiled_model_20261101.md"):
+            bound[str(path)] = sha(path)
     variants = ("shadow",) if sequential_shadow else ARMS
     if corrected_source:
         variants = ("shadow", "source3_exclude_global_exact", "source3_exact_text_source")
@@ -108,6 +127,8 @@ def prepare(root, *, sequential_shadow=False, corrected_source=False, optimized_
                 for header in ("fp32", "fp16")
             ),
         )
+    if fp32_tiling:
+        variants = (*variants, "source3_fp32_tiled_text")
     write_once(
         root / "plan.json",
         dict(
@@ -121,6 +142,8 @@ def prepare(root, *, sequential_shadow=False, corrected_source=False, optimized_
             sequential_shadow=sequential_shadow,
             corrected_source=corrected_source,
             optimized_source=optimized_source,
+            fp32_tiling=fp32_tiling,
+            selected_head_group=selected_head_group,
             sequential_transport=sequential_shadow or corrected_source,
             original_caps_unchanged=True,
             one_prefill=True,
@@ -346,6 +369,22 @@ def build(
             )
             if size <= cap:
                 formats[arm] = trial
+            continue
+        if arm == "source3_fp32_tiled_text":
+            from mosaickv.evaluation.source_retile import retile
+
+            parent_arm = "source3_exact_text_source"
+            trial = tuple(retile(f, plan["selected_head_group"]) for f in formats[parent_arm])
+            formats[arm] = trial
+            caps_by_arm[arm] = cap
+            times[arm] = times[parent_arm] + time.monotonic() - begun
+            construction_checks[arm] = dict(
+                status="constructed",
+                source_dependency=parent_arm,
+                hardware_tiling_only=True,
+                metadata_precision="fp32",
+                head_group=plan["selected_head_group"],
+            )
             continue
         if arm == "source3_fp16_native_fused_inputs":
             from mosaickv.evaluation.integrated_source_input import fuse
@@ -784,6 +823,16 @@ def worker(root, expected, index):
                         raise RuntimeError(
                             "integrated exact input fusion changed native parent logits"
                         )
+                if arm == "source3_fp32_tiled_text":
+                    values = torch.load(
+                        out / "source3_exact_text_source-logits.pt",
+                        map_location="cpu",
+                        weights_only=True,
+                    )
+                    if not torch.equal(fixed, values["fixed"]) or not torch.equal(
+                        greedy, values["greedy"]
+                    ):
+                        raise RuntimeError("FP32 hardware tiling changed model logits")
                 if arm == "source3_exact_text_source":
                     previous_values = torch.load(
                         out / "source3_exclude_global_exact-logits.pt",
@@ -1003,6 +1052,7 @@ if __name__ == "__main__":
             "prepare_sequential",
             "prepare_corrected",
             "prepare_optimized",
+            "prepare_fp32_tiling",
             "cpu",
             "submit",
             "worker",
@@ -1020,6 +1070,8 @@ if __name__ == "__main__":
         prepare(args.root, corrected_source=True)
     elif args.mode == "prepare_optimized":
         prepare(args.root, corrected_source=True, optimized_source=True)
+    elif args.mode == "prepare_fp32_tiling":
+        prepare(args.root, corrected_source=True, fp32_tiling=True)
     elif args.mode == "cpu":
         previous.cpu(args.root, args.plan_sha)
     elif args.mode == "worker":
