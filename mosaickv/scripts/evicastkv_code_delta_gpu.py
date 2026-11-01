@@ -24,7 +24,7 @@ GPU_PARENT = Path(
 )
 
 
-def prepare(root, *, lifetimes=False, repair=False):
+def prepare(root, *, lifetimes=False, repair=False, method_shards=False):
     if root.exists():
         raise FileExistsError("new immutable code-delta GPU diagnostic root required")
     old = previous.read(REFERENCE / "plan.json")
@@ -40,6 +40,11 @@ def prepare(root, *, lifetimes=False, repair=False):
     bound = dict(old["bound_files"])
     if lifetimes:
         bound[str(GPU_PARENT / "plan.json")] = sha(GPU_PARENT / "plan.json")
+    if method_shards:
+        reporting_parent = (
+            GPU_PARENT.parent / "lossless-layer-code-delta-gpu-consumed-20261101-retry2/plan.json"
+        )
+        bound[str(reporting_parent)] = sha(reporting_parent)
     if repair:
         negative = previous.read(GPU_PARENT / "analysis/decision.json")
         if (
@@ -64,12 +69,28 @@ def prepare(root, *, lifetimes=False, repair=False):
         SOURCE / "mosaickv/docs/lossless_code_delta_gpu_20261101.md",
     ):
         bound[str(path)] = sha(path)
+    teacher_bindings = {}
     for job in old["jobs"]:
         folder = REFERENCE / f"workers/{job['index']}"
         record = previous.read(folder / "result.json")
         if record["status"] != "completed" or record["failures"]:
             raise ValueError("all frozen producers must be complete")
         bound[str(folder / "result.json")] = sha(folder / "result.json")
+        original_teacher_path = common.REFERENCE / f"workers/{job['index']}/raw.jsonl"
+        bound[str(original_teacher_path)] = sha(original_teacher_path)
+        current_teacher = next(
+            json.loads(line)["teacher_forced"]
+            for line in (folder / "raw.jsonl").read_text().splitlines()
+            if json.loads(line)["variant"] == job["evaluation_variant"]
+        )
+        original_teacher = next(
+            json.loads(line)["teacher_forced"]
+            for line in original_teacher_path.read_text().splitlines()
+            if json.loads(line)["variant"] == job["evaluation_variant"]
+        )
+        teacher_bindings[str(job["index"])] = teacher_reference_hash(
+            current_teacher, original_teacher
+        )
         for name, expected in record["outputs"].items():
             if sha(folder / name) != expected:
                 raise ValueError("frozen producer changed")
@@ -78,6 +99,8 @@ def prepare(root, *, lifetimes=False, repair=False):
         dict(j, reference_worker=j["index"], index=i)
         for i, j in enumerate(j for j in old["jobs"] if common.method_of(j) == "mosaickv_exact")
     ]
+    if method_shards:
+        jobs = [dict(j, reference_worker=j["index"]) for j in old["jobs"]]
     write_once(
         root / "plan.json",
         dict(
@@ -91,8 +114,9 @@ def prepare(root, *, lifetimes=False, repair=False):
             constructor_lifetime_audit=lifetimes,
             shared_workspace_accounting_repair=repair,
             perform_source_decode_timing=repair or not lifetimes,
-            maximum_worker_minutes=90,
-            maximum_simultaneous_workers=2,
+            one_method_per_worker=method_shards,
+            maximum_worker_minutes=45 if method_shards else 90,
+            maximum_simultaneous_workers=6 if method_shards else 2,
             fresh_materialization_authorized=False,
             paper_campaign_authorized=False,
             GPU_consumed_diagnostic_authorized=True,
@@ -107,6 +131,7 @@ def prepare(root, *, lifetimes=False, repair=False):
             source_decode_pair_repetitions=20 if repair or not lifetimes else 0,
             prefill_peak_improvement_claim_authorized=False,
             common_codec_offered_to_all_five_methods=True,
+            complete_teacher_logit_bindings=teacher_bindings,
             fallback_is_original_same_method_not_FullKV=True,
             comparison_is_common_source_capacity_not_equal_encoded_bytes=True,
         ),
@@ -321,8 +346,10 @@ def worker(root, expected, index):
             variant="common_lossless_layer_code_delta",
             whole_request_peak_claim=False,
             representation_not_official_baseline=True,
-            method="multi_method_representation_diagnostic",
-            methods=list(METHODS),
+            method=common.method_of(job)
+            if plan.get("one_method_per_worker")
+            else "multi_method_representation_diagnostic",
+            methods=[common.method_of(job)] if plan.get("one_method_per_worker") else list(METHODS),
         )
         write_once(output / "manifest.json", manifest)
         write_once(output / "primitive_controls.json", controls())
@@ -338,7 +365,8 @@ def worker(root, expected, index):
         profile = tuple(previous.read(Path(plan["profile_path"])))
         originals = previous.read(REFERENCE / "plan.json")["jobs"]
         source = None
-        for method in METHODS:
+        methods = (common.method_of(job),) if plan.get("one_method_per_worker") else METHODS
+        for method in methods:
             reference_job = next(
                 j
                 for j in originals
@@ -347,6 +375,15 @@ def worker(root, expected, index):
             folder = REFERENCE / f"workers/{reference_job['index']}"
             reference = previous.read(folder / "offline_payload.json")
             prior = json.loads((folder / "raw.jsonl").read_text().splitlines()[0])
+            original_teacher_path = common.REFERENCE / f"workers/{reference_job['index']}/raw.jsonl"
+            original_teacher = next(
+                json.loads(line)["teacher_forced"]
+                for line in original_teacher_path.read_text().splitlines()
+                if json.loads(line)["variant"] == reference_job["evaluation_variant"]
+            )
+            expected_teacher_hash = teacher_reference_hash(
+                prior["teacher_forced"], original_teacher
+            )
             expected_logits = torch.load(
                 folder / "greedy_logits.pt", weights_only=True, map_location="cpu"
             )
@@ -391,6 +428,17 @@ def worker(root, expected, index):
             values, details = decode_run(adapter, runtime, encoded, audit=True)
             if not torch.equal(values, expected_logits):
                 raise RuntimeError("lossless replay changed frozen 128-token vocabulary logits")
+            write_once(
+                output / f"{method}-generation-observation.json",
+                dict(
+                    logits_sha256=common.control.digest_tensors((values,)),
+                    logits_bitwise=True,
+                    details=details,
+                    construction=construction,
+                    prefill_storage=prefill_storage,
+                    parent_prefill_storage=prior["prefill_storage"],
+                ),
+            )
             targets, provenance = load_targets(plan, payload, adapter.processor.tokenizer)
             teacher, teacher_logits = score_formats(
                 adapter,
@@ -403,9 +451,19 @@ def worker(root, expected, index):
                 return_logits=True,
             )
             original_teacher = prior["teacher_forced"]
-            if common.control.digest_tensors((teacher_logits,)) != original_teacher["storage"][
-                "raw_history_control"
-            ]["source_history_logit_sha256"] or any(
+            observed_teacher_hash = common.control.digest_tensors((teacher_logits,))
+            write_once(
+                output / f"{method}-teacher-observation.json",
+                dict(
+                    complete_teacher_logit_sha256=observed_teacher_hash,
+                    expected_teacher_logit_sha256=expected_teacher_hash,
+                    original_teacher_artifact_path=str(original_teacher_path),
+                    original_teacher_artifact_sha256=sha(original_teacher_path),
+                    teacher=teacher,
+                    target_provenance=provenance,
+                ),
+            )
+            if observed_teacher_hash != expected_teacher_hash or any(
                 teacher[k] != original_teacher[k]
                 for k in (
                     "nll_sum",
@@ -482,7 +540,7 @@ def worker(root, expected, index):
 def analyze(root, expected):
     plan = previous.common.inputs(root, expected)
     rows, failures, timing = [], [], []
-    for i in range(2):
+    for i, job in enumerate(plan["jobs"]):
         folder = root / f"workers/{i}"
         try:
             record = previous.read(folder / "result.json")
@@ -499,7 +557,9 @@ def analyze(root, expected):
             )
             if (folder / "source_decode_timing.json").exists():
                 timing.append(dict(case=i, **previous.read(folder / "source_decode_timing.json")))
-            elif plan.get("perform_source_decode_timing", True):
+            elif plan.get("perform_source_decode_timing", True) and (
+                not plan.get("one_method_per_worker") or common.method_of(job) == "mosaickv_exact"
+            ):
                 failures.append(dict(case=i, error="registered paired decode timing missing"))
         except (OSError, ValueError) as exc:
             failures.append(dict(case=i, error=str(exc)))
@@ -556,6 +616,33 @@ def rows_complete(rows):
         == r.get("constructed_code_payload", {}).get("net_active_bytes")
         for r in rows
     )
+
+
+def teacher_reference_hash(current, original):
+    fields = (
+        "nll_sum",
+        "per_token_nll",
+        "conditional_greedy_tokens",
+        "evaluated_token_count",
+        "target_ids",
+        "target_mask",
+        "no_EOS_stop",
+        "no_truncation",
+    )
+    if any(current.get(k) != original.get(k) or k not in current for k in fields):
+        raise ValueError("frozen teacher artifact differs from original bitwise-control producer")
+    control = original.get("storage", {}).get("raw_history_control", {})
+    digest = control.get("source_history_logit_sha256")
+    if (
+        control.get("complete_teacher_logits_bitwise") is not True
+        or control.get("maximum_logit_difference") != 0
+        or digest != control.get("original_logit_sha256")
+        or not isinstance(digest, str)
+        or len(digest) != 64
+        or any(c not in "0123456789abcdef" for c in digest)
+    ):
+        raise ValueError("original complete teacher-logit bitwise control is required")
+    return digest
 
 
 def submit(root, expected):
@@ -647,6 +734,7 @@ if __name__ == "__main__":
             "prepare",
             "prepare_lifetimes",
             "prepare_repair",
+            "prepare_method_retry",
             "cpu",
             "submit",
             "worker",
@@ -657,8 +745,13 @@ if __name__ == "__main__":
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--plan-sha")
     args = parser.parse_args()
-    if args.mode in ("prepare", "prepare_lifetimes", "prepare_repair"):
-        prepare(args.root, lifetimes=args.mode != "prepare", repair=args.mode == "prepare_repair")
+    if args.mode in ("prepare", "prepare_lifetimes", "prepare_repair", "prepare_method_retry"):
+        prepare(
+            args.root,
+            lifetimes=args.mode != "prepare",
+            repair=args.mode in ("prepare_repair", "prepare_method_retry"),
+            method_shards=args.mode == "prepare_method_retry",
+        )
     elif args.mode == "cpu":
         previous.cpu(args.root, args.plan_sha)
     elif args.mode == "worker":

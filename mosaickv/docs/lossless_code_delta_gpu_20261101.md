@@ -85,3 +85,19 @@ result auditing as the frozen parent. Only the separately labeled timed trials
 disable that instrumentation. Do not compare an unaudited decode peak with the
 parent's audited peak. The first repair's GPU admission was canceled while still
 pending to enforce this measurement-boundary correction before any GPU inference.
+
+The second retry exposed a reporting-schema error after greedy parity: the
+derived streaming artifact intentionally omits the original `raw_history_control`
+object. Resolve its complete teacher-logit hash from the explicitly hash-bound
+original common-history producer, only after checking that all NLL, target,
+mask and token-count fields match the derived artifact. Do not invent a digest
+or weaken bitwise comparison. Checkpoint generation and complete teacher
+observations before final report assembly so CPU-only recovery is possible if
+a later reporting operation fails. Preserve both negative retries.
+
+For this reporting repair, `prepare_method_retry` uses ten independent
+method/input workers (the same two consumed inputs times five methods), at
+most six one-A100/12-CPU workers concurrently, each capped at 45 minutes.
+Only the two source-variant workers perform their within-engine paired codec
+timing. No latency comparison is inferred from methods on separate GPUs.
+CPU afterany analysis verifies all ten rows; no fresh identities are selected.

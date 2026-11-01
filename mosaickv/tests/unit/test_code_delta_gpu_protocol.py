@@ -82,3 +82,36 @@ def test_memory_audit_and_timing_policies_remain_separate(monkeypatch):
     decode_run(None, None, ())
     assert [r["audit"] for r in calls] == [True, False]
     assert all(r["tokens"] == 128 and r["sequential_source_history"] for r in calls)
+
+
+def test_teacher_hash_comes_from_bound_original_not_derived_storage_schema():
+    from evicastkv_code_delta_gpu import teacher_reference_hash
+
+    # This fixture reproduces the actual two producer SCHEMAS, not their scores.
+    fields = dict(
+        nll_sum=1.0,
+        per_token_nll=[1.0],
+        conditional_greedy_tokens=[1],
+        evaluated_token_count=1,
+        target_ids=[1],
+        target_mask="fixture",
+        no_EOS_stop=True,
+        no_truncation=True,
+    )
+    current = dict(fields, storage={"source_history": True})
+    original = dict(
+        fields,
+        storage={
+            "raw_history_control": dict(
+                complete_teacher_logits_bitwise=True,
+                maximum_logit_difference=0,
+                source_history_logit_sha256="a" * 64,
+                original_logit_sha256="a" * 64,
+            )
+        },
+    )
+    assert teacher_reference_hash(current, original) == "a" * 64
+    with pytest.raises(ValueError):
+        teacher_reference_hash(dict(current, nll_sum=2.0), original)
+    with pytest.raises(ValueError):
+        teacher_reference_hash(current, dict(original, storage={}))
