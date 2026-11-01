@@ -33,7 +33,9 @@ class QuantizedBody:
         )
 
 
-def pack(values: Any, *, bits: int, axis: int, group: int = 128) -> QuantizedBody:
+def pack(
+    values: Any, *, bits: int, axis: int, group: int = 128, compact_workspace: bool = True
+) -> QuantizedBody:
     if (
         type(bits) is not int
         or bits not in (2, 3, 4, 8)
@@ -47,7 +49,11 @@ def pack(values: Any, *, bits: int, axis: int, group: int = 128) -> QuantizedBod
         or not bool(torch.isfinite(values).all())
     ):
         raise ValueError("finite nonempty batch-one BF16, 2/3/4/8 bits and group128 required")
-    transformed = values.float().movedim(axis, -1).contiguous()
+    if type(compact_workspace) is not bool:
+        raise ValueError("explicit compact quantizer workspace flag required")
+    if compact_workspace and torch.is_grad_enabled() and values.requires_grad:
+        return pack(values, bits=bits, axis=axis, group=group, compact_workspace=False)
+    transformed = (values if compact_workspace else values.float()).movedim(axis, -1).contiguous()
     length = transformed.shape[-1]
     pad = (-length) % group
     if pad:
@@ -55,6 +61,10 @@ def pack(values: Any, *, bits: int, axis: int, group: int = 128) -> QuantizedBod
         transformed = torch.cat(
             (transformed, transformed[..., -1:].expand(*transformed.shape[:-1], pad)), -1
         )
+    if compact_workspace:
+        # Copy/padding commute exactly with BF16->FP32 conversion. Avoid two
+        # overlapping full FP32 copies while preserving the original layout.
+        transformed = transformed.float()
     shaped = transformed.reshape(*transformed.shape[:-1], -1, group)
     minimum, maximum = shaped.amin(-1), shaped.amax(-1)
     scale = (maximum - minimum) / ((1 << bits) - 1)
@@ -63,12 +73,36 @@ def pack(values: Any, *, bits: int, axis: int, group: int = 128) -> QuantizedBod
     # or stored headers. Up to four bits need at most a 32-bit word; eight-bit
     # values already ARE their serialized bytes and need no word accumulator.
     integer_dtype = torch.uint8 if bits == 8 else torch.int32
-    quantized = (
-        ((shaped - minimum[..., None]) / scale[..., None])
-        .round()
-        .clamp(0, (1 << bits) - 1)
-        .to(integer_dtype)
-    )
+    if compact_workspace:
+        # PRIVATE workspace: retain separate FP32 ATen operations/rounding.
+        # Never mutate caller BF16 inputs, headers, model weights or original KV.
+        shaped.sub_(minimum[..., None])
+        shaped.div_(scale[..., None])
+        shaped.round_()
+        shaped.clamp_(0, (1 << bits) - 1)
+        if values.device.type == "cuda" and bool(
+            (torch.isfinite(scale) & (scale >= torch.finfo(torch.float32).tiny)).all()
+        ):
+            from mosaickv.evaluation.quantizer_workspace_kernel import serialize
+
+            codes = serialize(shaped, bits=bits, length=length, value_count=values.numel())
+            return QuantizedBody(
+                tuple(values.shape),
+                bits,
+                axis,
+                group,
+                codes,
+                minimum.contiguous(),
+                scale.contiguous(),
+            )
+        quantized = shaped.to(integer_dtype)
+    else:
+        quantized = (
+            ((shaped - minimum[..., None]) / scale[..., None])
+            .round()
+            .clamp(0, (1 << bits) - 1)
+            .to(integer_dtype)
+        )
     # Integer serialization no longer needs the full FP32 input or its views.
     # Headers, rounding order and quantized integers remain exactly unchanged.
     del transformed, shaped, maximum

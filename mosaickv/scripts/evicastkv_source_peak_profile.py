@@ -62,6 +62,25 @@ def prepare(root, *, components=False, all_methods=False):
             raise ValueError("measured conditional range peak must justify this optimization")
         for p in (component_root / "plan.json", component_root / "analysis/decision.json"):
             bound[str(p)] = sha(p)
+        range_root = PARENT.parent / "common-bf16-ranges-consumed-20261101-v1"
+        bound[str(range_root / "plan.json")] = sha(range_root / "plan.json")
+        for case in (0, 8):
+            folder = range_root / f"workers/{case}"
+            result = previous.previous.read(folder / "result.json")
+            if result["status"] != "completed" or result["failures"]:
+                raise ValueError("successful source range profiling required")
+            bound[str(folder / "result.json")] = sha(folder / "result.json")
+            for name, digest_value in result["outputs"].items():
+                if sha(folder / name) != digest_value:
+                    raise ValueError("profile producer changed")
+                bound[str(folder / name)] = digest_value
+            observations = previous.previous.read(folder / "observations.json")
+            cuda = [v for v in observations["peak_events"] if v["device"].startswith("cuda")]
+            if (
+                max(cuda, key=lambda v: v["bytes"])["phase"][-1]
+                != "mosaickv.evaluation.conditional_precision.pack"
+            ):
+                raise ValueError("measured quantizer workspace must justify the next optimization")
     for p in (PARENT / "plan.json", SOURCE / "mosaickv/docs/source_peak_profile_20261101.md"):
         bound[str(p)] = sha(p)
     write_once(
@@ -78,6 +97,7 @@ def prepare(root, *, components=False, all_methods=False):
             componentwise_transport_fitting=components,
             common_BF16_range_preparation_with_signed_zero_fallback=True,
             all_five_methods_profiled=all_methods,
+            compact_quantizer_workspace=True,
         ),
     )
     print(sha(root / "plan.json"))
@@ -155,6 +175,8 @@ def worker(root, expected, index):
             previous.REFERENCE / f"workers/{job['reference_worker']}/manifest.json"
         )
         manifest.update(
+            run_id=str(output),
+            parent_run_id=manifest.get("run_id"),
             source_sha=plan["source_sha"],
             source_dirty=False,
             plan_sha256=expected,
@@ -169,6 +191,9 @@ def worker(root, expected, index):
             componentwise_transport_fitting=plan.get("componentwise_transport_fitting", False),
         )
         write_once(output / "manifest.json", manifest)
+        from mosaickv.evaluation.quantizer_workspace_kernel import gpu_controls
+
+        write_once(output / "quantizer_gpu_controls.json", gpu_controls())
         adapter = load_hf_adapter(
             cfg.model.id,
             revision=cfg.model.revision,

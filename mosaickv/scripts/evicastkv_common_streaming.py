@@ -18,6 +18,12 @@ from mosaickv.evaluation.fox_campaign import clean_source, sha, write_once
 SOURCE = Path(__file__).resolve().parents[2]
 REFERENCE = Path("/scratch/djy8hg/runs/evicastkv/common-exact-history-consumed-20261101-v2")
 AUDIT = Path("/scratch/djy8hg/runs/evicastkv/exact-minimum-streaming-consumed-20261101-v1")
+RANGE_AUDIT = Path(
+    "/scratch/djy8hg/runs/evicastkv/compact-quantizer-workspace-consumed-20261101-v1"
+)
+CODE_AUDIT = Path(
+    "/scratch/djy8hg/runs/evicastkv/lossless-layer-code-delta-gpu-consumed-20261101-retry3"
+)
 previous = control.previous
 
 
@@ -62,7 +68,7 @@ def row_is_complete(row):
     )
 
 
-def prepare(root, *, timing=False, exact_minimum=False):
+def prepare(root, *, timing=False, exact_minimum=False, optimized=False):
     if root.exists():
         raise FileExistsError("new immutable common-streaming diagnostic root required")
     old = previous.read(REFERENCE / "plan.json")
@@ -92,6 +98,40 @@ def prepare(root, *, timing=False, exact_minimum=False):
                 raise ValueError("frozen original result changed")
             bound[str(folder / name)] = digest
     jobs = old["jobs"]
+    optimized_bytes = {}
+    if optimized:
+        if not timing:
+            raise ValueError("optimized execution is restricted to the registered timing follow-up")
+        proof = previous.read(CODE_AUDIT / "analysis/decision.json")
+        if (
+            not proof["complete"]
+            or proof["failures"]
+            or not proof["all_five_methods_bitwise"]
+            or not proof["source_net_storage_gate"]
+        ):
+            raise ValueError(
+                "complete code replay, quality identity and net-storage proof required"
+            )
+        if any(
+            r["constructed_code_payload"]["enabled"]
+            for r in proof["rows"]
+            if r["method"] != "mosaickv_exact"
+        ):
+            raise ValueError("do not disable a baseline codec that showed net savings")
+        for path in (
+            CODE_AUDIT / "plan.json",
+            CODE_AUDIT / "analysis/decision.json",
+            RANGE_AUDIT / "plan.json",
+            SOURCE / "mosaickv/docs/optimized_source_request_timing_20261101.md",
+        ):
+            bound[str(path)] = sha(path)
+        for j in jobs:
+            if method_of(j) == "mosaickv_exact":
+                folder = CODE_AUDIT / f"workers/{j['index']}"
+                row = json.loads((folder / "raw.jsonl").read_text().splitlines()[0])
+                optimized_bytes[str(j["input_index"])] = row["initial_active_bytes"]
+                for name in ("result.json", "raw.jsonl"):
+                    bound[str(folder / name)] = sha(folder / name)
     if exact_minimum:
         diagnostic = Path(
             "/scratch/djy8hg/runs/evicastkv/streaming-packet-diagnostic-consumed-20261101-v1/analysis/decision.json"
@@ -144,6 +184,12 @@ def prepare(root, *, timing=False, exact_minimum=False):
             maximum_simultaneous_workers=2 if timing else 6,
             maximum_worker_minutes=75 if timing else 45,
             paired_common_streaming_timing=timing,
+            optimized_source_runtime=optimized,
+            optimized_source_initial_bytes=optimized_bytes,
+            common_componentwise_fitting=optimized,
+            code_delta_methods=["mosaickv_exact"] if optimized else [],
+            baseline_codec_disabled_only_after_registered_no_savings_evidence=optimized,
+            require_lower_observed_constructor_peak_than_all_baselines=optimized,
             exact_minimum_only=exact_minimum,
             timing_warmups=5 if timing else 0,
             timing_repetitions=20 if timing else 0,
@@ -531,8 +577,13 @@ def timing_worker(root, expected, index, adapter, plan, job, payload, timing_con
         representation_adaptations_not_official_methods=True,
         independent_quality_N=0,
         randomized_same_engine_methods=True,
+        run_id=str(out),
+        parent_run_id=manifest.get("run_id"),
         warmups_per_method=5,
         repetitions_per_method=20,
+        optimized_source_runtime=plan.get("optimized_source_runtime", False),
+        code_delta_methods=plan.get("code_delta_methods", []),
+        initial_bytes_include_request_replay_workspace=True,
         output_predictions=128,
         tensor_result_auditing=False,
         warm_weights_and_media=True,
@@ -549,16 +600,46 @@ def timing_worker(root, expected, index, adapter, plan, job, payload, timing_con
         torch.cuda.synchronize()
         torch.cuda.reset_peak_memory_stats()
         method = entry["method"]
-        values, packets, measured = request(
-            adapter, messages, profile, method, minimum_only=plan.get("exact_minimum_only", False)
-        )
+        optimized = plan.get("optimized_source_runtime", False)
         reference = references[method]
+        validator = None
+        if optimized and method == "mosaickv_exact" and method not in seen:
+            if not entry["warmup"]:
+                raise RuntimeError("initial packet audit may only occur on excluded warmup")
+
+            def validator(packets, *, reference=reference):
+                if (
+                    control.digest_tensors(tuple(t for p in packets for t in p.tensors()))
+                    != reference["payload"]["payload_sha256"]
+                ):
+                    raise RuntimeError("optimized constructor changed frozen input packet bits")
+
+        values, packets, measured = request(
+            adapter,
+            messages,
+            profile,
+            method,
+            minimum_only=plan.get("exact_minimum_only", False),
+            componentwise_fitting=optimized,
+            code_delta=method in plan.get("code_delta_methods", []),
+            input_packet_validator=validator,
+        )
         if not torch.equal(values, reference["logits"]):
             raise RuntimeError("timed request changed frozen 128-token vocabulary logits")
-        if measured["initial_encoded_bytes"] != reference["payload"]["physical_bytes"]:
+        expected_bytes = (
+            plan["optimized_source_initial_bytes"][str(job["input_index"])]
+            if optimized and method == "mosaickv_exact"
+            else reference["payload"]["physical_bytes"]
+        )
+        if measured["initial_encoded_bytes"] != expected_bytes:
             raise RuntimeError("timed request changed frozen initial physical bytes")
+        if (
+            measured["original_precompression_packet_bytes"]
+            != reference["payload"]["physical_bytes"]
+        ):
+            raise RuntimeError("timed constructor changed original backing storage")
         if method not in seen:
-            if (
+            if not (optimized and method == "mosaickv_exact") and (
                 control.digest_tensors(tuple(t for p in packets for t in p.tensors()))
                 != reference["payload"]["payload_sha256"]
             ):
@@ -567,6 +648,7 @@ def timing_worker(root, expected, index, adapter, plan, job, payload, timing_con
         row = dict(
             **entry,
             **measured,
+            run_id=str(out),
             status="completed",
             logits_bitwise=True,
             sample_id=payload["sample_id"],
@@ -661,6 +743,27 @@ def analyze(root, expected):
 
 
 def submit(root, expected):
+    plan = previous.common.inputs(root, expected)
+    if plan.get("optimized_source_runtime", False):
+        proof = previous.read(RANGE_AUDIT / "analysis/decision.json")
+        range_jobs = previous.read(RANGE_AUDIT / "plan.json")["jobs"]
+        if not optimized_controls_pass(proof, range_jobs):
+            write_once(
+                root / "blocked.json",
+                dict(
+                    GPU_submitted=False,
+                    reason="all-method common-range packet/storage/prefill identity did not pass",
+                    parent_decision_sha256=sha(RANGE_AUDIT / "analysis/decision.json"),
+                ),
+            )
+            return
+        write_once(
+            root / "optimized_parent_proof.json",
+            dict(
+                path=str(RANGE_AUDIT / "analysis/decision.json"),
+                sha256=sha(RANGE_AUDIT / "analysis/decision.json"),
+            ),
+        )
     original = control.parent.subprocess.check_output
 
     def scoped(command, **kwargs):
@@ -707,6 +810,110 @@ def submit(root, expected):
                 paper_campaign_authorized=False,
             ),
         )
+
+
+def optimized_controls_pass(proof, jobs):
+    if (
+        not proof.get("complete")
+        or proof.get("failures")
+        or len(proof.get("cases", [])) != 10
+        or len(jobs) != 10
+    ):
+        return False
+    if {c["case"] for c in proof["cases"]} != set(range(10)):
+        return False
+    peaks = {}
+    for case in proof["cases"]:
+        row = case["observations"]
+        if not all(
+            row.get(k) is True
+            for k in (
+                "payload_bitwise",
+                "prefill_logits_bitwise",
+                "physical_packet_bytes_identical",
+            )
+        ):
+            return False
+        memory = row["memory"]
+        if (
+            memory.get("tensor_results_observed") is not True
+            or memory.get("original_KV_tensor_objects_alive") != 0
+            or memory.get("observed_prefill_cuda_peak_bytes", 0) <= 0
+        ):
+            return False
+        job = jobs[case["case"]]
+        key = (job["input_index"], method_of(job))
+        if key in peaks:
+            return False
+        peaks[key] = memory["observed_prefill_cuda_peak_bytes"]
+    return all(
+        peaks[i, "mosaickv_exact"]
+        < min(
+            peaks[i, m]
+            for m in ("prompt_attention_topk", "prefixkv_reimpl", "vl_cache_reimpl", "lookm_reimpl")
+        )
+        for i in (0, 1)
+    )
+
+
+def register_optimized_timing(root, expected):
+    """Finite continuation: reuse same-SHA CPU proof, wait for ALL GPU controls."""
+    plan = previous.common.inputs(root, expected)
+    if not plan.get("optimized_source_runtime") or not plan.get("paired_common_streaming_timing"):
+        raise ValueError("only the registered consumed optimized timing may continue")
+    producer = previous.read(RANGE_AUDIT / "plan.json")
+    proof = previous.read(RANGE_AUDIT / "cpu.json")
+    if (
+        producer["source_sha"] != plan["source_sha"]
+        or proof["source_sha"] != plan["source_sha"]
+        or proof["returncode"]
+        or proof["failed_or_skipped"]
+        or proof["xml_sha256"] != sha(RANGE_AUDIT / "cpu.xml")
+    ):
+        raise ValueError("complete same-immutable-source CPU suite required")
+    for name in ("cpu.json", "cpu.xml"):
+        os.link(RANGE_AUDIT / name, root / name)
+    write_once(
+        root / "cpu_reuse.json",
+        dict(
+            source_sha=plan["source_sha"],
+            producer_root=str(RANGE_AUDIT),
+            cpu_json_sha256=sha(RANGE_AUDIT / "cpu.json"),
+            cpu_xml_sha256=sha(RANGE_AUDIT / "cpu.xml"),
+            same_complete_suite_same_source=True,
+        ),
+    )
+    submission = previous.read(RANGE_AUDIT / "submission.json")
+    job = control.parent.subprocess.check_output(
+        [
+            "sbatch",
+            "--parsable",
+            "--partition=bii",
+            "--account=bii_dsc_community",
+            "--cpus-per-task=2",
+            "--mem=8G",
+            "--time=00:10:00",
+            f"--dependency=afterany:{submission['cpu_analysis']}",
+            "--job-name=mk-optimized-time-admit",
+            f"--output={root}/slurm/admit-%j.out",
+            f"--error={root}/slurm/admit-%j.err",
+            str(SOURCE / "mosaickv/slurm/evicastkv_common_streaming.sbatch"),
+            str(SOURCE),
+            str(root),
+            expected,
+            "submit",
+        ],
+        text=True,
+    ).strip()
+    write_once(
+        root / "registered_followup.json",
+        dict(
+            gpu_admission_job=job,
+            parent_analysis=submission["cpu_analysis"],
+            finite_scope="same_consumed_inputs_complete_requests_only",
+            fresh_or_large_campaign_authorized=False,
+        ),
+    )
 
 
 def advance(root, expected):
@@ -756,6 +963,8 @@ if __name__ == "__main__":
             "prepare",
             "prepare_timing",
             "prepare_exact_minimum",
+            "prepare_optimized_timing",
+            "register_optimized_timing",
             "cpu",
             "submit",
             "worker",
@@ -766,11 +975,17 @@ if __name__ == "__main__":
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--plan-sha")
     args = parser.parse_args()
-    if args.mode in ("prepare", "prepare_timing", "prepare_exact_minimum"):
+    if args.mode in (
+        "prepare",
+        "prepare_timing",
+        "prepare_exact_minimum",
+        "prepare_optimized_timing",
+    ):
         prepare(
             args.root,
-            timing=args.mode == "prepare_timing",
+            timing=args.mode in ("prepare_timing", "prepare_optimized_timing"),
             exact_minimum=args.mode == "prepare_exact_minimum",
+            optimized=args.mode == "prepare_optimized_timing",
         )
     elif args.mode == "cpu":
         previous.cpu(args.root, args.plan_sha)

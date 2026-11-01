@@ -8,7 +8,10 @@ lossless history and a single layer lease. No benchmark labels are inputs.
 import gc
 import random
 import time
+from contextlib import ExitStack
 from dataclasses import replace
+from functools import partial
+from unittest.mock import patch
 
 import numpy as np
 import torch
@@ -32,7 +35,17 @@ def order(seed):
 
 
 @torch.inference_mode()
-def request(adapter, messages, profile, method, *, minimum_only=False):
+def request(
+    adapter,
+    messages,
+    profile,
+    method,
+    *,
+    minimum_only=False,
+    componentwise_fitting=False,
+    code_delta=False,
+    input_packet_validator=None,
+):
     from mosaickv.evaluation.lossless_prompt_cache import backing_bytes
     from mosaickv.evaluation.storage_runs import run
     from mosaickv.evaluation.streaming_baselines import SelectedRetiringCache, StreamingBaseline
@@ -41,6 +54,10 @@ def request(adapter, messages, profile, method, *, minimum_only=False):
 
     if method not in METHODS:
         raise ValueError("five frozen local precision variants only")
+    if type(componentwise_fitting) is not bool or type(code_delta) is not bool:
+        raise ValueError("explicit common constructor and code-storage flags required")
+    if input_packet_validator is not None and not callable(input_packet_validator):
+        raise ValueError("optional first-warmup packet validator must be callable")
     torch.cuda.synchronize()
     begin, end = (torch.cuda.Event(enable_timing=True) for _ in range(2))
     started = time.monotonic()
@@ -58,14 +75,36 @@ def request(adapter, messages, profile, method, *, minimum_only=False):
         else StreamingBaseline(prepared, cache, profile, method, minimum_only=minimum_only)
     )
     fresh = replace(prepared, model_inputs=dict(prepared.model_inputs, past_key_values=cache))
-    with SealAfterAttention(adapter, cache, encoder):
-        pref = adapter.prefill(fresh, capture_queries=False, capture_attentions=False)
-    encoder.finish() if method == "mosaickv_exact" else encoder.finish(adapter)
+    with ExitStack() as stack:
+        if componentwise_fitting:
+            from mosaickv.evaluation import shared_source_format
+
+            stack.enter_context(
+                patch.object(
+                    shared_source_format,
+                    "fit_transport",
+                    partial(shared_source_format.fit_transport, componentwise=True),
+                )
+            )
+        with SealAfterAttention(adapter, cache, encoder):
+            pref = adapter.prefill(fresh, capture_queries=False, capture_attentions=False)
+        encoder.finish() if method == "mosaickv_exact" else encoder.finish(adapter)
     packets = cache.formats()
     runtime = replace(pref, state=replace(pref.state, past_key_values=None), attention_weights=())
     prepared.model_inputs.clear()
     del pref, fresh, cache, encoder, prepared
     gc.collect()
+    original_packet_bytes = backing_bytes(tuple(t for p in packets for t in p.tensors()))
+    if input_packet_validator is not None:
+        # Caller permits this ONLY on the excluded first warmup. No hash/copy
+        # is inserted into a measured repetition's request clock.
+        input_packet_validator(packets)
+    if code_delta:
+        from mosaickv.evaluation.layer_code_delta import convert
+
+        packets, code_report = convert(packets)
+        if not code_report["enabled"]:
+            raise RuntimeError("registered beneficial source codec did not reduce storage")
     torch.cuda.synchronize()
     constructed_at = time.monotonic()
     values, details = run(
@@ -93,7 +132,12 @@ def request(adapter, messages, profile, method, *, minimum_only=False):
             prefill_construct_retire_wall_seconds=constructed_at - prepared_at,
             decode_wall_seconds=details["decode_wall_seconds"],
             decode_cuda_ms=details["decode_cuda_ms"],
-            initial_encoded_bytes=backing_bytes(tuple(t for p in packets for t in p.tensors())),
+            initial_encoded_bytes=details["storage"]["initial_active_kv_storage_bytes"],
+            persistent_packet_bytes=backing_bytes(tuple(t for p in packets for t in p.tensors())),
+            original_precompression_packet_bytes=original_packet_bytes,
+            source_code_delta=code_delta,
+            common_componentwise_fitting=componentwise_fitting,
+            first_warmup_packet_audit=input_packet_validator is not None,
             tensor_result_auditing=False,
             memory_counters_not_peak_evidence=True,
             one_prefill_per_request=True,

@@ -54,3 +54,20 @@ twenty-minute limits. Preserve selected-cache validation in the profiling subcla
 Require identical complete frozen packets, physical bytes and prefill logits
 for every method before reusing its already verified quality/decode evidence.
 This is a constructor-memory test, not new independent answer-quality evidence.
+
+## Compact FP32 quantizer workspace and integer-only serialization
+
+The common BF16-preparation source measurements next located the peak INSIDE
+the unchanged FP32 quantizer. Pad/copy original BF16 data before casting, then
+use one private FP32 buffer for the same separate subtraction, division,
+round-to-even and clamp operations. Do not fuse floating-point arithmetic or
+alter any extrema, scale or quantization rule. Retain the old out-of-place
+implementation as the explicit reference; gradient-bearing calls use it.
+
+An integer-only GPU serializer reads already quantized integer-valued floats,
+skips logical padding, and emits the original little-endian 2/3/4/8-bit bytes.
+It performs NO quantization, division, minimum, scale or rounding. Non-normal
+scales retain the old Torch integer serialization. Charge actual code payloads.
+GPU controls compare every header and code bit before model loading. The full
+ten-method prefill test still requires exact frozen packets/bytes/logits.
+All baselines receive this common workspace optimization too.
