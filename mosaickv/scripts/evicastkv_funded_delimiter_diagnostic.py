@@ -661,6 +661,15 @@ def analyze(root, expected):
     )
 
 
+def bounded_worker_array(count, parallel):
+    if (
+        type(count) is not int or not 1 <= count <= 12
+        or type(parallel) is not int or not 1 <= parallel <= 6
+    ):
+        raise ValueError("finite consumed-input worker array and at most six A100s required")
+    return f"--array=0-{count - 1}%{min(count, parallel)}"
+
+
 def submit(root, expected):
     plan = previous.common.inputs(root, expected)
     minutes = plan.get("maximum_worker_minutes", 30)
@@ -668,8 +677,7 @@ def submit(root, expected):
         raise ValueError("bounded integer worker duration in [1,120] minutes required")
     count = len(plan["jobs"])
     parallel = plan.get("maximum_simultaneous_workers", 2)
-    if not 1 <= count <= 12 or type(parallel) is not int or not 1 <= parallel <= 6:
-        raise ValueError("finite consumed-input worker array and at most six A100s required")
+    array = bounded_worker_array(count, parallel)
     proof = previous.read(root / "cpu.json")
     if (
         proof["source_sha"] != plan["source_sha"]
@@ -700,7 +708,7 @@ def submit(root, expected):
             "--cpus-per-task=12",
             "--mem=48G",
             f"--time={minutes // 60:02d}:{minutes % 60:02d}:00",
-            f"--array=0-{count - 1}%{min(count, parallel)}",
+            "--array=0-1%2" if count == 2 and parallel == 2 else array,
             "--job-name=mk-funded-suffix",
             f"--output={root}/slurm/gpu-%A_%a.out",
             f"--error={root}/slurm/gpu-%A_%a.err",

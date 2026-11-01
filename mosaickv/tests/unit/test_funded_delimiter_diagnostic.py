@@ -26,6 +26,20 @@ def test_no_fresh_or_paper_promotion():
     assert '"--array=0-1%2"' in inspect.getsource(diagnostic.submit)
 
 
+@pytest.mark.parametrize(
+    "count,parallel,expected",
+    [(2, 2, "--array=0-1%2"), (10, 6, "--array=0-9%6"), (2, 6, "--array=0-1%2")],
+)
+def test_finite_common_method_array_preserves_legacy_scope(count, parallel, expected):
+    assert diagnostic.bounded_worker_array(count, parallel) == expected
+
+
+@pytest.mark.parametrize("count,parallel", [(0, 2), (13, 6), (10, 7), (True, 2), (2, True)])
+def test_array_cannot_expand_beyond_registered_finite_resources(count, parallel):
+    with pytest.raises(ValueError):
+        diagnostic.bounded_worker_array(count, parallel)
+
+
 def test_identity_gate_is_source_only_completion_changes_are_expected():
     anchor = torch.zeros(2, 3)
     changed = torch.ones(2, 3)
