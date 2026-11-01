@@ -51,6 +51,10 @@ def test_private_decode_forks_and_history_reservation_are_counted():
     a.sidecar[0][:, :, 4:] = 1
     assert not b.sidecar[0][:, :, 4:].any()
     assert seed.prompt[0].shape[-2] == 4
+    expanded = a.sidecar[0][:, :, :5].expand(1, 2, -1, -1)
+    assert expanded.stride(1) == 0
+    assert expanded.untyped_storage().data_ptr() == a.sidecar[0].untyped_storage().data_ptr()
+    assert expanded.untyped_storage().nbytes() == a.sidecar[0].untyped_storage().nbytes()
 
 
 @pytest.mark.parametrize("enabled", [False, True])

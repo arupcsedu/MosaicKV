@@ -71,3 +71,10 @@ the source-only anchor. ROUGE-L here is not official MM-Vet judging or PPL. Stop
 and diagnose if no meaningful safe change passes. Do not add more heads or launch
 a fresh/larger cohort simply because execution succeeded. This diagnostic cannot
 establish superiority over LOOK-M, PrefixKV, or VL-Cache or authorize a paper run.
+
+The first GPU launch failed the strict FullKV numerical control before quality
+evaluation: independent one-head BF16 GEMMs differed from native batched MHA.
+Keep v1 execution-negative. The corrective retry retains native head batch shape
+using zero-stride K/V views, not duplicated K/V buffers. It performs more attention
+compute and must report that cost. Save full control logits and head-output error
+telemetry. The 0.001 control and all 32-prefix quality thresholds are unchanged.

@@ -252,12 +252,41 @@ class ExactHeadTransport:
                         key, value = (
                             t[:, slot : slot + 1, : full_n + step, :] for t in packet.sidecar
                         )
-                        query = state["query"][:, head : head + 1]
+                        # Preserve the native MHA batch shape. H=1 chooses a
+                        # different BF16 GEMM reduction and failed the strict
+                        # FullKV numerical control. Zero-stride expansion is
+                        # a view, not another K/V allocation; unused outputs
+                        # are discarded. Charge/report its extra compute.
+                        query = state["query"]
+                        key = key.expand(1, query.shape[1], -1, -1)
+                        value = value.expand(1, query.shape[1], -1, -1)
                         scores = torch.matmul(query, key.transpose(2, 3)) * module.scaling
                         probabilities = torch.softmax(scores, dim=-1, dtype=torch.float32).to(
                             query.dtype
                         )
-                        output = torch.matmul(probabilities, value).reshape(1, 1, 128)
+                        output = torch.matmul(probabilities, value)[:, head : head + 1].reshape(
+                            1, 1, 128
+                        )
+                        if (
+                            getattr(packet.base, "kind", None) == "kv"
+                            and packet.base.shape[-2] == full_n
+                        ):
+                            records = getattr(self.cache, "exact_head_numerical_differences", None)
+                            if records is None:
+                                records = []
+                                self.cache.exact_head_numerical_differences = records
+                            records.append(
+                                dict(
+                                    layer=i,
+                                    head=head,
+                                    prefix=step,
+                                    maximum_head_output_difference=float(
+                                        (vector[..., head * 128 : (head + 1) * 128] - output)
+                                        .abs()
+                                        .max()
+                                    ),
+                                )
+                            )
                         vector[..., head * 128 : (head + 1) * 128].copy_(output)
                         self.recomputed_heads += 1
                 self.expected[i] = step

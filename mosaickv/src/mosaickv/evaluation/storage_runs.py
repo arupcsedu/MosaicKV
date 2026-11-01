@@ -235,6 +235,8 @@ def run(
             full_head_history_reservation_charged_from_initial_boundary=True,
             main_selected_KV_unchanged_virtual_head_context_added=True,
             inactive_duplicate_main_head_storage_still_charged=True,
+            exact_head_native_MHA_batch_shape_preserved=True,
+            exact_head_numerical_differences=getattr(cache, "exact_head_numerical_differences", []),
         )
     if any(hasattr(f, "valid_prompt_counts") for f in formats):
         record.update(

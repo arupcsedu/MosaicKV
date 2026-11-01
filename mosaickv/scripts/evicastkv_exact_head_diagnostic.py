@@ -265,6 +265,7 @@ def worker(root, expected, index):
                 adapter, prefill, formats, tokens=33, forced=forced, sealed=False, audit=False
             )
 
+        name = "ordinary_clone_control"
         clone, _ = fixed_run(raw)
         control = comparison(full[:33], clone)
         if control["maximum_logit_difference"] > 0.001 or control["token_agreement"] != 1:
@@ -272,7 +273,9 @@ def worker(root, expected, index):
         write_once(out / "clone_control.json", control)
         top8 = tuple((r["layer"], r["head"]) for r in ranking[:8])
         full_sidecar = construct(raw, source, top8, enabled=True)
+        name = "full_head_numerical_control"
         replay, sidecar_record = fixed_run(full_sidecar)
+        torch.save(dict(reference=clone, head_replay=replay), out / "fullcache-control-logits.pt")
         control = comparison(clone, replay)
         write_once(
             out / "exact_head_fullcache_control.json",
@@ -359,6 +362,12 @@ def worker(root, expected, index):
                     dict(
                         status="failed",
                         error=error,
+                        sample_id=payload["sample_id"] if "payload" in locals() else None,
+                        task=payload["task"] if "payload" in locals() else None,
+                        method="mosaickv_exact",
+                        manifest_path=str(out / "manifest.json")
+                        if (out / "manifest.json").exists()
+                        else None,
                         source_sha=plan["source_sha"],
                         plan_sha256=expected,
                         variant=locals().get("name", "setup"),
