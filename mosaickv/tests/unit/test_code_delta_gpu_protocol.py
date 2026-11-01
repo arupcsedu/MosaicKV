@@ -35,3 +35,37 @@ def test_only_explicit_lifetime_scope_registers_followup(monkeypatch, tmp_path):
     monkeypatch.setattr(module.previous.common, "inputs", lambda *a: {})
     with pytest.raises(ValueError, match="only the registered"):
         module.register_lifetimes(tmp_path, "plan")
+
+
+def test_complete_rows_require_all_methods_identities_bits_and_accounting():
+    from evicastkv_code_delta_gpu import rows_complete
+
+    from mosaickv.evaluation.common_streaming_timing import METHODS
+
+    rows = [
+        dict(
+            status="completed",
+            task=f"synthetic-task-{i}",
+            sample_id=str(i),
+            method=m,
+            decoded_KV_bitwise=True,
+            generation_128_logits_bitwise=True,
+            complete_teacher_logits_bitwise=True,
+            initial_active_bytes=100,
+            generation_storage={"initial_active_kv_storage_bytes": 100},
+            constructed_code_payload={"net_active_bytes": 100},
+        )
+        for i in range(2)
+        for m in METHODS
+    ]
+    assert rows_complete(rows)
+    assert not rows_complete([*rows[:-1], rows[0]])
+    for key, value in (
+        ("decoded_KV_bitwise", False),
+        ("initial_active_bytes", 99),
+        ("status", "failed"),
+        ("method", "lookm_official"),
+    ):
+        broken = [dict(r) for r in rows]
+        broken[0][key] = value
+        assert not rows_complete(broken)

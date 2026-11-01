@@ -24,7 +24,7 @@ GPU_PARENT = Path(
 )
 
 
-def prepare(root, *, lifetimes=False):
+def prepare(root, *, lifetimes=False, repair=False):
     if root.exists():
         raise FileExistsError("new immutable code-delta GPU diagnostic root required")
     old = previous.read(REFERENCE / "plan.json")
@@ -40,6 +40,22 @@ def prepare(root, *, lifetimes=False):
     bound = dict(old["bound_files"])
     if lifetimes:
         bound[str(GPU_PARENT / "plan.json")] = sha(GPU_PARENT / "plan.json")
+    if repair:
+        negative = previous.read(GPU_PARENT / "analysis/decision.json")
+        if (
+            negative["complete"]
+            or not negative["failures"]
+            or any(
+                "cached accounting differs from independent storage enumeration" not in str(f)
+                for f in negative["failures"]
+            )
+        ):
+            raise ValueError(
+                "repair scope requires the observed shared-workspace accounting failure"
+            )
+        bound[str(GPU_PARENT / "analysis/decision.json")] = sha(
+            GPU_PARENT / "analysis/decision.json"
+        )
     for path in (
         REFERENCE / "plan.json",
         REFERENCE / "analysis/decision.json",
@@ -73,6 +89,8 @@ def prepare(root, *, lifetimes=False):
             if lifetimes
             else "consumed_lossless_GPU_code_chain_model_diagnostic",
             constructor_lifetime_audit=lifetimes,
+            shared_workspace_accounting_repair=repair,
+            perform_source_decode_timing=repair or not lifetimes,
             maximum_worker_minutes=90,
             maximum_simultaneous_workers=2,
             fresh_materialization_authorized=False,
@@ -82,8 +100,8 @@ def prepare(root, *, lifetimes=False):
             identical_128_logits_and_complete_teacher_logits_required=True,
             code_replay_microbenchmark_warmups=5,
             code_replay_microbenchmark_repetitions=20,
-            source_decode_pair_warmups=0 if lifetimes else 5,
-            source_decode_pair_repetitions=0 if lifetimes else 20,
+            source_decode_pair_warmups=5 if repair or not lifetimes else 0,
+            source_decode_pair_repetitions=20 if repair or not lifetimes else 0,
             prefill_peak_improvement_claim_authorized=False,
             common_codec_offered_to_all_five_methods=True,
             fallback_is_original_same_method_not_FullKV=True,
@@ -168,11 +186,14 @@ def construct(adapter, messages, profile, method, *, audit=False):
     with torch.inference_mode():
         encoder.finish() if method == "mosaickv_exact" else encoder.finish(adapter)
     packets = cache.formats()
-    memory = cache.record()
     runtime = replace(pref, state=replace(pref.state, past_key_values=None), attention_weights=())
     prepared.model_inputs.clear()
-    del prepared, pref, fresh, cache, encoder
+    del prepared, pref, fresh, encoder
     gc.collect()
+    memory = cache.record()
+    if memory["original_KV_tensor_objects_alive"] or memory["original_native_layers_remaining"]:
+        raise RuntimeError("retired native cache tensors remain alive")
+    del cache
     return runtime, packets, memory
 
 
@@ -297,6 +318,8 @@ def worker(root, expected, index):
             variant="common_lossless_layer_code_delta",
             whole_request_peak_claim=False,
             representation_not_official_baseline=True,
+            method="multi_method_representation_diagnostic",
+            methods=list(METHODS),
         )
         write_once(output / "manifest.json", manifest)
         write_once(output / "primitive_controls.json", controls())
@@ -361,6 +384,7 @@ def worker(root, expected, index):
                     raise RuntimeError("lossless code replay changed actual reconstructed K/V")
                 del a, b, view
             del bound
+            write_once(output / f"{method}-construction.json", construction)
             values, details = decode_run(adapter, runtime, encoded)
             if not torch.equal(values, expected_logits):
                 raise RuntimeError("lossless replay changed frozen 128-token vocabulary logits")
@@ -398,6 +422,8 @@ def worker(root, expected, index):
                 source_sha=plan["source_sha"],
                 plan_sha256=expected,
                 manifest_path=str(output / "manifest.json"),
+                baseline_parent_manifest_path=str(folder / "manifest.json"),
+                baseline_parent_manifest_sha256=sha(folder / "manifest.json"),
                 config_sha256=manifest["config_sha256"],
                 measurement_type="diagnostic_measured",
                 constructed_code_payload=construction,
@@ -422,14 +448,25 @@ def worker(root, expected, index):
                 source = (runtime, packets, encoded, expected_logits)
             del packets, encoded, values, teacher_logits, details, row
             gc.collect()
-        if source is not None and not plan.get("constructor_lifetime_audit", False):
+        if source is not None and plan.get("perform_source_decode_timing", True):
+            method = "mosaickv_exact"
             source_timing(adapter, *source, output)
         result["status"] = "completed"
     except Exception as exc:
         result["failures"].append(f"{type(exc).__name__}: {exc}")
         with (output / "raw.jsonl").open("a") as stream:
             stream.write(
-                json.dumps(dict(status="failed", method=method, error=result["failures"][-1]))
+                json.dumps(
+                    dict(
+                        status="failed",
+                        method=method,
+                        error=result["failures"][-1],
+                        source_sha=plan["source_sha"],
+                        plan_sha256=expected,
+                        manifest_path=str(output / "manifest.json"),
+                        measurement_type="diagnostic_measured",
+                    )
+                )
                 + "\n"
             )
         raise
@@ -451,14 +488,18 @@ def analyze(root, expected):
                 if sha(folder / name) != digest:
                     raise ValueError("producer artifact changed")
             failures.extend(record["failures"])
+            if record["status"] != "completed":
+                failures.append(dict(case=i, error="worker incomplete or failed"))
             rows.extend(
                 json.loads(line) for line in (folder / "raw.jsonl").read_text().splitlines()
             )
             if (folder / "source_decode_timing.json").exists():
                 timing.append(dict(case=i, **previous.read(folder / "source_decode_timing.json")))
+            elif plan.get("perform_source_decode_timing", True):
+                failures.append(dict(case=i, error="registered paired decode timing missing"))
         except (OSError, ValueError) as exc:
             failures.append(dict(case=i, error=str(exc)))
-    complete = len(rows) == 10 and not failures and all(r["status"] == "completed" for r in rows)
+    complete = not failures and rows_complete(rows)
     source = [r for r in rows if r["method"] == "mosaickv_exact" and r["status"] == "completed"]
     write_once(
         root / "analysis/decision.json",
@@ -482,9 +523,42 @@ def analyze(root, expected):
     )
 
 
+def rows_complete(rows):
+    from mosaickv.evaluation.common_streaming_timing import METHODS
+
+    if len(rows) != 10 or any(r.get("status") != "completed" for r in rows):
+        return False
+    identities = {(r.get("task"), r.get("sample_id")) for r in rows}
+    keys = {(r.get("task"), r.get("sample_id"), r.get("method")) for r in rows}
+    if (
+        len(identities) != 2
+        or len(keys) != 10
+        or keys != {(*identity, method) for identity in identities for method in METHODS}
+    ):
+        return False
+    return all(
+        all(
+            r.get(k) is True
+            for k in (
+                "decoded_KV_bitwise",
+                "generation_128_logits_bitwise",
+                "complete_teacher_logits_bitwise",
+            )
+        )
+        and r.get("initial_active_bytes", 0) > 0
+        and r["initial_active_bytes"]
+        == r.get("generation_storage", {}).get("initial_active_kv_storage_bytes")
+        and r["initial_active_bytes"]
+        == r.get("constructed_code_payload", {}).get("net_active_bytes")
+        for r in rows
+    )
+
+
 def submit(root, expected):
     plan = previous.common.inputs(root, expected)
-    if plan.get("constructor_lifetime_audit", False):
+    if plan.get("constructor_lifetime_audit", False) and not plan.get(
+        "shared_workspace_accounting_repair", False
+    ):
         decision = previous.read(GPU_PARENT / "analysis/decision.json")
         if (
             not decision["complete"]
@@ -568,6 +642,7 @@ if __name__ == "__main__":
         choices=(
             "prepare",
             "prepare_lifetimes",
+            "prepare_repair",
             "cpu",
             "submit",
             "worker",
@@ -578,8 +653,8 @@ if __name__ == "__main__":
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--plan-sha")
     args = parser.parse_args()
-    if args.mode in ("prepare", "prepare_lifetimes"):
-        prepare(args.root, lifetimes=args.mode == "prepare_lifetimes")
+    if args.mode in ("prepare", "prepare_lifetimes", "prepare_repair"):
+        prepare(args.root, lifetimes=args.mode != "prepare", repair=args.mode == "prepare_repair")
     elif args.mode == "cpu":
         previous.cpu(args.root, args.plan_sha)
     elif args.mode == "worker":

@@ -66,3 +66,17 @@ trials, because none of the decode math changes. An observed encoder/cache peak
 is not whole-request GPU peak memory. Preserve the preceding code-delta result,
 including failures; do not relabel constructor-lifetime evidence as an automatic
 successful paper experiment. Submit only after the preceding GPU chain finishes.
+
+## Accounting repair retry
+
+Preserve the failed initial GPU chain: its primitive GPU controls passed, but
+the independent end-of-decode accounting check detected duplicated resident
+charges for the one shared replay buffer. `prepare_repair` binds that negative
+decision and retries only these same two consumed inputs. Replay buffers belong
+to `shared()` rather than every layer's `private()` residency; the independent
+enumeration check remains unchanged. A CPU regression now constructs a real
+cache, executes two K/V update epochs and checks cached-versus-enumerated storage
+before and after updates. The retry includes the common lifetime optimization,
+audited prefill storage, per-method partial construction records, explicit
+parent baseline manifests, and the original five/twenty paired decode schedule.
+Incomplete workers or missing timing records cannot pass its final analysis.

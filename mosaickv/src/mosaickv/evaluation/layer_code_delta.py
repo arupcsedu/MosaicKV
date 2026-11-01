@@ -174,10 +174,12 @@ class BoundDeltaFormat:
         return self.specification.shape
 
     def private(self):
-        return (*self.specification.private(), *self.replay.scratch.values())
+        return self.specification.private()
 
     def shared(self):
-        return self.specification.shared()
+        # One request owns these buffers, not each layer separately. They must
+        # appear in shared_bytes as well as the independent backing inventory.
+        return (*self.specification.shared(), *self.replay.scratch.values())
 
     def tensors(self):
         return (*self.private(), *self.shared())

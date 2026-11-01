@@ -1,6 +1,7 @@
 """CPU reference substitutes only the codec kernels, never replay semantics."""
 
 from dataclasses import replace
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -53,7 +54,7 @@ def packets(monkeypatch):
                 (body, replace(body, codes=codes.clone())),
                 torch.empty(0, dtype=torch.int32),
                 torch.empty(0, dtype=torch.int32),
-                (torch.empty(0), torch.empty(0)),
+                tuple(torch.empty(1, 1, 0, 128, dtype=torch.bfloat16) for _ in range(2)),
             )
         )
     return tuple(output)
@@ -131,3 +132,33 @@ def test_bound_component_transport_uses_original_fields(packets, monkeypatch):
     bound[0].fill_component("attention", 1, target)
     assert torch.equal(seen[0][0].pair[1].codes, packets[0].pair[1].codes)
     assert seen[0][1:] == ("attention", 1, target)
+
+
+def test_shared_replay_accounting_matches_live_cache_before_and_after_updates(packets):
+    from mosaickv.evaluation.storage_runs import cache_from_formats
+
+    encoded, report = runtime.convert(packets)
+    adapter = SimpleNamespace(
+        _language_layers=lambda: [
+            SimpleNamespace(self_attn=torch.nn.Linear(128, 128, bias=False).bfloat16())
+            for _ in packets
+        ]
+    )
+    cache = cache_from_formats(
+        adapter, encoded, updates=2, audit=False, sealed=False, sequential_lease=True
+    )
+    assert cache.initial_bytes == report["net_active_bytes"]
+    assert cache.storage_record()["final_active_kv_storage_bytes"] == cache.initial_bytes
+    for step in range(2):
+        for i, layer in enumerate(cache.layers):
+            state = torch.full((1, 1, 1, 128), step, dtype=torch.bfloat16)
+            key, value = layer.update(state, state)
+            expected = packets[i].materialize()
+            assert torch.equal(key[..., :8, :], expected[0])
+            layer.materialize_component(1)
+            assert torch.equal(value[..., :8, :], expected[1])
+            layer.release()
+        observed = cache.storage_record()
+        assert observed["final_active_kv_storage_bytes"] == backing_bytes(
+            tuple(t for layer in cache.layers for t in layer.owned_tensors())
+        )
