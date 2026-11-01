@@ -30,6 +30,7 @@ def prepare(
     corrected_source=False,
     optimized_source=False,
     fp32_tiling=False,
+    teacher_metrics=False,
 ):
     if root.exists():
         raise ValueError("new immutable source-runtime root required")
@@ -108,6 +109,35 @@ def prepare(
         selected_head_group = int(selected.removeprefix("fused_h"))
         for path in (micro, SOURCE / "mosaickv/docs/fp32_source_tiled_model_20261101.md"):
             bound[str(path)] = sha(path)
+    teacher_ledgers = {}
+    if teacher_metrics:
+        from mosaickv.evaluation.request_precision import METHODS
+
+        validation = Path(
+            "/scratch/djy8hg/runs/evicastkv/fp32-tiled-model-consumed-20261101-v1/analysis/decision.json"
+        )
+        checked = previous.read(validation)
+        gates = [g for g in checked["gates"] if g["arm"] == "source3_fp32_tiled_text"]
+        if (
+            not checked["complete"]
+            or checked["failures"]
+            or len(gates) != 1
+            or not gates[0]["model_gate"]
+        ):
+            raise ValueError("positive FP32 tiled model diagnostic required")
+        bound[str(validation)] = sha(validation)
+        for task in ("llava_description", "mmvet_prefixkv"):
+            path = (
+                Path(
+                    "/scratch/djy8hg/runs/mosaickv/paper-native-full-v1-61e5a68-setup/ledgers/prefixkv"
+                )
+                / task
+                / "full-ledger.json"
+            )
+            teacher_ledgers[task] = str(path)
+            bound[str(path)] = sha(path)
+        path = SOURCE / "mosaickv/docs/source_native_metrics_20261101.md"
+        bound[str(path)] = sha(path)
     variants = ("shadow",) if sequential_shadow else ARMS
     if corrected_source:
         variants = ("shadow", "source3_exclude_global_exact", "source3_exact_text_source")
@@ -129,6 +159,16 @@ def prepare(
         )
     if fp32_tiling:
         variants = (*variants, "source3_fp32_tiled_text")
+    if teacher_metrics:
+        variants = (
+            *variants,
+            *(
+                f"baseline_{method}__{header}"
+                for method in METHODS
+                if method != "mosaickv_exact"
+                for header in ("fp32", "fp16")
+            ),
+        )
     write_once(
         root / "plan.json",
         dict(
@@ -144,6 +184,9 @@ def prepare(
             optimized_source=optimized_source,
             fp32_tiling=fp32_tiling,
             selected_head_group=selected_head_group,
+            teacher_metrics=teacher_metrics,
+            teacher_ledgers=teacher_ledgers,
+            teacher_maximum_tokens=1024 if teacher_metrics else None,
             sequential_transport=sequential_shadow or corrected_source,
             original_caps_unchanged=True,
             one_prefill=True,
@@ -663,6 +706,62 @@ def worker(root, expected, index):
                 execute=execute,
             )
         write_once(out / "construction.json", proof)
+        teacher_targets = None
+        if plan.get("teacher_metrics", False):
+            from mosaickv.evaluation.exact_storage import ExactFormat
+            from mosaickv.evaluation.lossless_bf16 import PackedBF16
+            from mosaickv.evaluation.source_teacher_protocol import load_targets
+            from mosaickv.evaluation.storage_teacher_forcing import score_formats, score_ordinary
+
+            teacher_targets, teacher_provenance = load_targets(
+                plan, payload, adapter.processor.tokenizer
+            )
+            ordinary_teacher, expected_teacher = score_ordinary(
+                adapter,
+                prefill,
+                teacher_targets,
+                maximum=plan["teacher_maximum_tokens"],
+                return_logits=True,
+            )
+            layers, _ = adapter._legacy_layers(prefill.state.past_key_values)
+            teacher_raw = tuple(
+                ExactFormat(
+                    "kv",
+                    tuple(k.shape),
+                    pair=(
+                        PackedBF16(tuple(k.shape), True, (k,)),
+                        PackedBF16(tuple(v.shape), True, (v,)),
+                    ),
+                )
+                for k, v in layers
+            )
+            packed_teacher, actual_teacher = score_formats(
+                adapter,
+                prefill,
+                teacher_raw,
+                teacher_targets,
+                maximum=plan["teacher_maximum_tokens"],
+                return_logits=True,
+            )
+            difference = float((expected_teacher - actual_teacher).abs().max())
+            if (
+                difference > 0.001
+                or ordinary_teacher["conditional_greedy_tokens"]
+                != packed_teacher["conditional_greedy_tokens"]
+            ):
+                raise RuntimeError("complete teacher-forcing FullKV reinjection parity failed")
+            write_once(
+                out / "teacher_control.json",
+                dict(
+                    ordinary=ordinary_teacher,
+                    packed=packed_teacher,
+                    maximum_logit_difference=difference,
+                    provenance=teacher_provenance,
+                    retention_one_raw_bypass=True,
+                ),
+            )
+            torch.save(expected_teacher, out / "teacher_fullkv_logits.pt")
+            del layers, teacher_raw, expected_teacher, actual_teacher
         runtime = replace(
             prefill,
             state=replace(
@@ -898,6 +997,26 @@ def worker(root, expected, index):
                     different_memory_points_not_byte_matched=True,
                     not_official_MM_Vet_or_PPL=True,
                 )
+                if teacher_targets is not None:
+                    from mosaickv.evaluation.storage_teacher_forcing import score_formats
+
+                    teacher = score_formats(
+                        adapter,
+                        runtime,
+                        packet,
+                        teacher_targets,
+                        maximum=plan["teacher_maximum_tokens"],
+                    )
+                    if digest_tensors(tuple(t for p in packet for t in p.tensors())) != hashes[arm]:
+                        raise RuntimeError("teacher forcing mutated immutable encoded formats")
+                    teacher["encoded_formats_immutable_after_complete_target"] = True
+                    row.update(
+                        teacher_forced=teacher,
+                        teacher_target_provenance=teacher_provenance,
+                        complete_teacher_forced_PPL=True,
+                        not_official_MM_Vet_or_PPL=True,
+                        local_two_input_PPL_not_paper_reproduction=True,
+                    )
             with (out / "raw.jsonl").open("a") as stream:
                 stream.write(json.dumps(row, allow_nan=False) + "\n")
         isolation_arm = "shadow" if plan.get("sequential_shadow", False) else arms[1]
@@ -946,6 +1065,8 @@ def worker(root, expected, index):
 
 
 def analyze(root, expected):
+    import math
+
     plan = previous.common.inputs(root, expected)
     rows, failures = [], []
     for i in range(2):
@@ -1009,6 +1130,58 @@ def analyze(root, expected):
             and r["storage"]["sequential_lease_control"]["persistent_storage_identical"]
             for r in rows
         )
+    teacher_summary = []
+    if plan.get("teacher_metrics", False):
+        for i in range(2):
+            try:
+                control = previous.read(root / f"workers/{i}/teacher_control.json")
+                full_teacher = control["ordinary"]
+                count = full_teacher["evaluated_token_count"]
+                per_input = []
+                selected = [
+                    r for r in rows if r.get("sample_id") == control["provenance"]["sample_id"]
+                ]
+                if len(selected) != len(plan["variants"]):
+                    raise ValueError("incomplete teacher-forcing arms")
+                for row in selected:
+                    teacher = row["teacher_forced"]
+                    if (
+                        row["status"] != "completed"
+                        or teacher["evaluated_token_count"] != count
+                        or len(teacher["per_token_nll"]) != count
+                        or teacher["target_ids"] != full_teacher["target_ids"]
+                        or not math.isclose(
+                            math.fsum(teacher["per_token_nll"]), teacher["nll_sum"], abs_tol=1e-9
+                        )
+                    ):
+                        raise ValueError("incomplete or mismatched teacher targets/losses")
+                    per_input.append(
+                        dict(
+                            variant=row["variant"],
+                            nll_sum=teacher["nll_sum"],
+                            evaluated_token_count=count,
+                            PPL=math.exp(teacher["nll_sum"] / count),
+                            delta_mean_NLL_from_FullKV=(
+                                teacher["nll_sum"] - full_teacher["nll_sum"]
+                            )
+                            / count,
+                            fullkv_reference_ROUGE_L=row["fullkv_reference_rouge_l"],
+                            teacher_storage=teacher["storage"],
+                            generation_storage=row["storage"],
+                        )
+                    )
+                teacher_summary.append(
+                    dict(
+                        provenance=control["provenance"],
+                        fullkv_PPL=math.exp(full_teacher["nll_sum"] / count),
+                        fullkv_reinjection_max_logit_difference=control["maximum_logit_difference"],
+                        metrics_kept_separate=True,
+                        independent_quality_N=0,
+                        rows=per_input,
+                    )
+                )
+            except (KeyError, ValueError, OSError, OverflowError) as exc:
+                failures.append("teacher metric analysis: " + str(exc))
     write_once(
         root / "analysis/decision.json",
         dict(
@@ -1017,6 +1190,7 @@ def analyze(root, expected):
             rows=rows,
             gates=gates,
             common_sequential_transport_gate=transport_gate,
+            teacher_metric_summary=teacher_summary,
             source_sha=plan["source_sha"],
             plan_sha256=expected,
             independent_quality_N=0,
@@ -1053,6 +1227,7 @@ if __name__ == "__main__":
             "prepare_corrected",
             "prepare_optimized",
             "prepare_fp32_tiling",
+            "prepare_teacher_metrics",
             "cpu",
             "submit",
             "worker",
@@ -1072,6 +1247,8 @@ if __name__ == "__main__":
         prepare(args.root, corrected_source=True, optimized_source=True)
     elif args.mode == "prepare_fp32_tiling":
         prepare(args.root, corrected_source=True, fp32_tiling=True)
+    elif args.mode == "prepare_teacher_metrics":
+        prepare(args.root, corrected_source=True, fp32_tiling=True, teacher_metrics=True)
     elif args.mode == "cpu":
         previous.cpu(args.root, args.plan_sha)
     elif args.mode == "worker":
