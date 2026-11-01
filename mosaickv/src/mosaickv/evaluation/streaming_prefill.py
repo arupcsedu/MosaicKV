@@ -105,16 +105,20 @@ class RetiringPrefillCache(Cache):
         mode = ScratchAudit(excluded=excluded, observe=self.observe) if self.audit else None
         with mode if mode is not None else nullcontext():
             packet = encoder(index, attention, original, args, kwargs or {}, output)
+            packet = self.validate_encoding(index, packet, original)
             original_owners = {identity(t) for t in original}
             if any(identity(t) in original_owners for t in packet.tensors()):
                 raise RuntimeError("encoded prompt aliases retired original K/V backing")
-            if tuple(packet.shape) != tuple(original[0].shape):
-                raise RuntimeError("streamed encoder changed physical prompt geometry")
             self.observe((*original, *packet.tensors()))
         layer.packet = packet
         layer.keys = layer.values = None
         self.next_layer += 1
         self.observe(original)
+
+    def validate_encoding(self, index, packet, original):
+        if tuple(packet.shape) != tuple(original[0].shape):
+            raise RuntimeError("streamed encoder changed physical prompt geometry")
+        return packet
 
     def formats(self):
         if self.next_layer != len(self.layers) or any(
