@@ -21,7 +21,7 @@ FAILED = Path("/scratch/djy8hg/runs/evicastkv/shared-source-runtime-consumed-202
 PRECISIONS = ("bf16_default", "bf16_no_truncated_reduction", "fp32")
 
 
-def prepare(root, *, micro=False):
+def prepare(root, *, micro=False, header_dtype="fp16"):
     if root.exists():
         raise ValueError("new immutable operator-audit root required")
     plan = previous.read(STUDY / "plan.json")
@@ -60,6 +60,15 @@ def prepare(root, *, micro=False):
             SOURCE / "mosaickv/docs/source_operator_microbench_20261101.md",
         ):
             bound[str(path)] = sha(path)
+        if header_dtype == "fp32":
+            negative = Path(
+                "/scratch/djy8hg/runs/evicastkv/source-input-fusion-consumed-20261101-v1/analysis/decision.json"
+            )
+            report = previous.read(negative)
+            if not report["complete"] or report["failures"]:
+                raise ValueError("preserve complete compact-header development evidence")
+            for path in (negative, SOURCE / "mosaickv/docs/fp32_source_tiling_20261101.md"):
+                bound[str(path)] = sha(path)
     write_once(
         root / "plan.json",
         dict(
@@ -71,6 +80,7 @@ def prepare(root, *, micro=False):
             no_guard_or_tolerance_change=True,
             independent_quality_N=0,
             microbenchmark=micro,
+            quantization_header_dtype=header_dtype,
         ),
     )
     print(sha(root / "plan.json"))
@@ -155,7 +165,8 @@ def worker(root, expected, index):
                             from mosaickv.evaluation.compact_quantization_metadata import compact
                             from mosaickv.evaluation.source_operator_microbench import run
 
-                            fmt = replace(fmt, source=compact(fmt.source))
+                            if plan["quantization_header_dtype"] == "fp16":
+                                fmt = replace(fmt, source=compact(fmt.source))
                             record = run(fmt, attention)
                             result["cases"].append(
                                 dict(
@@ -271,7 +282,16 @@ def submit(root, expected):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "mode", choices=("prepare", "prepare_micro", "cpu", "submit", "worker", "analyze")
+        "mode",
+        choices=(
+            "prepare",
+            "prepare_micro",
+            "prepare_micro_fp32",
+            "cpu",
+            "submit",
+            "worker",
+            "analyze",
+        ),
     )
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--plan-sha")
@@ -280,6 +300,8 @@ if __name__ == "__main__":
         prepare(args.root)
     elif args.mode == "prepare_micro":
         prepare(args.root, micro=True)
+    elif args.mode == "prepare_micro_fp32":
+        prepare(args.root, micro=True, header_dtype="fp32")
     elif args.mode == "cpu":
         previous.cpu(args.root, args.plan_sha)
     elif args.mode == "worker":

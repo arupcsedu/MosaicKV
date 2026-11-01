@@ -34,6 +34,7 @@ def run(packet, attention):
     workspace = new_workspace(packets["native_bmm_256"])
     numeric = {}
     unsupported = {}
+    kernels = {}
 
     def execute(name):
         for component in (0, 1):
@@ -48,6 +49,12 @@ def run(packet, attention):
     for name, fmt in packets.items():
         checks = []
         try:
+            if name.startswith("fused"):
+                from mosaickv.evaluation.shared_source_kernel import project
+
+                kernels[name] = project(
+                    fmt, attention, (target, target), component=0, inspect_kernel=True
+                )
             for component in (0, 1):
                 fill_component(
                     fmt,
@@ -99,6 +106,7 @@ def run(packet, attention):
         raise RuntimeError("operator benchmark mutated encoded source or exact K/V")
     return dict(
         numerical=numeric,
+        kernel_metadata=kernels,
         unsupported=unsupported,
         trials=records,
         medians_ms={

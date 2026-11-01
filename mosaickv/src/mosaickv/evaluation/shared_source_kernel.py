@@ -74,7 +74,7 @@ def _project(
         tl.store(OV + pointer, av.to(tl.bfloat16), valid)
 
 
-def project(packet, attention, targets, *, component=-1):
+def project(packet, attention, targets, *, component=-1, inspect_kernel=False):
     import torch
 
     if type(component) is not int or component not in (-1, 0, 1):
@@ -104,7 +104,7 @@ def project(packet, attention, targets, *, component=-1):
         )
     ):
         raise ValueError("unchanged contiguous bias-free native projection weights required")
-    _project[(triton.cdiv(n, 16), h // head_group)](
+    compiled = _project[(triton.cdiv(n, 16), h // head_group)](
         body.codes,
         body.minimum,
         body.scale,
@@ -124,6 +124,15 @@ def project(packet, attention, targets, *, component=-1):
         num_stages={1: 3, 2: 2, 4: 1}[head_group],
         enable_fp_fusion=False,
     )
+    if inspect_kernel:
+        return dict(
+            registers=getattr(compiled, "n_regs", None),
+            spills=getattr(compiled, "n_spills", None),
+            shared_memory_bytes=getattr(compiled.metadata, "shared", None),
+            head_group=head_group,
+            num_warps=8 if head_group == 4 else 4,
+            num_stages={1: 3, 2: 2, 4: 1}[head_group],
+        )
 
 
 @triton.jit(do_not_specialize=["ROWS"])
