@@ -23,7 +23,7 @@ STUDY = Path("/scratch/djy8hg/runs/evicastkv/protected-source-cpu-20261101-v2")
 ARMS = ("shadow", "source3_full_prompt", "source3_exclude_global_exact")
 
 
-def prepare(root, *, sequential_shadow=False):
+def prepare(root, *, sequential_shadow=False, corrected_source=False):
     if root.exists():
         raise ValueError("new immutable source-runtime root required")
     old = previous.read(OLD / "plan.json")
@@ -49,6 +49,33 @@ def prepare(root, *, sequential_shadow=False):
     if sequential_shadow:
         protocol = SOURCE / "mosaickv/docs/sequential_kv_lease_20261101.md"
         bound[str(protocol)] = sha(protocol)
+    if corrected_source:
+        transport = Path(
+            "/scratch/djy8hg/runs/evicastkv/sequential-lease-consumed-20261101-v1/analysis/decision.json"
+        )
+        proof = previous.read(transport)
+        if (
+            not proof["complete"]
+            or proof["failures"]
+            or not proof["common_sequential_transport_gate"]
+        ):
+            raise ValueError("positive common one-buffer transport gate required")
+        operator = Path(
+            "/scratch/djy8hg/runs/evicastkv/shared-source-operator-consumed-20261101-v2/analysis/decision.json"
+        )
+        diagnostic = previous.read(operator)
+        if (
+            not diagnostic["complete"]
+            or diagnostic["failures"]
+            or diagnostic["mismatched_element_totals"]["bf16_default"] != 2
+        ):
+            raise ValueError("complete operator diagnosis required before correcting construction")
+        for path in (
+            transport,
+            operator,
+            SOURCE / "mosaickv/docs/source_transport_corrected_20261101.md",
+        ):
+            bound[str(path)] = sha(path)
     write_once(
         root / "plan.json",
         dict(
@@ -58,8 +85,14 @@ def prepare(root, *, sequential_shadow=False):
             stage="common_sequential_lease_consumed_control"
             if sequential_shadow
             else "consumed_full_prompt_shared_projection_source_precision",
-            variants=("shadow",) if sequential_shadow else ARMS,
+            variants=("shadow", "source3_exclude_global_exact", "source3_exact_text_source")
+            if corrected_source
+            else ("shadow",)
+            if sequential_shadow
+            else ARMS,
             sequential_shadow=sequential_shadow,
+            corrected_source=corrected_source,
+            sequential_transport=sequential_shadow or corrected_source,
             original_caps_unchanged=True,
             one_prefill=True,
             retire_original_source_before_decode=True,
@@ -170,6 +203,42 @@ def build(
     for arm in plan["variants"][1:]:
         torch.cuda.synchronize()
         begun = time.monotonic()
+        if arm == "source3_exact_text_source":
+            previous_arm = "source3_exclude_global_exact"
+            if previous_arm not in formats:
+                construction_checks[arm] = dict(
+                    status="unsupported", reason="source parent unsupported"
+                )
+                continue
+            h, n = source[0][0].shape[1:3]
+            identity_positions = (tuple(range(n)),) * h
+            results = tuple(
+                optimize(
+                    f,
+                    text_capture.records[i],
+                    identity_positions,
+                    text_capture.positions,
+                    block.self_attn,
+                )
+                for i, (f, block) in enumerate(
+                    zip(formats[previous_arm], adapter._language_layers(), strict=True)
+                )
+            )
+            trial = tuple(r[0] for r in results)
+            torch.cuda.synchronize()
+            times[arm] = times[previous_arm] + time.monotonic() - begun
+            size = backing_bytes(tuple(t for f in trial for t in f.tensors()))
+            if size > cap:
+                raise RuntimeError("lossless source-text construction increased the hard cap")
+            formats[arm] = trial
+            construction_checks[arm] = dict(
+                status="constructed",
+                initial_bytes=size,
+                cap_bytes=cap,
+                text_storage_checks=[r[1] for r in results],
+                source_dependency=previous_arm,
+            )
+            continue
         trial = tuple(
             construct(
                 source_capture.records[i],
@@ -182,6 +251,16 @@ def build(
             )
             for i, pair in enumerate(source)
         )
+        numerical_checks = []
+        if plan.get("corrected_source", False):
+            from mosaickv.evaluation.shared_source_format import fit_transport
+
+            results = tuple(
+                fit_transport(f, block.self_attn)
+                for f, block in zip(trial, adapter._language_layers(), strict=True)
+            )
+            trial = tuple(r[0] for r in results)
+            numerical_checks = [r[1] for r in results]
         torch.cuda.synchronize()
         times[arm] = time.monotonic() - begun
         size = backing_bytes(tuple(t for f in trial for t in f.tensors()))
@@ -245,7 +324,11 @@ def build(
             )
         formats[arm] = trial
         construction_checks[arm] = dict(
-            status="constructed", initial_bytes=size, cap_bytes=cap, checks=checks
+            status="constructed",
+            initial_bytes=size,
+            cap_bytes=cap,
+            checks=checks,
+            numerical_transport_checks=numerical_checks,
         )
     if before != parent.causal.tensor_hash(source):
         raise RuntimeError("source construction mutated original prefill K/V")
@@ -277,7 +360,7 @@ def worker(root, expected, index):
     plan = previous.common.inputs(root, expected)
     arms = tuple(plan["variants"])
     execute = storage_runs.run
-    if plan.get("sequential_shadow", False):
+    if plan.get("sequential_transport", plan.get("sequential_shadow", False)):
         from mosaickv.evaluation.sequential_kv_lease import paired_run
 
         execute = paired_run
@@ -471,6 +554,18 @@ def worker(root, expected, index):
                     or not torch.equal(greedy, original["greedy"])
                 ):
                     raise RuntimeError("source shadow changed historical 128-token trajectory")
+                if arm == "source3_exact_text_source":
+                    previous_values = torch.load(
+                        out / "source3_exclude_global_exact-logits.pt",
+                        map_location="cpu",
+                        weights_only=True,
+                    )
+                    if not torch.equal(fixed, previous_values["fixed"]) or not torch.equal(
+                        greedy, previous_values["greedy"]
+                    ):
+                        raise RuntimeError(
+                            "common lossless text storage changed source-variant logits"
+                        )
                 if details["storage"]["initial_active_kv_storage_bytes"] > proof["cap_bytes"]:
                     raise RuntimeError("actual source cache exceeds unchanged original cap")
                 if digest_tensors(tuple(t for p in packet for t in p.tensors())) != hashes[arm]:
@@ -514,7 +609,7 @@ def worker(root, expected, index):
                 )
             with (out / "raw.jsonl").open("a") as stream:
                 stream.write(json.dumps(row, allow_nan=False) + "\n")
-        isolation_arm = "shadow" if plan.get("sequential_shadow", False) else ARMS[1]
+        isolation_arm = "shadow" if plan.get("sequential_shadow", False) else arms[1]
         if isolation_arm in formats:
             gc.collect()
             again, _ = execute(
@@ -658,7 +753,16 @@ def submit(root, expected):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "mode", choices=("prepare", "prepare_sequential", "cpu", "submit", "worker", "analyze")
+        "mode",
+        choices=(
+            "prepare",
+            "prepare_sequential",
+            "prepare_corrected",
+            "cpu",
+            "submit",
+            "worker",
+            "analyze",
+        ),
     )
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--plan-sha")
@@ -667,6 +771,8 @@ if __name__ == "__main__":
         prepare(args.root)
     elif args.mode == "prepare_sequential":
         prepare(args.root, sequential_shadow=True)
+    elif args.mode == "prepare_corrected":
+        prepare(args.root, corrected_source=True)
     elif args.mode == "cpu":
         previous.cpu(args.root, args.plan_sha)
     elif args.mode == "worker":

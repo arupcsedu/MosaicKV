@@ -86,6 +86,26 @@ def text_slots(positions, text):
 
 def strip_text_overlays(packet, references, positions, text):
     """Drop only redundant exact text bodies; visual exact protection remains."""
+    from mosaickv.evaluation.shared_source_format import SharedSourceFormat
+
+    if isinstance(packet, SharedSourceFormat):
+        h, n, d = packet.shape[1:]
+        if tuple(map(tuple, positions)) != (tuple(range(n)),) * h:
+            raise ValueError("full original identity source positions required")
+        ids = packet.row_positions.long()
+        keep = torch.tensor(
+            [int(p) % n not in text for p in ids.cpu().tolist()],
+            device=ids.device,
+            dtype=torch.bool,
+        )
+        if not keep.any():
+            keep[0] = True  # retain the existing nonempty scatter contract
+        retained = ids[keep]
+        exact = tuple(
+            encode(t[0, retained // n, retained % n].reshape(1, 1, -1, d).contiguous())
+            for t in references
+        )
+        return replace(packet, row_positions=retained.to(torch.int32), exact=exact)
     if not isinstance(packet, HeadLocalFormat):
         raise NotImplementedError("explicit head-local common format required")
     protected = packet.base.exact_indices.cpu().tolist()
@@ -211,7 +231,9 @@ class TextSourceFormat:
 @torch.inference_mode()
 def optimize(packet, record, positions, text, attention):
     """Use source+exact residuals only when smaller; otherwise keep ACTUAL KV."""
-    if not isinstance(packet, HeadLocalFormat):
+    from mosaickv.evaluation.shared_source_format import SharedSourceFormat
+
+    if not isinstance(packet, (HeadLocalFormat, SharedSourceFormat)):
         raise NotImplementedError("head-local exact-text format required")
     text = tuple(text)
     slots = text_slots(positions, text)

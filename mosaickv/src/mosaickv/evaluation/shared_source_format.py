@@ -60,6 +60,7 @@ class SharedSourceFormat:
     sin: object
     union: object
     slots: object
+    transport_patches: tuple = ()
     kind: str = "evicastkv_full_prompt_shared_source_precision_variant"
 
     def private(self):
@@ -67,6 +68,7 @@ class SharedSourceFormat:
             *self.source.tensors(),
             self.row_positions,
             *(t for body in self.exact for t in body.buffers),
+            *(t for patch in self.transport_patches for t in patch.tensors),
         )
 
     def shared(self):
@@ -83,14 +85,18 @@ class SharedSourceFormat:
     def fill(self, attention, targets, *, direct):
         del direct
         n, h, d = self.shape[2], self.shape[1], self.shape[3]
-        if attention is None or len(targets) != 2 or any(
-            t.ndim != 4
-            or t.shape[:2] != (1, h)
-            or t.shape[-1] != d
-            or t.shape[-2] < n
-            or t.dtype != torch.bfloat16
-            or t.device != self.source.codes.device
-            for t in targets
+        if (
+            attention is None
+            or len(targets) != 2
+            or any(
+                t.ndim != 4
+                or t.shape[:2] != (1, h)
+                or t.shape[-1] != d
+                or t.shape[-2] < n
+                or t.dtype != torch.bfloat16
+                or t.device != self.source.codes.device
+                for t in targets
+            )
         ):
             raise ValueError("actual frozen attention and complete layer lease required")
         if targets[0].device.type == "cuda":
@@ -111,6 +117,10 @@ class SharedSourceFormat:
                 target[..., :n, :].copy_(value)
                 ids = self.row_positions.long()
                 target[0, ids // n, ids % n] = decoded(body)[0, 0]
+        for patch, target in zip(
+            self.transport_patches, targets if self.transport_patches else (), strict=True
+        ):
+            apply_transport_patch(patch, target, prompt_length=n)
 
     def materialize(self, attention):
         out = tuple(
@@ -180,3 +190,77 @@ def construct(
     if any(t.numel() and t.untyped_storage().data_ptr() in forbidden for t in result.private()):
         raise RuntimeError("encoded source or exact rows alias an original full cache/input owner")
     return result
+
+
+def apply_transport_patch(patch, target, *, prompt_length):
+    if not patch.indices.numel():
+        return
+    if target.device.type == "cuda":
+        from mosaickv.evaluation.dual_projection_kernel import apply_patch
+
+        apply_patch(patch, target[..., :prompt_length, :])
+    else:
+        ids = patch.indices.long()
+        d = target.shape[-1]
+        target[0, ids // (prompt_length * d), ids // d % prompt_length, ids % d] = patch.values
+
+
+def transport_corrections(reference, actual, protected_rows):
+    """Fix only violations of the FROZEN construction envelope, not task logits."""
+    from mosaickv.evaluation.exact_storage import SparseBitPatch
+
+    patches = []
+    d = reference[0].shape[-1]
+    for expected, output in zip(reference, actual, strict=True):
+        if (
+            expected.shape != output.shape
+            or expected.dtype != torch.bfloat16
+            or output.dtype != expected.dtype
+            or not torch.isfinite(output).all()
+        ):
+            raise ValueError("finite compatible BF16 construction pair required")
+        bad = ~torch.isclose(expected.float(), output.float(), rtol=0.01, atol=2**-6)
+        indices = bad.flatten().nonzero().flatten()
+        if torch.isin(indices // d, protected_rows.long()).any():
+            raise RuntimeError("protected K/V mismatch may not be hidden by a numerical patch")
+        patches.append(
+            SparseBitPatch(
+                indices.to(torch.int32),
+                expected.contiguous().flatten().index_select(0, indices).clone(),
+            )
+        )
+    return tuple(patches)
+
+
+@torch.inference_mode()
+def fit_transport(packet, attention):
+    """Native projection of the SAME encoded source; no FullKV/answer targets."""
+    from dataclasses import replace
+
+    from mosaickv.evaluation.shared_source_kernel import decode_source_for_construction
+
+    if packet.transport_patches:
+        raise ValueError("numerical transport fitting is a single immutable construction")
+    x = decode_source_for_construction(packet)
+    n, h, d = packet.shape[2], packet.shape[1], packet.shape[3]
+    k = attention.k_proj(x).reshape(1, n, h, d).transpose(1, 2)
+    v = attention.v_proj(x).reshape(1, n, h, d).transpose(1, 2)
+    k = k * packet.cos[:, None] + torch.cat((-k[..., 64:], k[..., :64]), -1) * packet.sin[:, None]
+    reference = (k.contiguous(), v.contiguous())
+    actual = packet.materialize(attention)
+    ids = packet.row_positions.long()
+    head, position = ids // n, ids % n
+    for target, body in zip(reference, packet.exact, strict=True):
+        target[0, head, position] = decoded(body)[0, 0]
+    patches = transport_corrections(reference, actual, packet.row_positions)
+    result = replace(packet, transport_patches=patches)
+    verified = result.materialize(attention)
+    for expected, output in zip(reference, verified, strict=True):
+        torch.testing.assert_close(output, expected, rtol=0.01, atol=2**-6)
+    return result, dict(
+        patch_scalars=[p.indices.numel() for p in patches],
+        persistent_patch_bytes=backing_bytes(tuple(t for p in patches for t in p.tensors)),
+        frozen_construction_tolerance_pass=True,
+        no_task_or_fullkv_target_for_unprotected=True,
+        construction_has_temporary_decoded_source_and_native_projection=True,
+    )

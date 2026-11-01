@@ -80,6 +80,12 @@ def fill_component(packet, attention, component, destination):
 
             project(packet, attention, (destination, destination), component=component)
             scatter(packet.exact[component], packet.row_positions, destination, prompt_length=n)
+            if packet.transport_patches:
+                from mosaickv.evaluation.shared_source_format import apply_transport_patch
+
+                apply_transport_patch(
+                    packet.transport_patches[component], destination, prompt_length=n
+                )
         else:
             prefix.copy_(packet.materialize(attention)[component])
     elif isinstance(packet, ExactFormat) and packet.kind == "kv":

@@ -116,3 +116,30 @@ def project(packet, attention, targets, *, component=-1):
         COMPONENT=component,
         enable_fp_fusion=False,
     )
+
+
+@triton.jit(do_not_specialize=["ROWS"])
+def _decoded_source(CODES, MINIMUM, SCALE, OUT, ROWS, WIDTH: tl.constexpr):
+    row = tl.program_id(0) * 16 + tl.arange(0, 16)
+    start = tl.program_id(1) * 64
+    values = _read(CODES, MINIMUM, SCALE, row, start, ROWS, WIDTH, 3)
+    offsets = row[:, None] * WIDTH + start + tl.arange(0, 64)[None, :]
+    tl.store(OUT + offsets, values, row[:, None] < ROWS)
+
+
+def decode_source_for_construction(packet):
+    """Charged temporary for numerical patch fitting ONLY, never decode."""
+    import torch
+
+    n, width = packet.source.shape[2:]
+    out = torch.empty((1, n, width), device=packet.source.codes.device, dtype=torch.bfloat16)
+    _decoded_source[(triton.cdiv(n, 16), width // 64)](
+        packet.source.codes,
+        packet.source.minimum,
+        packet.source.scale,
+        out,
+        n,
+        WIDTH=width,
+        enable_fp_fusion=False,
+    )
+    return out
