@@ -23,7 +23,7 @@ STUDY = Path("/scratch/djy8hg/runs/evicastkv/protected-source-cpu-20261101-v2")
 ARMS = ("shadow", "source3_full_prompt", "source3_exclude_global_exact")
 
 
-def prepare(root, *, sequential_shadow=False, corrected_source=False):
+def prepare(root, *, sequential_shadow=False, corrected_source=False, optimized_source=False):
     if root.exists():
         raise ValueError("new immutable source-runtime root required")
     old = previous.read(OLD / "plan.json")
@@ -76,6 +76,38 @@ def prepare(root, *, sequential_shadow=False, corrected_source=False):
             SOURCE / "mosaickv/docs/source_transport_corrected_20261101.md",
         ):
             bound[str(path)] = sha(path)
+    if optimized_source:
+        micro = Path(
+            "/scratch/djy8hg/runs/evicastkv/source-operator-micro-consumed-20261101-v1/analysis/decision.json"
+        )
+        data = previous.read(micro)
+        if (
+            not data["complete"]
+            or data["failures"]
+            or data["operator_selection"]["chosen_grouped_operator"] != "fused_h2"
+        ):
+            raise ValueError("complete bitwise two-head operator gate required")
+        for path in (micro, SOURCE / "mosaickv/docs/source_input_fusion_20261101.md"):
+            bound[str(path)] = sha(path)
+    variants = ("shadow",) if sequential_shadow else ARMS
+    if corrected_source:
+        variants = ("shadow", "source3_exclude_global_exact", "source3_exact_text_source")
+    if optimized_source:
+        from mosaickv.evaluation.request_precision import METHODS
+
+        variants = (
+            *variants,
+            "shadow_fp16_metadata",
+            "source3_fp16_group2_text",
+            "source3_fp16_native_text",
+            "source3_fp16_native_fused_inputs",
+            *(
+                f"baseline_{method}__{header}"
+                for method in METHODS
+                if method != "mosaickv_exact"
+                for header in ("fp32", "fp16")
+            ),
+        )
     write_once(
         root / "plan.json",
         dict(
@@ -85,13 +117,10 @@ def prepare(root, *, sequential_shadow=False, corrected_source=False):
             stage="common_sequential_lease_consumed_control"
             if sequential_shadow
             else "consumed_full_prompt_shared_projection_source_precision",
-            variants=("shadow", "source3_exclude_global_exact", "source3_exact_text_source")
-            if corrected_source
-            else ("shadow",)
-            if sequential_shadow
-            else ARMS,
+            variants=variants,
             sequential_shadow=sequential_shadow,
             corrected_source=corrected_source,
+            optimized_source=optimized_source,
             sequential_transport=sequential_shadow or corrected_source,
             original_caps_unchanged=True,
             one_prefill=True,
@@ -146,6 +175,7 @@ def build(
     from mosaickv.evaluation.text_source_storage import optimize
 
     execute = storage_runs.run if execute is None else execute
+    diagnostic_build_started = time.monotonic()
 
     source, _ = adapter._legacy_layers(prefill.state.past_key_values)
     before = parent.causal.tensor_hash(source)
@@ -200,9 +230,147 @@ def build(
     )
     formats = {"shadow": shadow}
     construction_checks = {}
+    caps_by_arm = {"shadow": cap}
+    setup_wall = time.monotonic()
     for arm in plan["variants"][1:]:
         torch.cuda.synchronize()
         begun = time.monotonic()
+        if arm == "shadow_fp16_metadata" or arm.startswith("baseline_"):
+            from mosaickv.evaluation.compact_quantization_metadata import compact_format
+
+            method = (
+                "mosaickv_exact"
+                if arm == "shadow_fp16_metadata"
+                else arm.removeprefix("baseline_").split("__")[0]
+            )
+            if arm == "shadow_fp16_metadata":
+                trial = tuple(compact_format(f) for f in shadow)
+                own_cap = cap
+            elif arm.endswith("__fp16"):
+                prior_arm = arm.removesuffix("fp16") + "fp32"
+                trial = tuple(compact_format(f) for f in formats[prior_arm])
+                own_cap = caps_by_arm[prior_arm]
+            else:
+                baseline, baseline_proof = bundle(
+                    adapter,
+                    prepared,
+                    prefill,
+                    capture,
+                    cfg,
+                    method,
+                    plan["profile_path"],
+                    0.5,
+                    policies=("head3_boundary8",),
+                    allocation_mode="balanced" if method == "prompt_attention_topk" else "profile",
+                )
+                packets2 = baseline["head3_boundary8"]
+                own_cap = backing_bytes(tuple(t for f in packets2 for t in f.tensors()))
+                trial = tuple(
+                    optimize(
+                        f,
+                        text_capture.records[i],
+                        baseline_proof["source_memberships"][i],
+                        text_capture.positions,
+                        block.self_attn,
+                    )[0]
+                    for i, (f, block) in enumerate(
+                        zip(packets2, adapter._language_layers(), strict=True)
+                    )
+                )
+            torch.cuda.synchronize()
+            times[arm] = time.monotonic() - begun
+            formats[arm] = trial
+            caps_by_arm[arm] = own_cap
+            membership_hash = (
+                construction_checks[prior_arm].get("source_memberships_sha256")
+                if arm.endswith("__fp16")
+                else hashlib.sha256(
+                    json.dumps(
+                        proof["source_memberships"]
+                        if method == "mosaickv_exact"
+                        else baseline_proof["source_memberships"],
+                        sort_keys=True,
+                    ).encode()
+                ).hexdigest()
+            )
+            construction_checks[arm] = dict(
+                status="constructed",
+                method_override=method,
+                source_memberships_sha256=membership_hash,
+                header_dtype="fp16"
+                if arm.endswith("fp16") or arm == "shadow_fp16_metadata"
+                else "fp32",
+                source_selection_ratio=0.5,
+                cap_bytes=own_cap,
+            )
+            continue
+        if arm in ("source3_fp16_group2_text", "source3_fp16_native_text"):
+            from mosaickv.evaluation.compact_quantization_metadata import compact_format
+            from mosaickv.evaluation.shared_source_format import fit_transport
+
+            native = arm == "source3_fp16_native_text"
+            results = []
+            native_checks = []
+            identity_positions = (tuple(range(n)),) * h
+            for i, (f, block) in enumerate(
+                zip(
+                    formats["source3_exclude_global_exact"], adapter._language_layers(), strict=True
+                )
+            ):
+                packet = replace(
+                    compact_format(f),
+                    projection_backend="native_bmm_256" if native else "fused",
+                    source_head_group=1 if native else 2,
+                )
+                packet, numerics = fit_transport(packet, block.self_attn)
+                packet, text_proof = optimize(
+                    packet,
+                    text_capture.records[i],
+                    identity_positions,
+                    text_capture.positions,
+                    block.self_attn,
+                )
+                results.append(packet)
+                native_checks.append(dict(numerical=numerics, text=text_proof))
+            trial = tuple(results)
+            torch.cuda.synchronize()
+            times[arm] = times["source3_exclude_global_exact"] + time.monotonic() - begun
+            own_cap = cap
+            size = backing_bytes(tuple(t for f in trial for t in f.tensors()))
+            caps_by_arm[arm] = own_cap
+            construction_checks[arm] = dict(
+                status="constructed" if size <= cap else "unsupported",
+                initial_bytes=size,
+                cap_bytes=cap,
+                checks=native_checks,
+            )
+            if size <= cap:
+                formats[arm] = trial
+            continue
+        if arm == "source3_fp16_native_fused_inputs":
+            from mosaickv.evaluation.integrated_source_input import fuse
+
+            parent_arm = "source3_fp16_native_text"
+            if parent_arm not in formats:
+                construction_checks[arm] = dict(
+                    status="unsupported", reason="native source parent unsupported"
+                )
+                continue
+            results = tuple(
+                fuse(f, block.self_attn)
+                for f, block in zip(formats[parent_arm], adapter._language_layers(), strict=True)
+            )
+            trial = tuple(r[0] for r in results)
+            torch.cuda.synchronize()
+            times[arm] = times[parent_arm] + time.monotonic() - begun
+            formats[arm] = trial
+            caps_by_arm[arm] = cap
+            construction_checks[arm] = dict(
+                status="constructed",
+                fusion_checks=[r[1] for r in results],
+                source_dependency=parent_arm,
+            )
+            continue
         if arm == "source3_exact_text_source":
             previous_arm = "source3_exclude_global_exact"
             if previous_arm not in formats:
@@ -332,9 +500,22 @@ def build(
         )
     if before != parent.causal.tensor_hash(source):
         raise RuntimeError("source construction mutated original prefill K/V")
+    owners = {(str(t.device), t.untyped_storage().data_ptr()) for pair in source for t in pair}
+    if any(
+        t.numel() and (str(t.device), t.untyped_storage().data_ptr()) in owners
+        for packets in formats.values()
+        for f in packets
+        for t in f.tensors()
+    ):
+        raise RuntimeError("encoded format retains original FullKV storage")
     return formats, dict(
         original_source_bytes=source_bytes,
         cap_bytes=cap,
+        caps_by_arm=caps_by_arm,
+        additional_formats_setup_seconds=time.monotonic() - setup_wall,
+        diagnostic_build_total_seconds=time.monotonic() - diagnostic_build_started,
+        encoded_formats_disjoint_from_original_KV=True,
+        shared_protection_setup_seconds=times["shadow"],
         construction_seconds=times,
         construction_checks=construction_checks,
     )
@@ -370,7 +551,9 @@ def worker(root, expected, index):
     result = dict(status="failed", failures=[], source_sha=plan["source_sha"], plan_sha256=expected)
     (out / "raw.jsonl").touch(exist_ok=False)
     arm = "setup"
+    payload = None
     try:
+        payload = previous.read(job["inputs"][0])
         if (
             torch.cuda.device_count() != 1
             or "A100" not in torch.cuda.get_device_name()
@@ -380,6 +563,11 @@ def worker(root, expected, index):
         torch.set_num_threads(12)
         torch.manual_seed(plan["seed"])
         torch.use_deterministic_algorithms(True)
+        if plan.get("optimized_source", False):
+            from mosaickv.evaluation.integrated_source_input_kernel import gpu_controls
+
+            write_once(out / "input_scatter_controls.json", gpu_controls())
+            torch.manual_seed(plan["seed"])
         cfg = RunConfig.from_mapping(previous.resolved_mapping(plan, job))
         if (
             cfg.model.id,
@@ -399,7 +587,6 @@ def worker(root, expected, index):
             model_kwargs=_model_kwargs(cfg, local_files_only=True),
             processor_kwargs={"local_files_only": True},
         )
-        payload = previous.read(job["inputs"][0])
         folder = Path(plan["parent"]) / f"workers/{index}"
         full = torch.load(folder / "logits.pt", map_location="cpu", weights_only=True)[
             "0-full_kv-ordinary"
@@ -415,6 +602,13 @@ def worker(root, expected, index):
         ):
             prefill = adapter.prefill(prepared, capture_queries=False, capture_attentions=True)
         with torch.inference_mode():
+            import weakref
+
+            original_refs = tuple(
+                weakref.ref(t)
+                for pair in adapter._legacy_layers(prefill.state.past_key_values)[0]
+                for t in pair
+            )
             formats, proof = build(
                 adapter,
                 prepared,
@@ -447,6 +641,11 @@ def worker(root, expected, index):
         gc.collect()
         torch.cuda.synchronize()
         after_retire = torch.cuda.memory_allocated()
+        live_originals = sum(ref() is not None for ref in original_refs)
+        if live_originals:
+            raise RuntimeError(
+                f"{live_originals} original KV tensors remain alive after retirement"
+            )
         if before_retire - after_retire < proof["original_source_bytes"]:
             raise RuntimeError(
                 "original prefill/source retirement not certified by allocation drop"
@@ -457,6 +656,10 @@ def worker(root, expected, index):
             allocated_after=after_retire,
             allocation_drop=before_retire - after_retire,
             original_cache_refs_removed=True,
+            original_KV_tensor_objects_alive=live_originals,
+            encoded_formats_disjoint_from_original_KV=proof[
+                "encoded_formats_disjoint_from_original_KV"
+            ],
             whole_request_peak_certified=False,
         )
         write_once(out / "retirement.json", retirement)
@@ -497,7 +700,11 @@ def worker(root, expected, index):
             no_superiority_or_byte_matched_claim=True,
             whole_request_peak_certified=False,
             actual_timing_protocol=dict(
-                warmups=0, repetitions=1, order="fixed", not_paper_latency=True
+                warmups=0,
+                preceding_fixed_prefix_control=True,
+                repetitions=1,
+                order="fixed",
+                not_paper_latency=True,
             ),
         )
         write_once(out / "manifest.json", manifest)
@@ -554,6 +761,29 @@ def worker(root, expected, index):
                     or not torch.equal(greedy, original["greedy"])
                 ):
                     raise RuntimeError("source shadow changed historical 128-token trajectory")
+                if arm.startswith("baseline_") and arm.endswith("__fp32"):
+                    method = arm.removeprefix("baseline_").split("__")[0]
+                    values = torch.load(
+                        OLD / f"workers/{index}/{method}--source-logits.pt",
+                        map_location="cpu",
+                        weights_only=True,
+                    )
+                    if not torch.equal(fixed, values["fixed"]) or not torch.equal(
+                        greedy, values["greedy"]
+                    ):
+                        raise RuntimeError("historical baseline source control changed logits")
+                if arm == "source3_fp16_native_fused_inputs":
+                    values = torch.load(
+                        out / "source3_fp16_native_text-logits.pt",
+                        map_location="cpu",
+                        weights_only=True,
+                    )
+                    if not torch.equal(fixed, values["fixed"]) or not torch.equal(
+                        greedy, values["greedy"]
+                    ):
+                        raise RuntimeError(
+                            "integrated exact input fusion changed native parent logits"
+                        )
                 if arm == "source3_exact_text_source":
                     previous_values = torch.load(
                         out / "source3_exclude_global_exact-logits.pt",
@@ -566,7 +796,9 @@ def worker(root, expected, index):
                         raise RuntimeError(
                             "common lossless text storage changed source-variant logits"
                         )
-                if details["storage"]["initial_active_kv_storage_bytes"] > proof["cap_bytes"]:
+                if details["storage"]["initial_active_kv_storage_bytes"] > proof["caps_by_arm"].get(
+                    arm, proof["cap_bytes"]
+                ):
                     raise RuntimeError("actual source cache exceeds unchanged original cap")
                 if digest_tensors(tuple(t for p in packet for t in p.tensors())) != hashes[arm]:
                     raise RuntimeError("decode mutated immutable encoded formats")
@@ -578,15 +810,20 @@ def worker(root, expected, index):
                 reference = parent.scored_text(
                     adapter.processor.tokenizer, full.argmax(-1).tolist(), eos_ids
                 )
+                baseline_arm = arm in ("shadow", "shadow_fp16_metadata") or arm.startswith(
+                    "baseline_"
+                )
                 details["storage"].update(
-                    unchanged_original_selected_memberships=arm == "shadow",
-                    all_original_prompt_positions_represented=arm != "shadow",
+                    unchanged_original_selected_memberships=baseline_arm,
+                    all_original_prompt_positions_represented=not baseline_arm,
                 )
                 row = dict(
                     common,
                     status="completed",
-                    method="mosaickv_exact"
-                    if arm == "shadow"
+                    method=arm.removeprefix("baseline_").split("__")[0]
+                    if arm.startswith("baseline_")
+                    else "mosaickv_exact"
+                    if baseline_arm
                     else "evicastkv_shared_source_precision_variant",
                     fullkv_fixed_prefix=comparison(full[1:33], fixed[1:]),
                     fullkv_reference_rouge_l=rouge_l_f1(scored["answer"], (reference["answer"],)),
@@ -595,6 +832,11 @@ def worker(root, expected, index):
                     decode_wall_seconds=details["decode_wall_seconds"],
                     decode_cuda_ms=details["decode_cuda_ms"],
                     construction_seconds=proof["construction_seconds"][arm],
+                    original_own_cap_bytes=proof["caps_by_arm"].get(arm, proof["cap_bytes"]),
+                    end_to_end_measured=False,
+                    source_component_timing_excludes_shared_protection_setup=not baseline_arm,
+                    nominal_selection_ratio=0.5 if baseline_arm else None,
+                    quantization_header_dtype="fp16" if "fp16" in arm else "fp32",
                     torch_peak_allocated=allocated,
                     torch_peak_reserved=reserved,
                     inactive_diagnostic_format_bytes=all_format_bytes
@@ -638,6 +880,8 @@ def worker(root, expected, index):
                     dict(
                         status="failed",
                         variant=arm,
+                        task=None if payload is None else payload.get("task"),
+                        sample_id=None if payload is None else payload.get("sample_id"),
                         error=result["failures"][-1],
                         source_sha=plan["source_sha"],
                         plan_sha256=expected,
@@ -671,7 +915,7 @@ def analyze(root, expected):
         except (ValueError, OSError) as exc:
             failures.append(str(exc))
     gates = []
-    for arm in plan["variants"][1:]:
+    for arm in (a for a in plan["variants"][1:] if a.startswith("source3")):
         per_input = []
         for job in plan["jobs"]:
             sample = previous.read(job["inputs"][0])["sample_id"]
@@ -758,6 +1002,7 @@ if __name__ == "__main__":
             "prepare",
             "prepare_sequential",
             "prepare_corrected",
+            "prepare_optimized",
             "cpu",
             "submit",
             "worker",
@@ -773,6 +1018,8 @@ if __name__ == "__main__":
         prepare(args.root, sequential_shadow=True)
     elif args.mode == "prepare_corrected":
         prepare(args.root, corrected_source=True)
+    elif args.mode == "prepare_optimized":
+        prepare(args.root, corrected_source=True, optimized_source=True)
     elif args.mode == "cpu":
         previous.cpu(args.root, args.plan_sha)
     elif args.mode == "worker":

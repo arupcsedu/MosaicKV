@@ -56,6 +56,10 @@ def project_component(packet, attention, component, target, workspace):
             decode_chunk(packet, x, first)
         else:
             x.copy_(decoded[:, first : first + take])
+        if packet.input_overlay is not None:
+            from mosaickv.evaluation.integrated_source_input import overlay_input
+
+            overlay_input(packet.input_overlay, x, first)
         output = target[0, :, first : first + take, :]
         torch.bmm(x.expand(h, take, width), weights, out=output)
         if component == 0:

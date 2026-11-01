@@ -63,6 +63,7 @@ class SharedSourceFormat:
     transport_patches: tuple = ()
     projection_backend: str = "fused"
     source_head_group: int = 1
+    input_overlay: object = None
     kind: str = "evicastkv_full_prompt_shared_source_precision_variant"
 
     def private(self):
@@ -71,6 +72,7 @@ class SharedSourceFormat:
             self.row_positions,
             *(t for body in self.exact for t in body.buffers),
             *(t for patch in self.transport_patches for t in patch.tensors),
+            *(() if self.input_overlay is None else self.input_overlay.tensors()),
         )
 
     def shared(self):
@@ -88,6 +90,8 @@ class SharedSourceFormat:
         del direct
         if self.projection_backend not in ("fused", "native_bmm_256"):
             raise NotImplementedError("unregistered source projection backend")
+        if self.input_overlay is not None and self.projection_backend != "native_bmm_256":
+            raise NotImplementedError("exact input fusion requires audited native source backend")
         n, h, d = self.shape[2], self.shape[1], self.shape[3]
         if (
             type(self.source_head_group) is not int
@@ -133,6 +137,10 @@ class SharedSourceFormat:
                 scatter(body, self.row_positions, target, prompt_length=n)
         else:
             x = unpack_cpu(self.source).squeeze(1)
+            if self.input_overlay is not None:
+                from mosaickv.evaluation.integrated_source_input import overlay_input
+
+                overlay_input(self.input_overlay, x, 0)
             k = attention.k_proj(x).reshape(1, n, h, d).transpose(1, 2)
             v = attention.v_proj(x).reshape(1, n, h, d).transpose(1, 2)
             rotated = torch.cat((-k[..., d // 2 :], k[..., : d // 2]), -1)
@@ -263,7 +271,7 @@ def fit_transport(packet, attention):
 
     from mosaickv.evaluation.shared_source_kernel import decode_source_for_construction
 
-    if packet.transport_patches:
+    if packet.transport_patches or packet.input_overlay is not None:
         raise ValueError("numerical transport fitting is a single immutable construction")
     x = decode_source_for_construction(packet)
     n, h, d = packet.shape[2], packet.shape[1], packet.shape[3]

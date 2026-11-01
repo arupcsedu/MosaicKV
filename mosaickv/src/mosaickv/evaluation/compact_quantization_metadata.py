@@ -23,3 +23,19 @@ def compact(body):
     if not (torch.isfinite(minimum).all() and torch.isfinite(scale).all() and (scale > 0).all()):
         raise ValueError("FP16 metadata would overflow or lose positive scale; unsupported")
     return replace(body, minimum=minimum, scale=scale)
+
+
+def compact_format(packet):
+    """Same option for every applicable compared format; never changes selection."""
+    from mosaickv.evaluation.head_local_precision import HeadLocalFormat
+    from mosaickv.evaluation.precision_tier import PrecisionFormat
+    from mosaickv.evaluation.shared_source_format import SharedSourceFormat
+    from mosaickv.evaluation.text_source_storage import TextSourceFormat
+
+    if isinstance(packet, (TextSourceFormat, HeadLocalFormat)):
+        return replace(packet, base=compact_format(packet.base))
+    if isinstance(packet, PrecisionFormat):
+        return replace(packet, pair=tuple(compact(b) for b in packet.pair))
+    if isinstance(packet, SharedSourceFormat) and packet.input_overlay is None:
+        return replace(packet, source=compact(packet.source), transport_patches=())
+    raise NotImplementedError("unaudited format cannot use compact affine metadata")
