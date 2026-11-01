@@ -6,6 +6,11 @@ import torch
 def source_packet(packet):
     while hasattr(packet, "base"):
         packet = packet.base
+    if (
+        getattr(packet, "projection_backend", None) == "native_bmm_256"
+        and getattr(packet, "channel_exceptions", None) is not None
+    ):
+        raise NotImplementedError("coherent columns are verified only for fused projection")
     return packet if getattr(packet, "projection_backend", None) == "native_bmm_256" else None
 
 

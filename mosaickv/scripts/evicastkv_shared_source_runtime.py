@@ -24,7 +24,7 @@ ARMS = ("shadow", "source3_full_prompt", "source3_exclude_global_exact")
 
 
 def precision_header_label(arm):
-    if arm.startswith("minimum__") or arm.endswith("exact_exceptions"):
+    if arm.startswith("minimum__") or arm.endswith(("exact_exceptions", "coherent_columns")):
         return "lossless_bf16_minimum_fp32_scale"
     return "fp16" if "fp16" in arm else "fp32"
 
@@ -41,6 +41,7 @@ def prepare(
     query_affine=False,
     hybrid_forecast=False,
     sparse_exceptions=False,
+    coherent_channels=False,
 ):
     if root.exists():
         raise ValueError("new immutable source-runtime root required")
@@ -238,6 +239,29 @@ def prepare(
             )
         for evidence in (path, SOURCE / "mosaickv/docs/sparse_original_exceptions_20261101.md"):
             bound[str(evidence)] = sha(evidence)
+    if coherent_channels:
+        if not hybrid_forecast or sparse_exceptions:
+            raise ValueError(
+                "coherent columns require common forecast and no output-scalar exceptions"
+            )
+        negative = Path(
+            "/scratch/djy8hg/runs/evicastkv/sparse-original-exceptions-consumed-20261101-v2"
+        )
+        decision = previous.read(negative / "analysis/decision.json")
+        if not decision["complete"] or decision["failures"]:
+            raise ValueError("complete negative independent-output-correction diagnostic required")
+        for path in (
+            negative / "analysis/decision.json",
+            SOURCE / "mosaickv/docs/coherent_source_columns_20261101.md",
+        ):
+            bound[str(path)] = sha(path)
+        for i in range(2):
+            folder = negative / f"workers/{i}"
+            record = previous.read(folder / "result.json")
+            for name, digest in record["outputs"].items():
+                if sha(folder / name) != digest:
+                    raise ValueError("negative correction evidence changed")
+                bound[str(folder / name)] = digest
     variants = ("shadow",) if sequential_shadow else ARMS
     if corrected_source:
         variants = ("shadow", "source3_exclude_global_exact", "source3_exact_text_source")
@@ -296,6 +320,15 @@ def prepare(
                 for kind in ("fp32", affine_suffix)
             ),
         )
+    if coherent_channels:
+        variants = tuple(a for a in variants if "query_affine" not in a)
+        variants = (*variants, "source3_direct_fp32", "source3_coherent_columns")
+        evaluation_variants = (
+            "source3_fp32_tiled_text",
+            "source3_direct_fp32",
+            "source3_coherent_columns",
+            *(f"baseline_{method}__fp32" for method in METHODS if method != "mosaickv_exact"),
+        )
     write_once(
         root / "plan.json",
         dict(
@@ -321,11 +354,21 @@ def prepare(
             query_affine=query_affine,
             hybrid_forecast=hybrid_forecast,
             sparse_exceptions=sparse_exceptions,
+            coherent_channels=coherent_channels,
+            coherent_column_allowance_bytes=2**20 if coherent_channels else 0,
+            baseline_comparison_admissible=not coherent_channels,
+            coherent_column_phase="source_transport_and_own_parent_diagnostic_not_comparative_claim"
+            if coherent_channels
+            else None,
             maximum_exact_exception_bytes=2**20 if sparse_exceptions else 0,
             draft_tokens=4 if hybrid_forecast else 0,
             forecast_family_weights=[0.5, 0.5] if hybrid_forecast else None,
             query_reference_root=str(parent_metrics) if query_affine else None,
-            affine_steps=0 if sparse_exceptions else 2 if query_affine else None,
+            affine_steps=0
+            if sparse_exceptions or coherent_channels
+            else 2
+            if query_affine
+            else None,
             sequential_transport=sequential_shadow or corrected_source,
             original_caps_unchanged=True,
             one_prefill=True,
@@ -458,6 +501,77 @@ def build(
     for arm in plan["variants"][1:]:
         torch.cuda.synchronize()
         begun = time.monotonic()
+        if arm == "source3_direct_fp32":
+            from mosaickv.evaluation.direct_source_constructor import (
+                DirectSourcePolicy,
+            )
+            from mosaickv.evaluation.direct_source_constructor import (
+                construct as direct_construct,
+            )
+
+            trial, checks = direct_construct(
+                adapter,
+                prepared,
+                prefill,
+                source_capture,
+                text_capture,
+                phase_capture,
+                tuple(previous.read(Path(plan["profile_path"]))),
+                cap,
+                policy=DirectSourcePolicy(
+                    head_group=plan["selected_head_group"], lossless_minimum=False
+                ),
+            )
+            torch.cuda.synchronize()
+            times[arm] = time.monotonic() - begun
+            if checks["source_memberships"] != proof["source_memberships"]:
+                raise RuntimeError("direct construction changed online memberships")
+            if digest_tensors(tuple(t for f in trial for t in f.tensors())) != digest_tensors(
+                tuple(t for f in formats["source3_fp32_tiled_text"] for t in f.tensors())
+            ):
+                raise RuntimeError("direct construction changed an encoded payload bit")
+            formats[arm] = trial
+            caps_by_arm[arm] = cap
+            construction_checks[arm] = dict(
+                status="constructed",
+                direct=checks,
+                encoded_payload_bitwise=True,
+                includes_own_online_selection=True,
+                no_discarded_shadow_codec_constructed=True,
+            )
+            continue
+        if arm == "source3_coherent_columns":
+            from mosaickv.evaluation.source_channel_exceptions import formats as channel_formats
+
+            trial, checks = channel_formats(
+                adapter,
+                prefill,
+                capture,
+                source_capture,
+                text_capture,
+                phase_capture,
+                formats["source3_exclude_global_exact"],
+                forecast,
+                head_group=plan["selected_head_group"],
+                cap_bytes=cap,
+            )
+            torch.cuda.synchronize()
+            times[arm] = (
+                time.monotonic()
+                - begun
+                + times["source3_exclude_global_exact"]
+                + forecast_proof["wall_seconds_excludes_integrity_hashes"]
+            )
+            formats[arm] = trial
+            caps_by_arm[arm] = cap
+            construction_checks[arm] = dict(
+                status="constructed",
+                fit=checks,
+                original_quantizer_codes_unchanged=True,
+                coupled_K_and_V_input=True,
+                no_benchmark_label_or_reference_logit_access=True,
+            )
+            continue
         if arm.endswith("exact_exceptions"):
             from mosaickv.evaluation.sparse_original_exceptions import formats as add_exceptions
 
@@ -941,6 +1055,11 @@ def worker(root, expected, index):
 
             write_once(out / "affine_cuda_controls.json", gpu_controls())
             torch.manual_seed(plan["seed"])
+        if plan.get("coherent_channels", False):
+            from mosaickv.evaluation.source_channel_exceptions import gpu_controls
+
+            write_once(out / "coherent_cuda_controls.json", gpu_controls())
+            torch.manual_seed(plan["seed"])
         if plan.get("optimized_source", False):
             from mosaickv.evaluation.integrated_source_input_kernel import gpu_controls
 
@@ -1247,6 +1366,16 @@ def worker(root, expected, index):
                         greedy, values["greedy"]
                     ):
                         raise RuntimeError("FP32 hardware tiling changed model logits")
+                if arm == "source3_direct_fp32":
+                    values = torch.load(
+                        out / "source3_fp32_tiled_text-logits.pt",
+                        map_location="cpu",
+                        weights_only=True,
+                    )
+                    if not torch.equal(fixed, values["fixed"]) or not torch.equal(
+                        greedy, values["greedy"]
+                    ):
+                        raise RuntimeError("direct construction changed model logits")
                 if arm == "source3_exact_text_source":
                     previous_values = torch.load(
                         out / "source3_exclude_global_exact-logits.pt",
@@ -1307,11 +1436,20 @@ def worker(root, expected, index):
                     local_precision_variant_not_unmodified_published_baseline=baseline_arm,
                     query_weighted_affine_refit="query_affine" in arm,
                     sparse_original_precision_exceptions=arm.endswith("exact_exceptions"),
-                    draft_forecast_used=arm.endswith(("query_affine_hybrid", "exact_exceptions")),
+                    coherent_source_columns=arm == "source3_coherent_columns",
+                    coherent_column_count=proof["construction_checks"][arm]["fit"]["channels"]
+                    if arm == "source3_coherent_columns"
+                    else 0,
+                    comparison_with_baselines_admissible=plan.get(
+                        "baseline_comparison_admissible", True
+                    ),
+                    draft_forecast_used=arm.endswith(
+                        ("query_affine_hybrid", "exact_exceptions", "coherent_columns")
+                    ),
                     forecast_overhead_seconds=proof["forecast"][
                         "wall_seconds_excludes_integrity_hashes"
                     ]
-                    if arm.endswith(("query_affine_hybrid", "exact_exceptions"))
+                    if arm.endswith(("query_affine_hybrid", "exact_exceptions", "coherent_columns"))
                     else 0.0,
                     quantization_header_dtype=precision_header_label(arm),
                     torch_peak_allocated=allocated,
@@ -1339,6 +1477,27 @@ def worker(root, expected, index):
                     if digest_tensors(tuple(t for p in packet for t in p.tensors())) != hashes[arm]:
                         raise RuntimeError("teacher forcing mutated immutable encoded formats")
                     teacher["encoded_formats_immutable_after_complete_target"] = True
+                    if arm == "source3_direct_fp32":
+                        parent_rows = [
+                            json.loads(line)
+                            for line in (out / "raw.jsonl").read_text().splitlines()
+                        ]
+                        original_teacher = next(
+                            r["teacher_forced"]
+                            for r in parent_rows
+                            if r["variant"] == "source3_fp32_tiled_text"
+                        )
+                        for field in (
+                            "per_token_nll",
+                            "nll_sum",
+                            "conditional_greedy_tokens",
+                            "evaluated_token_count",
+                        ):
+                            if teacher[field] != original_teacher[field]:
+                                raise RuntimeError(
+                                    "direct construction changed complete teacher forcing"
+                                )
+                        row["direct_complete_teacher_forcing_bitwise"] = True
                     if arm in plan.get("minimum_controls", {}):
                         prior_rows = [
                             json.loads(line)
@@ -1461,6 +1620,9 @@ def analyze(root, expected):
                 per_input.append(
                     dict(
                         sample_id=sample,
+                        meaningful_coherent_change=b.get("coherent_column_count", 0) > 0
+                        if b.get("coherent_source_columns", False)
+                        else True,
                         guard=b["fullkv_fixed_prefix"]["registered_guard_pass"],
                         quality_not_worse=b["fullkv_reference_rouge_l"]
                         >= a["fullkv_reference_rouge_l"],
@@ -1489,6 +1651,7 @@ def analyze(root, expected):
                 model_gate=len(per_input) == 2
                 and all(
                     p["guard"]
+                    and p["meaningful_coherent_change"]
                     and p["quality_not_worse"]
                     and p["teacher_PPL_not_worse"] is not False
                     for p in per_input
@@ -1700,6 +1863,7 @@ if __name__ == "__main__":
             "prepare_query_affine",
             "prepare_hybrid_query_affine",
             "prepare_sparse_exceptions",
+            "prepare_coherent_columns",
             "cpu",
             "submit",
             "worker",
@@ -1755,6 +1919,16 @@ if __name__ == "__main__":
             query_affine=True,
             hybrid_forecast=True,
             sparse_exceptions=True,
+        )
+    elif args.mode == "prepare_coherent_columns":
+        prepare(
+            args.root,
+            corrected_source=True,
+            fp32_tiling=True,
+            teacher_metrics=True,
+            query_affine=True,
+            hybrid_forecast=True,
+            coherent_channels=True,
         )
     elif args.mode == "cpu":
         previous.cpu(args.root, args.plan_sha)

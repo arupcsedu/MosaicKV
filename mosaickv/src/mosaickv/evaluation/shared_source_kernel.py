@@ -24,11 +24,37 @@ def _read(CODES, MINIMUM, SCALE, row, start, ROWS, WIDTH: tl.constexpr, BITS: tl
     return (code.to(tl.float32) * scale + minimum).to(tl.bfloat16)
 
 
+@triton.jit
+def _read_coherent(
+    CODES,
+    MINIMUM,
+    SCALE,
+    MAP,
+    VALUES,
+    row,
+    start,
+    ROWS,
+    WIDTH: tl.constexpr,
+    BITS: tl.constexpr,
+    HAS_COLUMNS: tl.constexpr,
+):
+    x = _read(CODES, MINIMUM, SCALE, row, start, ROWS, WIDTH, BITS)
+    if HAS_COLUMNS:
+        col = start + tl.arange(0, 64)
+        slot = tl.load(MAP + col).to(tl.int32)
+        restore = (slot[None, :] != 255) & (row[:, None] < ROWS)
+        original = tl.load(VALUES + slot[None, :] * ROWS + row[:, None], restore, other=0)
+        x = tl.where(restore, original, x)
+    return x
+
+
 @triton.jit(do_not_specialize=["ROWS", "HEAD_OUT"])
 def _project(
     CODES,
     MINIMUM,
     SCALE,
+    COLUMN_MAP,
+    COLUMN_VALUES,
     WK,
     WV,
     COS,
@@ -42,6 +68,7 @@ def _project(
     BITS: tl.constexpr,
     COMPONENT: tl.constexpr = -1,
     HEAD_GROUP: tl.constexpr = 1,
+    HAS_COLUMNS: tl.constexpr = False,
 ):
     row = tl.program_id(0) * 16 + tl.arange(0, 16)
     head = tl.program_id(1) * HEAD_GROUP
@@ -50,7 +77,19 @@ def _project(
     ak = tl.full((16, DIM * HEAD_GROUP), 0, tl.float32)
     av = tl.full((16, DIM * HEAD_GROUP), 0, tl.float32)
     for start in range(WIDTH // 64):
-        x = _read(CODES, MINIMUM, SCALE, row, start * 64, ROWS, WIDTH, BITS)
+        x = _read_coherent(
+            CODES,
+            MINIMUM,
+            SCALE,
+            COLUMN_MAP,
+            COLUMN_VALUES,
+            row,
+            start * 64,
+            ROWS,
+            WIDTH,
+            BITS,
+            HAS_COLUMNS,
+        )
         k = start * 64 + reduction
         if COMPONENT != 1:
             wk = tl.load(WK + (head * DIM + col[None, :]) * WIDTH + k[:, None])
@@ -84,6 +123,9 @@ def project(packet, attention, targets, *, component=-1, inspect_kernel=False):
     if type(head_group) is not int or head_group not in (1, 2, 4) or h % head_group:
         raise ValueError("divisible audited head group of one, two or four required")
     body = packet.source
+    from mosaickv.evaluation.source_channel_exceptions import kernel_arguments
+
+    column_map, column_values, has_columns = kernel_arguments(packet)
     width = body.shape[-1]
     if body.bits != 3 or body.axis != 2 or body.group != 128 or width != h * d or d != 128:
         raise ValueError("audited three-bit per-channel full-MHA source required")
@@ -108,6 +150,8 @@ def project(packet, attention, targets, *, component=-1, inspect_kernel=False):
         body.codes,
         body.minimum,
         body.scale,
+        column_map,
+        column_values,
         attention.k_proj.weight,
         attention.v_proj.weight,
         packet.cos,
@@ -120,6 +164,7 @@ def project(packet, attention, targets, *, component=-1, inspect_kernel=False):
         BITS=3,
         COMPONENT=component,
         HEAD_GROUP=head_group,
+        HAS_COLUMNS=has_columns,
         num_warps=8 if head_group == 4 else 4,
         num_stages={1: 3, 2: 2, 4: 1}[head_group],
         enable_fp_fusion=False,
@@ -136,10 +181,14 @@ def project(packet, attention, targets, *, component=-1, inspect_kernel=False):
 
 
 @triton.jit(do_not_specialize=["ROWS"])
-def _decoded_source(CODES, MINIMUM, SCALE, OUT, ROWS, WIDTH: tl.constexpr):
+def _decoded_source(
+    CODES, MINIMUM, SCALE, MAP, VALUES, OUT, ROWS, WIDTH: tl.constexpr, HAS_COLUMNS: tl.constexpr
+):
     row = tl.program_id(0) * 16 + tl.arange(0, 16)
     start = tl.program_id(1) * 64
-    values = _read(CODES, MINIMUM, SCALE, row, start, ROWS, WIDTH, 3)
+    values = _read_coherent(
+        CODES, MINIMUM, SCALE, MAP, VALUES, row, start, ROWS, WIDTH, 3, HAS_COLUMNS
+    )
     offsets = row[:, None] * WIDTH + start + tl.arange(0, 64)[None, :]
     tl.store(OUT + offsets, values, row[:, None] < ROWS)
 
@@ -149,14 +198,20 @@ def decode_source_for_construction(packet):
     import torch
 
     n, width = packet.source.shape[2:]
+    from mosaickv.evaluation.source_channel_exceptions import kernel_arguments
+
+    column_map, column_values, has_columns = kernel_arguments(packet)
     out = torch.empty((1, n, width), device=packet.source.codes.device, dtype=torch.bfloat16)
     _decoded_source[(triton.cdiv(n, 16), width // 64)](
         packet.source.codes,
         packet.source.minimum,
         packet.source.scale,
+        column_map,
+        column_values,
         out,
         n,
         WIDTH=width,
+        HAS_COLUMNS=has_columns,
         enable_fp_fusion=False,
     )
     return out

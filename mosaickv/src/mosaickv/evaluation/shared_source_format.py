@@ -65,6 +65,7 @@ class SharedSourceFormat:
     source_head_group: int = 1
     input_overlay: object = None
     kind: str = "evicastkv_full_prompt_shared_source_precision_variant"
+    channel_exceptions: object = None
 
     def private(self):
         return (
@@ -73,6 +74,7 @@ class SharedSourceFormat:
             *(t for body in self.exact for t in body.buffers),
             *(t for patch in self.transport_patches for t in patch.tensors),
             *(() if self.input_overlay is None else self.input_overlay.tensors()),
+            *(() if self.channel_exceptions is None else self.channel_exceptions.tensors()),
         )
 
     def shared(self):
@@ -92,6 +94,8 @@ class SharedSourceFormat:
             raise NotImplementedError("unregistered source projection backend")
         if self.input_overlay is not None and self.projection_backend != "native_bmm_256":
             raise NotImplementedError("exact input fusion requires audited native source backend")
+        if self.channel_exceptions is not None and self.projection_backend != "fused":
+            raise NotImplementedError("coherent columns currently require verified fused transport")
         n, h, d = self.shape[2], self.shape[1], self.shape[3]
         if (
             type(self.source_head_group) is not int
@@ -137,6 +141,10 @@ class SharedSourceFormat:
                 scatter(body, self.row_positions, target, prompt_length=n)
         else:
             x = unpack_cpu(self.source).squeeze(1)
+            if self.channel_exceptions is not None:
+                from mosaickv.evaluation.source_channel_exceptions import restore_cpu
+
+                x = restore_cpu(self.channel_exceptions, x)
             if self.input_overlay is not None:
                 from mosaickv.evaluation.integrated_source_input import overlay_input
 
