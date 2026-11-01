@@ -19,7 +19,7 @@ CHECKPOINT = Path(
 )
 
 
-def prepare(root, *, component_audit=False):
+def prepare(root, *, component_audit=False, query_weighted=False):
     if root.exists():
         raise ValueError("new immutable affine-feasibility root required")
     negative = previous.read(PPL / "analysis/decision.json")
@@ -74,6 +74,17 @@ def prepare(root, *, component_audit=False):
             SOURCE / "mosaickv/docs/source_component_audit_20261101.md",
         ):
             bound[str(path)] = sha(path)
+    if query_weighted:
+        parent = Path("/scratch/djy8hg/runs/evicastkv/source-component-cpu-consumed-20261101-v1")
+        status = previous.read(parent / "decision.json")
+        if not status["complete"] or status["failures"] or not status["component_audit"]:
+            raise ValueError("complete component diagnosis required before weighted fit")
+        for path in (
+            parent / "decision.json",
+            parent / "result.json",
+            SOURCE / "mosaickv/docs/query_weighted_source_cpu_20261101.md",
+        ):
+            bound[str(path)] = sha(path)
     write_once(
         root / "plan.json",
         dict(
@@ -90,7 +101,14 @@ def prepare(root, *, component_audit=False):
             p95_must_not_increase=True,
             same_bytes_and_exact_rows=True,
             component_audit=component_audit,
+            query_weighted=query_weighted,
             CPU_only=True,
+            measurement_type="derived_numerical_feasibility_not_task_quality",
+            backend="CPU_frozen_projection_attention_oracle",
+            gpu_count=0,
+            driver="not_used",
+            cuda_execution="not_used",
+            seed=20261101,
             independent_quality_N=0,
             model_weight_cast="BF16_then_FP32_CPU_numerical_oracle",
             fit_uses_only_prompt_source_tensors=True,
@@ -170,7 +188,24 @@ def run(root, expected):
                     )
                     global_exact = exact.all(0)[None]
                     old = pack_unprotected(x[:, None], global_exact, bits=3, axis=2)
-                    new, proof = refit(old, x[:, None], exact_rows=global_exact)
+                    importance_values = None
+                    weight_proof = None
+                    if plan.get("query_weighted", False):
+                        from mosaickv.evaluation.source_query_importance import importance
+
+                        importance_values, weight_proof = importance(
+                            q, k, v, matrices["k"], matrices["v"], pos, queries, phases, exact
+                        )
+                    new, proof = refit(
+                        old, x[:, None], exact_rows=global_exact, importance=importance_values
+                    )
+                    if weight_proof is not None:
+                        proof["importance"] = dict(
+                            weight_proof,
+                            minimum=float(importance_values.min()),
+                            maximum=float(importance_values.max()),
+                            mean=float(importance_values.mean()),
+                        )
                     if backing_bytes(old.tensors()) != backing_bytes(new.tensors()):
                         raise RuntimeError("physical source bytes changed")
                     decoded_pairs = []
@@ -266,6 +301,7 @@ def analyze(root, expected):
             result_sha256=sha(root / "result.json") if (root / "result.json").exists() else None,
             no_model_quality_claim=True,
             component_audit=plan.get("component_audit", False),
+            query_weighted=plan.get("query_weighted", False),
             component_results=[
                 dict(
                     index=c["index"],
@@ -291,7 +327,10 @@ def analyze(root, expected):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("prepare", "prepare_components", "cpu", "run", "analyze"))
+    parser.add_argument(
+        "mode",
+        choices=("prepare", "prepare_components", "prepare_weighted", "cpu", "run", "analyze"),
+    )
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--plan-sha")
     args = parser.parse_args()
@@ -299,6 +338,8 @@ if __name__ == "__main__":
         prepare(args.root)
     elif args.mode == "prepare_components":
         prepare(args.root, component_audit=True)
+    elif args.mode == "prepare_weighted":
+        prepare(args.root, component_audit=True, query_weighted=True)
     elif args.mode == "cpu":
         previous.cpu(args.root, args.plan_sha)
     else:
