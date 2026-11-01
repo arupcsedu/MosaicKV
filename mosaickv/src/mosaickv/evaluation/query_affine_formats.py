@@ -10,6 +10,7 @@ from mosaickv.evaluation.head_local_precision import HeadLocalFormat
 from mosaickv.evaluation.precision_tier import pack, unpack_cpu
 from mosaickv.evaluation.shared_source_format import fit_transport
 from mosaickv.evaluation.source_query_importance import (
+    blend_families,
     importance,
     importance_cuda,
     kv_importance_cuda,
@@ -29,7 +30,16 @@ def prompt_query(attention, record, heads):
 
 @torch.inference_mode()
 def source_formats(
-    adapter, prefill, capture, source_capture, text_capture, phase_capture, parents, *, head_group
+    adapter,
+    prefill,
+    capture,
+    source_capture,
+    text_capture,
+    phase_capture,
+    parents,
+    *,
+    head_group,
+    forecast=None,
 ):
     original, _ = adapter._legacy_layers(prefill.state.past_key_values)
     results, records = [], []
@@ -51,6 +61,29 @@ def source_formats(
             phase_capture.phases,
             mask,
         )
+        if forecast is not None:
+            from mosaickv.evaluation.source_query_importance import future_importance_cuda
+
+            future = forecast[i]
+            future_weights = future_importance_cuda(
+                future["query"],
+                pair[1],
+                block.self_attn.k_proj.weight,
+                block.self_attn.v_proj.weight,
+                phase_capture.phases,
+                mask,
+                future["probability"],
+                future["output"],
+            )
+            weights = blend_families(
+                weights, future_weights, q.shape[-2], future["query"].shape[-2]
+            )
+            weight_proof.update(
+                forecast_tokens=4,
+                prompt_family_weight=0.5,
+                future_family_weight=0.5,
+                actual_draft_attention_mass_not_renormalized=True,
+            )
         body, proof = refit_cuda(
             parent.source,
             source_capture.records[i][:, None],
@@ -80,7 +113,9 @@ def replace_pair(packet, pair):
 
 
 @torch.inference_mode()
-def baseline_formats(adapter, prefill, capture, parents, original_pairs, memberships):
+def baseline_formats(
+    adapter, prefill, capture, parents, original_pairs, memberships, *, forecast=None
+):
     results, records = [], []
     for i, (parent, pair, positions, block) in enumerate(
         zip(parents, original_pairs, memberships, adapter._language_layers(), strict=True)
@@ -99,6 +134,40 @@ def baseline_formats(adapter, prefill, capture, parents, original_pairs, members
             torch.arange(n - q.shape[-2], n, device=adapter.device),
             mask,
         )
+        if forecast is not None:
+            future = forecast[i]
+            r = future["query"].shape[-2]
+            length = pair[0].shape[-2]
+            joint = tuple(
+                torch.cat((a, b), dim=2) for a, b in zip(pair, future["history"], strict=True)
+            )
+            logical = torch.cat(
+                (
+                    torch.tensor(positions, device=adapter.device),
+                    torch.arange(n, n + r, device=adapter.device)[None].expand(h, r),
+                ),
+                dim=1,
+            )
+            exact = torch.cat(
+                (mask, torch.ones(h, r, device=adapter.device, dtype=torch.bool)), dim=1
+            )
+            future_weights, future_proof = kv_importance_cuda(
+                future["query"],
+                *joint,
+                logical,
+                torch.arange(n, n + r, device=adapter.device),
+                exact,
+            )
+            weights = tuple(
+                blend_families(a, b[..., :length, :], q.shape[-2], r)
+                for a, b in zip(weights, future_weights, strict=True)
+            )
+            weight_proof.update(
+                forecast_tokens=4,
+                prompt_family_weight=0.5,
+                future_family_weight=0.5,
+                hypothetical_selected_context_with_common_FullKV_draft=future_proof,
+            )
         weights = tuple(t.clone() for t in weights)
         for index, patch in enumerate(local.base.corrections):
             weights[index].reshape(-1)[patch.indices.long()] = 0
@@ -142,6 +211,26 @@ def gpu_controls():
         exact.cuda(),
     )
     torch.testing.assert_close(cuda_weight.cpu(), weight, atol=1e-6, rtol=1e-5)
+    from mosaickv.evaluation.source_query_importance import (
+        _probabilities,
+        future_importance_cpu,
+        future_importance_cuda,
+    )
+
+    probability, _, _ = _probabilities(q, key, value, positions, queries)
+    output = (probability @ value.float()).bfloat16()
+    reference_future = future_importance_cpu(q, value, wk, wv, phases, exact, probability, output)
+    actual_future = future_importance_cuda(
+        q.cuda(),
+        value.cuda(),
+        wk.cuda(),
+        wv.cuda(),
+        tuple(t.cuda() for t in phases),
+        exact.cuda(),
+        probability.cuda(),
+        output.cuda(),
+    )
+    torch.testing.assert_close(actual_future.cpu(), reference_future, atol=1e-6, rtol=1e-5)
     x = torch.randn(1, 1, n, h * d, generator=generator).bfloat16()
     cases = []
     mask = exact.all(0)[None]

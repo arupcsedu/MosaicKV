@@ -33,6 +33,7 @@ def prepare(
     teacher_metrics=False,
     minimum_headers=False,
     query_affine=False,
+    hybrid_forecast=False,
 ):
     if root.exists():
         raise ValueError("new immutable source-runtime root required")
@@ -198,6 +199,25 @@ def prepare(
                 if sha(folder / name) != digest:
                     raise ValueError("previous metric controls changed")
                 bound[str(folder / name)] = digest
+    if hybrid_forecast:
+        if not query_affine:
+            raise ValueError("hybrid requires common query-aware fitting")
+        negative_root = Path("/scratch/djy8hg/runs/evicastkv/query-affine-gpu-consumed-20261101-v1")
+        negative = previous.read(negative_root / "analysis/decision.json")
+        if not negative["complete"] or negative["failures"]:
+            raise ValueError("complete previous prompt-only diagnostic required")
+        for path in (
+            negative_root / "analysis/decision.json",
+            SOURCE / "mosaickv/docs/hybrid_source_forecast_20261101.md",
+        ):
+            bound[str(path)] = sha(path)
+        for i in range(2):
+            folder = negative_root / f"workers/{i}"
+            record = previous.read(folder / "result.json")
+            for name, digest in record["outputs"].items():
+                if sha(folder / name) != digest:
+                    raise ValueError("negative prompt-only evidence changed")
+                bound[str(folder / name)] = digest
     variants = ("shadow",) if sequential_shadow else ARMS
     if corrected_source:
         variants = ("shadow", "source3_exclude_global_exact", "source3_exact_text_source")
@@ -232,11 +252,12 @@ def prepare(
     if minimum_headers:
         variants = (*variants, *minimum_controls)
     if query_affine:
+        affine_suffix = "query_affine_hybrid" if hybrid_forecast else "query_affine"
         variants = (
             *variants,
-            "source3_query_affine",
+            f"source3_{affine_suffix}",
             *(
-                f"baseline_{method}__query_affine"
+                f"baseline_{method}__{affine_suffix}"
                 for method in METHODS
                 if method != "mosaickv_exact"
             ),
@@ -245,12 +266,12 @@ def prepare(
     if query_affine:
         evaluation_variants = (
             "source3_fp32_tiled_text",
-            "source3_query_affine",
+            f"source3_{affine_suffix}",
             *(
                 f"baseline_{method}__{kind}"
                 for method in METHODS
                 if method != "mosaickv_exact"
-                for kind in ("fp32", "query_affine")
+                for kind in ("fp32", affine_suffix)
             ),
         )
     write_once(
@@ -276,6 +297,9 @@ def prepare(
             minimum_control_root=str(control_root) if minimum_headers else None,
             evaluation_variants=evaluation_variants,
             query_affine=query_affine,
+            hybrid_forecast=hybrid_forecast,
+            draft_tokens=4 if hybrid_forecast else 0,
+            forecast_family_weights=[0.5, 0.5] if hybrid_forecast else None,
             query_reference_root=str(parent_metrics) if query_affine else None,
             affine_steps=2 if query_affine else None,
             sequential_transport=sequential_shadow or corrected_source,
@@ -333,6 +357,22 @@ def build(
 
     execute = storage_runs.run if execute is None else execute
     diagnostic_build_started = time.monotonic()
+    forecast = None
+    forecast_proof = None
+    if plan.get("hybrid_forecast", False):
+        from mosaickv.evaluation.source_draft_capture import collect
+
+        forecast, forecast_proof, draft_logits = collect(adapter, prefill)
+        draft_control = comparison(full[:5], draft_logits)
+        if (
+            draft_control["maximum_logit_difference"] > 0.001
+            or draft_control["token_agreement"] != 1
+        ):
+            raise RuntimeError("private FullKV draft changed ordinary trajectory")
+        forecast_proof["ordinary_fullkv_validation_only"] = draft_control
+        write_once(out / "forecast.json", forecast_proof)
+        torch.save(draft_logits, out / "forecast_logits.pt")
+        del draft_logits
 
     source, _ = adapter._legacy_layers(prefill.state.past_key_values)
     before = parent.causal.tensor_hash(source)
@@ -394,10 +434,12 @@ def build(
     for arm in plan["variants"][1:]:
         torch.cuda.synchronize()
         begun = time.monotonic()
-        if arm == "source3_query_affine" or arm.endswith("__query_affine"):
+        if "query_affine" in arm:
             from mosaickv.evaluation.query_affine_formats import baseline_formats, source_formats
 
-            if arm == "source3_query_affine":
+            source_arm = arm.startswith("source3_")
+            use_forecast = forecast if arm.endswith("_hybrid") else None
+            if source_arm:
                 trial, checks = source_formats(
                     adapter,
                     prefill,
@@ -407,10 +449,11 @@ def build(
                     phase_capture,
                     formats["source3_exclude_global_exact"],
                     head_group=plan["selected_head_group"],
+                    forecast=use_forecast,
                 )
                 own_cap = cap
             else:
-                method = arm.removeprefix("baseline_").removesuffix("__query_affine")
+                method = arm.removeprefix("baseline_").split("__")[0]
                 prior_arm = f"baseline_{method}__fp32"
                 trial, checks = baseline_formats(
                     adapter,
@@ -419,15 +462,14 @@ def build(
                     formats[prior_arm],
                     observed_pairs[method],
                     observed_memberships[method],
+                    forecast=use_forecast,
                 )
                 own_cap = caps_by_arm[prior_arm]
             torch.cuda.synchronize()
             times[arm] = time.monotonic() - begun
-            times[arm] += (
-                times["source3_exclude_global_exact"]
-                if arm == "source3_query_affine"
-                else times[prior_arm]
-            )
+            times[arm] += times["source3_exclude_global_exact"] if source_arm else times[prior_arm]
+            if use_forecast is not None:
+                times[arm] += forecast_proof["wall_seconds_excludes_integrity_hashes"]
             size = backing_bytes(tuple(t for f in trial for t in f.tensors()))
             caps_by_arm[arm] = own_cap
             construction_checks[arm] = dict(
@@ -780,6 +822,7 @@ def build(
         shared_protection_setup_seconds=times["shadow"],
         construction_seconds=times,
         construction_checks=construction_checks,
+        forecast=forecast_proof,
     )
 
 
@@ -1194,7 +1237,13 @@ def worker(root, expected, index):
                     if baseline_arm
                     else "three_bit_shared_normalized_source",
                     local_precision_variant_not_unmodified_published_baseline=baseline_arm,
-                    query_weighted_affine_refit=arm.endswith("query_affine"),
+                    query_weighted_affine_refit="query_affine" in arm,
+                    draft_forecast_used=arm.endswith("query_affine_hybrid"),
+                    forecast_overhead_seconds=proof["forecast"][
+                        "wall_seconds_excludes_integrity_hashes"
+                    ]
+                    if arm.endswith("query_affine_hybrid")
+                    else 0.0,
                     quantization_header_dtype="lossless_bf16_minimum_fp32_scale"
                     if arm.startswith("minimum__")
                     else "fp16"
@@ -1584,6 +1633,7 @@ if __name__ == "__main__":
             "prepare_lossless_minimum",
             "auto_minimum",
             "prepare_query_affine",
+            "prepare_hybrid_query_affine",
             "cpu",
             "submit",
             "worker",
@@ -1620,6 +1670,15 @@ if __name__ == "__main__":
             fp32_tiling=True,
             teacher_metrics=True,
             query_affine=True,
+        )
+    elif args.mode == "prepare_hybrid_query_affine":
+        prepare(
+            args.root,
+            corrected_source=True,
+            fp32_tiling=True,
+            teacher_metrics=True,
+            query_affine=True,
+            hybrid_forecast=True,
         )
     elif args.mode == "cpu":
         previous.cpu(args.root, args.plan_sha)

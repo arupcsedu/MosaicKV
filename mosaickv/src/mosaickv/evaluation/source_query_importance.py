@@ -136,3 +136,82 @@ def _importance(
         no_persistent_extra_metadata=True,
         ignored_no_causal_key_queries=ignored,
     )
+
+
+@torch.inference_mode()
+def future_importance_cuda(query, value, wk, wv, phases, exact_rows, probability, output):
+    return _future_importance(
+        query, value, wk, wv, phases, exact_rows, probability, output, device_type="cuda"
+    )
+
+
+@torch.inference_mode()
+def future_importance_cpu(query, value, wk, wv, phases, exact_rows, probability, output):
+    """CPU fixture oracle only, never a substitute for actual CUDA execution."""
+    return _future_importance(
+        query, value, wk, wv, phases, exact_rows, probability, output, device_type="cpu"
+    )
+
+
+def blend_families(prompt, future, prompt_queries, future_queries):
+    if (
+        type(prompt_queries) is not int
+        or type(future_queries) is not int
+        or min(prompt_queries, future_queries) < 1
+    ):
+        raise ValueError("nonempty independent prompt and draft query families required")
+    if (
+        prompt.shape != future.shape
+        or prompt.device != future.device
+        or any(not torch.isfinite(t).all() or (t < 0).any() for t in (prompt, future))
+    ):
+        raise ValueError("matching finite nonnegative family sensitivities required")
+    return 0.5 * prompt / prompt_queries + 0.5 * future / future_queries
+
+
+def _future_importance(
+    query, value, wk, wv, phases, exact_rows, probability, output, *, device_type
+):
+    h, n, d = value.shape[1:]
+    width = h * d
+    if (
+        value.device.type != device_type
+        or d != 128
+        or query.shape[:2] != (1, h)
+        or query.shape[-1] != d
+        or probability.shape != (1, h, query.shape[-2], n)
+        or output.shape != query.shape
+        or exact_rows.shape != (h, n)
+        or exact_rows.dtype != torch.bool
+        or phases[0].shape != (1, n, d)
+        or phases[1].shape != phases[0].shape
+        or wk.shape != (width, width)
+        or wv.shape != wk.shape
+        or any(
+            t.device != value.device or not torch.isfinite(t).all()
+            for t in (query, value, wk, wv, *phases, probability, output, exact_rows)
+        )
+        or (probability < 0).any()
+        or (probability.sum(-1) > 1 + 2**-7).any()
+    ):
+        raise ValueError(
+            "actual device-matched forecast probabilities/output and full prompt values required"
+        )
+    q = query.float()[0]
+    v = value.float()[0]
+    o = output.float()[0]
+    distances = (
+        o.square().sum(-1)[..., None]
+        + v.square().sum(-1)[:, None, :]
+        - 2 * (o @ v.transpose(-1, -2))
+    ).clamp_min(0)
+    a2 = probability[0].float().square() * (~exact_rows)[:, None, :]
+    rho = (phases[0].float().square() + phases[1].float().square()).amax(-1)[0]
+    key_coefficient = (a2 * distances * q.square().sum(-1)[..., None] / d).sum(1) * rho[None]
+    value_coefficient = a2.sum(1)
+    result = key_coefficient.T @ wk.float().reshape(h, d, width).square().sum(
+        1
+    ) + value_coefficient.T @ wv.float().reshape(h, d, width).square().sum(1)
+    if not torch.isfinite(result).all() or (result < 0).any():
+        raise RuntimeError("invalid future sensitivity")
+    return result[None, None]
