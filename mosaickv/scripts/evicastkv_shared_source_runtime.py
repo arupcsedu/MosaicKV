@@ -31,6 +31,7 @@ def prepare(
     optimized_source=False,
     fp32_tiling=False,
     teacher_metrics=False,
+    minimum_headers=False,
 ):
     if root.exists():
         raise ValueError("new immutable source-runtime root required")
@@ -110,6 +111,7 @@ def prepare(
         for path in (micro, SOURCE / "mosaickv/docs/fp32_source_tiled_model_20261101.md"):
             bound[str(path)] = sha(path)
     teacher_ledgers = {}
+    minimum_controls = {}
     if teacher_metrics:
         from mosaickv.evaluation.request_precision import METHODS
 
@@ -138,6 +140,39 @@ def prepare(
             bound[str(path)] = sha(path)
         path = SOURCE / "mosaickv/docs/source_native_metrics_20261101.md"
         bound[str(path)] = sha(path)
+    if minimum_headers:
+        control_root = Path(
+            "/scratch/djy8hg/runs/evicastkv/source-native-metrics-consumed-20261101-v1"
+        )
+        control = previous.read(control_root / "analysis/decision.json")
+        if (
+            not control["complete"]
+            or control["failures"]
+            or len(control["teacher_metric_summary"]) != 2
+        ):
+            raise ValueError(
+                "complete full-target controls required before lossless header experiment"
+            )
+        for i in range(2):
+            folder = control_root / f"workers/{i}"
+            record = previous.read(folder / "result.json")
+            for name, digest in record["outputs"].items():
+                if sha(folder / name) != digest:
+                    raise ValueError("minimum control changed")
+                bound[str(folder / name)] = digest
+        bound[str(control_root / "analysis/decision.json")] = sha(
+            control_root / "analysis/decision.json"
+        )
+        path = SOURCE / "mosaickv/docs/lossless_affine_minimum_20261101.md"
+        bound[str(path)] = sha(path)
+        minimum_controls = {
+            "minimum__source3_fp32_tiled_text": "source3_fp32_tiled_text",
+            **{
+                f"minimum__baseline_{m}__fp32": f"baseline_{m}__fp32"
+                for m in METHODS
+                if m != "mosaickv_exact"
+            },
+        }
     variants = ("shadow",) if sequential_shadow else ARMS
     if corrected_source:
         variants = ("shadow", "source3_exclude_global_exact", "source3_exact_text_source")
@@ -169,6 +204,8 @@ def prepare(
                 for header in ("fp32", "fp16")
             ),
         )
+    if minimum_headers:
+        variants = (*variants, *minimum_controls)
     write_once(
         root / "plan.json",
         dict(
@@ -187,6 +224,10 @@ def prepare(
             teacher_metrics=teacher_metrics,
             teacher_ledgers=teacher_ledgers,
             teacher_maximum_tokens=1024 if teacher_metrics else None,
+            minimum_headers=minimum_headers,
+            minimum_controls=minimum_controls,
+            minimum_control_root=str(control_root) if minimum_headers else None,
+            evaluation_variants=tuple(minimum_controls) if minimum_headers else variants,
             sequential_transport=sequential_shadow or corrected_source,
             original_caps_unchanged=True,
             one_prefill=True,
@@ -301,6 +342,38 @@ def build(
     for arm in plan["variants"][1:]:
         torch.cuda.synchronize()
         begun = time.monotonic()
+        if arm.startswith("minimum__"):
+            from mosaickv.evaluation.lossless_affine_minimum import encode_format
+
+            parent_arm = plan["minimum_controls"][arm]
+            trial = tuple(encode_format(f) for f in formats[parent_arm])
+            formats[arm] = trial
+            caps_by_arm[arm] = caps_by_arm.get(parent_arm, cap)
+            torch.cuda.synchronize()
+            times[arm] = times[parent_arm] + time.monotonic() - begun
+            verification_started = time.monotonic()
+            for parent_packet, packet, block in zip(
+                formats[parent_arm], trial, adapter._language_layers(), strict=True
+            ):
+                original_values = parent_packet.materialize(block.self_attn)
+                new_values = packet.materialize(block.self_attn)
+                if not all(
+                    torch.equal(x.view(torch.int16), y.view(torch.int16))
+                    for x, y in zip(original_values, new_values, strict=True)
+                ):
+                    raise RuntimeError("lossless minimum changed constructed K/V bits")
+            del original_values, new_values
+            torch.cuda.synchronize()
+            construction_checks[arm] = dict(
+                status="constructed",
+                source_dependency=parent_arm,
+                lossless_minimum_encoding=True,
+                original_FP32_scale_unchanged=True,
+                all_layer_KV_bitwise=True,
+                verification_seconds=time.monotonic() - verification_started,
+                encoding_time_excludes_verification=True,
+            )
+            continue
         if arm == "shadow_fp16_metadata" or arm.startswith("baseline_"):
             from mosaickv.evaluation.compact_quantization_metadata import compact_format
 
@@ -621,7 +694,7 @@ def worker(root, expected, index):
     from mosaickv.measurements.telemetry import capture_gpu_environment
 
     plan = previous.common.inputs(root, expected)
-    arms = tuple(plan["variants"])
+    arms = tuple(plan.get("evaluation_variants", plan["variants"]))
     execute = storage_runs.run
     if plan.get("sequential_transport", plan.get("sequential_shadow", False)):
         from mosaickv.evaluation.sequential_kv_lease import paired_run
@@ -894,6 +967,19 @@ def worker(root, expected, index):
                     torch.cuda.max_memory_reserved(),
                 )
                 torch.save(dict(fixed=fixed, greedy=greedy), out / (arm + "-logits.pt"))
+                if arm in plan.get("minimum_controls", {}):
+                    previous_arm = plan["minimum_controls"][arm]
+                    values = torch.load(
+                        Path(plan["minimum_control_root"])
+                        / f"workers/{index}"
+                        / (previous_arm + "-logits.pt"),
+                        map_location="cpu",
+                        weights_only=True,
+                    )
+                    if not torch.equal(fixed, values["fixed"]) or not torch.equal(
+                        greedy, values["greedy"]
+                    ):
+                        raise RuntimeError("lossless minimum encoding changed model logits")
                 if arm == "shadow" and (
                     not torch.equal(fixed, original["fixed"])
                     or not torch.equal(greedy, original["greedy"])
@@ -958,9 +1044,11 @@ def worker(root, expected, index):
                 reference = parent.scored_text(
                     adapter.processor.tokenizer, full.argmax(-1).tolist(), eos_ids
                 )
-                baseline_arm = arm in ("shadow", "shadow_fp16_metadata") or arm.startswith(
-                    "baseline_"
-                )
+                label_arm = plan.get("minimum_controls", {}).get(arm, arm)
+                baseline_arm = label_arm in (
+                    "shadow",
+                    "shadow_fp16_metadata",
+                ) or label_arm.startswith("baseline_")
                 details["storage"].update(
                     unchanged_original_selected_memberships=baseline_arm,
                     all_original_prompt_positions_represented=not baseline_arm,
@@ -968,8 +1056,8 @@ def worker(root, expected, index):
                 row = dict(
                     common,
                     status="completed",
-                    method=arm.removeprefix("baseline_").split("__")[0]
-                    if arm.startswith("baseline_")
+                    method=label_arm.removeprefix("baseline_").split("__")[0]
+                    if label_arm.startswith("baseline_")
                     else "mosaickv_exact"
                     if baseline_arm
                     else "evicastkv_shared_source_precision_variant",
@@ -984,7 +1072,15 @@ def worker(root, expected, index):
                     end_to_end_measured=False,
                     source_component_timing_excludes_shared_protection_setup=not baseline_arm,
                     nominal_selection_ratio=0.5 if baseline_arm else None,
-                    quantization_header_dtype="fp16" if "fp16" in arm else "fp32",
+                    prompt_precision_policy="head3_boundary8_KV"
+                    if baseline_arm
+                    else "three_bit_shared_normalized_source",
+                    local_precision_variant_not_unmodified_published_baseline=baseline_arm,
+                    quantization_header_dtype="lossless_bf16_minimum_fp32_scale"
+                    if arm.startswith("minimum__")
+                    else "fp16"
+                    if "fp16" in arm
+                    else "fp32",
                     torch_peak_allocated=allocated,
                     torch_peak_reserved=reserved,
                     inactive_diagnostic_format_bytes=all_format_bytes
@@ -1010,6 +1106,34 @@ def worker(root, expected, index):
                     if digest_tensors(tuple(t for p in packet for t in p.tensors())) != hashes[arm]:
                         raise RuntimeError("teacher forcing mutated immutable encoded formats")
                     teacher["encoded_formats_immutable_after_complete_target"] = True
+                    if arm in plan.get("minimum_controls", {}):
+                        prior_rows = [
+                            json.loads(line)
+                            for line in (
+                                Path(plan["minimum_control_root"]) / f"workers/{index}/raw.jsonl"
+                            )
+                            .read_text()
+                            .splitlines()
+                        ]
+                        prior = next(
+                            r for r in prior_rows if r["variant"] == plan["minimum_controls"][arm]
+                        )
+                        old_teacher = prior["teacher_forced"]
+                        if (
+                            teacher["per_token_nll"] != old_teacher["per_token_nll"]
+                            or teacher["conditional_greedy_tokens"]
+                            != old_teacher["conditional_greedy_tokens"]
+                        ):
+                            raise RuntimeError(
+                                "lossless minimum encoding changed full-target scoring"
+                            )
+                        row["lossless_controls"] = dict(
+                            generation_logits_bitwise=True,
+                            complete_teacher_NLL_bitwise=True,
+                            original_variant=prior["variant"],
+                            original_generation_storage=prior["storage"],
+                            original_teacher_storage=old_teacher["storage"],
+                        )
                     row.update(
                         teacher_forced=teacher,
                         teacher_target_provenance=teacher_provenance,
@@ -1141,7 +1265,7 @@ def analyze(root, expected):
                 selected = [
                     r for r in rows if r.get("sample_id") == control["provenance"]["sample_id"]
                 ]
-                if len(selected) != len(plan["variants"]):
+                if len(selected) != len(plan.get("evaluation_variants", plan["variants"])):
                     raise ValueError("incomplete teacher-forcing arms")
                 for row in selected:
                     teacher = row["teacher_forced"]
@@ -1185,12 +1309,21 @@ def analyze(root, expected):
     write_once(
         root / "analysis/decision.json",
         dict(
-            complete=len(rows) == 2 * len(plan["variants"]) and not failures,
+            complete=len(rows) == 2 * len(plan.get("evaluation_variants", plan["variants"]))
+            and not failures,
             failures=failures,
             rows=rows,
             gates=gates,
             common_sequential_transport_gate=transport_gate,
             teacher_metric_summary=teacher_summary,
+            lossless_minimum_gate=plan.get("minimum_headers", False)
+            and len(rows) == 10
+            and not failures
+            and all(
+                r.get("lossless_controls", {}).get("generation_logits_bitwise")
+                and r.get("lossless_controls", {}).get("complete_teacher_NLL_bitwise")
+                for r in rows
+            ),
             source_sha=plan["source_sha"],
             plan_sha256=expected,
             independent_quality_N=0,
@@ -1217,6 +1350,89 @@ def submit(root, expected):
         parent.submit(root, expected)
 
 
+def auto_minimum(root, expected):
+    """One bounded engineering successor, never a fresh research campaign."""
+    import subprocess
+
+    from mosaickv.evaluation.lossless_affine_minimum import eligible_parent
+
+    prior = Path("/scratch/djy8hg/runs/evicastkv/source-native-metrics-consumed-20261101-v1")
+    if sha(prior / "plan.json") != expected:
+        raise ValueError("registered parent plan changed")
+    control = previous.read(prior / "analysis/decision.json")
+    source_quality = eligible_parent(control)
+    if not source_quality:
+        write_once(
+            root / "blocked.json",
+            dict(
+                source_sha=clean_source(SOURCE),
+                parent_decision_sha256=sha(prior / "analysis/decision.json"),
+                complete=control["complete"],
+                failures=control["failures"],
+                source_not_worse_than_old_shadow_both_metrics=source_quality,
+                no_GPU_submitted=True,
+                no_fresh_or_large_campaign_authorized=True,
+            ),
+        )
+        return
+    prepare(
+        root, corrected_source=True, fp32_tiling=True, teacher_metrics=True, minimum_headers=True
+    )
+    digest = sha(root / "plan.json")
+    wrapper = str(SOURCE / "mosaickv/slurm/evicastkv_shared_source_runtime.sbatch")
+    common = [
+        "sbatch",
+        "--parsable",
+        "--partition=bii",
+        "--account=bii_dsc_community",
+        "--nodes=1",
+        "--ntasks=1",
+        "--cpus-per-task=2",
+        "--mem=16G",
+    ]
+    cpu = subprocess.check_output(
+        [
+            *common,
+            "--time=00:20:00",
+            "--job-name=mk-min-cpu",
+            f"--output={root}/cpu-%j.out",
+            f"--error={root}/cpu-%j.err",
+            wrapper,
+            str(SOURCE),
+            str(root),
+            digest,
+            "cpu",
+        ],
+        text=True,
+    ).strip()
+    admit = subprocess.check_output(
+        [
+            *common,
+            "--time=00:10:00",
+            f"--dependency=afterok:{cpu}",
+            "--job-name=mk-min-admit",
+            f"--output={root}/admit-%j.out",
+            f"--error={root}/admit-%j.err",
+            wrapper,
+            str(SOURCE),
+            str(root),
+            digest,
+            "submit",
+        ],
+        text=True,
+    ).strip()
+    write_once(
+        root / "automatic_cpu_chain.json",
+        dict(
+            cpu=cpu,
+            admit=admit,
+            parent_plan_sha256=expected,
+            source_sha=clean_source(SOURCE),
+            no_fresh_or_large_campaign_authorized=True,
+        ),
+    )
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -1228,6 +1444,8 @@ if __name__ == "__main__":
             "prepare_optimized",
             "prepare_fp32_tiling",
             "prepare_teacher_metrics",
+            "prepare_lossless_minimum",
+            "auto_minimum",
             "cpu",
             "submit",
             "worker",
@@ -1249,6 +1467,14 @@ if __name__ == "__main__":
         prepare(args.root, corrected_source=True, fp32_tiling=True)
     elif args.mode == "prepare_teacher_metrics":
         prepare(args.root, corrected_source=True, fp32_tiling=True, teacher_metrics=True)
+    elif args.mode == "prepare_lossless_minimum":
+        prepare(
+            args.root,
+            corrected_source=True,
+            fp32_tiling=True,
+            teacher_metrics=True,
+            minimum_headers=True,
+        )
     elif args.mode == "cpu":
         previous.cpu(args.root, args.plan_sha)
     elif args.mode == "worker":
