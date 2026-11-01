@@ -47,7 +47,7 @@ def test_conditional_preparation_does_not_overlap_packing_workspace(monkeypatch)
     monkeypatch.setattr(module, "pack", pack)
     with inventory:
         assert (
-            module.pack_unprotected(values, rows, bits=3, axis=2)
+            module.pack_unprotected(values, rows, bits=3, axis=2, bf16_prepare=False)
             == "all_original_preparation_checks_executed"
         )
 

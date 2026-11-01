@@ -35,3 +35,22 @@ diagnostic enables the new flag. Require byte-identical complete packets against
 the frozen GPU producer, plus prefill-logit parity, before reusing its proven
 decode/teacher results. Failure to match blocks any promotion. No extra answer
 generation, fresh cohort or paper claim is authorized by this memory test.
+
+## Common exact BF16 range preparation
+
+The componentwise GPU test preserved both frozen packets. Its new dominant
+peak was conditional range preparation. Minima of finite, nonzero BF16 values
+can be prepared in BF16 without FP32 copies: minima and masked substitution
+perform no arithmetic. Keep the ORIGINAL FP32 quantizer, scales and rounding.
+Fall back to the full original FP32 preparation whenever a group has a genuine
+zero minimum, avoiding signed-zero reduction ties, or an input contains a BF16
+subnormal, avoiding device-specific reduction behavior. All-protected groups
+still use the original explicit positive zero. Inputs remain unchanged.
+
+Apply this exact optimization through the common range-preparation function,
+not only EviCastKV. `prepare_common_ranges` measures all five methods on both
+consumed inputs, with ten one-A100/12-CPU workers, at most six concurrent and
+twenty-minute limits. Preserve selected-cache validation in the profiling subclass.
+Require identical complete frozen packets, physical bytes and prefill logits
+for every method before reusing its already verified quality/decode evidence.
+This is a constructor-memory test, not new independent answer-quality evidence.

@@ -30,7 +30,7 @@ def exact_rows(packet):
 
 
 @torch.inference_mode()
-def pack_unprotected(values, rows, *, bits, axis):
+def pack_unprotected(values, rows, *, bits, axis, bf16_prepare=True):
     if (
         values.ndim != 4
         or values.shape[0] != 1
@@ -42,7 +42,17 @@ def pack_unprotected(values, rows, *, bits, axis):
         or not torch.isfinite(values).all()
     ):
         raise ValueError("finite BF16 values and exact same-device per-head row mask required")
-    x = values.float().movedim(axis, -1).contiguous()
+    if type(bf16_prepare) is not bool:
+        raise ValueError("explicit BF16 range-preparation flag required")
+    if bf16_prepare:
+        words = values.view(torch.int16)
+        if bool((((words & 0x7F80) == 0) & ((words & 0x7F) != 0)).any()):
+            # Do not depend on device-specific subnormal reduction behavior.
+            return pack_unprotected(values, rows, bits=bits, axis=axis, bf16_prepare=False)
+    # Min and masked substitution perform no arithmetic: a nonzero extremum
+    # has exactly the same representation in BF16 and FP32. Quantization below
+    # still uses the ORIGINAL FP32 pack(), including scale and rounding.
+    x = (values if bf16_prepare else values.float()).movedim(axis, -1).contiguous()
     mask = rows[None, :, :, None].expand_as(values).movedim(axis, -1).contiguous()
     length = x.shape[-1]
     pad = (-length) % 128
@@ -52,6 +62,12 @@ def pack_unprotected(values, rows, *, bits, axis):
     shaped = x.reshape(*x.shape[:-1], -1, 128)
     protected = mask.reshape_as(shaped)
     minimum = shaped.masked_fill(protected, float("inf")).amin(-1)
+    if bf16_prepare and bool(((minimum == 0) & torch.isfinite(minimum)).any()):
+        # Signed-zero reduction tie order can depend on the reduction dtype.
+        # Release the trial workspace and use the unchanged FP32 reference for
+        # the entire tensor whenever an unprotected zero minimum is ambiguous.
+        del x, mask, shaped, protected, minimum
+        return pack_unprotected(values, rows, bits=bits, axis=axis, bf16_prepare=False)
     # All-protected groups are overwritten completely. Finite representatives
     # avoid NaNs and never affect an unprotected cache scalar.
     minimum = torch.where(torch.isfinite(minimum), minimum, torch.zeros_like(minimum))

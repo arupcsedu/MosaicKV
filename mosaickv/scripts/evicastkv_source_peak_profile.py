@@ -19,7 +19,7 @@ PARENT = Path(
 )
 
 
-def prepare(root, *, components=False):
+def prepare(root, *, components=False, all_methods=False):
     if root.exists():
         raise FileExistsError("new immutable profile root required")
     plan = previous.previous.read(PARENT / "plan.json")
@@ -29,6 +29,8 @@ def prepare(root, *, components=False):
             j for j in plan["jobs"] if previous.common.method_of(j) == "mosaickv_exact"
         )
     ]
+    if all_methods:
+        jobs = [dict(j, reference_worker=j["index"]) for j in plan["jobs"]]
     bound = dict(plan["bound_files"])
     if components:
         profile_root = PARENT.parent / "source-peak-profile-consumed-20261101-v1"
@@ -45,6 +47,21 @@ def prepare(root, *, components=False):
             raise ValueError("observed transport-fitting peak must justify this follow-up")
         for p in (profile_root / "plan.json", profile_root / "analysis/decision.json"):
             bound[str(p)] = sha(p)
+    if all_methods:
+        component_root = PARENT.parent / "componentwise-source-fit-consumed-20261101-v1"
+        proof = previous.previous.read(component_root / "analysis/decision.json")
+        if (
+            not proof["complete"]
+            or proof["failures"]
+            or any(
+                case["dominant_peak"]["phase"][-1]
+                != "mosaickv.evaluation.shared_source_format.pack_unprotected"
+                for case in proof["cases"]
+            )
+        ):
+            raise ValueError("measured conditional range peak must justify this optimization")
+        for p in (component_root / "plan.json", component_root / "analysis/decision.json"):
+            bound[str(p)] = sha(p)
     for p in (PARENT / "plan.json", SOURCE / "mosaickv/docs/source_peak_profile_20261101.md"):
         bound[str(p)] = sha(p)
     write_once(
@@ -55,10 +72,12 @@ def prepare(root, *, components=False):
             jobs=jobs,
             bound_files=bound,
             stage="consumed_source_constructor_peak_phase_localization",
-            maximum_simultaneous_workers=2,
-            maximum_worker_minutes=10,
+            maximum_simultaneous_workers=6 if all_methods else 2,
+            maximum_worker_minutes=20 if all_methods else 10,
             profile_only_no_decode_or_new_quality_measurement=True,
             componentwise_transport_fitting=components,
+            common_BF16_range_preparation_with_signed_zero_fallback=True,
+            all_five_methods_profiled=all_methods,
         ),
     )
     print(sha(root / "plan.json"))
@@ -108,10 +127,11 @@ def worker(root, expected, index):
     from mosaickv.evaluation import (
         conditional_precision,
         shared_source_format,
+        streaming_baselines,
         streaming_prefill,
         text_source_storage,
     )
-    from mosaickv.evaluation.prefill_phase_probe import PhaseCache, wrap_phase
+    from mosaickv.evaluation.prefill_phase_probe import PhaseCache, PhaseSelectedCache, wrap_phase
     from mosaickv.hf_cli import _model_kwargs
     from mosaickv.measurements.telemetry import capture_gpu_environment
 
@@ -160,6 +180,9 @@ def worker(root, expected, index):
         with ExitStack() as stack:
             stack.enter_context(patch.object(PhaseCache, "instances", instances))
             stack.enter_context(patch.object(streaming_prefill, "RetiringPrefillCache", PhaseCache))
+            stack.enter_context(
+                patch.object(streaming_baselines, "SelectedRetiringCache", PhaseSelectedCache)
+            )
             for module, key in (
                 (shared_source_format, "construct"),
                 (shared_source_format, "fit_transport"),
@@ -185,7 +208,7 @@ def worker(root, expected, index):
                 adapter,
                 previous.previous.load_messages(payload),
                 tuple(previous.previous.read(Path(plan["profile_path"]))),
-                "mosaickv_exact",
+                previous.common.method_of(job),
                 audit=True,
             )
         reference = previous.previous.read(
@@ -230,7 +253,7 @@ def worker(root, expected, index):
 def analyze(root, expected):
     plan = previous.previous.common.inputs(root, expected)
     cases, failures = [], []
-    for i in range(2):
+    for i in range(len(plan["jobs"])):
         folder = root / f"workers/{i}"
         try:
             result = previous.previous.read(folder / "result.json")
@@ -252,7 +275,7 @@ def analyze(root, expected):
     write_once(
         root / "analysis/decision.json",
         dict(
-            complete=len(cases) == 2 and not failures,
+            complete=len(cases) == len(plan["jobs"]) and not failures,
             cases=cases,
             failures=failures,
             source_sha=plan["source_sha"],
@@ -267,13 +290,26 @@ def analyze(root, expected):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "mode", choices=("prepare", "prepare_components", "cpu", "submit", "worker", "analyze")
+        "mode",
+        choices=(
+            "prepare",
+            "prepare_components",
+            "prepare_common_ranges",
+            "cpu",
+            "submit",
+            "worker",
+            "analyze",
+        ),
     )
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--plan-sha")
     args = parser.parse_args()
-    if args.mode in ("prepare", "prepare_components"):
-        prepare(args.root, components=args.mode == "prepare_components")
+    if args.mode in ("prepare", "prepare_components", "prepare_common_ranges"):
+        prepare(
+            args.root,
+            components=args.mode != "prepare",
+            all_methods=args.mode == "prepare_common_ranges",
+        )
     elif args.mode == "cpu":
         previous.previous.cpu(args.root, args.plan_sha)
     elif args.mode == "worker":

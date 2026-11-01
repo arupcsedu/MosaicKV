@@ -6,6 +6,7 @@ This probe does not change cache math or replace the original observer.
 
 from functools import wraps
 
+from mosaickv.evaluation.streaming_baselines import SelectedRetiringCache
 from mosaickv.evaluation.streaming_prefill import RetiringPrefillCache
 
 
@@ -47,3 +48,7 @@ def wrap_phase(name, function, instances):
             cache.phase_stack.pop()
 
     return wrapped
+
+
+class PhaseSelectedCache(PhaseCache, SelectedRetiringCache):
+    """The same observer, retaining the selected-cache membership validator."""

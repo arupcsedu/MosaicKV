@@ -38,6 +38,31 @@ def test_phase_stack_is_restored_on_failure(monkeypatch):
     assert cache.phase_stack == []
 
 
+def test_profiled_selected_cache_preserves_membership_validation(monkeypatch):
+    from mosaickv.evaluation.exact_storage import ExactFormat, encode
+    from mosaickv.evaluation.prefill_phase_probe import PhaseSelectedCache
+    from mosaickv.evaluation.streaming_baselines import SelectedEncoding
+
+    monkeypatch.setattr(PhaseCache, "instances", [])
+    cache = PhaseSelectedCache(1)
+    pair = tuple(torch.randn(1, 2, 16, 128).bfloat16() for _ in range(2))
+    cache.update(*pair, 0)
+    heads = ((0, 4, 15), (2, 8, 15))
+    packet = ExactFormat(
+        "kv",
+        (1, 2, 3, 128),
+        pair=tuple(
+            encode(torch.stack([t[0, h, list(ids)] for h, ids in enumerate(heads)])[None])
+            for t in pair
+        ),
+    )
+    with pytest.raises(ValueError):
+        cache.validate_encoding(0, SelectedEncoding(packet, ((0, 4, 14), (2, 8, 15))), pair)
+    cache.seal(0, torch.nn.Linear(2, 2), lambda *a: SelectedEncoding(packet, heads))
+    assert cache.memberships[0] == heads and cache.get_seq_length() == 16
+    assert cache.formats()[0].shape[-2] == 3
+
+
 @pytest.mark.parametrize(
     "outcome",
     [
