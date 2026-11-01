@@ -9,6 +9,7 @@ def _fill(
     OUT,
     COUNTS,
     OLD,
+    BIAS,
     LENGTH,
     PROMPT,
     H: tl.constexpr,
@@ -17,6 +18,7 @@ def _fill(
     SN,
     MINIMUM: tl.constexpr,
     USE_OLD: tl.constexpr,
+    USE_BIAS: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
     i = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
@@ -27,10 +29,12 @@ def _fill(
     if USE_OLD:
         old_head = h if OLD_H == H else tl.full((BLOCK,), 0, tl.int32)
         value += tl.load(OLD + old_head * SH + p * SN, valid, other=0).to(tl.float32)
+    if USE_BIAS:
+        value += tl.load(BIAS + h * PROMPT + p, valid & (p < PROMPT), other=0)
     tl.store(OUT + i, value, valid)
 
 
-def fill(mask, counts, prompt, old):
+def fill(mask, counts, prompt, old, bias=None):
     import torch
 
     length = mask.shape[-1]
@@ -38,6 +42,7 @@ def fill(mask, counts, prompt, old):
         mask,
         counts,
         counts if old is None else old,
+        counts if bias is None else bias,
         length,
         prompt,
         H=counts.numel(),
@@ -46,5 +51,6 @@ def fill(mask, counts, prompt, old):
         SN=0 if old is None else old.stride(-1),
         MINIMUM=torch.finfo(mask.dtype).min,
         USE_OLD=old is not None,
+        USE_BIAS=bias is not None,
         BLOCK=256,
     )

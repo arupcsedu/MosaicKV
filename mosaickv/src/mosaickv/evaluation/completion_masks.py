@@ -11,7 +11,7 @@ import torch
 from mosaickv.evaluation.lossless_prompt_cache import backing_bytes
 
 
-def build_mask(counts, length, prompt_length, dtype, old):
+def build_mask(counts, length, prompt_length, dtype, old, *, log_mass_bias=None):
     if (
         counts.ndim != 1
         or counts.dtype != torch.int16
@@ -33,17 +33,28 @@ def build_mask(counts, length, prompt_length, dtype, old):
         raise ValueError(
             "compatible compact counts, original additive mask and cache shape required"
         )
+    if log_mass_bias is not None and (
+        log_mass_bias.shape != (counts.numel(), prompt_length)
+        or log_mass_bias.dtype != torch.float32
+        or log_mass_bias.device != counts.device
+        or not log_mass_bias.is_contiguous()
+    ):
+        raise ValueError("contiguous FP32 head/prompt mass bias on the cache device required")
     mask = torch.empty(1, counts.numel(), 1, length, device=counts.device, dtype=dtype)
     if counts.device.type == "cuda":
         from mosaickv.evaluation.completion_masks_kernel import fill
 
-        fill(mask, counts, prompt_length, old)
+        fill(mask, counts, prompt_length, old, log_mass_bias)
     else:
         index = torch.arange(length, device=counts.device)
         valid = (index[None] < counts[:, None]) | (index[None] >= prompt_length)
         mask[0, :, 0] = torch.where(valid, 0.0, torch.finfo(dtype).min).to(dtype)
         if old is not None:
             mask += old[..., :length]
+        if log_mass_bias is not None:
+            work = mask.float()
+            work[..., :prompt_length] += log_mass_bias[None, :, None, :]
+            mask.copy_(work)
     return mask
 
 
@@ -100,6 +111,7 @@ class CompletionMaskTransport:
                         packet.shape[-2],
                         hidden.dtype if old is None else old.dtype,
                         old,
+                        log_mass_bias=getattr(packet, "log_mass_bias", None),
                     )
                     self.active[index] = mask
                     self.cache.shared_tensors = (*self.cache.shared_tensors, mask)
