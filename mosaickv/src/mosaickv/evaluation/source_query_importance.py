@@ -12,10 +12,84 @@ import torch
 
 @torch.inference_mode()
 def importance(query, key, value, wk, wv, positions, query_positions, phases, exact_rows):
+    return _importance(
+        query, key, value, wk, wv, positions, query_positions, phases, exact_rows, device_type="cpu"
+    )
+
+
+@torch.inference_mode()
+def importance_cuda(query, key, value, wk, wv, positions, query_positions, phases, exact_rows):
+    return _importance(
+        query,
+        key,
+        value,
+        wk,
+        wv,
+        positions,
+        query_positions,
+        phases,
+        exact_rows,
+        device_type="cuda",
+    )
+
+
+def _probabilities(query, key, value, positions, query_positions):
+    d = key.shape[-1]
+    scores = (query.float() @ key.float().transpose(-1, -2)).bfloat16() * (1 / math.sqrt(d))
+    causal = positions[None, :, None, :] > query_positions[None, None, :, None]
+    valid = (~causal).any(-1, keepdim=True)
+    scores = scores.masked_fill(causal, float("-inf"))
+    scores = torch.where(valid, scores, torch.zeros_like(scores))
+    probabilities = scores.float().softmax(-1).bfloat16().float() * valid
+    output = (probabilities @ value.float()).bfloat16().float()[0]
+    values = value.float()[0]
+    distances = (
+        output.square().sum(-1)[..., None]
+        + values.square().sum(-1)[:, None, :]
+        - 2 * (output @ values.transpose(-1, -2))
+    ).clamp_min(0)
+    return probabilities, distances, int((~valid).sum())
+
+
+@torch.inference_mode()
+def kv_importance_cuda(query, key, value, positions, query_positions, exact_rows):
+    if (
+        key.device.type != "cuda"
+        or key.shape != value.shape
+        or query.shape[:2] != key.shape[:2]
+        or query.shape[-1] != key.shape[-1]
+        or positions.shape != key.shape[1:3]
+        or exact_rows.shape != key.shape[1:3]
+        or exact_rows.dtype != torch.bool
+        or any(
+            t.device != key.device or not torch.isfinite(t).all()
+            for t in (query, key, value, positions, query_positions, exact_rows)
+        )
+    ):
+        raise ValueError(
+            "actual CUDA query, merged/selected KV and original logical positions required"
+        )
+    a, dist, ignored = _probabilities(query, key, value, positions, query_positions)
+    squared = a[0].square() * (~exact_rows)[:, None, :]
+    key_weights = torch.einsum(
+        "hqn,hqd->hnd", squared * dist / key.shape[-1], query.float()[0].square()
+    )
+    value_weights = squared.sum(1)[..., None].expand_as(key_weights)
+    return (key_weights[None].contiguous(), value_weights[None].contiguous()), dict(
+        surrogate="diagonal_post_RoPE_KV_attention_output_sensitivity",
+        original_logical_positions=True,
+        ignored_no_causal_key_queries=ignored,
+        actual_selected_or_merged_values_not_regenerated=True,
+    )
+
+
+def _importance(
+    query, key, value, wk, wv, positions, query_positions, phases, exact_rows, *, device_type
+):
     h, n, d = key.shape[1:]
     width = h * d
     if (
-        query.device.type != "cpu"
+        query.device.type != device_type
         or key.shape != value.shape
         or d != 128
         or query.shape[:2] != (1, h)
@@ -30,25 +104,18 @@ def importance(query, key, value, wk, wv, positions, query_positions, phases, ex
         or phases[1].shape != phases[0].shape
         or not torch.equal(phases[0][..., :64], phases[0][..., 64:])
         or not torch.equal(phases[1][..., :64], phases[1][..., 64:])
-        or not torch.equal(positions, torch.arange(n).repeat(h, 1))
+        or not torch.equal(positions, torch.arange(n, device=key.device).repeat(h, 1))
         or any(
-            t.device.type != "cpu" or not torch.isfinite(t).all()
-            for t in (query, key, value, wk, wv, *phases)
+            t.device != key.device or not torch.isfinite(t).all()
+            for t in (query, key, value, wk, wv, positions, query_positions, exact_rows, *phases)
         )
     ):
         raise ValueError(
             "finite CPU full-source MHA geometry, original positions/phases and exact rows required"
         )
-    scores = (query.float() @ key.float().transpose(-1, -2)).bfloat16() * (1 / math.sqrt(d))
-    causal = positions[None, :, None, :] > query_positions[None, None, :, None]
-    probabilities = scores.masked_fill(causal, float("-inf")).float().softmax(-1).bfloat16().float()
-    output = (probabilities @ value.float()).bfloat16().float()[0]
-    values = value.float()[0]
-    distances = (
-        output.square().sum(-1)[..., None]
-        + values.square().sum(-1)[:, None, :]
-        - 2 * (output @ values.transpose(-1, -2))
-    ).clamp_min(0)
+    probabilities, distances, ignored = _probabilities(
+        query, key, value, positions, query_positions
+    )
     a2 = probabilities[0].square() * (~exact_rows)[:, None, :]
     qnorm = query.float()[0].square().sum(-1)
     # ||R_i^T q||^2 <= max_j(cos_ij^2+sin_ij^2) ||q||^2.
@@ -67,4 +134,5 @@ def importance(query, key, value, wk, wv, positions, query_positions, phases, ex
         original_RoPE_phases_used=True,
         protected_KV_contributions_zero=True,
         no_persistent_extra_metadata=True,
+        ignored_no_causal_key_queries=ignored,
     )

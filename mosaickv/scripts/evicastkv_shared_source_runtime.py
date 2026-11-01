@@ -32,6 +32,7 @@ def prepare(
     fp32_tiling=False,
     teacher_metrics=False,
     minimum_headers=False,
+    query_affine=False,
 ):
     if root.exists():
         raise ValueError("new immutable source-runtime root required")
@@ -173,6 +174,30 @@ def prepare(
                 if m != "mosaickv_exact"
             },
         }
+    if query_affine:
+        numeric = Path(
+            "/scratch/djy8hg/runs/evicastkv/query-weighted-affine-cpu-consumed-20261101-v1/decision.json"
+        )
+        status = previous.read(numeric)
+        if not status["complete"] or status["failures"] or not status["numerical_feasibility_gate"]:
+            raise ValueError("positive frozen query-weighted CPU feasibility required")
+        parent_metrics = Path(
+            "/scratch/djy8hg/runs/evicastkv/source-native-metrics-consumed-20261101-v1"
+        )
+        for path in (
+            numeric,
+            numeric.parent / "result.json",
+            SOURCE / "mosaickv/docs/query_affine_gpu_20261101.md",
+            parent_metrics / "analysis/decision.json",
+        ):
+            bound[str(path)] = sha(path)
+        for i in range(2):
+            folder = parent_metrics / f"workers/{i}"
+            record = previous.read(folder / "result.json")
+            for name, digest in record["outputs"].items():
+                if sha(folder / name) != digest:
+                    raise ValueError("previous metric controls changed")
+                bound[str(folder / name)] = digest
     variants = ("shadow",) if sequential_shadow else ARMS
     if corrected_source:
         variants = ("shadow", "source3_exclude_global_exact", "source3_exact_text_source")
@@ -206,6 +231,28 @@ def prepare(
         )
     if minimum_headers:
         variants = (*variants, *minimum_controls)
+    if query_affine:
+        variants = (
+            *variants,
+            "source3_query_affine",
+            *(
+                f"baseline_{method}__query_affine"
+                for method in METHODS
+                if method != "mosaickv_exact"
+            ),
+        )
+    evaluation_variants = tuple(minimum_controls) if minimum_headers else variants
+    if query_affine:
+        evaluation_variants = (
+            "source3_fp32_tiled_text",
+            "source3_query_affine",
+            *(
+                f"baseline_{method}__{kind}"
+                for method in METHODS
+                if method != "mosaickv_exact"
+                for kind in ("fp32", "query_affine")
+            ),
+        )
     write_once(
         root / "plan.json",
         dict(
@@ -227,7 +274,10 @@ def prepare(
             minimum_headers=minimum_headers,
             minimum_controls=minimum_controls,
             minimum_control_root=str(control_root) if minimum_headers else None,
-            evaluation_variants=tuple(minimum_controls) if minimum_headers else variants,
+            evaluation_variants=evaluation_variants,
+            query_affine=query_affine,
+            query_reference_root=str(parent_metrics) if query_affine else None,
+            affine_steps=2 if query_affine else None,
             sequential_transport=sequential_shadow or corrected_source,
             original_caps_unchanged=True,
             one_prefill=True,
@@ -339,9 +389,58 @@ def build(
     construction_checks = {}
     caps_by_arm = {"shadow": cap}
     setup_wall = time.monotonic()
+    observed_pairs = {}
+    observed_memberships = {}
     for arm in plan["variants"][1:]:
         torch.cuda.synchronize()
         begun = time.monotonic()
+        if arm == "source3_query_affine" or arm.endswith("__query_affine"):
+            from mosaickv.evaluation.query_affine_formats import baseline_formats, source_formats
+
+            if arm == "source3_query_affine":
+                trial, checks = source_formats(
+                    adapter,
+                    prefill,
+                    capture,
+                    source_capture,
+                    text_capture,
+                    phase_capture,
+                    formats["source3_exclude_global_exact"],
+                    head_group=plan["selected_head_group"],
+                )
+                own_cap = cap
+            else:
+                method = arm.removeprefix("baseline_").removesuffix("__query_affine")
+                prior_arm = f"baseline_{method}__fp32"
+                trial, checks = baseline_formats(
+                    adapter,
+                    prefill,
+                    capture,
+                    formats[prior_arm],
+                    observed_pairs[method],
+                    observed_memberships[method],
+                )
+                own_cap = caps_by_arm[prior_arm]
+            torch.cuda.synchronize()
+            times[arm] = time.monotonic() - begun
+            times[arm] += (
+                times["source3_exclude_global_exact"]
+                if arm == "source3_query_affine"
+                else times[prior_arm]
+            )
+            size = backing_bytes(tuple(t for f in trial for t in f.tensors()))
+            caps_by_arm[arm] = own_cap
+            construction_checks[arm] = dict(
+                status="constructed" if size <= own_cap else "unsupported",
+                initial_bytes=size,
+                cap_bytes=own_cap,
+                fit=checks,
+                actual_CUDA_refinement=True,
+                no_benchmark_label_or_reference_logit_access=True,
+            )
+            if size <= own_cap:
+                formats[arm] = trial
+            continue
         if arm.startswith("minimum__"):
             from mosaickv.evaluation.lossless_affine_minimum import encode_format
 
@@ -401,7 +500,15 @@ def build(
                     0.5,
                     policies=("head3_boundary8",),
                     allocation_mode="balanced" if method == "prompt_attention_topk" else "profile",
+                    pair_observer=(
+                        lambda layer, pair, method=method: observed_pairs.setdefault(
+                            method, []
+                        ).append(pair)
+                    )
+                    if plan.get("query_affine", False)
+                    else None,
                 )
+                observed_memberships[method] = baseline_proof["source_memberships"]
                 packets2 = baseline["head3_boundary8"]
                 own_cap = backing_bytes(tuple(t for f in packets2 for t in f.tensors()))
                 trial = tuple(
@@ -718,6 +825,11 @@ def worker(root, expected, index):
         torch.set_num_threads(12)
         torch.manual_seed(plan["seed"])
         torch.use_deterministic_algorithms(True)
+        if plan.get("query_affine", False):
+            from mosaickv.evaluation.query_affine_formats import gpu_controls
+
+            write_once(out / "affine_cuda_controls.json", gpu_controls())
+            torch.manual_seed(plan["seed"])
         if plan.get("optimized_source", False):
             from mosaickv.evaluation.integrated_source_input_kernel import gpu_controls
 
@@ -1009,8 +1121,14 @@ def worker(root, expected, index):
                             "integrated exact input fusion changed native parent logits"
                         )
                 if arm == "source3_fp32_tiled_text":
+                    reference_path = out / "source3_exact_text_source-logits.pt"
+                    if plan.get("query_affine", False):
+                        reference_path = (
+                            Path(plan["query_reference_root"])
+                            / f"workers/{index}/source3_fp32_tiled_text-logits.pt"
+                        )
                     values = torch.load(
-                        out / "source3_exact_text_source-logits.pt",
+                        reference_path,
                         map_location="cpu",
                         weights_only=True,
                     )
@@ -1076,6 +1194,7 @@ def worker(root, expected, index):
                     if baseline_arm
                     else "three_bit_shared_normalized_source",
                     local_precision_variant_not_unmodified_published_baseline=baseline_arm,
+                    query_weighted_affine_refit=arm.endswith("query_affine"),
                     quantization_header_dtype="lossless_bf16_minimum_fp32_scale"
                     if arm.startswith("minimum__")
                     else "fp16"
@@ -1218,7 +1337,12 @@ def analyze(root, expected):
                 for r in rows
                 if r.get("sample_id") == sample and r["status"] == "completed"
             }
-            a, b = group.get("shadow"), group.get(arm)
+            a, b = (
+                group.get(
+                    "source3_fp32_tiled_text" if plan.get("query_affine", False) else "shadow"
+                ),
+                group.get(arm),
+            )
             if a and b:
                 per_input.append(
                     dict(
@@ -1226,6 +1350,14 @@ def analyze(root, expected):
                         guard=b["fullkv_fixed_prefix"]["registered_guard_pass"],
                         quality_not_worse=b["fullkv_reference_rouge_l"]
                         >= a["fullkv_reference_rouge_l"],
+                        teacher_PPL_not_worse=(
+                            b["teacher_forced"]["nll_sum"]
+                            / b["teacher_forced"]["evaluated_token_count"]
+                            <= a["teacher_forced"]["nll_sum"]
+                            / a["teacher_forced"]["evaluated_token_count"]
+                        )
+                        if "teacher_forced" in b and "teacher_forced" in a
+                        else None,
                         storage_reductions={
                             field: 1 - b["storage"][field] / a["storage"][field]
                             for field in (
@@ -1241,7 +1373,12 @@ def analyze(root, expected):
                 arm=arm,
                 per_input=per_input,
                 model_gate=len(per_input) == 2
-                and all(p["guard"] and p["quality_not_worse"] for p in per_input),
+                and all(
+                    p["guard"]
+                    and p["quality_not_worse"]
+                    and p["teacher_PPL_not_worse"] is not False
+                    for p in per_input
+                ),
                 all_storage_boundaries_smaller=len(per_input) == 2
                 and all(all(v > 0 for v in p["storage_reductions"].values()) for p in per_input),
             )
@@ -1446,6 +1583,7 @@ if __name__ == "__main__":
             "prepare_teacher_metrics",
             "prepare_lossless_minimum",
             "auto_minimum",
+            "prepare_query_affine",
             "cpu",
             "submit",
             "worker",
@@ -1474,6 +1612,14 @@ if __name__ == "__main__":
             fp32_tiling=True,
             teacher_metrics=True,
             minimum_headers=True,
+        )
+    elif args.mode == "prepare_query_affine":
+        prepare(
+            args.root,
+            corrected_source=True,
+            fp32_tiling=True,
+            teacher_metrics=True,
+            query_affine=True,
         )
     elif args.mode == "cpu":
         previous.cpu(args.root, args.plan_sha)
