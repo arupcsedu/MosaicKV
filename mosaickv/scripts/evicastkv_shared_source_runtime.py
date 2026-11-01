@@ -42,6 +42,7 @@ def prepare(
     hybrid_forecast=False,
     sparse_exceptions=False,
     coherent_channels=False,
+    sequential_history=False,
 ):
     if root.exists():
         raise ValueError("new immutable source-runtime root required")
@@ -262,6 +263,35 @@ def prepare(
                 if sha(folder / name) != digest:
                     raise ValueError("negative correction evidence changed")
                 bound[str(folder / name)] = digest
+    if sequential_history:
+        if coherent_channels or sparse_exceptions or hybrid_forecast:
+            raise ValueError(
+                "history engineering freezes the prompt codec and disables corrections/forecast"
+            )
+        proof_root = Path(
+            "/scratch/djy8hg/runs/evicastkv/coherent-source-columns-consumed-20261101-v1"
+        )
+        check = previous.read(proof_root / "analysis/decision.json")
+        direct = [g for g in check["gates"] if g["arm"] == "source3_direct_fp32"]
+        if (
+            not check["complete"]
+            or check["failures"]
+            or len(direct) != 1
+            or not direct[0]["model_gate"]
+        ):
+            raise ValueError("positive direct-constructor identity required")
+        for path in (
+            proof_root / "analysis/decision.json",
+            SOURCE / "mosaickv/docs/sequential_source_history_20261101.md",
+        ):
+            bound[str(path)] = sha(path)
+        for i in range(2):
+            folder = proof_root / f"workers/{i}"
+            record = previous.read(folder / "result.json")
+            for name, digest in record["outputs"].items():
+                if sha(folder / name) != digest:
+                    raise ValueError("frozen prompt controls changed")
+                bound[str(folder / name)] = digest
     variants = ("shadow",) if sequential_shadow else ARMS
     if corrected_source:
         variants = ("shadow", "source3_exclude_global_exact", "source3_exact_text_source")
@@ -320,15 +350,21 @@ def prepare(
                 for kind in ("fp32", affine_suffix)
             ),
         )
-    if coherent_channels:
+    if coherent_channels or sequential_history:
         variants = tuple(a for a in variants if "query_affine" not in a)
-        variants = (*variants, "source3_direct_fp32", "source3_coherent_columns")
+        variants = (
+            *variants,
+            "source3_direct_fp32",
+            *(("source3_coherent_columns",) if coherent_channels else ()),
+        )
         evaluation_variants = (
             "source3_fp32_tiled_text",
             "source3_direct_fp32",
-            "source3_coherent_columns",
+            *(("source3_coherent_columns",) if coherent_channels else ()),
             *(f"baseline_{method}__fp32" for method in METHODS if method != "mosaickv_exact"),
         )
+    if sequential_history:
+        evaluation_variants = ("source3_direct_fp32", "baseline_prompt_attention_topk__fp32")
     write_once(
         root / "plan.json",
         dict(
@@ -355,6 +391,12 @@ def prepare(
             hybrid_forecast=hybrid_forecast,
             sparse_exceptions=sparse_exceptions,
             coherent_channels=coherent_channels,
+            sequential_source_history=sequential_history,
+            history_audit=True if sequential_history else None,
+            maximum_worker_minutes=60 if sequential_history else 30,
+            history_reference_root=str(proof_root) if sequential_history else None,
+            no_prompt_codec_or_selection_change=sequential_history,
+            same_history_optimization_for_every_baseline=sequential_history,
             coherent_column_allowance_bytes=2**20 if coherent_channels else 0,
             baseline_comparison_admissible=not coherent_channels,
             coherent_column_phase="source_transport_and_own_parent_diagnostic_not_comparative_claim"
@@ -365,7 +407,7 @@ def prepare(
             forecast_family_weights=[0.5, 0.5] if hybrid_forecast else None,
             query_reference_root=str(parent_metrics) if query_affine else None,
             affine_steps=0
-            if sparse_exceptions or coherent_channels
+            if sparse_exceptions or coherent_channels or sequential_history
             else 2
             if query_affine
             else None,
@@ -458,7 +500,14 @@ def build(
         raise RuntimeError("retention-one raw FullKV 128-token parity failed")
     write_once(
         out / "fullcache_control.json",
-        dict(control, storage=ordinary_info["storage"], lossy_codec_bypassed=True),
+        dict(
+            control,
+            storage=ordinary_info["storage"],
+            lossy_codec_bypassed=True,
+            lossless_history_identity_control_not_FullKV_systems_row=plan.get(
+                "sequential_source_history", False
+            ),
+        ),
     )
     started = time.monotonic()
     packets, proof = bundle(
@@ -1032,6 +1081,12 @@ def worker(root, expected, index):
         from mosaickv.evaluation.sequential_kv_lease import paired_run
 
         execute = paired_run
+    if plan.get("sequential_source_history", False):
+        from functools import partial
+
+        from mosaickv.evaluation.sequential_source_history import paired_run
+
+        execute = partial(paired_run, audit_history=plan["history_audit"])
     job = plan["jobs"][index]
     out = root / f"workers/{index}"
     out.mkdir(parents=True, exist_ok=False)
@@ -1367,8 +1422,16 @@ def worker(root, expected, index):
                     ):
                         raise RuntimeError("FP32 hardware tiling changed model logits")
                 if arm == "source3_direct_fp32":
+                    reference_path = (
+                        (
+                            Path(plan["history_reference_root"])
+                            / f"workers/{index}/source3_direct_fp32-logits.pt"
+                        )
+                        if plan.get("sequential_source_history", False)
+                        else out / "source3_fp32_tiled_text-logits.pt"
+                    )
                     values = torch.load(
-                        out / "source3_fp32_tiled_text-logits.pt",
+                        reference_path,
                         map_location="cpu",
                         weights_only=True,
                     )
@@ -1428,6 +1491,9 @@ def worker(root, expected, index):
                     construction_seconds=proof["construction_seconds"][arm],
                     original_own_cap_bytes=proof["caps_by_arm"].get(arm, proof["cap_bytes"]),
                     end_to_end_measured=False,
+                    instrumented_history_timing_not_performance_evidence=plan.get(
+                        "history_audit", False
+                    ),
                     source_component_timing_excludes_shared_protection_setup=not baseline_arm,
                     nominal_selection_ratio=0.5 if baseline_arm else None,
                     prompt_precision_policy="head3_boundary8_KV"
@@ -1467,25 +1533,77 @@ def worker(root, expected, index):
                 if teacher_targets is not None:
                     from mosaickv.evaluation.storage_teacher_forcing import score_formats
 
-                    teacher = score_formats(
+                    teacher_result = score_formats(
                         adapter,
                         runtime,
                         packet,
                         teacher_targets,
                         maximum=plan["teacher_maximum_tokens"],
+                        return_logits=plan.get("sequential_source_history", False),
+                        audit_history=plan.get("sequential_source_history", False)
+                        and plan["history_audit"],
                     )
+                    if plan.get("sequential_source_history", False):
+                        original_teacher, original_logits = teacher_result
+                        gc.collect()
+                        torch.cuda.synchronize()
+                        teacher, actual_logits = score_formats(
+                            adapter,
+                            runtime,
+                            packet,
+                            teacher_targets,
+                            maximum=plan["teacher_maximum_tokens"],
+                            sequential_source_history=True,
+                            audit_history=plan["history_audit"],
+                            return_logits=True,
+                        )
+                        if not torch.equal(original_logits, actual_logits):
+                            raise RuntimeError(
+                                "source history changed complete teacher-forcing logits"
+                            )
+                        for field in (
+                            "per_token_nll",
+                            "nll_sum",
+                            "conditional_greedy_tokens",
+                            "evaluated_token_count",
+                        ):
+                            if teacher[field] != original_teacher[field]:
+                                raise RuntimeError(
+                                    "source history changed complete teacher-forced likelihood"
+                                )
+                        teacher["storage"]["raw_history_control"] = dict(
+                            storage=original_teacher["storage"],
+                            complete_teacher_logits_bitwise=True,
+                            original_logit_sha256=digest_tensors((original_logits,)),
+                            source_history_logit_sha256=digest_tensors((actual_logits,)),
+                            maximum_logit_difference=float(
+                                (original_logits - actual_logits).abs().max()
+                            ),
+                        )
+                        del original_logits, actual_logits, teacher_result
+                    else:
+                        teacher = teacher_result
                     if digest_tensors(tuple(t for p in packet for t in p.tensors())) != hashes[arm]:
                         raise RuntimeError("teacher forcing mutated immutable encoded formats")
                     teacher["encoded_formats_immutable_after_complete_target"] = True
                     if arm == "source3_direct_fp32":
+                        reference_rows = (
+                            (Path(plan["history_reference_root"]) / f"workers/{index}/raw.jsonl")
+                            if plan.get("sequential_source_history", False)
+                            else out / "raw.jsonl"
+                        )
+                        reference_arm = (
+                            "source3_direct_fp32"
+                            if plan.get("sequential_source_history", False)
+                            else "source3_fp32_tiled_text"
+                        )
                         parent_rows = [
-                            json.loads(line)
-                            for line in (out / "raw.jsonl").read_text().splitlines()
+                            json.loads(line) for line in reference_rows.read_text().splitlines()
                         ]
                         original_teacher = next(
                             r["teacher_forced"]
                             for r in parent_rows
-                            if r["variant"] == "source3_fp32_tiled_text"
+                            if r["variant"] == reference_arm
                         )
                         for field in (
                             "per_token_nll",
@@ -1720,6 +1838,52 @@ def analyze(root, expected):
                 )
             except (KeyError, ValueError, OSError, OverflowError) as exc:
                 failures.append("teacher metric analysis: " + str(exc))
+    history_gate = (
+        plan.get("sequential_source_history", False)
+        and len(rows) == 2 * len(plan["evaluation_variants"])
+        and not failures
+    )
+    history_memory = []
+    if history_gate:
+        for row in rows:
+            if row["status"] != "completed":
+                history_gate = False
+                continue
+            try:
+                storage = row["storage"]
+                prior = storage["raw_history_control"]
+                teacher = row["teacher_forced"]["storage"]
+                old_teacher = teacher["raw_history_control"]
+                history_gate = (
+                    history_gate
+                    and prior["logits_bitwise"]
+                    and old_teacher["complete_teacher_logits_bitwise"]
+                )
+                history_memory.append(
+                    dict(
+                        sample_id=row["sample_id"],
+                        variant=row["variant"],
+                        generation={
+                            k: 1 - storage[k] / prior["storage"][k]
+                            for k in (
+                                "initial_active_kv_storage_bytes",
+                                "final_active_kv_storage_bytes",
+                                "peak_active_kv_storage_bytes",
+                            )
+                        },
+                        teacher_forcing={
+                            k: 1 - teacher[k] / old_teacher["storage"][k]
+                            for k in (
+                                "initial_active_kv_storage_bytes",
+                                "final_active_kv_storage_bytes",
+                                "peak_active_kv_storage_bytes",
+                            )
+                        },
+                    )
+                )
+            except (KeyError, TypeError, ValueError, ZeroDivisionError) as exc:
+                history_gate = False
+                failures.append("history accounting analysis: " + str(exc))
     write_once(
         root / "analysis/decision.json",
         dict(
@@ -1730,6 +1894,17 @@ def analyze(root, expected):
             gates=gates,
             common_sequential_transport_gate=transport_gate,
             teacher_metric_summary=teacher_summary,
+            common_exact_history_transport_gate=history_gate,
+            history_memory_reductions=history_memory,
+            audited_history_memory_gate=history_gate
+            and all(
+                all(
+                    r[phase][key] > 0
+                    for phase in ("generation", "teacher_forcing")
+                    for key in ("final_active_kv_storage_bytes", "peak_active_kv_storage_bytes")
+                )
+                for r in history_memory
+            ),
             lossless_minimum_gate=plan.get("minimum_headers", False)
             and len(rows) == 10
             and not failures
@@ -1864,6 +2039,7 @@ if __name__ == "__main__":
             "prepare_hybrid_query_affine",
             "prepare_sparse_exceptions",
             "prepare_coherent_columns",
+            "prepare_sequential_history",
             "cpu",
             "submit",
             "worker",
@@ -1929,6 +2105,15 @@ if __name__ == "__main__":
             query_affine=True,
             hybrid_forecast=True,
             coherent_channels=True,
+        )
+    elif args.mode == "prepare_sequential_history":
+        prepare(
+            args.root,
+            corrected_source=True,
+            fp32_tiling=True,
+            teacher_metrics=True,
+            query_affine=True,
+            sequential_history=True,
         )
     elif args.mode == "cpu":
         previous.cpu(args.root, args.plan_sha)

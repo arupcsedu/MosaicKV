@@ -133,6 +133,8 @@ class SourceHistoryCache(ExactCache):
             whole_request_peak_certified=False,
             source_consolidation_layers=self.source_consolidation_layers,
             source_consolidation_epochs=self.source_consolidation_epochs,
+            source_consolidation_check_syncs=getattr(self, "source_consolidation_check_syncs", 0),
+            source_consolidation_checks=getattr(self, "source_consolidation_checks", 0),
         )
         return record
 

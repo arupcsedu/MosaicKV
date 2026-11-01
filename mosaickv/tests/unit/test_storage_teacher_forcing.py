@@ -35,6 +35,19 @@ def test_one_token_never_constructs_cache_or_calls_decode():
     )
 
 
+def test_one_token_exact_history_does_not_allocate_or_seal_any_history():
+    adapter = SimpleNamespace(decode_one_token=lambda *a, **kw: pytest.fail("unexpected decode"))
+    formats = (SimpleNamespace(tensors=lambda: (torch.ones(7),)),)
+    with patch(
+        "mosaickv.evaluation.storage_teacher_forcing.cache_from_formats", side_effect=AssertionError
+    ):
+        row = score_formats(
+            adapter, prefill(), formats, (2,), sequential_source_history=True, audit_history=True
+        )
+    assert row["evaluated_token_count"] == 1 and row["updates"] == 0
+    assert row["storage"]["final_active_kv_storage_bytes"] == 28
+
+
 def test_complete_teacher_prefix_no_greedy_or_eos_substitution():
     original = prefill()
     state = DecodeState(None, torch.ones(1, 5), 5, 5, 5, (), {})

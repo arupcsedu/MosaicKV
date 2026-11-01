@@ -24,6 +24,35 @@ def fill_component(packet, attention, component, destination, *, source_workspac
         raise ValueError("key or value component required")
     n = packet.shape[-2]
     prefix = destination[..., :n, :]
+    from mosaickv.evaluation.encoded_projection import EncodedFormat
+
+    if isinstance(packet, EncodedFormat):
+        if (
+            packet.archive is None
+            or packet.pair
+            or (packet.slots is not None and packet.slots.numel())
+        ):
+            raise NotImplementedError(
+                "only complete encoded history without direct overlays supported"
+            )
+        if destination.device.type != "cuda":
+            raise NotImplementedError("encoded sequential history requires actual CUDA")
+        from mosaickv.evaluation.encoded_projection_kernel import project
+        from mosaickv.evaluation.shared_source_format import apply_transport_patch
+
+        project(
+            packet.archive.source,
+            packet.literal_checkpoints,
+            attention,
+            packet.archive,
+            packet.output_slots,
+            (prefix, prefix),
+            component=component,
+            packed_counts=packet.packed_literal_counts,
+        )
+        if packet.patches:
+            apply_transport_patch(packet.patches[component], destination, prompt_length=n)
+        return
     from mosaickv.evaluation.sparse_original_exceptions import ExceptionFormat
 
     if isinstance(packet, ExceptionFormat):

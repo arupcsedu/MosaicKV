@@ -77,13 +77,8 @@ class SealedHistoryLayer(ExactLayer):
             target[..., self.tail_used : self.tail_used + 1, :].copy_(value)
         self.tail_used += 1
         self.history_length += 1
-        self.leased = tuple(
-            torch.empty(
-                (*expected[:2], self.get_seq_length(), expected[-1]),
-                device=key_states.device,
-                dtype=key_states.dtype,
-            )
-            for _ in range(2)
+        self.leased = self._new_lease(
+            (*expected[:2], self.get_seq_length(), expected[-1]), key_states
         )
         self.lease_bytes = backing_bytes(self.leased)
         self.observe(())

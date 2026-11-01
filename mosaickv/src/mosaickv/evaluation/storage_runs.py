@@ -23,6 +23,7 @@ def cache_from_formats(
     consolidated_history: bool = False,
     segmented_history: bool = False,
     sequential_lease: bool = False,
+    sequential_source_history: bool = False,
 ) -> ExactCache:
     from mosaickv.evaluation.sealed_history import SealedHistoryLayer
 
@@ -55,8 +56,28 @@ def cache_from_formats(
         )
     ):
         raise ValueError("segmented history requires only direct source history")
+    if type(sequential_source_history) is not bool or (
+        sequential_source_history
+        and (
+            not sequential_lease
+            or not source_history
+            or not sealed
+            or not consolidated_history
+            or source_history_constructor not in ("direct", "direct_batched_checks")
+            or shared_workspace
+            or workspace_graph
+            or segmented_history
+            or batched_history
+            or type(updates) is not int
+            or not 1 <= updates <= 1024
+        )
+    ):
+        raise ValueError(
+            "sequential source history requires explicit isolated consolidated direct history"
+        )
     if type(sequential_lease) is not bool or (
         sequential_lease
+        and not sequential_source_history
         and (
             sealed
             or batched_history
@@ -80,12 +101,17 @@ def cache_from_formats(
 
         cls = BatchedHistoryLayer
     if source_history:
-        if not sealed or batched_history or updates != 128:
+        if not sealed or batched_history or (updates != 128 and not sequential_source_history):
             raise ValueError("source history requires its explicit sealed 128-token diagnostic")
         from mosaickv.evaluation.source_history import SourceHistoryCache, SourceHistoryLayer
 
         cache = SourceHistoryCache(audit_workspace=audit, constructor=source_history_constructor)
         cls = SourceHistoryLayer
+        if sequential_source_history:
+            from mosaickv.evaluation.sequential_source_history import SequentialSourceHistoryLayer
+
+            cls = SequentialSourceHistoryLayer
+            cache.sequential_source_history = True
         if segmented_history:
             from mosaickv.evaluation.segmented_history import SegmentedSourceLayer
 
@@ -145,6 +171,7 @@ def run(
     history_reference: Any = None,
     history_repair_enabled: bool = True,
     sequential_lease: bool = False,
+    sequential_source_history: bool = False,
 ) -> tuple[Any, dict[str, Any]]:
     import time
 
@@ -177,6 +204,7 @@ def run(
         consolidated_history=consolidated_history,
         segmented_history=segmented_history,
         sequential_lease=sequential_lease,
+        sequential_source_history=sequential_source_history,
     )
     length = max(f.shape[-2] for f in formats)
     state = DecodeState(
@@ -288,6 +316,7 @@ def run(
         sequential_kv_lease=sequential_lease,
         sequential_component_fills=[getattr(layer, "component_fills", 0) for layer in cache.layers],
         segmented_history=segmented_history,
+        sequential_source_history=sequential_source_history,
         segment_table_builds=getattr(cache, "segment_table_builds", 0),
         source_check_flags_checked=getattr(cache, "source_check_flags_checked", 0),
         source_check_syncs=getattr(cache, "source_check_syncs", 0),

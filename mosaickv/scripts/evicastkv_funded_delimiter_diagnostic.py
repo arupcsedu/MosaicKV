@@ -663,6 +663,9 @@ def analyze(root, expected):
 
 def submit(root, expected):
     plan = previous.common.inputs(root, expected)
+    minutes = plan.get("maximum_worker_minutes", 30)
+    if type(minutes) is not int or not 1 <= minutes <= 120:
+        raise ValueError("bounded integer worker duration in [1,120] minutes required")
     proof = previous.read(root / "cpu.json")
     if (
         proof["source_sha"] != plan["source_sha"]
@@ -692,7 +695,7 @@ def submit(root, expected):
             "--ntasks=1",
             "--cpus-per-task=12",
             "--mem=48G",
-            "--time=00:30:00",
+            f"--time={minutes // 60:02d}:{minutes % 60:02d}:00",
             "--array=0-1%2",
             "--job-name=mk-funded-suffix",
             f"--output={root}/slurm/gpu-%A_%a.out",
@@ -726,7 +729,7 @@ def submit(root, expected):
 
     policy = dict(
         timezone="America/New_York",
-        maximum_worker_minutes=30,
+        maximum_worker_minutes=minutes,
         maximum_a100s=6,
         six_a100s_explicitly_authorized=True,
         arrays=[gpu],

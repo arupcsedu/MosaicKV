@@ -47,6 +47,10 @@ def _score(
                 from mosaickv.evaluation.sequential_kv_lease import SequentialAttentionTransport
 
                 stack.enter_context(SequentialAttentionTransport(adapter, cache))
+            if getattr(cache, "sequential_source_history", False):
+                from mosaickv.evaluation.source_history import SourceInputTransport
+
+                stack.enter_context(SourceInputTransport(adapter, cache))
         if event0 is not None:
             event0.record()
         for index, target in enumerate(target_ids):
@@ -57,6 +61,12 @@ def _score(
             if return_logits:
                 logits.append(current.cpu())
             if index + 1 < len(target_ids):
+                if cache is not None and getattr(cache, "sequential_source_history", False):
+                    from mosaickv.evaluation.consolidated_history import consolidate
+                    from mosaickv.evaluation.source_history import seal_source_full_tails
+
+                    if seal_source_full_tails(cache):
+                        consolidate(cache)
                 token = torch.tensor([[target]], dtype=torch.long, device=adapter.device)
                 output = adapter.decode_one_token(token, state, capture_queries=False)
                 current = output.logits.detach().reshape(-1).float()
@@ -101,11 +111,26 @@ def _score(
 
 
 def score_formats(
-    adapter, prefill, formats, target_ids, *, maximum=1024, sequential=True, return_logits=False
+    adapter,
+    prefill,
+    formats,
+    target_ids,
+    *,
+    maximum=1024,
+    sequential=True,
+    return_logits=False,
+    sequential_source_history=False,
+    audit_history=False,
 ):
     targets = validate_targets(target_ids, maximum=maximum)
     if not formats or type(sequential) is not bool:
         raise ValueError("complete storage formats and explicit transport policy required")
+    if (
+        type(sequential_source_history) is not bool
+        or type(audit_history) is not bool
+        or (sequential_source_history and not sequential)
+    ):
+        raise ValueError("explicit sequential source-history and audit policies required")
     if len(targets) == 1:
         result = _score(adapter, prefill, None, targets, return_logits=return_logits)
         record = result[0] if return_logits else result
@@ -124,9 +149,15 @@ def score_formats(
         adapter,
         formats,
         updates=len(targets) - 1,
-        audit=False,
-        sealed=False,
+        audit=audit_history,
+        sealed=sequential_source_history,
         sequential_lease=sequential,
+        source_history=sequential_source_history,
+        sequential_source_history=sequential_source_history,
+        consolidated_history=sequential_source_history,
+        source_history_constructor="direct_batched_checks"
+        if sequential_source_history
+        else "reference",
     )
     length = max(f.shape[-2] for f in formats)
     state = DecodeState(

@@ -77,7 +77,9 @@ def join_patches(
     return SparseBitPatch(torch.cat(tuple(indices)), torch.cat(tuple(values)))
 
 
-def build_consolidated(layer: Any, cos: Any, sin: Any) -> Any:
+def build_consolidated(
+    layer: Any, cos: Any, sin: Any, *, bit_flags: list[Any] | None = None
+) -> Any:
     from mosaickv.evaluation.encoded_projection import EncodedFormat
     from mosaickv.evaluation.encoded_projection_kernel import checkpoints
     from mosaickv.evaluation.projection_archive import ProjectionArchive
@@ -118,6 +120,12 @@ def build_consolidated(layer: Any, cos: Any, sin: Any) -> Any:
         offset = end
     for _ in range(3):
         actual = candidate.materialize(layer.attention)
+        if bit_flags is not None:
+            bit_flags.extend(
+                (a.view(torch.int16) == b.view(torch.int16)).all()
+                for a, b in zip(reference, actual, strict=True)
+            )
+            continue
         if not all(
             torch.equal(a.view(torch.int16), b.view(torch.int16))
             for a, b in zip(reference, actual, strict=True)
@@ -165,7 +173,25 @@ def consolidate(cache: Any) -> bool:
             old = tuple(layer.source_sealed)
             old_private = tuple(t for f in old for t in f.private())
             old_bytes = backing_bytes(old_private)
-            candidate = build_consolidated(layer, cos, sin)
+            flags = [] if getattr(cache, "sequential_source_history", False) else None
+            candidate = (
+                build_consolidated(layer, cos, sin, bit_flags=flags)
+                if flags is not None
+                else build_consolidated(layer, cos, sin)
+            )
+            if flags is not None:
+                if len(flags) != 6:
+                    raise RuntimeError("three independent K and V checks per layer required")
+                passed = torch.stack(flags).all()
+                cache.observe((*flags, passed))
+                if not bool(passed):
+                    raise RuntimeError("consolidated original history KV bit check failed")
+                cache.source_consolidation_check_syncs = (
+                    getattr(cache, "source_consolidation_check_syncs", 0) + 1
+                )
+                cache.source_consolidation_checks = getattr(
+                    cache, "source_consolidation_checks", 0
+                ) + len(flags)
             if candidate.shape[-2] != counts[0]:
                 raise RuntimeError("history consolidation changed source membership")
             protected = {identity(t) for t in (*layer.history, layer.normalized_tail)}
