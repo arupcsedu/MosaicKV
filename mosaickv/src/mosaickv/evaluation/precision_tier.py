@@ -69,6 +69,9 @@ def pack(values: Any, *, bits: int, axis: int, group: int = 128) -> QuantizedBod
         .clamp(0, (1 << bits) - 1)
         .to(integer_dtype)
     )
+    # Integer serialization no longer needs the full FP32 input or its views.
+    # Headers, rounding order and quantized integers remain exactly unchanged.
+    del transformed, shaped, maximum
     # Group padding affects extrema only, never the physical code payload.
     quantized = quantized.flatten(-2)[..., :length].contiguous()
     if bits == 8:

@@ -278,6 +278,7 @@ def optimize(packet, record, positions, text, attention):
     proposed = TextSourceFormat(base, projection)
     actual = proposed.materialize(attention)
     patches = tuple(SparseBitPatch.build(a, b) for a, b in zip(reference, actual, strict=True))
+    del actual
     # Verify every correction concerns a protected text slot. A visual change is
     # an implementation defect, not a reason to hide a larger patch/fallback.
     text_mask = torch.tensor(

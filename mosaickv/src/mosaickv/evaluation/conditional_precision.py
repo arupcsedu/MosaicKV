@@ -57,4 +57,7 @@ def pack_unprotected(values, rows, *, bits, axis):
     minimum = torch.where(torch.isfinite(minimum), minimum, torch.zeros_like(minimum))
     prepared = torch.where(protected, minimum[..., None], shaped).flatten(-2)[..., :length]
     prepared = prepared.movedim(-1, axis).contiguous().bfloat16()
+    # All range preparation is complete. Do not overlap its full FP32 source
+    # and expanded masks with pack()'s independent quantization workspace.
+    del x, mask, shaped, protected, minimum
     return pack(prepared, bits=bits, axis=axis)

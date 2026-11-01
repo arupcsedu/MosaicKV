@@ -45,3 +45,24 @@ occurs AFTER the unchanged streaming prefill, so no prefill-peak reduction is
 claimed. Common source-slot capacity is not equal encoded physical bytes.
 PPL and FullKV-reference ROUGE-L remain separate, unchanged development metrics.
 No result on these two consumed inputs establishes benchmark superiority.
+
+## Separate constructor-lifetime follow-up
+
+The `prepare_lifetimes` mode is a separately versioned, consumed-input diagnostic
+for the same five methods. It releases decoded source tensors after both native
+projections, releases redundant noncontiguous projection aliases after creating
+their original contiguous reference, and releases unpatched trial K/V tensors
+after sparse corrections have been copied. The common text constructor releases
+its redundant trial pair too. No operation, correction or independent check is
+removed; the frozen payload and all logits must remain bitwise identical.
+The common quantizer also releases its FP32 preparation tensor and expanded
+protection masks before entering the independent packing stage, and releases
+the full FP32 quantizer input before integer serialization. This is a lifetime
+change only: the same arithmetic, extrema, scale, rounding and bytes remain.
+
+This follow-up enables the same prefill tensor-result observer for every method
+and retains parent/new observations. It does not repeat the twenty paired decode
+trials, because none of the decode math changes. An observed encoder/cache peak
+is not whole-request GPU peak memory. Preserve the preceding code-delta result,
+including failures; do not relabel constructor-lifetime evidence as an automatic
+successful paper experiment. Submit only after the preceding GPU chain finishes.

@@ -285,14 +285,22 @@ def fit_transport(packet, attention):
     n, h, d = packet.shape[2], packet.shape[1], packet.shape[3]
     k = attention.k_proj(x).reshape(1, n, h, d).transpose(1, 2)
     v = attention.v_proj(x).reshape(1, n, h, d).transpose(1, 2)
+    # Projection results own their storage under inference_mode; the decoded
+    # source is not needed by RoPE, correction fitting or any verification.
+    del x
     k = k * packet.cos[:, None] + torch.cat((-k[..., 64:], k[..., :64]), -1) * packet.sin[:, None]
     reference = (k.contiguous(), v.contiguous())
+    del k, v
     actual = packet.materialize(attention)
     ids = packet.row_positions.long()
     head, position = ids // n, ids % n
     for target, body in zip(reference, packet.exact, strict=True):
         target[0, head, position] = decoded(body)[0, 0]
     patches = transport_corrections(reference, actual, packet.row_positions)
+    # Sparse patches own copied indexed values, not views of the old outputs.
+    # Keep every original correction and tolerance check, without overlapping
+    # an otherwise dead K/V pair with the independent verification pair.
+    del actual
     result = replace(packet, transport_patches=patches)
     verified = result.materialize(attention)
     for expected, output in zip(reference, verified, strict=True):

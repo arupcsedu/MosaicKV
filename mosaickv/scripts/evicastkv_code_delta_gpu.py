@@ -19,9 +19,12 @@ from mosaickv.evaluation.fox_campaign import clean_source, sha, write_once
 SOURCE, previous = common.SOURCE, common.previous
 REFERENCE = common.AUDIT
 CPU_STUDY = Path("/scratch/djy8hg/runs/evicastkv/source-code-delta-cpu-consumed-20261101-v1")
+GPU_PARENT = Path(
+    "/scratch/djy8hg/runs/evicastkv/lossless-layer-code-delta-gpu-consumed-20261101-v1"
+)
 
 
-def prepare(root):
+def prepare(root, *, lifetimes=False):
     if root.exists():
         raise FileExistsError("new immutable code-delta GPU diagnostic root required")
     old = previous.read(REFERENCE / "plan.json")
@@ -35,6 +38,8 @@ def prepare(root):
     ):
         raise ValueError("complete frozen all-method identity and CPU feasibility required")
     bound = dict(old["bound_files"])
+    if lifetimes:
+        bound[str(GPU_PARENT / "plan.json")] = sha(GPU_PARENT / "plan.json")
     for path in (
         REFERENCE / "plan.json",
         REFERENCE / "analysis/decision.json",
@@ -64,7 +69,10 @@ def prepare(root):
             source_sha=clean_source(SOURCE),
             jobs=jobs,
             bound_files=bound,
-            stage="consumed_lossless_GPU_code_chain_model_diagnostic",
+            stage="consumed_constructor_lifetime_and_code_chain_diagnostic"
+            if lifetimes
+            else "consumed_lossless_GPU_code_chain_model_diagnostic",
+            constructor_lifetime_audit=lifetimes,
             maximum_worker_minutes=90,
             maximum_simultaneous_workers=2,
             fresh_materialization_authorized=False,
@@ -74,8 +82,8 @@ def prepare(root):
             identical_128_logits_and_complete_teacher_logits_required=True,
             code_replay_microbenchmark_warmups=5,
             code_replay_microbenchmark_repetitions=20,
-            source_decode_pair_warmups=5,
-            source_decode_pair_repetitions=20,
+            source_decode_pair_warmups=0 if lifetimes else 5,
+            source_decode_pair_repetitions=0 if lifetimes else 20,
             prefill_peak_improvement_claim_authorized=False,
             common_codec_offered_to_all_five_methods=True,
             fallback_is_original_same_method_not_FullKV=True,
@@ -136,7 +144,7 @@ def controls():
     return cases
 
 
-def construct(adapter, messages, profile, method):
+def construct(adapter, messages, profile, method, *, audit=False):
     import torch
 
     from mosaickv.evaluation.streaming_baselines import SelectedRetiringCache, StreamingBaseline
@@ -145,9 +153,9 @@ def construct(adapter, messages, profile, method):
 
     prepared = adapter.prepare_inputs(messages)
     cache = (
-        RetiringPrefillCache(len(profile), audit=False)
+        RetiringPrefillCache(len(profile), audit=audit)
         if method == "mosaickv_exact"
-        else SelectedRetiringCache(len(profile), audit=False)
+        else SelectedRetiringCache(len(profile), audit=audit)
     )
     encoder = (
         StreamingDirectSource(adapter, prepared, cache, profile, minimum_only=True)
@@ -160,11 +168,12 @@ def construct(adapter, messages, profile, method):
     with torch.inference_mode():
         encoder.finish() if method == "mosaickv_exact" else encoder.finish(adapter)
     packets = cache.formats()
+    memory = cache.record()
     runtime = replace(pref, state=replace(pref.state, past_key_values=None), attention_weights=())
     prepared.model_inputs.clear()
     del prepared, pref, fresh, cache, encoder
     gc.collect()
-    return runtime, packets
+    return runtime, packets, memory
 
 
 def decode_run(adapter, runtime, packets):
@@ -315,7 +324,13 @@ def worker(root, expected, index):
             expected_logits = torch.load(
                 folder / "greedy_logits.pt", weights_only=True, map_location="cpu"
             )
-            runtime, packets = construct(adapter, messages, profile, method)
+            runtime, packets, prefill_storage = construct(
+                adapter,
+                messages,
+                profile,
+                method,
+                audit=plan.get("constructor_lifetime_audit", False),
+            )
             if (
                 common.control.digest_tensors(tuple(t for p in packets for t in p.tensors()))
                 != reference["payload_sha256"]
@@ -394,7 +409,9 @@ def worker(root, expected, index):
                 parent_generation_storage=prior["generation_storage"],
                 teacher_forced=teacher,
                 teacher_provenance=provenance,
-                prefill_peak_not_improved=True,
+                prefill_peak_improvement_not_yet_established=True,
+                prefill_storage=prefill_storage,
+                parent_prefill_storage=prior["prefill_storage"],
                 original_control_packets_simultaneously_resident=True,
                 whole_request_GPU_peak_certified=False,
                 independent_quality_N=0,
@@ -405,7 +422,7 @@ def worker(root, expected, index):
                 source = (runtime, packets, encoded, expected_logits)
             del packets, encoded, values, teacher_logits, details, row
             gc.collect()
-        if source is not None:
+        if source is not None and not plan.get("constructor_lifetime_audit", False):
             source_timing(adapter, *source, output)
         result["status"] = "completed"
     except Exception as exc:
@@ -466,6 +483,31 @@ def analyze(root, expected):
 
 
 def submit(root, expected):
+    plan = previous.common.inputs(root, expected)
+    if plan.get("constructor_lifetime_audit", False):
+        decision = previous.read(GPU_PARENT / "analysis/decision.json")
+        if (
+            not decision["complete"]
+            or decision["failures"]
+            or not decision["all_five_methods_bitwise"]
+        ):
+            write_once(
+                root / "blocked_admission.json",
+                dict(
+                    reason="preceding code replay requires repair; do not repeat it unchanged",
+                    parent_decision_sha256=sha(GPU_PARENT / "analysis/decision.json"),
+                    GPU_submitted=False,
+                    fresh_or_large_campaign_authorized=False,
+                ),
+            )
+            return
+        write_once(
+            root / "parent_replay_proof.json",
+            dict(
+                path=str(GPU_PARENT / "analysis/decision.json"),
+                sha256=sha(GPU_PARENT / "analysis/decision.json"),
+            ),
+        )
     original = common.control.parent.subprocess.check_output
 
     def scoped(command, **kwargs):
@@ -482,14 +524,62 @@ def submit(root, expected):
         common.control.parent.submit(root, expected)
 
 
+def register_lifetimes(root, expected):
+    plan = previous.common.inputs(root, expected)
+    if not plan.get("constructor_lifetime_audit", False):
+        raise ValueError("only the registered constructor-lifetime follow-up may wait here")
+    parent = previous.read(GPU_PARENT / "submission.json")
+    job = common.control.parent.subprocess.check_output(
+        [
+            "sbatch",
+            "--parsable",
+            "--partition=bii",
+            "--account=bii_dsc_community",
+            "--cpus-per-task=2",
+            "--mem=8G",
+            "--time=00:10:00",
+            f"--dependency=afterany:{parent['cpu_analysis']}",
+            "--job-name=mk-lifetime-admit",
+            f"--output={root}/slurm/admit-%j.out",
+            f"--error={root}/slurm/admit-%j.err",
+            str(SOURCE / "mosaickv/slurm/evicastkv_code_delta_gpu.sbatch"),
+            str(SOURCE),
+            str(root),
+            expected,
+            "submit",
+        ],
+        text=True,
+    ).strip()
+    write_once(
+        root / "registered_followup.json",
+        dict(
+            gpu_admission_job=job,
+            preceding_gpu_analysis=parent["cpu_analysis"],
+            finite_scope="same_consumed_inputs_constructor_lifetimes_only",
+            fresh_or_large_campaign_authorized=False,
+        ),
+    )
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("prepare", "cpu", "submit", "worker", "analyze"))
+    parser.add_argument(
+        "mode",
+        choices=(
+            "prepare",
+            "prepare_lifetimes",
+            "cpu",
+            "submit",
+            "worker",
+            "analyze",
+            "register_lifetimes",
+        ),
+    )
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--plan-sha")
     args = parser.parse_args()
-    if args.mode == "prepare":
-        prepare(args.root)
+    if args.mode in ("prepare", "prepare_lifetimes"):
+        prepare(args.root, lifetimes=args.mode == "prepare_lifetimes")
     elif args.mode == "cpu":
         previous.cpu(args.root, args.plan_sha)
     elif args.mode == "worker":
