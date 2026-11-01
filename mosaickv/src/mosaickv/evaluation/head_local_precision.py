@@ -159,6 +159,7 @@ def bundle(
     policies: tuple[str, ...] | None = None,
     allocation_mode: str = "profile",
     future_steps: int = 0,
+    pair_observer: Any = None,
 ) -> tuple[Any, dict[str, Any]]:
     """Compute original selection/merge once; build all registered packets."""
     requested = tuple(POLICIES) if policies is None else policies
@@ -168,6 +169,8 @@ def bundle(
         or any(p not in POLICIES for p in requested)
     ):
         raise ValueError("unique registered precision policies required")
+    if pair_observer is not None and not callable(pair_observer):
+        raise ValueError("optional actual-selected-pair observer must be callable")
     if (
         type(future_steps) is not int
         or future_steps not in (0, 4)
@@ -218,6 +221,10 @@ def bundle(
                 1, key.shape[1], len(heads[0]), key.shape[-1]
             )
             pair = key.gather(2, index), value.gather(2, index)
+        if pair_observer is not None:
+            # Diagnostic capture only: expose ACTUAL merged baseline K/V, not
+            # a decoded quantized approximation or an unmerged substitution.
+            pair_observer(i, pair)
         if i < 2 or i >= len(source) - 2:
             exact = ExactFormat("kv", tuple(pair[0].shape), pair=tuple(encode(t) for t in pair))
             for policy, packets in formats.items():
