@@ -28,7 +28,7 @@ def metadata_features(payload):
     return {key: payload[key] for key in keys}
 
 
-def prepare(root, *, protected=False):
+def prepare(root, *, protected=False, compact_metadata=False):
     from huggingface_hub import snapshot_download
 
     if root.exists():
@@ -94,6 +94,15 @@ def prepare(root, *, protected=False):
         )
     )
     bindings[str(protocol)] = sha(protocol)
+    if compact_metadata:
+        if not protected:
+            raise ValueError("compact-metadata study requires exact protected rows")
+        positive = Path(
+            "/scratch/djy8hg/runs/evicastkv/protected-source-cpu-20261101-v2/decision.json"
+        )
+        bindings[str(positive)] = sha(positive)
+        protocol = SOURCE / "mosaickv/docs/compact_source_metadata_cpu_20261101.md"
+        bindings[str(protocol)] = sha(protocol)
     if protected:
         failed = Path(
             "/scratch/djy8hg/runs/evicastkv/protected-source-cpu-20261101-v1/decision.json"
@@ -115,6 +124,7 @@ def prepare(root, *, protected=False):
             model_revision=REVISION,
             arms=PROTECTED_ARMS if protected else ARMS,
             protected_source=protected,
+            compact_metadata=compact_metadata,
             prompt_query_window=16,
             CPU_only=True,
             measurement_type="derived_numerical_feasibility_not_task_quality",
@@ -246,6 +256,10 @@ def run(root, expected):
                     for arm in arms:
                         bits, axis = arm
                         packet = pack(x[:, None], bits=bits, axis=axis)
+                        if plan.get("compact_metadata", False):
+                            from mosaickv.evaluation.compact_quantization_metadata import compact
+
+                            packet = compact(packet)
                         size = backing_bytes(packet.tensors())
                         payloads[arm] += size
                         layer_payloads[arm].append(size)
@@ -313,9 +327,39 @@ def run(root, expected):
             for c in result["cases"]
         )
     ]
+    metadata_gates = []
+    if complete and plan.get("compact_metadata", False):
+        old = previous.read(
+            Path("/scratch/djy8hg/runs/evicastkv/protected-source-cpu-20261101-v2/decision.json")
+        )
+        for case in result["cases"]:
+            new = next(r for r in case["arms"] if (r["bits"], r["axis"]) == (3, 2))
+            prior = next(
+                r for r in old["cases"][case["index"]]["arms"] if (r["bits"], r["axis"]) == (3, 2)
+            )
+            saved = (
+                prior["CPU_prefix_bytes_including_protection_maps_and_phase"]
+                - new["CPU_prefix_bytes_including_protection_maps_and_phase"]
+            )
+            metadata_gates.append(
+                dict(
+                    index=case["index"],
+                    prefix_bytes_saved=saved,
+                    pass_gate=new["feasibility_pass"]
+                    and saved >= 2**20
+                    and all(
+                        new["statistics"][metric] <= 1.05 * prior["statistics"][metric]
+                        for metric in ("relative_mse", "p95_per_query_head_relative_mse")
+                    ),
+                )
+            )
     result.update(
         complete=complete,
         passing_both_inputs=passing,
+        compact_metadata=plan.get("compact_metadata", False),
+        compact_metadata_gates=metadata_gates,
+        compact_metadata_feasibility_pass=len(metadata_gates) == 2
+        and all(r["pass_gate"] for r in metadata_gates),
         runtime_seconds=time.monotonic() - started,
         source_sha=plan["source_sha"],
         model_id=MODEL,
@@ -343,7 +387,9 @@ def run(root, expected):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("prepare", "prepare_protected", "cpu", "run"))
+    parser.add_argument(
+        "mode", choices=("prepare", "prepare_protected", "prepare_compact", "cpu", "run")
+    )
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--plan-sha")
     args = parser.parse_args()
@@ -351,6 +397,8 @@ if __name__ == "__main__":
         prepare(args.root)
     elif args.mode == "prepare_protected":
         prepare(args.root, protected=True)
+    elif args.mode == "prepare_compact":
+        prepare(args.root, protected=True, compact_metadata=True)
     elif args.mode == "cpu":
         previous.cpu(args.root, args.plan_sha)
     else:
