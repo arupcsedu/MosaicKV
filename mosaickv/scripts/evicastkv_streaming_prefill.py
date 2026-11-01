@@ -20,7 +20,7 @@ REFERENCE = Path("/scratch/djy8hg/runs/evicastkv/common-exact-history-consumed-2
 previous = control.previous
 
 
-def prepare(root):
+def prepare(root, *, timing=False):
     if root.exists():
         raise FileExistsError("new immutable streaming-prefill root required")
     old = previous.read(REFERENCE / "plan.json")
@@ -53,6 +53,28 @@ def prepare(root):
         raise ValueError("only the same two consumed inputs permitted")
     path = SOURCE / "mosaickv/docs/streaming_prefill_20261101.md"
     bound[str(path)] = sha(path)
+    if timing:
+        audit_root = Path("/scratch/djy8hg/runs/evicastkv/streaming-prefill-consumed-20261101-v1")
+        check = previous.read(audit_root / "analysis/decision.json")
+        if (
+            not check["complete"]
+            or check["failures"]
+            or not check["streaming_payload_and_output_gate"]
+            or not check["lower_observed_cache_transaction_peak_than_native_prefill_lower_bound"]
+        ):
+            raise ValueError("complete streaming payload/logit/teacher/transaction gate required")
+        for path in (audit_root / "plan.json", audit_root / "analysis/decision.json"):
+            bound[str(path)] = sha(path)
+        for i in range(2):
+            folder = audit_root / f"workers/{i}"
+            record = previous.read(folder / "result.json")
+            bound[str(folder / "result.json")] = sha(folder / "result.json")
+            for name, digest in record["outputs"].items():
+                if sha(folder / name) != digest:
+                    raise ValueError("streaming audit evidence changed")
+                bound[str(folder / name)] = digest
+        path = SOURCE / "mosaickv/docs/streaming_prefill_timing_20261101.md"
+        bound[str(path)] = sha(path)
     write_once(
         root / "plan.json",
         dict(
@@ -60,7 +82,9 @@ def prepare(root):
             jobs=jobs,
             source_sha=clean_source(SOURCE),
             bound_files=bound,
-            stage="consumed_streaming_prefill_transaction_diagnostic",
+            stage="consumed_streaming_source_paired_endtoend_timing"
+            if timing
+            else "consumed_streaming_prefill_transaction_diagnostic",
             reference_root=str(REFERENCE),
             maximum_simultaneous_workers=2,
             maximum_worker_minutes=45,
@@ -74,6 +98,9 @@ def prepare(root):
             no_model_weight_or_position_change=True,
             no_offload=True,
             instrumentation_not_production_latency=True,
+            paired_streaming_timing=timing,
+            timing_warmups=5 if timing else 0,
+            timing_repetitions=20 if timing else 0,
         ),
     )
     print(sha(root / "plan.json"))
@@ -209,14 +236,60 @@ def worker(root, expected, index):
                 ).encode()
             ).hexdigest(),
             actual_timing_protocol=dict(
-                warmups=0,
-                repetitions=1,
-                order="fixed",
-                tensor_result_audit=True,
+                warmups=5 if plan.get("paired_streaming_timing", False) else 0,
+                repetitions=20 if plan.get("paired_streaming_timing", False) else 1,
+                order="randomized_pairs" if plan.get("paired_streaming_timing", False) else "fixed",
+                tensor_result_audit=not plan.get("paired_streaming_timing", False),
                 not_paper_latency=True,
             ),
         )
         write_once(out / "manifest.json", manifest)
+        if plan.get("paired_streaming_timing", False):
+            from mosaickv.evaluation.streaming_prefill_timing import order, request, summary
+
+            messages = previous.load_messages(payload)
+            trials, seen = [], set()
+            for entry in order(plan["seed"] + index):
+                arm = entry["variant"]
+                gc.collect()
+                torch.cuda.synchronize()
+                torch.cuda.reset_peak_memory_stats()
+                values, measured, formats = request(
+                    adapter, messages, profile, cap, entry["variant"]
+                )
+                if not torch.equal(values, source_expected):
+                    raise RuntimeError("timed source execution changed a 128-logit trajectory bit")
+                if measured["initial_encoded_bytes"] != packet_bytes:
+                    raise RuntimeError("timed source execution changed cache backing bytes")
+                if entry["variant"] not in seen:
+                    if (
+                        control.digest_tensors(tuple(t for p in formats for t in p.tensors()))
+                        != packet_hash
+                    ):
+                        raise RuntimeError("minimal-summary capture changed the frozen payload")
+                    seen.add(entry["variant"])
+                row = dict(
+                    **entry,
+                    **measured,
+                    status="completed",
+                    logits_bitwise=True,
+                    sample_id=payload["sample_id"],
+                    task=payload["task"],
+                    source_sha=plan["source_sha"],
+                    plan_sha256=expected,
+                    config_sha256=manifest["config_sha256"],
+                    manifest_path=str(out / "manifest.json"),
+                    measurement_type="ablation_measured",
+                    torch_peak_allocated=torch.cuda.max_memory_allocated(),
+                    torch_peak_reserved=torch.cuda.max_memory_reserved(),
+                )
+                with (out / "raw.jsonl").open("a") as stream:
+                    stream.write(json.dumps(row, allow_nan=False) + "\n")
+                trials.append(row)
+                del values, formats, measured, row
+            write_once(out / "timing_summary.json", summary(trials, seed=plan["seed"] + index))
+            result["status"] = "completed"
+            return
         for arm in plan["evaluation_variants"]:
             gc.collect()
             torch.cuda.synchronize()
@@ -398,7 +471,36 @@ def analyze(root, expected):
             rows.extend(json.loads(x) for x in (folder / "raw.jsonl").read_text().splitlines())
         except (KeyError, ValueError, OSError) as exc:
             failures.append(str(exc))
-    complete = len(rows) == 4 and not failures and all(r["status"] == "completed" for r in rows)
+    timing = plan.get("paired_streaming_timing", False)
+    complete = (
+        len(rows) == (100 if timing else 4)
+        and not failures
+        and all(r["status"] == "completed" for r in rows)
+    )
+    if timing:
+        summaries = []
+        try:
+            summaries = [previous.read(root / f"workers/{i}/timing_summary.json") for i in range(2)]
+        except (KeyError, ValueError, OSError) as exc:
+            complete = False
+            failures.append(str(exc))
+        write_once(
+            root / "analysis/decision.json",
+            dict(
+                source_sha=plan["source_sha"],
+                plan_sha256=expected,
+                complete=complete,
+                failures=failures,
+                rows=rows,
+                summaries=summaries,
+                own_parent_similar_time_gate=complete
+                and all(s["similar_time_gate_upper_ratio_1_05"] for s in summaries),
+                independent_quality_N=0,
+                no_baseline_or_paper_superiority_claim=True,
+                memory_evidence_must_use_separate_audited_canary=True,
+            ),
+        )
+        return
     write_once(
         root / "analysis/decision.json",
         dict(
@@ -441,12 +543,14 @@ def submit(root, expected):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=["prepare", "cpu", "submit", "worker", "analyze"])
+    parser.add_argument(
+        "mode", choices=["prepare", "prepare_timing", "cpu", "submit", "worker", "analyze"]
+    )
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--plan-sha")
     args = parser.parse_args()
-    if args.mode == "prepare":
-        prepare(args.root)
+    if args.mode in ("prepare", "prepare_timing"):
+        prepare(args.root, timing=args.mode == "prepare_timing")
     elif args.mode == "cpu":
         previous.cpu(args.root, args.plan_sha)
     elif args.mode == "worker":
