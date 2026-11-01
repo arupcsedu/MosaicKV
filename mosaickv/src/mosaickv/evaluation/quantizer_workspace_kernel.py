@@ -107,7 +107,14 @@ def gpu_controls():
             protected[0, :128] = True
             protected[1, ::4] = True
             snapshot = values.clone()
-            old = pack_unprotected(values, protected, bits=bits, axis=axis, bf16_prepare=False)
+            old = pack_unprotected(
+                values,
+                protected,
+                bits=bits,
+                axis=axis,
+                bf16_prepare=False,
+                compact_ranges=False,
+            )
             actual = pack_unprotected(values, protected, bits=bits, axis=axis)
             if not all(
                 torch.equal(a.view(torch.uint8), b.view(torch.uint8))
@@ -117,4 +124,29 @@ def gpu_controls():
             rows.append(
                 dict(bits=bits, axis=axis, compact_ranges_bitwise=True, partial_group_length=129)
             )
+    for pattern in ("zero", "subnormal"):
+        for axis in (2, 3):
+            values = torch.randn((1, 2, 129, 128), device="cuda", generator=generator).bfloat16()
+            if pattern == "zero":
+                values.zero_()
+                values[:, :, ::2] = -0.0
+            else:
+                values.view(torch.int16)[0, 0, 0, 0] = 1
+            protected = torch.zeros((2, 129), dtype=torch.bool, device="cuda")
+            protected[1, :128] = True
+            old = pack_unprotected(
+                values,
+                protected,
+                bits=3,
+                axis=axis,
+                bf16_prepare=False,
+                compact_ranges=False,
+            )
+            actual = pack_unprotected(values, protected, bits=3, axis=axis)
+            if not all(
+                torch.equal(a.view(torch.uint8), b.view(torch.uint8))
+                for a, b in zip(old.tensors(), actual.tensors(), strict=True)
+            ):
+                raise RuntimeError("FP32 fallback changed an original zero/subnormal packet bit")
+            rows.append(dict(axis=axis, reference_workspace_pattern=pattern, bitwise=True))
     return rows

@@ -37,3 +37,25 @@ fresh examples/calibration/large campaign. Packet identity reuses prior
 complete greedy/teacher-logit evidence; it does not cure existing mixed PPL
 versus baseline results. Encoded points differ in measured bytes: not a
 byte-matched algorithm comparison, whole-request peak proof or paper claim.
+
+## Reference-path correction
+
+The BF16-only workspace change did not reduce Description's peak: its guarded
+FP32 reference path still used expanded masks and out-of-place replacements.
+MM-Vet's fitting peak was reduced by bounded checks. Preserve both outcomes.
+A CPU-only replay of the saved Description layer-28 normalized input and
+source memberships found one finite, unprotected zero minimum (24 text
+positions): this triggers the signed-zero fallback for the whole source.
+
+Optimize the FP32 fallback itself without changing its padded reduction layout,
+FP32 dtype, signed-zero tie behavior or original finite-value checks. Convert
+the transposed BF16 source directly into one contiguous FP32 workspace. Use a
+broadcast row mask, run the original padded masked minimum, replace protected
+entries in that PRIVATE workspace with torch.where(out=...), then convert
+directly into a contiguous BF16 prepared tensor. Do not create an intermediate
+contiguous FP32 output. Caller values/masks remain immutable. The full legacy
+path remains available through compact_ranges=False for independent controls.
+
+GPU controls explicitly compare original and new packets for zero/subnormal
+fallbacks as well as random full/partial groups. All ten model packets, byte
+counts and prefill logits must still match the frozen parents before timing.

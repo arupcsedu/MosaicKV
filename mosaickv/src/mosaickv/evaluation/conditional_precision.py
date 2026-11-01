@@ -71,6 +71,35 @@ def _token_group_preparation(values, rows):
     return prepared
 
 
+def _compact_float_reference(values, rows, *, axis):
+    """Preserve the original padded FP32 reduction, including signed-zero ties.
+
+    Only copies/masks change: one private transposed FP32 tensor, a broadcast
+    row mask, in-place replacement and one direct contiguous BF16 conversion.
+    """
+    x = values.movedim(axis, -1).to(dtype=torch.float32, memory_format=torch.contiguous_format)
+    length = x.shape[-1]
+    pad = (-length) % 128
+    if pad:
+        x = torch.cat((x, x[..., -1:].expand(*x.shape[:-1], pad)), -1)
+    shaped = x.reshape(*x.shape[:-1], -1, 128)
+    if axis == 2:
+        mask = rows[None, :, None, :]
+        if pad:
+            mask = torch.cat((mask, mask[..., -1:].expand(*mask.shape[:-1], pad)), -1)
+        protected = mask.reshape(*mask.shape[:-1], -1, 128)
+    else:
+        protected = rows[None, :, :, None, None]
+    minimum = shaped.masked_fill(protected, float("inf")).amin(-1)
+    minimum = torch.where(torch.isfinite(minimum), minimum, torch.zeros_like(minimum))
+    torch.where(protected, minimum[..., None], shaped, out=shaped)
+    return (
+        shaped.flatten(-2)[..., :length]
+        .movedim(-1, axis)
+        .to(dtype=torch.bfloat16, memory_format=torch.contiguous_format)
+    )
+
+
 @torch.inference_mode()
 def pack_unprotected(values, rows, *, bits, axis, bf16_prepare=True, compact_ranges=True):
     if (
@@ -92,16 +121,33 @@ def pack_unprotected(values, rows, *, bits, axis, bf16_prepare=True, compact_ran
         words = values.view(torch.int16)
         if bool((((words & 0x7F80) == 0) & ((words & 0x7F) != 0)).any()):
             # Do not depend on device-specific subnormal reduction behavior.
-            return pack_unprotected(values, rows, bits=bits, axis=axis, bf16_prepare=False)
+            return pack_unprotected(
+                values,
+                rows,
+                bits=bits,
+                axis=axis,
+                bf16_prepare=False,
+                compact_ranges=compact_ranges,
+            )
         if compact_ranges and axis == 2:
             prepared = _token_group_preparation(values, rows)
             if prepared is None:
-                return pack_unprotected(values, rows, bits=bits, axis=axis, bf16_prepare=False)
+                return pack_unprotected(
+                    values,
+                    rows,
+                    bits=bits,
+                    axis=axis,
+                    bf16_prepare=False,
+                    compact_ranges=compact_ranges,
+                )
             return pack(prepared, bits=bits, axis=axis)
         if compact_ranges and axis == 3:
             # Each entire feature group belongs to just one token. Protected
             # groups become +0; every unprotected input scalar is unchanged.
             return pack(values.masked_fill(rows[None, :, :, None], 0), bits=bits, axis=axis)
+    elif compact_ranges:
+        prepared = _compact_float_reference(values, rows, axis=axis)
+        return pack(prepared, bits=bits, axis=axis)
     # Min and masked substitution perform no arithmetic: a nonzero extremum
     # has exactly the same representation in BF16 and FP32. Quantization below
     # still uses the ORIGINAL FP32 pack(), including scale and rounding.

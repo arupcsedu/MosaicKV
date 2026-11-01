@@ -18,7 +18,9 @@ from mosaickv.evaluation.fox_campaign import clean_source, sha, write_once
 SOURCE = Path(__file__).resolve().parents[2]
 REFERENCE = Path("/scratch/djy8hg/runs/evicastkv/common-exact-history-consumed-20261101-v2")
 AUDIT = Path("/scratch/djy8hg/runs/evicastkv/exact-minimum-streaming-consumed-20261101-v1")
-RANGE_AUDIT = Path("/scratch/djy8hg/runs/evicastkv/compact-range-workspace-consumed-20261101-v1")
+RANGE_AUDIT = Path(
+    "/scratch/djy8hg/runs/evicastkv/compact-reference-range-workspace-consumed-20261101-v1"
+)
 CODE_AUDIT = Path(
     "/scratch/djy8hg/runs/evicastkv/lossless-layer-code-delta-gpu-consumed-20261101-retry3"
 )

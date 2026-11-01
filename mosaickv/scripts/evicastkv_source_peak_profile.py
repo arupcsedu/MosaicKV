@@ -19,7 +19,9 @@ PARENT = Path(
 )
 
 
-def prepare(root, *, components=False, all_methods=False, compact_ranges=False):
+def prepare(
+    root, *, components=False, all_methods=False, compact_ranges=False, reference_ranges=False
+):
     if root.exists():
         raise FileExistsError("new immutable profile root required")
     plan = previous.previous.read(PARENT / "plan.json")
@@ -100,6 +102,21 @@ def prepare(root, *, components=False, all_methods=False, compact_ranges=False):
             SOURCE / "mosaickv/docs/compact_range_workspace_20261101.md",
         ):
             bound[str(p)] = sha(p)
+    if reference_ranges:
+        parent_range = PARENT.parent / "compact-range-workspace-consumed-20261101-v1"
+        proof = previous.previous.read(parent_range / "analysis/decision.json")
+        source_case = next((c for c in proof["cases"] if c["case"] == 0), None)
+        if (
+            not compact_ranges
+            or not proof["complete"]
+            or proof["failures"]
+            or source_case is None
+            or source_case["dominant_peak"]["phase"][-1]
+            != "mosaickv.evaluation.shared_source_format.pack_unprotected"
+        ):
+            raise ValueError("complete observed reference-range peak proof required")
+        for p in (parent_range / "plan.json", parent_range / "analysis/decision.json"):
+            bound[str(p)] = sha(p)
     for p in (PARENT / "plan.json", SOURCE / "mosaickv/docs/source_peak_profile_20261101.md"):
         bound[str(p)] = sha(p)
     write_once(
@@ -118,6 +135,7 @@ def prepare(root, *, components=False, all_methods=False, compact_ranges=False):
             all_five_methods_profiled=all_methods,
             compact_quantizer_workspace=True,
             compact_range_workspace=compact_ranges,
+            compact_FP32_reference_range_workspace=reference_ranges,
         ),
     )
     print(sha(root / "plan.json"))
@@ -343,6 +361,7 @@ if __name__ == "__main__":
             "prepare_components",
             "prepare_common_ranges",
             "prepare_compact_ranges",
+            "prepare_reference_ranges",
             "cpu",
             "submit",
             "worker",
@@ -357,12 +376,15 @@ if __name__ == "__main__":
         "prepare_components",
         "prepare_common_ranges",
         "prepare_compact_ranges",
+        "prepare_reference_ranges",
     ):
         prepare(
             args.root,
             components=args.mode != "prepare",
-            all_methods=args.mode in ("prepare_common_ranges", "prepare_compact_ranges"),
-            compact_ranges=args.mode == "prepare_compact_ranges",
+            all_methods=args.mode
+            in ("prepare_common_ranges", "prepare_compact_ranges", "prepare_reference_ranges"),
+            compact_ranges=args.mode in ("prepare_compact_ranges", "prepare_reference_ranges"),
+            reference_ranges=args.mode == "prepare_reference_ranges",
         )
     elif args.mode == "cpu":
         previous.previous.cpu(args.root, args.plan_sha)
