@@ -19,7 +19,7 @@ CHECKPOINT = Path(
 )
 
 
-def prepare(root):
+def prepare(root, *, component_audit=False):
     if root.exists():
         raise ValueError("new immutable affine-feasibility root required")
     negative = previous.read(PPL / "analysis/decision.json")
@@ -61,6 +61,19 @@ def prepare(root):
         SOURCE / "mosaickv/docs/affine_source_feasibility_20261101.md",
     ):
         bound[str(path)] = sha(path)
+    if component_audit:
+        parent = Path("/scratch/djy8hg/runs/evicastkv/affine-refit-cpu-consumed-20261101-v1")
+        status = previous.read(parent / "decision.json")
+        if not status["complete"] or status["failures"] or status["numerical_feasibility_gate"]:
+            raise ValueError(
+                "preserve the complete negative affine result before component diagnosis"
+            )
+        for path in (
+            parent / "decision.json",
+            parent / "result.json",
+            SOURCE / "mosaickv/docs/source_component_audit_20261101.md",
+        ):
+            bound[str(path)] = sha(path)
     write_once(
         root / "plan.json",
         dict(
@@ -76,6 +89,7 @@ def prepare(root):
             minimum_attention_output_MSE_reduction=0.05,
             p95_must_not_increase=True,
             same_bytes_and_exact_rows=True,
+            component_audit=component_audit,
             CPU_only=True,
             independent_quality_N=0,
             model_weight_cast="BF16_then_FP32_CPU_numerical_oracle",
@@ -136,6 +150,7 @@ def run(root, expected):
                     metadata, previous.load_messages(features), expected_length=n
                 )
                 controls, candidates, groups = [], [], []
+                component_records = {}
                 for layer, x in sorted(capture["normalized"].items()):
                     matrices = {}
                     for kind in ("q", "k", "v"):
@@ -158,13 +173,37 @@ def run(root, expected):
                     new, proof = refit(old, x[:, None], exact_rows=global_exact)
                     if backing_bytes(old.tensors()) != backing_bytes(new.tensors()):
                         raise RuntimeError("physical source bytes changed")
+                    decoded_pairs = []
                     for packet, records in ((old, controls), (new, candidates)):
                         decoded = unpack_cpu(packet).squeeze(1)
                         ak = project(decoded, matrices["k"], heads=32, phases=phases)
                         av = project(decoded, matrices["v"], heads=32)
                         ak[0][exact] = k[0][exact]
                         av[0][exact] = v[0][exact]
+                        decoded_pairs.append((ak, av))
                         records.append(errors(reference, attention_output(q, ak, av, pos, queries)))
+                    if plan.get("component_audit", False):
+                        from mosaickv.evaluation.projection_source_components import compare
+
+                        metrics = compare(
+                            q, k, v, *decoded_pairs[0], *decoded_pairs[1], pos, queries
+                        )
+                        for name, record in metrics.items():
+                            component_records.setdefault(name, []).append(record)
+                        proof["projection_SSE"] = {
+                            "K_before": float(
+                                (decoded_pairs[0][0].double() - k.double()).square().sum()
+                            ),
+                            "K_after": float(
+                                (decoded_pairs[1][0].double() - k.double()).square().sum()
+                            ),
+                            "V_before": float(
+                                (decoded_pairs[0][1].double() - v.double()).square().sum()
+                            ),
+                            "V_after": float(
+                                (decoded_pairs[1][1].double() - v.double()).square().sum()
+                            ),
+                        }
                     groups.append(
                         dict(layer=layer, source_bytes=backing_bytes(old.tensors()), fit=proof)
                     )
@@ -180,6 +219,10 @@ def run(root, expected):
                         exact_rows_identical=True,
                         processor_token_hash=token_hash,
                         no_benchmark_label_access=True,
+                        component_counterfactuals={
+                            name: aggregate(records) for name, records in component_records.items()
+                        },
+                        counterfactuals_are_not_same_byte_implementations=True,
                     )
                 )
     except Exception as exc:
@@ -222,6 +265,24 @@ def analyze(root, expected):
             numerical_feasibility_gate=complete and all(g["numerical_gate"] for g in gates),
             result_sha256=sha(root / "result.json") if (root / "result.json").exists() else None,
             no_model_quality_claim=True,
+            component_audit=plan.get("component_audit", False),
+            component_results=[
+                dict(
+                    index=c["index"],
+                    task=c["task"],
+                    counterfactuals=c.get("component_counterfactuals", {}),
+                    projection_SSE={
+                        kind: sum(
+                            layer["fit"].get("projection_SSE", {}).get(kind, 0)
+                            for layer in c["layers"]
+                        )
+                        for kind in ("K_before", "K_after", "V_before", "V_after")
+                    },
+                )
+                for c in result["cases"]
+            ]
+            if plan.get("component_audit", False)
+            else [],
             GPU_authorized=False,
             no_fresh_or_large_campaign_authorized=True,
         ),
@@ -230,12 +291,14 @@ def analyze(root, expected):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("prepare", "cpu", "run", "analyze"))
+    parser.add_argument("mode", choices=("prepare", "prepare_components", "cpu", "run", "analyze"))
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--plan-sha")
     args = parser.parse_args()
     if args.mode == "prepare":
         prepare(args.root)
+    elif args.mode == "prepare_components":
+        prepare(args.root, component_audit=True)
     elif args.mode == "cpu":
         previous.cpu(args.root, args.plan_sha)
     else:
