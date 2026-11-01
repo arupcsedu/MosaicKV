@@ -17,6 +17,7 @@ from mosaickv.evaluation.fox_campaign import clean_source, sha, write_once
 
 SOURCE = Path(__file__).resolve().parents[2]
 REFERENCE = Path("/scratch/djy8hg/runs/evicastkv/common-exact-history-consumed-20261101-v2")
+AUDIT = Path("/scratch/djy8hg/runs/evicastkv/common-streaming-prefill-consumed-20261101-v1")
 previous = control.previous
 
 
@@ -61,7 +62,7 @@ def row_is_complete(row):
     )
 
 
-def prepare(root):
+def prepare(root, *, timing=False):
     if root.exists():
         raise FileExistsError("new immutable common-streaming diagnostic root required")
     old = previous.read(REFERENCE / "plan.json")
@@ -90,16 +91,51 @@ def prepare(root):
             if sha(folder / name) != digest:
                 raise ValueError("frozen original result changed")
             bound[str(folder / name)] = digest
+    jobs = old["jobs"]
+    if timing:
+        audit = previous.read(AUDIT / "analysis/decision.json")
+        if (
+            not audit["complete"]
+            or audit["failures"]
+            or not audit["all_five_methods_streaming_identity_gate"]
+        ):
+            raise ValueError(
+                "all-method payload/generation/teacher streaming identity must pass first"
+            )
+        for path in (
+            AUDIT / "plan.json",
+            AUDIT / "analysis/decision.json",
+            SOURCE / "mosaickv/docs/common_streaming_timing_20261101.md",
+        ):
+            bound[str(path)] = sha(path)
+        for job in jobs:
+            folder = AUDIT / f"workers/{job['index']}"
+            record = previous.read(folder / "result.json")
+            bound[str(folder / "result.json")] = sha(folder / "result.json")
+            for name, digest in record["outputs"].items():
+                if sha(folder / name) != digest:
+                    raise ValueError("streaming correctness evidence changed")
+                bound[str(folder / name)] = digest
+        jobs = [
+            dict(job, reference_worker=job["index"], index=i)
+            for i, job in enumerate(j for j in jobs if method_of(j) == "mosaickv_exact")
+        ]
     write_once(
         root / "plan.json",
         dict(
             old,
             source_sha=clean_source(SOURCE),
             bound_files=bound,
-            stage="consumed_all_method_streaming_construction_identity",
+            stage="consumed_all_method_streaming_randomized_timing"
+            if timing
+            else "consumed_all_method_streaming_construction_identity",
+            jobs=jobs,
             reference_root=str(REFERENCE),
-            maximum_simultaneous_workers=6,
-            maximum_worker_minutes=45,
+            maximum_simultaneous_workers=2 if timing else 6,
+            maximum_worker_minutes=75 if timing else 45,
+            paired_common_streaming_timing=timing,
+            timing_warmups=5 if timing else 0,
+            timing_repetitions=20 if timing else 0,
             baseline_comparison_admissible=False,
             common_storage_controls_not_byte_matched_algorithm_evidence=True,
             no_fresh_or_large_campaign_authorized=True,
@@ -223,6 +259,10 @@ def worker(root, expected, index):
             model_kwargs=_model_kwargs(cfg, local_files_only=True),
             processor_kwargs={"local_files_only": True},
         )
+        if plan.get("paired_common_streaming_timing", False):
+            timing_worker(root, expected, index, adapter, plan, job, payload)
+            result["status"] = "completed"
+            return
         prepared = adapter.prepare_inputs(previous.load_messages(payload))
         folder = REFERENCE / f"workers/{index}"
         cap = previous.read(folder / "construction.json")["cap_bytes"]
@@ -414,6 +454,97 @@ def worker(root, expected, index):
         write_once(out / "result.json", result)
 
 
+def timing_worker(root, expected, index, adapter, plan, job, payload):
+    import torch
+
+    from mosaickv.evaluation.common_streaming_timing import METHODS, order, request, summarize
+    from mosaickv.measurements.telemetry import capture_gpu_environment
+
+    out = root / f"workers/{index}"
+    originals = previous.read(AUDIT / "plan.json")["jobs"]
+    references = {}
+    for original in originals:
+        if original["input_index"] == job["input_index"]:
+            method = method_of(original)
+            folder = AUDIT / f"workers/{original['index']}"
+            references[method] = dict(
+                payload=previous.read(folder / "offline_payload.json"),
+                logits=torch.load(
+                    folder / "greedy_logits.pt", weights_only=True, map_location="cpu"
+                ),
+                memory=previous.read(folder / "prefill_storage.json"),
+            )
+    if set(references) != set(METHODS):
+        raise ValueError("all five frozen method references required")
+    manifest = previous.read(REFERENCE / f"workers/{job['reference_worker']}/manifest.json")
+    manifest.update(
+        source_sha=plan["source_sha"],
+        source_dirty=False,
+        plan_sha256=expected,
+        config_sha256=hashlib.sha256(
+            json.dumps(
+                dict(parent=manifest["config_sha256"], plan=expected), sort_keys=True
+            ).encode()
+        ).hexdigest(),
+        evaluator_commit=plan["source_sha"],
+        environment=control.environment(),
+        gpu=asdict(capture_gpu_environment(torch)),
+        methods=list(METHODS),
+        representation_adaptations_not_official_methods=True,
+        independent_quality_N=0,
+        randomized_same_engine_methods=True,
+        warmups_per_method=5,
+        repetitions_per_method=20,
+        output_predictions=128,
+        tensor_result_auditing=False,
+        warm_weights_and_media=True,
+        disk_media_and_model_loading_excluded=True,
+        shared_encoded_byte_budget_claim=False,
+    )
+    write_once(out / "manifest.json", manifest)
+    profile = tuple(previous.read(Path(plan["profile_path"])))
+    messages = previous.load_messages(payload)
+    rows, seen = [], set()
+    for entry in order(plan["seed"] + index):
+        gc.collect()
+        torch.cuda.synchronize()
+        torch.cuda.reset_peak_memory_stats()
+        method = entry["method"]
+        values, packets, measured = request(adapter, messages, profile, method)
+        reference = references[method]
+        if not torch.equal(values, reference["logits"]):
+            raise RuntimeError("timed request changed frozen 128-token vocabulary logits")
+        if measured["initial_encoded_bytes"] != reference["payload"]["physical_bytes"]:
+            raise RuntimeError("timed request changed frozen initial physical bytes")
+        if method not in seen:
+            if (
+                control.digest_tensors(tuple(t for p in packets for t in p.tensors()))
+                != reference["payload"]["payload_sha256"]
+            ):
+                raise RuntimeError("timed request changed encoded payload bits")
+            seen.add(method)
+        row = dict(
+            **entry,
+            **measured,
+            status="completed",
+            logits_bitwise=True,
+            sample_id=payload["sample_id"],
+            task=payload["task"],
+            source_sha=plan["source_sha"],
+            plan_sha256=expected,
+            config_sha256=manifest["config_sha256"],
+            manifest_path=str(out / "manifest.json"),
+            measurement_type="ablation_measured",
+            torch_peak_allocated=torch.cuda.max_memory_allocated(),
+            torch_peak_reserved=torch.cuda.max_memory_reserved(),
+        )
+        with (out / "raw.jsonl").open("a") as stream:
+            stream.write(json.dumps(row, allow_nan=False) + "\n")
+        rows.append(row)
+        del values, packets, measured, row
+    write_once(out / "timing_summary.json", summarize(rows, plan["seed"] + index))
+
+
 def analyze(root, expected):
     plan = previous.common.inputs(root, expected)
     rows, failures = [], []
@@ -432,6 +563,36 @@ def analyze(root, expected):
             )
         except (OSError, KeyError, ValueError) as exc:
             failures.append(f"worker {job['index']}: {exc}")
+    if plan.get("paired_common_streaming_timing", False):
+        summaries = []
+        try:
+            summaries = [previous.read(root / f"workers/{i}/timing_summary.json") for i in range(2)]
+        except (OSError, KeyError, ValueError) as exc:
+            failures.append(str(exc))
+        complete = (
+            len(rows) == 250 and not failures and all(r["status"] == "completed" for r in rows)
+        )
+        write_once(
+            root / "analysis/decision.json",
+            dict(
+                source_sha=plan["source_sha"],
+                plan_sha256=expected,
+                complete=complete,
+                failures=failures,
+                rows=rows,
+                summaries=summaries,
+                all_method_similar_time_gate=complete
+                and all(
+                    p["similar_time_gate_upper_ratio_1_05"]
+                    for s in summaries
+                    for p in s["pairs"].values()
+                ),
+                independent_quality_N=0,
+                no_byte_matched_algorithm_or_paper_superiority_claim=True,
+                memory_evidence_must_use_separate_audit=True,
+            ),
+        )
+        return
     identities = [(r.get("method"), r.get("task"), r.get("sample_id")) for r in rows]
     complete = (
         len(rows) == 10
@@ -476,12 +637,14 @@ def submit(root, expected):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("prepare", "cpu", "submit", "worker", "analyze"))
+    parser.add_argument(
+        "mode", choices=("prepare", "prepare_timing", "cpu", "submit", "worker", "analyze")
+    )
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--plan-sha")
     args = parser.parse_args()
-    if args.mode == "prepare":
-        prepare(args.root)
+    if args.mode in ("prepare", "prepare_timing"):
+        prepare(args.root, timing=args.mode == "prepare_timing")
     elif args.mode == "cpu":
         previous.cpu(args.root, args.plan_sha)
     elif args.mode == "worker":
