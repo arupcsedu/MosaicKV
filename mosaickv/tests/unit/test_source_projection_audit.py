@@ -1,7 +1,19 @@
 import pytest
 import torch
 
-from mosaickv.evaluation.source_projection_audit import comparison, projection_precision
+from mosaickv.evaluation.source_projection_audit import (
+    comparison,
+    frozen_projection_weight,
+    projection_precision,
+)
+
+
+def test_checkpoint_fp16_weight_follows_registered_bf16_runtime_load():
+    weight = torch.randn(16, 32).half()
+    loaded = frozen_projection_weight(weight, device="cpu")
+    assert loaded.dtype == torch.bfloat16
+    assert torch.equal(loaded, weight.bfloat16())
+    assert weight.dtype == torch.float16
 
 
 def test_existing_operator_tolerance_not_relaxed_and_failures_preserved():

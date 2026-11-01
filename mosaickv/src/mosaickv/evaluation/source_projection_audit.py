@@ -5,6 +5,13 @@ from contextlib import contextmanager
 import torch
 
 
+def frozen_projection_weight(weight, *, device):
+    """Match the runtime's explicit BF16 model load, not checkpoint file dtype."""
+    if weight.ndim != 2 or not weight.is_floating_point() or not torch.isfinite(weight).all():
+        raise ValueError("finite frozen projection matrix required")
+    return weight.to(device=device, dtype=torch.bfloat16).contiguous()
+
+
 @contextmanager
 def projection_precision(*, reduced, fp32=False):
     """Restore every backend flag even if a diagnostic projection raises."""

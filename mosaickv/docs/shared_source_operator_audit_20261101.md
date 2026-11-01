@@ -25,3 +25,9 @@ change tolerances, or promote any method/cohort. A corrected runtime must
 separately pass the unchanged model guard, memory and actual decode tests.
 Full CPU suite first; one A100, 12 CPUs, 30 minutes; finite afterany CPU
 analysis. No fresh identities or larger campaign.
+
+The first operator worker stopped before any numerical case: checkpoint files
+use FP16, while the registered runtime explicitly loads BF16. The audit loader
+must perform the same BF16 cast; preserve the rejected mismatched-dtype run.
+A regression covers FP16-on-disk to BF16-runtime conversion. This correction
+changes neither the representation nor any numerical threshold.

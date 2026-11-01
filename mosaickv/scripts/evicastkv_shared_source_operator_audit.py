@@ -60,7 +60,11 @@ def worker(root, expected, index):
         original_text_positions,
     )
     from mosaickv.evaluation.shared_source_format import construct
-    from mosaickv.evaluation.source_projection_audit import comparison, projected
+    from mosaickv.evaluation.source_projection_audit import (
+        comparison,
+        frozen_projection_weight,
+        projected,
+    )
 
     del index
     plan = previous.common.inputs(root, expected)
@@ -98,7 +102,7 @@ def worker(root, expected, index):
                         with safe_open(
                             checkpoint / weight_map[name], framework="pt", device="cpu"
                         ) as f:
-                            weight = f.get_tensor(name).cuda()
+                            weight = frozen_projection_weight(f.get_tensor(name), device="cuda")
                         projections[kind + "_proj"] = SimpleNamespace(weight=weight, bias=None)
                     attention = SimpleNamespace(**projections)
                     x = x_cpu.cuda()
