@@ -16,6 +16,12 @@ record the token-ID hash. The bound input JSON can contain annotations; only
 its prompt and media fields are passed to preprocessing, and annotation fields
 are never consulted. Do not falsely say the entire JSON was never parsed.
 
+Corrective metadata-only retry: the first attempt produced zero numerical cases
+because its wrapper omitted task/sample provenance required by the existing
+strict worker loader. Preserve and hash that failure. Pass exactly task,
+sample_id, prompt and media; continue rejecting references/answers/draft tokens.
+No numerical rule, encoding, protection, sample or memory cap changes.
+
 Frozen arms: 3/4 bits, each axis 2/3, group128, unchanged from the uniform-source
 study so the exact-protection effect is isolated. For each layer/head protect the
 first four and last eight SAVED SELECTED positions, plus SAVED SELECTED text

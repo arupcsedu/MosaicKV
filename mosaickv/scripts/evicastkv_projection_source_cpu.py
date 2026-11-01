@@ -20,6 +20,14 @@ ARMS = ((3, 2), (3, 3), (4, 2), (4, 3))
 PROTECTED_ARMS = ARMS
 
 
+def metadata_features(payload):
+    # Task/sample provenance is required by the original strict input loader.
+    keys = ("task", "sample_id", "prompt", "media")
+    if set(payload) != set(keys):
+        raise ValueError("metadata input must have exactly task, sample_id, prompt and media")
+    return {key: payload[key] for key in keys}
+
+
 def prepare(root, *, protected=False):
     from huggingface_hub import snapshot_download
 
@@ -65,7 +73,7 @@ def prepare(root, *, protected=False):
         )
         if protected:
             input_path = Path(parent_plan["jobs"][i]["inputs"][0])
-            features = json.loads(input_path.read_text())
+            features = metadata_features(json.loads(input_path.read_text()))
             bindings[str(input_path)] = sha(input_path)
             for medium in features["media"]:
                 media_path = Path(medium["path"])
@@ -86,6 +94,16 @@ def prepare(root, *, protected=False):
         )
     )
     bindings[str(protocol)] = sha(protocol)
+    if protected:
+        failed = Path(
+            "/scratch/djy8hg/runs/evicastkv/protected-source-cpu-20261101-v1/decision.json"
+        )
+        prior = json.loads(failed.read_text())
+        if prior["cases"] or prior["failures"] != [
+            "ValueError: worker input may contain neither references nor draft tokens"
+        ]:
+            raise ValueError("only the recorded metadata-schema failure may be retried")
+        bindings[str(failed)] = sha(failed)
     write_once(
         root / "plan.json",
         dict(
@@ -175,7 +193,7 @@ def run(root, expected):
                 if protected:
                     bound_input = json.loads(Path(job["input_metadata"]).read_text())
                     # Metadata constructor receives NO dataset annotation fields.
-                    features = {k: bound_input[k] for k in ("prompt", "media")}
+                    features = metadata_features(bound_input)
                     text, token_hash = original_text_positions(
                         metadata,
                         previous.load_messages(features),
