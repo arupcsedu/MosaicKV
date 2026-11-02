@@ -24,7 +24,7 @@ PARENT = Path(
 )
 
 
-def prepare(root):
+def prepare(root, *, verify_constructor_memory_once=False):
     if root.exists():
         raise FileExistsError("new immutable profile root required")
     plan = common.previous.read(PARENT / "plan.json")
@@ -46,11 +46,12 @@ def prepare(root):
             bound_files=bound,
             stage="consumed_nested_constructor_phase_profiling",
             paired_common_streaming_timing=False,
-            maximum_worker_minutes=15,
+            maximum_worker_minutes=30 if verify_constructor_memory_once else 15,
             maximum_simultaneous_workers=2,
             profile_warmups=2,
             profile_repetitions=3,
             profile_only_no_decode=True,
+            verify_constructor_memory_once=verify_constructor_memory_once,
             instrumentation_not_performance_evidence=True,
         ),
     )
@@ -125,12 +126,17 @@ def worker(root, expected, index):
         messages = common.previous.load_messages(common.previous.read(job["inputs"][0]))
         profile = tuple(common.previous.read(Path(plan["profile_path"])))
         rng = random.Random(plan["seed"] + index)
+        audited_methods = set()
         for trial in range(-plan["profile_warmups"], plan["profile_repetitions"]):
             methods = list(METHODS)
             rng.shuffle(methods)
             for position, method in enumerate(methods):
                 gc.collect()
                 torch.cuda.synchronize()
+                audit_memory = (
+                    plan.get("verify_constructor_memory_once", False)
+                    and method not in audited_methods
+                )
                 timer = PhaseTimer(event_factory=lambda: torch.cuda.Event(enable_timing=True))
                 with ExitStack() as stack:
                     stack.enter_context(
@@ -143,8 +149,10 @@ def worker(root, expected, index):
                     stack.enter_context(instrument(timer))
                     with timer.phase("complete_prefill_constructor"):
                         runtime, packets, memory = backend.construct(
-                            adapter, messages, profile, method, audit=False
+                            adapter, messages, profile, method, audit=audit_memory
                         )
+                        if audit_memory:
+                            audited_methods.add(method)
                     if method == "mosaickv_exact":
                         with timer.phase("lossless_code_conversion"):
                             converted, code_report = convert(packets)
@@ -186,6 +194,7 @@ def worker(root, expected, index):
                     packet_bitwise=True,
                     prefill_logits_bitwise=True,
                     original_packet_bytes=memory["final_prefill_cache_bytes"],
+                    constructor_memory=memory if audit_memory else None,
                     code_report=code_report,
                     independent_quality_N=0,
                     instrumentation_not_performance_evidence=True,
@@ -262,6 +271,14 @@ def analyze(root, expected):
             )
     expected_rows = 2 * 5 * (plan["profile_warmups"] + plan["profile_repetitions"])
     keys = [(r["input_index"], r["method"], r["trial"]) for r in rows]
+    memory_gate = None
+    if plan.get("verify_constructor_memory_once", False):
+        memory_gate = constructor_memory_gate(rows)
+        if not memory_gate:
+            failures.append(
+                "incomplete memory evidence or source constructor CUDA peak "
+                "not lower than every baseline"
+            )
     complete = len(rows) == expected_rows and len(keys) == len(set(keys)) and not failures
     write_once(
         root / "analysis/decision.json",
@@ -274,7 +291,53 @@ def analyze(root, expected):
             independent_quality_N=0,
             no_paper_superiority_claim=True,
             instrumentation_not_performance_evidence=True,
+            constructor_memory_gate=memory_gate,
+            constructor_memory=[
+                dict(input_index=r["input_index"], method=r["method"], **r["constructor_memory"])
+                for r in rows
+                if r.get("constructor_memory") is not None
+            ],
         ),
+    )
+
+
+def constructor_memory_gate(rows):
+    """Same consumed constructor boundary; never whole-request GPU memory."""
+    expected = {
+        (i, m)
+        for i in (0, 1)
+        for m in (
+            "mosaickv_exact",
+            "prompt_attention_topk",
+            "prefixkv_reimpl",
+            "vl_cache_reimpl",
+            "lookm_reimpl",
+        )
+    }
+    observed = {}
+    for row in rows:
+        memory = row.get("constructor_memory")
+        if memory is None:
+            continue
+        key = row["input_index"], row["method"]
+        if (
+            key in observed
+            or not row.get("warmup")
+            or not row.get("packet_bitwise")
+            or not row.get("prefill_logits_bitwise")
+            or not memory.get("tensor_results_observed")
+            or memory.get("original_KV_tensor_objects_alive") != 0
+            or memory.get("original_native_layers_remaining") != 0
+            or not isinstance(memory.get("observed_prefill_cuda_peak_bytes"), int)
+            or memory["observed_prefill_cuda_peak_bytes"]
+            < memory.get("final_prefill_cache_bytes", float("inf"))
+        ):
+            return False
+        observed[key] = memory["observed_prefill_cuda_peak_bytes"]
+    return set(observed) == expected and all(
+        observed[i, "mosaickv_exact"]
+        < min(v for (j, m), v in observed.items() if j == i and m != "mosaickv_exact")
+        for i in (0, 1)
     )
 
 
