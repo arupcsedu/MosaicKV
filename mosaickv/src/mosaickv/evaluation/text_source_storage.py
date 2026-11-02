@@ -308,16 +308,17 @@ def optimize(packet, record, positions, text, attention):
             if not bool(text_mask[idx // (n * d), idx // d % n].all()):
                 raise RuntimeError("source overlay changed a nontext cache scalar")
     proposed = replace(proposed, projection=replace(projection, patches=patches))
+    checks = []
     for _ in range(3):
         with _construction_phase("verification_materialize"):
             verified = proposed.materialize(attention)
         with _construction_phase("verification_equal"):
-            equal = all(
-                torch.equal(a.view(torch.int16), b.view(torch.int16))
-                for a, b in zip(reference, verified, strict=True)
-            )
+            from mosaickv.evaluation.async_bitwise import match_flags
+
+            checks.extend(match_flags(a, b) for a, b in zip(reference, verified, strict=True))
         del verified
-        if not equal:
+    with _construction_phase("verification_result"):
+        if not bool(torch.cat(checks).all()):
             raise RuntimeError("text source changed an existing decoded K/V bit")
     with _construction_phase("accounting_and_choice"):
         use_source = proposed.component_bytes < packet.component_bytes

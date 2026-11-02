@@ -24,7 +24,13 @@ PARENT = Path(
 )
 
 
-def prepare(root, *, verify_constructor_memory_once=False):
+def prepare(
+    root,
+    *,
+    verify_constructor_memory_once=False,
+    extra_bound_files=(),
+    async_bitwise_text_checks=False,
+):
     if root.exists():
         raise FileExistsError("new immutable profile root required")
     plan = common.previous.read(PARENT / "plan.json")
@@ -32,6 +38,8 @@ def prepare(root, *, verify_constructor_memory_once=False):
     if not decision["complete"] or decision["failures"] or decision["all_method_similar_time_gate"]:
         raise ValueError("complete failed-latency parent required before phase profiling")
     bound = dict(plan["bound_files"])
+    for path in extra_bound_files:
+        bound[str(path)] = sha(path)
     for path in (
         PARENT / "plan.json",
         PARENT / "analysis/decision.json",
@@ -52,6 +60,7 @@ def prepare(root, *, verify_constructor_memory_once=False):
             profile_repetitions=3,
             profile_only_no_decode=True,
             verify_constructor_memory_once=verify_constructor_memory_once,
+            async_bitwise_text_checks=async_bitwise_text_checks,
             instrumentation_not_performance_evidence=True,
         ),
     )
@@ -85,6 +94,13 @@ def worker(root, expected, index):
         torch.set_num_threads(12)
         torch.manual_seed(plan["seed"])
         torch.use_deterministic_algorithms(True)
+        if plan.get("async_bitwise_text_checks", False):
+            from mosaickv.evaluation.async_bitwise import gpu_controls
+
+            write_once(
+                out / "bitwise_controls.json",
+                dict(cases=gpu_controls(), source_sha=plan["source_sha"]),
+            )
         cfg = RunConfig.from_mapping(common.previous.resolved_mapping(plan, job))
         adapter = load_hf_adapter(
             cfg.model.id,
