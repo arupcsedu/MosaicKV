@@ -654,6 +654,7 @@ def timing_worker(root, expected, index, adapter, plan, job, payload, timing_con
             code_delta=method in plan.get("code_delta_methods", []),
             input_packet_validator=validator,
             source_geometry=plan.get("source_geometry"),
+            source_num_warps=plan.get("source_num_warps"),
             construction_geometry=plan.get("construction_geometry"),
         )
         if not torch.equal(values, reference["logits"]):

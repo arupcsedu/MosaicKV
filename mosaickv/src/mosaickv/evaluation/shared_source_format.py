@@ -67,6 +67,7 @@ class SharedSourceFormat:
     kind: str = "evicastkv_full_prompt_shared_source_precision_variant"
     channel_exceptions: object = None
     source_row_tile: int = 16
+    source_num_warps: int | None = None
 
     def private(self):
         return (
@@ -97,6 +98,12 @@ class SharedSourceFormat:
             raise ValueError("explicit supported row tile required")
         if self.source_row_tile != 16 and self.projection_backend != "fused":
             raise NotImplementedError("row tiling only supports fused source projection")
+        if self.source_num_warps is not None and (
+            type(self.source_num_warps) is not int or self.source_num_warps not in (4, 8, 16)
+        ):
+            raise ValueError("explicit supported warp count required")
+        if self.source_num_warps is not None and self.projection_backend != "fused":
+            raise NotImplementedError("warp overrides only support fused source projection")
         if self.input_overlay is not None and self.projection_backend != "native_bmm_256":
             raise NotImplementedError("exact input fusion requires audited native source backend")
         if self.channel_exceptions is not None and self.projection_backend != "fused":

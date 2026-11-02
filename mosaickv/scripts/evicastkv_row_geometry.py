@@ -71,7 +71,7 @@ def defer(root, revision):
     )
 
 
-def start(root, revision):
+def start(root, revision, *, launch_warps=None, extra_bound_files=()):
     if clean_source(SOURCE) != revision or root.exists():
         raise ValueError("clean geometry source and new root required")
     parent = common.previous.read(PARENT / "plan.json")
@@ -93,6 +93,13 @@ def start(root, revision):
         )
         return
     bound = dict(parent["bound_files"])
+    if launch_warps is not None and (
+        launch_warps != {"r16_h4": None, "r32_h4": 16, "r64_h4": 16, "r32_h2": 8}
+        or any(type(v) is not int for v in launch_warps.values() if v is not None)
+    ):
+        raise ValueError("fixed spill-reduction diagnostic launch grid required")
+    for path in extra_bound_files:
+        bound[str(path)] = sha(path)
     for p in (
         PARENT / "plan.json",
         PARENT / "analysis/decision.json",
@@ -107,10 +114,12 @@ def start(root, revision):
             source_sha=revision,
             bound_files=bound,
             stage="consumed_source_row_geometry_diagnostic",
+            parent_request_timing=str(PARENT),
             paired_common_streaming_timing=False,
             maximum_worker_minutes=30,
             maximum_simultaneous_workers=2,
             geometry_arms=GEOMETRIES,
+            geometry_launch_warps=launch_warps,
             geometry_warmups=5,
             geometry_repetitions=20,
             no_additional_memory_or_model_changes=True,
@@ -231,7 +240,9 @@ def worker(root, expected, index):
                 run_id=str(out),
             )
             try:
-                candidate = tuple(geometry(p, rows, heads) for p in packets)
+                warps = (plan.get("geometry_launch_warps") or {}).get(key)
+                candidate = tuple(geometry(p, rows, heads, num_warps=warps) for p in packets)
+                record["source_num_warps"] = warps
                 if (
                     backing_bytes(tuple(t for p in candidate for t in p.tensors()))
                     != frozen["physical_bytes"]
@@ -480,6 +491,9 @@ def analyze(root, expected):
             source_sha=plan["source_sha"],
             bound_files=bound,
             source_geometry=selected,
+            source_num_warps=(plan.get("geometry_launch_warps") or {}).get(
+                f"r{selected[0]}_h{selected[1]}"
+            ),
             geometry_KV_and_128_logits_bitwise=True,
             stage="consumed_geometry_complete_request_timing",
         ),

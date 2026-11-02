@@ -128,6 +128,11 @@ def project(packet, attention, targets, *, component=-1, inspect_kernel=False):
         raise ValueError("explicit supported row tile required")
     if type(head_group) is not int or head_group not in (1, 2, 4) or h % head_group:
         raise ValueError("divisible audited head group of one, two or four required")
+    warps = getattr(packet, "source_num_warps", None)
+    if warps is None:
+        warps = 8 if head_group == 4 else 4
+    if type(warps) is not int or warps not in (4, 8, 16):
+        raise ValueError("explicit supported warp count required")
     body = packet.source
     from mosaickv.evaluation.source_channel_exceptions import kernel_arguments
 
@@ -172,7 +177,7 @@ def project(packet, attention, targets, *, component=-1, inspect_kernel=False):
         HEAD_GROUP=head_group,
         HAS_COLUMNS=has_columns,
         ROW_TILE=row_tile,
-        num_warps=8 if head_group == 4 else 4,
+        num_warps=warps,
         num_stages={1: 3, 2: 2, 4: 1}[head_group],
         enable_fp_fusion=False,
     )
@@ -183,7 +188,7 @@ def project(packet, attention, targets, *, component=-1, inspect_kernel=False):
             shared_memory_bytes=getattr(compiled.metadata, "shared", None),
             head_group=head_group,
             row_tile=row_tile,
-            num_warps=8 if head_group == 4 else 4,
+            num_warps=warps,
             num_stages={1: 3, 2: 2, 4: 1}[head_group],
         )
 

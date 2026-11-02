@@ -10,11 +10,13 @@ from mosaickv.evaluation.text_source_storage import TextSourceFormat
 GEOMETRIES = ((16, 4), (32, 4), (64, 4), (32, 2))
 
 
-def geometry(packet, rows, heads):
+def geometry(packet, rows, heads, *, num_warps=None):
     if type(rows) is not int or type(heads) is not int or (rows, heads) not in GEOMETRIES:
         raise ValueError("one of the four preregistered row/head geometries required")
+    if num_warps is not None and (type(num_warps) is not int or num_warps not in (4, 8, 16)):
+        raise ValueError("explicit supported warp count required")
     if isinstance(packet, TextSourceFormat):
-        return replace(packet, base=geometry(packet.base, rows, heads))
+        return replace(packet, base=geometry(packet.base, rows, heads, num_warps=num_warps))
     if not isinstance(packet, SharedSourceFormat) or packet.projection_backend != "fused":
         raise NotImplementedError("fused shared-source geometry only")
     if (
@@ -24,7 +26,9 @@ def geometry(packet, rows, heads):
         or packet.source.scale.dtype != torch.float32
     ):
         raise ValueError("audited complete full-MHA source metadata required")
-    return replace(packet, source_head_group=heads, source_row_tile=rows)
+    return replace(
+        packet, source_head_group=heads, source_row_tile=rows, source_num_warps=num_warps
+    )
 
 
 def eligible(packet):
@@ -33,14 +37,18 @@ def eligible(packet):
     return isinstance(packet, SharedSourceFormat) and packet.projection_backend == "fused"
 
 
-def apply(packets, spec):
+def apply(packets, spec, *, num_warps=None):
     if not isinstance(spec, (tuple, list)) or len(spec) != 2:
         raise ValueError("explicit row/head geometry required")
     rows, heads = spec
     # Validate even when a baseline has no eligible source projection.
     if type(rows) is not int or type(heads) is not int or (rows, heads) not in GEOMETRIES:
         raise ValueError("unsupported hardware geometry")
-    return tuple(geometry(p, rows, heads) if eligible(p) else p for p in packets)
+    if num_warps is not None and (type(num_warps) is not int or num_warps not in (4, 8, 16)):
+        raise ValueError("explicit supported warp count required")
+    return tuple(
+        geometry(p, rows, heads, num_warps=num_warps) if eligible(p) else p for p in packets
+    )
 
 
 def paired_resource_controls(packets, adapter, spec):

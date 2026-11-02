@@ -46,6 +46,7 @@ def request(
     code_delta=False,
     input_packet_validator=None,
     source_geometry=None,
+    source_num_warps=None,
     construction_geometry=None,
 ):
     from mosaickv.evaluation.lossless_prompt_cache import backing_bytes
@@ -109,7 +110,9 @@ def request(
         from mosaickv.evaluation.source_row_geometry import apply, eligible
 
         geometry_layers = sum(eligible(p) for p in packets)
-        packets = apply(packets, source_geometry)
+        packets = apply(packets, source_geometry, num_warps=source_num_warps)
+    elif source_num_warps is not None:
+        raise ValueError("warp overrides require an explicit source geometry")
     if input_packet_validator is not None:
         # Caller permits this ONLY on the excluded first warmup. No hash/copy
         # is inserted into a measured repetition's request clock.
@@ -153,6 +156,7 @@ def request(
             source_code_delta=code_delta,
             common_componentwise_fitting=componentwise_fitting,
             source_geometry=source_geometry,
+            source_num_warps=source_num_warps,
             construction_geometry=construction_geometry,
             source_geometry_applied_layers=geometry_layers,
             first_warmup_packet_audit=input_packet_validator is not None,
