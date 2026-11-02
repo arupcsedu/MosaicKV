@@ -69,13 +69,14 @@ def _project(
     COMPONENT: tl.constexpr = -1,
     HEAD_GROUP: tl.constexpr = 1,
     HAS_COLUMNS: tl.constexpr = False,
+    ROW_TILE: tl.constexpr = 16,
 ):
-    row = tl.program_id(0) * 16 + tl.arange(0, 16)
+    row = tl.program_id(0) * ROW_TILE + tl.arange(0, ROW_TILE)
     head = tl.program_id(1) * HEAD_GROUP
     col = tl.arange(0, DIM * HEAD_GROUP)
     reduction = tl.arange(0, 64)
-    ak = tl.full((16, DIM * HEAD_GROUP), 0, tl.float32)
-    av = tl.full((16, DIM * HEAD_GROUP), 0, tl.float32)
+    ak = tl.full((ROW_TILE, DIM * HEAD_GROUP), 0, tl.float32)
+    av = tl.full((ROW_TILE, DIM * HEAD_GROUP), 0, tl.float32)
     for start in range(WIDTH // 64):
         x = _read_coherent(
             CODES,
@@ -102,7 +103,9 @@ def _project(
     if COMPONENT != 1:
         key = ak.to(tl.bfloat16).to(tl.float32)
         rotate_index = col // DIM * DIM + (col + DIM // 2) % DIM
-        rotated = tl.gather(key, tl.broadcast_to(rotate_index[None, :], (16, DIM * HEAD_GROUP)), 1)
+        rotated = tl.gather(
+            key, tl.broadcast_to(rotate_index[None, :], (ROW_TILE, DIM * HEAD_GROUP)), 1
+        )
         rotated = tl.where(col[None, :] % DIM < DIM // 2, -rotated, rotated)
         cos = tl.load(COS + row[:, None] * DIM + col[None, :] % DIM, valid, other=0).to(tl.float32)
         sin = tl.load(SIN + row[:, None] * DIM + col[None, :] % DIM, valid, other=0).to(tl.float32)
@@ -120,6 +123,9 @@ def project(packet, attention, targets, *, component=-1, inspect_kernel=False):
         raise ValueError("explicit both/key/value projection component required")
     h, n, d = packet.shape[1:]
     head_group = getattr(packet, "source_head_group", 1)
+    row_tile = getattr(packet, "source_row_tile", 16)
+    if type(row_tile) is not int or row_tile not in (16, 32, 64):
+        raise ValueError("explicit supported row tile required")
     if type(head_group) is not int or head_group not in (1, 2, 4) or h % head_group:
         raise ValueError("divisible audited head group of one, two or four required")
     body = packet.source
@@ -146,7 +152,7 @@ def project(packet, attention, targets, *, component=-1, inspect_kernel=False):
         )
     ):
         raise ValueError("unchanged contiguous bias-free native projection weights required")
-    compiled = _project[(triton.cdiv(n, 16), h // head_group)](
+    compiled = _project[(triton.cdiv(n, row_tile), h // head_group)](
         body.codes,
         body.minimum,
         body.scale,
@@ -165,6 +171,7 @@ def project(packet, attention, targets, *, component=-1, inspect_kernel=False):
         COMPONENT=component,
         HEAD_GROUP=head_group,
         HAS_COLUMNS=has_columns,
+        ROW_TILE=row_tile,
         num_warps=8 if head_group == 4 else 4,
         num_stages={1: 3, 2: 2, 4: 1}[head_group],
         enable_fp_fusion=False,
@@ -175,6 +182,7 @@ def project(packet, attention, targets, *, component=-1, inspect_kernel=False):
             spills=getattr(compiled, "n_spills", None),
             shared_memory_bytes=getattr(compiled.metadata, "shared", None),
             head_group=head_group,
+            row_tile=row_tile,
             num_warps=8 if head_group == 4 else 4,
             num_stages={1: 3, 2: 2, 4: 1}[head_group],
         )

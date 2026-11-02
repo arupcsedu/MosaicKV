@@ -45,6 +45,7 @@ def request(
     componentwise_fitting=False,
     code_delta=False,
     input_packet_validator=None,
+    source_geometry=None,
 ):
     from mosaickv.evaluation.lossless_prompt_cache import backing_bytes
     from mosaickv.evaluation.storage_runs import run
@@ -95,6 +96,12 @@ def request(
     del pref, fresh, cache, encoder, prepared
     gc.collect()
     original_packet_bytes = backing_bytes(tuple(t for p in packets for t in p.tensors()))
+    geometry_layers = 0
+    if source_geometry is not None:
+        from mosaickv.evaluation.source_row_geometry import apply, eligible
+
+        geometry_layers = sum(eligible(p) for p in packets)
+        packets = apply(packets, source_geometry)
     if input_packet_validator is not None:
         # Caller permits this ONLY on the excluded first warmup. No hash/copy
         # is inserted into a measured repetition's request clock.
@@ -137,6 +144,8 @@ def request(
             original_precompression_packet_bytes=original_packet_bytes,
             source_code_delta=code_delta,
             common_componentwise_fitting=componentwise_fitting,
+            source_geometry=source_geometry,
+            source_geometry_applied_layers=geometry_layers,
             first_warmup_packet_audit=input_packet_validator is not None,
             tensor_result_auditing=False,
             memory_counters_not_peak_evidence=True,

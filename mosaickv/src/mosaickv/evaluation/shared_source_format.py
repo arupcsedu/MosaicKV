@@ -66,6 +66,7 @@ class SharedSourceFormat:
     input_overlay: object = None
     kind: str = "evicastkv_full_prompt_shared_source_precision_variant"
     channel_exceptions: object = None
+    source_row_tile: int = 16
 
     def private(self):
         return (
@@ -92,6 +93,10 @@ class SharedSourceFormat:
         del direct
         if self.projection_backend not in ("fused", "native_bmm_256"):
             raise NotImplementedError("unregistered source projection backend")
+        if type(self.source_row_tile) is not int or self.source_row_tile not in (16, 32, 64):
+            raise ValueError("explicit supported row tile required")
+        if self.source_row_tile != 16 and self.projection_backend != "fused":
+            raise NotImplementedError("row tiling only supports fused source projection")
         if self.input_overlay is not None and self.projection_backend != "native_bmm_256":
             raise NotImplementedError("exact input fusion requires audited native source backend")
         if self.channel_exceptions is not None and self.projection_backend != "fused":
