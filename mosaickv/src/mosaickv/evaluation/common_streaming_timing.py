@@ -50,6 +50,7 @@ def request(
     construction_geometry=None,
     reconstruction_readers="original",
     reuse_kernel_dispatch=False,
+    audit_decode_storage=False,
 ):
     from mosaickv.evaluation.lossless_prompt_cache import backing_bytes
     from mosaickv.evaluation.reconstruction_policy import use, validate
@@ -60,6 +61,8 @@ def request(
     from mosaickv.evaluation.streaming_source_constructor import StreamingDirectSource
 
     validate(reconstruction_readers)
+    if type(audit_decode_storage) is not bool:
+        raise ValueError("explicit decode storage audit boolean required")
 
     if method not in METHODS:
         raise ValueError("five frozen local precision variants only")
@@ -137,7 +140,7 @@ def request(
             runtime,
             packets,
             tokens=128,
-            audit=False,
+            audit=audit_decode_storage,
             sealed=True,
             sequential_lease=True,
             source_history=True,
@@ -159,7 +162,13 @@ def request(
             decode_cuda_ms=details["decode_cuda_ms"],
             initial_encoded_bytes=details["storage"]["initial_active_kv_storage_bytes"],
             final_encoded_bytes=details["storage"]["final_active_kv_storage_bytes"],
-            decode_owned_peak_bytes=details["storage"]["peak_active_kv_storage_bytes"],
+            reported_counter_peak_bytes=details["storage"]["peak_active_kv_storage_bytes"],
+            peak_measurement_admissible=details["storage"][
+                "peak_admissible_only_for_declared_tensor_boundary"
+            ],
+            decode_owned_peak_bytes=details["storage"]["peak_active_kv_storage_bytes"]
+            if details["storage"]["peak_admissible_only_for_declared_tensor_boundary"]
+            else None,
             persistent_packet_bytes=backing_bytes(tuple(t for p in packets for t in p.tensors())),
             original_precompression_packet_bytes=original_packet_bytes,
             source_code_delta=code_delta,
@@ -173,8 +182,9 @@ def request(
             dispatch_misses=0 if dispatch is None else dispatch["misses"],
             source_geometry_applied_layers=geometry_layers,
             first_warmup_packet_audit=input_packet_validator is not None,
-            tensor_result_auditing=False,
-            memory_counters_not_peak_evidence=True,
+            tensor_result_auditing=audit_decode_storage,
+            memory_counters_not_peak_evidence=not audit_decode_storage,
+            whole_request_GPU_peak_certified=False,
             one_prefill_per_request=True,
             full_image_and_language_prefill_included=True,
             warm_cache_PIL_media_loading_excluded=True,

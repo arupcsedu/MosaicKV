@@ -15,6 +15,7 @@ import evicastkv_common_streaming as common
 
 from mosaickv.evaluation.fox_campaign import clean_source, digest, sha, write_once
 from mosaickv.evaluation.request_reader_diagnostic import METHODS, WindowTimer, order, summarize
+from mosaickv.evaluation.request_storage_evidence import audited, timed
 from mosaickv.evaluation.scheduler_identity import scheduler_identity
 
 SOURCE = common.SOURCE
@@ -22,6 +23,10 @@ PARENT = Path(
     "/scratch/djy8hg/runs/evicastkv/reconstruction-roles-readers-consumed-20261102-v1/verification-1/timing"
 )
 DOC = SOURCE / "mosaickv/docs/paired_request_readers_20261102.md"
+FAILED = Path("/scratch/djy8hg/runs/evicastkv/paired-request-readers-consumed-20261102-v1")
+ACCOUNTING = Path(
+    "/scratch/djy8hg/runs/evicastkv/paired-request-storage-diagnostic-consumed-20261102-v1"
+)
 SCRIPT = SOURCE / "mosaickv/slurm/evicastkv_paired_request_readers.sbatch"
 STORAGE_FIELDS = (
     ("initial_encoded_bytes", "initial_active_kv_storage_bytes"),
@@ -58,6 +63,23 @@ def bootstrap(root, revision):
     bound = dict(plan["bound_files"])
     for path in (PARENT / "plan.json", PARENT / "analysis/decision.json", DOC):
         bound[str(path)] = sha(path)
+    for path in (
+        FAILED / "plan.json",
+        FAILED / "analysis/decision.json",
+        FAILED / "engineering_closeout.json",
+        ACCOUNTING / "diagnostic.py",
+        ACCOUNTING / "manifest.json",
+        *(
+            ACCOUNTING / f"audit-{audit}-reader-{reader}.json"
+            for audit in (False, True)
+            for reader in ("original", "carry_literals")
+        ),
+    ):
+        bound[str(path)] = sha(path)
+    for reader in ("original", "carry_literals"):
+        diagnosis = common.previous.read(ACCOUNTING / f"audit-True-reader-{reader}.json")
+        if not diagnosis["logits_bitwise"] or any(diagnosis["boundary_deltas"].values()):
+            raise ValueError("positive same-source AUDITED accounting diagnosis required")
     write_once(
         root / "plan.json",
         dict(
@@ -75,6 +97,8 @@ def bootstrap(root, revision):
             fresh_or_large_campaign_authorized=False,
             fresh_materialization_authorized=False,
             paper_campaign_authorized=False,
+            physical_peak_evidence="separate_audited_companions_exact_frozen_equality",
+            uninstrumented_peak_counters_are_lower_bounds=True,
         ),
     )
     # Preserve historical manifests. Corrections are separate hash-bound records.
@@ -254,13 +278,17 @@ def references(index):
     return result
 
 
-def assert_request(logits, measured, reference):
+def assert_request(logits, measured, reference, *, expected_counter=None):
     import torch
 
     if not torch.equal(logits, reference["logits"]):
         raise RuntimeError("changed original 128-token vocabulary logits")
-    if any(measured[k] != reference["storage"][v] for k, v in STORAGE_FIELDS):
-        raise RuntimeError("changed initial/final/decode-owned peak storage")
+    if measured["tensor_result_auditing"]:
+        audited(measured, reference["storage"])
+    else:
+        if expected_counter is None:
+            raise RuntimeError("matching uninstrumented counter control required")
+        timed(measured, reference["storage"], expected_counter=expected_counter)
 
 
 def mode_config(plan, mode):
@@ -364,6 +392,8 @@ def worker(root, expected, index):
             windows=dict(early=[0, 15], middle=[16, 95], late=[96, 126]),
             evaluator="not_used_timing_and_bitwise_parent_controls_only",
             quality_metrics="not_recomputed",
+            audited_peak_evidence_path=str(out / "audited_storage_controls.json"),
+            uninstrumented_peak_counters_are_not_physical_peak_evidence=True,
             actual_timing_protocol=dict(
                 order="randomized_methods_and_within_method_reader_pairs",
                 warmups=5,
@@ -376,14 +406,14 @@ def worker(root, expected, index):
         refs = references(job["input_index"])
         messages = common.previous.load_messages(common.previous.read(job["inputs"][0]))
         profile = tuple(common.previous.read(Path(plan["profile_path"])))
-        seen = set()
+        seen, counters = set(), {}
 
         def validate_packet(packets, *, method):
             actual = common.control.digest_tensors(tuple(t for p in packets for t in p.tensors()))
             if actual != refs[method]["payload"]["payload_sha256"]:
                 raise RuntimeError("changed original preconversion packet bits")
 
-        def execute(method, mode, *, validator=None):
+        def execute(method, mode, *, validator=None, audit=False, register_counter=False):
             reader, reuse = mode_config(plan, mode)
             logits, packets, measured = request(
                 adapter,
@@ -399,28 +429,90 @@ def worker(root, expected, index):
                 construction_geometry=plan.get("construction_geometry"),
                 reconstruction_readers=reader,
                 reuse_kernel_dispatch=reuse,
+                audit_decode_storage=audit,
             )
-            assert_request(logits, measured, refs[method])
+            try:
+                counter = (
+                    measured["reported_counter_peak_bytes"]
+                    if register_counter
+                    else counters.get(method)
+                )
+                if register_counter and mode != plan["reader_modes"][0]:
+                    raise ValueError("counter control must use the original registered mode")
+                assert_request(logits, measured, refs[method], expected_counter=counter)
+            except Exception:
+                write_once(
+                    out / "validation_failure.json",
+                    dict(
+                        method=method,
+                        mode=mode,
+                        audit=audit,
+                        active=active,
+                        actual_measurements=measured,
+                        frozen_storage={v: refs[method]["storage"][v] for _, v in STORAGE_FIELDS},
+                        registered_uninstrumented_counter=counters.get(method),
+                        logits_bitwise=torch.equal(logits, refs[method]["logits"]),
+                    ),
+                )
+                raise
+            if register_counter:
+                counters[method] = measured["reported_counter_peak_bytes"]
             del logits, packets
             return measured
 
-        # Dispatch cannot bypass all-method validation merely because timing
-        # focuses on the nearest measured baseline.
-        if plan["paired_reader_stage"] == "dispatch":
-            checks = []
-            for method in sorted(refs):
+        # Physical peak parity is measured with tensor auditing ON, outside
+        # latency. Fast counters are separately registered in the same ON/OFF
+        # instrumentation category, never substituted for audited peak data.
+        control_methods = sorted(refs) if plan["paired_reader_stage"] == "dispatch" else METHODS
+        checks, audit_rows = [], []
+        for method in control_methods:
+            for mode in plan["reader_modes"]:
+                active = dict(method=method, reader=mode, phase="audited_storage_control")
                 measured = execute(
-                    method, "reused_dispatch", validator=partial(validate_packet, method=method)
+                    method, mode, validator=partial(validate_packet, method=method), audit=True
                 )
-                checks.append(
+                audit_rows.append(
                     dict(
                         method=method,
+                        reader=mode,
                         logits_bitwise=True,
-                        accounting_identical=True,
-                        dispatch_hits=measured["dispatch_hits"],
-                        storage_boundaries={k: measured[k] for k, _ in STORAGE_FIELDS},
+                        packet_bits_identical=True,
+                        frozen_physical_boundaries_identical=True,
+                        measured=measured,
+                        frozen_storage={v: refs[method]["storage"][v] for _, v in STORAGE_FIELDS},
                     )
                 )
+            active = dict(method=method, phase="uninstrumented_counter_control")
+            baseline = execute(method, plan["reader_modes"][0], register_counter=True)
+            checks.append(
+                dict(
+                    method=method,
+                    logits_bitwise=True,
+                    accounting_identical=True,
+                    dispatch_hits=audit_rows[-1]["measured"]["dispatch_hits"],
+                    audited_storage_boundaries={
+                        k: audit_rows[-1]["measured"][k] for k, _ in STORAGE_FIELDS
+                    },
+                    storage_boundaries={
+                        "initial_encoded_bytes": baseline["initial_encoded_bytes"],
+                        "final_encoded_bytes": baseline["final_encoded_bytes"],
+                        "reported_counter_peak_bytes": counters[method],
+                    },
+                )
+            )
+        write_once(
+            out / "audited_storage_controls.json",
+            dict(
+                rows=audit_rows,
+                counter_controls=checks,
+                source_sha=plan["source_sha"],
+                plan_sha256=expected,
+                not_latency_evidence=True,
+                independent_quality_N=0,
+            ),
+        )
+        audit_sha = sha(out / "audited_storage_controls.json")
+        if plan["paired_reader_stage"] == "dispatch":
             write_once(out / "all_method_controls.json", dict(rows=checks))
 
         for entry in order(plan["seed"] + index, readers=tuple(plan["reader_modes"])):
@@ -449,6 +541,7 @@ def worker(root, expected, index):
                 plan_sha256=expected,
                 manifest_path=str(out / "manifest.json"),
                 independent_quality_N=0,
+                audited_storage_controls_sha256=audit_sha,
             )
             with (out / "raw.jsonl").open("a") as stream:
                 stream.write(json.dumps(row, allow_nan=False) + "\n")
@@ -473,6 +566,7 @@ def worker(root, expected, index):
                     accounting_identical=True,
                     **trace,
                     diagnostic_measurements_not_latency_evidence=measured,
+                    audited_storage_controls_sha256=audit_sha,
                 )
                 with (out / "profiles.jsonl").open("a") as stream:
                     stream.write(json.dumps(record, allow_nan=False) + "\n")
@@ -514,6 +608,51 @@ def read_producers(root, plan, expected):
             ):
                 raise ValueError("incorrect current scheduler provenance")
             rows = [json.loads(x) for x in (folder / "raw.jsonl").read_text().splitlines()]
+            controls = common.previous.read(folder / "audited_storage_controls.json")
+            expected_methods = (
+                set(METHODS)
+                if plan["paired_reader_stage"] == "reader"
+                else {
+                    "mosaickv_exact",
+                    "prefixkv_reimpl",
+                    "prompt_attention_topk",
+                    "vl_cache_reimpl",
+                    "lookm_reimpl",
+                }
+            )
+            audit_rows = controls["rows"]
+            if len(audit_rows) != len(expected_methods) * 2 or {
+                (r["method"], r["reader"]) for r in audit_rows
+            } != {(m, p) for m in expected_methods for p in plan["reader_modes"]}:
+                raise ValueError("incomplete audited physical-storage companions")
+            for control in audit_rows:
+                if not all(
+                    control[k] is True
+                    for k in (
+                        "logits_bitwise",
+                        "packet_bits_identical",
+                        "frozen_physical_boundaries_identical",
+                    )
+                ):
+                    raise ValueError("failed audited original physical-storage parity")
+                audited(control["measured"], control["frozen_storage"])
+            registered_counters = {
+                r["method"]: r["storage_boundaries"]["reported_counter_peak_bytes"]
+                for r in controls["counter_controls"]
+            }
+            if set(registered_counters) != expected_methods or len(
+                controls["counter_controls"]
+            ) != len(expected_methods):
+                raise ValueError("missing matched uninstrumented counter controls")
+            for row in rows:
+                if row["audited_storage_controls_sha256"] != sha(
+                    folder / "audited_storage_controls.json"
+                ):
+                    raise ValueError("changed physical-storage companion")
+                frozen = next(
+                    c["frozen_storage"] for c in audit_rows if c["method"] == row["method"]
+                )
+                timed(row, frozen, expected_counter=registered_counters[row["method"]])
             if any(
                 (r["reconstruction_readers"], r["reuse_kernel_dispatch"])
                 != mode_config(plan, r["reader"])
@@ -654,6 +793,17 @@ def analyze(root, expected):
         bound = dict(plan["bound_files"])
         for p in (root / "plan.json", root / "analysis/decision.json"):
             bound[str(p)] = sha(p)
+        companions = {}
+        for i in (0, 1):
+            for name in (
+                "all_method_controls.json",
+                "audited_storage_controls.json",
+                "result.json",
+            ):
+                path = root / f"workers/{i}/{name}"
+                bound[str(path)] = sha(path)
+            path = root / f"workers/{i}/audited_storage_controls.json"
+            companions[str(i)] = dict(path=str(path), sha256=sha(path))
         write_once(
             target / "plan.json",
             dict(
@@ -662,6 +812,7 @@ def analyze(root, expected):
                 paired_common_streaming_timing=True,
                 reconstruction_readers=plan["selected_reader"],
                 reuse_kernel_dispatch=True,
+                audited_storage_companions=companions,
                 expected_storage_boundaries={
                     str(i): {
                         row["method"]: row["storage_boundaries"]

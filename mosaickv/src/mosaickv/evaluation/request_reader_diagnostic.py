@@ -160,6 +160,8 @@ def summarize(rows, seed, *, readers=READERS):
             raise ValueError("bitwise and storage controls must pass for every request")
         if row.get("instrumented") is not False:
             raise ValueError("instrumentation forbidden in latency trials")
+        if row.get("tensor_result_auditing") is not False:
+            raise ValueError("tensor-audited storage controls are not latency trials")
         for name in (
             "total_wall_seconds",
             "decode_wall_seconds",

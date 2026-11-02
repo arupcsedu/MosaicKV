@@ -621,6 +621,7 @@ def timing_worker(root, expected, index, adapter, plan, job, payload, timing_con
         warm_weights_and_media=True,
         disk_media_and_model_loading_excluded=True,
         shared_encoded_byte_budget_claim=False,
+        physical_peak_evidence=plan.get("audited_storage_companions", "requires_separate_audit"),
     )
     manifest.update(scheduler_identity(manifest))
     write_once(out / "manifest.json", manifest)

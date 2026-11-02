@@ -62,6 +62,7 @@ def example_rows():
             logits_bitwise=True,
             accounting_identical=True,
             instrumented=False,
+            tensor_result_auditing=False,
             total_wall_seconds=1.0 if r["reader"] == "carry_literals" else 2.0,
             decode_wall_seconds=0.8,
             prefill_construct_retire_wall_seconds=0.2,
@@ -76,7 +77,7 @@ def test_paired_statistics_preserve_all_controls_and_separate_quality_N():
     for method in METHODS:
         assert data["within_method"][method]["mean_ratio"] == 0.5
         assert data["within_method"][method]["familywise_ratio_bounds"] == [0.5, 0.5]
-    for fault in ("duplicate", "missing", "logit", "storage", "instrumented", "nan"):
+    for fault in ("duplicate", "missing", "logit", "storage", "instrumented", "audit", "nan"):
         rows = example_rows()
         if fault == "duplicate":
             rows[-1] = rows[0]
@@ -88,6 +89,8 @@ def test_paired_statistics_preserve_all_controls_and_separate_quality_N():
             rows[-1]["accounting_identical"] = False
         elif fault == "instrumented":
             rows[-1]["instrumented"] = True
+        elif fault == "audit":
+            rows[-1]["tensor_result_auditing"] = True
         else:
             rows[-1]["decode_wall_seconds"] = float("nan")
         with pytest.raises(ValueError):
