@@ -24,6 +24,8 @@ RANGE_AUDIT = Path(
 CODE_AUDIT = Path(
     "/scratch/djy8hg/runs/evicastkv/lossless-layer-code-delta-gpu-consumed-20261101-retry3"
 )
+HOST_PROFILE = Path("/scratch/djy8hg/runs/evicastkv/construction-phase-consumed-20261102-v1")
+HOST_METADATA = Path("/scratch/djy8hg/runs/evicastkv/text-metadata-cpu-consumed-20261102-v1")
 previous = control.previous
 
 
@@ -68,7 +70,7 @@ def row_is_complete(row):
     )
 
 
-def prepare(root, *, timing=False, exact_minimum=False, optimized=False):
+def prepare(root, *, timing=False, exact_minimum=False, optimized=False, host_metadata_once=False):
     if root.exists():
         raise FileExistsError("new immutable common-streaming diagnostic root required")
     old = previous.read(REFERENCE / "plan.json")
@@ -80,6 +82,33 @@ def prepare(root, *, timing=False, exact_minimum=False, optimized=False):
     ):
         raise ValueError("complete common lossless-history transport gate required")
     bound = dict(old["bound_files"])
+    if host_metadata_once:
+        if not timing or not optimized:
+            raise ValueError(
+                "host metadata verification requires the full optimized timing controls"
+            )
+        profile = previous.read(HOST_PROFILE / "analysis/decision.json")
+        cpu = previous.read(HOST_METADATA / "decision.json")
+        source_profiles = [s for s in profile["summaries"] if s["method"] == "mosaickv_exact"]
+        target = "mosaickv.evaluation.text_source_storage.optimize"
+        if (
+            not profile["complete"]
+            or profile["failures"]
+            or len(source_profiles) != 2
+            or any(target not in s["exclusive_wall_ranking"][:3] for s in source_profiles)
+            or not cpu["complete"]
+            or cpu["source_sha"] != clean_source(SOURCE)
+            or len(cpu["cases"]) != 10
+            or not all(c["all_slots_and_masks_identical"] for c in cpu["cases"])
+        ):
+            raise ValueError("complete dominant-phase and exact common-metadata evidence required")
+        for path in (
+            HOST_PROFILE / "plan.json",
+            HOST_PROFILE / "analysis/decision.json",
+            HOST_METADATA / "decision.json",
+            SOURCE / "mosaickv/docs/text_metadata_once_20261102.md",
+        ):
+            bound[str(path)] = sha(path)
     for path in (
         REFERENCE / "plan.json",
         REFERENCE / "analysis/decision.json",
@@ -187,6 +216,7 @@ def prepare(root, *, timing=False, exact_minimum=False, optimized=False):
             optimized_source_runtime=optimized,
             optimized_source_initial_bytes=optimized_bytes,
             common_componentwise_fitting=optimized,
+            constructor_metadata_once=host_metadata_once,
             code_delta_methods=["mosaickv_exact"] if optimized else [],
             baseline_codec_disabled_only_after_registered_no_savings_evidence=optimized,
             require_lower_observed_constructor_peak_than_all_baselines=optimized,
@@ -964,6 +994,7 @@ if __name__ == "__main__":
             "prepare_timing",
             "prepare_exact_minimum",
             "prepare_optimized_timing",
+            "prepare_host_metadata_timing",
             "register_optimized_timing",
             "cpu",
             "submit",
@@ -980,12 +1011,15 @@ if __name__ == "__main__":
         "prepare_timing",
         "prepare_exact_minimum",
         "prepare_optimized_timing",
+        "prepare_host_metadata_timing",
     ):
         prepare(
             args.root,
-            timing=args.mode in ("prepare_timing", "prepare_optimized_timing"),
+            timing=args.mode
+            in ("prepare_timing", "prepare_optimized_timing", "prepare_host_metadata_timing"),
             exact_minimum=args.mode == "prepare_exact_minimum",
-            optimized=args.mode == "prepare_optimized_timing",
+            optimized=args.mode in ("prepare_optimized_timing", "prepare_host_metadata_timing"),
+            host_metadata_once=args.mode == "prepare_host_metadata_timing",
         )
     elif args.mode == "cpu":
         previous.cpu(args.root, args.plan_sha)

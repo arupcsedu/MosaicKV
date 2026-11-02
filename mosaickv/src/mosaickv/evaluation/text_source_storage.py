@@ -81,7 +81,10 @@ def text_slots(positions, text):
         )
     ):
         raise ValueError("sorted text IDs and uniform unique head positions required")
-    return tuple(tuple({p: j for j, p in enumerate(h)}.get(t, -1) for t in text) for h in positions)
+    # Build each head's index ONCE, not once for every text token. Validation
+    # and absent-slot semantics remain identical for all cache methods.
+    lookups = tuple({p: j for j, p in enumerate(h)} for h in positions)
+    return tuple(tuple(index.get(t, -1) for t in text) for index in lookups)
 
 
 def strip_text_overlays(packet, references, positions, text):
@@ -243,6 +246,7 @@ def optimize(packet, record, positions, text, attention):
     if not isinstance(packet, (HeadLocalFormat, SharedSourceFormat)):
         raise NotImplementedError("head-local exact-text format required")
     text = tuple(text)
+    text_set = frozenset(text)
     slots = text_slots(positions, text)
     hidden = record["normalized"]
     h, n, d = packet.shape[1:]
@@ -257,7 +261,7 @@ def optimize(packet, record, positions, text, attention):
     ):
         raise ValueError("complete BF16 full-MHA text source and original phase required")
     reference = packet.materialize(attention)
-    base = strip_text_overlays(packet, reference, positions, set(text))
+    base = strip_text_overlays(packet, reference, positions, text_set)
     device = hidden.device
     source = encode(hidden[:, None].contiguous())
     checkpoints = torch.empty(0, dtype=torch.int16, device=device)
@@ -282,7 +286,7 @@ def optimize(packet, record, positions, text, attention):
     # Verify every correction concerns a protected text slot. A visual change is
     # an implementation defect, not a reason to hide a larger patch/fallback.
     text_mask = torch.tensor(
-        [[p in text for p in head] for head in positions], device=device, dtype=torch.bool
+        [[p in text_set for p in head] for head in positions], device=device, dtype=torch.bool
     )
     for patch in patches:
         idx = patch.indices.long()
