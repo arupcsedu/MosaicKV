@@ -9,7 +9,17 @@ import triton.language as tl
 
 
 @triton.jit
-def _read(CODES, MINIMUM, SCALE, row, start, ROWS, WIDTH: tl.constexpr, BITS: tl.constexpr):
+def _read(
+    CODES,
+    MINIMUM,
+    SCALE,
+    row,
+    start,
+    ROWS,
+    WIDTH: tl.constexpr,
+    BITS: tl.constexpr,
+    REUSE_HEADERS: tl.constexpr = False,
+):
     col = start + tl.arange(0, 64)
     index = col[None, :] * ROWS + row[:, None]
     valid = row[:, None] < ROWS
@@ -18,10 +28,19 @@ def _read(CODES, MINIMUM, SCALE, row, start, ROWS, WIDTH: tl.constexpr, BITS: tl
     a = tl.load(CODES + byte, valid, other=0).to(tl.int32)
     b = tl.load(CODES + byte + 1, valid & (shift + BITS > 8), other=0).to(tl.int32)
     code = ((a >> shift) | (b << (8 - shift))) & ((1 << BITS) - 1)
-    group = col[None, :] * tl.cdiv(ROWS, 128) + row[:, None] // 128
-    minimum = tl.load(MINIMUM + group, valid, other=0)
-    scale = tl.load(SCALE + group, valid, other=1)
-    return (code.to(tl.float32) * scale + minimum).to(tl.bfloat16)
+    if REUSE_HEADERS:
+        # The fixed 16/32/64-row tiles divide the 128-row quantizer group.
+        # Every valid row in this CTA therefore shares these exact headers.
+        group = col * tl.cdiv(ROWS, 128) + tl.program_id(0) * row.shape[0] // 128
+        minimum = tl.load(MINIMUM + group)[None, :]
+        scale = tl.load(SCALE + group)[None, :]
+        result = (code.to(tl.float32) * scale + minimum).to(tl.bfloat16)
+        return tl.where(valid, result, 0)
+    else:
+        group = col[None, :] * tl.cdiv(ROWS, 128) + row[:, None] // 128
+        minimum = tl.load(MINIMUM + group, valid, other=0)
+        scale = tl.load(SCALE + group, valid, other=1)
+        return (code.to(tl.float32) * scale + minimum).to(tl.bfloat16)
 
 
 @triton.jit
@@ -37,8 +56,9 @@ def _read_coherent(
     WIDTH: tl.constexpr,
     BITS: tl.constexpr,
     HAS_COLUMNS: tl.constexpr,
+    REUSE_HEADERS: tl.constexpr = False,
 ):
-    x = _read(CODES, MINIMUM, SCALE, row, start, ROWS, WIDTH, BITS)
+    x = _read(CODES, MINIMUM, SCALE, row, start, ROWS, WIDTH, BITS, REUSE_HEADERS)
     if HAS_COLUMNS:
         col = start + tl.arange(0, 64)
         slot = tl.load(MAP + col).to(tl.int32)
@@ -70,6 +90,7 @@ def _project(
     HEAD_GROUP: tl.constexpr = 1,
     HAS_COLUMNS: tl.constexpr = False,
     ROW_TILE: tl.constexpr = 16,
+    REUSE_HEADERS: tl.constexpr = False,
 ):
     row = tl.program_id(0) * ROW_TILE + tl.arange(0, ROW_TILE)
     head = tl.program_id(1) * HEAD_GROUP
@@ -90,6 +111,7 @@ def _project(
             WIDTH,
             BITS,
             HAS_COLUMNS,
+            REUSE_HEADERS,
         )
         k = start * 64 + reduction
         if COMPONENT != 1:
@@ -157,6 +179,8 @@ def project(packet, attention, targets, *, component=-1, inspect_kernel=False):
         )
     ):
         raise ValueError("unchanged contiguous bias-free native projection weights required")
+    from mosaickv.evaluation.reconstruction_policy import reuse_headers
+
     compiled = _project[(triton.cdiv(n, row_tile), h // head_group)](
         body.codes,
         body.minimum,
@@ -177,6 +201,7 @@ def project(packet, attention, targets, *, component=-1, inspect_kernel=False):
         HEAD_GROUP=head_group,
         HAS_COLUMNS=has_columns,
         ROW_TILE=row_tile,
+        REUSE_HEADERS=reuse_headers(),
         num_warps=warps,
         num_stages={1: 3, 2: 2, 4: 1}[head_group],
         enable_fp_fusion=False,
@@ -195,12 +220,21 @@ def project(packet, attention, targets, *, component=-1, inspect_kernel=False):
 
 @triton.jit(do_not_specialize=["ROWS"])
 def _decoded_source(
-    CODES, MINIMUM, SCALE, MAP, VALUES, OUT, ROWS, WIDTH: tl.constexpr, HAS_COLUMNS: tl.constexpr
+    CODES,
+    MINIMUM,
+    SCALE,
+    MAP,
+    VALUES,
+    OUT,
+    ROWS,
+    WIDTH: tl.constexpr,
+    HAS_COLUMNS: tl.constexpr,
+    REUSE_HEADERS: tl.constexpr = False,
 ):
     row = tl.program_id(0) * 16 + tl.arange(0, 16)
     start = tl.program_id(1) * 64
     values = _read_coherent(
-        CODES, MINIMUM, SCALE, MAP, VALUES, row, start, ROWS, WIDTH, 3, HAS_COLUMNS
+        CODES, MINIMUM, SCALE, MAP, VALUES, row, start, ROWS, WIDTH, 3, HAS_COLUMNS, REUSE_HEADERS
     )
     offsets = row[:, None] * WIDTH + start + tl.arange(0, 64)[None, :]
     tl.store(OUT + offsets, values, row[:, None] < ROWS)
@@ -215,6 +249,8 @@ def decode_source_for_construction(packet):
 
     column_map, column_values, has_columns = kernel_arguments(packet)
     out = torch.empty((1, n, width), device=packet.source.codes.device, dtype=torch.bfloat16)
+    from mosaickv.evaluation.reconstruction_policy import reuse_headers
+
     _decoded_source[(triton.cdiv(n, 16), width // 64)](
         packet.source.codes,
         packet.source.minimum,
@@ -225,6 +261,7 @@ def decode_source_for_construction(packet):
         n,
         WIDTH=width,
         HAS_COLUMNS=has_columns,
+        REUSE_HEADERS=reuse_headers(),
         enable_fp_fusion=False,
     )
     return out

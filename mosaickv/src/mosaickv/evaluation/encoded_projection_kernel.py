@@ -83,6 +83,44 @@ def _read(
         return ((low & 127) | ((low & 128) << 8) | (exponent << 7)).to(tl.uint16)
 
 
+@triton.jit
+def _read_carried(
+    SM, CODES, BASE, OFFSETS, LITERALS, CHECK, row, start, ROWS, WIDTH: tl.constexpr, previous_count
+):
+    col = tl.arange(0, 64)
+    begin = row * WIDTH + start
+    index = begin[:, None] + col[None, :]
+    valid = row[:, None] < ROWS
+    code = _codes(CODES, index, valid)
+    escaped = (code == 7) & valid
+    rank = tl.cumsum(escaped.to(tl.int32), 1) - 1
+    block = begin // 1024
+    group = (begin % 1024) // 128
+    prefix = tl.load(CHECK + block * 8 + group, row < ROWS, other=0).to(tl.int32)
+    extra = tl.where(start % 128 >= 64, previous_count, 0)
+    offset = tl.load(OFFSETS + block, row < ROWS, other=0) + prefix + extra
+    literal = tl.load(LITERALS + offset[:, None] + rank, escaped, other=0).to(tl.int32)
+    base = tl.load(BASE + block, row < ROWS, other=0).to(tl.int32)
+    exponent = tl.where(escaped, literal, base[:, None] + code)
+    low = tl.load(SM + index, valid, other=0).to(tl.int32)
+    return (
+        ((low & 127) | ((low & 128) << 8) | (exponent << 7)).to(tl.uint16),
+        tl.sum(escaped.to(tl.int32), 1),
+    )
+
+
+@triton.jit
+def _materialize_carried(SM, CODES, BASE, OFFSETS, LITERALS, CHECK, OUT, ROWS, WIDTH: tl.constexpr):
+    row = tl.program_id(0) * 16 + tl.arange(0, 16)
+    previous = tl.full((16,), 0, tl.int32)
+    for start in range(WIDTH // 64):
+        words, previous = _read_carried(
+            SM, CODES, BASE, OFFSETS, LITERALS, CHECK, row, start * 64, ROWS, WIDTH, previous
+        )
+        offset = row[:, None] * WIDTH + start * 64 + tl.arange(0, 64)[None, :]
+        tl.store(OUT + offset, words, row[:, None] < ROWS)
+
+
 @triton.jit(do_not_specialize=["ROWS", "HEAD_OUT", "MAP_STRIDE"])
 def _project(
     SM,
@@ -107,6 +145,7 @@ def _project(
     RAW: tl.constexpr,
     PACK_COUNTS: tl.constexpr = False,
     COMPONENT: tl.constexpr = -1,
+    CARRY_LITERALS: tl.constexpr = False,
 ):
     row = tl.program_id(0) * 16 + tl.arange(0, 16)
     head = tl.program_id(1)
@@ -116,21 +155,38 @@ def _project(
     if tl.sum((slot >= 0).to(tl.int32), 0) > 0:
         ak = tl.full((16, DIM), 0, tl.float32)
         av = tl.full((16, DIM), 0, tl.float32)
+        previous_count = tl.full((16,), 0, tl.int32)
         for start in range(WIDTH // 64):
-            x = _read(
-                SM,
-                CODES,
-                BASE,
-                OFFSETS,
-                LITERALS,
-                CHECK,
-                row,
-                start * 64,
-                ROWS,
-                WIDTH,
-                RAW,
-                PACK_COUNTS,
-            ).to(tl.bfloat16, bitcast=True)
+            if CARRY_LITERALS and not RAW and not PACK_COUNTS:
+                words, previous_count = _read_carried(
+                    SM,
+                    CODES,
+                    BASE,
+                    OFFSETS,
+                    LITERALS,
+                    CHECK,
+                    row,
+                    start * 64,
+                    ROWS,
+                    WIDTH,
+                    previous_count,
+                )
+            else:
+                words = _read(
+                    SM,
+                    CODES,
+                    BASE,
+                    OFFSETS,
+                    LITERALS,
+                    CHECK,
+                    row,
+                    start * 64,
+                    ROWS,
+                    WIDTH,
+                    RAW,
+                    PACK_COUNTS,
+                )
+            x = words.to(tl.bfloat16, bitcast=True)
             k = start * 64 + reduction
             if COMPONENT != 1:
                 wk = tl.load(WK + (head * DIM + col[None, :]) * WIDTH + k[:, None])
@@ -215,7 +271,8 @@ def project(
     *,
     packed_counts: bool = False,
     component: int = -1,
-) -> None:
+    inspect_kernel: bool = False,
+) -> Any:
     import torch
 
     if type(component) is not int or component not in (-1, 0, 1):
@@ -250,7 +307,9 @@ def project(
         for layer in (attention.k_proj, attention.v_proj)
     ):
         raise NotImplementedError("contiguous unmodified BF16 square K/V weights required")
-    _project[(triton.cdiv(archive.union.numel(), 16), heads)](
+    from mosaickv.evaluation.reconstruction_policy import carry_literals
+
+    compiled = _project[(triton.cdiv(archive.union.numel(), 16), heads)](
         *pointers(body),
         check,
         attention.k_proj.weight,
@@ -268,9 +327,16 @@ def project(
         RAW=body.raw,
         PACK_COUNTS=packed_counts,
         COMPONENT=component,
+        CARRY_LITERALS=carry_literals(),
         num_warps=4,
         enable_fp_fusion=False,
     )
+    if inspect_kernel:
+        return dict(
+            registers=getattr(compiled, "n_regs", None),
+            spills=getattr(compiled, "n_spills", None),
+            shared_memory_bytes=getattr(compiled.metadata, "shared", None),
+        )
 
 
 def gpu_controls() -> list[dict[str, Any]]:

@@ -656,6 +656,7 @@ def timing_worker(root, expected, index, adapter, plan, job, payload, timing_con
             source_geometry=plan.get("source_geometry"),
             source_num_warps=plan.get("source_num_warps"),
             construction_geometry=plan.get("construction_geometry"),
+            reconstruction_readers=plan.get("reconstruction_readers", "original"),
         )
         if not torch.equal(values, reference["logits"]):
             raise RuntimeError("timed request changed frozen 128-token vocabulary logits")

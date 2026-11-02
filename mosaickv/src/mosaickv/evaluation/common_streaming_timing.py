@@ -48,12 +48,16 @@ def request(
     source_geometry=None,
     source_num_warps=None,
     construction_geometry=None,
+    reconstruction_readers="original",
 ):
     from mosaickv.evaluation.lossless_prompt_cache import backing_bytes
+    from mosaickv.evaluation.reconstruction_policy import use, validate
     from mosaickv.evaluation.storage_runs import run
     from mosaickv.evaluation.streaming_baselines import SelectedRetiringCache, StreamingBaseline
     from mosaickv.evaluation.streaming_prefill import RetiringPrefillCache, SealAfterAttention
     from mosaickv.evaluation.streaming_source_constructor import StreamingDirectSource
+
+    validate(reconstruction_readers)
 
     if method not in METHODS:
         raise ValueError("five frozen local precision variants only")
@@ -125,19 +129,20 @@ def request(
             raise RuntimeError("registered beneficial source codec did not reduce storage")
     torch.cuda.synchronize()
     constructed_at = time.monotonic()
-    values, details = run(
-        adapter,
-        runtime,
-        packets,
-        tokens=128,
-        audit=False,
-        sealed=True,
-        sequential_lease=True,
-        source_history=True,
-        sequential_source_history=True,
-        source_history_constructor="direct_batched_checks",
-        consolidated_history=True,
-    )
+    with use(reconstruction_readers):
+        values, details = run(
+            adapter,
+            runtime,
+            packets,
+            tokens=128,
+            audit=False,
+            sealed=True,
+            sequential_lease=True,
+            source_history=True,
+            sequential_source_history=True,
+            source_history_constructor="direct_batched_checks",
+            consolidated_history=True,
+        )
     end.record()
     torch.cuda.synchronize()
     return (
@@ -158,6 +163,7 @@ def request(
             source_geometry=source_geometry,
             source_num_warps=source_num_warps,
             construction_geometry=construction_geometry,
+            reconstruction_readers=reconstruction_readers,
             source_geometry_applied_layers=geometry_layers,
             first_warmup_packet_audit=input_packet_validator is not None,
             tensor_result_auditing=False,
