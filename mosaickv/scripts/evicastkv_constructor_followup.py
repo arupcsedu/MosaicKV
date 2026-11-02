@@ -103,6 +103,7 @@ def analyze(root, expected):
             verification_predicate_unchanged=True,
             constructor_memory_verified_in=str(root / "analysis/decision.json"),
             same_metadata_optimization_as_ancestor=True,
+            construction_geometry=plan.get("construction_geometry"),
         ),
     )
     for name in ("cpu.json", "cpu.xml"):

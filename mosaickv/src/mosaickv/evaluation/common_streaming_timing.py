@@ -46,6 +46,7 @@ def request(
     code_delta=False,
     input_packet_validator=None,
     source_geometry=None,
+    construction_geometry=None,
 ):
     from mosaickv.evaluation.lossless_prompt_cache import backing_bytes
     from mosaickv.evaluation.storage_runs import run
@@ -71,7 +72,14 @@ def request(
         else SelectedRetiringCache(len(profile), audit=False)
     )
     encoder = (
-        StreamingDirectSource(adapter, prepared, cache, profile, minimum_only=minimum_only)
+        StreamingDirectSource(
+            adapter,
+            prepared,
+            cache,
+            profile,
+            minimum_only=minimum_only,
+            construction_geometry=construction_geometry,
+        )
         if method == "mosaickv_exact"
         else StreamingBaseline(prepared, cache, profile, method, minimum_only=minimum_only)
     )
@@ -145,6 +153,7 @@ def request(
             source_code_delta=code_delta,
             common_componentwise_fitting=componentwise_fitting,
             source_geometry=source_geometry,
+            construction_geometry=construction_geometry,
             source_geometry_applied_layers=geometry_layers,
             first_warmup_packet_audit=input_packet_validator is not None,
             tensor_result_auditing=False,

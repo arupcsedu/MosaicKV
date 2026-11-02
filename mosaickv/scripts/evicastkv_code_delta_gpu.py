@@ -190,7 +190,7 @@ def controls():
     return cases
 
 
-def construct(adapter, messages, profile, method, *, audit=False):
+def construct(adapter, messages, profile, method, *, audit=False, construction_geometry=None):
     import torch
 
     from mosaickv.evaluation.streaming_baselines import SelectedRetiringCache, StreamingBaseline
@@ -204,7 +204,14 @@ def construct(adapter, messages, profile, method, *, audit=False):
         else SelectedRetiringCache(len(profile), audit=audit)
     )
     encoder = (
-        StreamingDirectSource(adapter, prepared, cache, profile, minimum_only=True)
+        StreamingDirectSource(
+            adapter,
+            prepared,
+            cache,
+            profile,
+            minimum_only=True,
+            construction_geometry=construction_geometry,
+        )
         if method == "mosaickv_exact"
         else StreamingBaseline(prepared, cache, profile, method, minimum_only=True)
     )

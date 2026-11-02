@@ -41,3 +41,35 @@ def apply(packets, spec):
     if type(rows) is not int or type(heads) is not int or (rows, heads) not in GEOMETRIES:
         raise ValueError("unsupported hardware geometry")
     return tuple(geometry(p, rows, heads) if eligible(p) else p for p in packets)
+
+
+def paired_resource_controls(packets, adapter, spec):
+    """Do not introduce hidden paired-projection spills during construction."""
+    from mosaickv.evaluation.shared_source_kernel import project
+
+    result = []
+    for layer, (packet, block) in enumerate(zip(packets, adapter._language_layers(), strict=True)):
+        baseline = geometry(packet, 16, 4)
+        proposed = geometry(packet, *spec)
+        targets = tuple(
+            torch.empty(
+                packet.shape, device=next(block.self_attn.parameters()).device, dtype=torch.bfloat16
+            )
+            for _ in range(2)
+        )
+        resources = []
+        for index, p in enumerate((baseline, proposed)):
+            template = p.base if isinstance(p, TextSourceFormat) else p
+            if index == 0:
+                template = replace(template, source_head_group=1, source_row_tile=16)
+            resources.append(
+                project(template, block.self_attn, targets, component=-1, inspect_kernel=True)
+            )
+        if (
+            any(type(r.get("spills")) is not int for r in resources)
+            or resources[1]["spills"] > resources[0]["spills"]
+        ):
+            raise RuntimeError("unverified or increased paired projection spills")
+        result.append(dict(layer=layer, baseline=resources[0], proposed=resources[1]))
+        del targets
+    return result

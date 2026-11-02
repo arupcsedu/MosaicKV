@@ -30,6 +30,7 @@ def prepare(
     verify_constructor_memory_once=False,
     extra_bound_files=(),
     async_bitwise_text_checks=False,
+    construction_geometry=None,
 ):
     if root.exists():
         raise FileExistsError("new immutable profile root required")
@@ -61,6 +62,7 @@ def prepare(
             profile_only_no_decode=True,
             verify_constructor_memory_once=verify_constructor_memory_once,
             async_bitwise_text_checks=async_bitwise_text_checks,
+            construction_geometry=construction_geometry,
             instrumentation_not_performance_evidence=True,
         ),
     )
@@ -165,7 +167,12 @@ def worker(root, expected, index):
                     stack.enter_context(instrument(timer))
                     with timer.phase("complete_prefill_constructor"):
                         runtime, packets, memory = backend.construct(
-                            adapter, messages, profile, method, audit=audit_memory
+                            adapter,
+                            messages,
+                            profile,
+                            method,
+                            audit=audit_memory,
+                            construction_geometry=plan.get("construction_geometry"),
                         )
                         if audit_memory:
                             audited_methods.add(method)
@@ -175,6 +182,22 @@ def worker(root, expected, index):
                     else:
                         converted, code_report = packets, None
                 torch.cuda.synchronize()
+                if (
+                    audit_memory
+                    and method == "mosaickv_exact"
+                    and plan.get("construction_geometry") is not None
+                ):
+                    from mosaickv.evaluation.source_row_geometry import paired_resource_controls
+
+                    write_once(
+                        out / "paired_geometry_resources.json",
+                        dict(
+                            records=paired_resource_controls(
+                                packets, adapter, plan["construction_geometry"]
+                            ),
+                            source_sha=plan["source_sha"],
+                        ),
+                    )
                 # Audits are outside every timed phase and use original uncompressed packets.
                 payload_hash = common.control.digest_tensors(
                     tuple(t for packet in packets for t in packet.tensors())

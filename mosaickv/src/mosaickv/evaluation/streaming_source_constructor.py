@@ -8,13 +8,27 @@ import torch
 
 
 class StreamingDirectSource:
-    def __init__(self, adapter, prepared, cache, profile, *, minimum_only=False):
+    def __init__(
+        self, adapter, prepared, cache, profile, *, minimum_only=False, construction_geometry=None
+    ):
         from mosaickv.evaluation.text_source_storage import TextSourceCapture
         from mosaickv.selection.profile_lifetime import allocate_profile_lifetime
 
         if type(minimum_only) is not bool:
             raise ValueError("explicit lossless-minimum storage flag required")
         self.minimum_only = minimum_only
+        from mosaickv.evaluation.source_row_geometry import GEOMETRIES
+
+        if construction_geometry is not None and (
+            not isinstance(construction_geometry, (list, tuple))
+            or len(construction_geometry) != 2
+            or any(type(x) is not int for x in construction_geometry)
+            or tuple(construction_geometry) not in GEOMETRIES
+        ):
+            raise ValueError("explicit preregistered construction geometry required")
+        self.construction_geometry = (
+            None if construction_geometry is None else tuple(construction_geometry)
+        )
 
         self.positions = TextSourceCapture(adapter, prepared).positions
         self.length, self.cache = prepared.logical_sequence_length, cache
@@ -82,13 +96,18 @@ class StreamingDirectSource:
             exclude_global_exact=True,
         )
         packet, _ = fit_transport(packet, attention)
+        if self.construction_geometry is not None:
+            from mosaickv.evaluation.source_row_geometry import geometry
+
+            packet = geometry(packet, *self.construction_geometry)
         text = dict(
             normalized=x.index_select(1, self.ids).detach().contiguous(),
             cos=self.text_phases[0],
             sin=self.text_phases[1],
         )
         packet, _ = optimize(packet, text, (tuple(range(n)),) * h, self.positions, attention)
-        packet = retile(packet, 4)
+        if self.construction_geometry is None:
+            packet = retile(packet, 4)
         if self.minimum_only:
             from mosaickv.evaluation.exact_minimum_metadata import compact_format
 
