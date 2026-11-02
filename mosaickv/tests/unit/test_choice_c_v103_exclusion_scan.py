@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import subprocess
 import sys
 from pathlib import Path
 from types import ModuleType
@@ -93,12 +94,34 @@ def test_v103_scan_rejects_manifest_missing_a_mandatory_v102_ledger() -> None:
         scanner.verify_payload_coverage(protocol, payload, package, ())
 
 
-def test_v103_resolution_ledger_loads_ten_hash_bound_records() -> None:
+def test_v103_resolution_ledger_verifies_records_or_rejects_missing_git_archive() -> None:
     package = Path(__file__).parents[2]
     scanner = _scanner(package)
     protocol = scanner._load_protocol(
         package / "configs/experiments/choice_c_v103_fresh_identity_calibration_protocol.yaml"
     )
+    commit = "4449e6d673dba5b0f65235f9967f7b6da0b00444"
+    archive = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(package.parent),
+            "cat-file",
+            "-e",
+            f"{commit}:mosaickv/configs/experiments/choice_c_v102_v100_fresh_cross_dataset_calibration.yaml",
+        ],
+        capture_output=True,
+        check=False,
+    )
+    if archive.returncode:
+        # Never replace unavailable historical evidence with the live file.
+        with pytest.raises(subprocess.CalledProcessError) as error:
+            scanner.load_provenance_resolutions(protocol, package, require_reviewed=False)
+        assert commit in " ".join(error.value.cmd)
+        assert error.value.returncode != 0
+        with pytest.raises(PermissionError, match="not committed and retry-authorized"):
+            scanner.load_provenance_resolutions(protocol, package, require_reviewed=True)
+        return
     resolutions = scanner.load_provenance_resolutions(protocol, package, require_reviewed=False)
     assert len(resolutions) == 10
     assert len({record.source_path for record in resolutions}) == 10

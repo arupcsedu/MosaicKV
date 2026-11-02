@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import importlib.util
+import subprocess
 import sys
 from pathlib import Path
 from types import ModuleType
 
+import pytest
 import yaml
 
 
@@ -117,10 +119,31 @@ def test_v101_keeps_v100_memory_and_fidelity_gates() -> None:
     assert cache["repair_enabled"] is False
 
 
-def test_v101_validator_accepts_feasibility_negative_seal() -> None:
+def test_v101_validator_verifies_seal_or_rejects_missing_git_archive() -> None:
     package = Path(__file__).parents[2]
     path = package / "configs/experiments/choice_c_v101_v100_fresh_disjoint_calibration.yaml"
-    result = _validator(package).validate(path)
+    validator = _validator(package)
+    archive = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(package.parent),
+            "cat-file",
+            "-e",
+            f"{validator.FEASIBILITY_SEAL_GIT_SHA}:mosaickv/src/mosaickv/evaluation/disjoint_samples.py",
+        ],
+        capture_output=True,
+        check=False,
+    )
+    if archive.returncode:
+        # A squashed/distributed checkout need not contain the old object. This
+        # is an explicit rejection test, NOT a successful historical validation.
+        with pytest.raises(subprocess.CalledProcessError) as error:
+            validator.validate(path)
+        assert validator.FEASIBILITY_SEAL_GIT_SHA in " ".join(error.value.cmd)
+        assert error.value.returncode != 0
+        return
+    result = validator.validate(path)
 
     assert result == {
         "experiment_id": "choice_c_v101_v100_fresh_disjoint_calibration",

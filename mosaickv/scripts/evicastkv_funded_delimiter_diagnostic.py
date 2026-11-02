@@ -742,8 +742,7 @@ def submit(root, expected):
     policy = dict(
         timezone="America/New_York",
         maximum_worker_minutes=minutes,
-        maximum_a100s=6,
-        six_a100s_explicitly_authorized=True,
+        maximum_a100s=4,
         arrays=[gpu],
     )
     write_once(root / "scheduler/policy.json", policy)

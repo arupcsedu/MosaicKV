@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 import evicastkv_constructor_followup as driver
 
-ROW = Path("/scratch/djy8hg/runs/evicastkv/source-row-geometry-consumed-20261102-v1")
+ROW = Path("/scratch/djy8hg/runs/evicastkv/source-row-geometry-consumed-20261102-retry1")
 ASYNC = Path("/scratch/djy8hg/runs/evicastkv/async-text-bitwise-consumed-20261102-v1/timing")
 
 
