@@ -1,5 +1,16 @@
 # Consumed-input construction profiling
 
+Second-level diagnostic: the parent is now the completed aggregated-transport
+complete-request benchmark at source 461214f. Text-source optimize still has
+approximately 0.44--0.45 seconds exclusive wall time. Add named scopes for
+metadata validation, original materialization, overlay removal, source
+encoding, projection metadata, candidate materialization, sparse patch build,
+text-only patch checks, each of the three independent materializations and
+bitwise comparisons, and final accounting. Only scopes and a temporary pair
+name change; all operations, checks, packet bits and selection remain fixed.
+The inactive scopes create no events or retained tensors. Require the same
+frozen packet/logit/storage controls before using the profiling attribution.
+
 Source parent 944098b passed all ten packet/storage/prefill GPU controls but
 the subsequent repeated complete-request study failed the all-baseline 1.05x
 latency gate. Preserve both results. Source construction exceeds Top-K by

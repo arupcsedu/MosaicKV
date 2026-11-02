@@ -20,7 +20,7 @@ from mosaickv.evaluation.fox_campaign import clean_source, digest, sha, write_on
 
 SOURCE = common.SOURCE
 PARENT = Path(
-    "/scratch/djy8hg/runs/evicastkv/optimized-source-request-timing-consumed-20261101-retry2"
+    "/scratch/djy8hg/runs/evicastkv/aggregate-transport-checks-consumed-20261102-v1/timing"
 )
 
 

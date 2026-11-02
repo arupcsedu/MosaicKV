@@ -110,6 +110,13 @@ def instrument(timer):
         (layer_code_delta, "convert"),
     )
     with ExitStack() as stack:
+        stack.enter_context(
+            patch.object(
+                text_source_storage,
+                "_construction_phase",
+                lambda name: timer.phase("text_source." + name),
+            )
+        )
         for owner, key in targets:
             prefix = getattr(owner, "__name__", type(owner).__name__)
             stack.enter_context(

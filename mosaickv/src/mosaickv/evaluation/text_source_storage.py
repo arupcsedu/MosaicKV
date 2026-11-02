@@ -6,7 +6,7 @@ No selections, model weights, attention, logical positions or K/V bits change.
 This is a representation ablation, not a claim of benchmark superiority.
 """
 
-from contextlib import ExitStack
+from contextlib import ExitStack, nullcontext
 from dataclasses import dataclass, replace
 from types import SimpleNamespace
 from typing import Any
@@ -16,6 +16,11 @@ import torch
 from mosaickv.evaluation.exact_storage import SparseBitPatch, decoded, encode
 from mosaickv.evaluation.head_local_precision import HeadLocalFormat
 from mosaickv.evaluation.lossless_prompt_cache import backing_bytes
+
+
+def _construction_phase(name):
+    """No event/tensor work outside the explicitly instrumented diagnostic."""
+    return nullcontext()
 
 
 class TextSourceCapture:
@@ -245,77 +250,93 @@ def optimize(packet, record, positions, text, attention):
 
     if not isinstance(packet, (HeadLocalFormat, SharedSourceFormat)):
         raise NotImplementedError("head-local exact-text format required")
-    text = tuple(text)
-    text_set = frozenset(text)
-    slots = text_slots(positions, text)
-    hidden = record["normalized"]
-    h, n, d = packet.shape[1:]
-    if (
-        d != 128
-        or hidden.shape != (1, len(text), h * d)
-        or hidden.dtype != torch.bfloat16
-        or record["cos"].shape != (1, len(text), d)
-        or record["sin"].shape != record["cos"].shape
-        or n >= 32768
-        or not text
-    ):
-        raise ValueError("complete BF16 full-MHA text source and original phase required")
-    reference = packet.materialize(attention)
-    base = strip_text_overlays(packet, reference, positions, text_set)
+    with _construction_phase("metadata_validation"):
+        text = tuple(text)
+        text_set = frozenset(text)
+        slots = text_slots(positions, text)
+        hidden = record["normalized"]
+        h, n, d = packet.shape[1:]
+        if (
+            d != 128
+            or hidden.shape != (1, len(text), h * d)
+            or hidden.dtype != torch.bfloat16
+            or record["cos"].shape != (1, len(text), d)
+            or record["sin"].shape != record["cos"].shape
+            or n >= 32768
+            or not text
+        ):
+            raise ValueError("complete BF16 full-MHA text source and original phase required")
+    with _construction_phase("reference_materialize"):
+        reference = packet.materialize(attention)
+    with _construction_phase("strip_reference_overlays"):
+        base = strip_text_overlays(packet, reference, positions, text_set)
     device = hidden.device
-    source = encode(hidden[:, None].contiguous())
-    checkpoints = torch.empty(0, dtype=torch.int16, device=device)
-    if device.type == "cuda":
-        from mosaickv.evaluation.encoded_projection_kernel import checkpoints as make_checkpoints
+    with _construction_phase("source_encoding"):
+        source = encode(hidden[:, None].contiguous())
+    with _construction_phase("projection_metadata"):
+        checkpoints = torch.empty(0, dtype=torch.int16, device=device)
+        if device.type == "cuda":
+            from mosaickv.evaluation.encoded_projection_kernel import (
+                checkpoints as make_checkpoints,
+            )
 
-        checkpoints = make_checkpoints(source)
-    projection = TextProjection(
-        source,
-        torch.tensor(text, dtype=torch.int32, device=device),
-        torch.arange(len(text), dtype=torch.int32, device=device),
-        torch.tensor(slots, dtype=torch.int16, device=device),
-        checkpoints,
-        record["cos"],
-        record["sin"],
-        packet.shape,
-    )
-    proposed = TextSourceFormat(base, projection)
-    actual = proposed.materialize(attention)
-    patches = tuple(SparseBitPatch.build(a, b) for a, b in zip(reference, actual, strict=True))
+            checkpoints = make_checkpoints(source)
+        projection = TextProjection(
+            source,
+            torch.tensor(text, dtype=torch.int32, device=device),
+            torch.arange(len(text), dtype=torch.int32, device=device),
+            torch.tensor(slots, dtype=torch.int16, device=device),
+            checkpoints,
+            record["cos"],
+            record["sin"],
+            packet.shape,
+        )
+        proposed = TextSourceFormat(base, projection)
+    with _construction_phase("candidate_materialize"):
+        actual = proposed.materialize(attention)
+    with _construction_phase("sparse_patch_build"):
+        patches = tuple(SparseBitPatch.build(a, b) for a, b in zip(reference, actual, strict=True))
     del actual
     # Verify every correction concerns a protected text slot. A visual change is
     # an implementation defect, not a reason to hide a larger patch/fallback.
-    text_mask = torch.tensor(
-        [[p in text_set for p in head] for head in positions], device=device, dtype=torch.bool
-    )
-    for patch in patches:
-        idx = patch.indices.long()
-        if not bool(text_mask[idx // (n * d), idx // d % n].all()):
-            raise RuntimeError("source overlay changed a nontext cache scalar")
+    with _construction_phase("text_only_patch_validation"):
+        text_mask = torch.tensor(
+            [[p in text_set for p in head] for head in positions], device=device, dtype=torch.bool
+        )
+        for patch in patches:
+            idx = patch.indices.long()
+            if not bool(text_mask[idx // (n * d), idx // d % n].all()):
+                raise RuntimeError("source overlay changed a nontext cache scalar")
     proposed = replace(proposed, projection=replace(projection, patches=patches))
     for _ in range(3):
-        if not all(
-            torch.equal(a.view(torch.int16), b.view(torch.int16))
-            for a, b in zip(reference, proposed.materialize(attention), strict=True)
-        ):
+        with _construction_phase("verification_materialize"):
+            verified = proposed.materialize(attention)
+        with _construction_phase("verification_equal"):
+            equal = all(
+                torch.equal(a.view(torch.int16), b.view(torch.int16))
+                for a, b in zip(reference, verified, strict=True)
+            )
+        del verified
+        if not equal:
             raise RuntimeError("text source changed an existing decoded K/V bit")
-    use_source = proposed.component_bytes < packet.component_bytes
-    return (proposed if use_source else packet), dict(
-        original_component_bytes=packet.component_bytes,
-        candidate_component_bytes=proposed.component_bytes,
-        retained_component_bytes=(proposed if use_source else packet).component_bytes,
-        source_used=use_source,
-        fallback_reason=None if use_source else "exact_residuals_and_headers_not_smaller",
-        changed_selected_positions=0,
-        changed_decoded_KV_scalars=0,
-        patch_scalars=[p.indices.numel() for p in patches],
-        patch_bytes=sum(backing_bytes(p.tensors) for p in patches),
-        source_bytes=backing_bytes(source.buffers),
-        selected_text_slots=sum(s >= 0 for head in slots for s in head),
-        raw_text_source_rows=len(text),
-        phase_values_are_original_not_renumbered=True,
-        merged_baseline_values_preserved=True,
-        no_labels_or_generated_answers_used=True,
-        three_independent_materializations_bitwise=True,
-        same_option_offered_to_every_baseline=True,
-    )
+    with _construction_phase("accounting_and_choice"):
+        use_source = proposed.component_bytes < packet.component_bytes
+        return (proposed if use_source else packet), dict(
+            original_component_bytes=packet.component_bytes,
+            candidate_component_bytes=proposed.component_bytes,
+            retained_component_bytes=(proposed if use_source else packet).component_bytes,
+            source_used=use_source,
+            fallback_reason=None if use_source else "exact_residuals_and_headers_not_smaller",
+            changed_selected_positions=0,
+            changed_decoded_KV_scalars=0,
+            patch_scalars=[p.indices.numel() for p in patches],
+            patch_bytes=sum(backing_bytes(p.tensors) for p in patches),
+            source_bytes=backing_bytes(source.buffers),
+            selected_text_slots=sum(s >= 0 for head in slots for s in head),
+            raw_text_source_rows=len(text),
+            phase_values_are_original_not_renumbered=True,
+            merged_baseline_values_preserved=True,
+            no_labels_or_generated_answers_used=True,
+            three_independent_materializations_bitwise=True,
+            same_option_offered_to_every_baseline=True,
+        )
