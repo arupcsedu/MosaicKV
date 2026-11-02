@@ -19,6 +19,7 @@ import numpy as np
 
 from mosaickv.evaluation.fox_campaign import clean_source, digest, sha, write_once
 from mosaickv.evaluation.reconstruction_roles import choose_order
+from mosaickv.evaluation.scheduler_identity import scheduler_identity
 
 SOURCE = common.SOURCE
 PARENT = Path(
@@ -202,6 +203,7 @@ def verify_worker(root, expected, index):
             measurement_type="diagnostic_measured",
             independent_quality_N=0,
         )
+        manifest.update(scheduler_identity(manifest))
         write_once(out / "manifest.json", manifest)
         refs = {}
         for original in common.previous.read(common.AUDIT / "plan.json")["jobs"]:

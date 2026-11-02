@@ -308,26 +308,32 @@ def project(
     ):
         raise NotImplementedError("contiguous unmodified BF16 square K/V weights required")
     from mosaickv.evaluation.reconstruction_policy import carry_literals
+    from mosaickv.evaluation.request_kernel_dispatch import launch
 
-    compiled = _project[(triton.cdiv(archive.union.numel(), 16), heads)](
-        *pointers(body),
-        check,
-        attention.k_proj.weight,
-        attention.v_proj.weight,
-        archive.union,
-        slots,
-        archive.cos,
-        archive.sin,
-        *targets,
-        archive.union.numel(),
-        targets[0].stride(-3),
-        slots.stride(0),
+    carry = carry_literals()
+    compiled = launch(
+        _project,
+        (triton.cdiv(archive.union.numel(), 16), heads),
+        (
+            *pointers(body),
+            check,
+            attention.k_proj.weight,
+            attention.v_proj.weight,
+            archive.union,
+            slots,
+            archive.cos,
+            archive.sin,
+            *targets,
+            archive.union.numel(),
+            targets[0].stride(-3),
+            slots.stride(0),
+        ),
         WIDTH=width,
         DIM=128,
         RAW=body.raw,
         PACK_COUNTS=packed_counts,
         COMPONENT=component,
-        CARRY_LITERALS=carry_literals(),
+        CARRY_LITERALS=carry,
         num_warps=4,
         enable_fp_fusion=False,
     )
@@ -336,6 +342,10 @@ def project(
             registers=getattr(compiled, "n_regs", None),
             spills=getattr(compiled, "n_spills", None),
             shared_memory_bytes=getattr(compiled.metadata, "shared", None),
+            launch_constants=dict(CARRY_LITERALS=carry, RAW=body.raw, PACK_COUNTS=packed_counts),
+            compiled_reader_branch="raw"
+            if body.raw
+            else ("packed_counts" if packed_counts else "carried" if carry else "original"),
         )
 
 

@@ -14,6 +14,7 @@ from unittest.mock import patch
 import evicastkv_shared_source_runtime as control
 
 from mosaickv.evaluation.fox_campaign import clean_source, sha, write_once
+from mosaickv.evaluation.scheduler_identity import scheduler_identity
 
 SOURCE = Path(__file__).resolve().parents[2]
 REFERENCE = Path("/scratch/djy8hg/runs/evicastkv/common-exact-history-consumed-20261101-v2")
@@ -416,6 +417,7 @@ def worker(root, expected, index):
             instrumentation_not_production_latency=True,
             independent_quality_N=0,
         )
+        manifest.update(scheduler_identity(manifest))
         write_once(out / "manifest.json", manifest)
         torch.cuda.reset_peak_memory_stats()
         cache = (
@@ -620,6 +622,7 @@ def timing_worker(root, expected, index, adapter, plan, job, payload, timing_con
         disk_media_and_model_loading_excluded=True,
         shared_encoded_byte_budget_claim=False,
     )
+    manifest.update(scheduler_identity(manifest))
     write_once(out / "manifest.json", manifest)
     profile = tuple(previous.read(Path(plan["profile_path"])))
     messages = previous.load_messages(payload)
@@ -657,6 +660,7 @@ def timing_worker(root, expected, index, adapter, plan, job, payload, timing_con
             source_num_warps=plan.get("source_num_warps"),
             construction_geometry=plan.get("construction_geometry"),
             reconstruction_readers=plan.get("reconstruction_readers", "original"),
+            reuse_kernel_dispatch=plan.get("reuse_kernel_dispatch", False),
         )
         if not torch.equal(values, reference["logits"]):
             raise RuntimeError("timed request changed frozen 128-token vocabulary logits")
@@ -667,6 +671,10 @@ def timing_worker(root, expected, index, adapter, plan, job, payload, timing_con
         )
         if measured["initial_encoded_bytes"] != expected_bytes:
             raise RuntimeError("timed request changed frozen initial physical bytes")
+        if "expected_storage_boundaries" in plan:
+            boundaries = plan["expected_storage_boundaries"][str(job["input_index"])][method]
+            if any(measured[k] != value for k, value in boundaries.items()):
+                raise RuntimeError("timed request changed an audited storage boundary")
         if (
             measured["original_precompression_packet_bytes"]
             != reference["payload"]["physical_bytes"]

@@ -180,20 +180,25 @@ def project(packet, attention, targets, *, component=-1, inspect_kernel=False):
     ):
         raise ValueError("unchanged contiguous bias-free native projection weights required")
     from mosaickv.evaluation.reconstruction_policy import reuse_headers
+    from mosaickv.evaluation.request_kernel_dispatch import launch
 
-    compiled = _project[(triton.cdiv(n, row_tile), h // head_group)](
-        body.codes,
-        body.minimum,
-        body.scale,
-        column_map,
-        column_values,
-        attention.k_proj.weight,
-        attention.v_proj.weight,
-        packet.cos,
-        packet.sin,
-        *targets,
-        n,
-        targets[0].stride(1),
+    compiled = launch(
+        _project,
+        (triton.cdiv(n, row_tile), h // head_group),
+        (
+            body.codes,
+            body.minimum,
+            body.scale,
+            column_map,
+            column_values,
+            attention.k_proj.weight,
+            attention.v_proj.weight,
+            packet.cos,
+            packet.sin,
+            *targets,
+            n,
+            targets[0].stride(1),
+        ),
         WIDTH=width,
         DIM=d,
         BITS=3,

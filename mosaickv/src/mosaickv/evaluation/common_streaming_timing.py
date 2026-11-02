@@ -49,9 +49,11 @@ def request(
     source_num_warps=None,
     construction_geometry=None,
     reconstruction_readers="original",
+    reuse_kernel_dispatch=False,
 ):
     from mosaickv.evaluation.lossless_prompt_cache import backing_bytes
     from mosaickv.evaluation.reconstruction_policy import use, validate
+    from mosaickv.evaluation.request_kernel_dispatch import use_dispatch
     from mosaickv.evaluation.storage_runs import run
     from mosaickv.evaluation.streaming_baselines import SelectedRetiringCache, StreamingBaseline
     from mosaickv.evaluation.streaming_prefill import RetiringPrefillCache, SealAfterAttention
@@ -129,7 +131,7 @@ def request(
             raise RuntimeError("registered beneficial source codec did not reduce storage")
     torch.cuda.synchronize()
     constructed_at = time.monotonic()
-    with use(reconstruction_readers):
+    with use(reconstruction_readers), use_dispatch(reuse_kernel_dispatch) as dispatch:
         values, details = run(
             adapter,
             runtime,
@@ -156,6 +158,8 @@ def request(
             decode_wall_seconds=details["decode_wall_seconds"],
             decode_cuda_ms=details["decode_cuda_ms"],
             initial_encoded_bytes=details["storage"]["initial_active_kv_storage_bytes"],
+            final_encoded_bytes=details["storage"]["final_active_kv_storage_bytes"],
+            decode_owned_peak_bytes=details["storage"]["peak_active_kv_storage_bytes"],
             persistent_packet_bytes=backing_bytes(tuple(t for p in packets for t in p.tensors())),
             original_precompression_packet_bytes=original_packet_bytes,
             source_code_delta=code_delta,
@@ -164,6 +168,9 @@ def request(
             source_num_warps=source_num_warps,
             construction_geometry=construction_geometry,
             reconstruction_readers=reconstruction_readers,
+            reuse_kernel_dispatch=reuse_kernel_dispatch,
+            dispatch_hits=0 if dispatch is None else dispatch["hits"],
+            dispatch_misses=0 if dispatch is None else dispatch["misses"],
             source_geometry_applied_layers=geometry_layers,
             first_warmup_packet_audit=input_packet_validator is not None,
             tensor_result_auditing=False,

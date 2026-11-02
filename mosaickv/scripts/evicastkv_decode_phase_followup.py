@@ -15,6 +15,7 @@ import evicastkv_common_streaming as common
 
 from mosaickv.evaluation.decode_phase_timing import next_dependency
 from mosaickv.evaluation.fox_campaign import clean_source, digest, sha, write_once
+from mosaickv.evaluation.scheduler_identity import scheduler_identity
 
 SOURCE = common.SOURCE
 STAGED = Path("/scratch/djy8hg/runs/evicastkv/staged-source-geometry-consumed-20261102-retry1")
@@ -183,6 +184,7 @@ def worker(root, expected, index):
             independent_quality_N=0,
             instrumentation_not_performance_evidence=True,
         )
+        manifest.update(scheduler_identity(manifest))
         write_once(out / "manifest.json", manifest)
         original_jobs = common.previous.read(common.AUDIT / "plan.json")["jobs"]
         references = {}

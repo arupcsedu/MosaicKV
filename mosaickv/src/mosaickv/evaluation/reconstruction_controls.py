@@ -3,7 +3,7 @@
 from types import SimpleNamespace
 
 
-def gpu_controls(policy):
+def gpu_controls(policy, *, repeat_projection=False):
     import torch
     import triton
 
@@ -15,6 +15,8 @@ def gpu_controls(policy):
     from mosaickv.evaluation.shared_source_kernel import decode_source_for_construction
 
     validate(policy)
+    if type(repeat_projection) is not bool:
+        raise ValueError("explicit projection-repeat control required")
     records = []
     if policy in ("reuse_headers", "reuse_both"):
         generator = torch.Generator(device="cuda").manual_seed(20261102)
@@ -87,13 +89,26 @@ def gpu_controls(policy):
                     torch.empty((1, heads, n, 128), device="cuda", dtype=torch.bfloat16)
                     for _ in range(2)
                 )
+                snapshot = {}
                 with use(label):
-                    if kind == "source":
-                        shared.project(source, attention, target, component=component)
-                    else:
-                        encoded.project(
-                            body, check, attention, archive, slots, target, component=component
-                        )
+                    for repeat in range(2 if repeat_projection else 1):
+                        if kind == "source":
+                            shared.project(source, attention, target, component=component)
+                        else:
+                            encoded.project(
+                                body, check, attention, archive, slots, target, component=component
+                            )
+                        compared = range(2) if component == -1 else (component,)
+                        if repeat:
+                            if not all(
+                                torch.equal(
+                                    snapshot[c].view(torch.int16), target[c].view(torch.int16)
+                                )
+                                for c in compared
+                            ):
+                                raise RuntimeError("compiled-handle repeat changed projection bits")
+                        elif repeat_projection:
+                            snapshot = {c: target[c].clone() for c in compared}
                 outputs.append(target)
             for c in range(2) if component == -1 else (component,):
                 if not torch.equal(
