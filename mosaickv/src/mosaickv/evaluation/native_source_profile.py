@@ -95,13 +95,13 @@ class Events:
 @contextmanager
 def product_mode(mode, *, timer=None):
     """Isolated study only. The production packet format/default stays unchanged."""
-    if mode not in PRODUCTS:
+    if mode not in (*PRODUCTS, "fused"):
         raise ValueError("registered product required")
     original = native.projection_product
     buffers = []
 
     def product(workspace, weights, output):
-        if mode == "bmm":
+        if mode in ("bmm", "fused"):
             if timer is None:
                 return original(workspace, weights, output)
             return timer.call("product", original, workspace, weights, output)
@@ -129,6 +129,7 @@ def product_mode(mode, *, timer=None):
 
 @contextmanager
 def instrument(timer, candidate):
+    from mosaickv.evaluation import fused_source_restore as fused
     from mosaickv.evaluation import head_local_precision_kernel as local
     from mosaickv.evaluation import shared_source_format as shared
     from mosaickv.evaluation import shared_source_kernel as kernel
@@ -137,6 +138,7 @@ def instrument(timer, candidate):
         for module, name, phase in (
             (native, "decode_into", "source_unpack"),
             (native, "project_into", "project_inclusive"),
+            (fused, "restore", "fused_restore"),
             (kernel, "rotate_native", "rope"),
             (local, "scatter", "protected_restore"),
         ):
@@ -178,7 +180,7 @@ def aggregate(records):
 
 
 @torch.inference_mode()
-def study(base, attention, layer, padding, *, seed):
+def study(base, attention, layer, padding, *, seed, products=PRODUCTS):
     from mosaickv.evaluation.sequential_kv_lease import fill_component
 
     shape = (*base.shape[:2], base.shape[-2] + padding, base.shape[-1])
@@ -189,9 +191,11 @@ def study(base, attention, layer, padding, *, seed):
     for c in (0, 1):
         fill_component(base, attention, c, reference[c])
     candidates, correctness = {}, {}
-    for mode in PRODUCTS:
+    for mode in products:
         with product_mode(mode):
             candidate = native.fit(base, attention, (0, 1))
+            if mode == "fused":
+                candidate = native.enable_fused_restore(candidate)
             workspace = native.new_workspace(candidate, base.cos.device)
             for c in (0, 1):
                 candidate.fill_component(attention, c, targets[c], workspace)
@@ -208,7 +212,7 @@ def study(base, attention, layer, padding, *, seed):
                 repair_bytes=backing_bytes(tuple(t for p in candidate.repairs for t in p.tensors)),
                 source_workspace_bytes=source,
                 extra_output_workspace_bytes=0
-                if mode == "bmm"
+                if mode in ("bmm", "fused")
                 else (min(base.shape[-2], 128) if mode == "wide_128" else base.shape[-2])
                 * base.shape[1]
                 * base.shape[-1]
@@ -243,7 +247,7 @@ def study(base, attention, layer, padding, *, seed):
     raw, releases = [], []
     rng = random.Random(seed + 1000 * layer + padding)
     for trial in range(-5, 20):
-        modes = ["original", *PRODUCTS]
+        modes = ["original", *products]
         rng.shuffle(modes)
         for mode in modes:
             torch.cuda.synchronize()
@@ -263,7 +267,7 @@ def study(base, attention, layer, padding, *, seed):
                 )
             )
     phases = []
-    for mode in PRODUCTS:
+    for mode in products:
         for trial in range(5):
             timer = Events()
             run(mode, timer)

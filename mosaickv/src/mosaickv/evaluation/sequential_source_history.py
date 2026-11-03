@@ -40,6 +40,8 @@ class SequentialSourceHistoryLayer(SequentialLayer, SourceHistoryLayer):
         )
         if using_native:
             self.native_full_component_fills = getattr(self, "native_full_component_fills", 0) + 1
+            if native.fused_restore:
+                self.native_fused_restore_fills = getattr(self, "native_fused_restore_fills", 0) + 1
         offset = self.prompt_length
         for packet in self.source_sealed:
             end = offset + packet.shape[-2]

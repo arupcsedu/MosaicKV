@@ -214,6 +214,7 @@ def request(
             native_conversion_wall_is_not_pure_kernel_time=True,
             native_full_source_decodes=details["storage"].get("native_full_source_decodes", 0),
             native_full_component_fills=details["storage"].get("native_full_component_fills", 0),
+            native_fused_restore_fills=details["storage"].get("native_fused_restore_fills", 0),
             source_launch_hits=0 if hotpath is None else hotpath["source_hits"],
             source_launch_misses=0 if hotpath is None else hotpath["source_misses"],
             fused_restore_calls=0 if hotpath is None else hotpath["fused_restore_calls"],

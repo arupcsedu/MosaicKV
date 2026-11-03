@@ -175,7 +175,14 @@ def worker(root, expected, index):
             )
             for padding in PADDINGS:
                 with use("carry_literals"):
-                    case = study(packet, attentions[layer], layer, padding, seed=plan["seed"])
+                    case = study(
+                        packet,
+                        attentions[layer],
+                        layer,
+                        padding,
+                        seed=plan["seed"],
+                        products=tuple(plan["products"]),
+                    )
                 cases.append(case)
                 write_once(out / f"layer-{layer}-padding-{padding}.json", case)
         write_once(

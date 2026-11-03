@@ -62,12 +62,14 @@ def _restore(
         )
 
 
-def restore(packet, component, target):
+def restore(packet, component, target, *, record=True):
     import torch
 
     from mosaickv.evaluation.prompt_source_subphases import phase
     from mosaickv.evaluation.source_hotpath import record_restore
 
+    if type(record) is not bool:
+        raise ValueError("explicit source-hotpath activity-recording boolean required")
     if not packet.transport_patches or packet.protected_patches_disjoint is not True:
         raise ValueError("constructor-verified disjoint source patches required")
     if type(component) is not int or component not in (0, 1):
@@ -106,4 +108,5 @@ def restore(packet, component, target):
         )
     if getattr(compiled.metadata, "global_scratch_size", None) != 0:
         raise RuntimeError("fused restore cannot allocate opaque global scratch")
-    record_restore(patches)
+    if record:
+        record_restore(patches)

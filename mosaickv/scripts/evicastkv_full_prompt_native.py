@@ -71,7 +71,7 @@ def launch(root, action, *, gpu=False, array=False, dependency=None):
     )
     if array:
         args.append("--array=0-1%2")
-    if action == "primitive":
+    if action in ("primitive", "operator"):
         args = ["--time=00:10:00" if x == "--time=01:00:00" else x for x in args]
     if dependency:
         args.append(f"--dependency=afterany:{dependency}")
@@ -364,11 +364,18 @@ def execute(
             or report["repair_bytes"] > plan["persistent_repair_cap_bytes"]
             or measured["native_full_source_decodes"] != 127 * selected
             or measured["native_full_component_fills"]
-            != 127 * selected * (2 if policy == "kv" else 1)
+            != 127 * selected * (1 if policy == "v_only" else 2)
         ):
             raise RuntimeError("requested native construction/reuse did not engage")
     elif measured["native_full_source_decodes"] or measured["native_full_component_fills"]:
         raise RuntimeError("ineligible/original packet silently used native projection")
+    expected_fused = (
+        measured["native_full_component_fills"]
+        if policy == "kv_fused_restore" and method == "mosaickv_exact"
+        else 0
+    )
+    if measured["native_fused_restore_fills"] != expected_fused:
+        raise RuntimeError("fused native restore activity did not match constructed policy")
     measured.update(
         logits_bitwise=True,
         torch_peak_allocated=torch.cuda.max_memory_allocated(),

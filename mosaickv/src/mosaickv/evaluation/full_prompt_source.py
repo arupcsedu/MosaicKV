@@ -12,13 +12,13 @@ import torch
 from mosaickv.evaluation.exact_storage import SparseBitPatch
 from mosaickv.evaluation.lossless_prompt_cache import backing_bytes
 
-POLICIES = {"kv": (0, 1), "v_only": (1,)}
+POLICIES = {"kv": (0, 1), "v_only": (1,), "kv_fused_restore": (0, 1)}
 MAXIMUM_REPAIR_BYTES = 3 * 2**20
 
 
 def validate(policy):
     if type(policy) is not str or policy not in POLICIES:
-        raise ValueError("explicit kv or v_only native-source policy required")
+        raise ValueError("explicit registered native-source policy required")
 
 
 def source_format(packet):
@@ -96,10 +96,7 @@ def projection_product(workspace, weights, output):
 
 
 @torch.inference_mode()
-def project_into(packet, attention, component, destination, workspace):
-    from mosaickv.evaluation.exact_storage import decoded
-    from mosaickv.evaluation.shared_source_format import apply_transport_patch
-
+def project_into(packet, attention, component, destination, workspace, *, restore=True):
     _, h, n, d = packet.shape
     if type(component) is not int or component not in (0, 1):
         raise ValueError("explicit key/value component required")
@@ -138,7 +135,17 @@ def project_into(packet, attention, component, destination, workspace):
             output.copy_(
                 key * packet.cos + torch.cat((-key[..., 64:], key[..., :64]), -1) * packet.sin
             )
-    if output.device.type == "cuda":
+    if not restore:
+        return
+    restore_projected(packet, component, destination)
+
+
+def restore_projected(packet, component, destination):
+    from mosaickv.evaluation.exact_storage import decoded
+    from mosaickv.evaluation.shared_source_format import apply_transport_patch
+
+    _, _h, n, _d = packet.shape
+    if destination.device.type == "cuda":
         from mosaickv.evaluation.head_local_precision_kernel import scatter
 
         scatter(packet.exact[component], packet.row_positions, destination, prompt_length=n)
@@ -155,12 +162,14 @@ class FullPromptSourceFormat:
     repairs: tuple
     components: tuple = (0, 1)
     kind: str = "lossless_full_prompt_native_source_execution_variant"
+    fused_restore: bool = False
 
     def __post_init__(self):
         from mosaickv.evaluation.shared_source_format import SharedSourceFormat
 
         if (
             not isinstance(self.base, SharedSourceFormat)
+            or type(self.fused_restore) is not bool
             or type(self.components) is not tuple
             or any(type(c) is not int for c in self.components)
             or self.components not in tuple(POLICIES.values())
@@ -196,6 +205,22 @@ class FullPromptSourceFormat:
         return (*self.private(), *self.shared())
 
     @property
+    def exact(self):
+        return self.base.exact
+
+    @property
+    def row_positions(self):
+        return self.base.row_positions
+
+    @property
+    def transport_patches(self):
+        return self.repairs
+
+    @property
+    def protected_patches_disjoint(self):
+        return self.fused_restore and self.base.protected_patches_disjoint is True
+
+    @property
     def component_bytes(self):
         return backing_bytes(self.tensors())
 
@@ -210,8 +235,19 @@ class FullPromptSourceFormat:
             raise RuntimeError("native source requires a charged, layer-owned workspace")
         if component == self.components[0]:
             decode_into(self.base, workspace)
-        project_into(self.base, attention, component, destination, workspace)
-        apply_transport_patch(self.repairs[component], destination, prompt_length=self.shape[-2])
+        if self.fused_restore:
+            project_into(self.base, attention, component, destination, workspace, restore=False)
+            if destination.device.type == "cuda":
+                from mosaickv.evaluation.fused_source_restore import restore
+
+                restore(self, component, destination, record=False)
+            else:
+                restore_projected(self, component, destination)
+        else:
+            project_into(self.base, attention, component, destination, workspace)
+            apply_transport_patch(
+                self.repairs[component], destination, prompt_length=self.shape[-2]
+            )
 
     def fill(self, attention, targets, *, direct, workspace_observer=None):
         if not direct or len(targets) != 2:
@@ -300,6 +336,52 @@ class FeasibilityDeclined(RuntimeError):
         self.report = report
 
 
+def enable_fused_restore(candidate):
+    """Merge only constructor-proven DISJOINT bit patches; no change to math.
+
+    The base retains its original patches for provenance. Their duplicated
+    backing, if nonempty, remains explicitly included in private() accounting.
+    One host decision validates every range/uniqueness/overlap predicate.
+    """
+    if not candidate.base.transport_patches:
+        empty = SparseBitPatch(
+            torch.empty(0, device=candidate.base.cos.device, dtype=torch.int32),
+            torch.empty(0, device=candidate.base.cos.device, dtype=torch.bfloat16),
+        )
+        candidate = replace(
+            candidate,
+            base=replace(
+                candidate.base, transport_patches=(empty, empty), protected_patches_disjoint=True
+            ),
+        )
+    if candidate.fused_restore or candidate.base.protected_patches_disjoint is not True:
+        raise ValueError(
+            "unfused candidate with constructor-proven disjoint protected rows required"
+        )
+    merged, checks = [], []
+    size = candidate.shape[1] * candidate.shape[2] * candidate.shape[3]
+    for c in (0, 1):
+        new = candidate.repairs[c]
+        old = candidate.base.transport_patches[c]
+        indices = torch.cat((old.indices, new.indices))
+        values = torch.cat((old.values, new.values))
+        checks.extend(
+            [
+                ((indices >= 0) & (indices < size)).all().reshape(1),
+                (~torch.isin(indices // candidate.shape[-1], candidate.row_positions))
+                .all()
+                .reshape(1),
+            ]
+        )
+        # Metadata lengths are host-only; exact duplicate detection stays on device.
+        sorted_ids = indices.sort().values
+        checks.append((sorted_ids[1:] != sorted_ids[:-1]).all().reshape(1))
+        merged.append(SparseBitPatch(indices, values))
+    if not bool(torch.cat(checks).all()):
+        raise RuntimeError("overlapping, duplicate, protected or out-of-range fused patches")
+    return replace(candidate, repairs=tuple(merged), fused_restore=True)
+
+
 @torch.inference_mode()
 def convert(packets, attentions, policy):
     """Deterministic cheapest-repair layer subset, fixed 3 MiB total cap.
@@ -319,6 +401,8 @@ def convert(packets, attentions, policy):
         if not isinstance(base, SharedSourceFormat):
             continue
         candidate = fit(base, attention, POLICIES[policy])
+        if policy == "kv_fused_restore":
+            candidate = enable_fused_restore(candidate)
         cost = backing_bytes(tuple(t for p in candidate.repairs for t in p.tensors))
         candidates[index] = (
             replace(packet, base=candidate) if isinstance(packet, TextSourceFormat) else candidate
@@ -360,7 +444,7 @@ def convert(packets, attentions, policy):
     ), report
 
 
-def gpu_controls():
+def gpu_controls(*, policies=("kv", "v_only")):
     """Small real kernels; correctness evidence, never task quality evidence."""
     from types import SimpleNamespace
     from unittest.mock import patch
@@ -397,8 +481,11 @@ def gpu_controls():
     for component in (0, 1):
         fill_component(packet, attention, component, expected[component])
     cases = []
-    for policy, components in POLICIES.items():
+    for policy in policies:
+        components = POLICIES[policy]
         candidate = fit(packet, attention, components)
+        if policy == "kv_fused_restore":
+            candidate = enable_fused_restore(candidate)
         workspace = new_workspace(candidate, device)
         targets = tuple(
             torch.full((1, h, n + 11, d), -71, device=device, dtype=torch.bfloat16)

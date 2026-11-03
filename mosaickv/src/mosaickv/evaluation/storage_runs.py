@@ -324,6 +324,9 @@ def run(
         native_full_component_fills=sum(
             getattr(layer, "native_full_component_fills", 0) for layer in cache.layers
         ),
+        native_fused_restore_fills=sum(
+            getattr(layer, "native_fused_restore_fills", 0) for layer in cache.layers
+        ),
         segmented_history=segmented_history,
         sequential_source_history=sequential_source_history,
         segment_table_builds=getattr(cache, "segment_table_builds", 0),
