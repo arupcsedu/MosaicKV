@@ -90,6 +90,11 @@ def decode_into(packet, workspace):
         raise NotImplementedError("only CPU oracle and actual CUDA supported")
 
 
+def projection_product(workspace, weights, output):
+    """Unchanged default product; an isolated operator-study injection boundary."""
+    torch.bmm(workspace.expand(output.shape[0], -1, -1), weights, out=output)
+
+
 @torch.inference_mode()
 def project_into(packet, attention, component, destination, workspace):
     from mosaickv.evaluation.exact_storage import decoded
@@ -122,7 +127,7 @@ def project_into(packet, attention, component, destination, workspace):
         raise ValueError("native BF16 full-MHA weights, full source and strided lease required")
     weights = projection.weight.view(h, d, h * d).transpose(1, 2)
     output = destination[0, :, :n, :]
-    torch.bmm(workspace.expand(h, n, h * d), weights, out=output)
+    projection_product(workspace, weights, output)
     if component == 0:
         if output.device.type == "cuda":
             from mosaickv.evaluation.shared_source_kernel import rotate_native

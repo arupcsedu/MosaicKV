@@ -218,7 +218,7 @@ def begin(root, expected):
     submit_array(target, "feasibility", "feasibility_analysis")
 
 
-def setup(root, expected, index):
+def setup(root, expected, index, *, operator_study=False):
     import torch
 
     from mosaickv.adapters.huggingface import load_hf_adapter
@@ -291,6 +291,23 @@ def setup(root, expected, index):
             conversion_and_workspace_included=True,
         ),
     )
+    if operator_study:
+        manifest.update(
+            variant="consumed_source_reconstruction_operator_study",
+            methods=["mosaickv_exact"],
+            actual_timing_protocol=dict(
+                output_predictions=0,
+                warmups=5,
+                repetitions=20,
+                source_layers=[0, 16, 31],
+                history_padding=[0, 64, 127],
+                no_model_decode=True,
+                no_benchmark_scoring=True,
+                operator_intervals_not_complete_request_latency=True,
+                intermediates_excluded_from_uninstrumented_pipeline=True,
+                source_and_output_workspaces_explicitly_counted=True,
+            ),
+        )
     write_once(root / f"workers/{index}/manifest.json", manifest)
     adapter = load_hf_adapter(
         cfg.model.id,
