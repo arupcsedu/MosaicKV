@@ -351,7 +351,9 @@ def hotpath_activity(measured, method, policy):
             else measured["source_launch_hits"] == 0
         )
         and (
-            measured["fused_restore_calls"] > 0 and measured["fused_nonempty_calls"] > 0
+            measured["fused_restore_calls"] > 0
+            and type(measured["fused_nonempty_calls"]) is int
+            and 0 <= measured["fused_nonempty_calls"] <= measured["fused_restore_calls"]
             if source and restored
             else measured["fused_restore_calls"] == 0
         )

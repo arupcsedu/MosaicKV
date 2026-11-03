@@ -218,3 +218,12 @@ def test_registered_modes_and_activity_reject_unadvertised_fallbacks():
     assert not hotpath_activity(
         dict(metrics, fused_restore_calls=0), "mosaickv_exact", "prepared_restore"
     )
+    # MM-Vet's original packet has no numerical corrections. The nonempty
+    # protected-row scatter still executed 8,128 times; zero patches is valid.
+    assert hotpath_activity(
+        dict(metrics, fused_nonempty_calls=0), "mosaickv_exact", "prepared_restore"
+    )
+    for invalid in (-1, 11, True, None):
+        assert not hotpath_activity(
+            dict(metrics, fused_nonempty_calls=invalid), "mosaickv_exact", "prepared_restore"
+        )
