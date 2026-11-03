@@ -116,6 +116,7 @@ def instrument(adapter, timer):
             (source_history, "seal_source_full_tails", "history_sealing"),
             (consolidated_history, "consolidate", "history_consolidation"),
             (layer_code_delta.Replay, "view", "code_replay"),
+            (layer_code_delta.Replay, "__init__", "code_replay_setup"),
         ):
             stack.enter_context(patch.object(owner, name, timer.wrap(label, getattr(owner, name))))
         yield dict(counts=calls, progress=state)

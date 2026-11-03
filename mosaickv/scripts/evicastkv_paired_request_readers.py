@@ -215,6 +215,10 @@ def precheck(root, expected):
         torch.use_deterministic_algorithms(True)
         with use_dispatch(True) as state:
             controls = gpu_controls("carry_literals", repeat_projection=True)
+        if plan["paired_reader_stage"] == "descriptor":
+            from mosaickv.evaluation.replay_descriptor_policy import gpu_controls as replay_controls
+
+            result["replay_descriptor_controls"] = replay_controls()
         if state["hits"] <= 0 or state["handles"]:
             raise RuntimeError("compiled hit or request cleanup control missing")
         result.update(
@@ -246,6 +250,21 @@ def begin(root, expected):
             or result["hits"] <= 0
         ):
             raise ValueError("compiled reader controls failed")
+        if plan["paired_reader_stage"] == "descriptor":
+            proof = result["replay_descriptor_controls"]
+            if (
+                proof["descriptor_preparations"] != 32
+                or proof["descriptor_reuses"] != 96
+                or not all(
+                    proof[k] is True
+                    for k in (
+                        "backing_bytes_identical",
+                        "private_scratch_disjoint",
+                        "code_bits_identical",
+                    )
+                )
+            ):
+                raise ValueError("actual GPU descriptor/ownership controls failed")
     except (OSError, ValueError, KeyError) as exc:
         write_once(root / "precheck/blocked.json", dict(error=str(exc), paired_GPU_submitted=False))
         return
@@ -293,13 +312,15 @@ def assert_request(logits, measured, reference, *, expected_counter=None):
 
 def mode_config(plan, mode):
     if (
-        plan["paired_reader_stage"] not in ("reader", "dispatch")
+        plan["paired_reader_stage"] not in ("reader", "dispatch", "descriptor")
         or mode not in plan["reader_modes"]
     ):
         raise ValueError("unregistered request mode")
     return (
         (mode, False)
         if plan["paired_reader_stage"] == "reader"
+        else (plan["selected_reader"], plan["base_dispatch"])
+        if plan["paired_reader_stage"] == "descriptor"
         else (plan["selected_reader"], mode == "reused_dispatch")
     )
 
@@ -429,6 +450,8 @@ def worker(root, expected, index):
                 construction_geometry=plan.get("construction_geometry"),
                 reconstruction_readers=reader,
                 reuse_kernel_dispatch=reuse,
+                reuse_code_descriptors=plan["paired_reader_stage"] == "descriptor"
+                and mode == "reused_descriptors",
                 audit_decode_storage=audit,
             )
             try:
@@ -463,7 +486,7 @@ def worker(root, expected, index):
         # Physical peak parity is measured with tensor auditing ON, outside
         # latency. Fast counters are separately registered in the same ON/OFF
         # instrumentation category, never substituted for audited peak data.
-        control_methods = sorted(refs) if plan["paired_reader_stage"] == "dispatch" else METHODS
+        control_methods = sorted(refs) if plan["paired_reader_stage"] != "reader" else METHODS
         checks, audit_rows = [], []
         for method in control_methods:
             for mode in plan["reader_modes"]:
@@ -490,6 +513,10 @@ def worker(root, expected, index):
                     logits_bitwise=True,
                     accounting_identical=True,
                     dispatch_hits=audit_rows[-1]["measured"]["dispatch_hits"],
+                    descriptor_reuses=audit_rows[-1]["measured"]["replay_descriptor_reuses"],
+                    descriptor_preparations=audit_rows[-1]["measured"][
+                        "replay_descriptor_preparations"
+                    ],
                     audited_storage_boundaries={
                         k: audit_rows[-1]["measured"][k] for k, _ in STORAGE_FIELDS
                     },
@@ -512,7 +539,7 @@ def worker(root, expected, index):
             ),
         )
         audit_sha = sha(out / "audited_storage_controls.json")
-        if plan["paired_reader_stage"] == "dispatch":
+        if plan["paired_reader_stage"] != "reader":
             write_once(out / "all_method_controls.json", dict(rows=checks))
 
         for entry in order(plan["seed"] + index, readers=tuple(plan["reader_modes"])):
@@ -659,6 +686,15 @@ def read_producers(root, plan, expected):
                 for r in rows
             ):
                 raise ValueError("recorded request mode differs from registered policy")
+            if any(
+                r["reuse_code_descriptors"]
+                != (
+                    plan["paired_reader_stage"] == "descriptor"
+                    and r["reader"] == "reused_descriptors"
+                )
+                for r in rows
+            ):
+                raise ValueError("recorded descriptor mode differs from registered policy")
             summaries.append(summarize(rows, plan["seed"] + i, readers=tuple(plan["reader_modes"])))
             group = [json.loads(x) for x in (folder / "profiles.jsonl").read_text().splitlines()]
             if len(group) != 4 or {(r["method"], r["reader"]) for r in group} != {
@@ -681,7 +717,7 @@ def read_producers(root, plan, expected):
                     if not any(r["branch"] == required and r["calls"] > 0 for r in branches):
                         raise ValueError("requested reader did not engage in every window")
                 profiles.append(row)
-            if plan["paired_reader_stage"] == "dispatch":
+            if plan["paired_reader_stage"] != "reader":
                 checks = common.previous.read(folder / "all_method_controls.json")["rows"]
                 from mosaickv.evaluation.common_streaming_timing import METHODS as ALL_METHODS
 
@@ -689,7 +725,18 @@ def read_producers(root, plan, expected):
                     len(checks) != 5
                     or {r["method"] for r in checks} != set(ALL_METHODS)
                     or not all(
-                        r["logits_bitwise"] and r["accounting_identical"] and r["dispatch_hits"] > 0
+                        r["logits_bitwise"]
+                        and r["accounting_identical"]
+                        and (
+                            r["dispatch_hits"] > 0
+                            if plan["paired_reader_stage"] == "dispatch"
+                            else (
+                                r["descriptor_reuses"] > 0 and r["descriptor_preparations"] == 32
+                                if r["method"] in plan.get("code_delta_methods", [])
+                                else r["descriptor_reuses"] == 0
+                                and r["descriptor_preparations"] == 0
+                            )
+                        )
                         for r in checks
                     )
                 ):
@@ -742,7 +789,7 @@ def analyze(root, expected):
         and min(host_projection) >= 0.1
     )
     improved = (
-        plan["paired_reader_stage"] == "dispatch"
+        plan["paired_reader_stage"] in ("dispatch", "descriptor")
         and not failures
         and len(summaries) == 2
         and all(
@@ -762,7 +809,9 @@ def analyze(root, expected):
         else plan["selected_reader"],
         label_blind_host_projection_opportunity_seconds=host_projection,
         conditional_dispatch_attempt_authorized=reuse_eligible,
-        dispatch_end_to_end_improvement_gate=improved,
+        dispatch_end_to_end_improvement_gate=improved and plan["paired_reader_stage"] == "dispatch",
+        descriptor_end_to_end_improvement_gate=improved
+        and plan["paired_reader_stage"] == "descriptor",
         independent_quality_N=0,
         paper_superiority_established=False,
         fresh_or_large_campaign_submitted=False,
@@ -811,7 +860,8 @@ def analyze(root, expected):
                 bound_files=bound,
                 paired_common_streaming_timing=True,
                 reconstruction_readers=plan["selected_reader"],
-                reuse_kernel_dispatch=True,
+                reuse_kernel_dispatch=plan.get("base_dispatch", True),
+                reuse_code_descriptors=plan["paired_reader_stage"] == "descriptor",
                 audited_storage_companions=companions,
                 expected_storage_boundaries={
                     str(i): {
@@ -864,6 +914,7 @@ def closeout(root, decision, *, path=None):
             final_decision=str(path or root / "analysis/decision.json"),
             source_sha=plan["source_sha"],
             automatic_dispatch_attempts=1 if plan["paired_reader_stage"] == "dispatch" else 0,
+            automatic_descriptor_attempts=1 if plan["paired_reader_stage"] == "descriptor" else 0,
             independent_quality_N=0,
             paper_superiority_established=False,
             fresh_or_large_campaign_submitted=False,

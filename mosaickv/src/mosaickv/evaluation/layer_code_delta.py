@@ -138,7 +138,31 @@ class Replay:
 
             map_bodies(packet.template, collect)
 
+        from mosaickv.evaluation.replay_descriptor_policy import current
+
+        self.descriptor_metrics = current()
+        self.prepared_views, self.prepared_bindings = None, None
+        if self.descriptor_metrics is not None:
+            views, bindings = [], []
+            for packet in self.packets:
+                prepared = []
+
+                def prepare(role, encoded, *, prepared=prepared):
+                    if not isinstance(encoded, EncodedBody):
+                        raise ValueError("immutable encoded metadata required")
+                    stream = encoded.stream
+                    codes = stream.payload if stream.raw else self.scratch[role][: stream.length]
+                    prepared.append((role, encoded, codes))
+                    return replace(encoded.metadata, codes=codes)
+
+                views.append(map_bodies(packet.template, prepare))
+                bindings.append(tuple(prepared))
+            self.prepared_views, self.prepared_bindings = tuple(views), tuple(bindings)
+            self.descriptor_metrics["prepared_formats"] += len(views)
+
     def view(self, index):
+        if type(index) is not int or not 0 <= index < len(self.packets):
+            raise ValueError("valid private replay layer index required")
         if index == self.last:
             return self.current
         if index != (self.last + 1) % len(self.packets):
@@ -147,17 +171,34 @@ class Replay:
             self.previous = {}
         current = {}
 
-        def body(role, encoded):
-            stream = encoded.stream
-            codes = (
-                stream.payload
-                if stream.raw
-                else decode(self.previous.get(role), stream, self.scratch[role][: stream.length])
-            )
-            current[role] = codes
-            return replace(encoded.metadata, codes=codes)
+        if self.prepared_views is None:
 
-        self.current = map_bodies(self.packets[index].template, body)
+            def body(role, encoded):
+                stream = encoded.stream
+                codes = (
+                    stream.payload
+                    if stream.raw
+                    else decode(
+                        self.previous.get(role), stream, self.scratch[role][: stream.length]
+                    )
+                )
+                current[role] = codes
+                return replace(encoded.metadata, codes=codes)
+
+            self.current = map_bodies(self.packets[index].template, body)
+        else:
+            for role, encoded, destination in self.prepared_bindings[index]:
+                stream = encoded.stream
+                codes = (
+                    stream.payload
+                    if stream.raw
+                    else decode(self.previous.get(role), stream, destination)
+                )
+                if codes.data_ptr() != destination.data_ptr() or codes.shape != destination.shape:
+                    raise RuntimeError("codec returned a foreign replay destination")
+                current[role] = codes
+            self.current = self.prepared_views[index]
+            self.descriptor_metrics["reused_formats"] += 1
         self.previous, self.last = current, index
         return self.current
 

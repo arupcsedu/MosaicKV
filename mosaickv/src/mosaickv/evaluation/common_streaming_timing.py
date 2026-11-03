@@ -51,9 +51,11 @@ def request(
     reconstruction_readers="original",
     reuse_kernel_dispatch=False,
     audit_decode_storage=False,
+    reuse_code_descriptors=False,
 ):
     from mosaickv.evaluation.lossless_prompt_cache import backing_bytes
     from mosaickv.evaluation.reconstruction_policy import use, validate
+    from mosaickv.evaluation.replay_descriptor_policy import use as use_descriptors
     from mosaickv.evaluation.request_kernel_dispatch import use_dispatch
     from mosaickv.evaluation.storage_runs import run
     from mosaickv.evaluation.streaming_baselines import SelectedRetiringCache, StreamingBaseline
@@ -134,7 +136,11 @@ def request(
             raise RuntimeError("registered beneficial source codec did not reduce storage")
     torch.cuda.synchronize()
     constructed_at = time.monotonic()
-    with use(reconstruction_readers), use_dispatch(reuse_kernel_dispatch) as dispatch:
+    with (
+        use(reconstruction_readers),
+        use_dispatch(reuse_kernel_dispatch) as dispatch,
+        use_descriptors(reuse_code_descriptors) as descriptors,
+    ):
         values, details = run(
             adapter,
             runtime,
@@ -178,6 +184,11 @@ def request(
             construction_geometry=construction_geometry,
             reconstruction_readers=reconstruction_readers,
             reuse_kernel_dispatch=reuse_kernel_dispatch,
+            reuse_code_descriptors=reuse_code_descriptors,
+            replay_descriptor_preparations=0
+            if descriptors is None
+            else descriptors["prepared_formats"],
+            replay_descriptor_reuses=0 if descriptors is None else descriptors["reused_formats"],
             dispatch_hits=0 if dispatch is None else dispatch["hits"],
             dispatch_misses=0 if dispatch is None else dispatch["misses"],
             source_geometry_applied_layers=geometry_layers,

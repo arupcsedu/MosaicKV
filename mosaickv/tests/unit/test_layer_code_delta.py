@@ -37,8 +37,7 @@ def cpu_decode(previous, packet, destination=None):
     return destination
 
 
-@pytest.fixture
-def packets(monkeypatch):
+def make_packets(monkeypatch):
     monkeypatch.setattr(runtime, "encode", cpu_encode)
     monkeypatch.setattr(runtime, "decode", cpu_decode)
     output = []
@@ -58,6 +57,11 @@ def packets(monkeypatch):
             )
         )
     return tuple(output)
+
+
+@pytest.fixture
+def packets(monkeypatch):
+    return make_packets(monkeypatch)
 
 
 def test_exact_replay_accounting_and_request_isolation(packets):

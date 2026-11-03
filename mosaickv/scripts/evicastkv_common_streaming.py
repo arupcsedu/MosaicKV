@@ -622,6 +622,15 @@ def timing_worker(root, expected, index, adapter, plan, job, payload, timing_con
         disk_media_and_model_loading_excluded=True,
         shared_encoded_byte_budget_claim=False,
         physical_peak_evidence=plan.get("audited_storage_companions", "requires_separate_audit"),
+        evaluator="not_used_timing_and_bitwise_parent_controls_only",
+        quality_metrics="not_recomputed",
+        actual_timing_protocol=dict(
+            order="randomized_same_engine_method_blocks",
+            warmups=5,
+            repetitions=20,
+            output_predictions=128,
+            tensor_result_auditing=False,
+        ),
     )
     manifest.update(scheduler_identity(manifest))
     write_once(out / "manifest.json", manifest)
@@ -662,6 +671,7 @@ def timing_worker(root, expected, index, adapter, plan, job, payload, timing_con
             construction_geometry=plan.get("construction_geometry"),
             reconstruction_readers=plan.get("reconstruction_readers", "original"),
             reuse_kernel_dispatch=plan.get("reuse_kernel_dispatch", False),
+            reuse_code_descriptors=plan.get("reuse_code_descriptors", False),
         )
         if not torch.equal(values, reference["logits"]):
             raise RuntimeError("timed request changed frozen 128-token vocabulary logits")
