@@ -15,6 +15,7 @@ import torch
 from mosaickv.evaluation.exact_storage import ExactFormat, ExactLayer, decoded
 from mosaickv.evaluation.head_local_precision import HeadLocalFormat
 from mosaickv.evaluation.precision_tier import PrecisionFormat
+from mosaickv.evaluation.prompt_source_subphases import phase as source_phase
 from mosaickv.evaluation.shared_source_format import SharedSourceFormat
 from mosaickv.evaluation.text_source_storage import TextSourceFormat
 
@@ -27,8 +28,9 @@ def fill_component(packet, attention, component, destination, *, source_workspac
     if isinstance(packet, BoundDeltaFormat):
         packet.fill_component(attention, component, destination)
         return
-    n = packet.shape[-2]
-    prefix = destination[..., :n, :]
+    with source_phase("indexing_views"):
+        n = packet.shape[-2]
+        prefix = destination[..., :n, :]
     from mosaickv.evaluation.encoded_projection import EncodedFormat
 
     if isinstance(packet, EncodedFormat):

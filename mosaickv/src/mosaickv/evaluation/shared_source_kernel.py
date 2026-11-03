@@ -7,6 +7,8 @@ source or separate K/V temporary is allocated in GPU global memory.
 import triton
 import triton.language as tl
 
+from mosaickv.evaluation.prompt_source_subphases import phase as source_phase
+
 
 @triton.jit
 def _read(
@@ -141,51 +143,51 @@ def _project(
 def project(packet, attention, targets, *, component=-1, inspect_kernel=False):
     import torch
 
-    if type(component) is not int or component not in (-1, 0, 1):
-        raise ValueError("explicit both/key/value projection component required")
-    h, n, d = packet.shape[1:]
-    head_group = getattr(packet, "source_head_group", 1)
-    row_tile = getattr(packet, "source_row_tile", 16)
-    if type(row_tile) is not int or row_tile not in (16, 32, 64):
-        raise ValueError("explicit supported row tile required")
-    if type(head_group) is not int or head_group not in (1, 2, 4) or h % head_group:
-        raise ValueError("divisible audited head group of one, two or four required")
-    warps = getattr(packet, "source_num_warps", None)
-    if warps is None:
-        warps = 8 if head_group == 4 else 4
-    if type(warps) is not int or warps not in (4, 8, 16):
-        raise ValueError("explicit supported warp count required")
-    body = packet.source
-    from mosaickv.evaluation.source_channel_exceptions import kernel_arguments
+    with source_phase("validation"):
+        if type(component) is not int or component not in (-1, 0, 1):
+            raise ValueError("explicit both/key/value projection component required")
+        h, n, d = packet.shape[1:]
+        head_group = getattr(packet, "source_head_group", 1)
+        row_tile = getattr(packet, "source_row_tile", 16)
+        if type(row_tile) is not int or row_tile not in (16, 32, 64):
+            raise ValueError("explicit supported row tile required")
+        if type(head_group) is not int or head_group not in (1, 2, 4) or h % head_group:
+            raise ValueError("divisible audited head group of one, two or four required")
+        warps = getattr(packet, "source_num_warps", None)
+        if warps is None:
+            warps = 8 if head_group == 4 else 4
+        if type(warps) is not int or warps not in (4, 8, 16):
+            raise ValueError("explicit supported warp count required")
+        body = packet.source
+        from mosaickv.evaluation.source_channel_exceptions import kernel_arguments
 
-    column_map, column_values, has_columns = kernel_arguments(packet)
-    width = body.shape[-1]
-    if body.bits != 3 or body.axis != 2 or body.group != 128 or width != h * d or d != 128:
-        raise ValueError("audited three-bit per-channel full-MHA source required")
-    if any(t.stride(-1) != 1 or t.stride(-2) != d for t in targets) or targets[0].stride(
-        1
-    ) != targets[1].stride(1):
-        raise ValueError("compatible existing strided K/V leases required")
-    if (
-        attention.k_proj.bias is not None
-        or attention.v_proj.bias is not None
-        or not attention.k_proj.weight.is_contiguous()
-        or not attention.v_proj.weight.is_contiguous()
-        or any(
-            weight.shape != (h * d, width)
-            or weight.dtype != torch.bfloat16
-            or weight.device != body.codes.device
-            for weight in (attention.k_proj.weight, attention.v_proj.weight)
-        )
-    ):
-        raise ValueError("unchanged contiguous bias-free native projection weights required")
+        column_map, column_values, has_columns = kernel_arguments(packet)
+        width = body.shape[-1]
+        if body.bits != 3 or body.axis != 2 or body.group != 128 or width != h * d or d != 128:
+            raise ValueError("audited three-bit per-channel full-MHA source required")
+        if any(t.stride(-1) != 1 or t.stride(-2) != d for t in targets) or targets[0].stride(
+            1
+        ) != targets[1].stride(1):
+            raise ValueError("compatible existing strided K/V leases required")
+        if (
+            attention.k_proj.bias is not None
+            or attention.v_proj.bias is not None
+            or not attention.k_proj.weight.is_contiguous()
+            or not attention.v_proj.weight.is_contiguous()
+            or any(
+                weight.shape != (h * d, width)
+                or weight.dtype != torch.bfloat16
+                or weight.device != body.codes.device
+                for weight in (attention.k_proj.weight, attention.v_proj.weight)
+            )
+        ):
+            raise ValueError("unchanged contiguous bias-free native projection weights required")
     from mosaickv.evaluation.reconstruction_policy import reuse_headers
     from mosaickv.evaluation.request_kernel_dispatch import launch
 
-    compiled = launch(
-        _project,
-        (triton.cdiv(n, row_tile), h // head_group),
-        (
+    with source_phase("indexing_views"):
+        grid = (triton.cdiv(n, row_tile), h // head_group)
+        arguments = (
             body.codes,
             body.minimum,
             body.scale,
@@ -198,19 +200,22 @@ def project(packet, attention, targets, *, component=-1, inspect_kernel=False):
             *targets,
             n,
             targets[0].stride(1),
-        ),
-        WIDTH=width,
-        DIM=d,
-        BITS=3,
-        COMPONENT=component,
-        HEAD_GROUP=head_group,
-        HAS_COLUMNS=has_columns,
-        ROW_TILE=row_tile,
-        REUSE_HEADERS=reuse_headers(),
-        num_warps=warps,
-        num_stages={1: 3, 2: 2, 4: 1}[head_group],
-        enable_fp_fusion=False,
-    )
+        )
+        options = dict(
+            WIDTH=width,
+            DIM=d,
+            BITS=3,
+            COMPONENT=component,
+            HEAD_GROUP=head_group,
+            HAS_COLUMNS=has_columns,
+            ROW_TILE=row_tile,
+            REUSE_HEADERS=reuse_headers(),
+            num_warps=warps,
+            num_stages={1: 3, 2: 2, 4: 1}[head_group],
+            enable_fp_fusion=False,
+        )
+    with source_phase("projection_dispatch"):
+        compiled = launch(_project, grid, arguments, **options)
     if inspect_kernel:
         return dict(
             registers=getattr(compiled, "n_regs", None),

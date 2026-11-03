@@ -3,6 +3,8 @@
 import triton
 import triton.language as tl
 
+from mosaickv.evaluation.prompt_source_subphases import phase as source_phase
+
 
 @triton.jit(do_not_specialize=["COUNT", "N", "HEAD_OUT"])
 def _scatter_flat(
@@ -47,16 +49,21 @@ def _scatter_flat(
 def scatter(body, positions, target, *, prompt_length):
     import torch
 
-    buffers = (body.buffers[0].view(torch.uint16),) * 5 if body.raw else body.buffers
-    count = body.shape[-2] * body.shape[-1]
-    _scatter_flat[(triton.cdiv(count, 1024),)](
-        *buffers,
-        positions,
-        target.view(torch.uint16),
-        count,
-        prompt_length,
-        target.stride(1),
-        D=body.shape[-1],
-        RAW=body.raw,
-        BLOCK=1024,
-    )
+    with source_phase("indexing_views"):
+        buffers = (body.buffers[0].view(torch.uint16),) * 5 if body.raw else body.buffers
+        count = body.shape[-2] * body.shape[-1]
+        output = target.view(torch.uint16)
+        stride = target.stride(1)
+        grid = (triton.cdiv(count, 1024),)
+    with source_phase("protected_restore_dispatch"):
+        _scatter_flat[grid](
+            *buffers,
+            positions,
+            output,
+            count,
+            prompt_length,
+            stride,
+            D=body.shape[-1],
+            RAW=body.raw,
+            BLOCK=1024,
+        )

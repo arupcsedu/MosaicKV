@@ -9,6 +9,8 @@ from typing import Any
 import triton
 import triton.language as tl
 
+from mosaickv.evaluation.prompt_source_subphases import phase as source_phase
+
 
 @triton.jit(do_not_specialize=["ROWS", "MAP_STRIDE", "HEAD_OUT"])
 def _project(
@@ -139,15 +141,21 @@ def project(source: Any, attention: Any, archive: Any, slots: Any, targets: Any)
 def apply_patch(patch: Any, target: Any) -> None:
     import torch
 
-    count = patch.indices.numel()
+    with source_phase("validation"):
+        count = patch.indices.numel()
     if count:
-        _patch[(triton.cdiv(count, 256),)](
-            patch.indices,
-            patch.values.view(torch.int16),
-            target.view(torch.int16),
-            COUNT=count,
-            KEPT=target.shape[-2],
-            HEAD_OUT=target.stride(-3),
-            DIM=target.shape[-1],
-            BLOCK=256,
-        )
+        with source_phase("indexing_views"):
+            values, output = patch.values.view(torch.int16), target.view(torch.int16)
+            kept, head_out, dim = target.shape[-2], target.stride(-3), target.shape[-1]
+            grid = (triton.cdiv(count, 256),)
+        with source_phase("correction_dispatch"):
+            _patch[grid](
+                patch.indices,
+                values,
+                output,
+                COUNT=count,
+                KEPT=kept,
+                HEAD_OUT=head_out,
+                DIM=dim,
+                BLOCK=256,
+            )
