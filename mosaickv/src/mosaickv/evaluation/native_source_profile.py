@@ -95,13 +95,13 @@ class Events:
 @contextmanager
 def product_mode(mode, *, timer=None):
     """Isolated study only. The production packet format/default stays unchanged."""
-    if mode not in (*PRODUCTS, "fused"):
+    if mode not in (*PRODUCTS, "fused", "prepared"):
         raise ValueError("registered product required")
     original = native.projection_product
     buffers = []
 
     def product(workspace, weights, output):
-        if mode in ("bmm", "fused"):
+        if mode in ("bmm", "fused", "prepared"):
             if timer is None:
                 return original(workspace, weights, output)
             return timer.call("product", original, workspace, weights, output)
@@ -181,6 +181,24 @@ def aggregate(records):
 
 @torch.inference_mode()
 def study(base, attention, layer, padding, *, seed, products=PRODUCTS):
+    from mosaickv.evaluation.native_execution_plan import use
+
+    # One private session for the repeated consumed-layer replay, not a global
+    # cache. Other arms explicitly suspend it, including during fitting.
+    with use("prepared" in products) as plan:
+        result = _study(base, attention, layer, padding, seed=seed, products=products)
+        result["prepared_activity"] = (
+            None
+            if plan is None
+            else {k: v for k, v in plan.items() if k not in ("weights", "restores")}
+        )
+    if plan is not None and (plan["weights"] or plan["restores"]):
+        raise RuntimeError("operator study leaked native execution aliases")
+    return result
+
+
+def _study(base, attention, layer, padding, *, seed, products):
+    from mosaickv.evaluation.native_execution_plan import suspend
     from mosaickv.evaluation.sequential_kv_lease import fill_component
 
     shape = (*base.shape[:2], base.shape[-2] + padding, base.shape[-1])
@@ -192,9 +210,9 @@ def study(base, attention, layer, padding, *, seed, products=PRODUCTS):
         fill_component(base, attention, c, reference[c])
     candidates, correctness = {}, {}
     for mode in products:
-        with product_mode(mode):
+        with product_mode(mode), suspend(mode != "prepared"):
             candidate = native.fit(base, attention, (0, 1))
-            if mode == "fused":
+            if mode in ("fused", "prepared"):
                 candidate = native.enable_fused_restore(candidate)
             workspace = native.new_workspace(candidate, base.cos.device)
             for c in (0, 1):
@@ -212,7 +230,7 @@ def study(base, attention, layer, padding, *, seed, products=PRODUCTS):
                 repair_bytes=backing_bytes(tuple(t for p in candidate.repairs for t in p.tensors)),
                 source_workspace_bytes=source,
                 extra_output_workspace_bytes=0
-                if mode in ("bmm", "fused")
+                if mode in ("bmm", "fused", "prepared")
                 else (min(base.shape[-2], 128) if mode == "wide_128" else base.shape[-2])
                 * base.shape[1]
                 * base.shape[-1]
@@ -231,7 +249,7 @@ def study(base, attention, layer, padding, *, seed, products=PRODUCTS):
             return native.new_workspace(candidate, base.cos.device)
 
         workspace = allocate() if timer is None else timer.call("workspace_allocate", allocate)
-        with product_mode(mode, timer=timer) as buffers:
+        with product_mode(mode, timer=timer) as buffers, suspend(mode != "prepared"):
             with instrument(timer, candidate) if timer is not None else ExitStack():
                 for c in (0, 1):
                     candidate.fill_component(attention, c, targets[c], workspace)

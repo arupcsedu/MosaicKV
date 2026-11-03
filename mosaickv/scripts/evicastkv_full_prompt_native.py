@@ -371,11 +371,19 @@ def execute(
         raise RuntimeError("ineligible/original packet silently used native projection")
     expected_fused = (
         measured["native_full_component_fills"]
-        if policy == "kv_fused_restore" and method == "mosaickv_exact"
+        if policy in ("kv_fused_restore", "kv_fused_prepared") and method == "mosaickv_exact"
         else 0
     )
     if measured["native_fused_restore_fills"] != expected_fused:
         raise RuntimeError("fused native restore activity did not match constructed policy")
+    if policy == "kv_fused_prepared" and method == "mosaickv_exact":
+        misses = 2 * len(report["converted_layers"])
+        if any(
+            measured[f"native_plan_{kind}_misses"] != misses
+            or measured[f"native_plan_{kind}_hits"] != expected_fused - misses
+            for kind in ("weight", "restore")
+        ):
+            raise RuntimeError("request-private native plans did not engage at every decode step")
     measured.update(
         logits_bitwise=True,
         torch_peak_allocated=torch.cuda.max_memory_allocated(),

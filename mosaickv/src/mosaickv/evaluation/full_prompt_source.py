@@ -12,7 +12,7 @@ import torch
 from mosaickv.evaluation.exact_storage import SparseBitPatch
 from mosaickv.evaluation.lossless_prompt_cache import backing_bytes
 
-POLICIES = {"kv": (0, 1), "v_only": (1,), "kv_fused_restore": (0, 1)}
+POLICIES = {"kv": (0, 1), "v_only": (1,), "kv_fused_restore": (0, 1), "kv_fused_prepared": (0, 1)}
 MAXIMUM_REPAIR_BYTES = 3 * 2**20
 
 
@@ -122,7 +122,9 @@ def project_into(packet, attention, component, destination, workspace, *, restor
         or projection.weight.device != workspace.device
     ):
         raise ValueError("native BF16 full-MHA weights, full source and strided lease required")
-    weights = projection.weight.view(h, d, h * d).transpose(1, 2)
+    from mosaickv.evaluation.native_execution_plan import weight_view
+
+    weights = weight_view(projection.weight, h, d)
     output = destination[0, :, :n, :]
     projection_product(workspace, weights, output)
     if component == 0:
@@ -238,9 +240,9 @@ class FullPromptSourceFormat:
         if self.fused_restore:
             project_into(self.base, attention, component, destination, workspace, restore=False)
             if destination.device.type == "cuda":
-                from mosaickv.evaluation.fused_source_restore import restore
+                from mosaickv.evaluation.native_execution_plan import restore
 
-                restore(self, component, destination, record=False)
+                restore(self, component, destination)
             else:
                 restore_projected(self, component, destination)
         else:
@@ -401,7 +403,7 @@ def convert(packets, attentions, policy):
         if not isinstance(base, SharedSourceFormat):
             continue
         candidate = fit(base, attention, POLICIES[policy])
-        if policy == "kv_fused_restore":
+        if policy in ("kv_fused_restore", "kv_fused_prepared"):
             candidate = enable_fused_restore(candidate)
         cost = backing_bytes(tuple(t for p in candidate.repairs for t in p.tensors))
         candidates[index] = (
@@ -484,7 +486,7 @@ def gpu_controls(*, policies=("kv", "v_only")):
     for policy in policies:
         components = POLICIES[policy]
         candidate = fit(packet, attention, components)
-        if policy == "kv_fused_restore":
+        if policy in ("kv_fused_restore", "kv_fused_prepared"):
             candidate = enable_fused_restore(candidate)
         workspace = new_workspace(candidate, device)
         targets = tuple(
@@ -497,7 +499,12 @@ def gpu_controls(*, policies=("kv", "v_only")):
             calls.append(destination.data_ptr())
             original_decode(base, destination)
 
-        with patch(__name__ + ".decode_into", counted):
+        from mosaickv.evaluation.native_execution_plan import use as use_native_plan
+
+        with (
+            patch(__name__ + ".decode_into", counted),
+            use_native_plan(policy == "kv_fused_prepared"),
+        ):
             for component in (0, 1):
                 candidate.fill_component(attention, component, targets[component], workspace)
         if calls != [workspace.data_ptr()]:

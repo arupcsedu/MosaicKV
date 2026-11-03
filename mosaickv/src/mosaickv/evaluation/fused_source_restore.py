@@ -62,7 +62,7 @@ def _restore(
         )
 
 
-def restore(packet, component, target, *, record=True):
+def restore(packet, component, target, *, record=True, launcher=None):
     import torch
 
     from mosaickv.evaluation.prompt_source_subphases import phase
@@ -92,7 +92,7 @@ def restore(packet, component, target, *, record=True):
         values, output = patch.values.view(torch.uint16), target.view(torch.uint16)
         grid = (triton.cdiv(count, 1024) + triton.cdiv(patches, 256),)
     with phase("protected_restore_dispatch"):
-        compiled = _restore[grid](
+        arguments = (
             *buffers,
             packet.row_positions,
             patch.indices,
@@ -102,11 +102,15 @@ def restore(packet, component, target, *, record=True):
             patches,
             n,
             target.stride(1),
-            D=d,
-            RAW=body.raw,
-            num_warps=4,
+        )
+        options = dict(D=d, RAW=body.raw, num_warps=4)
+        compiled = (
+            _restore[grid](*arguments, **options)
+            if launcher is None
+            else launcher(_restore, grid, arguments, options)
         )
     if getattr(compiled.metadata, "global_scratch_size", None) != 0:
         raise RuntimeError("fused restore cannot allocate opaque global scratch")
     if record:
         record_restore(patches)
+    return compiled

@@ -10,6 +10,6 @@ export OMP_NUM_THREADS=2 OPENBLAS_NUM_THREADS=2 MKL_NUM_THREADS=2
 export TRITON_CACHE_DIR="$MOSAICKV_CACHE_ROOT/triton/native-restore-${SLURM_JOB_ID:?}-${SLURM_ARRAY_TASK_ID:-cpu}"
 bash mosaickv/scripts/assert_clean_worktree.sh
 if [[ "$4" == prepare ]]; then
- exec /scratch/djy8hg/env/mosaickv/bin/python mosaickv/scripts/evicastkv_native_restore_followup.py prepare --root "$2" --source-sha "$3"
+ exec /scratch/djy8hg/env/mosaickv/bin/python mosaickv/scripts/evicastkv_native_restore_followup.py prepare --root "$2" --source-sha "$3" --candidate "${5:-fused}"
 fi
 exec /scratch/djy8hg/env/mosaickv/bin/python mosaickv/scripts/evicastkv_native_restore_followup.py "$4" --root "$2" --plan-sha "$3"

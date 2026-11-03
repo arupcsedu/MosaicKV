@@ -56,6 +56,7 @@ def request(
     full_prompt_native=None,
 ):
     from mosaickv.evaluation.lossless_prompt_cache import backing_bytes
+    from mosaickv.evaluation.native_execution_plan import use as native_plan
     from mosaickv.evaluation.reconstruction_policy import use, validate
     from mosaickv.evaluation.replay_descriptor_policy import use as use_descriptors
     from mosaickv.evaluation.request_kernel_dispatch import use_dispatch
@@ -162,6 +163,7 @@ def request(
         use_dispatch(reuse_kernel_dispatch) as dispatch,
         use_descriptors(reuse_code_descriptors) as descriptors,
         source_plan(source_hotpath) as hotpath,
+        native_plan(full_prompt_native == "kv_fused_prepared") as prepared_native,
     ):
         values, details = run(
             adapter,
@@ -215,6 +217,18 @@ def request(
             native_full_source_decodes=details["storage"].get("native_full_source_decodes", 0),
             native_full_component_fills=details["storage"].get("native_full_component_fills", 0),
             native_fused_restore_fills=details["storage"].get("native_fused_restore_fills", 0),
+            native_plan_weight_hits=0
+            if prepared_native is None
+            else prepared_native["weight_hits"],
+            native_plan_weight_misses=0
+            if prepared_native is None
+            else prepared_native["weight_misses"],
+            native_plan_restore_hits=0
+            if prepared_native is None
+            else prepared_native["restore_hits"],
+            native_plan_restore_misses=0
+            if prepared_native is None
+            else prepared_native["restore_misses"],
             source_launch_hits=0 if hotpath is None else hotpath["source_hits"],
             source_launch_misses=0 if hotpath is None else hotpath["source_misses"],
             fused_restore_calls=0 if hotpath is None else hotpath["fused_restore_calls"],

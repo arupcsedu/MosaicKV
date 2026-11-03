@@ -20,12 +20,21 @@ SCRIPT = SOURCE / "mosaickv/slurm/evicastkv_native_restore_followup.sbatch"
 DOC = SOURCE / "mosaickv/docs/native_restore_followup_20261103.md"
 
 
-def prepare(root, revision):
+def prepare(root, revision, *, candidate="fused"):
+    global PARENT, DOC
+
+    if candidate == "prepared":
+        PARENT = Path("/scratch/djy8hg/runs/evicastkv/native-restore-consumed-20261103-v1")
+        DOC = SOURCE / "mosaickv/docs/native_prepared_restore_20261103.md"
+    elif candidate != "fused":
+        raise ValueError("registered fused or prepared candidate required")
     if root.exists() or clean_source(SOURCE) != revision:
         raise ValueError("new immutable root and full clean source SHA required")
     negative = driver.read(PARENT / "analysis/decision.json")
     if not negative["complete"] or negative["failures"]:
         raise ValueError("complete measured operator evidence required")
+    if candidate == "prepared" and negative["fused_operator_gate"]:
+        raise ValueError("preserve the negative fused-only gate before this bounded follow-up")
     old = driver.read(PARENT / "plan.json")
     bound = dict(old["bound_files"])
     for p in (PARENT / "plan.json", PARENT / "analysis/decision.json", DOC):
@@ -47,8 +56,11 @@ def prepare(root, revision):
             bound_files=bound,
             chain_root=str(root),
             stage="consumed_native_restore_operator_gate",
-            products=["bmm", "fused"],
-            native_policies=["kv_fused_restore"],
+            products=["bmm", "fused", "prepared"] if candidate == "prepared" else ["bmm", "fused"],
+            operator_candidate=candidate,
+            native_policies=[
+                "kv_fused_prepared" if candidate == "prepared" else "kv_fused_restore"
+            ],
             maximum_policy_attempts=1,
             automatic_full_request_submission=True,
             automatic_quality_submission=False,
@@ -66,7 +78,7 @@ def prepare(root, revision):
     driver.submit_array(root, "operator", "operator_analysis")
 
 
-def eligible(rows):
+def eligible(rows, candidate="fused"):
     if len(rows) != 2:
         return False
     grid = {(layer, padding) for layer in (0, 16, 31) for padding in (0, 64, 127)}
@@ -76,14 +88,21 @@ def eligible(rows):
             return False
         for case in cases:
             if (
-                not case["correctness"]["fused"]["bitwise"]
-                or not case["correctness"]["fused"]["history_sentinel"]
-                or case["correctness"]["fused"]["extra_output_workspace_bytes"] != 0
+                not case["correctness"][candidate]["bitwise"]
+                or not case["correctness"][candidate]["history_sentinel"]
+                or case["correctness"][candidate]["extra_output_workspace_bytes"] != 0
                 or any(
-                    case["aggregate"]["fused"]["mean_cuda_ms"]
+                    case["aggregate"][candidate]["mean_cuda_ms"]
                     > 0.9 * case["aggregate"][mode]["mean_cuda_ms"]
                     for mode in ("bmm", "original")
                 )
+            ):
+                return False
+            if candidate == "prepared" and (
+                case["aggregate"][candidate]["mean_cuda_ms"]
+                > 0.99 * case["aggregate"]["fused"]["mean_cuda_ms"]
+                or not case["prepared_activity"]["weight_hits"]
+                or not case["prepared_activity"]["restore_hits"]
             ):
                 return False
     return True
@@ -92,11 +111,13 @@ def eligible(rows):
 def operator_analysis(root, expected):
     plan = driver.checked(root, expected)
     rows, failures = driver.load_producers(root, plan, "profile.json")
-    passed = not failures and eligible(rows)
+    candidate = plan.get("operator_candidate", "fused")
+    passed = not failures and eligible(rows, candidate)
     decision = dict(
         complete=not failures,
         failures=failures,
         fused_operator_gate=passed,
+        operator_candidate=candidate,
         source_sha=plan["source_sha"],
         independent_quality_N=0,
         paper_superiority_established=False,
@@ -106,9 +127,9 @@ def operator_analysis(root, expected):
                 dict(
                     layer=c["layer"],
                     padding=c["padding"],
-                    versus_bmm=c["aggregate"]["fused"]["mean_cuda_ms"]
+                    versus_bmm=c["aggregate"][candidate]["mean_cuda_ms"]
                     / c["aggregate"]["bmm"]["mean_cuda_ms"],
-                    versus_original=c["aggregate"]["fused"]["mean_cuda_ms"]
+                    versus_original=c["aggregate"][candidate]["mean_cuda_ms"]
                     / c["aggregate"]["original"]["mean_cuda_ms"],
                 )
                 for c in r["cases"]
@@ -146,9 +167,10 @@ def main():
     parser.add_argument("--root", required=True, type=Path)
     parser.add_argument("--source-sha")
     parser.add_argument("--plan-sha")
+    parser.add_argument("--candidate", choices=("fused", "prepared"), default="fused")
     args = parser.parse_args()
     if args.action == "prepare":
-        prepare(args.root, args.source_sha)
+        prepare(args.root, args.source_sha, candidate=args.candidate)
     elif args.action == "operator":
         operators.worker(args.root, args.plan_sha, int(os.environ["SLURM_ARRAY_TASK_ID"]))
     elif args.action == "operator_analysis":
