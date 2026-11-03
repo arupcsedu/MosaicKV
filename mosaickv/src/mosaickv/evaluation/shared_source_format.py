@@ -68,6 +68,9 @@ class SharedSourceFormat:
     channel_exceptions: object = None
     source_row_tile: int = 16
     source_num_warps: int | None = None
+    # Set only after transport_corrections checks every index against the
+    # protected rows. Text-overlay stripping keeps a subset of those rows.
+    protected_patches_disjoint: bool = False
 
     def private(self):
         return (
@@ -370,7 +373,7 @@ def fit_transport(packet, attention, *, componentwise=False):
     # Keep every original correction and tolerance check, without overlapping
     # an otherwise dead K/V pair with the independent verification pair.
     del actual
-    result = replace(packet, transport_patches=patches)
+    result = replace(packet, transport_patches=patches, protected_patches_disjoint=True)
     verified = result.materialize(attention)
     for expected, output in zip(reference, verified, strict=True):
         torch.testing.assert_close(output, expected, rtol=0.01, atol=2**-6)
@@ -437,7 +440,7 @@ def fit_transport_components(packet, attention):
         assert_transport_close(verified, reference)
         patches.append(patch)
         del reference, verified, temporary
-    result = replace(packet, transport_patches=tuple(patches))
+    result = replace(packet, transport_patches=tuple(patches), protected_patches_disjoint=True)
     return result, dict(
         patch_scalars=[p.indices.numel() for p in patches],
         persistent_patch_bytes=backing_bytes(tuple(t for p in patches for t in p.tensors)),

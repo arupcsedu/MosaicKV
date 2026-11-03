@@ -28,10 +28,15 @@ def fill_component(packet, attention, component, destination, *, source_workspac
     if isinstance(packet, BoundDeltaFormat):
         packet.fill_component(attention, component, destination)
         return
+    from mosaickv.evaluation.encoded_projection import EncodedFormat
+    from mosaickv.evaluation.source_hotpath import restore_enabled, skip_prefix
+
     with source_phase("indexing_views"):
         n = packet.shape[-2]
-        prefix = destination[..., :n, :]
-    from mosaickv.evaluation.encoded_projection import EncodedFormat
+        unused = not isinstance(packet, (EncodedFormat, TextSourceFormat)) and not (
+            isinstance(packet, SharedSourceFormat) and destination.device.type != "cuda"
+        )
+        prefix = None if unused and skip_prefix() else destination[..., :n, :]
 
     if isinstance(packet, EncodedFormat):
         if (
@@ -126,6 +131,12 @@ def fill_component(packet, attention, component, destination, *, source_workspac
             from mosaickv.evaluation.head_local_precision_kernel import scatter
             from mosaickv.evaluation.shared_source_kernel import project
 
+            if restore_enabled() and (
+                packet.projection_backend != "fused"
+                or packet.protected_patches_disjoint is not True
+            ):
+                raise NotImplementedError("fused restore requires verified disjoint source patches")
+
             if packet.projection_backend == "native_bmm_256":
                 from mosaickv.evaluation.native_source_chunks import project_component
 
@@ -134,6 +145,11 @@ def fill_component(packet, attention, component, destination, *, source_workspac
                 project_component(packet, attention, component, destination, source_workspace)
             else:
                 project(packet, attention, (destination, destination), component=component)
+            if restore_enabled():
+                from mosaickv.evaluation.fused_source_restore import restore
+
+                restore(packet, component, destination)
+                return
             scatter(packet.exact[component], packet.row_positions, destination, prompt_length=n)
             if packet.transport_patches:
                 from mosaickv.evaluation.shared_source_format import apply_transport_patch

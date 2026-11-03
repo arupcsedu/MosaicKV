@@ -43,6 +43,7 @@ def instrument(adapter, timer):
 
     from mosaickv.evaluation import (
         consolidated_history,
+        fused_source_restore,
         layer_code_delta,
         source_history,
         storage_runs,
@@ -117,6 +118,7 @@ def instrument(adapter, timer):
             (consolidated_history, "consolidate", "history_consolidation"),
             (layer_code_delta.Replay, "view", "code_replay"),
             (layer_code_delta.Replay, "__init__", "code_replay_setup"),
+            (fused_source_restore, "restore", "source_sparse_restore"),
         ):
             stack.enter_context(patch.object(owner, name, timer.wrap(label, getattr(owner, name))))
         yield dict(counts=calls, progress=state)

@@ -93,6 +93,7 @@ def test_transport_releases_source_and_old_pair_before_independent_verification(
         exact: tuple
         transport_patches: tuple = ()
         input_overlay: object = None
+        protected_patches_disjoint: bool = False
 
         def materialize(self, _attention):
             assert alive["source"]() is None
@@ -122,3 +123,4 @@ def test_transport_releases_source_and_old_pair_before_independent_verification(
     assert checkpoints == ["original_materialization", "independent_verification"]
     assert proof["frozen_construction_tolerance_pass"]
     assert len(output.transport_patches) == 2
+    assert output.protected_patches_disjoint

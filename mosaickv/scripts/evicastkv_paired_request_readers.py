@@ -219,6 +219,10 @@ def precheck(root, expected):
             from mosaickv.evaluation.replay_descriptor_policy import gpu_controls as replay_controls
 
             result["replay_descriptor_controls"] = replay_controls()
+        if plan["paired_reader_stage"] == "source_hotpath":
+            from mosaickv.evaluation.source_hotpath import gpu_controls as hotpath_controls
+
+            result["source_hotpath_controls"] = hotpath_controls()
         if state["hits"] <= 0 or state["handles"]:
             raise RuntimeError("compiled hit or request cleanup control missing")
         result.update(
@@ -265,6 +269,18 @@ def begin(root, expected):
                 )
             ):
                 raise ValueError("actual GPU descriptor/ownership controls failed")
+        if plan["paired_reader_stage"] == "source_hotpath":
+            proof = result["source_hotpath_controls"]
+            if (
+                proof["source_hits"] <= 0
+                or proof["source_misses"] != 2
+                or not proof["request_state_released"]
+                or len(proof["fused_cases"]) != 4
+                or not all(
+                    x["bitwise"] and x["history_sentinels_unchanged"] for x in proof["fused_cases"]
+                )
+            ):
+                raise ValueError("source hotpath primitive controls failed")
     except (OSError, ValueError, KeyError) as exc:
         write_once(root / "precheck/blocked.json", dict(error=str(exc), paired_GPU_submitted=False))
         return
@@ -310,12 +326,52 @@ def assert_request(logits, measured, reference, *, expected_counter=None):
         timed(measured, reference["storage"], expected_counter=expected_counter)
 
 
+def hotpath_policy(plan, mode):
+    if plan["paired_reader_stage"] != "source_hotpath":
+        return "original"
+    if mode not in ("anchor_hotpath", "candidate_hotpath") or mode not in plan["reader_modes"]:
+        raise ValueError("registered hotpath comparison mode required")
+    from mosaickv.evaluation.source_hotpath import validate
+
+    policy = plan["anchor_hotpath"] if mode == "anchor_hotpath" else plan["candidate_hotpath"]
+    validate(policy)
+    return policy
+
+
+def hotpath_activity(measured, method, policy):
+    # Only the source precision variant has SharedSourceFormat projection.
+    # Do not fabricate source activity for selected-KV baseline adaptations.
+    source = method == "mosaickv_exact"
+    prepared = policy in ("prepared", "prepared_restore")
+    restored = policy in ("restore", "prepared_restore")
+    return (
+        (
+            measured["source_launch_hits"] > 0
+            if source and prepared
+            else measured["source_launch_hits"] == 0
+        )
+        and (
+            measured["fused_restore_calls"] > 0 and measured["fused_nonempty_calls"] > 0
+            if source and restored
+            else measured["fused_restore_calls"] == 0
+        )
+        and (
+            measured["skipped_prefix_views"] > 0
+            if restored
+            else measured["skipped_prefix_views"] == 0
+        )
+    )
+
+
 def mode_config(plan, mode):
     if (
-        plan["paired_reader_stage"] not in ("reader", "dispatch", "descriptor")
+        plan["paired_reader_stage"] not in ("reader", "dispatch", "descriptor", "source_hotpath")
         or mode not in plan["reader_modes"]
     ):
         raise ValueError("unregistered request mode")
+    if plan["paired_reader_stage"] == "source_hotpath":
+        hotpath_policy(plan, mode)
+        return plan["selected_reader"], False
     return (
         (mode, False)
         if plan["paired_reader_stage"] == "reader"
@@ -453,6 +509,7 @@ def worker(root, expected, index):
                 reuse_code_descriptors=plan["paired_reader_stage"] == "descriptor"
                 and mode == "reused_descriptors",
                 audit_decode_storage=audit,
+                source_hotpath=hotpath_policy(plan, mode),
             )
             try:
                 counter = (
@@ -463,6 +520,10 @@ def worker(root, expected, index):
                 if register_counter and mode != plan["reader_modes"][0]:
                     raise ValueError("counter control must use the original registered mode")
                 assert_request(logits, measured, refs[method], expected_counter=counter)
+                if plan["paired_reader_stage"] == "source_hotpath" and not hotpath_activity(
+                    measured, method, hotpath_policy(plan, mode)
+                ):
+                    raise RuntimeError("registered source hotpath did not engage as required")
             except Exception:
                 write_once(
                     out / "validation_failure.json",
@@ -517,6 +578,10 @@ def worker(root, expected, index):
                     descriptor_preparations=audit_rows[-1]["measured"][
                         "replay_descriptor_preparations"
                     ],
+                    source_launch_hits=audit_rows[-1]["measured"]["source_launch_hits"],
+                    fused_restore_calls=audit_rows[-1]["measured"]["fused_restore_calls"],
+                    fused_nonempty_calls=audit_rows[-1]["measured"]["fused_nonempty_calls"],
+                    skipped_prefix_views=audit_rows[-1]["measured"]["skipped_prefix_views"],
                     audited_storage_boundaries={
                         k: audit_rows[-1]["measured"][k] for k, _ in STORAGE_FIELDS
                     },
@@ -695,6 +760,12 @@ def read_producers(root, plan, expected):
                 for r in rows
             ):
                 raise ValueError("recorded descriptor mode differs from registered policy")
+            if plan["paired_reader_stage"] == "source_hotpath" and any(
+                r["source_hotpath"] != hotpath_policy(plan, r["reader"])
+                or not hotpath_activity(r, r["method"], r["source_hotpath"])
+                for r in rows
+            ):
+                raise ValueError("source hotpath identity or engagement differs from plan")
             summaries.append(summarize(rows, plan["seed"] + i, readers=tuple(plan["reader_modes"])))
             group = [json.loads(x) for x in (folder / "profiles.jsonl").read_text().splitlines()]
             if len(group) != 4 or {(r["method"], r["reader"]) for r in group} != {
@@ -730,6 +801,8 @@ def read_producers(root, plan, expected):
                         and (
                             r["dispatch_hits"] > 0
                             if plan["paired_reader_stage"] == "dispatch"
+                            else hotpath_activity(r, r["method"], plan["candidate_hotpath"])
+                            if plan["paired_reader_stage"] == "source_hotpath"
                             else (
                                 r["descriptor_reuses"] > 0 and r["descriptor_preparations"] == 32
                                 if r["method"] in plan.get("code_delta_methods", [])

@@ -52,17 +52,21 @@ def request(
     reuse_kernel_dispatch=False,
     audit_decode_storage=False,
     reuse_code_descriptors=False,
+    source_hotpath="original",
 ):
     from mosaickv.evaluation.lossless_prompt_cache import backing_bytes
     from mosaickv.evaluation.reconstruction_policy import use, validate
     from mosaickv.evaluation.replay_descriptor_policy import use as use_descriptors
     from mosaickv.evaluation.request_kernel_dispatch import use_dispatch
+    from mosaickv.evaluation.source_hotpath import use as source_plan
+    from mosaickv.evaluation.source_hotpath import validate as validate_source_plan
     from mosaickv.evaluation.storage_runs import run
     from mosaickv.evaluation.streaming_baselines import SelectedRetiringCache, StreamingBaseline
     from mosaickv.evaluation.streaming_prefill import RetiringPrefillCache, SealAfterAttention
     from mosaickv.evaluation.streaming_source_constructor import StreamingDirectSource
 
     validate(reconstruction_readers)
+    validate_source_plan(source_hotpath)
     if type(audit_decode_storage) is not bool:
         raise ValueError("explicit decode storage audit boolean required")
 
@@ -140,6 +144,7 @@ def request(
         use(reconstruction_readers),
         use_dispatch(reuse_kernel_dispatch) as dispatch,
         use_descriptors(reuse_code_descriptors) as descriptors,
+        source_plan(source_hotpath) as hotpath,
     ):
         values, details = run(
             adapter,
@@ -185,6 +190,12 @@ def request(
             reconstruction_readers=reconstruction_readers,
             reuse_kernel_dispatch=reuse_kernel_dispatch,
             reuse_code_descriptors=reuse_code_descriptors,
+            source_hotpath=source_hotpath,
+            source_launch_hits=0 if hotpath is None else hotpath["source_hits"],
+            source_launch_misses=0 if hotpath is None else hotpath["source_misses"],
+            fused_restore_calls=0 if hotpath is None else hotpath["fused_restore_calls"],
+            fused_nonempty_calls=0 if hotpath is None else hotpath["fused_nonempty_calls"],
+            skipped_prefix_views=0 if hotpath is None else hotpath["skipped_prefix_views"],
             replay_descriptor_preparations=0
             if descriptors is None
             else descriptors["prepared_formats"],

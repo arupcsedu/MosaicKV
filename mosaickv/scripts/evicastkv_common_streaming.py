@@ -672,6 +672,7 @@ def timing_worker(root, expected, index, adapter, plan, job, payload, timing_con
             reconstruction_readers=plan.get("reconstruction_readers", "original"),
             reuse_kernel_dispatch=plan.get("reuse_kernel_dispatch", False),
             reuse_code_descriptors=plan.get("reuse_code_descriptors", False),
+            source_hotpath=plan.get("source_hotpath", "original"),
         )
         if not torch.equal(values, reference["logits"]):
             raise RuntimeError("timed request changed frozen 128-token vocabulary logits")

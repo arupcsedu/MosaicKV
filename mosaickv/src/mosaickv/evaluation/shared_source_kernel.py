@@ -183,7 +183,7 @@ def project(packet, attention, targets, *, component=-1, inspect_kernel=False):
         ):
             raise ValueError("unchanged contiguous bias-free native projection weights required")
     from mosaickv.evaluation.reconstruction_policy import reuse_headers
-    from mosaickv.evaluation.request_kernel_dispatch import launch
+    from mosaickv.evaluation.source_hotpath import source_launch
 
     with source_phase("indexing_views"):
         grid = (triton.cdiv(n, row_tile), h // head_group)
@@ -215,7 +215,7 @@ def project(packet, attention, targets, *, component=-1, inspect_kernel=False):
             enable_fp_fusion=False,
         )
     with source_phase("projection_dispatch"):
-        compiled = launch(_project, grid, arguments, **options)
+        compiled = source_launch(_project, grid, arguments, options, attention)
     if inspect_kernel:
         return dict(
             registers=getattr(compiled, "n_regs", None),
