@@ -53,6 +53,7 @@ def request(
     audit_decode_storage=False,
     reuse_code_descriptors=False,
     source_hotpath="original",
+    full_prompt_native=None,
 ):
     from mosaickv.evaluation.lossless_prompt_cache import backing_bytes
     from mosaickv.evaluation.reconstruction_policy import use, validate
@@ -67,6 +68,10 @@ def request(
 
     validate(reconstruction_readers)
     validate_source_plan(source_hotpath)
+    if full_prompt_native is not None:
+        from mosaickv.evaluation.full_prompt_source import validate as validate_native
+
+        validate_native(full_prompt_native)
     if type(audit_decode_storage) is not bool:
         raise ValueError("explicit decode storage audit boolean required")
 
@@ -132,6 +137,18 @@ def request(
         # Caller permits this ONLY on the excluded first warmup. No hash/copy
         # is inserted into a measured repetition's request clock.
         input_packet_validator(packets)
+    native_report = None
+    native_conversion_wall_seconds = 0.0
+    if full_prompt_native is not None:
+        from mosaickv.evaluation.full_prompt_source import convert as convert_native
+
+        conversion_started = time.monotonic()
+        packets, native_report = convert_native(
+            packets,
+            tuple(layer.self_attn for layer in adapter._language_layers()),
+            full_prompt_native,
+        )
+        native_conversion_wall_seconds = time.monotonic() - conversion_started
     if code_delta:
         from mosaickv.evaluation.layer_code_delta import convert
 
@@ -191,6 +208,12 @@ def request(
             reuse_kernel_dispatch=reuse_kernel_dispatch,
             reuse_code_descriptors=reuse_code_descriptors,
             source_hotpath=source_hotpath,
+            full_prompt_native=full_prompt_native,
+            native_conversion=native_report,
+            native_conversion_wall_seconds=native_conversion_wall_seconds,
+            native_conversion_wall_is_not_pure_kernel_time=True,
+            native_full_source_decodes=details["storage"].get("native_full_source_decodes", 0),
+            native_full_component_fills=details["storage"].get("native_full_component_fills", 0),
             source_launch_hits=0 if hotpath is None else hotpath["source_hits"],
             source_launch_misses=0 if hotpath is None else hotpath["source_misses"],
             fused_restore_calls=0 if hotpath is None else hotpath["fused_restore_calls"],

@@ -318,6 +318,12 @@ def run(
     record.update(
         sequential_kv_lease=sequential_lease,
         sequential_component_fills=[getattr(layer, "component_fills", 0) for layer in cache.layers],
+        native_full_source_decodes=sum(
+            getattr(layer, "native_full_source_decodes", 0) for layer in cache.layers
+        ),
+        native_full_component_fills=sum(
+            getattr(layer, "native_full_component_fills", 0) for layer in cache.layers
+        ),
         segmented_history=segmented_history,
         sequential_source_history=sequential_source_history,
         segment_table_builds=getattr(cache, "segment_table_builds", 0),

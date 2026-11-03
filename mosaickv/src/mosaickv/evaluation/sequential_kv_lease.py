@@ -26,7 +26,12 @@ def fill_component(packet, attention, component, destination, *, source_workspac
     from mosaickv.evaluation.layer_code_delta import BoundDeltaFormat
 
     if isinstance(packet, BoundDeltaFormat):
-        packet.fill_component(attention, component, destination)
+        packet.fill_component(attention, component, destination, source_workspace=source_workspace)
+        return
+    from mosaickv.evaluation.full_prompt_source import FullPromptSourceFormat
+
+    if isinstance(packet, FullPromptSourceFormat):
+        packet.fill_component(attention, component, destination, source_workspace)
         return
     from mosaickv.evaluation.encoded_projection import EncodedFormat
     from mosaickv.evaluation.source_hotpath import restore_enabled, skip_prefix

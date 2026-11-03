@@ -15,7 +15,31 @@ class SequentialSourceHistoryLayer(SequentialLayer, SourceHistoryLayer):
         if not self.leased or component not in (0, 1):
             raise RuntimeError("private single layer lease and KV component required")
         destination = self.leased[0]
-        fill_component(self.representation, self.attention, component, destination)
+        from mosaickv.evaluation.full_prompt_source import new_workspace, source_format
+        from mosaickv.evaluation.lossless_prompt_cache import backing_bytes
+
+        native = source_format(self.representation)
+        using_native = native is not None and component in native.components
+        if using_native and component == native.components[0]:
+            if getattr(self, "source_workspace", None) is not None:
+                raise RuntimeError("duplicate native source transaction")
+            self.source_workspace = new_workspace(self.representation, destination.device)
+            self.lease_bytes = backing_bytes((*self.leased, self.source_workspace))
+            self.native_full_source_decodes = getattr(self, "native_full_source_decodes", 0) + 1
+            self.observe(())
+        elif using_native and (
+            getattr(self, "source_workspace", None) is None or self.current_component != 0
+        ):
+            raise RuntimeError("value projection requires its private key/source transaction")
+        fill_component(
+            self.representation,
+            self.attention,
+            component,
+            destination,
+            source_workspace=getattr(self, "source_workspace", None),
+        )
+        if using_native:
+            self.native_full_component_fills = getattr(self, "native_full_component_fills", 0) + 1
         offset = self.prompt_length
         for packet in self.source_sealed:
             end = offset + packet.shape[-2]
@@ -28,6 +52,10 @@ class SequentialSourceHistoryLayer(SequentialLayer, SourceHistoryLayer):
             raise RuntimeError("sequential source history dropped or duplicated a position")
         self.current_component = component
         self.component_fills = getattr(self, "component_fills", 0) + 1
+        if using_native and component == native.components[-1]:
+            self.source_workspace = None
+            self.lease_bytes = backing_bytes(self.leased)
+            self.observe(())
 
 
 def paired_run(adapter, prefill, formats, *, audit_history=True, **kwargs):

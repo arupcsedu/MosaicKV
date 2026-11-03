@@ -17,12 +17,13 @@ from mosaickv.evaluation.precision_tier import QuantizedBody
 
 def map_bodies(packet, function):
     from mosaickv.evaluation.exact_storage import ExactFormat
+    from mosaickv.evaluation.full_prompt_source import FullPromptSourceFormat
     from mosaickv.evaluation.head_local_precision import HeadLocalFormat
     from mosaickv.evaluation.precision_tier import PrecisionFormat
     from mosaickv.evaluation.shared_source_format import SharedSourceFormat
     from mosaickv.evaluation.text_source_storage import TextSourceFormat
 
-    if isinstance(packet, (HeadLocalFormat, TextSourceFormat)):
+    if isinstance(packet, (HeadLocalFormat, TextSourceFormat, FullPromptSourceFormat)):
         return replace(packet, base=map_bodies(packet.base, function))
     if isinstance(packet, PrecisionFormat):
         return replace(
@@ -232,10 +233,19 @@ class BoundDeltaFormat:
     def fill(self, attention, targets, *, direct):
         self.replay.view(self.index).fill(attention, targets, direct=direct)
 
-    def fill_component(self, attention, component, destination):
+    def fill_component(self, attention, component, destination, *, source_workspace=None):
         from mosaickv.evaluation.sequential_kv_lease import fill_component
 
-        fill_component(self.replay.view(self.index), attention, component, destination)
+        if source_workspace is None:
+            fill_component(self.replay.view(self.index), attention, component, destination)
+            return
+        fill_component(
+            self.replay.view(self.index),
+            attention,
+            component,
+            destination,
+            source_workspace=source_workspace,
+        )
 
 
 def bind(packets):
