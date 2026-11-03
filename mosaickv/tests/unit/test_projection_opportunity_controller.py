@@ -3,6 +3,14 @@ import json
 import evicastkv_projection_opportunity as driver
 
 
+def test_immutable_ledger_string_paths_and_path_objects_share_the_same_reader(tmp_path):
+    path = tmp_path / "input.json"
+    path.write_text(json.dumps(dict(task="consumed", sample_id="not_fresh")))
+    assert driver.read(str(path)) == driver.read(path) == dict(
+        task="consumed", sample_id="not_fresh"
+    )
+
+
 def test_analysis_requires_both_inputs_not_only_mean_or_text_union(monkeypatch, tmp_path):
     plan = dict(source_sha="s", minimum_skip_fraction_on_each_input=0.10)
     monkeypatch.setattr(driver.pair.common.previous.common, "inputs", lambda *a: plan)

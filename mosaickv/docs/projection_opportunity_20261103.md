@@ -43,3 +43,10 @@ Two one-A100/12-CPU workers, ten-minute limits; finite afterany CPU aggregation.
 The complete CPU suite runs from the new clean SHA before GPU submission.
 If metadata feasibility fails, stop this approach rather than launch another
 kernel sweep. Independent quality N=0; whole-request GPU peak uncertified.
+
+The first metadata audit (22391884) stopped before prefill: its JSON reader
+accepted Path objects but not the filename strings in the immutable ledger.
+No opportunity measurement was produced. Preserve that root and its negative
+analysis; the correction normalizes paths at the reader boundary, adds a
+string/Path regression, and retries only the two consumed inputs under a new
+output root. No source ledger, payload digest, numerical gate or scope changes.

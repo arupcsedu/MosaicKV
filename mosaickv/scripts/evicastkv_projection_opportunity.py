@@ -18,7 +18,9 @@ SCRIPT = SOURCE / "mosaickv/slurm/evicastkv_projection_opportunity.sbatch"
 
 
 def read(path):
-    return json.loads(path.read_text())
+    # Immutable ledgers serialize paths as strings; pathlib callers are also
+    # accepted. Do not require callers to mutate or rematerialize the ledger.
+    return json.loads(Path(path).read_text())
 
 
 def historical_report(root, decision):
@@ -342,7 +344,10 @@ def worker(root, expected, index):
             outputs={name: sha(out / name) for name in ("manifest.json", "opportunity.json")},
         )
     except Exception as error:
+        import traceback
+
         result["failures"].append(f"{type(error).__name__}: {error}")
+        result["traceback"] = traceback.format_exc()
     write_once(out / "result.json", result)
     if result["status"] != "completed":
         raise SystemExit(1)
