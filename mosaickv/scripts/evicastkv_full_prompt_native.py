@@ -218,7 +218,7 @@ def begin(root, expected):
     submit_array(target, "feasibility", "feasibility_analysis")
 
 
-def setup(root, expected, index, *, operator_study=False):
+def setup(root, expected, index, *, operator_study=False, model_profile=False):
     import torch
 
     from mosaickv.adapters.huggingface import load_hf_adapter
@@ -291,6 +291,22 @@ def setup(root, expected, index, *, operator_study=False):
             conversion_and_workspace_included=True,
         ),
     )
+    if operator_study and model_profile:
+        raise ValueError("one explicit measurement protocol required")
+    if model_profile:
+        manifest.update(
+            variant="consumed_actual_model_kernel_attribution",
+            methods=["mosaickv_exact"],
+            actual_timing_protocol=dict(
+                output_predictions=128,
+                warmups=1,
+                instrumented_requests_per_policy=1,
+                profiled_decode_steps=[0, 64, 126],
+                no_request_latency_or_quality_claim=True,
+                history_sealing_outside_profile_windows=True,
+                CUDA_kernel_activity_required=True,
+            ),
+        )
     if operator_study:
         manifest.update(
             variant="consumed_source_reconstruction_operator_study",
