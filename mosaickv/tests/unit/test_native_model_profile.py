@@ -5,16 +5,37 @@ import pytest
 
 
 def test_windows_require_actual_cuda_activity_and_exact_registered_steps():
-    rows = [
-        dict(step=i, operators=[dict(device_type="DeviceType.CUDA", device_us=2)])
-        for i in driver.STEPS
-    ]
+    rows = [dict(step=i, actual_kernels=dict(count=2, positive_count=2)) for i in driver.STEPS]
     driver.validate_windows(rows)
     with pytest.raises(ValueError, match="unique"):
         driver.validate_windows(rows[:-1])
-    rows[0]["operators"][0]["device_type"] = "DeviceType.CPU"
+    rows[0]["actual_kernels"]["positive_count"] = 1
     with pytest.raises(ValueError, match="CUPTI"):
         driver.validate_windows(rows)
+
+
+def test_annotations_are_not_kernels_and_zero_duration_is_not_valid(tmp_path):
+    import json
+
+    path = tmp_path / "trace.json"
+    path.write_text(
+        json.dumps(
+            dict(
+                traceEvents=[
+                    dict(cat="gpu_user_annotation", ph="X", name="scope", dur=100),
+                    dict(cat="kernel", ph="X", name="a", dur=0),
+                    dict(cat="kernel", ph="X", name="b", dur=2),
+                    dict(cat="kernel", ph="X", name="b", dur=3),
+                ]
+            )
+        )
+    )
+    result = driver.actual_kernels(path)
+    assert result["count"] == 3 and result["positive_count"] == 2
+    assert result["sum_kernel_us"] == 5
+    assert result["top"][0] == dict(name="b", count=2, device_us=5)
+    with pytest.raises(ValueError, match="EVERY"):
+        driver.validate_windows([dict(step=i, actual_kernels=result) for i in driver.STEPS])
 
 
 def test_event_row_separates_device_and_host_times():

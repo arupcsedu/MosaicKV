@@ -54,9 +54,12 @@ def request(
     reuse_code_descriptors=False,
     source_hotpath="original",
     full_prompt_native=None,
+    hybrid_reader_policy=None,
+    prompt_prefetch=False,
 ):
     from mosaickv.evaluation.lossless_prompt_cache import backing_bytes
     from mosaickv.evaluation.native_execution_plan import use as native_plan
+    from mosaickv.evaluation.prompt_prefetch import use as prefetch_plan
     from mosaickv.evaluation.reconstruction_policy import use, validate
     from mosaickv.evaluation.replay_descriptor_policy import use as use_descriptors
     from mosaickv.evaluation.request_kernel_dispatch import use_dispatch
@@ -75,6 +78,12 @@ def request(
         validate_native(full_prompt_native)
     if type(audit_decode_storage) is not bool:
         raise ValueError("explicit decode storage audit boolean required")
+    if hybrid_reader_policy is not None and full_prompt_native is not None:
+        raise ValueError("hybrid and native projection policies are separate variants")
+    if type(prompt_prefetch) is not bool or (
+        prompt_prefetch and (hybrid_reader_policy is not None or full_prompt_native is not None)
+    ):
+        raise ValueError("prefetch requires a separate original-representation policy")
 
     if method not in METHODS:
         raise ValueError("five frozen local precision variants only")
@@ -150,6 +159,14 @@ def request(
             full_prompt_native,
         )
         native_conversion_wall_seconds = time.monotonic() - conversion_started
+    hybrid_report = None
+    if hybrid_reader_policy is not None:
+        from mosaickv.evaluation.hybrid_reader import convert as hybrid_convert
+
+        packets, hybrid_report = hybrid_convert(
+            packets, tuple(layer.self_attn for layer in adapter._language_layers()),
+            hybrid_reader_policy,
+        )
     if code_delta:
         from mosaickv.evaluation.layer_code_delta import convert
 
@@ -164,6 +181,7 @@ def request(
         use_descriptors(reuse_code_descriptors) as descriptors,
         source_plan(source_hotpath) as hotpath,
         native_plan(full_prompt_native == "kv_fused_prepared") as prepared_native,
+        prefetch_plan(prompt_prefetch) as prefetched,
     ):
         values, details = run(
             adapter,
@@ -212,6 +230,12 @@ def request(
             source_hotpath=source_hotpath,
             full_prompt_native=full_prompt_native,
             native_conversion=native_report,
+            hybrid_conversion=hybrid_report,
+            prompt_prefetch=prompt_prefetch,
+            prefetch_hits=prefetched["hits"],
+            prefetch_misses=prefetched["misses"],
+            prefetch_launches=prefetched["launches"],
+            prefetch_buffer_bytes=prefetched["buffer_bytes"],
             native_conversion_wall_seconds=native_conversion_wall_seconds,
             native_conversion_wall_is_not_pure_kernel_time=True,
             native_full_source_decodes=details["storage"].get("native_full_source_decodes", 0),

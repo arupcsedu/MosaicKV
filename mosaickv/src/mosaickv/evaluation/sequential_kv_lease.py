@@ -23,6 +23,11 @@ from mosaickv.evaluation.text_source_storage import TextSourceFormat
 def fill_component(packet, attention, component, destination, *, source_workspace=None):
     if type(component) is not int or component not in (0, 1):
         raise ValueError("key or value component required")
+    from mosaickv.evaluation.hybrid_reader import HybridFormat
+
+    if isinstance(packet, HybridFormat):
+        packet.fill_component(attention, component, destination, source_workspace=source_workspace)
+        return
     from mosaickv.evaluation.layer_code_delta import BoundDeltaFormat
 
     if isinstance(packet, BoundDeltaFormat):
@@ -278,6 +283,9 @@ class SequentialAttentionTransport:
             weights = torch.nn.functional.dropout(weights, p=dropout, training=module.training)
             layer.materialize_component(1)
             output = torch.matmul(weights, value).transpose(1, 2).contiguous()
+            from mosaickv.evaluation.prompt_prefetch import after_attention
+
+            after_attention(layer)
             return output, weights
 
         forward._evicastkv_sequential_private = True

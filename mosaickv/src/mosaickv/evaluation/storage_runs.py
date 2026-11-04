@@ -152,6 +152,9 @@ def cache_from_formats(
         tuple(t for x in cache.layers for t in cast(ExactLayer, x).owned_tensors())
     )
     cache.observe()
+    from mosaickv.evaluation.prompt_prefetch import attach
+
+    attach(cache, updates)
     return cache
 
 

@@ -218,7 +218,9 @@ def begin(root, expected):
     submit_array(target, "feasibility", "feasibility_analysis")
 
 
-def setup(root, expected, index, *, operator_study=False, model_profile=False):
+def setup(
+    root, expected, index, *, operator_study=False, model_profile=False, manifest_overrides=None
+):
     import torch
 
     from mosaickv.adapters.huggingface import load_hf_adapter
@@ -324,6 +326,10 @@ def setup(root, expected, index, *, operator_study=False, model_profile=False):
                 source_and_output_workspaces_explicitly_counted=True,
             ),
         )
+    if manifest_overrides is not None:
+        if set(manifest_overrides) - {"variant", "actual_timing_protocol", "methods"}:
+            raise ValueError("only scoped variant/protocol/method manifest overrides allowed")
+        manifest.update(manifest_overrides)
     write_once(root / f"workers/{index}/manifest.json", manifest)
     adapter = load_hf_adapter(
         cfg.model.id,

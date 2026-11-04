@@ -31,13 +31,16 @@ class SequentialSourceHistoryLayer(SequentialLayer, SourceHistoryLayer):
             getattr(self, "source_workspace", None) is None or self.current_component != 0
         ):
             raise RuntimeError("value projection requires its private key/source transaction")
-        fill_component(
-            self.representation,
-            self.attention,
-            component,
-            destination,
-            source_workspace=getattr(self, "source_workspace", None),
-        )
+        from mosaickv.evaluation.prompt_prefetch import take
+
+        if component != 0 or not take(self, destination):
+            fill_component(
+                self.representation,
+                self.attention,
+                component,
+                destination,
+                source_workspace=getattr(self, "source_workspace", None),
+            )
         if using_native:
             self.native_full_component_fills = getattr(self, "native_full_component_fills", 0) + 1
             if native.fused_restore:

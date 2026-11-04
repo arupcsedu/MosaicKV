@@ -79,8 +79,32 @@ def validate_windows(windows):
     if len(windows) != 3 or [x["step"] for x in windows] != list(STEPS):
         raise ValueError("complete unique actual decode windows required")
     for window in windows:
-        if not any("CUDA" in x["device_type"] and x["device_us"] > 0 for x in window["operators"]):
-            raise ValueError("actual CUPTI CUDA activity required; CPU events are insufficient")
+        summary = window.get("actual_kernels", {})
+        if not summary.get("count") or summary.get("positive_count") != summary["count"]:
+            raise ValueError("positive-duration actual CUPTI kernels required in EVERY window")
+
+
+def actual_kernels(path):
+    """Chrome kernel activities only: annotations are not kernels or wall time."""
+    import math
+
+    events = driver.read(path).get("traceEvents", [])
+    kernels = [x for x in events if x.get("cat") == "kernel" and x.get("ph") == "X"]
+    times = [float(x.get("dur", 0)) for x in kernels]
+    if any(not math.isfinite(t) or t < 0 for t in times):
+        raise ValueError("invalid actual kernel duration")
+    by_name = {}
+    for event, duration in zip(kernels, times, strict=True):
+        entry = by_name.setdefault(event["name"], dict(name=event["name"], count=0, device_us=0.0))
+        entry["count"] += 1
+        entry["device_us"] += duration
+    return dict(
+        count=len(kernels),
+        positive_count=sum(t > 0 for t in times),
+        sum_kernel_us=sum(times),
+        sum_is_not_wall_time=True,
+        top=sorted(by_name.values(), key=lambda x: (-x["device_us"], x["name"]))[:15],
+    )
 
 
 def scoped(function, label, active):
@@ -103,7 +127,7 @@ def profiled_request(adapter, call, folder):
     from mosaickv.evaluation import native_execution_plan as plans
     from mosaickv.evaluation import shared_source_kernel as original
 
-    active, captures, counter = dict(value=False), [], 0
+    active, windows, counter = dict(value=False), [], 0
     decode = adapter.decode_one_token
 
     def step(*args, **kwargs):
@@ -123,8 +147,21 @@ def profiled_request(adapter, call, folder):
             try:
                 result = decode(*args, **kwargs)
             finally:
+                torch.cuda.synchronize()
                 active["value"] = False
-        captures.append((index, profiler))
+        # Export before another CUPTI profiler starts. Deferred exports left
+        # earlier windows with zero kernel durations in the preceding run.
+        path = folder / f"step-{index}.json"
+        profiler.export_chrome_trace(str(path))
+        windows.append(
+            dict(
+                step=index,
+                trace=str(path),
+                trace_sha256=sha(path),
+                actual_kernels=actual_kernels(path),
+                operators=[event_row(x) for x in profiler.key_averages(group_by_input_shape=True)],
+            )
+        )
         return result
 
     with ExitStack() as stack:
@@ -142,18 +179,6 @@ def profiled_request(adapter, call, folder):
         measured = call()
     if counter != 127:
         raise RuntimeError("full 127-step model decode required")
-    windows = []
-    for index, profiler in captures:
-        path = folder / f"step-{index}.json"
-        profiler.export_chrome_trace(str(path))
-        windows.append(
-            dict(
-                step=index,
-                trace=str(path),
-                trace_sha256=sha(path),
-                operators=[event_row(x) for x in profiler.key_averages(group_by_input_shape=True)],
-            )
-        )
     validate_windows(windows)
     # Remove all instrumented request durations: they cannot enter latency tables.
     return dict(
@@ -244,15 +269,22 @@ def analyze(root, expected):
                             or sha(trace) != window["trace_sha256"]
                         ):
                             raise ValueError("foreign or modified CUDA trace")
-                        for key in ("device_us", "self_cpu_us"):
+                        kernels = actual_kernels(trace)
+                        if kernels != window["actual_kernels"]:
+                            raise ValueError("kernel summary differs from immutable trace")
+                        rankings.append(
+                            dict(
+                                input_index=index,
+                                policy=record["policy"],
+                                step=window["step"],
+                                quantity="actual_kernel_us",
+                                top=kernels["top"],
+                                sum_is_not_wall_time=True,
+                            )
+                        )
+                        for key in ("self_cpu_us",):
                             selected = [
-                                x
-                                for x in window["operators"]
-                                if (
-                                    "CUDA" in x["device_type"]
-                                    if key == "device_us"
-                                    else x["name"].startswith("evicast.")
-                                )
+                                x for x in window["operators"] if x["name"].startswith("evicast.")
                             ]
                             rankings.append(
                                 dict(

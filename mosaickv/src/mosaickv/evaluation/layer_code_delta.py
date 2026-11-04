@@ -16,6 +16,7 @@ from mosaickv.evaluation.precision_tier import QuantizedBody
 
 
 def map_bodies(packet, function):
+    from mosaickv.evaluation.hybrid_reader import HybridFormat
     from mosaickv.evaluation.exact_storage import ExactFormat
     from mosaickv.evaluation.full_prompt_source import FullPromptSourceFormat
     from mosaickv.evaluation.head_local_precision import HeadLocalFormat
@@ -23,6 +24,12 @@ def map_bodies(packet, function):
     from mosaickv.evaluation.shared_source_format import SharedSourceFormat
     from mosaickv.evaluation.text_source_storage import TextSourceFormat
 
+    if isinstance(packet, HybridFormat):
+        return (
+            packet
+            if packet.base is None
+            else replace(packet, base=map_bodies(packet.base, function))
+        )
     if isinstance(packet, (HeadLocalFormat, TextSourceFormat, FullPromptSourceFormat)):
         return replace(packet, base=map_bodies(packet.base, function))
     if isinstance(packet, PrecisionFormat):
