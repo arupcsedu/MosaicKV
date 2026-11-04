@@ -52,10 +52,10 @@ class StreamingDirectSource:
         self.capacities = tuple(lower + int(i < extra) for i in range(count))
 
     def __call__(self, index, attention, original, args, kwargs, output):
+        from mosaickv.evaluation.direct_text_construction import optimize
         from mosaickv.evaluation.request_precision import REQUEST_POLICY, ranked_positions
         from mosaickv.evaluation.shared_source_format import construct, fit_transport
         from mosaickv.evaluation.source_retile import retile
-        from mosaickv.evaluation.text_source_storage import optimize
 
         x = kwargs.get("hidden_states", args[0] if args else None)
         phase = kwargs.get("position_embeddings")
@@ -105,7 +105,9 @@ class StreamingDirectSource:
             cos=self.text_phases[0],
             sin=self.text_phases[1],
         )
-        packet, _ = optimize(packet, text, (tuple(range(n)),) * h, self.positions, attention)
+        packet, _ = optimize(
+            packet, text, (tuple(range(n)),) * h, self.positions, attention, reference_pair=original
+        )
         if self.construction_geometry is None:
             packet = retile(packet, 4)
         if self.minimum_only:

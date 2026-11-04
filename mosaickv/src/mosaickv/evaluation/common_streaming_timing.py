@@ -57,6 +57,8 @@ def request(
     hybrid_reader_policy=None,
     prompt_prefetch=False,
     text_overlay_policy=None,
+    direct_text_policy=None,
+    final_packet_validator=None,
 ):
     from mosaickv.evaluation.lossless_prompt_cache import backing_bytes
     from mosaickv.evaluation.native_execution_plan import use as native_plan
@@ -89,6 +91,15 @@ def request(
         hybrid_reader_policy is not None or full_prompt_native is not None or prompt_prefetch
     ):
         raise ValueError("cached text requires a separate original-representation policy")
+    if (
+        direct_text_policy is not None
+        and any(
+            p is not None for p in (text_overlay_policy, hybrid_reader_policy, full_prompt_native)
+        )
+    ) or (direct_text_policy is not None and prompt_prefetch):
+        raise ValueError("direct construction requires a separate frozen text policy")
+    if final_packet_validator is not None and not callable(final_packet_validator):
+        raise ValueError("explicit optional constructed-packet validator required")
 
     if method not in METHODS:
         raise ValueError("five frozen local precision variants only")
@@ -121,6 +132,9 @@ def request(
     )
     fresh = replace(prepared, model_inputs=dict(prepared.model_inputs, past_key_values=cache))
     with ExitStack() as stack:
+        from mosaickv.evaluation.direct_text_construction import use as direct_text
+
+        direct_state = stack.enter_context(direct_text(direct_text_policy))
         if componentwise_fitting:
             from mosaickv.evaluation import shared_source_format
 
@@ -135,6 +149,7 @@ def request(
             pref = adapter.prefill(fresh, capture_queries=False, capture_attentions=False)
         encoder.finish() if method == "mosaickv_exact" else encoder.finish(adapter)
     packets = cache.formats()
+    direct_report = direct_state.finish(packets) if direct_state is not None else None
     runtime = replace(pref, state=replace(pref.state, past_key_values=None), attention_weights=())
     prepared.model_inputs.clear()
     del pref, fresh, cache, encoder, prepared
@@ -182,6 +197,8 @@ def request(
             tuple(layer.self_attn for layer in adapter._language_layers()),
             text_overlay_policy,
         )
+    if final_packet_validator is not None:
+        final_packet_validator(packets)
     if code_delta:
         from mosaickv.evaluation.layer_code_delta import convert
 
@@ -247,6 +264,7 @@ def request(
             native_conversion=native_report,
             hybrid_conversion=hybrid_report,
             cached_text_conversion=text_report,
+            direct_text_construction=direct_report,
             prompt_prefetch=prompt_prefetch,
             prefetch_hits=prefetched["hits"],
             prefetch_misses=prefetched["misses"],

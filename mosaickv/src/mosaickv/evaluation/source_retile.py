@@ -11,7 +11,9 @@ from mosaickv.evaluation.text_source_storage import TextSourceFormat
 def retile(packet, head_group):
     if type(head_group) is not int or head_group not in (1, 2, 4):
         raise ValueError("explicit audited head group required")
-    if isinstance(packet, TextSourceFormat):
+    from mosaickv.evaluation.cached_text_reader import CachedTextFormat
+
+    if isinstance(packet, (TextSourceFormat, CachedTextFormat)):
         return replace(packet, base=retile(packet.base, head_group))
     if not isinstance(packet, SharedSourceFormat) or packet.projection_backend != "fused":
         raise NotImplementedError("fused shared-source packet required")

@@ -160,10 +160,10 @@ def selected_pair(original, heads):
 
 def encode_layer(index, count, attention, pair, heads, text_positions, record, probabilities, text):
     """Exact operation order of head3_boundary8 then text-source optimize."""
+    from mosaickv.evaluation.direct_text_construction import optimize
     from mosaickv.evaluation.head_local_precision import localize, refit_corrections
     from mosaickv.evaluation.precision_corrections import fund_corrections, prompt_weights
     from mosaickv.evaluation.precision_tier import construct
-    from mosaickv.evaluation.text_source_storage import optimize
 
     union = tuple(sorted({j for row in heads for j, p in enumerate(row) if p in text_positions}))
     boundary = index < 2 or index >= count - 2
@@ -181,7 +181,7 @@ def encode_layer(index, count, attention, pair, heads, text_positions, record, p
     if boundary:
         # The frozen boundary branch refits AFTER head-local exact overlays.
         packet, _ = refit_corrections(packet, pair, key_weight=kw, value_weight=vw)
-    packet, _ = optimize(packet, text, heads, text_positions, attention)
+    packet, _ = optimize(packet, text, heads, text_positions, attention, reference_pair=pair)
     return packet
 
 
