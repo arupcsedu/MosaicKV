@@ -21,15 +21,21 @@ def _read(
     WIDTH: tl.constexpr,
     BITS: tl.constexpr,
     REUSE_HEADERS: tl.constexpr = False,
+    ROW4: tl.constexpr = False,
 ):
     col = start + tl.arange(0, 64)
     index = col[None, :] * ROWS + row[:, None]
     valid = row[:, None] < ROWS
-    bit = index * BITS
-    byte, shift = bit // 8, bit % 8
-    a = tl.load(CODES + byte, valid, other=0).to(tl.int32)
-    b = tl.load(CODES + byte + 1, valid & (shift + BITS > 8), other=0).to(tl.int32)
-    code = ((a >> shift) | (b << (8 - shift))) & ((1 << BITS) - 1)
+    if ROW4:
+        flat = row[:, None] * WIDTH + col[None, :]
+        byte = tl.load(CODES + flat // 2, valid, other=0).to(tl.int32)
+        code = (byte >> ((flat % 2) * 4)) & 7
+    else:
+        bit = index * BITS
+        byte, shift = bit // 8, bit % 8
+        a = tl.load(CODES + byte, valid, other=0).to(tl.int32)
+        b = tl.load(CODES + byte + 1, valid & (shift + BITS > 8), other=0).to(tl.int32)
+        code = ((a >> shift) | (b << (8 - shift))) & ((1 << BITS) - 1)
     if REUSE_HEADERS:
         # The fixed 16/32/64-row tiles divide the 128-row quantizer group.
         # Every valid row in this CTA therefore shares these exact headers.
@@ -59,8 +65,9 @@ def _read_coherent(
     BITS: tl.constexpr,
     HAS_COLUMNS: tl.constexpr,
     REUSE_HEADERS: tl.constexpr = False,
+    ROW4: tl.constexpr = False,
 ):
-    x = _read(CODES, MINIMUM, SCALE, row, start, ROWS, WIDTH, BITS, REUSE_HEADERS)
+    x = _read(CODES, MINIMUM, SCALE, row, start, ROWS, WIDTH, BITS, REUSE_HEADERS, ROW4)
     if HAS_COLUMNS:
         col = start + tl.arange(0, 64)
         slot = tl.load(MAP + col).to(tl.int32)
@@ -93,6 +100,7 @@ def _project(
     HAS_COLUMNS: tl.constexpr = False,
     ROW_TILE: tl.constexpr = 16,
     REUSE_HEADERS: tl.constexpr = False,
+    ROW4: tl.constexpr = False,
 ):
     row = tl.program_id(0) * ROW_TILE + tl.arange(0, ROW_TILE)
     head = tl.program_id(1) * HEAD_GROUP
@@ -114,6 +122,7 @@ def _project(
             BITS,
             HAS_COLUMNS,
             REUSE_HEADERS,
+            ROW4,
         )
         k = start * 64 + reduction
         if COMPONENT != 1:
@@ -183,12 +192,14 @@ def project(packet, attention, targets, *, component=-1, inspect_kernel=False):
         ):
             raise ValueError("unchanged contiguous bias-free native projection weights required")
     from mosaickv.evaluation.reconstruction_policy import reuse_headers
+    from mosaickv.evaluation.row_major_source_codes import lookup
     from mosaickv.evaluation.source_hotpath import source_launch
 
     with source_phase("indexing_views"):
+        row4 = lookup(body)
         grid = (triton.cdiv(n, row_tile), h // head_group)
         arguments = (
-            body.codes,
+            body.codes if row4 is None else row4,
             body.minimum,
             body.scale,
             column_map,
@@ -210,6 +221,7 @@ def project(packet, attention, targets, *, component=-1, inspect_kernel=False):
             HAS_COLUMNS=has_columns,
             ROW_TILE=row_tile,
             REUSE_HEADERS=reuse_headers(),
+            ROW4=row4 is not None,
             num_warps=warps,
             num_stages={1: 3, 2: 2, 4: 1}[head_group],
             enable_fp_fusion=False,
