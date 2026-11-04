@@ -37,3 +37,19 @@ def test_phase_summary_requires_numerical_controls():
     ]
     with pytest.raises(ValueError, match="complete constructor"):
         profile.summarize(rows)
+
+
+def test_manifest_uses_only_runtime_authorized_scope_fields():
+    fields = profile.manifest_overrides()
+    assert set(fields) == {"variant", "methods", "actual_timing_protocol"}
+    assert fields["actual_timing_protocol"]["instrumentation_not_performance_evidence"]
+
+
+def test_decode_boundary_disables_events_and_phase_records():
+    timer = profile.ConstructorTimer()
+    wrapped = timer.wrap("operator", lambda: 3)
+    assert wrapped() == 3
+    before = timer.resolve()
+    timer.enabled = False
+    assert wrapped() == 3
+    assert timer.resolve() == before

@@ -26,6 +26,34 @@ SCRIPT = SOURCE / "mosaickv/slurm/evicastkv_direct_construction_profile.sbatch"
 DOC = SOURCE / "mosaickv/docs/direct_construction_profile_20261103.md"
 
 
+class ConstructorTimer(PhaseTimer):
+    """Stop instrumentation at the final-packet boundary, before decoding."""
+
+    enabled = True
+
+    @contextmanager
+    def phase(self, name):
+        if not self.enabled:
+            yield
+        else:
+            with super().phase(name):
+                yield
+
+
+def manifest_overrides():
+    return dict(
+        variant="consumed_direct_constructor_subphase_instrumentation",
+        methods=list(direct.common.previous.METHODS),
+        actual_timing_protocol=dict(
+            profile_warmups=1,
+            profile_repetitions=2,
+            output_predictions=128,
+            instrumentation_not_performance_evidence=True,
+            no_latency_acceptance_from_instrumented_requests=True,
+        ),
+    )
+
+
 @contextmanager
 def observe(timer):
     from mosaickv.evaluation import direct_text_construction as construction
@@ -60,6 +88,15 @@ def prepare(root, revision):
     bound = dict(old["bound_files"])
     for path in (PARENT / "plan.json", PARENT / "paired-timing/analysis/decision.json", DOC):
         bound[str(path)] = sha(path)
+    negative = Path(
+        "/scratch/djy8hg/runs/evicastkv/direct-construction-phases-consumed-20261103-v1"
+    )
+    if (negative / "analysis/decision.json").exists():
+        for path in [
+            negative / "analysis/decision.json",
+            *(negative / f"workers/{i}/result.json" for i in (0, 1)),
+        ]:
+            bound[str(path)] = sha(path)
     for index in (0, 1):
         result = driver.read(PARENT / f"workers/{index}/result.json")
         if result["status"] != "completed" or result["failures"]:
@@ -108,17 +145,7 @@ def study(root, expected, index):
             root,
             expected,
             index,
-            manifest_overrides=dict(
-                variant="consumed_direct_constructor_subphase_instrumentation",
-                methods=list(direct.common.previous.METHODS),
-                instrumentation_not_performance_evidence=True,
-                actual_timing_protocol=dict(
-                    profile_warmups=1,
-                    profile_repetitions=2,
-                    output_predictions=128,
-                    no_latency_acceptance_from_instrumented_requests=True,
-                ),
-            ),
+            manifest_overrides=manifest_overrides(),
         )
         controls = driver.read(PARENT / f"workers/{index}/study.json")["records"]
         rng, rows = random.Random(plan["seed"]), []
@@ -128,14 +155,15 @@ def study(root, expected, index):
             for method in methods:
                 record = controls[method]["direct"]
                 captured = {}
+                timer = ConstructorTimer(event_factory=lambda: torch.cuda.Event(enable_timing=True))
 
-                def verify(packets, method=method, captured=captured):
+                def verify(packets, method=method, captured=captured, timer=timer):
                     signature = direct.packet_signature(packets)
                     if signature["digest"] != controls[method]["packet_sha256"]:
                         raise RuntimeError("instrumentation changed frozen packet words")
                     captured["packet_sha256"] = signature["digest"]
+                    timer.enabled = False
 
-                timer = PhaseTimer(event_factory=lambda: torch.cuda.Event(enable_timing=True))
                 with observe(timer):
                     measured = direct.execute(
                         adapter,
