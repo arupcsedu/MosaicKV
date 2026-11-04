@@ -63,6 +63,7 @@ def request(
     coalesce_transport_nonzero=False,
     batch_source_validation=False,
     full_predicate_span=False,
+    prompt_graph_reader=False,
 ):
     from mosaickv.evaluation.lossless_prompt_cache import backing_bytes
     from mosaickv.evaluation.native_execution_plan import use as native_plan
@@ -92,6 +93,7 @@ def request(
             coalesce_transport_nonzero,
             batch_source_validation,
             full_predicate_span,
+            prompt_graph_reader,
         )
     ):
         raise ValueError("explicit private transport validation policy required")
@@ -254,6 +256,7 @@ def request(
             sequential_source_history=True,
             source_history_constructor="direct_batched_checks",
             consolidated_history=True,
+            prompt_graph_reader=prompt_graph_reader,
         )
     end.record()
     torch.cuda.synchronize()
@@ -267,6 +270,7 @@ def request(
             prefill_construct_retire_wall_seconds=constructed_at - prepared_at,
             decode_wall_seconds=details["decode_wall_seconds"],
             decode_cuda_ms=details["decode_cuda_ms"],
+            prompt_graph_reader=details["storage"].get("prompt_graph_reader", dict(enabled=False)),
             initial_encoded_bytes=details["storage"]["initial_active_kv_storage_bytes"],
             final_encoded_bytes=details["storage"]["final_active_kv_storage_bytes"],
             reported_counter_peak_bytes=details["storage"]["peak_active_kv_storage_bytes"],

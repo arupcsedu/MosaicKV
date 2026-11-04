@@ -24,6 +24,7 @@ def cache_from_formats(
     segmented_history: bool = False,
     sequential_lease: bool = False,
     sequential_source_history: bool = False,
+    prompt_graph_reader: bool = False,
 ) -> ExactCache:
     from mosaickv.evaluation.sealed_history import SealedHistoryLayer
 
@@ -89,6 +90,10 @@ def cache_from_formats(
     ):
         raise ValueError("sequential lease requires explicit raw append-only history")
     cache = ExactCache(audit_workspace=audit)
+    if type(prompt_graph_reader) is not bool or (
+        prompt_graph_reader and (not sequential_source_history or updates < 2)
+    ):
+        raise ValueError("prompt graph requires explicit bounded sequential source history")
     cls = SealedHistoryLayer if sealed else ExactLayer
     if sequential_lease:
         from mosaickv.evaluation.sequential_kv_lease import SequentialLayer
@@ -125,6 +130,12 @@ def cache_from_formats(
                 graphs=workspace_graph,
             )
             cls = SharedSourceLayer
+    if prompt_graph_reader:
+        from mosaickv.evaluation.prompt_graph_reader import PromptGraphCache, PromptGraphLayer
+
+        cache = PromptGraphCache(audit_workspace=audit, constructor=source_history_constructor)
+        cache.sequential_source_history = True
+        cls = PromptGraphLayer
     shared: list[Any] = []
     from mosaickv.evaluation.layer_code_delta import bind
 
@@ -143,6 +154,8 @@ def cache_from_formats(
             **({"cache": cache} if shared_workspace else {}),
         )
         cache.layers.append(layer)
+        if prompt_graph_reader:
+            layer.prompt_graph_pool = cache.prompt_graph_pool
         cache.build_records.append(
             dict(layer=i, format=format.kind, component_bytes=format.component_bytes)
         )
@@ -178,6 +191,7 @@ def run(
     history_repair_enabled: bool = True,
     sequential_lease: bool = False,
     sequential_source_history: bool = False,
+    prompt_graph_reader: bool = False,
 ) -> tuple[Any, dict[str, Any]]:
     import time
 
@@ -211,6 +225,7 @@ def run(
         segmented_history=segmented_history,
         sequential_lease=sequential_lease,
         sequential_source_history=sequential_source_history,
+        prompt_graph_reader=prompt_graph_reader,
     )
     length = max(f.shape[-2] for f in formats)
     state = DecodeState(
@@ -233,6 +248,8 @@ def run(
     from contextlib import ExitStack
 
     with ExitStack() as stack:
+        if prompt_graph_reader:
+            stack.callback(cache.prompt_graph_pool.close)
         history_repair = None
         if history_reference is not None:
             from mosaickv.evaluation.draft_history_causal import HistoryRepairTransport
@@ -289,6 +306,8 @@ def run(
             token = output.next_token_id
         if shared_workspace:
             cache.release_workspace()
+        if prompt_graph_reader:
+            cache.prompt_graph_pool.close()
         ends.record()
     torch.cuda.synchronize()
     wall = time.monotonic() - started

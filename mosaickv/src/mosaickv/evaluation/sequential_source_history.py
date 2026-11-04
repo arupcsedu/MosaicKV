@@ -34,13 +34,21 @@ class SequentialSourceHistoryLayer(SequentialLayer, SourceHistoryLayer):
         from mosaickv.evaluation.prompt_prefetch import take
 
         if component != 0 or not take(self, destination):
-            fill_component(
-                self.representation,
-                self.attention,
-                component,
-                destination,
-                source_workspace=getattr(self, "source_workspace", None),
-            )
+            graph_pool = getattr(self, "prompt_graph_pool", None)
+            if graph_pool is not None:
+                if using_native:
+                    raise NotImplementedError(
+                        "prompt graph cannot borrow a native source workspace"
+                    )
+                graph_pool.reconstruct(self, component, destination)
+            else:
+                fill_component(
+                    self.representation,
+                    self.attention,
+                    component,
+                    destination,
+                    source_workspace=getattr(self, "source_workspace", None),
+                )
         if using_native:
             self.native_full_component_fills = getattr(self, "native_full_component_fills", 0) + 1
             if native.fused_restore:
