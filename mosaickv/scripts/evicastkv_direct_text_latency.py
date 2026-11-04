@@ -121,6 +121,9 @@ def execute(
         batch_source_validation=record.get(
             "batch_source_validation", plan.get("batch_source_validation", False)
         ),
+        full_predicate_span=record.get(
+            "full_predicate_span", plan.get("full_predicate_span", False)
+        ),
     )
     if not bits_equal(values, refs[method]["logits"]):
         raise RuntimeError("direct text construction changed parent vocabulary words")

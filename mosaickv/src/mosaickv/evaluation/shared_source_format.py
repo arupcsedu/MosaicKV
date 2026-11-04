@@ -289,7 +289,11 @@ def apply_transport_patch(patch, target, *, prompt_length):
 
 def transport_corrections(reference, actual, protected_rows, *, chunk_scalars=None):
     """Fix only violations of the FROZEN construction envelope, not task logits."""
-    from mosaickv.evaluation.deferred_transport_checks import correction_mask, enqueue
+    from mosaickv.evaluation.deferred_transport_checks import (
+        correction_mask,
+        enqueue,
+        predicate_span,
+    )
     from mosaickv.evaluation.exact_storage import SparseBitPatch
 
     patches = []
@@ -303,18 +307,19 @@ def transport_corrections(reference, actual, protected_rows, *, chunk_scalars=No
             or output.dtype != expected.dtype
         ):
             raise ValueError("finite compatible BF16 construction pair required")
+        quantum = predicate_span(expected.numel(), chunk_scalars, kind="corrections")
         finite = torch.isfinite(output).all()
         if not enqueue(finite, "finite") and not bool(finite):
             raise ValueError("finite compatible BF16 construction pair required")
-        if chunk_scalars is None:
+        if quantum is None:
             bad = ~torch.isclose(expected.float(), output.float(), rtol=0.01, atol=2**-6)
             indices = bad.flatten().nonzero().flatten()
         else:
             left, right = expected.flatten(), output.flatten()
             mask = correction_mask(left.numel(), left.device)
             parts = []
-            for start in range(0, left.numel(), chunk_scalars):
-                stop = start + chunk_scalars
+            for start in range(0, left.numel(), quantum):
+                stop = start + quantum
                 bad = ~torch.isclose(
                     left[start:stop].float(), right[start:stop].float(), rtol=0.01, atol=2**-6
                 )
@@ -347,6 +352,9 @@ def assert_transport_close(output, expected, *, chunk_scalars=524288):
     """
     if type(chunk_scalars) is not int or chunk_scalars < 1 or output.shape != expected.shape:
         raise ValueError("same shape and positive explicit verification chunk required")
+    from mosaickv.evaluation.deferred_transport_checks import predicate_span
+
+    chunk_scalars = predicate_span(output.numel(), chunk_scalars, kind="verification")
     left, right = output.flatten(), expected.flatten()
     if (
         output.dtype == expected.dtype == torch.bfloat16
@@ -437,6 +445,7 @@ def fit_transport_components(packet, attention):
     """
     from dataclasses import replace
 
+    from mosaickv.evaluation.deferred_transport_checks import predicate_span
     from mosaickv.evaluation.exact_storage import SparseBitPatch
     from mosaickv.evaluation.sequential_kv_lease import fill_component
     from mosaickv.evaluation.shared_source_kernel import decode_source_for_construction
@@ -490,5 +499,5 @@ def fit_transport_components(packet, attention):
         construction_has_temporary_decoded_source_and_native_projection=True,
         componentwise_reference_and_independent_verification=True,
         private_BF16_RoPE_operations_not_fused=True,
-        bounded_verification_chunk_scalars=524288,
+        bounded_verification_chunk_scalars=predicate_span(n * h * d, 524288),
     )

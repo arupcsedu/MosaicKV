@@ -15,12 +15,16 @@ _state = ContextVar("evicastkv_transport_validation_transaction", default=None)
 
 
 class Validation:
-    def __init__(self, *, coalesce_nonzero=False, batch_source_validation=False):
+    def __init__(
+        self, *, coalesce_nonzero=False, batch_source_validation=False, full_predicate_span=False
+    ):
         self.flags, self.kinds, self.expected = [], [], []
         self.device, self.closed, self.flushes = None, False, 0
         self.counts, self.peak_bytes = {}, 0
         self.coalesce_nonzero = coalesce_nonzero
         self.batch_source_validation = batch_source_validation
+        self.full_predicate_span = full_predicate_span
+        self.span_calls, self.span_peak_elements, self.span_fallbacks = {}, 0, 0
         self.mask_calls, self.mask_peak_bytes, self.mask_bound_fallbacks = 0, 0, 0
 
     def correction_mask(self, size, device):
@@ -34,6 +38,18 @@ class Validation:
         self.mask_calls += 1
         self.mask_peak_bytes = max(self.mask_peak_bytes, size)
         return torch.empty(size, device=device, dtype=torch.bool)
+
+    def predicate_span(self, size, requested, kind):
+        if not self.full_predicate_span:
+            return requested
+        if not 0 < size <= 4 * 1024 * 1024:
+            if kind is not None:
+                self.span_fallbacks += 1
+            return 524288 if requested is None else requested
+        if kind is not None:
+            self.span_calls[kind] = self.span_calls.get(kind, 0) + 1
+            self.span_peak_elements = max(self.span_peak_elements, size)
+        return size
 
     def append(self, flag, kind, expected):
         if self.closed or len(self.flags) >= 256:
@@ -91,6 +107,12 @@ class Validation:
             all_checks_before_decode=self.closed,
             coalesced_correction_nonzero=self.coalesce_nonzero,
             batched_source_validation=self.batch_source_validation,
+            full_predicate_span=self.full_predicate_span,
+            full_predicate_calls=dict(self.span_calls),
+            full_predicate_peak_elements=self.span_peak_elements,
+            full_predicate_hard_bound_elements=4 * 1024 * 1024,
+            full_predicate_bound_fallbacks=self.span_fallbacks,
+            theoretical_auxiliary_tensor_bound_not_measured_bytes=64 * self.span_peak_elements,
             correction_mask_calls=self.mask_calls,
             correction_mask_peak_tensor_bytes=self.mask_peak_bytes,
             correction_mask_hard_bound_bytes=4 * 1024 * 1024,
@@ -117,14 +139,23 @@ def source_validation_enabled():
     return state is not None and state.batch_source_validation
 
 
+def predicate_span(size, requested, *, kind=None):
+    state = _state.get()
+    return requested if state is None else state.predicate_span(size, requested, kind)
+
+
 @contextmanager
-def use(enabled, *, coalesce_nonzero=False, batch_source_validation=False):
+def use(
+    enabled, *, coalesce_nonzero=False, batch_source_validation=False, full_predicate_span=False
+):
     if (
         type(enabled) is not bool
         or type(coalesce_nonzero) is not bool
         or type(batch_source_validation) is not bool
+        or type(full_predicate_span) is not bool
         or (coalesce_nonzero and not enabled)
         or (batch_source_validation and not enabled)
+        or (full_predicate_span and not enabled)
         or _state.get() is not None
     ):
         raise ValueError("explicit nonnested private validation transaction required")
@@ -132,6 +163,7 @@ def use(enabled, *, coalesce_nonzero=False, batch_source_validation=False):
         Validation(
             coalesce_nonzero=coalesce_nonzero,
             batch_source_validation=batch_source_validation,
+            full_predicate_span=full_predicate_span,
         )
         if enabled
         else None
@@ -147,7 +179,7 @@ def use(enabled, *, coalesce_nonzero=False, batch_source_validation=False):
             state.flags.clear()
 
 
-def gpu_controls(*, coalesce_nonzero=False):
+def gpu_controls(*, coalesce_nonzero=False, full_predicate_span=False):
     """Real same-predicate/patch and failure controls, never task evidence."""
     from mosaickv.evaluation.shared_source_format import (
         assert_transport_close,
@@ -163,7 +195,9 @@ def gpu_controls(*, coalesce_nonzero=False):
         protected = torch.empty(0, device="cuda", dtype=torch.int32)
         chunk = 128 if rows < 100 else 524288
         old = transport_corrections((reference,), (actual,), protected, chunk_scalars=chunk)[0]
-        with use(True, coalesce_nonzero=coalesce_nonzero) as state:
+        with use(
+            True, coalesce_nonzero=coalesce_nonzero, full_predicate_span=full_predicate_span
+        ) as state:
             new = transport_corrections((reference,), (actual,), protected, chunk_scalars=chunk)[0]
             assert_transport_close(reference, reference.clone(), chunk_scalars=chunk)
         if not all(
@@ -181,7 +215,9 @@ def gpu_controls(*, coalesce_nonzero=False):
         y = x.clone()
         y.flatten()[0] = float("nan") if kind == "finite" else 2.0
         try:
-            with use(True, coalesce_nonzero=coalesce_nonzero):
+            with use(
+                True, coalesce_nonzero=coalesce_nonzero, full_predicate_span=full_predicate_span
+            ):
                 if kind == "close":
                     assert_transport_close(y, x)
                 else:

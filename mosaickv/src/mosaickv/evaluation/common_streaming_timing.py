@@ -62,6 +62,7 @@ def request(
     defer_transport_validation=False,
     coalesce_transport_nonzero=False,
     batch_source_validation=False,
+    full_predicate_span=False,
 ):
     from mosaickv.evaluation.lossless_prompt_cache import backing_bytes
     from mosaickv.evaluation.native_execution_plan import use as native_plan
@@ -86,10 +87,17 @@ def request(
         raise ValueError("explicit decode storage audit boolean required")
     if any(
         type(v) is not bool
-        for v in (defer_transport_validation, coalesce_transport_nonzero, batch_source_validation)
+        for v in (
+            defer_transport_validation,
+            coalesce_transport_nonzero,
+            batch_source_validation,
+            full_predicate_span,
+        )
     ):
         raise ValueError("explicit private transport validation policy required")
-    if (coalesce_transport_nonzero or batch_source_validation) and not defer_transport_validation:
+    if (
+        coalesce_transport_nonzero or batch_source_validation or full_predicate_span
+    ) and not defer_transport_validation:
         raise ValueError("construction optimizations require the private validation transaction")
     if hybrid_reader_policy is not None and full_prompt_native is not None:
         raise ValueError("hybrid and native projection policies are separate variants")
@@ -150,6 +158,7 @@ def request(
                 defer_transport_validation,
                 coalesce_nonzero=coalesce_transport_nonzero,
                 batch_source_validation=batch_source_validation,
+                full_predicate_span=full_predicate_span,
             )
         )
         direct_state = stack.enter_context(direct_text(direct_text_policy))

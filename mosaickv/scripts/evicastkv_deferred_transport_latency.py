@@ -17,7 +17,7 @@ SOURCE, driver = direct.SOURCE, direct.driver
 SCRIPT = SOURCE / "mosaickv/slurm/evicastkv_deferred_transport_latency.sbatch"
 PARENT = Path("/scratch/djy8hg/runs/evicastkv/direct-text-consumed-20261103-retry1")
 PROFILE = Path("/scratch/djy8hg/runs/evicastkv/direct-construction-phases-consumed-20261103-retry1")
-DOC = SOURCE / "mosaickv/docs/source_validation_barrier_20261104.md"
+DOC = SOURCE / "mosaickv/docs/full_predicate_span_20261104.md"
 
 
 def bookkeeping_microbenchmark(revision):
@@ -99,6 +99,13 @@ def prepare(root, revision):
         raise ValueError("complete bookkeeping strict negative required before source follow-up")
     bound[str(terminal)] = sha(terminal)
     bound[str(bookkeeping / "plan.json")] = sha(bookkeeping / "plan.json")
+    source_parent = Path("/scratch/djy8hg/runs/evicastkv/source-validation-consumed-20261104-v1")
+    source_decision = source_parent / "paired-timing/analysis/decision.json"
+    rejected = driver.read(source_decision)
+    if not rejected["complete"] or rejected["all_input_latency_gate"]:
+        raise ValueError("complete source strict negative required before larger-span follow-up")
+    for path in (source_decision, source_parent / "plan.json"):
+        bound[str(path)] = sha(path)
     cpu_benchmark = root / "cpu-bookkeeping.json"
     write_once(cpu_benchmark, bookkeeping_microbenchmark(revision))
     bound[str(cpu_benchmark)] = sha(cpu_benchmark)
@@ -127,11 +134,14 @@ def prepare(root, revision):
             old,
             source_sha=revision,
             bound_files=bound,
-            stage="consumed_unchanged_source_predicates_single_commit_barrier",
+            stage="consumed_bounded_larger_ATen_predicate_spans",
             direct_text_root=str(root),
             defer_transport_validation=True,
             coalesce_transport_nonzero=True,
             batch_source_validation=True,
+            full_predicate_span=True,
+            full_predicate_hard_bound_elements=4194304,
+            registered_operator_upper_ratio=0.85,
             constructor_mask_hard_bound_bytes=4 * 1024 * 1024,
             immutable_parent_policies=True,
             automatic_quality_submission=False,
@@ -168,16 +178,22 @@ def study(root, expected, index):
                 gpu_correction_timing,
                 gpu_source_controls,
             )
+            from mosaickv.evaluation.predicate_span_operator import run
+
+            operator = run(index)
 
             write_once(
                 root / f"workers/{index}/validation_primitive_controls.json",
                 dict(
-                    cases=gpu_controls(coalesce_nonzero=True),
+                    cases=gpu_controls(coalesce_nonzero=True, full_predicate_span=True),
                     timing=gpu_correction_timing(),
                     source_controls=gpu_source_controls(),
+                    larger_span_operator=operator,
                     no_task_evidence=True,
                 ),
             )
+            if not operator["summary"]["operator_improvement_gate"]:
+                raise RuntimeError("registered larger-span operator improvement gate failed")
             primitive_controls_done = True
         method, record, validate = args[5], args[6], kwargs.get("final_validator")
         whole_digest = None
@@ -195,6 +211,7 @@ def study(root, expected, index):
                 defer_transport_validation=False,
                 coalesce_transport_nonzero=False,
                 batch_source_validation=False,
+                full_predicate_span=False,
             )
             immediate = original(*immediate_args, **dict(kwargs, final_validator=capture))
             previous = frozen[method]["whole-6291456"]["audited"]
@@ -225,6 +242,7 @@ def study(root, expected, index):
             validation["counts"] != dict(source=32, finite=64, protected=64, close=64)
             or validation["commit_flushes"] != 1
             or validation["validation_flag_peak_tensor_bytes"] > 1025
+            or validation["full_predicate_calls"] != dict(corrections=64, verification=64)
         ):
             raise RuntimeError("complete bounded source validation transaction required")
         if (
@@ -233,6 +251,8 @@ def study(root, expected, index):
             or validation["correction_mask_bound_fallbacks"] != 0
             or validation["correction_mask_persistent_bytes"] != 0
             or not validation["batched_source_validation"]
+            or not validation["full_predicate_span"]
+            or validation["full_predicate_bound_fallbacks"] != 0
         ):
             raise RuntimeError("complete explicitly bounded coalesced construction required")
         return measured
