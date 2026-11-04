@@ -115,6 +115,9 @@ def execute(
         defer_transport_validation=record.get(
             "defer_transport_validation", plan.get("defer_transport_validation", False)
         ),
+        coalesce_transport_nonzero=record.get(
+            "coalesce_transport_nonzero", plan.get("coalesce_transport_nonzero", False)
+        ),
     )
     if not bits_equal(values, refs[method]["logits"]):
         raise RuntimeError("direct text construction changed parent vocabulary words")

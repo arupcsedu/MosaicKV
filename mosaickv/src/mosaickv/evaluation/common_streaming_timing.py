@@ -60,6 +60,7 @@ def request(
     direct_text_policy=None,
     final_packet_validator=None,
     defer_transport_validation=False,
+    coalesce_transport_nonzero=False,
 ):
     from mosaickv.evaluation.lossless_prompt_cache import backing_bytes
     from mosaickv.evaluation.native_execution_plan import use as native_plan
@@ -138,7 +139,11 @@ def request(
         from mosaickv.evaluation.deferred_transport_checks import use as transport_checks
         from mosaickv.evaluation.direct_text_construction import use as direct_text
 
-        transport_state = stack.enter_context(transport_checks(defer_transport_validation))
+        transport_state = stack.enter_context(
+            transport_checks(
+                defer_transport_validation, coalesce_nonzero=coalesce_transport_nonzero
+            )
+        )
         direct_state = stack.enter_context(direct_text(direct_text_policy))
         if componentwise_fitting:
             from mosaickv.evaluation import shared_source_format

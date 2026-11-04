@@ -3,6 +3,8 @@
 
 import argparse
 import os
+import statistics
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -15,7 +17,54 @@ SOURCE, driver = direct.SOURCE, direct.driver
 SCRIPT = SOURCE / "mosaickv/slurm/evicastkv_deferred_transport_latency.sbatch"
 PARENT = Path("/scratch/djy8hg/runs/evicastkv/direct-text-consumed-20261103-retry1")
 PROFILE = Path("/scratch/djy8hg/runs/evicastkv/direct-construction-phases-consumed-20261103-retry1")
-DOC = SOURCE / "mosaickv/docs/deferred_transport_latency_20261103.md"
+DOC = SOURCE / "mosaickv/docs/construction_bookkeeping_latency_20261104.md"
+
+
+def bookkeeping_microbenchmark(revision):
+    """Same outputs; CPU-only attribution, never a request-latency gate."""
+    from mosaickv.evaluation.text_source_storage import text_slots
+
+    def reference(positions, text):
+        if (
+            not positions
+            or len({len(h) for h in positions}) != 1
+            or tuple(sorted(set(text))) != tuple(text)
+            or any(
+                len(set(h)) != len(h) or any(type(p) is not int or p < 0 for p in h)
+                for h in positions
+            )
+        ):
+            raise ValueError("invalid fixture")
+        lookups = tuple({p: j for j, p in enumerate(h)} for h in positions)
+        return tuple(tuple(index.get(t, -1) for t in text) for index in lookups)
+
+    rows = []
+    for shared in (True, False):
+        head = tuple(range(632))
+        positions = (head,) * 32 if shared else tuple(tuple(range(632)) for _ in range(32))
+        text = tuple(range(576, 632))
+        expected = reference(positions, text)
+        if text_slots(positions, text) != expected:
+            raise RuntimeError("CPU bookkeeping changed head-slot map")
+        trials = {"reference": [], "candidate": []}
+        for trial in range(7):
+            order = [("reference", reference), ("candidate", text_slots)]
+            if trial % 2:
+                order.reverse()
+            for name, fn in order:
+                start = time.perf_counter()
+                for _ in range(100):
+                    fn(positions, text)
+                trials[name].append((time.perf_counter() - start) / 100)
+        rows.append(
+            dict(
+                shared_immutable_head_aliases=shared,
+                trials_seconds_per_call=trials,
+                median_seconds_per_call={k: statistics.median(v) for k, v in trials.items()},
+                head_slots_identical=True,
+            )
+        )
+    return dict(source_sha=revision, rows=rows, CPU_only=True, request_latency_evidence=False)
 
 
 def prepare(root, revision):
@@ -38,8 +87,20 @@ def prepare(root, revision):
         DOC,
     ):
         bound[str(path)] = sha(path)
+    cpu_benchmark = root / "cpu-bookkeeping.json"
+    write_once(cpu_benchmark, bookkeeping_microbenchmark(revision))
+    bound[str(cpu_benchmark)] = sha(cpu_benchmark)
     for i in (0, 1):
         path = PARENT / f"workers/{i}/study.json"
+        bound[str(path)] = sha(path)
+    previous = Path("/scratch/djy8hg/runs/evicastkv/deferred-transport-consumed-20261103-retry1")
+    failed_gate = driver.read(previous / "paired-timing/analysis/decision.json")
+    if not failed_gate["complete"] or failed_gate["all_input_latency_gate"]:
+        raise ValueError("complete preserved deferred-validation negative required")
+    for path in (
+        previous / "paired-timing/analysis/decision.json",
+        previous / "analysis/decision.json",
+    ):
         bound[str(path)] = sha(path)
     negative = Path("/scratch/djy8hg/runs/evicastkv/deferred-transport-consumed-20261103-v1")
     if (negative / "analysis/decision.json").exists():
@@ -54,9 +115,11 @@ def prepare(root, revision):
             old,
             source_sha=revision,
             bound_files=bound,
-            stage="consumed_deferred_unchanged_transport_validation",
+            stage="consumed_identical_construction_bookkeeping_and_coalesced_indices",
             direct_text_root=str(root),
             defer_transport_validation=True,
+            coalesce_transport_nonzero=True,
+            constructor_mask_hard_bound_bytes=4 * 1024 * 1024,
             immutable_parent_policies=True,
             automatic_quality_submission=False,
             paper_campaign_authorized=False,
@@ -87,11 +150,18 @@ def study(root, expected, index):
     def checked(*args, **kwargs):
         nonlocal primitive_controls_done
         if not primitive_controls_done:
-            from mosaickv.evaluation.deferred_transport_checks import gpu_controls
+            from mosaickv.evaluation.deferred_transport_checks import (
+                gpu_controls,
+                gpu_correction_timing,
+            )
 
             write_once(
                 root / f"workers/{index}/validation_primitive_controls.json",
-                dict(cases=gpu_controls(), no_task_evidence=True),
+                dict(
+                    cases=gpu_controls(coalesce_nonzero=True),
+                    timing=gpu_correction_timing(),
+                    no_task_evidence=True,
+                ),
             )
             primitive_controls_done = True
         method, record, validate = args[5], args[6], kwargs.get("final_validator")
@@ -105,7 +175,9 @@ def study(root, expected, index):
                 captured.update(direct.packet_signature(packets))
 
             immediate_args = list(args)
-            immediate_args[6] = dict(record, defer_transport_validation=False)
+            immediate_args[6] = dict(
+                record, defer_transport_validation=False, coalesce_transport_nonzero=False
+            )
             immediate = original(*immediate_args, **dict(kwargs, final_validator=capture))
             previous = frozen[method]["whole-6291456"]["audited"]
             if any(immediate[k] != previous[k] for k in driver.STORAGE):
@@ -137,6 +209,13 @@ def study(root, expected, index):
             or validation["validation_flag_peak_tensor_bytes"] > 1025
         ):
             raise RuntimeError("complete bounded source validation transaction required")
+        if (
+            not validation["coalesced_correction_nonzero"]
+            or validation["correction_mask_peak_tensor_bytes"] > 4 * 1024 * 1024
+            or validation["correction_mask_bound_fallbacks"] != 0
+            or validation["correction_mask_persistent_bytes"] != 0
+        ):
+            raise RuntimeError("complete explicitly bounded coalesced construction required")
         return measured
 
     with patch.object(direct, "execute", checked):

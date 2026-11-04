@@ -52,6 +52,63 @@ def test_head_slot_map_uses_original_positions_not_text_rank():
         text_slots(((0, 2, 2),), (0, 2))
 
 
+def test_immutable_alias_reuse_preserves_distinct_and_mutable_heads():
+    head = (0, 2, 8, 9)
+    slots = text_slots((head, head, [0, 1, 8, 9], tuple([0, 2, 8, 9])), (0, 1, 9))
+    assert slots == ((0, -1, 3), (0, -1, 3), (0, 1, 3), (0, -1, 3))
+    assert slots[0] is slots[1]
+    # No cross-call reuse or reuse of a mutable row's previously valid contents.
+    mutable = [0, 2, 8, 9]
+    text_slots((mutable, mutable), (0, 9))
+    mutable[-1] = 8
+    with pytest.raises(ValueError):
+        text_slots((mutable, mutable), (0, 9))
+
+
+@pytest.mark.parametrize("bad", [(0, 1, 1), (0, -1, 2), (0, True, 2), (0, 1.0, 2)])
+def test_alias_reuse_never_hides_bad_distinct_head(bad):
+    head = (0, 1, 2)
+    with pytest.raises(ValueError):
+        text_slots((head, head, bad), (0, 2))
+
+
+def test_alias_slots_match_reference_for_random_unique_head_shapes():
+    import random
+
+    rng = random.Random(20261104)
+    for _ in range(100):
+        rows = [tuple(rng.sample(range(40), 20)) for _ in range(4)]
+        positions = tuple(rng.choice(rows) for _ in range(32))
+        text = tuple(sorted(rng.sample(range(45), 12)))
+        expected = tuple(
+            tuple(({p: j for j, p in enumerate(head)}).get(t, -1) for t in text)
+            for head in positions
+        )
+        assert text_slots(positions, text) == expected
+
+
+@pytest.mark.parametrize("text", [(), (0, 1, 2, 3), (1, 3)])
+def test_shared_source_overlay_cpu_plan_matches_original_order_and_words(text):
+    from mosaickv.evaluation.exact_storage import decoded, encode
+    from mosaickv.evaluation.shared_source_format import SharedSourceFormat
+
+    shape = (1, 2, 4, 8)
+    ids = torch.tensor([7, 1, 4, 2], dtype=torch.int32)
+    references = tuple(torch.arange(64).reshape(shape).bfloat16() + offset for offset in (0, 10))
+    fmt = SharedSourceFormat(None, shape, ids, (), None, None, None, None)
+    result = strip_text_overlays(fmt, references, (tuple(range(4)),) * 2, set(text))
+    kept = [p for p in ids.tolist() if p % 4 not in text] or ids[:1].tolist()
+    assert result.row_positions.tolist() == kept
+    expected_ids = torch.tensor(kept)
+    for original, body in zip(references, result.exact, strict=True):
+        expected = original[0, expected_ids // 4, expected_ids % 4].reshape(1, 1, -1, 8)
+        assert torch.equal(decoded(body).view(torch.uint8), expected.view(torch.uint8))
+        assert all(
+            torch.equal(a.view(torch.uint8), b.view(torch.uint8))
+            for a, b in zip(body.buffers, encode(expected.contiguous()).buffers, strict=True)
+        )
+
+
 def test_strip_changes_only_text_overlays_and_keeps_visual_protection():
     fmt, positions, text, _, attention = setup()
     old = fmt.materialize(attention)

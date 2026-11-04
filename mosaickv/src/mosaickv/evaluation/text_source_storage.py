@@ -81,15 +81,25 @@ def text_slots(positions, text):
         not positions
         or len({len(h) for h in positions}) != 1
         or tuple(sorted(set(text))) != tuple(text)
-        or any(
-            len(set(h)) != len(h) or any(type(p) is not int or p < 0 for p in h) for h in positions
-        )
     ):
         raise ValueError("sorted text IDs and uniform unique head positions required")
-    # Build each head's index ONCE, not once for every text token. Validation
-    # and absent-slot semantics remain identical for all cache methods.
-    lookups = tuple({p: j for j, p in enumerate(h)} for h in positions)
-    return tuple(tuple(index.get(t, -1) for t in text) for index in lookups)
+    # Identity-only reuse of immutable rows, LOCAL to this call. All distinct
+    # rows still receive the full validation. Never cache mutable head lists
+    # or carry a lookup between requests. Holding the tuple prevents id reuse.
+    shared, output = {}, []
+    for head in positions:
+        cached = shared.get(id(head)) if type(head) is tuple else None
+        if cached is not None:
+            output.append(cached[1])
+            continue
+        if len(set(head)) != len(head) or any(type(p) is not int or p < 0 for p in head):
+            raise ValueError("sorted text IDs and uniform unique head positions required")
+        lookup = {p: j for j, p in enumerate(head)}
+        slots = tuple(lookup.get(t, -1) for t in text)
+        output.append(slots)
+        if type(head) is tuple:
+            shared[id(head)] = (head, slots)
+    return tuple(output)
 
 
 def strip_text_overlays(packet, references, positions, text):
@@ -101,14 +111,15 @@ def strip_text_overlays(packet, references, positions, text):
         if tuple(map(tuple, positions)) != (tuple(range(n)),) * h:
             raise ValueError("full original identity source positions required")
         ids = packet.row_positions.long()
-        keep = torch.tensor(
-            [int(p) % n not in text for p in ids.cpu().tolist()],
-            device=ids.device,
-            dtype=torch.bool,
-        )
-        if not keep.any():
-            keep[0] = True  # retain the existing nonempty scatter contract
-        retained = ids[keep]
+        source_ids = ids.cpu().tolist()
+        retained_ids = [p for p in source_ids if p % n not in text]
+        if not retained_ids:
+            if not source_ids:
+                raise ValueError("original nonempty common exact overlay required")
+            retained_ids = source_ids[:1]  # same existing nonempty scatter contract
+        # Filtering already happens on the CPU. Construct its exact ordered
+        # result directly, avoiding a Boolean GPU reduction/nonzero round-trip.
+        retained = torch.tensor(retained_ids, device=ids.device, dtype=torch.long)
         exact = tuple(
             encode(t[0, retained // n, retained % n].reshape(1, 1, -1, d).contiguous())
             for t in references

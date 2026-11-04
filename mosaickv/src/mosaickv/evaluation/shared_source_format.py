@@ -262,7 +262,7 @@ def apply_transport_patch(patch, target, *, prompt_length):
 
 def transport_corrections(reference, actual, protected_rows, *, chunk_scalars=None):
     """Fix only violations of the FROZEN construction envelope, not task logits."""
-    from mosaickv.evaluation.deferred_transport_checks import enqueue
+    from mosaickv.evaluation.deferred_transport_checks import correction_mask, enqueue
     from mosaickv.evaluation.exact_storage import SparseBitPatch
 
     patches = []
@@ -284,14 +284,19 @@ def transport_corrections(reference, actual, protected_rows, *, chunk_scalars=No
             indices = bad.flatten().nonzero().flatten()
         else:
             left, right = expected.flatten(), output.flatten()
+            mask = correction_mask(left.numel(), left.device)
             parts = []
             for start in range(0, left.numel(), chunk_scalars):
                 stop = start + chunk_scalars
                 bad = ~torch.isclose(
                     left[start:stop].float(), right[start:stop].float(), rtol=0.01, atol=2**-6
                 )
-                parts.append(bad.nonzero().flatten() + start)
-            indices = torch.cat(parts)
+                if mask is None:
+                    parts.append(bad.nonzero().flatten() + start)
+                else:
+                    mask[start:stop].copy_(bad)
+            indices = torch.cat(parts) if mask is None else mask.nonzero().flatten()
+            del mask
         protected = torch.isin(indices // d, protected_rows.long()).any()
         if not enqueue(protected, "protected", expected=False) and bool(protected):
             raise RuntimeError("protected K/V mismatch may not be hidden by a numerical patch")

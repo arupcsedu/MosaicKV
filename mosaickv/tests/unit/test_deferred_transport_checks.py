@@ -63,3 +63,54 @@ def test_empty_disabled_nested_and_capacity_controls():
             enqueue(torch.tensor(True), "close")
         with pytest.raises(RuntimeError, match="exhausted"):
             enqueue(torch.tensor(True), "close")
+
+
+@pytest.mark.parametrize("chunk", [1, 17, 128, 50000])
+def test_coalesced_nonzero_is_exact_and_workspace_is_bounded(chunk):
+    generator = torch.Generator().manual_seed(112)
+    reference = torch.randn(1, 2, 7, 128, generator=generator).bfloat16()
+    actual = reference.clone()
+    actual.flatten()[::127] += 0.25
+    protected = torch.empty(0, dtype=torch.int32)
+    old = transport_corrections((reference,), (actual,), protected, chunk_scalars=chunk)[0]
+    with use(True, coalesce_nonzero=True) as state:
+        new = transport_corrections((reference,), (actual,), protected, chunk_scalars=chunk)[0]
+    assert all(
+        torch.equal(a.view(torch.uint8), b.view(torch.uint8))
+        for a, b in zip(old.tensors, new.tensors, strict=True)
+    )
+    report = state.report()
+    assert report["correction_mask_calls"] == 1
+    assert report["correction_mask_peak_tensor_bytes"] == reference.numel()
+    assert report["correction_mask_persistent_bytes"] == 0
+
+
+def test_coalesced_mask_bound_default_and_invalid_scope():
+    from mosaickv.evaluation.deferred_transport_checks import correction_mask
+
+    assert correction_mask(1, "cpu") is None
+    with use(True) as state:
+        assert correction_mask(10, "cpu") is None
+    assert state.mask_calls == 0
+    with use(True, coalesce_nonzero=True) as state:
+        assert correction_mask(4 * 1024 * 1024 + 1, "cpu") is None
+        assert correction_mask(4, "cpu").numel() == 4
+    assert state.mask_peak_bytes == 4 and state.mask_bound_fallbacks == 1
+    with pytest.raises(ValueError), use(False, coalesce_nonzero=True):
+        pass
+
+
+@pytest.mark.parametrize("coalesced", [False, True])
+@pytest.mark.parametrize("mode", ["finite", "protected", "close"])
+def test_coalesced_failure_predicates_are_unchanged(coalesced, mode):
+    x = torch.ones(1, 1, 8, 128, dtype=torch.bfloat16)
+    y = x.clone()
+    y.flatten()[0] = float("nan") if mode == "finite" else 2.0
+    error = {"finite": ValueError, "protected": RuntimeError, "close": AssertionError}[mode]
+    with pytest.raises(error), use(True, coalesce_nonzero=coalesced):
+        if mode == "close":
+            assert_transport_close(y, x)
+        else:
+            transport_corrections(
+                (x,), (y,), torch.tensor([0], dtype=torch.int32), chunk_scalars=64
+            )
