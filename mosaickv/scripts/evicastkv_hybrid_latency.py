@@ -50,7 +50,7 @@ def submit(root, action, *, gpu=False, dependency=None):
         ]
     else:
         args += [
-            "--partition=bii,parallel,standard",
+            "--partition=bii,standard",
             "--cpus-per-task=2",
             "--mem=16G",
             "--time=00:15:00",

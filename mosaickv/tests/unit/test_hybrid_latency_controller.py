@@ -64,3 +64,18 @@ def test_failed_producers_never_launch_timing(monkeypatch, tmp_path):
     controller.study_analysis(tmp_path, "x")
     report = json.loads((tmp_path / "analysis/decision.json").read_text())
     assert not report["complete"] and report["failures"]
+
+
+def test_small_cpu_launcher_does_not_enter_parallel_minimum_cpu_qos(monkeypatch, tmp_path):
+    (tmp_path / "plan.json").write_text("{}")
+    commands = []
+
+    def launch(command, **_kwargs):
+        commands.append(command)
+        return "12345\n"
+
+    monkeypatch.setattr(controller.subprocess, "check_output", launch)
+    assert controller.submit(tmp_path, "cpu") == "12345"
+    assert "--partition=bii,standard" in commands[0]
+    assert "--cpus-per-task=2" in commands[0]
+    assert "--nodes=1" in commands[0]

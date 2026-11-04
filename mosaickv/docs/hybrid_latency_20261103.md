@@ -85,7 +85,7 @@ Record that boundary explicitly; do not fabricate an HF/backend result.
 Event-driven `afterany` CPU preparation -> two one-A100 workers -> CPU analysis
 at each stage. One GPU, 12 CPUs, 48 GiB per worker, <=2-hour shards; at most two
 simultaneous workers and six aggregate A100s. GPU reservation `bi_fox_dgx`;
-CPU `bii,parallel,standard`. Common environment only; all caches under scratch;
+CPU `bii,standard` (the parallel QOS rejects two-CPU requests). Common environment only; all caches under scratch;
 clean immutable source, hashed plan, reused immutable consumed media, exact
 model revision, manifests, raw trials, negative decisions and explicit failures.
 Callbacks may submit only this bounded next stage; never fresh samples, quality
