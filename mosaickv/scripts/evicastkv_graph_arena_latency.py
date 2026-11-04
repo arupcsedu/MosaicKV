@@ -142,7 +142,7 @@ def submit(root, action, *, dependency=None):
             + {"study": "00:35:00", "timing": "01:15:00", "all_baselines": "01:55:00"}[action],
         ]
     else:
-        args += ["--partition=bii,standard", "--cpus-per-task=2", "--mem=16G", "--time=00:25:00"]
+        args += ["--partition=bii", "--cpus-per-task=2", "--mem=16G", "--time=00:25:00"]
     if dependency:
         args.append(f"--dependency=afterany:{dependency}")
     (root / "slurm").mkdir(exist_ok=True)
@@ -184,6 +184,13 @@ def prepare(root, revision):
         OWNED / "plan.json",
         OWNED / "analysis/decision.json",
         SOURCE / "mosaickv/docs/graph_arena_latency_20261104.md",
+        Path(
+            "/scratch/djy8hg/runs/evicastkv/graph-arena-consumed-20261104-v1/analysis/decision.json"
+        ),
+        Path(
+            "/scratch/djy8hg/runs/evicastkv/captured-code-retirement-20261104-retry1/diagnostic.py"
+        ),
+        Path("/scratch/djy8hg/runs/evicastkv/captured-code-retirement-20261104-retry1/result.json"),
     ):
         bound[str(path)] = sha(path)
     for index in (0, 1):

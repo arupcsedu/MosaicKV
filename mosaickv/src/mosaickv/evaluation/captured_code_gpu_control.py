@@ -45,7 +45,7 @@ def run():
     if any(reference.scratch[r].data_ptr() == actual.scratch[r].data_ptr() for r in actual.scratch):
         raise RuntimeError("captured decoder shares mutable request scratch")
     actual.prepare_graph()
-    graphs, replays = {}, 0
+    graphs, replays, graph = {}, 0, None
     stream = torch.cuda.Stream()
     try:
         for _ in range(3):
@@ -82,8 +82,10 @@ def run():
         for graph in graphs.values():
             graph.reset()
         graphs.clear()
-        if "graph" in locals():
-            del graph
+        # locals() caches a dict containing the final graph. Deleting only
+        # the fast local then leaves that hidden strong owner alive until
+        # this function returns. The variable is initialized above instead.
+        del graph
         torch.cuda.synchronize()
         released = before - torch.cuda.memory_allocated()
         if released != 1024:

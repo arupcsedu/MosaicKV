@@ -42,3 +42,16 @@ campaign. This is a precision/storage variant with the main six mechanisms
 disabled; independent benchmark-quality N=0. Decode-owned tensor-storage
 peak is not whole-request GPU ownership peak. A positive two-input timing
 diagnostic would not establish broad EviCastKV quality or superiority.
+
+## Retirement-harness corrective retry
+
+The first model-control attempt stopped before checkpoint loading in both
+workers. A separately saved allocation diagnostic measured 31 live graph
+objects before destruction, one afterward, unchanged tensor allocations,
+and zero objects/allocations after the function returned. The harness called
+`locals()` to test variable existence: its cached dictionary retained that
+last strong graph reference even after `del graph`. Initialize the variable
+explicitly and delete it unconditionally instead. A CPU weak-reference
+regression covers this ownership trap; the real CUDA retirement guard remains
+exactly 1,024 bytes with all original-code comparisons unchanged. Bind the
+failed decision and allocation diagnostic in the corrective retry manifest.
