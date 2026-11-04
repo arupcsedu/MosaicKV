@@ -130,6 +130,7 @@ def test_projection_arguments_checks_and_subphases_preserve_original_launch(monk
         HAS_COLUMNS=False,
         ROW_TILE=16,
         REUSE_HEADERS=False,
+        ROW4=False,
         num_warps=4,
         num_stages=3,
         enable_fp_fusion=False,
@@ -154,6 +155,28 @@ def test_projection_arguments_checks_and_subphases_preserve_original_launch(monk
     with pytest.raises(ValueError, match="unchanged contiguous"):
         shared_source_kernel.project(packet, attention, targets)
     assert len(captured) == 2
+
+
+def test_opt_in_nibble_transport_changes_only_code_pointer_and_layout_flag(monkeypatch):
+    from mosaickv.evaluation import request_kernel_dispatch, shared_source_kernel
+    from mosaickv.evaluation.row_major_source_codes import lookup, use
+
+    calls = []
+    monkeypatch.setattr(request_kernel_dispatch, "launch", lambda *a, **kw: calls.append((a, kw)))
+    packet, attention, targets = projection_fixture()
+    scratch = torch.zeros(16 * 256 // 2, dtype=torch.uint8)
+    shared_source_kernel.project(packet, attention, targets, component=1)
+    with use(packet.source, scratch):
+        shared_source_kernel.project(packet, attention, targets, component=1)
+    old_args, old_options = calls[0]
+    new_args, new_options = calls[1]
+    assert old_args[:2] == new_args[:2]
+    assert old_args[2][0] is packet.source.codes and new_args[2][0] is scratch
+    assert all(a is b for a, b in zip(old_args[2][1:-2], new_args[2][1:-2], strict=True))
+    assert old_args[2][-2:] == new_args[2][-2:]
+    assert new_options == dict(old_options, ROW4=True)
+    assert old_options["ROW4"] is False and lookup(packet.source) is None
+    assert len(calls) == 2
 
 
 @pytest.mark.parametrize(
