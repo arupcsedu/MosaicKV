@@ -112,6 +112,9 @@ def execute(
         text_overlay_policy=record.get("text_policy"),
         direct_text_policy=record.get("direct_policy"),
         final_packet_validator=final_validator,
+        defer_transport_validation=record.get(
+            "defer_transport_validation", plan.get("defer_transport_validation", False)
+        ),
     )
     if not bits_equal(values, refs[method]["logits"]):
         raise RuntimeError("direct text construction changed parent vocabulary words")

@@ -59,6 +59,7 @@ def request(
     text_overlay_policy=None,
     direct_text_policy=None,
     final_packet_validator=None,
+    defer_transport_validation=False,
 ):
     from mosaickv.evaluation.lossless_prompt_cache import backing_bytes
     from mosaickv.evaluation.native_execution_plan import use as native_plan
@@ -81,6 +82,8 @@ def request(
         validate_native(full_prompt_native)
     if type(audit_decode_storage) is not bool:
         raise ValueError("explicit decode storage audit boolean required")
+    if type(defer_transport_validation) is not bool:
+        raise ValueError("explicit private transport validation policy required")
     if hybrid_reader_policy is not None and full_prompt_native is not None:
         raise ValueError("hybrid and native projection policies are separate variants")
     if type(prompt_prefetch) is not bool or (
@@ -132,8 +135,10 @@ def request(
     )
     fresh = replace(prepared, model_inputs=dict(prepared.model_inputs, past_key_values=cache))
     with ExitStack() as stack:
+        from mosaickv.evaluation.deferred_transport_checks import use as transport_checks
         from mosaickv.evaluation.direct_text_construction import use as direct_text
 
+        transport_state = stack.enter_context(transport_checks(defer_transport_validation))
         direct_state = stack.enter_context(direct_text(direct_text_policy))
         if componentwise_fitting:
             from mosaickv.evaluation import shared_source_format
@@ -265,6 +270,9 @@ def request(
             hybrid_conversion=hybrid_report,
             cached_text_conversion=text_report,
             direct_text_construction=direct_report,
+            transport_validation=transport_state.report()
+            if transport_state is not None
+            else dict(enabled=False),
             prompt_prefetch=prompt_prefetch,
             prefetch_hits=prefetched["hits"],
             prefetch_misses=prefetched["misses"],

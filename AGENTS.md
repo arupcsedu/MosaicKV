@@ -100,6 +100,12 @@ Do not vendor model weights, datasets, or code whose license does not permit red
 
 ## Engineering workflow
 
+- The user's November 3 latency clarification requires equal-or-faster
+  execution: the multiplicity-adjusted upper latency-ratio bound must be
+  <=1.00 versus the measured competitor. <=1.05 is a reported trade-off only,
+  never an acceptance pass. Preserve legacy diagnostic gates/results, but do
+  not reuse their 5%-slower progression flag as strict latency evidence.
+
 - For the user's October 26 event-driven workflow, chain finite Slurm jobs
   with `afterany` so failed producers also receive completeness/error analysis.
   Use write-once decisions and explicitly bounded follow-up scope; do not

@@ -262,6 +262,7 @@ def apply_transport_patch(patch, target, *, prompt_length):
 
 def transport_corrections(reference, actual, protected_rows, *, chunk_scalars=None):
     """Fix only violations of the FROZEN construction envelope, not task logits."""
+    from mosaickv.evaluation.deferred_transport_checks import enqueue
     from mosaickv.evaluation.exact_storage import SparseBitPatch
 
     patches = []
@@ -273,8 +274,10 @@ def transport_corrections(reference, actual, protected_rows, *, chunk_scalars=No
             expected.shape != output.shape
             or expected.dtype != torch.bfloat16
             or output.dtype != expected.dtype
-            or not torch.isfinite(output).all()
         ):
+            raise ValueError("finite compatible BF16 construction pair required")
+        finite = torch.isfinite(output).all()
+        if not enqueue(finite, "finite") and not bool(finite):
             raise ValueError("finite compatible BF16 construction pair required")
         if chunk_scalars is None:
             bad = ~torch.isclose(expected.float(), output.float(), rtol=0.01, atol=2**-6)
@@ -289,7 +292,8 @@ def transport_corrections(reference, actual, protected_rows, *, chunk_scalars=No
                 )
                 parts.append(bad.nonzero().flatten() + start)
             indices = torch.cat(parts)
-        if torch.isin(indices // d, protected_rows.long()).any():
+        protected = torch.isin(indices // d, protected_rows.long()).any()
+        if not enqueue(protected, "protected", expected=False) and bool(protected):
             raise RuntimeError("protected K/V mismatch may not be hidden by a numerical patch")
         patches.append(
             SparseBitPatch(
@@ -327,7 +331,12 @@ def assert_transport_close(output, expected, *, chunk_scalars=524288):
             ).all()
             for start in range(0, left.numel(), chunk_scalars)
         ]
-        if not checks or bool(torch.stack(checks).all()):
+        if not checks:
+            return
+        predicate = torch.stack(checks).all()
+        from mosaickv.evaluation.deferred_transport_checks import enqueue
+
+        if enqueue(predicate, "close") or bool(predicate):
             return
     # Preserve upstream metadata validation and failure diagnostics. This is
     # deliberately not a weakened guard or an empty-check success fallback.
