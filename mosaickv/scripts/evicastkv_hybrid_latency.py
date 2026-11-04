@@ -198,6 +198,7 @@ def execute(
     audit=False,
     collector=None,
     prefetch=False,
+    text_policy=None,
 ):
     import torch
 
@@ -233,6 +234,7 @@ def execute(
         reuse_code_descriptors=reuse,
         source_hotpath="prepared_restore" if reuse else "original",
         prompt_prefetch=prefetch,
+        text_overlay_policy=text_policy,
     )
     if not bits_equal(values, refs[method]["logits"]):
         difference = float((values - refs[method]["logits"]).abs().max())

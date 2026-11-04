@@ -56,6 +56,7 @@ def request(
     full_prompt_native=None,
     hybrid_reader_policy=None,
     prompt_prefetch=False,
+    text_overlay_policy=None,
 ):
     from mosaickv.evaluation.lossless_prompt_cache import backing_bytes
     from mosaickv.evaluation.native_execution_plan import use as native_plan
@@ -84,6 +85,10 @@ def request(
         prompt_prefetch and (hybrid_reader_policy is not None or full_prompt_native is not None)
     ):
         raise ValueError("prefetch requires a separate original-representation policy")
+    if text_overlay_policy is not None and (
+        hybrid_reader_policy is not None or full_prompt_native is not None or prompt_prefetch
+    ):
+        raise ValueError("cached text requires a separate original-representation policy")
 
     if method not in METHODS:
         raise ValueError("five frozen local precision variants only")
@@ -164,8 +169,18 @@ def request(
         from mosaickv.evaluation.hybrid_reader import convert as hybrid_convert
 
         packets, hybrid_report = hybrid_convert(
-            packets, tuple(layer.self_attn for layer in adapter._language_layers()),
+            packets,
+            tuple(layer.self_attn for layer in adapter._language_layers()),
             hybrid_reader_policy,
+        )
+    text_report = None
+    if text_overlay_policy is not None:
+        from mosaickv.evaluation.cached_text_reader import convert as text_convert
+
+        packets, text_report = text_convert(
+            packets,
+            tuple(layer.self_attn for layer in adapter._language_layers()),
+            text_overlay_policy,
         )
     if code_delta:
         from mosaickv.evaluation.layer_code_delta import convert
@@ -231,6 +246,7 @@ def request(
             full_prompt_native=full_prompt_native,
             native_conversion=native_report,
             hybrid_conversion=hybrid_report,
+            cached_text_conversion=text_report,
             prompt_prefetch=prompt_prefetch,
             prefetch_hits=prefetched["hits"],
             prefetch_misses=prefetched["misses"],
