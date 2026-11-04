@@ -1,7 +1,8 @@
 """Construct the SAME frozen cached-text representation without discarded fits.
 
-This is an explicitly scoped execution variant. Use actual protected original
-or merged K/V rows, never labels or new values. Default construction delegates
+This is an explicitly scoped execution variant. Borrow only protected original
+or merged rows; otherwise decode the frozen parent. Never use labels or new values.
+Default construction delegates
 to the unchanged validated text-source constructor. No process-global state.
 """
 
@@ -22,7 +23,7 @@ _state = ContextVar("evicastkv_direct_cached_text", default=None)
 
 
 @torch.inference_mode()
-def build(packet, pair, positions, text, modes):
+def build(packet, pair, positions, text, modes, *, attention=None, report=None):
     if (
         not isinstance(packet, (HeadLocalFormat, SharedSourceFormat))
         or type(modes) is not tuple
@@ -65,8 +66,17 @@ def build(packet, pair, positions, text, modes):
                 packet.flat_tokens,
             )
         )
-    if not bool(torch.isin(flat, protected).all()):
-        raise ValueError("every borrowed text row must already be parent-exact")
+    all_protected = bool(torch.isin(flat, protected).all())
+    if not all_protected:
+        # NEVER promote approximate parent rows to raw FullKV values. The old
+        # text-source constructor fits to THIS decoder's output, not to raw K/V.
+        # Materialize it ONCE, avoiding the discarded projection and four more
+        # materializations while retaining exactly its original approximation.
+        pair = packet.materialize(attention)
+    if report is not None:
+        report.update(
+            borrowed_only_parent_exact=all_protected, original_parent_materialized=not all_protected
+        )
     base = strip_text_overlays(packet, pair, positions, frozenset(text))
     bodies = []
     for tensor, mode in zip(pair, modes, strict=True):
@@ -101,9 +111,9 @@ class Construction:
             for row in self.modes
         ):
             raise ValueError("one registered source/cached mode per layer required")
-        self.policy, self.count, self.cached = dict(policy), 0, []
+        self.policy, self.count, self.cached, self.materialized = dict(policy), 0, [], []
 
-    def optimize(self, packet, positions, text, pair):
+    def optimize(self, packet, positions, text, pair, attention):
         if self.count >= len(self.modes):
             raise RuntimeError("more construction calls than frozen layers")
         index = self.count
@@ -111,8 +121,11 @@ class Construction:
         modes = self.modes[index]
         if modes == ("source", "source"):
             return packet, dict(direct_text_noop=True)
-        value = build(packet, pair, positions, text, modes)
+        details = {}
+        value = build(packet, pair, positions, text, modes, attention=attention, report=details)
         self.cached.append(index)
+        if details["original_parent_materialized"]:
+            self.materialized.append(index)
         return value, dict(direct_text_constructed=True)
 
     def finish(self, packets):
@@ -121,11 +134,13 @@ class Construction:
         size = backing_bytes(tuple(t for p in packets for t in p.private()))
         if size != self.policy["expected_private_bytes"]:
             raise RuntimeError(
-                "direct packet storage differs from frozen cached-text representation"
+                "direct packet storage differs from frozen cached-text representation: "
+                f"expected={self.policy['expected_private_bytes']}, actual={size}"
             )
         return dict(
             private_bytes=size,
             cached_layers=self.cached,
+            parent_materialization_layers=self.materialized,
             bypassed_text_fits=self.count,
             same_frozen_representation_required=True,
             no_labels_or_answers_used=True,
@@ -150,4 +165,4 @@ def optimize(packet, record, positions, text, attention, *, reference_pair):
         from mosaickv.evaluation.text_source_storage import optimize as original
 
         return original(packet, record, positions, text, attention)
-    return state.optimize(packet, positions, text, reference_pair)
+    return state.optimize(packet, positions, text, reference_pair, attention)

@@ -11,7 +11,10 @@ The existing text-source constructor materializes the full packet, fits a
 normalized text projection, builds numerical repairs, and verifies it three
 times. Posthoc text-row caching then discards that projection. Replace this
 wasted work by borrowing only rows already protected exactly by the parent.
-Reject unprotected rows. Strip only redundant text overlays. Preserve the
+For unprotected text, reconstruct the actual frozen parent once; NEVER borrow
+raw model values or upgrade its approximation. The first GPU verification
+correctly rejected that unsafe shortcut; preserve its negative artifacts.
+Record the layers requiring parent reconstruction. Strip only redundant text overlays. Preserve the
 exact codec/resident choice and per-layer membership from the completed frozen
 text-cache study; no new cost profiling or policy search is allowed.
 

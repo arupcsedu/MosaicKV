@@ -33,11 +33,16 @@ def test_direct_borrowing_preserves_parent_bits_memberships_and_history(modes):
     assert all((t[..., 17:, :] == -71).all() for t in targets)
 
 
-def test_unprotected_rows_cannot_be_borrowed_as_if_parent_exact():
+def test_unprotected_rows_are_reconstructed_not_borrowed_from_raw_model():
     source, pair, positions, text = example()
     source = replace(source, flat_tokens=torch.empty(0, dtype=torch.int32), protected=())
-    with pytest.raises(ValueError, match="already be parent-exact"):
-        direct.build(source, pair, positions, text, ("resident", "resident"))
+    details = {}
+    value = direct.build(source, pair, positions, text, ("resident", "resident"), report=details)
+    assert details["original_parent_materialized"]
+    assert not details["borrowed_only_parent_exact"]
+    parent, actual = source.materialize(None), value.materialize(None)
+    assert all(bits_equal(a, b) for a, b in zip(parent, actual, strict=True))
+    assert not bits_equal(actual[0][..., 4, :], pair[0][..., 4, :])
 
 
 def test_scope_no_labels_count_exact_bytes_and_rollback(monkeypatch):
@@ -72,7 +77,8 @@ def test_scope_no_labels_count_exact_bytes_and_rollback(monkeypatch):
         state.finish(())
 
 
-def test_shared_source_keeps_exact_values_and_retiles_without_reencoding():
+@pytest.mark.parametrize("all_selected", [False, True])
+def test_shared_source_keeps_parent_values_and_retiles_without_reencoding(all_selected):
     from mosaickv.evaluation.shared_source_format import construct as source_construct
     from mosaickv.evaluation.source_retile import retile
 
@@ -93,8 +99,13 @@ def test_shared_source_keeps_exact_values_and_retiles_without_reencoding():
         torch.arange(17, dtype=torch.int16)[None].expand(2, 17),
     )
     phases = torch.ones(1, 17, 128).bfloat16(), torch.zeros(1, 17, 128).bfloat16()
-    source = source_construct(x, pair, positions, text, phases, identity)
-    value = direct.build(source, pair, positions, text, ("encoded", "resident"))
+    memberships = positions if all_selected else ((0, 16),) * 2
+    source = source_construct(x, pair, memberships, text, phases, identity)
+    details = {}
+    value = direct.build(
+        source, pair, positions, text, ("encoded", "resident"), attention=attention, report=details
+    )
+    assert details["original_parent_materialized"] is not all_selected
     moved = retile(value, 2)
     assert moved.base.source is value.base.source and moved.base.source_head_group == 2
     for old, new in zip(source.materialize(attention), value.materialize(attention), strict=True):

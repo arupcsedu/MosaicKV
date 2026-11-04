@@ -19,6 +19,14 @@ PARENT = Path("/scratch/djy8hg/runs/evicastkv/cached-text-consumed-20261103-v1")
 SCRIPT = SOURCE / "mosaickv/slurm/evicastkv_direct_text_latency.sbatch"
 
 
+def packet_signature(packets):
+    digest = driver.pair.common.control.digest_tensors
+    return dict(
+        digest=digest(tuple(t for p in packets for t in p.tensors())),
+        layers=[digest(p.tensors()) for p in packets],
+    )
+
+
 def submit(root, action, **kwargs):
     with patch.object(common, "SCRIPT", SCRIPT):
         return common.submit(root, action, **kwargs)
@@ -43,6 +51,10 @@ def prepare(root, revision):
         SOURCE / "mosaickv/docs/direct_text_latency_20261103.md",
     ]
     files.extend(PARENT / f"workers/{i}/study.json" for i in (0, 1))
+    negative = Path("/scratch/djy8hg/runs/evicastkv/direct-text-consumed-20261103-v1")
+    if (negative / "analysis/decision.json").exists():
+        files.append(negative / "analysis/decision.json")
+        files.extend(negative / f"workers/{i}/result.json" for i in (0, 1))
     for path in files:
         bound[str(path)] = sha(path)
     write_once(
@@ -149,9 +161,7 @@ def study(root, expected, index):
             captured = {}
 
             def capture(packets, captured=captured):
-                captured["digest"] = driver.pair.common.control.digest_tensors(
-                    tuple(t for p in packets for t in p.tensors())
-                )
+                captured.update(packet_signature(packets))
 
             cached_record = dict(text_policy=policy)
             cached = execute(
@@ -175,13 +185,31 @@ def study(root, expected, index):
             )
             direct_record = dict(direct_policy=direct_policy)
 
-            def require_same(packets, expected_digest=captured["digest"]):
-                actual = driver.pair.common.control.digest_tensors(
-                    tuple(t for p in packets for t in p.tensors())
-                )
-                if actual != expected_digest:
+            expected_layers = tuple(captured["layers"])
+
+            def require_same(
+                packets,
+                expected_digest=captured["digest"],
+                expected_layers=expected_layers,
+                method=method,
+            ):
+                expected_signature = dict(digest=expected_digest, layers=list(expected_layers))
+                actual = packet_signature(packets)
+                if actual != expected_signature:
+                    changed = [
+                        i
+                        for i, (a, b) in enumerate(
+                            zip(actual["layers"], expected_signature["layers"], strict=True)
+                        )
+                        if a != b
+                    ]
+                    write_once(
+                        out / f"packet-mismatch-{method}.json",
+                        dict(expected=expected_signature, actual=actual, changed_layers=changed),
+                    )
                     raise RuntimeError(
-                        "direct packet tensor words/shapes/dtypes differ from frozen reader"
+                        "direct packet tensor words/shapes/dtypes differ from frozen reader: "
+                        f"changed_layers={changed}"
                     )
 
             direct = execute(
