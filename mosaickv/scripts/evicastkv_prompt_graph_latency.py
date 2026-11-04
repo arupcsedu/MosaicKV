@@ -99,6 +99,21 @@ def prepare(root, revision):
     for i in (0, 1):
         p = PARENT / f"workers/{i}/study.json"
         bound[str(p)] = sha(p)
+    failed = Path("/scratch/djy8hg/runs/evicastkv/prompt-graph-consumed-20261104-v1")
+    attribution = Path("/scratch/djy8hg/runs/evicastkv/prompt-graph-allocation-20261104-v1")
+    for p in (
+        failed / "analysis/decision.json",
+        failed / "plan.json",
+        attribution / "diagnostic.py",
+        attribution / "result.json",
+    ):
+        bound[str(p)] = sha(p)
+    allocation = driver.read(attribution / "result.json")
+    if any(
+        r["captured"] - r["before"] != 1024 or r["after_del"] != r["before"]
+        for r in allocation["records"]
+    ):
+        raise ValueError("positive separately measured generator-lifetime attribution required")
     write_once(
         root / "plan.json",
         dict(
@@ -118,7 +133,8 @@ def prepare(root, revision):
             automatic_quality_submission=False,
             main_six_mechanisms_disabled_precision_variant=True,
             parent_packet_words_unchanged=True,
-            graph_private_tensor_bytes_allowed=0,
+            graph_private_generator_scalar_bytes_charged=1024,
+            graph_unowned_tensor_bytes_allowed=0,
             whole_request_GPU_peak_certified=False,
         ),
     )
@@ -207,13 +223,13 @@ def study(root, expected, index):
                     if (
                         info["captures"] != 64
                         or info["replays"] != 8128
-                        or info["graph_private_tensor_bytes"] != 0
+                        or info["graph_private_tensor_bytes"] != 1024
+                        or info["graph_private_live_bytes"] != 0
+                        or info["unowned_tensor_bytes"] != 0
                         or not info["retired"]
                         or info["active_workspace_bytes"]
                     ):
-                        raise RuntimeError(
-                            "complete isolated, zero-private-tensor graph replay required"
-                        )
+                        raise RuntimeError("complete isolated, fully charged graph replay required")
                 record["audited"] = measured
                 record["packet_sha256"] = signatures[family]["digest"]
                 write_once(out / f"control-{method}-{arm}.json", record)

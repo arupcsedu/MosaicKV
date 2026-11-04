@@ -23,7 +23,7 @@ the shared backing inventory. Allocate lazily after the initial boundary and
 retire it after decoding but before the final boundary. Peak accounting must
 include it throughout its lifetime. Register `predictions - 1` maximum updates
 and reject overrun. Reject overlapping leases, changed bindings and any
-nonzero private tensor allocation during capture. Driver graph metadata is
+unowned private tensor allocation during capture. Driver graph metadata is
 not certified whole-request KV ownership; record CUDA allocated/reserved peaks
 and do not claim a certified whole-request memory win.
 
@@ -42,6 +42,22 @@ controls, then both consumed model controls for every arm. Require bitwise
 packet signatures, all 128 parent vocabulary-logit words and identical initial
 and final persistent backing. Report the newly measured decode-owned peak,
 including the fixed workspace; do not assume view bytes or old peaks.
+
+The first attempt (`1fc0bf5`, array 22472716) failed before any checkpoint
+inference: capture registered 1,024 bytes absent from the initial ledger. The
+separate synthetic allocator diagnostic (22472949) found exactly two eight-byte
+requests in 512-byte allocator blocks, released only after deleting the graph.
+The pinned PyTorch
+[generator registration implementation](https://github.com/pytorch/pytorch/blob/a1cb3cc05d46d198467bebbb6e8fba50a325d4e7/aten/src/ATen/cuda/CUDAGeneratorImpl.cpp#L124)
+allocates these seed/offset scalars; the
+[graph wrapper](https://github.com/pytorch/pytorch/blob/a1cb3cc05d46d198467bebbb6e8fba50a325d4e7/aten/src/ATen/cuda/CUDAGraph.cpp#L58)
+always registers the default generator. Its destructor unregisters it.
+The corrected ledger charges the full 1,024-byte allocation throughout graph
+lifetime, verifies both requested sizes and physical block sizes, rejects any
+additional allocation, and proves their release after destroying every graph.
+Serialize graph requests within a process; concurrent graph requests fail
+explicitly. This correction changes accounting, not arithmetic or thresholds.
+The failed run and its allocation diagnostic remain hash-bound dependencies.
 
 Only then run five warmups plus twenty randomized paired full requests per
 arm. The primary gate is the multiplicity-adjusted upper paired ratio <=0.96

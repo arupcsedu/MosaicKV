@@ -13,19 +13,55 @@ from mosaickv.evaluation.sequential_source_history import SequentialSourceHistor
 from mosaickv.evaluation.source_history import SourceHistoryCache
 
 
+def allocator_blocks():
+    return {
+        b["address"]: (b["requested_size"], b["size"])
+        for s in torch.cuda.memory_snapshot()
+        for b in s["blocks"]
+        if b["state"] == "active_allocated"
+    }
+
+
+def generator_metadata(before, after, additional):
+    """The pinned generator registers two int64 scalars, 512-byte blocks each.
+
+    Never bless arbitrary allocations of the same total size. Existing active
+    owners must survive and the only new owners must be exactly these scalars.
+    This was verified separately without checkpoint weights before this retry.
+    """
+    new = {p: size for p, size in after.items() if p not in before}
+    if (
+        not before.keys() <= after.keys()
+        or len(new) != 2
+        or any(v != (8, 512) for v in new.values())
+        or additional != 1024
+    ):
+        raise RuntimeError("only the pinned two-scalar CUDA generator metadata is admissible")
+    return tuple(new)
+
+
 class PromptGraphPool:
+    _active_owner = None
+
     def __init__(self, cache):
         self.cache, self.buffer, self.entries = cache, None, {}
         self.closed = False
         self.captures = self.replays = self.warm_fills = 0
         self.maximum_workspace_bytes = 0
         self.checked_private_tensor_bytes = 0
+        self.private_live_bytes = 0
+        self.generator_addresses = ()
 
     def acquire(self, layer, shape, source):
-        if self.closed or any(x.leased for x in self.cache.layers):
+        if (
+            self.closed
+            or any(x.leased for x in self.cache.layers)
+            or PromptGraphPool._active_owner not in (None, self)
+        ):
             raise RuntimeError("private nonoverlapping prompt-graph lease required")
         if source.device.type != "cuda" or source.dtype != torch.bfloat16:
             raise NotImplementedError("prompt reader replay requires CUDA BF16")
+        PromptGraphPool._active_owner = self
         # A run emits `updates` predictions and performs `updates - 1` updates.
         # Fail explicitly if any caller tries to exceed that registered horizon.
         capacity = max(x.prompt_length for x in self.cache.layers) + max(
@@ -84,6 +120,7 @@ class PromptGraphPool:
             self.warm_fills += 1
             torch.cuda.synchronize()
             before = torch.cuda.memory_allocated()
+            blocks = allocator_blocks() if not self.entries else None
             graph = torch.cuda.CUDAGraph()
             current, stream = torch.cuda.current_stream(), torch.cuda.Stream()
             stream.wait_stream(current)
@@ -97,10 +134,13 @@ class PromptGraphPool:
                 current.wait_stream(stream)
                 torch.cuda.synchronize()
                 additional = torch.cuda.memory_allocated() - before
-                # Refuse opaque private tensor allocations rather than hide
-                # them in a cache-memory claim. Graph driver metadata is not
-                # certified whole-request KV storage and is reported as such.
-                if additional != 0:
+                if not self.entries:
+                    self.generator_addresses = generator_metadata(
+                        blocks, allocator_blocks(), additional
+                    )
+                    self.private_live_bytes = self.checked_private_tensor_bytes = additional
+                    self.cache.observe()
+                elif additional != 0:
                     raise RuntimeError(f"prompt graph introduced {additional} unowned tensor bytes")
             except BaseException:
                 graph.reset()
@@ -123,14 +163,23 @@ class PromptGraphPool:
             before = torch.cuda.memory_allocated()
             for _, graph in self.entries.values():
                 graph.reset()
-            if torch.cuda.memory_allocated() != before:
-                raise RuntimeError("prompt graph retirement changed unowned tensor storage")
-        self.entries.clear()
+            self.entries.clear()
+            # reset() destroys kernels but the C++ destructor unregisters RNG
+            # state. Do not retain the final loop-local graph during this check.
+            del graph
+            torch.cuda.synchronize()
+            if before - torch.cuda.memory_allocated() != self.private_live_bytes:
+                raise RuntimeError("graph metadata retirement differs from its charged owners")
+            if any(p in allocator_blocks() for p in self.generator_addresses):
+                raise RuntimeError("retired graph still owns a generator metadata allocation")
+            self.private_live_bytes = 0
         value = self.buffer
         self.cache.shared_tensors = tuple(t for t in self.cache.shared_tensors if t is not value)
         self.buffer = None
         self.cache.shared_bytes = backing_bytes(self.cache.shared_tensors)
         self.closed = True
+        if PromptGraphPool._active_owner is self:
+            PromptGraphPool._active_owner = None
         self.cache.observe()
 
     def record(self):
@@ -141,6 +190,10 @@ class PromptGraphPool:
             warm_fills=self.warm_fills,
             maximum_workspace_bytes=self.maximum_workspace_bytes,
             graph_private_tensor_bytes=self.checked_private_tensor_bytes,
+            graph_private_live_bytes=self.private_live_bytes,
+            unowned_tensor_bytes=0,
+            generator_scalar_allocations=len(self.generator_addresses),
+            concurrent_graph_requests_supported=False,
             active_workspace_bytes=backing_bytes((self.buffer,)) if self.buffer is not None else 0,
             retired=self.closed,
             only_immutable_prompt_captured=True,
@@ -173,9 +226,17 @@ class PromptGraphCache(SourceHistoryCache):
         super().__init__(**kwargs)
         self.prompt_graph_pool = PromptGraphPool(self)
 
+    def observe(self, extras=()):
+        super().observe(extras)
+        pool = getattr(self, "prompt_graph_pool", None)
+        private = 0 if pool is None else pool.private_live_bytes
+        current = self.shared_bytes + sum(x.resident_bytes + x.lease_bytes for x in self.layers)
+        self.peak_bytes = max(self.peak_bytes, current + backing_bytes(extras) + private)
+
     def storage_record(self):
         record = super().storage_record()
         record["prompt_graph_reader"] = self.prompt_graph_pool.record()
+        record["final_active_kv_storage_bytes"] += self.prompt_graph_pool.private_live_bytes
         return record
 
 
@@ -222,22 +283,22 @@ def gpu_controls():
         for _ in range(2)
     ]
     try:
-        histories = [[[], []] for _ in formats]
-        for step in range(7):
-            phase = (
-                torch.ones(1, 1, 128, device="cuda", dtype=torch.bfloat16),
-                torch.zeros(1, 1, 128, device="cuda", dtype=torch.bfloat16),
-            )
-            position = torch.tensor([[900 + step]], device="cuda")
-            for i in range(len(formats)):
-                hidden = torch.randn((1, 1, 256), device="cuda", generator=generator).bfloat16()
-                pair = tuple(
-                    torch.randn((1, 2, 1, 128), device="cuda", generator=generator).bfloat16()
-                    for _ in range(2)
+        for cache in caches:
+            histories = [[[], []] for _ in formats]
+            for step in range(7):
+                phase = (
+                    torch.ones(1, 1, 128, device="cuda", dtype=torch.bfloat16),
+                    torch.zeros(1, 1, 128, device="cuda", dtype=torch.bfloat16),
                 )
-                for h, x in zip(histories[i], pair, strict=True):
-                    h.append(x.clone())
-                for cache in caches:
+                position = torch.tensor([[900 + step]], device="cuda")
+                for i in range(len(formats)):
+                    hidden = torch.randn((1, 1, 256), device="cuda", generator=generator).bfloat16()
+                    pair = tuple(
+                        torch.randn((1, 2, 1, 128), device="cuda", generator=generator).bfloat16()
+                        for _ in range(2)
+                    )
+                    for h, x in zip(histories[i], pair, strict=True):
+                        h.append(x.clone())
                     cache.source_input(i, hidden, phase, position)
                     layer = cache.layers[i]
                     leased = layer.update(*pair)
@@ -249,12 +310,6 @@ def gpu_controls():
                                 "prompt graph changed a K/V, history or logical slot"
                             )
                     layer.release()
-        if (
-            caches[0].prompt_graph_pool.buffer.data_ptr()
-            == caches[1].prompt_graph_pool.buffer.data_ptr()
-        ):
-            raise RuntimeError("requests share a graph workspace")
-        for cache in caches:
             before = cache.storage_record()
             pool = cache.prompt_graph_pool
             if pool.captures != 4 or pool.replays != 42 or pool.maximum_workspace_bytes != 8192:
@@ -263,7 +318,7 @@ def gpu_controls():
             after = cache.storage_record()
             if (
                 before["final_active_kv_storage_bytes"] - after["final_active_kv_storage_bytes"]
-                != pool.maximum_workspace_bytes
+                != pool.maximum_workspace_bytes + 1024
             ):
                 raise RuntimeError("workspace retirement disagrees with independent inventory")
         return dict(
@@ -272,6 +327,8 @@ def gpu_controls():
             captures_per_request=4,
             replays_per_request=42,
             full_workspace_backing_bytes_per_request=8192,
+            separately_charged_generator_metadata_bytes_per_request=1024,
+            serial_requests_only=True,
             retired=True,
             independent_quality_N=0,
             synthetic_control_only=True,

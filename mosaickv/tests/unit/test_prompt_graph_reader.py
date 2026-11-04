@@ -5,7 +5,11 @@ import torch
 
 from mosaickv.evaluation.exact_storage import ExactFormat
 from mosaickv.evaluation.lossless_bf16 import PackedBF16
-from mosaickv.evaluation.prompt_graph_reader import PromptGraphLayer, PromptGraphPool
+from mosaickv.evaluation.prompt_graph_reader import (
+    PromptGraphLayer,
+    PromptGraphPool,
+    generator_metadata,
+)
 from mosaickv.evaluation.storage_runs import cache_from_formats
 
 
@@ -101,3 +105,45 @@ def test_closed_pool_rejects_reuse_and_never_carries_state_to_another_request():
     with pytest.raises(RuntimeError, match="private nonoverlapping"):
         pool.acquire(cache.layers[0], (1, 2, 6, 128), cache.layers[0].history[0])
     assert not PromptGraphPool(cache).closed
+
+
+def test_only_measured_two_int64_generator_owners_are_admissible():
+    before = {10: (100, 512)}
+    after = dict(before, **{})
+    after.update({20: (8, 512), 30: (8, 512)})
+    assert generator_metadata(before, after, 1024) == (20, 30)
+    for invalid in (
+        {20: (8, 512), 30: (8, 512)},
+        dict(before, **{}) | {20: (1024, 1024)},
+        dict(before, **{}) | {20: (8, 512), 30: (16, 512)},
+        dict(before, **{}) | {20: (8, 512), 30: (8, 512), 40: (8, 512)},
+    ):
+        with pytest.raises(RuntimeError, match="two-scalar"):
+            generator_metadata(before, invalid, 1024)
+    with pytest.raises(RuntimeError):
+        generator_metadata(before, after, 0)
+
+
+def test_framework_metadata_is_charged_in_peak_and_live_storage():
+    cache = factory(prompt_graph_reader=True)
+    old = cache.storage_record()["final_active_kv_storage_bytes"]
+    cache.prompt_graph_pool.private_live_bytes = 1024
+    cache.observe()
+    record = cache.storage_record()
+    assert record["final_active_kv_storage_bytes"] == old + 1024
+    assert record["peak_active_kv_storage_bytes"] >= old + 1024
+    cache.prompt_graph_pool.private_live_bytes = 0
+    cache.prompt_graph_pool.close()
+
+
+def test_concurrent_graph_requests_rejected_without_touching_either_cache():
+    a, b = factory(prompt_graph_reader=True), factory(prompt_graph_reader=True)
+    PromptGraphPool._active_owner = a.prompt_graph_pool
+    try:
+        with pytest.raises(RuntimeError, match="private nonoverlapping"):
+            b.prompt_graph_pool.acquire(b.layers[0], (1, 2, 6, 128), b.layers[0].history[0])
+        assert b.prompt_graph_pool.buffer is None
+    finally:
+        a.prompt_graph_pool.close()
+        b.prompt_graph_pool.close()
+    assert PromptGraphPool._active_owner is None
