@@ -27,3 +27,11 @@ is required to launch the already registered all-five timing. <=1.05 is only a
 trade-off. Preserve all prior negative artifacts. At most two workers, one
 A100/12 CPUs each, <=6 A100 aggregate, <2h shards. No fresh cohort, retuning,
 calibration or paper campaign. Independent quality N remains zero.
+
+Representation-matching correction: whole-layer and text-cache formats have
+intentionally different serialized packets. Text modes retain their frozen
+text-packet hash. The PrefixKV whole-reader control first constructs the same
+whole policy with immediate validation, requiring its frozen parent vocabulary
+words and audited storage; deferred execution must match that whole-packet hash.
+This additional control is not timing evidence. Never compare a whole-reader
+packet to a text-reader packet or skip packet verification on either path.

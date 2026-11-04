@@ -41,6 +41,13 @@ def prepare(root, revision):
     for i in (0, 1):
         path = PARENT / f"workers/{i}/study.json"
         bound[str(path)] = sha(path)
+    negative = Path("/scratch/djy8hg/runs/evicastkv/deferred-transport-consumed-20261103-v1")
+    if (negative / "analysis/decision.json").exists():
+        for path in [
+            negative / "analysis/decision.json",
+            *(negative / f"workers/{i}/result.json" for i in (0, 1)),
+        ]:
+            bound[str(path)] = sha(path)
     write_once(
         root / "plan.json",
         dict(
@@ -61,6 +68,17 @@ def prepare(root, revision):
     write_once(root / "preparation_submission.json", dict(cpu=job))
 
 
+def require_matching_packet(signature, method, record, frozen, whole_digest=None):
+    if record.get("whole_policy") is not None:
+        if whole_digest is None:
+            raise RuntimeError("matching immediate whole-reader signature required")
+        expected = whole_digest
+    else:
+        expected = frozen[method]["packet_sha256"]
+    if signature["digest"] != expected:
+        raise RuntimeError("deferred validation changed matching parent packet words")
+
+
 def study(root, expected, index):
     frozen = driver.read(PARENT / f"workers/{index}/study.json")["records"]
     original = direct.execute
@@ -76,11 +94,36 @@ def study(root, expected, index):
                 dict(cases=gpu_controls(), no_task_evidence=True),
             )
             primitive_controls_done = True
-        method, validate = args[5], kwargs.get("final_validator")
+        method, record, validate = args[5], args[6], kwargs.get("final_validator")
+        whole_digest = None
+        if record.get("whole_policy") is not None:
+            # Different frozen reader representations intentionally have
+            # different packet words. Compare whole to whole, never to text.
+            captured = {}
+
+            def capture(packets):
+                captured.update(direct.packet_signature(packets))
+
+            immediate_args = list(args)
+            immediate_args[6] = dict(record, defer_transport_validation=False)
+            immediate = original(*immediate_args, **dict(kwargs, final_validator=capture))
+            previous = frozen[method]["whole-6291456"]["audited"]
+            if any(immediate[k] != previous[k] for k in driver.STORAGE):
+                raise RuntimeError("immediate whole-reader reference changed audited storage")
+            whole_digest = captured["digest"]
+            write_once(
+                root / f"workers/{index}/immediate-whole-{method}.json",
+                dict(
+                    signature=captured,
+                    measured=immediate,
+                    validation_control_only_not_latency_evidence=True,
+                ),
+            )
 
         def verify(packets):
-            if direct.packet_signature(packets)["digest"] != frozen[method]["packet_sha256"]:
-                raise RuntimeError("deferred validation changed frozen parent packet words")
+            require_matching_packet(
+                direct.packet_signature(packets), method, record, frozen, whole_digest
+            )
             if validate is not None:
                 validate(packets)
 
