@@ -8,6 +8,16 @@ passes. No CUDA imports or kernels execute merely by importing this module.
 import torch
 
 
+def bits_equal(a, b):
+    """Unlike float torch.equal, distinguish signed zero and retain NaN payloads."""
+    return (
+        a.dtype == b.dtype
+        and a.shape == b.shape
+        and a.device == b.device
+        and torch.equal(a.contiguous().view(torch.uint8), b.contiguous().view(torch.uint8))
+    )
+
+
 def validate(query, key, value):
     from mosaickv.evaluation.lossless_bf16 import PackedBF16
 

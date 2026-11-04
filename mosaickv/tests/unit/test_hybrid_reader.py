@@ -20,6 +20,7 @@ def packet():
     # Include signed zero and unusual BF16 words: float comparisons would miss
     # signed-zero changes and reject otherwise preserved NaN payloads.
     bits = torch.arange(2 * 17 * 128, dtype=torch.int16).reshape(1, 2, 17, 128)
+    bits.flatten()[:5] = torch.tensor([0, -32768, 32640, -128, 32705], dtype=torch.int16)
     return ExactFormat(
         "kv",
         tuple(bits.shape),

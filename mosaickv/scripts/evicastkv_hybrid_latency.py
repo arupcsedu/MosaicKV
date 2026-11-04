@@ -202,6 +202,7 @@ def execute(
     import torch
 
     from mosaickv.evaluation.common_streaming_timing import request
+    from mosaickv.evaluation.fused_lossless_attention import bits_equal
 
     def validate(packets):
         value = driver.pair.common.control.digest_tensors(
@@ -233,7 +234,7 @@ def execute(
         source_hotpath="prepared_restore" if reuse else "original",
         prompt_prefetch=prefetch,
     )
-    if not torch.equal(values, refs[method]["logits"]):
+    if not bits_equal(values, refs[method]["logits"]):
         difference = float((values - refs[method]["logits"]).abs().max())
         raise RuntimeError(f"hybrid request changed parent logits: max_abs={difference}")
     if (
@@ -246,6 +247,8 @@ def execute(
         no_FullKV_fallback=True,
         torch_peak_allocated=torch.cuda.max_memory_allocated(),
         torch_peak_reserved=torch.cuda.max_memory_reserved(),
+        generated_token_ids=values.argmax(-1).tolist(),
+        logit_comparison="same-shape/dtype uint8 word equality, including signed zero",
     )
     if prefetch and (
         measured["prefetch_misses"] != 1
