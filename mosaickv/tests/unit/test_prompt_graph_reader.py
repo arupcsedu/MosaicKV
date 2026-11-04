@@ -147,3 +147,31 @@ def test_concurrent_graph_requests_rejected_without_touching_either_cache():
         a.prompt_graph_pool.close()
         b.prompt_graph_pool.close()
     assert PromptGraphPool._active_owner is None
+
+
+def test_idle_history_borrow_is_disjoint_bounded_and_exception_safe():
+    options = dict(history_arena=True, captured_code_replay=False, row_major_codes=False)
+    cache = factory(prompt_graph_reader=True, prompt_graph_policy=options)
+    pool = cache.prompt_graph_pool
+    pool.buffer = torch.zeros(1, 2, 128, 128, dtype=torch.bfloat16)
+    with pytest.raises(RuntimeError, match="abort"), pool.borrow_history((1, 2, 16, 128)) as views:
+        assert all(t.shape == (1, 2, 16, 128) for pair in views for t in pair)
+        with pytest.raises(RuntimeError, match="exclusive"), pool.borrow_history((1, 2, 16, 128)):
+            pass
+        with pytest.raises(RuntimeError, match="active lease"):
+            pool.close()
+        raise RuntimeError("abort")
+    assert not pool.history_borrowed and pool.history_borrows == 1
+    with pool.borrow_history((1, 2, 64, 128)) as value:
+        assert value is None
+    assert pool.history_borrow_misses == 1
+    pool.close()
+
+
+def test_policy_cannot_silently_enable_a_non_graph_reader():
+    with pytest.raises(ValueError, match="explicit graph reader"):
+        factory(
+            prompt_graph_policy=dict(
+                history_arena=True, captured_code_replay=False, row_major_codes=False
+            )
+        )

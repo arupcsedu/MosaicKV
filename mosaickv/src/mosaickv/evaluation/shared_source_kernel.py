@@ -101,8 +101,11 @@ def _project(
     ROW_TILE: tl.constexpr = 16,
     REUSE_HEADERS: tl.constexpr = False,
     ROW4: tl.constexpr = False,
+    FIRST: tl.constexpr = 0,
+    TAKE: tl.constexpr = 0,
+    V_PREFIX: tl.constexpr = False,
 ):
-    row = tl.program_id(0) * ROW_TILE + tl.arange(0, ROW_TILE)
+    row = FIRST + tl.program_id(0) * ROW_TILE + tl.arange(0, ROW_TILE)
     head = tl.program_id(1) * HEAD_GROUP
     col = tl.arange(0, DIM * HEAD_GROUP)
     reduction = tl.arange(0, 64)
@@ -132,6 +135,8 @@ def _project(
             wv = tl.load(WV + (head * DIM + col[None, :]) * WIDTH + k[:, None])
             av = tl.dot(x, wv, av)
     valid = row[:, None] < ROWS
+    if TAKE:
+        valid = valid & (row[:, None] < FIRST + TAKE)
     pointer = (head + col[None, :] // DIM) * HEAD_OUT + row[:, None] * DIM + col[None, :] % DIM
     if COMPONENT != 1:
         key = ak.to(tl.bfloat16).to(tl.float32)
@@ -146,16 +151,34 @@ def _project(
         second = (rotated * sin).to(tl.bfloat16).to(tl.float32)
         tl.store(OK + pointer, first + second, valid)
     if COMPONENT != 0:
-        tl.store(OV + pointer, av.to(tl.bfloat16), valid)
+        if V_PREFIX:
+            v_pointer = (head + col[None, :] // DIM) * TAKE * DIM
+            v_pointer += (row[:, None] - FIRST) * DIM + col[None, :] % DIM
+        else:
+            v_pointer = pointer
+        tl.store(OV + v_pointer, av.to(tl.bfloat16), valid)
 
 
-def project(packet, attention, targets, *, component=-1, inspect_kernel=False):
+def project(packet, attention, targets, *, component=-1, inspect_kernel=False, window=None):
     import torch
 
     with source_phase("validation"):
         if type(component) is not int or component not in (-1, 0, 1):
             raise ValueError("explicit both/key/value projection component required")
         h, n, d = packet.shape[1:]
+        first, take, v_prefix = 0, 0, False
+        if window is not None:
+            if (
+                type(window) is not tuple
+                or len(window) != 3
+                or any(type(x) is not int for x in window[:2])
+                or type(window[2]) is not bool
+                or not 0 <= window[0] < window[0] + window[1] <= n
+            ):
+                raise ValueError("explicit bounded original-position projection window required")
+            first, take, v_prefix = window
+            if v_prefix and (component != -1 or first != 0):
+                raise ValueError("paired prefix requires both components at original position zero")
         head_group = getattr(packet, "source_head_group", 1)
         row_tile = getattr(packet, "source_row_tile", 16)
         if type(row_tile) is not int or row_tile not in (16, 32, 64):
@@ -165,6 +188,8 @@ def project(packet, attention, targets, *, component=-1, inspect_kernel=False):
         warps = getattr(packet, "source_num_warps", None)
         if warps is None:
             warps = 8 if head_group == 4 else 4
+        if v_prefix:
+            warps = 16
         if type(warps) is not int or warps not in (4, 8, 16):
             raise ValueError("explicit supported warp count required")
         body = packet.source
@@ -174,10 +199,16 @@ def project(packet, attention, targets, *, component=-1, inspect_kernel=False):
         width = body.shape[-1]
         if body.bits != 3 or body.axis != 2 or body.group != 128 or width != h * d or d != 128:
             raise ValueError("audited three-bit per-channel full-MHA source required")
-        if any(t.stride(-1) != 1 or t.stride(-2) != d for t in targets) or targets[0].stride(
-            1
-        ) != targets[1].stride(1):
+        if any(t.stride(-1) != 1 or t.stride(-2) != d for t in targets) or (
+            not v_prefix and targets[0].stride(1) != targets[1].stride(1)
+        ):
             raise ValueError("compatible existing strided K/V leases required")
+        if v_prefix and (
+            targets[1].shape != (1, h, take, d)
+            or not targets[1].is_contiguous()
+            or targets[0].data_ptr() == targets[1].data_ptr()
+        ):
+            raise ValueError("separate charged contiguous prefix-value workspace required")
         if (
             attention.k_proj.bias is not None
             or attention.v_proj.bias is not None
@@ -196,8 +227,10 @@ def project(packet, attention, targets, *, component=-1, inspect_kernel=False):
     from mosaickv.evaluation.source_hotpath import source_launch
 
     with source_phase("indexing_views"):
+        if first and reuse_headers():
+            raise NotImplementedError("offset windows do not support the header-reuse ablation")
         row4 = lookup(body)
-        grid = (triton.cdiv(n, row_tile), h // head_group)
+        grid = (triton.cdiv(take or n, row_tile), h // head_group)
         arguments = (
             body.codes if row4 is None else row4,
             body.minimum,
@@ -222,6 +255,9 @@ def project(packet, attention, targets, *, component=-1, inspect_kernel=False):
             ROW_TILE=row_tile,
             REUSE_HEADERS=reuse_headers(),
             ROW4=row4 is not None,
+            FIRST=first,
+            TAKE=take,
+            V_PREFIX=v_prefix,
             num_warps=warps,
             num_stages={1: 3, 2: 2, 4: 1}[head_group],
             enable_fp_fusion=False,

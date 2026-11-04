@@ -112,25 +112,11 @@ def build_consolidated(
             for i in range(2)
         ),
     )
-    reference = tuple(torch.empty(shape, dtype=torch.bfloat16, device=cos.device) for _ in range(2))
-    offset = 0
-    for f in formats:
-        end = offset + f.shape[-2]
-        f.fill(layer.attention, tuple(t[..., offset:end, :] for t in reference), direct=True)
-        offset = end
-    for _ in range(3):
-        actual = candidate.materialize(layer.attention)
-        if bit_flags is not None:
-            bit_flags.extend(
-                (a.view(torch.int16) == b.view(torch.int16)).all()
-                for a, b in zip(reference, actual, strict=True)
-            )
-            continue
-        if not all(
-            torch.equal(a.view(torch.int16), b.view(torch.int16))
-            for a, b in zip(reference, actual, strict=True)
-        ):
-            raise RuntimeError("consolidated projection changed original history K/V bits")
+    from mosaickv.evaluation.history_verification_workspace import verify
+
+    pool = getattr(layer, "prompt_graph_pool", None)
+    with pool.borrow_history(shape) if pool is not None else nullcontext(None) as scratch:
+        verify(layer, candidate, formats, shape, bit_flags, scratch)
     return candidate
 
 

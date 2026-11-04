@@ -1,14 +1,19 @@
 """Private prompt-reader graphs; never capture attention, history or a model.
 
 The immutable prompt reader alone writes to one charged request-wide lease.
-Ordered layer-code replay, generated history and native eager attention stay
-outside the graph. The default runtime is unchanged. This is an execution
+Generated history and native eager attention stay outside the graph. Ordered
+code replay is captured only by a separately configured private policy.
+The default runtime is unchanged. This is an execution
 diagnostic for already consumed inputs, not independent quality evidence.
 """
+
+from contextlib import contextmanager
+from dataclasses import asdict
 
 import torch
 
 from mosaickv.evaluation.lossless_prompt_cache import backing_bytes
+from mosaickv.evaluation.prompt_graph_policy import PromptGraphPolicy
 from mosaickv.evaluation.sequential_source_history import SequentialSourceHistoryLayer
 from mosaickv.evaluation.source_history import SourceHistoryCache
 
@@ -43,8 +48,16 @@ def generator_metadata(before, after, additional):
 class PromptGraphPool:
     _active_owner = None
 
-    def __init__(self, cache):
+    def __init__(self, cache, policy=None):
         self.cache, self.buffer, self.entries = cache, None, {}
+        self.policy = PromptGraphPolicy.parse(policy)
+        self.row4_workspace = None
+        self.row4_workspace_bytes = 0
+        self.history_borrowed = False
+        self.history_borrows = self.history_borrow_misses = self.history_borrow_maximum_bytes = 0
+        self.captured_code_replays = self.row4_replays = 0
+        self.captured_code_kernel_dispatches = 0
+        self.key_epochs = {}
         self.closed = False
         self.captures = self.replays = self.warm_fills = 0
         self.maximum_workspace_bytes = 0
@@ -55,6 +68,7 @@ class PromptGraphPool:
     def acquire(self, layer, shape, source):
         if (
             self.closed
+            or self.history_borrowed
             or any(x.leased for x in self.cache.layers)
             or PromptGraphPool._active_owner not in (None, self)
         ):
@@ -95,6 +109,7 @@ class PromptGraphPool:
 
         if (
             self.closed
+            or self.history_borrowed
             or self.buffer is None
             or component not in (0, 1)
             or not layer.leased
@@ -103,11 +118,46 @@ class PromptGraphPool:
         ):
             raise RuntimeError("only a private fixed-address prompt reader may be replayed")
         packet = layer.representation
+        replay = None
         if isinstance(packet, BoundDeltaFormat):
-            # This mutates ordered code-replay state and MUST NOT be captured.
-            packet = packet.replay.view(packet.index)
-            if layer.representation.replay.prepared_views is None:
+            bound = packet
+            replay = bound.replay if self.policy.captured_code_replay else None
+            if replay is not None:
+                if component == 0:
+                    if self.key_epochs.get(id(layer)) == layer.history_length:
+                        raise RuntimeError("captured XOR replay may run only once per layer/token")
+                    self.key_epochs[id(layer)] = layer.history_length
+                packet = replay.advance_for_graph(bound.index)
+            else:
+                packet = bound.replay.view(bound.index)
+            if bound.replay.prepared_views is None:
                 raise ValueError("prompt graphs require stable private replay descriptors")
+        body = self._row4_body(packet) if self.policy.row_major_codes else None
+        if body is not None and self.row4_workspace is None:
+            from mosaickv.evaluation.row_major_source_codes import geometry
+
+            value = torch.empty(
+                geometry(*body.shape[2:]), device=body.codes.device, dtype=torch.uint8
+            )
+            self.cache.observe((value,))
+            self.row4_workspace = value
+            self.row4_workspace_bytes = backing_bytes((value,))
+            self.cache.shared_tensors = (*self.cache.shared_tensors, value)
+            self.cache.shared_bytes = backing_bytes(self.cache.shared_tensors)
+            self.cache.observe()
+
+        def fill(*, decode):
+            from contextlib import nullcontext
+
+            from mosaickv.evaluation.row_major_source_codes import pack_into, use
+
+            if decode and replay is not None and component == 0:
+                replay.decode_for_graph(bound.index)
+            if body is not None and component == 0:
+                pack_into(body, self.row4_workspace)
+            with use(body, self.row4_workspace) if body is not None else nullcontext():
+                fill_component(packet, layer.attention, component, self.buffer)
+
         signature = (id(packet), id(layer.attention), self.buffer.data_ptr(), self.buffer.stride())
         key = id(layer), component
         entry = self.entries.get(key)
@@ -116,7 +166,10 @@ class PromptGraphPool:
                 raise RuntimeError("bounded prompt-graph route table exhausted")
             # Compile/warm the exact kernels before CUDA capture. Do not include
             # ordered replay or changing history tensors in the graph closure.
-            fill_component(packet, layer.attention, component, self.buffer)
+            # Warming may read predecessor codes into UNUSED output. It must
+            # not run an in-place XOR decoder twice. Capture records decode
+            # but executes nothing; the first replay then decodes exactly once.
+            fill(decode=False)
             self.warm_fills += 1
             torch.cuda.synchronize()
             before = torch.cuda.memory_allocated()
@@ -128,7 +181,7 @@ class PromptGraphPool:
                 with torch.cuda.stream(stream):
                     graph.capture_begin(capture_error_mode="thread_local")
                     try:
-                        fill_component(packet, layer.attention, component, self.buffer)
+                        fill(decode=True)
                     finally:
                         graph.capture_end()
                 current.wait_stream(stream)
@@ -152,11 +205,53 @@ class PromptGraphPool:
             raise RuntimeError("immutable prompt graph bindings changed during request")
         entry[1].replay()
         self.replays += 1
+        self.captured_code_replays += int(replay is not None and component == 0)
+        if replay is not None and component == 0:
+            self.captured_code_kernel_dispatches += len(replay.graph_bindings[bound.index])
+        self.row4_replays += int(body is not None and component == 0)
+
+    @staticmethod
+    def _row4_body(packet):
+        from mosaickv.evaluation.head_local_precision import HeadLocalFormat
+        from mosaickv.evaluation.hybrid_reader import HybridFormat
+        from mosaickv.evaluation.shared_source_format import SharedSourceFormat
+        from mosaickv.evaluation.text_source_storage import TextSourceFormat
+
+        while isinstance(packet, (HeadLocalFormat, TextSourceFormat, HybridFormat)):
+            packet = packet.base
+        if isinstance(packet, SharedSourceFormat) and packet.projection_backend == "fused":
+            return packet.source
+        return None
+
+    @contextmanager
+    def borrow_history(self, shape):
+        if not self.policy.history_arena:
+            yield None
+            return
+        if self.closed or self.history_borrowed or any(x.leased for x in self.cache.layers):
+            raise RuntimeError("history scratch requires a released exclusive graph workspace")
+        from mosaickv.evaluation.history_verification_workspace import partition
+
+        scratch = None if self.buffer is None else partition(self.buffer, shape)
+        if scratch is None:
+            self.history_borrow_misses += 1
+            yield None
+            return
+        self.history_borrowed = True
+        self.history_borrows += 1
+        self.history_borrow_maximum_bytes = max(
+            self.history_borrow_maximum_bytes,
+            sum(t.numel() * t.element_size() for pair in scratch for t in pair),
+        )
+        try:
+            yield scratch
+        finally:
+            self.history_borrowed = False
 
     def close(self):
         if self.closed:
             return
-        if any(x.leased for x in self.cache.layers):
+        if self.history_borrowed or any(x.leased for x in self.cache.layers):
             raise RuntimeError("prompt graphs cannot retire an active lease")
         if self.entries:
             torch.cuda.synchronize()
@@ -173,9 +268,11 @@ class PromptGraphPool:
             if any(p in allocator_blocks() for p in self.generator_addresses):
                 raise RuntimeError("retired graph still owns a generator metadata allocation")
             self.private_live_bytes = 0
-        value = self.buffer
-        self.cache.shared_tensors = tuple(t for t in self.cache.shared_tensors if t is not value)
-        self.buffer = None
+        owners = (self.buffer, self.row4_workspace)
+        self.cache.shared_tensors = tuple(
+            t for t in self.cache.shared_tensors if all(t is not x for x in owners)
+        )
+        self.buffer = self.row4_workspace = None
         self.cache.shared_bytes = backing_bytes(self.cache.shared_tensors)
         self.closed = True
         if PromptGraphPool._active_owner is self:
@@ -194,13 +291,26 @@ class PromptGraphPool:
             unowned_tensor_bytes=0,
             generator_scalar_allocations=len(self.generator_addresses),
             concurrent_graph_requests_supported=False,
-            active_workspace_bytes=backing_bytes((self.buffer,)) if self.buffer is not None else 0,
+            active_workspace_bytes=backing_bytes(
+                tuple(x for x in (self.buffer, self.row4_workspace) if x is not None)
+            ),
+            row4_workspace_peak_bytes=self.row4_workspace_bytes,
+            maximum_total_reader_workspace_bytes=self.maximum_workspace_bytes
+            + self.row4_workspace_bytes,
             retired=self.closed,
             only_immutable_prompt_captured=True,
-            history_attention_and_ordered_replay_outside_graph=True,
+            history_attention_and_ordered_replay_outside_graph=not self.policy.captured_code_replay,
+            history_and_attention_outside_graph=True,
             capture_and_retirement_in_request_timing=True,
             driver_graph_metadata_not_KV_ownership_certified=True,
             independent_quality_N=0,
+            optimized_policy=asdict(self.policy),
+            history_borrows=self.history_borrows,
+            history_borrow_misses=self.history_borrow_misses,
+            history_borrow_maximum_bytes=self.history_borrow_maximum_bytes,
+            captured_code_replays=self.captured_code_replays,
+            captured_code_kernel_dispatches=self.captured_code_kernel_dispatches,
+            row4_replays=self.row4_replays,
         )
 
 
@@ -222,9 +332,9 @@ class PromptGraphLayer(SequentialSourceHistoryLayer):
 
 
 class PromptGraphCache(SourceHistoryCache):
-    def __init__(self, **kwargs):
+    def __init__(self, *, policy=None, **kwargs):
         super().__init__(**kwargs)
-        self.prompt_graph_pool = PromptGraphPool(self)
+        self.prompt_graph_pool = PromptGraphPool(self, policy)
 
     def observe(self, extras=()):
         super().observe(extras)

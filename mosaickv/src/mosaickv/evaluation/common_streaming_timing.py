@@ -64,6 +64,7 @@ def request(
     batch_source_validation=False,
     full_predicate_span=False,
     prompt_graph_reader=False,
+    prompt_graph_policy=None,
 ):
     from mosaickv.evaluation.lossless_prompt_cache import backing_bytes
     from mosaickv.evaluation.native_execution_plan import use as native_plan
@@ -79,6 +80,12 @@ def request(
     from mosaickv.evaluation.streaming_source_constructor import StreamingDirectSource
 
     validate(reconstruction_readers)
+    if prompt_graph_policy is not None:
+        from mosaickv.evaluation.prompt_graph_policy import PromptGraphPolicy
+
+        PromptGraphPolicy.parse(prompt_graph_policy)
+        if not prompt_graph_reader:
+            raise ValueError("explicit graph reader required for its optimization policy")
     validate_source_plan(source_hotpath)
     if full_prompt_native is not None:
         from mosaickv.evaluation.full_prompt_source import validate as validate_native
@@ -257,6 +264,7 @@ def request(
             source_history_constructor="direct_batched_checks",
             consolidated_history=True,
             prompt_graph_reader=prompt_graph_reader,
+            prompt_graph_policy=prompt_graph_policy,
         )
     end.record()
     torch.cuda.synchronize()

@@ -16,10 +16,10 @@ from mosaickv.evaluation.precision_tier import QuantizedBody
 
 
 def map_bodies(packet, function):
-    from mosaickv.evaluation.hybrid_reader import HybridFormat
     from mosaickv.evaluation.exact_storage import ExactFormat
     from mosaickv.evaluation.full_prompt_source import FullPromptSourceFormat
     from mosaickv.evaluation.head_local_precision import HeadLocalFormat
+    from mosaickv.evaluation.hybrid_reader import HybridFormat
     from mosaickv.evaluation.precision_tier import PrecisionFormat
     from mosaickv.evaluation.shared_source_format import SharedSourceFormat
     from mosaickv.evaluation.text_source_storage import TextSourceFormat
@@ -150,6 +150,7 @@ class Replay:
 
         self.descriptor_metrics = current()
         self.prepared_views, self.prepared_bindings = None, None
+        self.graph_bindings = None
         if self.descriptor_metrics is not None:
             views, bindings = [], []
             for packet in self.packets:
@@ -168,7 +169,45 @@ class Replay:
             self.prepared_views, self.prepared_bindings = tuple(views), tuple(bindings)
             self.descriptor_metrics["prepared_formats"] += len(views)
 
+    def prepare_graph(self):
+        """Static GPU pointers only, never execute/reorder a code transaction."""
+        if self.prepared_bindings is None:
+            raise ValueError("captured code replay requires immutable prepared descriptors")
+        if self.graph_bindings is not None:
+            return
+        previous, bindings = {}, []
+        for items in self.prepared_bindings:
+            current, operations = {}, []
+            for role, encoded, destination in items:
+                stream = encoded.stream
+                if not stream.raw:
+                    predecessor = previous.get(role)
+                    if predecessor is None or predecessor.shape != destination.shape:
+                        raise ValueError(
+                            "complete same-shape predecessor required for captured replay"
+                        )
+                    operations.append((predecessor, stream, destination))
+                current[role] = destination
+            bindings.append(tuple(operations))
+            previous = current
+        self.graph_bindings = tuple(bindings)
+
+    def advance_for_graph(self, index):
+        self.prepare_graph()
+        return self._view(index, launch=False)
+
+    def decode_for_graph(self, index):
+        if self.graph_bindings is None or self.last != index:
+            raise RuntimeError("host ordering must advance before captured code decoding")
+        for predecessor, stream, destination in self.graph_bindings[index]:
+            actual = decode(predecessor, stream, destination)
+            if actual.data_ptr() != destination.data_ptr():
+                raise RuntimeError("captured code decode changed the charged destination")
+
     def view(self, index):
+        return self._view(index, launch=True)
+
+    def _view(self, index, *, launch):
         if type(index) is not int or not 0 <= index < len(self.packets):
             raise ValueError("valid private replay layer index required")
         if index == self.last:
@@ -180,6 +219,8 @@ class Replay:
         current = {}
 
         if self.prepared_views is None:
+            if not launch:
+                raise ValueError("launch-free advance requires prepared graph descriptors")
 
             def body(role, encoded):
                 stream = encoded.stream
@@ -198,9 +239,13 @@ class Replay:
             for role, encoded, destination in self.prepared_bindings[index]:
                 stream = encoded.stream
                 codes = (
-                    stream.payload
-                    if stream.raw
-                    else decode(self.previous.get(role), stream, destination)
+                    destination
+                    if not launch
+                    else (
+                        stream.payload
+                        if stream.raw
+                        else decode(self.previous.get(role), stream, destination)
+                    )
                 )
                 if codes.data_ptr() != destination.data_ptr() or codes.shape != destination.shape:
                     raise RuntimeError("codec returned a foreign replay destination")

@@ -125,6 +125,7 @@ def execute(
             "full_predicate_span", plan.get("full_predicate_span", False)
         ),
         prompt_graph_reader=record.get("prompt_graph_reader", False),
+        prompt_graph_policy=record.get("prompt_graph_policy"),
     )
     if not bits_equal(values, refs[method]["logits"]):
         raise RuntimeError("direct text construction changed parent vocabulary words")

@@ -25,6 +25,7 @@ def cache_from_formats(
     sequential_lease: bool = False,
     sequential_source_history: bool = False,
     prompt_graph_reader: bool = False,
+    prompt_graph_policy=None,
 ) -> ExactCache:
     from mosaickv.evaluation.sealed_history import SealedHistoryLayer
 
@@ -90,6 +91,8 @@ def cache_from_formats(
     ):
         raise ValueError("sequential lease requires explicit raw append-only history")
     cache = ExactCache(audit_workspace=audit)
+    if prompt_graph_policy is not None and not prompt_graph_reader:
+        raise ValueError("graph optimization policy requires the explicit graph reader")
     if type(prompt_graph_reader) is not bool or (
         prompt_graph_reader and (not sequential_source_history or updates < 2)
     ):
@@ -133,7 +136,11 @@ def cache_from_formats(
     if prompt_graph_reader:
         from mosaickv.evaluation.prompt_graph_reader import PromptGraphCache, PromptGraphLayer
 
-        cache = PromptGraphCache(audit_workspace=audit, constructor=source_history_constructor)
+        cache = PromptGraphCache(
+            audit_workspace=audit,
+            constructor=source_history_constructor,
+            policy=prompt_graph_policy,
+        )
         cache.sequential_source_history = True
         cls = PromptGraphLayer
     shared: list[Any] = []
@@ -192,6 +199,7 @@ def run(
     sequential_lease: bool = False,
     sequential_source_history: bool = False,
     prompt_graph_reader: bool = False,
+    prompt_graph_policy=None,
 ) -> tuple[Any, dict[str, Any]]:
     import time
 
@@ -226,6 +234,7 @@ def run(
         sequential_lease=sequential_lease,
         sequential_source_history=sequential_source_history,
         prompt_graph_reader=prompt_graph_reader,
+        prompt_graph_policy=prompt_graph_policy,
     )
     length = max(f.shape[-2] for f in formats)
     state = DecodeState(
