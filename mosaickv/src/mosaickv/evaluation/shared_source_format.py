@@ -223,13 +223,9 @@ def construct(
         or sin.dtype != cos.dtype
         or union.dtype != torch.int32
         or slots.dtype != torch.int16
-        or not torch.equal(union, torch.arange(n, device=key.device, dtype=torch.int32))
-        or not torch.equal(slots, union.to(torch.int16)[None].expand(h, n))
-        or not all(torch.isfinite(t).all() for t in (normalized, key, value, cos, sin))
-        or not torch.equal(cos[..., :64], cos[..., 64:])
-        or not torch.equal(sin[..., :64], sin[..., 64:])
     ):
         raise ValueError("shared original phase and full identity positions required")
+    validate_source_tensors(normalized, original_pair, phases, identity, h=h, n=n)
     mask = protected_positions(memberships, text, length=n).to(key.device)
     rows = mask.flatten().nonzero().flatten().to(torch.int32)
     if exclude_global_exact:
@@ -245,6 +241,37 @@ def construct(
     if any(t.numel() and t.untyped_storage().data_ptr() in forbidden for t in result.private()):
         raise RuntimeError("encoded source or exact rows alias an original full cache/input owner")
     return result
+
+
+def validate_source_tensors(normalized, original_pair, phases, identity, *, h, n):
+    """All original predicates, optionally one private scalar until commit.
+
+    Metadata/device/dtype validation must precede this helper. It changes only
+    successful host synchronization, not predicate coverage or tensor math.
+    """
+    from mosaickv.evaluation.deferred_transport_checks import enqueue, source_validation_enabled
+
+    cos, sin = phases
+    union, slots = identity
+    key, value = original_pair
+    if source_validation_enabled():
+        predicates = [
+            (union == torch.arange(n, device=key.device, dtype=torch.int32)).all(),
+            (slots == union.to(torch.int16)[None].expand(h, n)).all(),
+            *(torch.isfinite(t).all() for t in (normalized, key, value, cos, sin)),
+            (cos[..., :64] == cos[..., 64:]).all(),
+            (sin[..., :64] == sin[..., 64:]).all(),
+        ]
+        enqueue(torch.stack(predicates).all(), "source")
+        return
+    if (
+        not torch.equal(union, torch.arange(n, device=key.device, dtype=torch.int32))
+        or not torch.equal(slots, union.to(torch.int16)[None].expand(h, n))
+        or not all(torch.isfinite(t).all() for t in (normalized, key, value, cos, sin))
+        or not torch.equal(cos[..., :64], cos[..., 64:])
+        or not torch.equal(sin[..., :64], sin[..., 64:])
+    ):
+        raise ValueError("shared original phase and full identity positions required")
 
 
 def apply_transport_patch(patch, target, *, prompt_length):

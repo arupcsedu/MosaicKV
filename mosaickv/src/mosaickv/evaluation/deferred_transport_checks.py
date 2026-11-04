@@ -15,11 +15,12 @@ _state = ContextVar("evicastkv_transport_validation_transaction", default=None)
 
 
 class Validation:
-    def __init__(self, *, coalesce_nonzero=False):
+    def __init__(self, *, coalesce_nonzero=False, batch_source_validation=False):
         self.flags, self.kinds, self.expected = [], [], []
         self.device, self.closed, self.flushes = None, False, 0
         self.counts, self.peak_bytes = {}, 0
         self.coalesce_nonzero = coalesce_nonzero
+        self.batch_source_validation = batch_source_validation
         self.mask_calls, self.mask_peak_bytes, self.mask_bound_fallbacks = 0, 0, 0
 
     def correction_mask(self, size, device):
@@ -38,7 +39,7 @@ class Validation:
         if self.closed or len(self.flags) >= 256:
             raise RuntimeError("closed or exhausted bounded validation transaction")
         if (
-            kind not in ("finite", "protected", "close")
+            kind not in ("finite", "protected", "close", "source")
             or type(expected) is not bool
             or flag.dtype != torch.bool
             or flag.numel() != 1
@@ -68,6 +69,10 @@ class Validation:
             first = next(k for k, passed in zip(self.kinds, failures, strict=True) if not passed)
             if first == "finite":
                 raise ValueError("finite compatible BF16 construction pair required (commit)")
+            if first == "source":
+                raise ValueError(
+                    "shared original phase and full identity positions required (commit)"
+                )
             if first == "protected":
                 raise RuntimeError(
                     "protected K/V mismatch may not be hidden by a numerical patch (commit)"
@@ -85,6 +90,7 @@ class Validation:
             no_source_or_reference_tensors_retained=True,
             all_checks_before_decode=self.closed,
             coalesced_correction_nonzero=self.coalesce_nonzero,
+            batched_source_validation=self.batch_source_validation,
             correction_mask_calls=self.mask_calls,
             correction_mask_peak_tensor_bytes=self.mask_peak_bytes,
             correction_mask_hard_bound_bytes=4 * 1024 * 1024,
@@ -106,16 +112,30 @@ def correction_mask(size, device):
     return None if state is None else state.correction_mask(size, device)
 
 
+def source_validation_enabled():
+    state = _state.get()
+    return state is not None and state.batch_source_validation
+
+
 @contextmanager
-def use(enabled, *, coalesce_nonzero=False):
+def use(enabled, *, coalesce_nonzero=False, batch_source_validation=False):
     if (
         type(enabled) is not bool
         or type(coalesce_nonzero) is not bool
+        or type(batch_source_validation) is not bool
         or (coalesce_nonzero and not enabled)
+        or (batch_source_validation and not enabled)
         or _state.get() is not None
     ):
         raise ValueError("explicit nonnested private validation transaction required")
-    state = Validation(coalesce_nonzero=coalesce_nonzero) if enabled else None
+    state = (
+        Validation(
+            coalesce_nonzero=coalesce_nonzero,
+            batch_source_validation=batch_source_validation,
+        )
+        if enabled
+        else None
+    )
     token = _state.set(state)
     try:
         yield state
@@ -229,3 +249,55 @@ def gpu_correction_timing():
         operator_only_not_request_latency=True,
         independent_quality_N=0,
     )
+
+
+def gpu_source_controls():
+    """Nine original source predicates, actual CUDA failures, no task labels."""
+    from mosaickv.evaluation.shared_source_format import validate_source_tensors
+
+    cases = []
+    for kind in (
+        "valid",
+        "union",
+        "slots",
+        "source",
+        "key",
+        "value",
+        "cos",
+        "sin",
+        "cos_half",
+        "sin_half",
+    ):
+        x = torch.ones(1, 8, 256, device="cuda", dtype=torch.bfloat16)
+        pair = tuple(torch.ones(1, 2, 8, 128, device="cuda", dtype=x.dtype) for _ in range(2))
+        phases = tuple(torch.ones(1, 8, 128, device="cuda", dtype=x.dtype) for _ in range(2))
+        identity = (
+            torch.arange(8, device="cuda", dtype=torch.int32),
+            torch.arange(8, device="cuda", dtype=torch.int16)[None].expand(2, 8).clone(),
+        )
+        tensors = dict(
+            source=x,
+            key=pair[0],
+            value=pair[1],
+            cos=phases[0],
+            sin=phases[1],
+            union=identity[0],
+            slots=identity[1],
+        )
+        if kind in ("union", "slots"):
+            tensors[kind].flatten()[0] = 2
+        elif kind.endswith("_half"):
+            tensors[kind[:-5]].flatten()[0] = 0.25
+        elif kind != "valid":
+            tensors[kind].flatten()[0] = float("nan")
+        for batched in (False, True):
+            failed = False
+            try:
+                with use(True, batch_source_validation=batched):
+                    validate_source_tensors(x, pair, phases, identity, h=2, n=8)
+            except ValueError:
+                failed = True
+            if failed != (kind != "valid"):
+                raise RuntimeError("CUDA source predicate coverage changed")
+            cases.append(dict(predicate=kind, batched=batched, expected_verdict_observed=True))
+    return cases

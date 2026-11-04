@@ -25,3 +25,22 @@ def test_wrong_reference_does_not_silently_pass():
             controller.require_matching_packet(
                 dict(digest=signature), "prefixkv_reimpl", record, frozen, whole
             )
+
+
+@pytest.mark.parametrize("complete,passed", [(False, False), (True, True)])
+def test_source_followup_cannot_skip_current_terminal_gate(tmp_path, monkeypatch, complete, passed):
+    def read(path):
+        if path.name == "plan.json":
+            return {"bound_files": {}}
+        if "construction-bookkeeping-consumed" in str(path):
+            return dict(complete=complete, all_input_latency_gate=passed)
+        return dict(complete=True, all_input_latency_gate=False)
+
+    monkeypatch.setattr(controller, "clean_source", lambda *_: "immutable")
+    monkeypatch.setattr(controller.driver, "read", read)
+    monkeypatch.setattr(controller, "sha", lambda *_: "digest")
+    monkeypatch.setattr(controller.direct, "submit", lambda *_: pytest.fail("must not submit"))
+    root = tmp_path / "not-authorized"
+    with pytest.raises(ValueError, match="bookkeeping strict negative"):
+        controller.prepare(root, "immutable")
+    assert not root.exists()

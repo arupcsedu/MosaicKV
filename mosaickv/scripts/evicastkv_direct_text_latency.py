@@ -118,6 +118,9 @@ def execute(
         coalesce_transport_nonzero=record.get(
             "coalesce_transport_nonzero", plan.get("coalesce_transport_nonzero", False)
         ),
+        batch_source_validation=record.get(
+            "batch_source_validation", plan.get("batch_source_validation", False)
+        ),
     )
     if not bits_equal(values, refs[method]["logits"]):
         raise RuntimeError("direct text construction changed parent vocabulary words")

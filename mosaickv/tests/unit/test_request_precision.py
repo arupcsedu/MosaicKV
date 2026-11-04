@@ -14,6 +14,21 @@ def test_deterministic_capacity_mandatory_and_ties():
     assert ranked_positions(scores, 4, (3,)) == ((0, 1, 2, 3),) * 2
 
 
+@pytest.mark.parametrize("count", [0, 1, 17, 64])
+@pytest.mark.parametrize("tied", [False, True])
+def test_tensor_postordering_preserves_exact_reference_memberships(count, tied):
+    generator = torch.Generator().manual_seed(20261104)
+    scores = torch.rand(32, 64, generator=generator)
+    if tied:
+        scores = (scores * 4).floor()
+    mandatory = (63,) if count else ()
+    values = scores.clone()
+    values[:, list(mandatory)] = float("inf")
+    chosen = torch.argsort(values, dim=-1, descending=True, stable=True)[:, :count]
+    reference = tuple(tuple(sorted(h)) for h in chosen.tolist())
+    assert ranked_positions(scores, count, mandatory) == reference
+
+
 @pytest.mark.parametrize("count", [0, 5])
 def test_infeasible_capacity_rejected(count):
     with pytest.raises(ValueError):

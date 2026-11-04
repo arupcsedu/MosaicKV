@@ -54,7 +54,10 @@ def ranked_positions(
     values[:, list(mandatory)] = float("inf")
     # Source index is the deterministic secondary ordering, also at ties.
     order = torch.argsort(values, dim=-1, descending=True, stable=True)[:, :count]
-    return tuple(tuple(sorted(h)) for h in order.cpu().tolist())
+    # Reorder the SAME unique integer memberships before transfer. Keep stable
+    # score/tie ranking above untouched; avoid Python sorting once per head.
+    ordered_ids = torch.sort(order, dim=-1).values
+    return tuple(tuple(h) for h in ordered_ids.cpu().tolist())
 
 
 def online_frozen(

@@ -17,7 +17,7 @@ SOURCE, driver = direct.SOURCE, direct.driver
 SCRIPT = SOURCE / "mosaickv/slurm/evicastkv_deferred_transport_latency.sbatch"
 PARENT = Path("/scratch/djy8hg/runs/evicastkv/direct-text-consumed-20261103-retry1")
 PROFILE = Path("/scratch/djy8hg/runs/evicastkv/direct-construction-phases-consumed-20261103-retry1")
-DOC = SOURCE / "mosaickv/docs/construction_bookkeeping_latency_20261104.md"
+DOC = SOURCE / "mosaickv/docs/source_validation_barrier_20261104.md"
 
 
 def bookkeeping_microbenchmark(revision):
@@ -87,6 +87,18 @@ def prepare(root, revision):
         DOC,
     ):
         bound[str(path)] = sha(path)
+    bookkeeping = Path(
+        "/scratch/djy8hg/runs/evicastkv/construction-bookkeeping-consumed-20261104-v1"
+    )
+    terminal = bookkeeping / "paired-timing/analysis/decision.json"
+    full = bookkeeping / "paired-timing/all-baselines/analysis/decision.json"
+    if full.exists():
+        terminal = full
+    last = driver.read(terminal)
+    if not last["complete"] or last["all_input_latency_gate"]:
+        raise ValueError("complete bookkeeping strict negative required before source follow-up")
+    bound[str(terminal)] = sha(terminal)
+    bound[str(bookkeeping / "plan.json")] = sha(bookkeeping / "plan.json")
     cpu_benchmark = root / "cpu-bookkeeping.json"
     write_once(cpu_benchmark, bookkeeping_microbenchmark(revision))
     bound[str(cpu_benchmark)] = sha(cpu_benchmark)
@@ -115,10 +127,11 @@ def prepare(root, revision):
             old,
             source_sha=revision,
             bound_files=bound,
-            stage="consumed_identical_construction_bookkeeping_and_coalesced_indices",
+            stage="consumed_unchanged_source_predicates_single_commit_barrier",
             direct_text_root=str(root),
             defer_transport_validation=True,
             coalesce_transport_nonzero=True,
+            batch_source_validation=True,
             constructor_mask_hard_bound_bytes=4 * 1024 * 1024,
             immutable_parent_policies=True,
             automatic_quality_submission=False,
@@ -153,6 +166,7 @@ def study(root, expected, index):
             from mosaickv.evaluation.deferred_transport_checks import (
                 gpu_controls,
                 gpu_correction_timing,
+                gpu_source_controls,
             )
 
             write_once(
@@ -160,6 +174,7 @@ def study(root, expected, index):
                 dict(
                     cases=gpu_controls(coalesce_nonzero=True),
                     timing=gpu_correction_timing(),
+                    source_controls=gpu_source_controls(),
                     no_task_evidence=True,
                 ),
             )
@@ -176,7 +191,10 @@ def study(root, expected, index):
 
             immediate_args = list(args)
             immediate_args[6] = dict(
-                record, defer_transport_validation=False, coalesce_transport_nonzero=False
+                record,
+                defer_transport_validation=False,
+                coalesce_transport_nonzero=False,
+                batch_source_validation=False,
             )
             immediate = original(*immediate_args, **dict(kwargs, final_validator=capture))
             previous = frozen[method]["whole-6291456"]["audited"]
@@ -204,7 +222,7 @@ def study(root, expected, index):
         if not validation["enabled"] or not validation["all_checks_before_decode"]:
             raise RuntimeError("validation transaction did not commit before decode")
         if method == "mosaickv_exact" and (
-            validation["counts"] != dict(finite=64, protected=64, close=64)
+            validation["counts"] != dict(source=32, finite=64, protected=64, close=64)
             or validation["commit_flushes"] != 1
             or validation["validation_flag_peak_tensor_bytes"] > 1025
         ):
@@ -214,6 +232,7 @@ def study(root, expected, index):
             or validation["correction_mask_peak_tensor_bytes"] > 4 * 1024 * 1024
             or validation["correction_mask_bound_fallbacks"] != 0
             or validation["correction_mask_persistent_bytes"] != 0
+            or not validation["batched_source_validation"]
         ):
             raise RuntimeError("complete explicitly bounded coalesced construction required")
         return measured
