@@ -295,6 +295,9 @@ def run(
         from mosaickv.evaluation.joint_incoming_projection import transport as joint_transport
 
         stack.enter_context(joint_transport(adapter, cache))
+        from mosaickv.evaluation.post_attention_segment import transport as segment_transport
+
+        segment = stack.enter_context(segment_transport(adapter, cache))
         starts.record()
         for step in range(tokens - 1):
             if source_history:
@@ -323,6 +326,8 @@ def run(
         if shared_workspace:
             cache.release_workspace()
         if prompt_graph_reader:
+            if segment is not None:
+                segment.close()
             cache.prompt_graph_pool.close()
         ends.record()
     torch.cuda.synchronize()

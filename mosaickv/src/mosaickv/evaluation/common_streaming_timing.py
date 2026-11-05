@@ -17,6 +17,7 @@ import numpy as np
 import torch
 
 from mosaickv.evaluation.joint_incoming_projection import managed as joint_projection_scope
+from mosaickv.evaluation.post_attention_segment import managed as post_attention_scope
 
 METHODS = (
     "mosaickv_exact",
@@ -38,6 +39,7 @@ def order(seed):
 
 @torch.inference_mode()
 @joint_projection_scope
+@post_attention_scope
 def request(
     adapter,
     messages,
@@ -78,6 +80,7 @@ def request(
     static_transport_patches=False,
     joint_incoming_projection="none",
     reuse_graph_replay_plan=False,
+    post_attention_segment=False,
 ):
     from mosaickv.evaluation.lossless_prompt_cache import backing_bytes
     from mosaickv.evaluation.native_execution_plan import use as native_plan
@@ -93,6 +96,10 @@ def request(
     from mosaickv.evaluation.streaming_source_constructor import StreamingDirectSource
 
     validate(reconstruction_readers)
+    if type(post_attention_segment) is not bool or (
+        post_attention_segment and not prompt_graph_reader
+    ):
+        raise ValueError("post-attention segment requires explicit private graph cache")
     from mosaickv.evaluation.graph_accounting import use as accounting_scope
     from mosaickv.evaluation.graph_accounting import validate as validate_accounting
 
