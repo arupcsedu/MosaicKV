@@ -20,6 +20,8 @@ DOC = SOURCE / "mosaickv/docs/joint_row_feasibility.md"
 STAGE = "consumed_joint_row_feasibility"
 VARIANT = "consumed_joint_row_operator_feasibility"
 EXTRA_PLAN = {}
+EXTRA_BOUND_FILES = ()
+ONLY_LAYER = 0
 
 
 def execute(adapter, refs, messages, profile, plan, method, record, **kwargs):
@@ -98,6 +100,7 @@ def prepare(root, revision):
         WAIT / "cpu_submission.json",
         PROFILE / "analysis/decision.json",
         DOC,
+        *EXTRA_BOUND_FILES,
     ]
     bound = dict(old["bound_files"])
     bound.update({str(path): sha(path) for path in paths})
@@ -116,7 +119,7 @@ def prepare(root, revision):
             automatic_bounded_followup=False,
             automatic_bounded_cohort_after_correctness=False,
             frozen_operator_windows=list(probe.WINDOWS),
-            only_layer=0,
+            only_layer=ONLY_LAYER,
             original_forward_operators_NEVER_replaced=True,
             any_changed_word_rejects_same_parent_integration=True,
             predecessor_source_sha=previous["source_sha"],
@@ -222,7 +225,7 @@ def main():
     controller.MANIFEST_TIMING_PROTOCOL = dict(
         output_predictions=128,
         operator_windows=list(probe.WINDOWS),
-        only_layer=0,
+        only_layer=ONLY_LAYER,
         actual_model_forward_unchanged=True,
         not_latency_evidence=True,
     )
