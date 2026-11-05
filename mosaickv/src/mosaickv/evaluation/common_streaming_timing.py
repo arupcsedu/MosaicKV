@@ -67,6 +67,7 @@ def request(
     prompt_graph_policy=None,
     lt_source_reader=False,
     lt_fit_policy="full",
+    selective_text_rows=False,
 ):
     from mosaickv.evaluation.lossless_prompt_cache import backing_bytes
     from mosaickv.evaluation.native_execution_plan import use as native_plan
@@ -82,6 +83,10 @@ def request(
     from mosaickv.evaluation.streaming_source_constructor import StreamingDirectSource
 
     validate(reconstruction_readers)
+    if type(selective_text_rows) is not bool or (
+        selective_text_rows and direct_text_policy is None
+    ):
+        raise ValueError("selective text rows require explicit frozen direct-text construction")
     if (
         type(lt_fit_policy) is not str
         or lt_fit_policy not in ("full", "direct")
@@ -172,6 +177,9 @@ def request(
     )
     fresh = replace(prepared, model_inputs=dict(prepared.model_inputs, past_key_values=cache))
     with ExitStack() as stack:
+        from mosaickv.evaluation import selective_text_construction as selective_text
+
+        selective_state = stack.enter_context(selective_text.use(selective_text_rows))
         from mosaickv.evaluation.deferred_transport_checks import use as transport_checks
         from mosaickv.evaluation.direct_text_construction import use as direct_text
 
@@ -304,6 +312,12 @@ def request(
             prompt_graph_reader=details["storage"].get("prompt_graph_reader", dict(enabled=False)),
             lt_source_reader=lt_source_reader,
             lt_fit_policy=lt_fit_policy,
+            selective_text_construction=dict(
+                enabled=selective_text_rows,
+                cpu_index_metadata_bytes=selective_text.cpu_metadata_bytes(packets),
+                CPU_indices_are_NOT_residual_KV=True,
+                **(selective_state or {}),
+            ),
             lt_source_conversion=lt_report,
             initial_encoded_bytes=details["storage"]["initial_active_kv_storage_bytes"],
             final_encoded_bytes=details["storage"]["final_active_kv_storage_bytes"],

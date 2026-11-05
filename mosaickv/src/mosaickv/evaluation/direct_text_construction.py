@@ -67,17 +67,42 @@ def build(packet, pair, positions, text, modes, *, attention=None, report=None):
             )
         )
     all_protected = bool(torch.isin(flat, protected).all())
+    from mosaickv.evaluation import selective_text_construction as selective
+
+    selective_source = selective.enabled() and isinstance(packet, SharedSourceFormat)
+    if selective_source and tuple(map(tuple, positions)) != (tuple(range(n)),) * h:
+        raise ValueError("selective shared source requires original identity positions")
     if not all_protected:
         # NEVER promote approximate parent rows to raw FullKV values. The old
         # text-source constructor fits to THIS decoder's output, not to raw K/V.
         # Materialize it ONCE, avoiding the discarded projection and four more
         # materializations while retaining exactly its original approximation.
-        pair = packet.materialize(attention)
+        pair = (
+            selective.text_pair(
+                packet,
+                attention,
+                tuple(sorted({slot for row in slots for slot in row if slot >= 0})),
+            )
+            if selective_source
+            else packet.materialize(attention)
+        )
     if report is not None:
         report.update(
-            borrowed_only_parent_exact=all_protected, original_parent_materialized=not all_protected
+            borrowed_only_parent_exact=all_protected,
+            original_parent_materialized=not all_protected,
+            parent_materialization_extent=(
+                "borrowed_exact"
+                if all_protected
+                else "text_rows_only"
+                if selective_source
+                else "full"
+            ),
         )
-    base = strip_text_overlays(packet, pair, positions, frozenset(text))
+    base = (
+        selective.strip_exact(packet, frozenset(text))
+        if selective_source
+        else strip_text_overlays(packet, pair, positions, frozenset(text))
+    )
     bodies = []
     for tensor, mode in zip(pair, modes, strict=True):
         rows = tensor.reshape(1, 1, h * n, d).index_select(2, flat.long()).contiguous()

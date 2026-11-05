@@ -71,6 +71,9 @@ class SharedSourceFormat:
     # Set only after transport_corrections checks every index against the
     # protected rows. Text-overlay stripping keeps a subset of those rows.
     protected_patches_disjoint: bool = False
+    # Optional constructor-owned CPU INDICES only, never K/V or residual values.
+    # GPU row_positions remain authoritative and charged exactly as before.
+    row_positions_cpu: object = None
 
     def private(self):
         return (
@@ -226,8 +229,16 @@ def construct(
     ):
         raise ValueError("shared original phase and full identity positions required")
     validate_source_tensors(normalized, original_pair, phases, identity, h=h, n=n)
-    mask = protected_positions(memberships, text, length=n).to(key.device)
-    rows = mask.flatten().nonzero().flatten().to(torch.int32)
+    from mosaickv.evaluation.selective_text_construction import enabled
+
+    host_mask = protected_positions(memberships, text, length=n)
+    cpu_rows = host_mask.flatten().nonzero().flatten().to(torch.int32) if enabled() else None
+    mask = host_mask.to(key.device)
+    rows = (
+        cpu_rows.to(key.device)
+        if cpu_rows is not None
+        else mask.flatten().nonzero().flatten().to(torch.int32)
+    )
     if exclude_global_exact:
         source = pack_unprotected(normalized[:, None], mask.all(0)[None], bits=3, axis=2)
     else:
@@ -236,7 +247,9 @@ def construct(
     exact = tuple(
         encode(t[0, head, position].reshape(1, 1, len(rows), d).contiguous()) for t in original_pair
     )
-    result = SharedSourceFormat(source, tuple(key.shape), rows, exact, cos, sin, union, slots)
+    result = SharedSourceFormat(
+        source, tuple(key.shape), rows, exact, cos, sin, union, slots, row_positions_cpu=cpu_rows
+    )
     forbidden = {t.untyped_storage().data_ptr() for t in (*original_pair, normalized)}
     if any(t.numel() and t.untyped_storage().data_ptr() in forbidden for t in result.private()):
         raise RuntimeError("encoded source or exact rows alias an original full cache/input owner")

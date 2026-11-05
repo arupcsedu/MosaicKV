@@ -160,12 +160,14 @@ def prepare(root, revision):
     common.stage(root, "cpu")
 
 
-def screen_summary(rows):
+def screen_summary(rows, *, arms=None, candidate=None):
     import math
     import statistics
 
     keys = [(r["method"], r["arm"], r["trial"]) for r in rows]
-    expected = {(m, a, t) for m, a in SCREEN_ARMS for t in range(-5, 3)}
+    registered = SCREEN_ARMS if arms is None else arms
+    selected_candidate = CANDIDATE if candidate is None else candidate
+    expected = {(m, a, t) for m, a in registered for t in range(-5, 3)}
     if len(keys) != len(set(keys)) or set(keys) != expected:
         raise ValueError("complete unique five-warmup/three-repeat screen required")
     values = {}
@@ -183,7 +185,7 @@ def screen_summary(rows):
         if not r["warmup"]:
             values[r["method"], r["arm"], r["trial"]] = value
     ratios = [
-        values[CANDIDATE[0], CANDIDATE[1], t] / values["prefixkv_reimpl", a, t]
+        values[selected_candidate[0], selected_candidate[1], t] / values["prefixkv_reimpl", a, t]
         for a in ("graph", "graph-original")
         for t in range(3)
     ]
@@ -194,7 +196,7 @@ def screen_summary(rows):
         independent_quality_N=0,
         summaries=[
             dict(method=m, arm=a, mean=statistics.mean(values[m, a, t] for t in range(3)))
-            for m, a in SCREEN_ARMS
+            for m, a in registered
         ],
     )
 

@@ -124,7 +124,16 @@ def strip_text_overlays(packet, references, positions, text):
             encode(t[0, retained // n, retained % n].reshape(1, 1, -1, d).contiguous())
             for t in references
         )
-        return replace(packet, row_positions=retained.to(torch.int32), exact=exact)
+        return replace(
+            packet,
+            row_positions=retained.to(torch.int32),
+            exact=exact,
+            row_positions_cpu=(
+                torch.tensor(retained_ids, dtype=torch.int32)
+                if packet.row_positions_cpu is not None
+                else None
+            ),
+        )
     if not isinstance(packet, HeadLocalFormat):
         raise NotImplementedError("explicit head-local common format required")
     protected = packet.base.exact_indices.cpu().tolist()
