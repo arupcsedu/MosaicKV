@@ -67,6 +67,7 @@ class PromptGraphPool:
         self.lt_engine = None
         self.lt_engine_info = None
         self.lt_workspace_bytes = self.lt_replays = self.lt_matmul_dispatches = 0
+        self.lookahead = None
 
     def acquire(self, layer, shape, source):
         if (
@@ -78,6 +79,8 @@ class PromptGraphPool:
             raise RuntimeError("private nonoverlapping prompt-graph lease required")
         if source.device.type != "cuda" or source.dtype != torch.bfloat16:
             raise NotImplementedError("prompt reader replay requires CUDA BF16")
+        if self.lookahead is not None:
+            self.lookahead.check_acquire(layer)
         PromptGraphPool._active_owner = self
         # A run emits `updates` predictions and performs `updates - 1` updates.
         # Fail explicitly if any caller tries to exceed that registered horizon.
@@ -106,20 +109,35 @@ class PromptGraphPool:
         view = self.buffer[..., : shape[-2], :]
         return view, view
 
-    def reconstruct(self, layer, component, destination):
+    def reconstruct(self, layer, component, destination, *, _lookahead_epoch=None):
         from mosaickv.evaluation.layer_code_delta import BoundDeltaFormat
         from mosaickv.evaluation.sequential_kv_lease import fill_component
 
+        producing = _lookahead_epoch is not None
+        if producing and (
+            component != 0
+            or self.lookahead is None
+            or not self.lookahead.authorized(layer, _lookahead_epoch, destination)
+            or (id(layer), 0) not in self.entries
+        ):
+            raise RuntimeError("explicit existing-graph next-layer producer required")
         if (
             self.closed
             or self.history_borrowed
             or self.buffer is None
             or component not in (0, 1)
-            or not layer.leased
+            or (not producing and not layer.leased)
             or destination.data_ptr() != self.buffer.data_ptr()
             or torch.cuda.is_current_stream_capturing()
         ):
             raise RuntimeError("only a private fixed-address prompt reader may be replayed")
+        if (
+            not producing
+            and component == 0
+            and self.lookahead is not None
+            and self.lookahead.take(layer, destination)
+        ):
+            return
         packet = layer.representation
         replay = None
         if isinstance(packet, BoundDeltaFormat):
@@ -127,9 +145,10 @@ class PromptGraphPool:
             replay = bound.replay if self.policy.captured_code_replay else None
             if replay is not None:
                 if component == 0:
-                    if self.key_epochs.get(id(layer)) == layer.history_length:
+                    epoch = _lookahead_epoch if producing else layer.history_length
+                    if self.key_epochs.get(id(layer)) == epoch:
                         raise RuntimeError("captured XOR replay may run only once per layer/token")
-                    self.key_epochs[id(layer)] = layer.history_length
+                    self.key_epochs[id(layer)] = epoch
                 packet = replay.advance_for_graph(bound.index)
             else:
                 packet = bound.replay.view(bound.index)
@@ -255,7 +274,10 @@ class PromptGraphPool:
         if not self.policy.history_arena:
             yield None
             return
-        if self.closed or self.history_borrowed or any(x.leased for x in self.cache.layers):
+        if (
+            self.closed or self.history_borrowed or any(x.leased for x in self.cache.layers)
+            or (self.lookahead is not None and self.lookahead.pending is not None)
+        ):
             raise RuntimeError("history scratch requires a released exclusive graph workspace")
         from mosaickv.evaluation.history_verification_workspace import partition
 
@@ -280,6 +302,8 @@ class PromptGraphPool:
             return
         if self.history_borrowed or any(x.leased for x in self.cache.layers):
             raise RuntimeError("prompt graphs cannot retire an active lease")
+        if self.lookahead is not None:
+            self.lookahead.close()
         if self.entries:
             torch.cuda.synchronize()
             before = torch.cuda.memory_allocated()
@@ -360,6 +384,7 @@ class PromptGraphPool:
             captured_code_replays=self.captured_code_replays,
             captured_code_kernel_dispatches=self.captured_code_kernel_dispatches,
             row4_replays=self.row4_replays,
+            lookahead=dict(enabled=False) if self.lookahead is None else self.lookahead.record(),
         )
 
 

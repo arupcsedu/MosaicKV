@@ -291,6 +291,9 @@ class SequentialAttentionTransport:
             from mosaickv.evaluation.prompt_prefetch import after_attention
 
             after_attention(layer)
+            from mosaickv.evaluation.graph_lookahead import after_attention as lookahead
+
+            lookahead(layer)
             return output, weights
 
         forward._evicastkv_sequential_private = True

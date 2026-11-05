@@ -70,6 +70,7 @@ def request(
     selective_text_rows=False,
     defer_exact_encoding=False,
     graph_accounting="original",
+    graph_lookahead=False,
 ):
     from mosaickv.evaluation.lossless_prompt_cache import backing_bytes
     from mosaickv.evaluation.native_execution_plan import use as native_plan
@@ -89,6 +90,10 @@ def request(
     from mosaickv.evaluation.graph_accounting import validate as validate_accounting
 
     validate_accounting(graph_accounting)
+    if type(graph_lookahead) is not bool or (
+        graph_lookahead and (not prompt_graph_reader or prompt_prefetch)
+    ):
+        raise ValueError("private graph lookahead requires graph reader without copied prefetch")
     if graph_accounting != "original" and not prompt_graph_reader:
         raise ValueError("optimized accounting requires the private graph cache")
     if type(defer_exact_encoding) is not bool or (
@@ -289,7 +294,10 @@ def request(
             raise RuntimeError("registered beneficial source codec did not reduce storage")
     torch.cuda.synchronize()
     constructed_at = time.monotonic()
+    from mosaickv.evaluation.graph_lookahead import use as lookahead_scope
+
     with (
+        lookahead_scope(graph_lookahead),
         accounting_scope(graph_accounting),
         use(reconstruction_readers),
         use_dispatch(reuse_kernel_dispatch) as dispatch,
@@ -329,6 +337,7 @@ def request(
             lt_source_reader=lt_source_reader,
             lt_fit_policy=lt_fit_policy,
             graph_cache_accounting=details["storage"].get("graph_cache_accounting"),
+            graph_lookahead=graph_lookahead,
             deferred_exact_encoding=deferred_exact.report(deferred_state),
             selective_text_construction=dict(
                 enabled=selective_text_rows,

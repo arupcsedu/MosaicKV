@@ -173,6 +173,9 @@ def cache_from_formats(
         tuple(t for x in cache.layers for t in cast(ExactLayer, x).owned_tensors())
     )
     cache.observe()
+    from mosaickv.evaluation.graph_lookahead import attach as attach_lookahead
+
+    attach_lookahead(cache)
     from mosaickv.evaluation.prompt_prefetch import attach
 
     attach(cache, updates)
