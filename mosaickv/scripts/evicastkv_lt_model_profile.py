@@ -15,6 +15,7 @@ SOURCE, driver = common.SOURCE, common.driver
 PARENT = Path("/scratch/djy8hg/runs/evicastkv/lt-reader-consumed-20261104-v1")
 SCRIPT = SOURCE / "mosaickv/slurm/evicastkv_lt_model_profile.sbatch"
 MANIFEST_VARIANT = "consumed_native_actual_model_attribution"
+CPU_NODE = None
 ARMS = (
     ("mosaickv_exact", "graph"),
     ("mosaickv_exact", "graph-lt"),
@@ -38,6 +39,8 @@ def submit(root, action, dependency=None):
         ]
     else:
         args += ["--partition=bii", "--cpus-per-task=2", "--mem=16G", "--time=00:25:00"]
+        if CPU_NODE is not None:
+            args.append(f"--nodelist={CPU_NODE}")
     if dependency:
         args.append("--dependency=afterany:" + dependency)
     (root / "slurm").mkdir(exist_ok=True)
