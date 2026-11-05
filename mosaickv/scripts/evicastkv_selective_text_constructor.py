@@ -17,6 +17,7 @@ PARENT = base.PARENT
 NEGATIVE = Path("/scratch/djy8hg/runs/evicastkv/lt-direct-constructor-consumed-20261105-v1")
 SCRIPT = SOURCE / "mosaickv/slurm/evicastkv_selective_text_constructor.sbatch"
 CANDIDATE = ("mosaickv_exact", "graph-selective-text")
+MANIFEST_VARIANT = "consumed_exact_selective_text_constructor"
 ARMS = (
     ("mosaickv_exact", "graph"),
     CANDIDATE,
@@ -120,7 +121,7 @@ def worker(root, expected, index):
             expected,
             index,
             manifest_overrides=dict(
-                variant="consumed_exact_selective_text_constructor",
+                variant=MANIFEST_VARIANT,
                 methods=["mosaickv_exact", "prefixkv_reimpl"],
                 actual_timing_protocol=dict(
                     output_predictions=128, warmups=5, repetitions=3, not_acceptance=True

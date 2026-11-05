@@ -12,6 +12,7 @@ from mosaickv.evaluation.host_decode_profile import collect
 SOURCE, PARENT, driver = controller.SOURCE, controller.PARENT, controller.driver
 EVENT = Path("/scratch/djy8hg/runs/evicastkv/event-only-reader-consumed-20261105-v1")
 SCRIPT = SOURCE / "mosaickv/slurm/evicastkv_host_dispatch_profile.sbatch"
+MANIFEST_VARIANT = "consumed_host_decode_attribution"
 
 
 def prepare(root, revision):
@@ -53,6 +54,7 @@ def prepare(root, revision):
 
 
 def main():
+    controller.MANIFEST_VARIANT = MANIFEST_VARIANT
     controller.SCRIPT, controller.prepare = SCRIPT, prepare
     lt_model_profile.collect = collect
     controller.main()

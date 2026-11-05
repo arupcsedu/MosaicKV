@@ -9,6 +9,7 @@ from mosaickv.evaluation.fox_campaign import clean_source, sha, write_once
 
 SOURCE, PARENT, driver = controller.SOURCE, controller.PARENT, controller.driver
 SCRIPT = SOURCE / "mosaickv/slurm/evicastkv_event_only_reader_profile.sbatch"
+MANIFEST_VARIANT = "consumed_event_only_native_model_attribution"
 
 
 def prepare(root, revision):
@@ -49,6 +50,7 @@ def prepare(root, revision):
 
 
 def main():
+    controller.MANIFEST_VARIANT = MANIFEST_VARIANT
     controller.SCRIPT, controller.prepare = SCRIPT, prepare
     lt_model_profile.collect = collect
     controller.main()

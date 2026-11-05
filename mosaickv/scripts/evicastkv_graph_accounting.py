@@ -11,6 +11,7 @@ SOURCE, base, PARENT = controller.SOURCE, controller.base, controller.PARENT
 PROFILE = Path("/scratch/djy8hg/runs/evicastkv/host-dispatch-consumed-20261105-v1")
 SCRIPT = SOURCE / "mosaickv/slurm/evicastkv_graph_accounting.sbatch"
 CANDIDATE = ("mosaickv_exact", "graph-event-sum")
+MANIFEST_VARIANT = "consumed_graph_accounting_execution_screen"
 ARMS = (
     ("mosaickv_exact", "graph"),
     ("mosaickv_exact", "graph-single-pass"),
@@ -129,6 +130,7 @@ def summary(rows):
 
 
 def main():
+    controller.MANIFEST_VARIANT = MANIFEST_VARIANT
     controller.SCRIPT, controller.CANDIDATE, controller.ARMS = SCRIPT, CANDIDATE, ARMS
     controller.prepare, controller.variants = prepare, variants
     controller.execute, controller.summary = execute, summary

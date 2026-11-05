@@ -14,6 +14,7 @@ from mosaickv.evaluation.fox_campaign import clean_source, sha, write_once
 SOURCE, driver = common.SOURCE, common.driver
 PARENT = Path("/scratch/djy8hg/runs/evicastkv/lt-reader-consumed-20261104-v1")
 SCRIPT = SOURCE / "mosaickv/slurm/evicastkv_lt_model_profile.sbatch"
+MANIFEST_VARIANT = "consumed_native_actual_model_attribution"
 ARMS = (
     ("mosaickv_exact", "graph"),
     ("mosaickv_exact", "graph-lt"),
@@ -161,7 +162,7 @@ def worker(root, expected, index):
             expected,
             index,
             manifest_overrides=dict(
-                variant="consumed_native_actual_model_attribution",
+                variant=MANIFEST_VARIANT,
                 methods=["mosaickv_exact", "prefixkv_reimpl"],
                 actual_timing_protocol=dict(
                     output_predictions=128, profiled_steps=[1, 64, 126], not_latency_evidence=True

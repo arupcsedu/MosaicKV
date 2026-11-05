@@ -8,6 +8,7 @@ from mosaickv.evaluation.fox_campaign import clean_source, sha, write_once
 SOURCE, base = controller.SOURCE, controller.base
 PARENT = controller.PARENT
 CANDIDATE = ("mosaickv_exact", "graph-deferred-exact")
+MANIFEST_VARIANT = "consumed_deferred_exact_constructor"
 SCRIPT = SOURCE / "mosaickv/slurm/evicastkv_deferred_exact_constructor.sbatch"
 ARMS = (
     ("mosaickv_exact", "graph"),
@@ -106,6 +107,7 @@ def summary(rows):
 
 
 def main():
+    controller.MANIFEST_VARIANT = MANIFEST_VARIANT
     controller.SCRIPT = SCRIPT
     controller.CANDIDATE, controller.ARMS = CANDIDATE, ARMS
     controller.prepare, controller.variants = prepare, variants
