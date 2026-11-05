@@ -1,6 +1,12 @@
 import pytest
+import torch
 
-from mosaickv.evaluation.native_history_feasibility import ROWS, RepairBudgetError, validate_rows
+from mosaickv.evaluation.native_history_feasibility import (
+    ROWS,
+    Engine,
+    RepairBudgetError,
+    validate_rows,
+)
 
 
 def test_only_complete_bounded_epochs():
@@ -17,3 +23,22 @@ def test_budget_failure_keeps_its_measured_diagnostic():
     error = RepairBudgetError(diagnostic)
     assert error.diagnostic is diagnostic
     assert "unchanged" in str(error)
+
+
+def test_frozen_factory_uses_actual_one_argument_api(monkeypatch):
+    from mosaickv.evaluation import joint_kernel_compatibility as mod
+    from mosaickv.evaluation.joint_all_layer_compatibility import FROZEN
+
+    algorithm, record = object(), object()
+
+    class Plans:
+        def __init__(self, rows):
+            assert rows == ROWS
+            self.candidates = [(algorithm, record)]
+            self.plans = {n: (object(), object(), object(), None, None) for n in rows}
+
+    monkeypatch.setattr(mod, "KernelPlans", Plans)
+    monkeypatch.setattr(mod, "fingerprint", lambda r: FROZEN if r is record else None)
+    engine = Engine(torch.device("cpu"), frozen=True)
+    assert all(p[3] is algorithm and p[4] is record for p in engine.plans.plans.values())
+    assert engine.source.shape == (128, 4096)

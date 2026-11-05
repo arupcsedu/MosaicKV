@@ -36,7 +36,7 @@ class Engine:
             from mosaickv.evaluation.joint_all_layer_compatibility import FROZEN
             from mosaickv.evaluation.joint_kernel_compatibility import KernelPlans, fingerprint
 
-            self.plans = KernelPlans(ROWS, 4096)
+            self.plans = KernelPlans(ROWS)
             options = [
                 (algo, record)
                 for algo, record in self.plans.candidates
