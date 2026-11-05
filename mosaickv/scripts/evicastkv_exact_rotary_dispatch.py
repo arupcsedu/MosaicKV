@@ -12,7 +12,7 @@ from mosaickv.evaluation.fox_campaign import clean_source, sha, write_once
 
 SOURCE, parent, driver = control.SOURCE, control.parent, control.driver
 WAIT = Path("/scratch/djy8hg/runs/evicastkv/prepared-joint-replay-consumed-20261105-v1")
-SEGMENT = Path("/scratch/djy8hg/runs/evicastkv/post-attention-segment-consumed-20261105-v1")
+SEGMENT = Path("/scratch/djy8hg/runs/evicastkv/post-attention-segment-consumed-20261105-retry1")
 SCRIPT = SOURCE / "mosaickv/slurm/evicastkv_exact_rotary_dispatch.sbatch"
 DOC = SOURCE / "mosaickv/docs/exact_rotary_dispatch.md"
 ARMS = (

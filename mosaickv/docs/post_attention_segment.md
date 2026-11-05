@@ -1,5 +1,11 @@
 # Common, exact-operator post-attention replay
 
+The first CUDA attempt stopped in its control fixture before any model request:
+its parameters were created under inference mode and exposed no version counter.
+Preserve that failed root. The retry creates only the test parameters outside
+inference mode, with gradients disabled, then checks their versions under the
+original inference compute scope. Runtime operators and guards are unchanged.
+
 The saved joint-KV profile leaves roughly 0.97 seconds in RMSNorm dispatch and
 1.63 seconds in native linear calls across the instrumented trajectory. These
 are attribution totals, not isolated removable wall time. The active replay

@@ -288,8 +288,7 @@ def gpu_controls():
         attention_bias=False,
         mlp_bias=False,
     )
-    with torch.device("cuda"):
-        layer = llama.LlamaDecoderLayer(config, 0).to(dtype=torch.bfloat16).eval()
+    layer = control_layer(config, "cuda")
     workspace = Workspace(layer)
     current, stream = torch.cuda.current_stream(), capture_stream(workspace.output.device)
     workspace.fill(torch.ones_like(workspace.residual), torch.zeros_like(workspace.attention))
@@ -347,3 +346,11 @@ def gpu_controls():
         model_weights_unchanged=True,
         no_checkpoint_or_benchmark_inputs=True,
     )
+
+
+def control_layer(config, device):
+    """Control parameters need version counters even inside inference scope."""
+    from transformers.models.llama import modeling_llama as llama
+
+    with torch.inference_mode(False), torch.no_grad(), torch.device(device):
+        return llama.LlamaDecoderLayer(config, 0).to(dtype=torch.bfloat16).eval()

@@ -67,3 +67,14 @@ def test_non_pinned_layers_are_rejected_before_allocating_workspace():
     adapter = SimpleNamespace(_language_layers=lambda: [layer()])
     with pytest.raises(NotImplementedError, match="pinned"):
         segment.Transport(adapter, SimpleNamespace(prompt_graph_pool=object()), state).__enter__()
+
+
+def test_control_weight_versions_survive_an_outer_inference_scope():
+    config = llama.LlamaConfig(hidden_size=64, intermediate_size=128, num_attention_heads=4)
+    with torch.inference_mode():
+        model = segment.control_layer(config, "cpu")
+        before = [p._version for p in model.parameters()]
+        work = segment.Workspace(model)
+        work.fill(torch.ones_like(work.residual), torch.zeros_like(work.attention))
+        work.compute(model)
+        assert before == [p._version for p in model.parameters()]
