@@ -26,3 +26,19 @@ Only a positive exact operator result could justify all-layer real-checkpoint
 verification and a new complete-request screen on the same consumed inputs.
 It cannot itself establish latency superiority, certify whole-request peak,
 authorize fresh quality data or advance a larger campaign.
+
+## Separately registered lossless-correction successor
+
+The zero-new-correction operator failed at N=600: K/V differed by 164/401
+words; incoming rows were exact. Preserve that output as negative, never
+reinterpret it as a pass. The explicit `--lossless-corrections` successor
+constructs and counts actual original-word patches after RoPE using the
+existing SparseBitPatch format and unchanged 32-KiB per-layer cap. It must
+restore every original word and untouched sentinel in eager and graph replay.
+Incoming rows still must be bitwise without any correction: they vary during
+decoding and cannot be repaired by a prefill table. This changes the stored
+representation and its measured bytes, not the numerical tolerance. The
+full-request runtime must fit the new prompt corrections, charge them in
+initial/final/peak storage and preserve all 128 logit vectors before any
+latency screen. Neither the failed zero-correction policy nor a synthetic
+fixture establishes real-model superiority.

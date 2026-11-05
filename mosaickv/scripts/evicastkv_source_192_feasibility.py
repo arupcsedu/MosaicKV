@@ -18,6 +18,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--source-sha", required=True)
+    parser.add_argument("--lossless-corrections", action="store_true")
     args = parser.parse_args()
     if (
         args.root.exists()
@@ -35,7 +36,9 @@ def main():
             source_width=4096,
             original_full_and_joint_algorithm_descriptors_copied_without_search=True,
             added_workspace_bytes=2**20,
-            added_repair_bytes_allowed=0,
+            added_repair_bytes_allowed=32768 if args.lossless_corrections else 0,
+            lossless_corrections_explicitly_registered=args.lossless_corrections,
+            preceding_zero_correction_operator_retained_as_negative=True,
             warmups=5,
             timed_repetitions=20,
             graph_replays_per_interval=5,
@@ -83,7 +86,7 @@ def main():
     try:
         from mosaickv.evaluation.source_192_feasibility import study
 
-        result = study()
+        result = study(lossless_corrections=args.lossless_corrections)
     except Exception as error:
         result = dict(
             complete=False,

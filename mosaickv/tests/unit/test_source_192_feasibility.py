@@ -1,6 +1,6 @@
 import pytest
 
-from mosaickv.evaluation.source_192_feasibility import CAPACITY, WIDTH, Plans192, ranges
+from mosaickv.evaluation.source_192_feasibility import CAPACITY, WIDTH, Plans192, ranges, study
 
 
 @pytest.mark.parametrize("n,tail", [(600, 24), (604, 28)])
@@ -16,3 +16,8 @@ def test_registered_tiling_covers_every_source_position_once(n, tail):
 def test_unregistered_shapes_fail_before_creating_gpu_descriptors(n):
     with pytest.raises(ValueError, match="consumed"):
         Plans192(n)
+
+
+def test_lossless_successor_requires_an_explicit_boolean_before_gpu_access():
+    with pytest.raises(ValueError, match="separately registered"):
+        study(lossless_corrections=1)

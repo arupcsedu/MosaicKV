@@ -1,8 +1,9 @@
 """One bounded 192-row operator hypothesis, not a row/algorithm search.
 
 Copy the exact existing 128-row and joint-tail algorithm descriptors and
-require installed API compatibility at the new shapes. Do not select another
-heuristic, relax rounding, add numerical repairs, or modify model weights.
+require installed API compatibility at the new shapes. The default forbids
+new corrections; a separately registered successor charges exact original
+word patches within the unchanged cap. Never relax rounding or modify weights.
 """
 
 import ctypes as C
@@ -154,11 +155,15 @@ def decode(packet, source, first, take, capacity, incoming=None):
 
 
 @torch.inference_mode()
-def study():
+def study(*, lossless_corrections=False):
+    from mosaickv.evaluation.dual_projection_kernel import apply_patch
+    from mosaickv.evaluation.exact_storage import SparseBitPatch
     from mosaickv.evaluation.precision_tier import pack
     from mosaickv.evaluation.prompt_graph_reader import allocator_blocks, generator_metadata
     from mosaickv.evaluation.shared_source_kernel import rotate_native
 
+    if type(lossless_corrections) is not bool:
+        raise ValueError("explicit separately registered numerical correction policy required")
     torch.manual_seed(20261105)
     torch.use_deterministic_algorithms(True)
     records = []
@@ -194,6 +199,7 @@ def study():
             phase = torch.randn(1, n, 64, device="cuda")
             phase = torch.cat((phase, phase), -1)
             cos, sin = phase.cos().bfloat16(), phase.sin().bfloat16()
+            corrections = {}
 
             def call(
                 cap,
@@ -208,6 +214,7 @@ def study():
                 incoming_outputs=incoming_outputs,
                 cos=cos,
                 sin=sin,
+                corrections=corrections,
             ):
                 source, output = buffers[cap]
                 for c, weight in enumerate(weights):
@@ -221,6 +228,8 @@ def study():
                         if tail:
                             incoming_outputs[cap][c].copy_(output[take])
                     rotate_native(owners[cap][c][..., :n, :], cos, sin, 0, n) if c == 0 else None
+                    if cap in corrections:
+                        apply_patch(corrections[cap][c], owners[cap][c][..., :n, :])
 
             # Old reference rows are part of the exact same private handle.
             if old_tail + 1 not in plans.plans or 128 not in plans.plans:
@@ -236,7 +245,29 @@ def study():
                 int((a.view(torch.int16) != b.view(torch.int16)).sum())
                 for a, b in zip(incoming_outputs[128], incoming_outputs[CAPACITY], strict=True)
             ]
-            if any(different + incoming_different):
+            repair_bytes = 0
+            if any(different) and lossless_corrections and not any(incoming_different):
+                corrections[CAPACITY] = tuple(
+                    SparseBitPatch.build(a[..., :n, :], b[..., :n, :])
+                    for a, b in zip(owners[128], owners[CAPACITY], strict=True)
+                )
+                repair_bytes = backing_bytes(
+                    tuple(t for p in corrections[CAPACITY] for t in p.tensors)
+                )
+                if repair_bytes > 32768:
+                    raise RuntimeError(
+                        "192-row lossless corrections exceed unchanged 32-KiB layer cap"
+                    )
+                call(CAPACITY)
+                torch.cuda.synchronize()
+                if any(
+                    not torch.equal(
+                        a[..., :n, :].view(torch.int16), b[..., :n, :].view(torch.int16)
+                    )
+                    for a, b in zip(owners[128], owners[CAPACITY], strict=True)
+                ):
+                    raise RuntimeError("actual counted word corrections failed exact K/V parity")
+            elif any(different + incoming_different):
                 records.append(
                     dict(
                         source_length=n,
@@ -314,7 +345,7 @@ def study():
                 dict(
                     source_length=n,
                     compatible=True,
-                    different_prompt_words=different,
+                    before_correction_prompt_word_mismatches=different,
                     different_incoming_words=incoming_different,
                     native_operator_median_ms=medians,
                     paired_operator_trials_ms=timings,
@@ -322,10 +353,14 @@ def study():
                     old_explicit_workspace_bytes=backing_bytes(buffers[128]),
                     new_explicit_workspace_bytes=backing_bytes(buffers[CAPACITY]),
                     new_additional_workspace_bytes=2**20,
+                    actual_added_numerical_correction_bytes=repair_bytes,
+                    lossless_corrections_explicitly_registered=lossless_corrections,
+                    bitwise_after_actual_counted_correction=True,
                     old_chunks=len(ranges(n, 128)),
                     new_chunks=len(ranges(n)),
                     original_algorithm_fingerprints_preserved=True,
-                    no_new_repairs_or_changes_to_phase_positions=True,
+                    no_changes_to_phase_positions=True,
+                    incoming_words_cannot_be_corrected_or_relaxed=True,
                     algorithm_workspace_bytes=0,
                     source_decoder_scratch_and_spills=0,
                 )
