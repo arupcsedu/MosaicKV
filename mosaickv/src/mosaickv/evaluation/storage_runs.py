@@ -304,6 +304,8 @@ def run(
         from mosaickv.evaluation.post_attention_segment import transport as segment_transport
 
         segment = stack.enter_context(segment_transport(adapter, cache))
+        if input_norm is not None:
+            input_norm.bind_segment(segment)
         from mosaickv.evaluation.exact_rotary_dispatch import transport as rotary_transport
 
         stack.enter_context(rotary_transport())

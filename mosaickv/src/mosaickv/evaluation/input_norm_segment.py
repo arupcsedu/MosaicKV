@@ -21,13 +21,16 @@ def managed(function):
     @wraps(function)
     def call(*args, **kwargs):
         enabled = kwargs.get("input_norm_segment", False)
+        reuse = kwargs.get("reuse_norm_input", False)
+        if type(reuse) is not bool or (reuse and not enabled):
+            raise ValueError("explicit norm input reuse requires the common norm transport")
         if type(enabled) is not bool:
             raise ValueError("explicit input norm boolean required")
         if enabled and kwargs.get("post_attention_segment", False) is not True:
             raise ValueError("registered common post-attention transport required")
         if _scope.get() is not None:
             raise RuntimeError("input norm request scopes cannot nest")
-        state = dict(enabled=enabled, report=None)
+        state = dict(enabled=enabled, reuse=reuse, report=None)
         token = _scope.set(state)
         try:
             values, packets, details = function(*args, **kwargs)
@@ -56,8 +59,8 @@ class Workspace:
     def tensors(self):
         return tuple(vars(self).values())
 
-    def compute(self, norm):
-        self.float_x.copy_(self.input)
+    def compute(self, norm, source=None):
+        self.float_x.copy_(self.input if source is None else source.reshape_as(self.input))
         torch.pow(self.float_x, 2, out=self.square)
         torch.mean(self.square, -1, keepdim=True, out=self.variance)
         self.variance.add_(norm.variance_epsilon)
@@ -77,6 +80,41 @@ class Transport:
         self.calls = self.cold = self.replays = self.captures = self.extra_graph_bytes = 0
         self.bytes = 0
         self.closed = False
+        self.shared_input = None
+        self.skipped_copies = self.first_layer_copies = 0
+
+    def bind_segment(self, segment):
+        """One request's already-owned epilogue output, never a new buffer."""
+        if not self.state.get("reuse", False):
+            return
+        if (
+            self.shared_input is not None
+            or segment is None
+            or segment.cache is not self.cache
+            or segment.closed
+            or segment.workspace is None
+            or segment.workspace.output.shape != self.workspace.input.shape
+            or segment.workspace.output.dtype != self.workspace.input.dtype
+            or segment.workspace.output.device != self.workspace.input.device
+        ):
+            raise RuntimeError("same-request live epilogue output must bind exactly once")
+        self.shared_input = segment.workspace.output
+
+    def prepare_input(self, hidden, index):
+        if not self.state.get("reuse", False):
+            self.workspace.input.copy_(hidden.reshape_as(self.workspace.input))
+            return
+        if self.shared_input is None:
+            raise RuntimeError("input reuse not bound to its epilogue owner")
+        if index == 0:
+            if hidden.data_ptr() == self.shared_input.data_ptr():
+                raise RuntimeError("original token embedding must not alias epilogue output")
+            self.shared_input.copy_(hidden.reshape_as(self.shared_input))
+            self.first_layer_copies += 1
+        else:
+            if hidden.data_ptr() != self.shared_input.data_ptr() or not hidden.is_contiguous():
+                raise RuntimeError("later layers must consume the exact preceding epilogue output")
+            self.skipped_copies += 1
 
     def __enter__(self):
         from transformers.models.llama import modeling_llama as llama
@@ -130,7 +168,7 @@ class Transport:
             if self.calls <= 32:
                 self.cold += 1
                 return original(hidden)
-            self.workspace.input.copy_(hidden.reshape_as(self.workspace.input))
+            self.prepare_input(hidden, index)
             graph = self.entries.get(index)
             if graph is None:
                 self.capture(norm, index)
@@ -150,7 +188,7 @@ class Transport:
         stream = capture_stream(self.workspace.output.device)
         stream.wait_stream(current)
         with torch.cuda.stream(stream):
-            self.workspace.compute(norm)
+            self.workspace.compute(norm, self.shared_input)
         current.wait_stream(stream)
         torch.cuda.synchronize()
         before = torch.cuda.memory_allocated()
@@ -160,7 +198,7 @@ class Transport:
             with torch.cuda.stream(stream):
                 graph.capture_begin(capture_error_mode="thread_local")
                 try:
-                    self.workspace.compute(norm)
+                    self.workspace.compute(norm, self.shared_input)
                 finally:
                     graph.capture_end()
             current.wait_stream(stream)
@@ -188,6 +226,7 @@ class Transport:
             t for t in self.cache.shared_tensors if all(t is not owner for owner in owners)
         )
         self.workspace = None
+        self.shared_input = None
         self.cache.shared_bytes = backing_bytes(self.cache.shared_tensors)
         self.cache.observe()
         self.closed = True
@@ -201,6 +240,12 @@ class Transport:
             4032,
         ):
             raise RuntimeError("complete 127-update common input norm trajectory required")
+        if (
+            kind is None
+            and self.state.get("reuse", False)
+            and (self.skipped_copies, self.first_layer_copies) != (3906, 126)
+        ):
+            raise RuntimeError("all later-layer norm copies must bypass with 126 embedding copies")
         self.state["report"] = dict(
             enabled=True,
             calls=self.calls,
@@ -211,6 +256,10 @@ class Transport:
             additional_graph_tensor_bytes=self.extra_graph_bytes,
             retired=self.closed,
             common_to_every_method=True,
+            input_reuse_requested=self.state.get("reuse", False),
+            skipped_later_layer_input_copies=self.skipped_copies,
+            first_layer_embedding_copies=self.first_layer_copies,
+            unused_original_input_buffer_still_owned_and_charged=True,
             original_operator_rounding=True,
             whole_request_GPU_peak_certified=False,
         )

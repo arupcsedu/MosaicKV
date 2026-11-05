@@ -57,6 +57,7 @@ def request(
     overlap_native_fit=False,
     native_history_reader=False,
     input_norm_segment=False,
+    reuse_norm_input=False,
     minimum_only=False,
     componentwise_fitting=False,
     code_delta=False,

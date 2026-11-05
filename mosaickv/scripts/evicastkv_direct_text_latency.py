@@ -143,6 +143,7 @@ def execute(
         overlap_native_fit=record.get("overlap_native_fit", False),
         native_history_reader=record.get("native_history_reader", False),
         input_norm_segment=record.get("input_norm_segment", False),
+        reuse_norm_input=record.get("reuse_norm_input", False),
     )
     if not bits_equal(values, refs[method]["logits"]):
         raise RuntimeError("direct text construction changed parent vocabulary words")
