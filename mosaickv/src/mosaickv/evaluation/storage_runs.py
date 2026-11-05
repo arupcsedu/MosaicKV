@@ -134,7 +134,8 @@ def cache_from_formats(
             )
             cls = SharedSourceLayer
     if prompt_graph_reader:
-        from mosaickv.evaluation.prompt_graph_reader import PromptGraphCache, PromptGraphLayer
+        from mosaickv.evaluation.graph_accounting import layer_class
+        from mosaickv.evaluation.prompt_graph_reader import PromptGraphCache
 
         cache = PromptGraphCache(
             audit_workspace=audit,
@@ -142,7 +143,7 @@ def cache_from_formats(
             policy=prompt_graph_policy,
         )
         cache.sequential_source_history = True
-        cls = PromptGraphLayer
+        cls = layer_class()
     shared: list[Any] = []
     from mosaickv.evaluation.layer_code_delta import bind
 

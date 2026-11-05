@@ -380,12 +380,95 @@ class PromptGraphLayer(SequentialSourceHistoryLayer):
         return self.prompt_graph_pool.acquire(self, shape, source)
 
 
+class TrackedPromptGraphLayer(PromptGraphLayer):
+    """Only event_sum uses these setters; old controls keep the old class."""
+
+    @property
+    def resident_bytes(self):
+        return getattr(self, "_resident_bytes", 0)
+
+    @resident_bytes.setter
+    def resident_bytes(self, value):
+        if type(value) is not int or value < 0:
+            raise RuntimeError("nonnegative actual resident bytes required")
+        owner = getattr(self, "_accounting_owner", None)
+        old = getattr(self, "_resident_bytes", 0)
+        if owner is not None:
+            owner.accounting_delta(value - old)
+        self._resident_bytes = value
+
+    @PromptGraphLayer.lease_bytes.setter
+    def lease_bytes(self, value):
+        if type(value) is not int or value < 0:
+            raise RuntimeError("nonnegative actual lease bytes required")
+        self._ordinary_lease_bytes = value
+        owner = getattr(self, "_accounting_owner", None)
+        if owner is not None:
+            charge = self.lease_bytes
+            owner.accounting_delta(charge - self._tracked_lease_charge)
+            self._tracked_lease_charge = charge
+
+
 class PromptGraphCache(SourceHistoryCache):
     def __init__(self, *, policy=None, **kwargs):
         super().__init__(**kwargs)
         self.prompt_graph_pool = PromptGraphPool(self, policy)
+        from mosaickv.evaluation.graph_accounting import current
+
+        self.accounting_policy = current()
+        self.accounting_total = self.accounting_bound_layers = 0
+        self.accounting_notifications = self.accounting_audits = 0
+        self.accounting_ids = ()
+
+    def accounting_delta(self, delta):
+        if type(delta) is not int or self.accounting_total + delta < 0:
+            raise RuntimeError("nonnegative exact integer live-storage total required")
+        self.accounting_total += delta
+        self.accounting_notifications += 1
+
+    def bind_accounting(self):
+        if len(self.layers) < self.accounting_bound_layers:
+            raise RuntimeError("private fixed graph-cache layer list cannot shrink")
+        if len(self.layers) == self.accounting_bound_layers:
+            return
+        for layer in self.layers[self.accounting_bound_layers :]:
+            if (
+                not isinstance(layer, TrackedPromptGraphLayer)
+                or getattr(layer, "_accounting_owner", None) is not None
+                or layer.prompt_graph_pool is not self.prompt_graph_pool
+            ):
+                raise RuntimeError("unique private tracked graph layer required")
+            cost = layer.resident_bytes + layer.lease_bytes
+            if type(cost) is not int or cost < 0:
+                raise RuntimeError("nonnegative actual layer bytes required")
+            self.accounting_total += cost
+            layer._tracked_lease_charge = layer.lease_bytes
+            layer._accounting_owner = self
+        self.accounting_bound_layers = len(self.layers)
+        self.accounting_ids = tuple(map(id, self.layers))
 
     def observe(self, extras=()):
+        policy = getattr(self, "accounting_policy", "original")
+        if policy != "original":
+            if policy == "event_sum":
+                self.bind_accounting()
+                layer_bytes = self.accounting_total
+                if self.audit_workspace:
+                    actual = sum(x.resident_bytes + x.lease_bytes for x in self.layers)
+                    if actual != layer_bytes or self.accounting_ids != tuple(map(id, self.layers)):
+                        raise RuntimeError("event accounting differs from independent layer sum")
+                    self.accounting_audits += 1
+            else:
+                layer_bytes = sum(x.resident_bytes + x.lease_bytes for x in self.layers)
+            pool = getattr(self, "prompt_graph_pool", None)
+            private = 0 if pool is None else pool.private_live_bytes
+            if type(private) is not int or private < 0:
+                raise RuntimeError("nonnegative charged graph-private bytes required")
+            self.peak_bytes = max(
+                self.peak_bytes, self.shared_bytes + layer_bytes + backing_bytes(extras) + private
+            )
+            self.observations += 1
+            return
         super().observe(extras)
         pool = getattr(self, "prompt_graph_pool", None)
         private = 0 if pool is None else pool.private_live_bytes
@@ -393,7 +476,19 @@ class PromptGraphCache(SourceHistoryCache):
         self.peak_bytes = max(self.peak_bytes, current + backing_bytes(extras) + private)
 
     def storage_record(self):
+        if self.accounting_policy == "event_sum":
+            self.bind_accounting()
+            if self.accounting_ids != tuple(map(id, self.layers)) or self.accounting_total != sum(
+                x.resident_bytes + x.lease_bytes for x in self.layers
+            ):
+                raise RuntimeError("final independent graph accounting differs")
         record = super().storage_record()
+        record["graph_cache_accounting"] = dict(
+            policy=self.accounting_policy,
+            notifications=self.accounting_notifications,
+            audited_independent_comparisons=self.accounting_audits,
+            final_independent_tensor_enumeration_preserved=True,
+        )
         record["prompt_graph_reader"] = self.prompt_graph_pool.record()
         record["final_active_kv_storage_bytes"] += self.prompt_graph_pool.private_live_bytes
         return record

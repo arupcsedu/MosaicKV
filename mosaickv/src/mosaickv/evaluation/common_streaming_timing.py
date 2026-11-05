@@ -69,6 +69,7 @@ def request(
     lt_fit_policy="full",
     selective_text_rows=False,
     defer_exact_encoding=False,
+    graph_accounting="original",
 ):
     from mosaickv.evaluation.lossless_prompt_cache import backing_bytes
     from mosaickv.evaluation.native_execution_plan import use as native_plan
@@ -84,6 +85,12 @@ def request(
     from mosaickv.evaluation.streaming_source_constructor import StreamingDirectSource
 
     validate(reconstruction_readers)
+    from mosaickv.evaluation.graph_accounting import use as accounting_scope
+    from mosaickv.evaluation.graph_accounting import validate as validate_accounting
+
+    validate_accounting(graph_accounting)
+    if graph_accounting != "original" and not prompt_graph_reader:
+        raise ValueError("optimized accounting requires the private graph cache")
     if type(defer_exact_encoding) is not bool or (
         defer_exact_encoding and direct_text_policy is None
     ):
@@ -283,6 +290,7 @@ def request(
     torch.cuda.synchronize()
     constructed_at = time.monotonic()
     with (
+        accounting_scope(graph_accounting),
         use(reconstruction_readers),
         use_dispatch(reuse_kernel_dispatch) as dispatch,
         use_descriptors(reuse_code_descriptors) as descriptors,
@@ -320,6 +328,7 @@ def request(
             prompt_graph_reader=details["storage"].get("prompt_graph_reader", dict(enabled=False)),
             lt_source_reader=lt_source_reader,
             lt_fit_policy=lt_fit_policy,
+            graph_cache_accounting=details["storage"].get("graph_cache_accounting"),
             deferred_exact_encoding=deferred_exact.report(deferred_state),
             selective_text_construction=dict(
                 enabled=selective_text_rows,

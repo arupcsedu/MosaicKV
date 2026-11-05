@@ -130,6 +130,7 @@ def execute(
         lt_fit_policy=record.get("lt_fit_policy", "full"),
         selective_text_rows=record.get("selective_text_rows", False),
         defer_exact_encoding=record.get("defer_exact_encoding", False),
+        graph_accounting=record.get("graph_accounting", "original"),
     )
     if not bits_equal(values, refs[method]["logits"]):
         raise RuntimeError("direct text construction changed parent vocabulary words")
