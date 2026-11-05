@@ -108,7 +108,11 @@ class SourceHistoryCache(ExactCache):
             self.observe((normal,))
             layer.normalized_tail = normal
             layer.resident_bytes += backing_bytes((normal,))
-        layer.normalized_tail[:, slot : slot + 1].copy_(hidden)
+        joint_copy = getattr(self, "joint_source_input_copy", None)
+        if joint_copy is None:
+            layer.normalized_tail[:, slot : slot + 1].copy_(hidden)
+        else:
+            joint_copy(index, layer, hidden, slot)
         layer.source_pending = True
         self.observe()
 

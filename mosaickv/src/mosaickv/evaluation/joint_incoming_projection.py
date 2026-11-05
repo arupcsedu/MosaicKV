@@ -34,11 +34,21 @@ def managed(function):
         policy = kwargs.get("joint_incoming_projection", "none")
         validate(policy)
         graph_plan = kwargs.get("reuse_graph_replay_plan", False)
+        input_copy = kwargs.get("reuse_source_input_copy", False)
+        if type(input_copy) is not bool:
+            raise ValueError("explicit once-only source-copy boolean required")
         if type(graph_plan) is not bool:
             raise ValueError("explicit prepared graph replay boolean required")
         if _scope.get() is not None:
             raise RuntimeError("joint projection scopes may not nest or share requests")
-        state = dict(policy=policy, transports=[], eligible_layers=0, graph_plan=graph_plan)
+        state = dict(
+            policy=policy,
+            transports=[],
+            eligible_layers=0,
+            graph_plan=graph_plan,
+            input_copy=input_copy,
+            input_copy_reports=[],
+        )
         token = _scope.set(state)
         try:
             values, packets, details = function(*args, **kwargs)
@@ -50,6 +60,7 @@ def managed(function):
                 original_attention_and_RoPE=True,
                 no_placeholder_values=True,
                 no_new_selection_or_quality_claim=True,
+                source_input_copy=dict(enabled=input_copy, reports=state["input_copy_reports"]),
             )
             return values, packets, details
         finally:
@@ -361,6 +372,7 @@ class Transport:
         else:
             self.ledger = Ledger(len(self.layers))
         self.closed = False
+        self.input_copy = None
 
     def __enter__(self):
         from mosaickv.evaluation.layer_code_delta import BoundDeltaFormat
@@ -391,6 +403,29 @@ class Transport:
         self.pool.joint_projection_policy = self.mode
         self.state["eligible_layers"] += len(self.layers)
         try:
+            if self.state.get("input_copy", False):
+                from torch.nn.modules import module as torch_modules
+
+                from mosaickv.evaluation.joint_input_copy import Copy
+
+                if (
+                    hasattr(self.cache, "joint_source_input_copy")
+                    or torch_modules._global_forward_hooks
+                    or torch_modules._global_forward_pre_hooks
+                    or any(
+                        type(x.attention.q_proj) is not torch.nn.Linear
+                        or "forward" in vars(x.attention.q_proj)
+                        or x.attention.q_proj._forward_hooks
+                        or x.attention.q_proj._forward_pre_hooks
+                        for x in self.layers
+                    )
+                ):
+                    raise NotImplementedError(
+                        "unchanged side-effect-free native query projection required"
+                    )
+                self.input_copy = Copy(self)
+                self.cache.joint_source_input_copy = self.input_copy.write
+                self.stack.callback(delattr, self.cache, "joint_source_input_copy")
             for index, layer in enumerate(self.layers):
                 module, original_forward = layer.attention.k_proj, layer.attention.k_proj.forward
 
@@ -406,7 +441,10 @@ class Transport:
                     ):
                         raise RuntimeError("isolated source-captured one-token BF16 key required")
                     engine = self.pool.lt_engine
-                    engine.incoming.copy_(hidden.reshape(-1))
+                    if self.input_copy is None:
+                        engine.incoming.copy_(hidden.reshape(-1))
+                    else:
+                        self.input_copy.take(index, layer, hidden)
                     ready = (id(layer), 0) in self.pool.entries
                     self.ledger.enter(index, layer.history_length, ready=ready)
                     if not ready:
@@ -465,9 +503,16 @@ class Transport:
     def __exit__(self, kind, value, traceback):
         self.stack.close()
         self.closed = True
-        if kind is None:
-            self.state["transports"].append(self.ledger.finish(127))
-        self.pool.joint_projection = None
+        try:
+            if kind is None:
+                self.state["transports"].append(self.ledger.finish(127))
+                if self.input_copy is not None:
+                    self.state["input_copy_reports"].append(self.input_copy.record())
+        finally:
+            if self.input_copy is not None:
+                self.input_copy.owner = None
+                self.input_copy = None
+            self.pool.joint_projection = None
 
 
 def transport(adapter, cache):
