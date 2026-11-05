@@ -23,7 +23,16 @@ def validate_patches(patches):
 
 
 @torch.inference_mode()
-def run(index):
+def run(index, *, engine_name="tile"):
+    owners = []
+    try:
+        return _run(index, engine_name, owners)
+    finally:
+        for engine in owners:
+            engine.close()
+
+
+def _run(index, engine_name, owners):
     from mosaickv.evaluation.exact_storage import SparseBitPatch
     from mosaickv.evaluation.full_prompt_source import decode_into
     from mosaickv.evaluation.lossless_affine_minimum import encode_minimum
@@ -56,12 +65,23 @@ def run(index):
         source_head_group=4,
         channel_exceptions=columns if index else None,
     )
+    if engine_name not in ("tile", "lt128"):
+        raise ValueError("explicit registered native projection engine required")
+    engine = None
+    if engine_name == "lt128":
+        from mosaickv.evaluation.lt_source_chunks import Engine
+
+        engine = Engine(packet)
+        owners.append(engine)
+        project_raw = engine.project
     a, b = tuple(torch.empty((1, n, h * d), device="cuda", dtype=torch.bfloat16) for _ in range(2))
     decode_into(packet, a)
     decode_control(packet, b)
     source_equal = torch.equal(a.view(torch.int16), b.view(torch.int16))
     if not source_equal:
         raise RuntimeError("native tile changed an original dequantized input word")
+    if engine is not None:
+        engine.check_source(packet, a)
     del a, b
     attention = SimpleNamespace(
         k_proj=torch.nn.Linear(h * d, h * d, bias=False, device="cuda", dtype=torch.bfloat16),
@@ -186,7 +206,7 @@ def run(index):
         torch.cuda.synchronize()
         if live - torch.cuda.memory_allocated() != 1024:
             raise RuntimeError("native tile did not retire exact graph ownership")
-    return dict(
+    result = dict(
         rows=records,
         summary=summarize(records),
         resources=resources,
@@ -206,3 +226,11 @@ def run(index):
         numerical_tolerance_not_relaxed=True,
         patch_fitted_to_original_decoder_not_labels=True,
     )
+    result["engine_name"] = engine_name
+    if engine is not None:
+        result["engine"] = engine.record()
+        for row in records:
+            row["extra_workspace_backing_bytes"] = engine.workspace_bytes if row["row4"] else 0
+        engine.close()
+        result["request_private_vendor_descriptors_retired"] = True
+    return result
