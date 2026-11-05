@@ -16,6 +16,10 @@ WAIT = Path("/scratch/djy8hg/runs/evicastkv/static-transport-consumed-20261105-v
 PROFILE = Path("/scratch/djy8hg/runs/evicastkv/optimized-runtime-profile-consumed-20261105-v1")
 SCRIPT = SOURCE / "mosaickv/slurm/evicastkv_joint_row_feasibility.sbatch"
 ORIGINAL_EXECUTE, ORIGINAL_SUBMIT = controller.common.execute, controller.submit
+DOC = SOURCE / "mosaickv/docs/joint_row_feasibility.md"
+STAGE = "consumed_joint_row_feasibility"
+VARIANT = "consumed_joint_row_operator_feasibility"
+EXTRA_PLAN = {}
 
 
 def execute(adapter, refs, messages, profile, plan, method, record, **kwargs):
@@ -84,7 +88,8 @@ def prepare(root, revision):
     if root.exists() or clean_source(SOURCE) != revision:
         raise ValueError("new immutable root and clean source required")
     previous = driver.read(WAIT / "plan.json")
-    cpu_dependency = str(driver.read(WAIT / "cpu_submission.json")["analysis"])
+    submission = driver.read(WAIT / "cpu_submission.json")
+    cpu_dependency = str(submission.get("analysis", submission.get("release", "")))
     if not cpu_dependency.isdecimal():
         raise ValueError("registered preceding CPU release job required")
     old = driver.read(PARENT / "plan.json")
@@ -92,7 +97,7 @@ def prepare(root, revision):
         WAIT / "plan.json",
         WAIT / "cpu_submission.json",
         PROFILE / "analysis/decision.json",
-        SOURCE / "mosaickv/docs/joint_row_feasibility.md",
+        DOC,
     ]
     bound = dict(old["bound_files"])
     bound.update({str(path): sha(path) for path in paths})
@@ -102,7 +107,7 @@ def prepare(root, revision):
             old,
             source_sha=revision,
             bound_files=bound,
-            stage="consumed_joint_row_feasibility",
+            stage=STAGE,
             independent_quality_N=0,
             no_new_identities=True,
             automatic_quality_submission=False,
@@ -117,6 +122,7 @@ def prepare(root, revision):
             predecessor_source_sha=previous["source_sha"],
             predecessor_plan_sha256=sha(WAIT / "plan.json"),
             no_overlapping_GPU_screens=True,
+            **EXTRA_PLAN,
         ),
     )
     cpu = submit(root, "cpu")
@@ -212,7 +218,7 @@ def analyze(root, expected):
 def main():
     controller.CPU_NODE = "udc-aj36-2c0"
     controller.MANIFEST_METHODS = ("mosaickv_exact",)
-    controller.MANIFEST_VARIANT = "consumed_joint_row_operator_feasibility"
+    controller.MANIFEST_VARIANT = VARIANT
     controller.MANIFEST_TIMING_PROTOCOL = dict(
         output_predictions=128,
         operator_windows=list(probe.WINDOWS),
