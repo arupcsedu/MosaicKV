@@ -19,6 +19,7 @@ MANIFEST_TIMING_PROTOCOL = dict(
     output_predictions=128, profiled_steps=[1, 64, 126], not_latency_evidence=True
 )
 CPU_NODE = None
+MANIFEST_METHODS = ("mosaickv_exact", "prefixkv_reimpl")
 ARMS = (
     ("mosaickv_exact", "graph"),
     ("mosaickv_exact", "graph-lt"),
@@ -169,7 +170,7 @@ def worker(root, expected, index):
             index,
             manifest_overrides=dict(
                 variant=MANIFEST_VARIANT,
-                methods=["mosaickv_exact", "prefixkv_reimpl"],
+                methods=list(MANIFEST_METHODS),
                 actual_timing_protocol=dict(MANIFEST_TIMING_PROTOCOL),
             ),
         )
