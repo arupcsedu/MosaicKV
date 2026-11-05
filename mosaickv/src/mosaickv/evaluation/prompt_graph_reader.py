@@ -199,7 +199,8 @@ class PromptGraphPool:
                 self.row4_replays += int(row4 and component == 0)
                 if native_rows:
                     self.lt_replays += 1
-                    self.lt_matmul_dispatches += (native_rows + 127) // 128
+                    rows = getattr(self.lt_engine, "chunk_rows", 128)
+                    self.lt_matmul_dispatches += (native_rows + rows - 1) // rows
                 return
         from mosaickv.evaluation.lt_source_format import source_format as lt_format
 
@@ -306,7 +307,8 @@ class PromptGraphPool:
         self.row4_replays += int(body is not None and component == 0)
         if native is not None:
             self.lt_replays += 1
-            self.lt_matmul_dispatches += (native.shape[2] + 127) // 128
+            rows = getattr(self.lt_engine, "chunk_rows", 128)
+            self.lt_matmul_dispatches += (native.shape[2] + rows - 1) // rows
 
     @staticmethod
     def _row4_body(packet):

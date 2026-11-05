@@ -28,6 +28,13 @@ def validate(policy):
         raise ValueError("explicit registered none/keys/kv incoming-projection policy required")
 
 
+def validate_source_rows(rows, policy, frozen, history):
+    if type(rows) is not int or rows not in (128, 192):
+        raise ValueError("explicit registered 128/192 source row capacity required")
+    if rows == 192 and (policy not in ("none", "kv") or frozen is not True or history):
+        raise NotImplementedError("source-192 requires frozen KV mode and original history")
+
+
 def managed(function):
     @wraps(function)
     def wrapped(*args, **kwargs):
@@ -36,6 +43,10 @@ def managed(function):
         graph_plan = kwargs.get("reuse_graph_replay_plan", False)
         input_copy = kwargs.get("reuse_source_input_copy", False)
         frozen_plan = kwargs.get("frozen_joint_plan", False)
+        source_rows = kwargs.get("source_tile_rows", 128)
+        validate_source_rows(
+            source_rows, policy, frozen_plan, kwargs.get("native_history_reader", False)
+        )
         if type(frozen_plan) is not bool:
             raise ValueError("explicit frozen joint configuration boolean required")
         if type(input_copy) is not bool:
@@ -53,12 +64,14 @@ def managed(function):
             input_copy_reports=[],
             frozen_plan=frozen_plan,
             frozen_plan_engines=0,
+            source_rows=source_rows,
         )
         token = _scope.set(state)
         try:
             values, packets, details = function(*args, **kwargs)
             details["joint_incoming_projection"] = dict(
                 policy=policy,
+                source_tile_rows=source_rows,
                 eligible_layers=state["eligible_layers"],
                 transactions=state["transports"],
                 value_projection_unchanged=policy != "kv" or not state["eligible_layers"],
@@ -363,6 +376,10 @@ def gpu_decoder_controls():
 def engine_factory(packet):
     state = _scope.get()
     if state is not None and state["policy"] in ("keys", "kv"):
+        if state.get("source_rows", 128) == 192:
+            from mosaickv.evaluation.source_192_reader import Engine192
+
+            return Engine192(packet)
         return Engine(packet)
     from mosaickv.evaluation.lt_source_chunks import Engine as DefaultEngine
 

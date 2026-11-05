@@ -52,11 +52,23 @@ def validate(measured, active, *, require_audited=True):
             "exactly the original graph count and complete workspace retirement required"
         )
     if active:
+        rows = info.get("source_tile_rows", 128)
+        if type(rows) is not int or rows not in (128, 192):
+            raise ValueError("explicit bounded registered source capacity required")
+        if rows == 192 and (
+            graph.get("lt_engine", {}).get("source_chunk_rows") != rows
+            or graph["lt_matmul_dispatches"] != 32512
+            or graph["lt_engine"]["extra_source_output_bytes_vs_128"] != 2**20
+            or graph["lt_engine"]["algorithm_workspace_bytes"] != 0
+        ):
+            raise ValueError(
+                "actual corrected source-192 capacity, dispatch and workspace required"
+            )
         if (
             info["policy"] != POLICY
             or info["eligible_layers"] != 32
             or info["transactions"] != [EXPECTED_TRANSACTION]
-            or graph["lt_workspace_peak_bytes"] != 2**21 + 8192
+            or graph["lt_workspace_peak_bytes"] != 2 * rows * 4096 * 2 + 8192
         ):
             raise ValueError("all 4032 warm key projections must actually share the prompt graph")
     elif info["policy"] != "none" or info["transactions"] or info["eligible_layers"]:

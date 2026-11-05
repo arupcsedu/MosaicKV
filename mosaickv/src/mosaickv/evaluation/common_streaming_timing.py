@@ -58,6 +58,7 @@ def request(
     native_history_reader=False,
     input_norm_segment=False,
     reuse_norm_input=False,
+    source_tile_rows=128,
     minimum_only=False,
     componentwise_fitting=False,
     code_delta=False,

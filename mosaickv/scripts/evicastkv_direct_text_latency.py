@@ -144,6 +144,7 @@ def execute(
         native_history_reader=record.get("native_history_reader", False),
         input_norm_segment=record.get("input_norm_segment", False),
         reuse_norm_input=record.get("reuse_norm_input", False),
+        source_tile_rows=record.get("source_tile_rows", 128),
     )
     if not bits_equal(values, refs[method]["logits"]):
         raise RuntimeError("direct text construction changed parent vocabulary words")

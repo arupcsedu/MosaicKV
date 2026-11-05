@@ -69,8 +69,9 @@ class OrderedQueue:
 
 
 class Pipeline:
-    def __init__(self, *, audit, frozen):
+    def __init__(self, *, audit, frozen, source_rows=128):
         self.audit, self.frozen = audit, frozen
+        self.source_rows = source_rows
         self.stream = self.engine = None
         self.queue = OrderedQueue(self.fit, self.retire)
         self.engines = self.layers = self.audit_operations = self.temporary_peak = 0
@@ -81,8 +82,8 @@ class Pipeline:
 
     @torch.inference_mode()
     def fit(self, index, item):
-        from mosaickv.evaluation.joint_incoming_projection import Engine
         from mosaickv.evaluation.joint_incoming_projection import _scope as joint_scope
+        from mosaickv.evaluation.joint_incoming_projection import engine_factory
         from mosaickv.evaluation.lossless_prompt_cache import backing_bytes
         from mosaickv.evaluation.lt_source_format import fit, verify_strides
         from mosaickv.evaluation.projection_cache import ScratchAudit, identity
@@ -91,12 +92,19 @@ class Pipeline:
         started = time.monotonic()
         if self.stream is None:
             self.stream = torch.cuda.Stream(device=base.cos.device)
-        token = joint_scope.set(dict(policy="kv", frozen_plan=self.frozen, frozen_plan_engines=0))
+        token = joint_scope.set(
+            dict(
+                policy="kv",
+                frozen_plan=self.frozen,
+                frozen_plan_engines=0,
+                source_rows=self.source_rows,
+            )
+        )
         try:
             with torch.cuda.device(base.cos.device), torch.cuda.stream(self.stream):
                 self.stream.wait_event(ready)
                 if self.engine is None:
-                    self.engine = Engine(base)
+                    self.engine = engine_factory(base)
                     self.engines += 1
                 excluded = {identity(t) for t in (*base.tensors(), *attention.parameters())}
 
@@ -254,6 +262,7 @@ def managed(function):
             state = Pipeline(
                 audit=kwargs.get("audit_decode_storage", False),
                 frozen=kwargs.get("frozen_joint_plan", False),
+                source_rows=kwargs.get("source_tile_rows", 128),
             )
         token = _scope.set(state)
         try:
