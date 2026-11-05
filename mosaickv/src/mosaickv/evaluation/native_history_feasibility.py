@@ -28,10 +28,40 @@ def validate_rows(n):
         raise ValueError("only complete 16-token history epochs through 112 supported")
 
 
+def canonical_device(device):
+    result = torch.device(device)
+    if result.type == "cuda" and result.index is None:
+        result = torch.device("cuda", torch.cuda.current_device())
+    return result
+
+
+def workspace_buffers(device, buffers):
+    device = canonical_device(device)
+    if buffers is None:
+        source = torch.empty((128, 4096), device=device, dtype=torch.bfloat16)
+        return source, torch.empty_like(source)
+    if (
+        type(buffers) is not tuple
+        or len(buffers) != 2
+        or any(
+            t.shape != (128, 4096)
+            or t.dtype != torch.bfloat16
+            or t.device != device
+            or not t.is_contiguous()
+            for t in buffers
+        )
+        or buffers[0].untyped_storage().data_ptr() == buffers[1].untyped_storage().data_ptr()
+    ):
+        raise ValueError("two distinct original 128-row BF16 workspaces required")
+    return buffers
+
+
 class Engine:
-    def __init__(self, device, *, frozen=False):
+    def __init__(self, device, *, frozen=False, buffers=None):
         from mosaickv.evaluation.zero_workspace_lt import Plans
 
+        if type(frozen) is not bool:
+            raise ValueError("explicit frozen native history algorithm boolean required")
         if frozen:
             from mosaickv.evaluation.joint_all_layer_compatibility import FROZEN
             from mosaickv.evaluation.joint_kernel_compatibility import KernelPlans, fingerprint
@@ -51,8 +81,12 @@ class Engine:
                 self.plans.plans[n] = a, b, d, *options[0]
         else:
             self.plans = Plans(ROWS, 4096)
-        self.source = torch.empty((128, 4096), device=device, dtype=torch.bfloat16)
-        self.output = torch.empty_like(self.source)
+        self.borrowed = buffers is not None
+        try:
+            self.source, self.output = workspace_buffers(device, buffers)
+        except BaseException:
+            self.plans.close()
+            raise
 
     def project(self, packet, attention, component, target, repairs=None):
         from mosaickv.evaluation.dual_projection_kernel import apply_patch

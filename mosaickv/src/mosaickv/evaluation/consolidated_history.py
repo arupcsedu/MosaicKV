@@ -80,6 +80,11 @@ def join_patches(
 def build_consolidated(
     layer: Any, cos: Any, sin: Any, *, bit_flags: list[Any] | None = None
 ) -> Any:
+    from mosaickv.evaluation.native_history_reader import consolidate as native_consolidate
+    from mosaickv.evaluation.native_history_reader import current as native_state
+
+    if native_state() is not None:
+        return native_consolidate(layer, cos, sin, bit_flags=bit_flags)
     from mosaickv.evaluation.encoded_projection import EncodedFormat
     from mosaickv.evaluation.encoded_projection_kernel import checkpoints
     from mosaickv.evaluation.projection_archive import ProjectionArchive

@@ -208,6 +208,11 @@ def build_chunk_direct(
     layer: Any, cos: Any, sin: Any, *, bit_flags: list[Any] | None = None
 ) -> Any:
     """Four projections instead of nine; three final original-bit checks remain."""
+    from mosaickv.evaluation.native_history_reader import build_chunk as native_chunk
+    from mosaickv.evaluation.native_history_reader import current as native_state
+
+    if native_state() is not None:
+        return native_chunk(layer, cos, sin, bit_flags=bit_flags)
     from dataclasses import replace
 
     from mosaickv.evaluation.dual_projection import output_slots

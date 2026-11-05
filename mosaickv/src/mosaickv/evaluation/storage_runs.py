@@ -295,6 +295,9 @@ def run(
         from mosaickv.evaluation.joint_incoming_projection import transport as joint_transport
 
         stack.enter_context(joint_transport(adapter, cache))
+        from mosaickv.evaluation.native_history_reader import transport as history_transport
+
+        stack.enter_context(history_transport(adapter, cache))
         from mosaickv.evaluation.post_attention_segment import transport as segment_transport
 
         segment = stack.enter_context(segment_transport(adapter, cache))
