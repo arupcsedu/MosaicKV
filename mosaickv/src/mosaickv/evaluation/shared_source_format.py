@@ -288,6 +288,14 @@ def validate_source_tensors(normalized, original_pair, phases, identity, *, h, n
 
 
 def apply_transport_patch(patch, target, *, prompt_length):
+    from mosaickv.evaluation.exact_storage import SparseBitPatch
+
+    if not isinstance(patch, SparseBitPatch):
+        from mosaickv.evaluation.static_transport_patches import TemporaryPatch
+
+        if isinstance(patch, TemporaryPatch):
+            patch.apply_strided(target, prompt_length=prompt_length)
+            return
     if not patch.indices.numel():
         return
     if target.device.type == "cuda":
@@ -308,6 +316,7 @@ def transport_corrections(reference, actual, protected_rows, *, chunk_scalars=No
         predicate_span,
     )
     from mosaickv.evaluation.exact_storage import SparseBitPatch
+    from mosaickv.evaluation import static_transport_patches as static
 
     patches = []
     if chunk_scalars is not None and (type(chunk_scalars) is not int or chunk_scalars < 1):
@@ -326,7 +335,8 @@ def transport_corrections(reference, actual, protected_rows, *, chunk_scalars=No
             raise ValueError("finite compatible BF16 construction pair required")
         if quantum is None:
             bad = ~torch.isclose(expected.float(), output.float(), rtol=0.01, atol=2**-6)
-            indices = bad.flatten().nonzero().flatten()
+            pending = static.build(expected, bad) if static.enabled() else None
+            indices = pending.indices if pending is not None else bad.flatten().nonzero().flatten()
         else:
             left, right = expected.flatten(), output.flatten()
             mask = correction_mask(left.numel(), left.device)
@@ -340,13 +350,24 @@ def transport_corrections(reference, actual, protected_rows, *, chunk_scalars=No
                     parts.append(bad.nonzero().flatten() + start)
                 else:
                     mask[start:stop].copy_(bad)
-            indices = torch.cat(parts) if mask is None else mask.nonzero().flatten()
+            if static.enabled() and mask is None:
+                raise ValueError("static transport requires the existing bounded full mask")
+            pending = static.build(expected, mask) if static.enabled() else None
+            indices = (
+                pending.indices
+                if pending is not None
+                else torch.cat(parts)
+                if mask is None
+                else mask.nonzero().flatten()
+            )
             del mask
         protected = torch.isin(indices // d, protected_rows.long()).any()
         if not enqueue(protected, "protected", expected=False) and bool(protected):
             raise RuntimeError("protected K/V mismatch may not be hidden by a numerical patch")
         patches.append(
-            SparseBitPatch(
+            pending
+            if pending is not None
+            else SparseBitPatch(
                 indices.to(torch.int32),
                 expected.contiguous().flatten().index_select(0, indices).clone(),
             )

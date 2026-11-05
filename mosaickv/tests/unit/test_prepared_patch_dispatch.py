@@ -24,8 +24,11 @@ class Kernel:
 
                 return run
 
-        def run(*args):
-            self.calls.append(("original", grid, tuple(args[3:])))
+        def run(*args, **kwargs):
+            assert len(args) == 3
+            assert set(kwargs) == {"COUNT", "KEPT", "HEAD_OUT", "DIM", "BLOCK"}
+            ordered = tuple(kwargs[n] for n in ("COUNT", "KEPT", "HEAD_OUT", "DIM", "BLOCK"))
+            self.calls.append(("original", grid, ordered))
             return Compiled()
 
         return run

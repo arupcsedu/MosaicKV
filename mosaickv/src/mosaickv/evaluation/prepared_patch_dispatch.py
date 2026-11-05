@@ -34,7 +34,7 @@ def use(enabled):
 def launch(kernel, grid, arguments):
     state = _state.get()
     if state is None or state is _INACTIVE:
-        return kernel[grid](*arguments)
+        return original(kernel, grid, arguments)
     if len(arguments) != 8 or len(grid) != 1:
         raise ValueError("exact original sparse patch launch ABI required")
     indices, values, output, count, kept, stride, dimension, block = arguments
@@ -65,7 +65,7 @@ def launch(kernel, grid, arguments):
     if entry is None:
         if len(state["handles"]) >= 4096:
             raise RuntimeError("bounded private sparse patch plans exhausted")
-        compiled = kernel[grid](*arguments)
+        compiled = original(kernel, grid, arguments)
         if getattr(compiled.metadata, "global_scratch_size", None) != 0:
             raise RuntimeError("prepared patch dispatch cannot add opaque global scratch")
         runner = compiled[(*grid, 1, 1)]
@@ -76,6 +76,20 @@ def launch(kernel, grid, arguments):
         runner(*arguments)
         state["hits"] += 1
     return compiled
+
+
+def original(kernel, grid, arguments):
+    indices, values, output, count, kept, stride, dimension, block = arguments
+    return kernel[grid](
+        indices,
+        values,
+        output,
+        COUNT=count,
+        KEPT=kept,
+        HEAD_OUT=stride,
+        DIM=dimension,
+        BLOCK=block,
+    )
 
 
 def report(state):

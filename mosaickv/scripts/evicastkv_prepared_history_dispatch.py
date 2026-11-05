@@ -11,6 +11,9 @@ from mosaickv.evaluation.fox_campaign import clean_source, sha, write_once
 controller, base = parent.controller, parent.base
 SOURCE, PARENT, PROFILE = parent.SOURCE, parent.PARENT, parent.PROFILE
 LOOKAHEAD = Path("/scratch/djy8hg/runs/evicastkv/graph-lookahead-consumed-20261105-retry1")
+FAILED_CPU = Path(
+    "/scratch/djy8hg/runs/evicastkv/prepared-history-dispatch-consumed-20261105-v1/cpu-analysis/decision.json"
+)
 SCRIPT = SOURCE / "mosaickv/slurm/evicastkv_prepared_history_dispatch.sbatch"
 ORIGINAL_EXECUTE = parent.ORIGINAL_EXECUTE
 ORIGINAL_ANALYZE = parent.ORIGINAL_ANALYZE
@@ -25,6 +28,9 @@ ARMS = tuple(
     for suffix in ("", "-prepared-patch")
 )
 CANDIDATE = ("mosaickv_exact", "graph-prepared-patch")
+STAGE = "consumed_prepared_history_patch_dispatch_screen"
+DOC = SOURCE / "mosaickv/docs/prepared_history_dispatch.md"
+EXTRA_PLAN = {}
 
 
 def variants(records):
@@ -67,7 +73,8 @@ def prepare(root, revision):
         PROFILE / "analysis/decision.json",
         LOOKAHEAD / "plan.json",
         dependency_file,
-        SOURCE / "mosaickv/docs/prepared_history_dispatch.md",
+        DOC,
+        FAILED_CPU,
     ]
     bound.update({str(p): sha(p) for p in paths})
     write_once(
@@ -76,7 +83,7 @@ def prepare(root, revision):
             old,
             source_sha=revision,
             bound_files=bound,
-            stage="consumed_prepared_history_patch_dispatch_screen",
+            stage=STAGE,
             warmups=5,
             repetitions=3,
             screen_NOT_acceptance=True,
@@ -95,6 +102,7 @@ def prepare(root, revision):
             optimization_offered_to_all_baseline_controls=True,
             predecessor_source_sha=preceding["source_sha"],
             predecessor_plan_sha256=sha(LOOKAHEAD / "plan.json"),
+            **EXTRA_PLAN,
         ),
     )
     cpu = base.common.submit(root, "cpu")

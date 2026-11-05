@@ -72,6 +72,7 @@ def request(
     graph_accounting="original",
     graph_lookahead=False,
     reuse_patch_dispatch=False,
+    static_transport_patches=False,
 ):
     from mosaickv.evaluation.lossless_prompt_cache import backing_bytes
     from mosaickv.evaluation.native_execution_plan import use as native_plan
@@ -91,6 +92,13 @@ def request(
     from mosaickv.evaluation.graph_accounting import validate as validate_accounting
 
     validate_accounting(graph_accounting)
+    if type(static_transport_patches) is not bool or (
+        static_transport_patches and not (
+            componentwise_fitting and defer_transport_validation and coalesce_transport_nonzero
+            and full_predicate_span
+        )
+    ):
+        raise ValueError("static patches require the complete bounded componentwise constructor")
     if type(reuse_patch_dispatch) is not bool:
         raise ValueError("explicit private patch-dispatch boolean required")
     if type(graph_lookahead) is not bool or (
@@ -197,6 +205,9 @@ def request(
     )
     fresh = replace(prepared, model_inputs=dict(prepared.model_inputs, past_key_values=cache))
     with ExitStack() as stack:
+        from mosaickv.evaluation import static_transport_patches as static_patches
+
+        static_state = stack.enter_context(static_patches.use(static_transport_patches))
         from mosaickv.evaluation import deferred_exact_encoding as deferred_exact
 
         deferred_state = stack.enter_context(deferred_exact.use(defer_exact_encoding))
@@ -228,12 +239,14 @@ def request(
         with SealAfterAttention(adapter, cache, encoder):
             pref = adapter.prefill(fresh, capture_queries=False, capture_attentions=False)
         encoder.finish() if method == "mosaickv_exact" else encoder.finish(adapter)
-    packets = cache.formats()
+        packets = static_patches.finalize(cache.formats(), static_state)
     direct_report = direct_state.finish(packets) if direct_state is not None else None
     runtime = replace(pref, state=replace(pref.state, past_key_values=None), attention_weights=())
     prepared.model_inputs.clear()
     del pref, fresh, cache, encoder, prepared
     gc.collect()
+    if static_state is not None:
+        static_state.check_retired()
     original_packet_bytes = backing_bytes(tuple(t for p in packets for t in p.tensors()))
     geometry_layers = 0
     if source_geometry is not None:
@@ -344,6 +357,9 @@ def request(
             graph_cache_accounting=details["storage"].get("graph_cache_accounting"),
             graph_lookahead=graph_lookahead,
             prepared_patch_dispatch=patch_dispatch.report(patch_state),
+            static_transport_construction=(
+                dict(enabled=False) if static_state is None else static_state.report()
+            ),
             deferred_exact_encoding=deferred_exact.report(deferred_state),
             selective_text_construction=dict(
                 enabled=selective_text_rows,
