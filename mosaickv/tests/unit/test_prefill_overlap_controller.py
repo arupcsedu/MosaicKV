@@ -32,3 +32,37 @@ def test_common_policy_and_baseline_truthful_noop(monkeypatch):
             key[1] == "joint-overlap" or key[0] != "mosaickv_exact"
         )
     assert not configs["mosaickv_exact", "joint-overlap"]["reuse_source_input_copy"]
+
+
+def test_prepare_binds_the_actual_release_predecessor(monkeypatch, tmp_path):
+    import json
+    from types import SimpleNamespace
+
+    wait, frozen, old = tmp_path / "wait", tmp_path / "frozen", tmp_path / "old"
+    monkeypatch.setattr(control, "WAIT", wait)
+    monkeypatch.setattr(control, "FROZEN", frozen)
+    monkeypatch.setattr(control, "clean_source", lambda _: "new-revision")
+    monkeypatch.setattr(control, "sha", lambda path: "sha:" + str(path))
+    monkeypatch.setattr(control, "frozen_policy", lambda _: True)
+    cases = {
+        frozen / "plan.json": dict(
+            frozen_runtime_policies=dict(segment=True, rotary=True, copy=False)
+        ),
+        frozen / "analysis/decision.json": {},
+        old / "plan.json": dict(bound_files={}),
+        wait / "plan.json": dict(source_sha="actual-predecessor"),
+    }
+    monkeypatch.setattr(control.driver, "read", lambda path: cases[path])
+    submitted = []
+
+    def submit(root, action, dependency=None):
+        submitted.append((action, dependency))
+        return str(len(submitted))
+
+    monkeypatch.setattr(control, "parent", SimpleNamespace(PARENT=old, submit=submit))
+    root = tmp_path / "new-output"
+    control.prepare(root, "new-revision")
+    plan = json.loads((root / "plan.json").read_text())
+    assert plan["predecessor_source_sha"] == "actual-predecessor"
+    assert plan["predecessor_plan_sha256"] == "sha:" + str(wait / "plan.json")
+    assert submitted == [("cpu", None), ("release", "1")]

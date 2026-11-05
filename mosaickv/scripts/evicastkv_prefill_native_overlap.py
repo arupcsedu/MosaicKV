@@ -68,6 +68,8 @@ def prepare(root, revision):
             warmups=5,
             repetitions=3,
             frozen_runtime_policies=policies,
+            predecessor_source_sha=driver.read(WAIT / "plan.json")["source_sha"],
+            predecessor_plan_sha256=sha(WAIT / "plan.json"),
             one_thread_stream_handle_per_request=True,
             maximum_pending_layers=2,
             original_all_word_and_stride_checks_unchanged=True,
