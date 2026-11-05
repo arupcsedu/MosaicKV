@@ -17,6 +17,7 @@ from mosaickv.evaluation.native_history_feasibility import study
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", type=Path, required=True)
+    parser.add_argument("--frozen", action="store_true")
     args = parser.parse_args()
     source = Path(__file__).resolve().parents[2]
     revision = clean_source(source)
@@ -31,6 +32,7 @@ def main():
             warmups=5,
             repetitions=20,
             no_model_or_dataset_access=True,
+            frozen_previously_audited_algorithm=args.frozen,
         ),
     )
     versions = {}
@@ -64,13 +66,14 @@ def main():
         ),
     )
     try:
-        result = study()
+        result = study(frozen=args.frozen)
     except Exception as error:
         result = dict(
             complete=False,
             error=f"{type(error).__name__}: {error}",
             traceback=traceback.format_exc(),
             no_runtime_integration=True,
+            diagnostic=getattr(error, "diagnostic", None),
         )
     write_once(args.root / "decision.json", result)
     print({k: v for k, v in result.items() if k != "records"})

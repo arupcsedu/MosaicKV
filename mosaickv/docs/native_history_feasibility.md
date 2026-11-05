@@ -19,3 +19,11 @@ modified by this experiment. A positive operator result is not latency or
 quality superiority; real-model all-word checks, constructor costs, lifetime
 and physical workspace accounting would still be required. Any implementation
 must apply the history optimization identically to all compared readers.
+
+The first default-heuristic run failed its unchanged 32-KiB epoch repair cap.
+Preserve it as negative, not a timing result. A separate operator-only follow-up
+tests the already all-layer-audited algorithm/configuration 31 (not a new timing
+search), with actual feasibility checks at all seven history row counts. Keep
+the same random inputs and repair cap. If rejected, save the epoch, per-component
+changed-word counts/error and exact native algorithm attributes; do not hide
+the failure behind an uninformative exception or expand runtime eligibility.

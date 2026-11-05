@@ -17,16 +17,40 @@ from mosaickv.evaluation.lossless_prompt_cache import backing_bytes
 ROWS = (16, 32, 48, 64, 80, 96, 112)
 
 
+class RepairBudgetError(RuntimeError):
+    def __init__(self, diagnostic):
+        super().__init__("native history correction storage exceeds unchanged 32-KiB epoch cap")
+        self.diagnostic = diagnostic
+
+
 def validate_rows(n):
     if type(n) is not int or n not in ROWS:
         raise ValueError("only complete 16-token history epochs through 112 supported")
 
 
 class Engine:
-    def __init__(self, device):
+    def __init__(self, device, *, frozen=False):
         from mosaickv.evaluation.zero_workspace_lt import Plans
 
-        self.plans = Plans(ROWS, 4096)
+        if frozen:
+            from mosaickv.evaluation.joint_all_layer_compatibility import FROZEN
+            from mosaickv.evaluation.joint_kernel_compatibility import KernelPlans, fingerprint
+
+            self.plans = KernelPlans(ROWS, 4096)
+            options = [
+                (algo, record)
+                for algo, record in self.plans.candidates
+                if fingerprint(record) == FROZEN
+            ]
+            if len(options) != 1:
+                self.plans.close()
+                raise NotImplementedError(
+                    "previously audited native kernel unavailable at history rows"
+                )
+            for n, (a, b, d, _, _) in self.plans.plans.items():
+                self.plans.plans[n] = a, b, d, *options[0]
+        else:
+            self.plans = Plans(ROWS, 4096)
         self.source = torch.empty((128, 4096), device=device, dtype=torch.bfloat16)
         self.output = torch.empty_like(self.source)
 
@@ -98,7 +122,7 @@ def make_packet(x, cos, sin):
 
 
 @torch.inference_mode()
-def study():
+def study(*, frozen=False):
     from mosaickv.evaluation.dual_projection_kernel import apply_patch
     from mosaickv.evaluation.encoded_projection_kernel import project
     from mosaickv.evaluation.exact_storage import SparseBitPatch, decoded
@@ -111,7 +135,7 @@ def study():
         k_proj=torch.nn.Linear(4096, 4096, bias=False, device="cuda", dtype=torch.bfloat16),
         v_proj=torch.nn.Linear(4096, 4096, bias=False, device="cuda", dtype=torch.bfloat16),
     )
-    engine, records = Engine(torch.device("cuda")), []
+    engine, records = Engine(torch.device("cuda"), frozen=frozen), []
     try:
         for n in ROWS:
             packet = make_packet(
@@ -157,7 +181,22 @@ def study():
                     SparseBitPatch.build(a, b) for a, b in zip(reference, targets, strict=True)
                 )
                 if backing_bytes(tuple(t for p in patches for t in p.tensors)) > 32768:
-                    raise RuntimeError("native history correction storage exceeds 32-KiB epoch cap")
+                    raise RepairBudgetError(
+                        dict(
+                            rows=n,
+                            repair_bytes=backing_bytes(
+                                tuple(t for p in patches for t in p.tensors)
+                            ),
+                            changed_words_by_component=[p.indices.numel() for p in patches],
+                            maximum_absolute_error_by_component=[
+                                float((a.float() - b.float()).abs().max())
+                                for a, b in zip(reference, targets, strict=True)
+                            ],
+                            native_algorithm=engine.plans.plans[n][4],
+                            prior_completed_epochs=records,
+                            registered_cap_bytes=32768,
+                        )
+                    )
                 for c in (0, 1):
                     apply_patch(patches[c], targets[c])
                 if any(
