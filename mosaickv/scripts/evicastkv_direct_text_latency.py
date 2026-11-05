@@ -132,6 +132,7 @@ def execute(
         defer_exact_encoding=record.get("defer_exact_encoding", False),
         graph_accounting=record.get("graph_accounting", "original"),
         graph_lookahead=record.get("graph_lookahead", False),
+        reuse_patch_dispatch=record.get("reuse_patch_dispatch", False),
     )
     if not bits_equal(values, refs[method]["logits"]):
         raise RuntimeError("direct text construction changed parent vocabulary words")

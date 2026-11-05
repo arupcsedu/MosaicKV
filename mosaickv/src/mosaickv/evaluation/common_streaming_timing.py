@@ -71,6 +71,7 @@ def request(
     defer_exact_encoding=False,
     graph_accounting="original",
     graph_lookahead=False,
+    reuse_patch_dispatch=False,
 ):
     from mosaickv.evaluation.lossless_prompt_cache import backing_bytes
     from mosaickv.evaluation.native_execution_plan import use as native_plan
@@ -90,6 +91,8 @@ def request(
     from mosaickv.evaluation.graph_accounting import validate as validate_accounting
 
     validate_accounting(graph_accounting)
+    if type(reuse_patch_dispatch) is not bool:
+        raise ValueError("explicit private patch-dispatch boolean required")
     if type(graph_lookahead) is not bool or (
         graph_lookahead and (not prompt_graph_reader or prompt_prefetch)
     ):
@@ -295,9 +298,11 @@ def request(
     torch.cuda.synchronize()
     constructed_at = time.monotonic()
     from mosaickv.evaluation.graph_lookahead import use as lookahead_scope
+    from mosaickv.evaluation import prepared_patch_dispatch as patch_dispatch
 
     with (
         lookahead_scope(graph_lookahead),
+        patch_dispatch.use(reuse_patch_dispatch) as patch_state,
         accounting_scope(graph_accounting),
         use(reconstruction_readers),
         use_dispatch(reuse_kernel_dispatch) as dispatch,
@@ -338,6 +343,7 @@ def request(
             lt_fit_policy=lt_fit_policy,
             graph_cache_accounting=details["storage"].get("graph_cache_accounting"),
             graph_lookahead=graph_lookahead,
+            prepared_patch_dispatch=patch_dispatch.report(patch_state),
             deferred_exact_encoding=deferred_exact.report(deferred_state),
             selective_text_construction=dict(
                 enabled=selective_text_rows,

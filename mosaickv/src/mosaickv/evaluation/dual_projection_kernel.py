@@ -149,13 +149,6 @@ def apply_patch(patch: Any, target: Any) -> None:
             kept, head_out, dim = target.shape[-2], target.stride(-3), target.shape[-1]
             grid = (triton.cdiv(count, 256),)
         with source_phase("correction_dispatch"):
-            _patch[grid](
-                patch.indices,
-                values,
-                output,
-                COUNT=count,
-                KEPT=kept,
-                HEAD_OUT=head_out,
-                DIM=dim,
-                BLOCK=256,
-            )
+            from mosaickv.evaluation.prepared_patch_dispatch import launch
+
+            launch(_patch, grid, (patch.indices, values, output, count, kept, head_out, dim, 256))
