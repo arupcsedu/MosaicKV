@@ -33,9 +33,12 @@ def managed(function):
     def wrapped(*args, **kwargs):
         policy = kwargs.get("joint_incoming_projection", "none")
         validate(policy)
+        graph_plan = kwargs.get("reuse_graph_replay_plan", False)
+        if type(graph_plan) is not bool:
+            raise ValueError("explicit prepared graph replay boolean required")
         if _scope.get() is not None:
             raise RuntimeError("joint projection scopes may not nest or share requests")
-        state = dict(policy=policy, transports=[], eligible_layers=0)
+        state = dict(policy=policy, transports=[], eligible_layers=0, graph_plan=graph_plan)
         token = _scope.set(state)
         try:
             values, packets, details = function(*args, **kwargs)
@@ -339,6 +342,11 @@ def owned(engine):
     return engine.source, engine.output, *getattr(engine, "extra_tensors", ())
 
 
+def reuse_graph_plan():
+    state = _scope.get()
+    return state is not None and state.get("graph_plan", False)
+
+
 class Transport:
     def __init__(self, adapter, cache, state):
         self.adapter, self.cache, self.state = adapter, cache, state
@@ -380,6 +388,7 @@ class Transport:
         self.pool.lt_workspace_bytes = backing_bytes(owners)
         self.cache.observe()
         self.pool.joint_projection = self
+        self.pool.joint_projection_policy = self.mode
         self.state["eligible_layers"] += len(self.layers)
         try:
             for index, layer in enumerate(self.layers):
@@ -442,7 +451,11 @@ class Transport:
         if self.ledger.pending is None:
             return self.ledger.consume(self.indices[id(layer)], layer.history_length)
         if (
-            not layer.leased
+            self.closed
+            or self.pool.closed
+            or self.pool.history_borrowed
+            or torch.cuda.is_current_stream_capturing()
+            or not layer.leased
             or destination.data_ptr() != self.pool.buffer.data_ptr()
             or destination.stride() != self.pool.buffer.stride()
         ):

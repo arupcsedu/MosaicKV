@@ -40,7 +40,17 @@ class SequentialSourceHistoryLayer(SequentialLayer, SourceHistoryLayer):
                     raise NotImplementedError(
                         "prompt graph cannot borrow a native source workspace"
                     )
-                graph_pool.reconstruct(self, component, destination)
+                owner = getattr(graph_pool, "joint_projection", None)
+                consumed = (
+                    getattr(graph_pool, "prepared_replay", False)
+                    and component == 0
+                    and owner is not None
+                    and owner.take(self, destination)
+                )
+                if consumed:
+                    graph_pool.prepared_consume_bypasses += 1
+                else:
+                    graph_pool.reconstruct(self, component, destination)
             else:
                 fill_component(
                     self.representation,

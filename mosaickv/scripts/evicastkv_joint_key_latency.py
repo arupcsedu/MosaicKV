@@ -77,7 +77,7 @@ def configurations(records):
 
 def execute(adapter, refs, messages, profile, plan, method, arm, record, **kwargs):
     value = direct.execute(adapter, refs, messages, profile, plan, method, record, **kwargs)
-    if arm == CANDIDATE_ARM:
+    if record.get("joint_incoming_projection", "none") != "none":
         # Keep every engagement check; an unaudited timing is not peak evidence.
         correctness.validate(value, True, require_audited=kwargs.get("audit", False))
         if not kwargs.get("audit", False) and value["peak_measurement_admissible"]:

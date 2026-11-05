@@ -77,6 +77,7 @@ def request(
     reuse_patch_dispatch=False,
     static_transport_patches=False,
     joint_incoming_projection="none",
+    reuse_graph_replay_plan=False,
 ):
     from mosaickv.evaluation.lossless_prompt_cache import backing_bytes
     from mosaickv.evaluation.native_execution_plan import use as native_plan
@@ -96,6 +97,8 @@ def request(
     from mosaickv.evaluation.graph_accounting import validate as validate_accounting
 
     validate_accounting(graph_accounting)
+    if reuse_graph_replay_plan and not prompt_graph_reader:
+        raise ValueError("prepared graph replay requires the explicit private graph reader")
     if joint_incoming_projection != "none" and (
         not lt_source_reader
         or not prompt_graph_reader

@@ -1,8 +1,10 @@
-"""Private prompt-reader graphs; never capture attention, history or a model.
+"""Private prompt-reader graphs; no attention or model layers are captured.
 
 The immutable prompt reader alone writes to one charged request-wide lease.
 Generated history and native eager attention stay outside the graph. Ordered
 code replay is captured only by a separately configured private policy.
+The explicit joint variant also captures incoming frozen-weight projections;
+it must not be labeled immutable-prompt-only.
 The default runtime is unchanged. This is an execution
 diagnostic for already consumed inputs, not independent quality evidence.
 """
@@ -69,6 +71,12 @@ class PromptGraphPool:
         self.lt_workspace_bytes = self.lt_replays = self.lt_matmul_dispatches = 0
         self.lookahead = None
         self.joint_projection = None
+        self.joint_projection_policy = "none"
+        from mosaickv.evaluation.joint_incoming_projection import reuse_graph_plan
+
+        self.prepared_replay = reuse_graph_plan()
+        self.entry_metadata = {}
+        self.prepared_replay_hits = self.prepared_consume_bypasses = 0
 
     def acquire(self, layer, shape, source):
         if (
@@ -169,6 +177,30 @@ class PromptGraphPool:
                 packet = bound.replay.view(bound.index)
             if bound.replay.prepared_views is None:
                 raise ValueError("prompt graphs require stable private replay descriptors")
+        if self.prepared_replay:
+            signature = (
+                id(packet),
+                id(layer.attention),
+                self.buffer.data_ptr(),
+                self.buffer.stride(),
+            )
+            key = id(layer), component
+            entry = self.entries.get(key)
+            if entry is not None:
+                if entry[0] != signature or key not in self.entry_metadata:
+                    raise RuntimeError("immutable prepared graph bindings or metadata changed")
+                native_rows, row4 = self.entry_metadata[key]
+                entry[1].replay()
+                self.replays += 1
+                self.prepared_replay_hits += 1
+                self.captured_code_replays += int(replay is not None and component == 0)
+                if replay is not None and component == 0:
+                    self.captured_code_kernel_dispatches += len(replay.graph_bindings[bound.index])
+                self.row4_replays += int(row4 and component == 0)
+                if native_rows:
+                    self.lt_replays += 1
+                    self.lt_matmul_dispatches += (native_rows + 127) // 128
+                return
         from mosaickv.evaluation.lt_source_format import source_format as lt_format
 
         native = lt_format(packet, component)
@@ -258,6 +290,11 @@ class PromptGraphPool:
                 raise
             entry = signature, graph
             self.entries[key] = entry
+            if self.prepared_replay:
+                self.entry_metadata[key] = (
+                    0 if native is None else native.shape[2],
+                    body is not None,
+                )
             self.captures += 1
         elif entry[0] != signature:
             raise RuntimeError("immutable prompt graph bindings changed during request")
@@ -345,6 +382,7 @@ class PromptGraphPool:
             for _, graph in self.entries.values():
                 graph.reset()
             self.entries.clear()
+            self.entry_metadata.clear()
             # reset() destroys kernels but the C++ destructor unregisters RNG
             # state. Do not retain the final loop-local graph during this check.
             del graph
@@ -374,6 +412,7 @@ class PromptGraphPool:
         self.cache.observe()
 
     def record(self):
+        from mosaickv.evaluation.joint_graph_scope import graph_scope
         from mosaickv.evaluation.joint_incoming_projection import owned
 
         return dict(
@@ -410,13 +449,20 @@ class PromptGraphPool:
             else self.lt_engine_info,
             vendor_internal_peak_certified=False,
             retired=self.closed,
-            only_immutable_prompt_captured=True,
+            **graph_scope(self.joint_projection_policy),
             history_attention_and_ordered_replay_outside_graph=not self.policy.captured_code_replay,
             history_and_attention_outside_graph=True,
             capture_and_retirement_in_request_timing=True,
             driver_graph_metadata_not_KV_ownership_certified=True,
             independent_quality_N=0,
             optimized_policy=asdict(self.policy),
+            prepared_replay_plan=dict(
+                enabled=self.prepared_replay,
+                hits=self.prepared_replay_hits,
+                joint_key_consume_bypasses=self.prepared_consume_bypasses,
+                CPU_only_metadata=True,
+                additional_GPU_tensor_bytes=0,
+            ),
             history_borrows=self.history_borrows,
             history_borrow_misses=self.history_borrow_misses,
             history_borrow_maximum_bytes=self.history_borrow_maximum_bytes,
