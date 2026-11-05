@@ -65,7 +65,8 @@ class NativeHistoryFormat(EncodedFormat):
         if self.phase_versions != (phase_token(self.archive.cos), phase_token(self.archive.sin)):
             raise RuntimeError("native history phases changed after validation")
         n = self.shape[-2]
-        state.engine.project(
+        projector = state.engine.project if state.graphs is None else state.graphs.project
+        projector(
             self,
             attention,
             component,
@@ -76,12 +77,15 @@ class NativeHistoryFormat(EncodedFormat):
 
 
 class State:
-    def __init__(self):
+    def __init__(self, *, graph=False):
+        if type(graph) is not bool:
+            raise ValueError("explicit history graph boolean required")
         self.engine = self.pool = None
         self.owners = ()
         self.closed = False
         self.projections = self.built_chunks = self.consolidations = 0
         self.extra_workspace = self.maximum_repairs = self.borrowed_workspace = 0
+        self.graph_enabled, self.graphs, self.graph_report = graph, None, None
 
     def bind(self, layer, device=None):
         pool = getattr(layer, "prompt_graph_pool", None)
@@ -105,12 +109,20 @@ class State:
         pool.cache.shared_tensors = (*pool.cache.shared_tensors, *self.owners)
         pool.cache.shared_bytes = backing_bytes(pool.cache.shared_tensors)
         pool.cache.observe()
+        if self.graph_enabled:
+            from mosaickv.evaluation.native_history_graph import Reader
+
+            self.graphs = Reader(self)
 
     def retire(self, pool=None):
         if self.closed:
             return
         if pool is not None and self.pool is not pool:
             raise RuntimeError("foreign prompt pool cannot retire native history")
+        if self.graphs is not None:
+            self.graphs.close()
+            self.graph_report = self.graphs.record()
+            self.graphs = None
         if self.engine is not None:
             self.engine.close()
             self.engine.source = self.engine.output = None
@@ -135,6 +147,9 @@ class State:
             maximum_per_layer_repair_bytes=self.maximum_repairs,
             original_sources_phases_and_KV_preserved=True,
             whole_request_GPU_peak_certified=False,
+            immutable_history_graph=(
+                dict(enabled=False) if self.graph_report is None else self.graph_report
+            ),
         )
 
 
@@ -266,6 +281,8 @@ def consolidate(layer, cos, sin, *, bit_flags=None):
         # clearing and verification that persistent packets never alias scratch.
         verify(layer, candidate, formats, shape, bit_flags, scratch)
     state.consolidations += 1
+    if state.graphs is not None:
+        state.graphs.discard(formats)
     return candidate
 
 
@@ -273,13 +290,16 @@ def managed(function):
     @wraps(function)
     def call(*args, **kwargs):
         enabled = kwargs.get("native_history_reader", False)
+        graph = kwargs.get("native_history_graph", False)
+        if type(graph) is not bool or (graph and not enabled):
+            raise ValueError("explicit history graph requires enabled common native history")
         if type(enabled) is not bool or _scope.get() is not None:
             raise ValueError("explicit nonnested common native-history policy required")
         if enabled and kwargs.get("prompt_graph_reader") is not True:
             raise NotImplementedError(
                 "native history requires the common exclusive prompt workspace"
             )
-        state = State() if enabled else None
+        state = State(graph=graph) if enabled else None
         token = _scope.set(state)
         try:
             values, packets, details = function(*args, **kwargs)

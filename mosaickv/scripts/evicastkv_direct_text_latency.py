@@ -142,6 +142,7 @@ def execute(
         frozen_joint_plan=record.get("frozen_joint_plan", False),
         overlap_native_fit=record.get("overlap_native_fit", False),
         native_history_reader=record.get("native_history_reader", False),
+        native_history_graph=record.get("native_history_graph", False),
         input_norm_segment=record.get("input_norm_segment", False),
         reuse_norm_input=record.get("reuse_norm_input", False),
         source_tile_rows=record.get("source_tile_rows", 128),

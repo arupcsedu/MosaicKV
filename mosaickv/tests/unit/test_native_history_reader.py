@@ -77,6 +77,7 @@ def test_format_is_request_local_and_checks_tracked_phase_mutation():
     calls = []
     state = SimpleNamespace(
         closed=False,
+        graphs=None,
         projections=0,
         engine=SimpleNamespace(project=lambda *args: calls.append(args)),
     )

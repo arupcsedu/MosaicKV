@@ -378,6 +378,11 @@ class PromptGraphPool:
             raise RuntimeError("prompt graphs cannot retire an uncommitted joint value")
         if self.lookahead is not None:
             self.lookahead.close()
+        from mosaickv.evaluation.native_history_reader import current as native_state
+
+        native = native_state()
+        if native is not None and native.graphs is not None:
+            native.retire(self)
         if self.entries:
             torch.cuda.synchronize()
             before = torch.cuda.memory_allocated()
@@ -416,6 +421,10 @@ class PromptGraphPool:
     def record(self):
         from mosaickv.evaluation.joint_graph_scope import graph_scope
         from mosaickv.evaluation.joint_incoming_projection import owned
+        from mosaickv.evaluation.native_history_reader import current as native_state
+
+        native = native_state()
+        history_graph = native is not None and native.graph_enabled
 
         return dict(
             enabled=True,
@@ -452,8 +461,11 @@ class PromptGraphPool:
             vendor_internal_peak_certified=False,
             retired=self.closed,
             **graph_scope(self.joint_projection_policy),
-            history_attention_and_ordered_replay_outside_graph=not self.policy.captured_code_replay,
-            history_and_attention_outside_graph=True,
+            history_attention_and_ordered_replay_outside_graph=not (
+                self.policy.captured_code_replay or history_graph
+            ),
+            history_and_attention_outside_graph=not history_graph,
+            attention_outside_graph=True,
             capture_and_retirement_in_request_timing=True,
             driver_graph_metadata_not_KV_ownership_certified=True,
             independent_quality_N=0,
