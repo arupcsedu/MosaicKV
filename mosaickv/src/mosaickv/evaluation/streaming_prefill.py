@@ -129,11 +129,13 @@ class RetiringPrefillCache(Cache):
         if layer.keys is None or layer.packet is not None:
             raise RuntimeError("original unsealed K/V required")
         original = (layer.keys, layer.values)
-        excluded = {identity(t) for t in self.owned_tensors()}
-        excluded.update(identity(t) for t in attention.parameters())
         from contextlib import nullcontext
 
-        mode = ScratchAudit(excluded=excluded, observe=self.observe) if self.audit else None
+        mode = None
+        if self.audit:
+            excluded = {identity(t) for t in self.owned_tensors()}
+            excluded.update(identity(t) for t in attention.parameters())
+            mode = ScratchAudit(excluded=excluded, observe=self.observe)
         with mode if mode is not None else nullcontext():
             packet = encoder(index, attention, original, args, kwargs or {}, output)
             from mosaickv.evaluation.deferred_exact_encoding import finalize
