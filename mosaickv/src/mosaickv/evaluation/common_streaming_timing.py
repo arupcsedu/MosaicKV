@@ -16,6 +16,8 @@ from unittest.mock import patch
 import numpy as np
 import torch
 
+from mosaickv.evaluation.joint_incoming_projection import managed as joint_projection_scope
+
 METHODS = (
     "mosaickv_exact",
     "prompt_attention_topk",
@@ -35,6 +37,7 @@ def order(seed):
 
 
 @torch.inference_mode()
+@joint_projection_scope
 def request(
     adapter,
     messages,
@@ -73,6 +76,7 @@ def request(
     graph_lookahead=False,
     reuse_patch_dispatch=False,
     static_transport_patches=False,
+    joint_incoming_projection="none",
 ):
     from mosaickv.evaluation.lossless_prompt_cache import backing_bytes
     from mosaickv.evaluation.native_execution_plan import use as native_plan
@@ -92,9 +96,20 @@ def request(
     from mosaickv.evaluation.graph_accounting import validate as validate_accounting
 
     validate_accounting(graph_accounting)
+    if joint_incoming_projection != "none" and (
+        not lt_source_reader
+        or not prompt_graph_reader
+        or graph_lookahead
+        or prompt_prefetch
+        or full_prompt_native is not None
+    ):
+        raise ValueError("joint keys require only the private native prompt graph reader")
     if type(static_transport_patches) is not bool or (
-        static_transport_patches and not (
-            componentwise_fitting and defer_transport_validation and coalesce_transport_nonzero
+        static_transport_patches
+        and not (
+            componentwise_fitting
+            and defer_transport_validation
+            and coalesce_transport_nonzero
             and full_predicate_span
         )
     ):
@@ -310,8 +325,8 @@ def request(
             raise RuntimeError("registered beneficial source codec did not reduce storage")
     torch.cuda.synchronize()
     constructed_at = time.monotonic()
-    from mosaickv.evaluation.graph_lookahead import use as lookahead_scope
     from mosaickv.evaluation import prepared_patch_dispatch as patch_dispatch
+    from mosaickv.evaluation.graph_lookahead import use as lookahead_scope
 
     with (
         lookahead_scope(graph_lookahead),

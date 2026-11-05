@@ -68,6 +68,7 @@ class PromptGraphPool:
         self.lt_engine_info = None
         self.lt_workspace_bytes = self.lt_replays = self.lt_matmul_dispatches = 0
         self.lookahead = None
+        self.joint_projection = None
 
     def acquire(self, layer, shape, source):
         if (
@@ -109,15 +110,21 @@ class PromptGraphPool:
         view = self.buffer[..., : shape[-2], :]
         return view, view
 
-    def reconstruct(self, layer, component, destination, *, _lookahead_epoch=None):
+    def reconstruct(
+        self, layer, component, destination, *, _lookahead_epoch=None, _projection_epoch=None
+    ):
         from mosaickv.evaluation.layer_code_delta import BoundDeltaFormat
         from mosaickv.evaluation.sequential_kv_lease import fill_component
 
-        producing = _lookahead_epoch is not None
+        producing = _lookahead_epoch is not None or _projection_epoch is not None
+        if _lookahead_epoch is not None and _projection_epoch is not None:
+            raise RuntimeError("joint projection and lookahead may not share a producer")
+        producer = self.joint_projection if _projection_epoch is not None else self.lookahead
+        epoch = _projection_epoch if _projection_epoch is not None else _lookahead_epoch
         if producing and (
             component != 0
-            or self.lookahead is None
-            or not self.lookahead.authorized(layer, _lookahead_epoch, destination)
+            or producer is None
+            or not producer.authorized(layer, epoch, destination)
             or (id(layer), 0) not in self.entries
         ):
             raise RuntimeError("explicit existing-graph next-layer producer required")
@@ -138,6 +145,13 @@ class PromptGraphPool:
             and self.lookahead.take(layer, destination)
         ):
             return
+        if (
+            not producing
+            and component == 0
+            and self.joint_projection is not None
+            and self.joint_projection.take(layer, destination)
+        ):
+            return
         packet = layer.representation
         replay = None
         if isinstance(packet, BoundDeltaFormat):
@@ -145,10 +159,10 @@ class PromptGraphPool:
             replay = bound.replay if self.policy.captured_code_replay else None
             if replay is not None:
                 if component == 0:
-                    epoch = _lookahead_epoch if producing else layer.history_length
-                    if self.key_epochs.get(id(layer)) == epoch:
+                    key_epoch = epoch if producing else layer.history_length
+                    if self.key_epochs.get(id(layer)) == key_epoch:
                         raise RuntimeError("captured XOR replay may run only once per layer/token")
-                    self.key_epochs[id(layer)] = epoch
+                    self.key_epochs[id(layer)] = key_epoch
                 packet = replay.advance_for_graph(bound.index)
             else:
                 packet = bound.replay.view(bound.index)
@@ -161,10 +175,10 @@ class PromptGraphPool:
             if self.policy.row_major_codes:
                 raise ValueError("native Lt source and row-major code ablation cannot be mixed")
             if self.lt_engine is None:
-                from mosaickv.evaluation.lt_source_chunks import Engine
+                from mosaickv.evaluation.joint_incoming_projection import engine_factory, owned
 
-                self.lt_engine = Engine(native.base)
-                owners = (self.lt_engine.source, self.lt_engine.output)
+                self.lt_engine = engine_factory(native.base)
+                owners = owned(self.lt_engine)
                 self.cache.observe(owners)
                 self.cache.shared_tensors = (*self.cache.shared_tensors, *owners)
                 self.cache.shared_bytes = backing_bytes(self.cache.shared_tensors)
@@ -275,7 +289,9 @@ class PromptGraphPool:
             yield None
             return
         if (
-            self.closed or self.history_borrowed or any(x.leased for x in self.cache.layers)
+            self.closed
+            or self.history_borrowed
+            or any(x.leased for x in self.cache.layers)
             or (self.lookahead is not None and self.lookahead.pending is not None)
         ):
             raise RuntimeError("history scratch requires a released exclusive graph workspace")
@@ -302,6 +318,8 @@ class PromptGraphPool:
             return
         if self.history_borrowed or any(x.leased for x in self.cache.layers):
             raise RuntimeError("prompt graphs cannot retire an active lease")
+        if self.joint_projection is not None and self.joint_projection.ledger.pending is not None:
+            raise RuntimeError("prompt graphs cannot retire an unconsumed joint key")
         if self.lookahead is not None:
             self.lookahead.close()
         if self.entries:
@@ -322,7 +340,9 @@ class PromptGraphPool:
         lt_owners = ()
         if self.lt_engine is not None:
             self.lt_engine_info = self.lt_engine.record()
-            lt_owners = (self.lt_engine.source, self.lt_engine.output)
+            from mosaickv.evaluation.joint_incoming_projection import owned
+
+            lt_owners = owned(self.lt_engine)
             self.lt_engine.close()
         owners = (self.buffer, self.row4_workspace, *lt_owners)
         self.cache.shared_tensors = tuple(
@@ -337,6 +357,8 @@ class PromptGraphPool:
         self.cache.observe()
 
     def record(self):
+        from mosaickv.evaluation.joint_incoming_projection import owned
+
         return dict(
             enabled=True,
             captures=self.captures,
@@ -354,7 +376,7 @@ class PromptGraphPool:
                     for x in (
                         self.buffer,
                         self.row4_workspace,
-                        *((self.lt_engine.source, self.lt_engine.output) if self.lt_engine else ()),
+                        *(owned(self.lt_engine) if self.lt_engine else ()),
                     )
                     if x is not None
                 )

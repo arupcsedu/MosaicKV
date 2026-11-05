@@ -242,9 +242,8 @@ def convert(packets, attentions, *, engine_factory=None, policy="full", audit=Fa
     if len(packets) != len(attentions):
         raise ValueError("complete matching source/attention sequence required")
     if engine_factory is None:
-        from mosaickv.evaluation.lt_source_chunks import Engine
+        from mosaickv.evaluation.joint_incoming_projection import engine_factory
 
-        engine_factory = Engine
     engine, records, result = None, [], []
     try:
         for index, (packet, attention) in enumerate(zip(packets, attentions, strict=True)):

@@ -134,6 +134,7 @@ def execute(
         graph_lookahead=record.get("graph_lookahead", False),
         reuse_patch_dispatch=record.get("reuse_patch_dispatch", False),
         static_transport_patches=record.get("static_transport_patches", False),
+        joint_incoming_projection=record.get("joint_incoming_projection", "none"),
     )
     if not bits_equal(values, refs[method]["logits"]):
         raise RuntimeError("direct text construction changed parent vocabulary words")

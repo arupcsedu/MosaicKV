@@ -22,6 +22,7 @@ VARIANT = "consumed_joint_row_operator_feasibility"
 EXTRA_PLAN = {}
 EXTRA_BOUND_FILES = ()
 ONLY_LAYER = 0
+JOB_NAME = "mk-joint-row"
 
 
 def execute(adapter, refs, messages, profile, plan, method, record, **kwargs):
@@ -59,7 +60,7 @@ def submit(root, action, dependency=None):
         "--mem=48G",
         "--array=0-1%2",
         "--time=00:20:00",
-        "--job-name=mk-joint-row",
+        "--job-name=" + JOB_NAME,
         f"--output={root}/slurm/profile-%A_%a.out",
         f"--error={root}/slurm/profile-%A_%a.err",
     ]

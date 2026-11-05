@@ -292,6 +292,9 @@ def run(
             from mosaickv.evaluation.source_history import SourceInputTransport
 
             stack.enter_context(SourceInputTransport(adapter, cache))
+        from mosaickv.evaluation.joint_incoming_projection import transport as joint_transport
+
+        stack.enter_context(joint_transport(adapter, cache))
         starts.record()
         for step in range(tokens - 1):
             if source_history:
