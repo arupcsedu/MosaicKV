@@ -36,7 +36,7 @@ def submit(root, action, dependency=None):
             "--time=00:15:00",
         ]
         if gpu
-        else ["--partition=bii,standard", "--cpus-per-task=2", "--mem=16G", "--time=00:25:00"]
+        else ["--partition=bii", "--cpus-per-task=2", "--mem=16G", "--time=00:25:00"]
     )
     if dependency:
         args.append(f"--dependency=afterany:{dependency}")
