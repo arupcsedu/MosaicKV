@@ -53,6 +53,9 @@ class SequentialSourceHistoryLayer(SequentialLayer, SourceHistoryLayer):
             self.native_full_component_fills = getattr(self, "native_full_component_fills", 0) + 1
             if native.fused_restore:
                 self.native_fused_restore_fills = getattr(self, "native_fused_restore_fills", 0) + 1
+        from mosaickv.evaluation.joint_value_transaction import after_prompt
+
+        after_prompt(self, component)  # A joint V must commit before history/PV reads.
         offset = self.prompt_length
         for packet in self.source_sealed:
             end = offset + packet.shape[-2]

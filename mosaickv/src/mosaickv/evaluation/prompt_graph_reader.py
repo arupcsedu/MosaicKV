@@ -126,6 +126,7 @@ class PromptGraphPool:
             or producer is None
             or not producer.authorized(layer, epoch, destination)
             or (id(layer), 0) not in self.entries
+            or PromptGraphPool._active_owner not in (None, self)
         ):
             raise RuntimeError("explicit existing-graph next-layer producer required")
         if (
@@ -293,6 +294,18 @@ class PromptGraphPool:
             or self.history_borrowed
             or any(x.leased for x in self.cache.layers)
             or (self.lookahead is not None and self.lookahead.pending is not None)
+            or (
+                self.joint_projection is not None
+                and (
+                    self.joint_projection.ledger.pending is not None
+                    or getattr(
+                        self.joint_projection.ledger,
+                        "value_commits",
+                        self.joint_projection.ledger.calls,
+                    )
+                    != self.joint_projection.ledger.calls
+                )
+            )
         ):
             raise RuntimeError("history scratch requires a released exclusive graph workspace")
         from mosaickv.evaluation.history_verification_workspace import partition
@@ -320,6 +333,10 @@ class PromptGraphPool:
             raise RuntimeError("prompt graphs cannot retire an active lease")
         if self.joint_projection is not None and self.joint_projection.ledger.pending is not None:
             raise RuntimeError("prompt graphs cannot retire an unconsumed joint key")
+        if self.joint_projection is not None and any(
+            getattr(layer, "_joint_pending_value", None) is not None for layer in self.cache.layers
+        ):
+            raise RuntimeError("prompt graphs cannot retire an uncommitted joint value")
         if self.lookahead is not None:
             self.lookahead.close()
         if self.entries:

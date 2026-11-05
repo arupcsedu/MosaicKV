@@ -15,6 +15,15 @@ SCRIPT = SOURCE / "mosaickv/slurm/evicastkv_joint_key_transaction.sbatch"
 WAIT = Path("/scratch/djy8hg/runs/evicastkv/joint-all-layer-compatibility-consumed-20261105-v1")
 ORIGINAL_PREPARE = parent.prepare
 SEQUENCE = ("graph-lt", "joint-keys", "graph-lt")
+POLICY, CANDIDATE_ARM = "keys", "joint-keys"
+VARIANT = "consumed_joint_key_transaction_A_B_A"
+EXPECTED_TRANSACTION = dict(
+    key_calls=4064,
+    folded_keys=4032,
+    original_cold_keys=32,
+    pending=False,
+    all_value_projections_original=True,
+)
 
 
 def prepare(root, revision):
@@ -44,25 +53,19 @@ def validate(measured, active, *, require_audited=True):
         )
     if active:
         if (
-            info["policy"] != "keys"
+            info["policy"] != POLICY
             or info["eligible_layers"] != 32
-            or info["transactions"]
-            != [
-                dict(
-                    key_calls=4064,
-                    folded_keys=4032,
-                    original_cold_keys=32,
-                    pending=False,
-                    all_value_projections_original=True,
-                )
-            ]
+            or info["transactions"] != [EXPECTED_TRANSACTION]
             or graph["lt_workspace_peak_bytes"] != 2**21 + 8192
         ):
             raise ValueError("all 4032 warm key projections must actually share the prompt graph")
     elif info["policy"] != "none" or info["transactions"] or info["eligible_layers"]:
         raise ValueError("original control was silently modified")
-    if not info["value_projection_unchanged"] or not info["no_placeholder_values"]:
-        raise ValueError("no deferred or placeholder values are allowed in the key-only gate")
+    if (
+        info["value_projection_unchanged"] is not (not active or POLICY != "kv")
+        or not info["no_placeholder_values"]
+    ):
+        raise ValueError("registered value boundary and no fake raw values are required")
 
 
 def worker(root, expected, index):
@@ -87,7 +90,7 @@ def worker(root, expected, index):
             expected,
             index,
             manifest_overrides=dict(
-                variant="consumed_joint_key_transaction_A_B_A",
+                variant=VARIANT,
                 methods=["mosaickv_exact"],
                 actual_timing_protocol=dict(
                     instrumented_A_B_A=True,
@@ -105,12 +108,12 @@ def worker(root, expected, index):
                 graph_accounting="event_sum",
                 lt_fit_policy="direct",
                 reuse_patch_dispatch=True,
-                joint_incoming_projection="keys" if arm == "joint-keys" else "none",
+                joint_incoming_projection=POLICY if arm == CANDIDATE_ARM else "none",
             )
             measured = direct.execute(
                 adapter, refs, messages, profile, plan, "mosaickv_exact", record, audit=True
             )
-            validate(measured, arm == "joint-keys")
+            validate(measured, arm == CANDIDATE_ARM)
             row = dict(order=order, arm=arm, measurement=measured)
             write_once(out / f"audited-{order}-{arm}.json", row)
             observations.append(row)

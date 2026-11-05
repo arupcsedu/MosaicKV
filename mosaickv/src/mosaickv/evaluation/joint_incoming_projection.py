@@ -24,8 +24,8 @@ _scope = ContextVar("evicastkv_joint_incoming_projection", default=None)
 
 
 def validate(policy):
-    if type(policy) is not str or policy not in ("none", "keys"):
-        raise ValueError("explicit registered none/keys incoming-projection policy required")
+    if type(policy) is not str or policy not in ("none", "keys", "kv"):
+        raise ValueError("explicit registered none/keys/kv incoming-projection policy required")
 
 
 def managed(function):
@@ -43,7 +43,7 @@ def managed(function):
                 policy=policy,
                 eligible_layers=state["eligible_layers"],
                 transactions=state["transports"],
-                value_projection_unchanged=True,
+                value_projection_unchanged=policy != "kv" or not state["eligible_layers"],
                 original_attention_and_RoPE=True,
                 no_placeholder_values=True,
                 no_new_selection_or_quality_claim=True,
@@ -181,6 +181,7 @@ class Engine(OriginalEngine):
             self.incoming = torch.zeros(4096, device=packet.cos.device, dtype=torch.bfloat16)
             self.extra_tensors = (self.incoming,)
             self.joint_calls = 0
+            self.fold_values = _scope.get() is not None and _scope.get()["policy"] == "kv"
         except BaseException:
             self.close()
             raise
@@ -252,7 +253,7 @@ class Engine(OriginalEngine):
             frozen_joint_configuration=FROZEN,
             extra_incoming_buffer_bytes=8192,
             input_source_copied_once_per_layer=True,
-            value_projection_unchanged=True,
+            value_projection_unchanged=not self.fold_values,
         )
 
 
@@ -327,7 +328,7 @@ def gpu_decoder_controls():
 
 def engine_factory(packet):
     state = _scope.get()
-    if state is not None and state["policy"] == "keys":
+    if state is not None and state["policy"] in ("keys", "kv"):
         return Engine(packet)
     from mosaickv.evaluation.lt_source_chunks import Engine as DefaultEngine
 
@@ -344,7 +345,13 @@ class Transport:
         self.pool, self.stack = cache.prompt_graph_pool, ExitStack()
         self.layers = tuple(cache.layers)
         self.indices = {id(layer): i for i, layer in enumerate(self.layers)}
-        self.ledger = Ledger(len(self.layers))
+        self.mode = state["policy"]
+        if self.mode == "kv":
+            from mosaickv.evaluation.joint_value_transaction import ValueLedger
+
+            self.ledger = ValueLedger(len(self.layers))
+        else:
+            self.ledger = Ledger(len(self.layers))
         self.closed = False
 
     def __enter__(self):
@@ -402,6 +409,20 @@ class Transport:
                     return engine.output[engine.tail].view(1, 1, 4096)
 
                 self.stack.enter_context(patch.object(module, "forward", forward))
+                if self.mode == "kv":
+                    from mosaickv.evaluation.joint_value_transaction import attention_forward
+
+                    def no_separate_value(*args, **kwargs):
+                        raise RuntimeError(
+                            "separate V projection is forbidden in the joint-KV path"
+                        )
+
+                    self.stack.enter_context(
+                        patch.object(layer.attention.v_proj, "forward", no_separate_value)
+                    )
+                    self.stack.enter_context(
+                        patch.object(layer.attention, "forward", attention_forward(self, layer))
+                    )
             return self
         except BaseException:
             self.stack.close()
