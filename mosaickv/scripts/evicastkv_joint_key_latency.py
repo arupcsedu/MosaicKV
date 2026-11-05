@@ -28,27 +28,29 @@ ARMS = (
     ("prefixkv_reimpl", "graph"),
     ("prefixkv_reimpl", "graph-original"),
 )
+CANDIDATE_ARM, POLICY = "joint-keys", "keys"
+VARIANT = "consumed_joint_key_paired_screen"
+JOB_NAME = "mk-joint-K-time"
+DOC = SOURCE / "mosaickv/docs/joint_key_latency.md"
+GATE_FIELD = "joint_key_128_vector_parity_and_isolation"
+AUXILIARY_PROFILE_ARMS = frozenset()
+APPROVED_CONTROLLER_PATHS = {
+    "mosaickv/scripts/evicastkv_joint_key_latency.py",
+    "mosaickv/scripts/evicastkv_joint_key_transaction.py",
+    "mosaickv/slurm/evicastkv_joint_key_latency.sbatch",
+    "mosaickv/docs/joint_key_latency.md",
+    "mosaickv/tests/unit/test_joint_key_latency.py",
+}
 
 
 def prepare(root, revision):
     gate = driver.read(WAIT / "analysis/decision.json")
-    if (
-        not gate["complete"]
-        or gate["failures"]
-        or not gate["joint_key_128_vector_parity_and_isolation"]
-    ):
+    if not gate["complete"] or gate["failures"] or not gate[GATE_FIELD]:
         raise ValueError("complete positive joint-key A-B-A gate required")
-    allowed = {
-        "mosaickv/scripts/evicastkv_joint_key_latency.py",
-        "mosaickv/scripts/evicastkv_joint_key_transaction.py",
-        "mosaickv/slurm/evicastkv_joint_key_latency.sbatch",
-        "mosaickv/docs/joint_key_latency.md",
-        "mosaickv/tests/unit/test_joint_key_latency.py",
-    }
     changed = subprocess.check_output(
         ["git", "diff", "--name-only", gate["source_sha"], revision], cwd=SOURCE, text=True
     ).splitlines()
-    if not set(changed) <= allowed:
+    if not set(changed) <= APPROVED_CONTROLLER_PATHS:
         raise ValueError("this timing-only stage forbids runtime changes from passed A-B-A")
     ORIGINAL_PREPARE(root, revision)
 
@@ -56,13 +58,13 @@ def prepare(root, revision):
 def configurations(records):
     return {
         (m, a): dict(
-            records[m]["graph-lt" if a == "joint-keys" else a],
+            records[m]["graph-lt" if a == CANDIDATE_ARM else a],
             graph_accounting="event_sum",
             reuse_patch_dispatch=True,
             lt_fit_policy="direct",
-            joint_incoming_projection="keys",
+            joint_incoming_projection=POLICY,
         )
-        if a == "joint-keys"
+        if a == CANDIDATE_ARM
         else dict(
             records[m][a],
             graph_accounting="event_sum",
@@ -75,7 +77,7 @@ def configurations(records):
 
 def execute(adapter, refs, messages, profile, plan, method, arm, record, **kwargs):
     value = direct.execute(adapter, refs, messages, profile, plan, method, record, **kwargs)
-    if arm == "joint-keys":
+    if arm == CANDIDATE_ARM:
         # Keep every engagement check; an unaudited timing is not peak evidence.
         correctness.validate(value, True, require_audited=kwargs.get("audit", False))
         if not kwargs.get("audit", False) and value["peak_measurement_admissible"]:
@@ -132,9 +134,9 @@ def summary(rows, audited):
                 },
             )
         )
-    source = means["mosaickv_exact", "joint-keys"]
+    source = means["mosaickv_exact", CANDIDATE_ARM]
     ratios = {a: source / means[m, a] for m, a in ARMS if m == "prefixkv_reimpl"}
-    candidate = audited["mosaickv_exact", "joint-keys"]
+    candidate = audited["mosaickv_exact", CANDIDATE_ARM]
     storage = all(
         candidate[k] < audited[m, a][k]
         for m, a in ARMS
@@ -172,7 +174,7 @@ def worker(root, expected, index):
             expected,
             index,
             manifest_overrides=dict(
-                variant="consumed_joint_key_paired_screen",
+                variant=VARIANT,
                 methods=["mosaickv_exact", "prefixkv_reimpl"],
                 actual_timing_protocol=dict(
                     warmups=5,
@@ -181,6 +183,8 @@ def worker(root, expected, index):
                     randomized_paired_order=True,
                     complete_prefill_construction_capture_decode_retirement_included=True,
                     NOT_formal_latency_acceptance=True,
+                    auxiliary_requests_per_arm=int(bool(AUXILIARY_PROFILE_ARMS)),
+                    separate_auxiliary_profile_arms=sorted(AUXILIARY_PROFILE_ARMS),
                 ),
             ),
         )
@@ -209,6 +213,20 @@ def worker(root, expected, index):
             )
             audited[m, a] = measured
             write_once(out / f"audited-{m}-{a}.json", measured)
+        if AUXILIARY_PROFILE_ARMS:
+            from mosaickv.evaluation.optimized_runtime_profile import collect
+
+            for m, a in ARMS:
+
+                def call(m=m, a=a):
+                    return execute(adapter, refs, messages, profile, plan, m, a, configured[m, a])
+
+                if (m, a) in AUXILIARY_PROFILE_ARMS:
+                    folder = out / f"auxiliary-profile-{m}-{a}"
+                    folder.mkdir()
+                    write_once(folder / "profile.json", collect(adapter, call, folder))
+                else:
+                    call()  # Identical auxiliary count, never a timed repetition.
         rows, rng = [], random.Random(plan["seed"])
         for trial in range(-5, 3):
             order = list(ARMS)
@@ -261,9 +279,9 @@ def analyze(root, expected):
 
 def main():
     parent.WAIT, parent.SCRIPT = WAIT, SCRIPT
-    parent.ONLY_LAYER, parent.JOB_NAME = None, "mk-joint-K-time"
-    parent.STAGE = parent.VARIANT = "consumed_joint_key_paired_screen"
-    parent.DOC = SOURCE / "mosaickv/docs/joint_key_latency.md"
+    parent.ONLY_LAYER, parent.JOB_NAME = None, JOB_NAME
+    parent.STAGE = parent.VARIANT = VARIANT
+    parent.DOC = DOC
     parent.EXTRA_PLAN = dict(
         warmups=5,
         repetitions=3,
@@ -271,6 +289,8 @@ def main():
         no_runtime_change_from_passed_key_transaction=True,
         acceptance_ratio_upper_bound=0.96,
         formal_gate_NOT_decided_by_screen=True,
+        auxiliary_requests_per_arm=int(bool(AUXILIARY_PROFILE_ARMS)),
+        auxiliary_profiles_not_latency_acceptance=True,
     )
     parent.EXTRA_BOUND_FILES = (WAIT / "analysis/decision.json",)
     parent.prepare, parent.analyze = prepare, analyze
