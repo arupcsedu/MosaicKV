@@ -137,6 +137,7 @@ def execute(
         joint_incoming_projection=record.get("joint_incoming_projection", "none"),
         reuse_graph_replay_plan=record.get("reuse_graph_replay_plan", False),
         post_attention_segment=record.get("post_attention_segment", False),
+        exact_rotary_dispatch=record.get("exact_rotary_dispatch", False),
     )
     if not bits_equal(values, refs[method]["logits"]):
         raise RuntimeError("direct text construction changed parent vocabulary words")

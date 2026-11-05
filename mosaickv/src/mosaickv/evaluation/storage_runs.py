@@ -298,6 +298,9 @@ def run(
         from mosaickv.evaluation.post_attention_segment import transport as segment_transport
 
         segment = stack.enter_context(segment_transport(adapter, cache))
+        from mosaickv.evaluation.exact_rotary_dispatch import transport as rotary_transport
+
+        stack.enter_context(rotary_transport())
         starts.record()
         for step in range(tokens - 1):
             if source_history:
