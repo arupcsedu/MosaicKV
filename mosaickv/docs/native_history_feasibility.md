@@ -27,3 +27,12 @@ search), with actual feasibility checks at all seven history row counts. Keep
 the same random inputs and repair cap. If rejected, save the epoch, per-component
 changed-word counts/error and exact native algorithm attributes; do not hide
 the failure behind an uninformative exception or expand runtime eligibility.
+
+The measured fixed-kernel failure isolated an invalid synthetic RoPE fixture:
+32,682 key words but only 91 value words changed at 16 rows. Its independently
+random 128-wide phase halves do not obey Llama's duplicate-half rotary layout,
+which the native reader requires. Correct the fixture to the actual shared
+64-frequency sine/cosine construction and reject incompatible phases before
+encoding. Preserve the invalid-fixture artifacts; they are not evidence that
+native history on Llama is numerically or physically eligible. Rerun only this
+checkpoint-free operator test, with the same repair cap and no runtime change.

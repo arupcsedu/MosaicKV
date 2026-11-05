@@ -5,6 +5,8 @@ from mosaickv.evaluation.native_history_feasibility import (
     ROWS,
     Engine,
     RepairBudgetError,
+    duplicated_phases,
+    make_packet,
     validate_rows,
 )
 
@@ -42,3 +44,19 @@ def test_frozen_factory_uses_actual_one_argument_api(monkeypatch):
     engine = Engine(torch.device("cpu"), frozen=True)
     assert all(p[3] is algorithm and p[4] is record for p in engine.plans.plans.values())
     assert engine.source.shape == (128, 4096)
+
+
+def test_rotary_fixture_matches_actual_llama_not_independent_halves():
+    theta = torch.randn((1, 16, 64))
+    cos, sin = duplicated_phases(theta)
+    assert cos.shape == sin.shape == (1, 16, 128)
+    for t in (cos, sin):
+        assert torch.equal(t[..., :64].view(torch.int16), t[..., 64:].view(torch.int16))
+    with pytest.raises(ValueError, match="duplicate-half"):
+        make_packet(
+            torch.zeros((1, 1, 16, 4096), dtype=torch.bfloat16),
+            torch.randn((1, 16, 128)).bfloat16(),
+            sin,
+        )
+    with pytest.raises(ValueError):
+        duplicated_phases(torch.zeros((1, 16, 128)))

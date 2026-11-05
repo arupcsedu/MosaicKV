@@ -108,6 +108,14 @@ def make_packet(x, cos, sin):
 
     n = x.shape[2]
     validate_rows(n)
+    if any(
+        t.shape != (1, n, 128)
+        or t.dtype != torch.bfloat16
+        or t.device != x.device
+        or not torch.equal(t[..., :64].view(torch.int16), t[..., 64:].view(torch.int16))
+        for t in (cos, sin)
+    ):
+        raise ValueError("actual Llama duplicate-half BF16 rotary phases required")
     union = torch.arange(n, device=x.device, dtype=torch.int32)
     slots = union[None].expand(32, -1)
     body = encode(x)
@@ -119,6 +127,13 @@ def make_packet(x, cos, sin):
         output_slots=slots,
         literal_checkpoints=checkpoints(body),
     )
+
+
+def duplicated_phases(theta):
+    if theta.ndim != 3 or theta.shape[0] != 1 or theta.shape[-1] != 64:
+        raise ValueError("one original 64-frequency Llama rotary table required")
+    phases = torch.cat((theta, theta), -1)
+    return phases.cos().bfloat16(), phases.sin().bfloat16()
 
 
 @torch.inference_mode()
@@ -138,11 +153,14 @@ def study(*, frozen=False):
     engine, records = Engine(torch.device("cuda"), frozen=frozen), []
     try:
         for n in ROWS:
+            source = torch.randn((1, 1, n, 4096), device="cuda", dtype=torch.bfloat16)
+            cos, sin = duplicated_phases(torch.randn((1, n, 64), device="cuda"))
             packet = make_packet(
-                torch.randn((1, 1, n, 4096), device="cuda", dtype=torch.bfloat16),
-                torch.randn((1, n, 128), device="cuda").cos().bfloat16(),
-                torch.randn((1, n, 128), device="cuda").sin().bfloat16(),
+                source,
+                cos,
+                sin,
             )
+            del source
             owners = tuple(
                 torch.full((1, 32, n + 7, 128), -71, device="cuda", dtype=torch.bfloat16)
                 for _ in range(2)
