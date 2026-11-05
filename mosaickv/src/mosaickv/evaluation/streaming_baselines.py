@@ -88,6 +88,9 @@ class SelectedRetiringCache(RetiringPrefillCache):
         with mode:
             original = old.materialize(attention)
             proposed = build(original)
+            from mosaickv.evaluation.deferred_exact_encoding import finalize
+
+            proposed = finalize(proposed)
             packet = self.validate_encoding(index, proposed, original)
             if any(identity(t) in {identity(x) for x in original} for t in packet.tensors()):
                 self.memberships.pop(index, None)

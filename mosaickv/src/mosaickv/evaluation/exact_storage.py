@@ -50,6 +50,11 @@ def token_partition(positions: Any) -> tuple[tuple[int, ...], tuple[int, ...]]:
 
 
 def encode(tensor: Any) -> PackedBF16:
+    from mosaickv.evaluation.deferred_exact_encoding import pending
+
+    intermediate = pending(tensor)
+    if intermediate is not None:
+        return intermediate
     if tensor.device.type == "cuda":
         from mosaickv.evaluation.lossless_bf16_kernel import encode as pack_gpu
 

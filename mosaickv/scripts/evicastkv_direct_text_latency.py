@@ -129,6 +129,7 @@ def execute(
         lt_source_reader=record.get("lt_source_reader", False),
         lt_fit_policy=record.get("lt_fit_policy", "full"),
         selective_text_rows=record.get("selective_text_rows", False),
+        defer_exact_encoding=record.get("defer_exact_encoding", False),
     )
     if not bits_equal(values, refs[method]["logits"]):
         raise RuntimeError("direct text construction changed parent vocabulary words")

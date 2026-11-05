@@ -68,6 +68,7 @@ def request(
     lt_source_reader=False,
     lt_fit_policy="full",
     selective_text_rows=False,
+    defer_exact_encoding=False,
 ):
     from mosaickv.evaluation.lossless_prompt_cache import backing_bytes
     from mosaickv.evaluation.native_execution_plan import use as native_plan
@@ -83,6 +84,10 @@ def request(
     from mosaickv.evaluation.streaming_source_constructor import StreamingDirectSource
 
     validate(reconstruction_readers)
+    if type(defer_exact_encoding) is not bool or (
+        defer_exact_encoding and direct_text_policy is None
+    ):
+        raise ValueError("deferred exact encoding requires frozen direct-text construction")
     if type(selective_text_rows) is not bool or (
         selective_text_rows and direct_text_policy is None
     ):
@@ -177,6 +182,9 @@ def request(
     )
     fresh = replace(prepared, model_inputs=dict(prepared.model_inputs, past_key_values=cache))
     with ExitStack() as stack:
+        from mosaickv.evaluation import deferred_exact_encoding as deferred_exact
+
+        deferred_state = stack.enter_context(deferred_exact.use(defer_exact_encoding))
         from mosaickv.evaluation import selective_text_construction as selective_text
 
         selective_state = stack.enter_context(selective_text.use(selective_text_rows))
@@ -312,6 +320,7 @@ def request(
             prompt_graph_reader=details["storage"].get("prompt_graph_reader", dict(enabled=False)),
             lt_source_reader=lt_source_reader,
             lt_fit_policy=lt_fit_policy,
+            deferred_exact_encoding=deferred_exact.report(deferred_state),
             selective_text_construction=dict(
                 enabled=selective_text_rows,
                 cpu_index_metadata_bytes=selective_text.cpu_metadata_bytes(packets),

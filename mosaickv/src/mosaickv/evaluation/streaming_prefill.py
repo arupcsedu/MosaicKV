@@ -136,6 +136,9 @@ class RetiringPrefillCache(Cache):
         mode = ScratchAudit(excluded=excluded, observe=self.observe) if self.audit else None
         with mode if mode is not None else nullcontext():
             packet = encoder(index, attention, original, args, kwargs or {}, output)
+            from mosaickv.evaluation.deferred_exact_encoding import finalize
+
+            packet = finalize(packet)
             packet = self.validate_encoding(index, packet, original)
             original_owners = {identity(t) for t in original}
             if any(identity(t) in original_owners for t in packet.tensors()):

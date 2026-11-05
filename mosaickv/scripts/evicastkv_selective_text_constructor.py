@@ -25,6 +25,16 @@ ARMS = (
 )
 
 
+def variants(records):
+    return [
+        (
+            CANDIDATE[0],
+            CANDIDATE[1],
+            dict(records["mosaickv_exact"]["graph"], selective_text_rows=True),
+        )
+    ]
+
+
 def prepare(root, revision):
     if root.exists() or clean_source(SOURCE) != revision:
         raise ValueError("new immutable root and clean source required")
@@ -118,30 +128,30 @@ def worker(root, expected, index):
             ),
         )
         records = driver.read(PARENT / f"workers/{index}/study.json")["records"]
-        candidate = dict(records["mosaickv_exact"]["graph"], selective_text_rows=True)
+        for method, arm, candidate in variants(records):
 
-        def verify(packets):
-            actual = base.common.previous.direct.packet_signature(packets)["digest"]
-            if actual != candidate["packet_sha256"]:
-                raise RuntimeError("selective construction changed parent cache tensor words")
+            def verify(packets, expected=candidate["packet_sha256"]):
+                actual = base.common.previous.direct.packet_signature(packets)["digest"]
+                if actual != expected:
+                    raise RuntimeError("selective construction changed parent cache tensor words")
 
-        audited = execute(
-            adapter,
-            refs,
-            messages,
-            profile,
-            plan,
-            "mosaickv_exact",
-            candidate,
-            audit=True,
-            final_validator=verify,
-        )
-        if any(audited[k] != candidate["audited"][k] for k in driver.STORAGE):
-            raise RuntimeError(
-                "selective construction changed initial/final/decode-owned peak GPU storage"
+            audited = execute(
+                adapter,
+                refs,
+                messages,
+                profile,
+                plan,
+                method,
+                candidate,
+                audit=True,
+                final_validator=verify,
             )
-        records["mosaickv_exact"]["graph-selective-text"] = dict(candidate, audited=audited)
-        write_once(out / "audited_candidate.json", audited)
+            if any(audited[k] != candidate["audited"][k] for k in driver.STORAGE):
+                raise RuntimeError(
+                    "selective construction changed initial/final/decode-owned peak GPU storage"
+                )
+            records[method][arm] = dict(candidate, audited=audited)
+            write_once(out / f"audited-{method}-{arm}.json", audited)
         rows = []
         rng = random.Random(plan["seed"])
         for trial in range(-5, 3):

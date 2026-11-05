@@ -346,6 +346,9 @@ def refit_corrections(
     per_head: bool = False,
 ) -> tuple[HeadLocalFormat, dict[str, Any]]:
     """Re-rank actual low-bit errors with exactly the old exception allowance."""
+    from mosaickv.evaluation.deferred_exact_encoding import finalize
+
+    packet = finalize(packet)
     old = packet.base.corrections
     if len(old) != 2 or type(per_head) is not bool:
         raise ValueError("two funded component budgets and explicit head policy required")

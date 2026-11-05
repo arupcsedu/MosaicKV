@@ -39,6 +39,11 @@ def fund_corrections(
     key_weight: Any = None,
     value_weight: Any = None,
 ) -> tuple[PrecisionFormat, dict[str, Any]]:
+    from mosaickv.evaluation.deferred_exact_encoding import finalize
+
+    # Storage-funded choices must see the original encoded bytes, not raw
+    # constructor intermediates. Never estimate or change the exception budget.
+    fmt = finalize(fmt)
     if (
         not fmt.encoded_exact
         or fmt.corrections
