@@ -24,11 +24,11 @@ def prepare(root, revision):
     ORIGINAL_PREPARE(root, revision)
 
 
-def validate(measured, active):
+def validate(measured, active, *, require_audited=True):
     if (
         not measured["logits_bitwise"]
         or not measured["no_FullKV_fallback"]
-        or not measured["peak_measurement_admissible"]
+        or (require_audited and not measured["peak_measurement_admissible"])
     ):
         raise ValueError("audited complete same-parent trajectory and actual tensor peak required")
     graph, info = measured["prompt_graph_reader"], measured["joint_incoming_projection"]
