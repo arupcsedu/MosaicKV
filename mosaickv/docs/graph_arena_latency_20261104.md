@@ -55,3 +55,26 @@ explicitly and delete it unconditionally instead. A CPU weak-reference
 regression covers this ownership trap; the real CUDA retirement guard remains
 exactly 1,024 bytes with all original-code comparisons unchanged. Bind the
 failed decision and allocation diagnostic in the corrective retry manifest.
+
+## Capacity-derived engagement guard and selective reuse
+
+The retirement-corrected run passed every EviCastKV and PrefixKV arm, but its
+all-method verifier incorrectly demanded zero arena misses even for shorter
+Prompt Top-K caches. The runtime already has a safe ordinary-allocation
+fallback when four independent verification outputs cannot fit. Enforce exact
+geometry-derived counts instead: for each of 32 layers, the six 32/48/64/80/
+96/112-token verification epochs need `4*n*32*128*2` bytes; borrow exactly those
+that fit the recorded fixed backing and report the remainder as misses.
+The maximum borrowed bytes must equal the largest feasible requirement. All
+comparisons, three fills, word checks, workspace accounting, and original fast
+reader controls remain unchanged. This correction does not grow a baseline
+buffer or force a slower comparator path.
+
+Retry only missing controls. The ten complete positive controls per input
+retain their exact fc94667 producer SHA, file hashes, original measurements,
+and explicit reuse labels. Fail closed if a reused file/configuration changed,
+if the original failure was anything other than this known verifier error,
+or if ANY runtime/algorithm source differs from fc94667. Only this controller,
+its documentation, and tests may differ. New manifests explicitly list reused
+and newly measured controls; derived copies are not new GPU observations.
+Every paired timing request nevertheless executes the current clean source.
