@@ -66,6 +66,7 @@ def request(
     prompt_graph_reader=False,
     prompt_graph_policy=None,
     lt_source_reader=False,
+    lt_fit_policy="full",
 ):
     from mosaickv.evaluation.lossless_prompt_cache import backing_bytes
     from mosaickv.evaluation.native_execution_plan import use as native_plan
@@ -82,9 +83,14 @@ def request(
 
     validate(reconstruction_readers)
     if (
-        type(lt_source_reader) is not bool
-        or (lt_source_reader
-        and (not prompt_graph_reader or full_prompt_native is not None or prompt_prefetch))
+        type(lt_fit_policy) is not str
+        or lt_fit_policy not in ("full", "direct")
+        or (not lt_source_reader and lt_fit_policy != "full")
+    ):
+        raise ValueError("registered native-source constructor policy requires its enabled reader")
+    if type(lt_source_reader) is not bool or (
+        lt_source_reader
+        and (not prompt_graph_reader or full_prompt_native is not None or prompt_prefetch)
     ):
         raise ValueError("native Lt source reader requires its separate private graph policy")
     if prompt_graph_policy is not None:
@@ -247,7 +253,10 @@ def request(
         from mosaickv.evaluation.lt_source_format import convert as convert_lt
 
         packets, lt_report = convert_lt(
-            packets, tuple(layer.self_attn for layer in adapter._language_layers())
+            packets,
+            tuple(layer.self_attn for layer in adapter._language_layers()),
+            policy=lt_fit_policy,
+            audit=audit_decode_storage,
         )
     if code_delta:
         from mosaickv.evaluation.layer_code_delta import convert
@@ -294,6 +303,7 @@ def request(
             decode_cuda_ms=details["decode_cuda_ms"],
             prompt_graph_reader=details["storage"].get("prompt_graph_reader", dict(enabled=False)),
             lt_source_reader=lt_source_reader,
+            lt_fit_policy=lt_fit_policy,
             lt_source_conversion=lt_report,
             initial_encoded_bytes=details["storage"]["initial_active_kv_storage_bytes"],
             final_encoded_bytes=details["storage"]["final_active_kv_storage_bytes"],

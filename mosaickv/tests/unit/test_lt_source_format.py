@@ -67,6 +67,46 @@ def test_fixed_repairs_preserve_every_parent_word_and_padded_history():
         value.fill_component(attention, 0, torch.empty(base.shape, dtype=torch.bfloat16))
 
 
+def test_direct_constructor_preserves_identical_patch_words_with_fewer_model_products():
+    attention, base = fixture()
+    full_engine, direct_engine = Engine(base), Engine(base)
+    full = native.fit(base, attention, full_engine)
+    direct = native.fit(base, attention, direct_engine, direct_validation=True)
+    assert full_engine.calls == 8 and direct_engine.calls == 2
+    assert all(
+        torch.equal(a, b)
+        for x, y in zip(full.repairs, direct.repairs, strict=True)
+        for a, b in zip(x.tensors, y.tensors, strict=True)
+    )
+    native.verify_strides(direct, attention, direct_engine)
+    assert direct_engine.calls == 8
+
+
+@pytest.mark.parametrize("audit", [False, True])
+def test_direct_conversion_keeps_exhaustive_stride_checks_in_audited_controls(audit):
+    attention, base = fixture()
+    owners = []
+
+    def factory(packet):
+        owners.append(Engine(packet))
+        return owners[-1]
+
+    values, info = native.convert(
+        (base,), (attention,), engine_factory=factory, policy="direct", audit=audit
+    )
+    assert info["full_parent_KV_word_validation"] is True
+    assert info["exhaustive_stride_audit"] is audit
+    assert info["constructor_policy"] == "direct"
+    assert owners[0].calls == (8 if audit else 2) and owners[0].closed
+    assert values[0].base is base
+
+
+@pytest.mark.parametrize("kwargs", [dict(policy="skip"), dict(audit=1)])
+def test_constructor_cannot_disable_word_validation(kwargs):
+    with pytest.raises(ValueError):
+        native.convert((), (), **kwargs)
+
+
 def test_conversion_retires_its_engine_in_success_and_failure(monkeypatch):
     attention, base = fixture()
     owners = []

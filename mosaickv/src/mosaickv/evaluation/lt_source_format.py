@@ -160,10 +160,12 @@ def map_sources(packet, function):
 
 
 @torch.inference_mode()
-def fit(base, attention, engine):
+def fit(base, attention, engine, *, direct_validation=False):
     from mosaickv.evaluation.full_prompt_source import restore_projected
     from mosaickv.evaluation.sequential_kv_lease import fill_component
 
+    if type(direct_validation) is not bool:
+        raise ValueError("explicit direct-validation boolean required")
     if not isinstance(base, SharedSourceFormat) or base.protected_patches_disjoint is not True:
         raise ValueError("original constructor-certified disjoint source required")
     patches, checks = [], []
@@ -174,6 +176,14 @@ def fit(base, attention, engine):
         engine.project(base, attention, component, actual)
         restore_projected(base, component, actual)
         new = SparseBitPatch.build(reference, actual)
+        if direct_validation:
+            # The original protected rows/transport are already restored.
+            # Verify the exact new correction on these existing full K/V
+            # buffers, rather than repeating the expensive matrix product.
+            new.apply(actual)
+            checks.append(
+                (reference.view(torch.int16) == actual.view(torch.int16)).all().reshape(1)
+            )
         old = (
             base.transport_patches[component]
             if base.transport_patches
@@ -196,6 +206,16 @@ def fit(base, attention, engine):
     if not bool(torch.cat(checks).all()):
         raise RuntimeError("native numerical patches conflict with original protected evidence")
     candidate = LTSourceFormat(base, tuple(patches))
+    if not direct_validation:
+        verify_strides(candidate, attention, engine)
+    return candidate
+
+
+@torch.inference_mode()
+def verify_strides(candidate, attention, engine):
+    from mosaickv.evaluation.sequential_kv_lease import fill_component
+
+    base = candidate.base
     with use(engine):
         for tail in (0, 1, 127):
             for component in (0, 1):
@@ -213,11 +233,12 @@ def fit(base, attention, engine):
                         "frozen native-source repair failed original K/V or history bits"
                     )
                 del reference, actual
-    return candidate
 
 
 @torch.inference_mode()
-def convert(packets, attentions, *, engine_factory=None):
+def convert(packets, attentions, *, engine_factory=None, policy="full", audit=False):
+    if type(policy) is not str or policy not in ("full", "direct") or type(audit) is not bool:
+        raise ValueError("registered full/direct constructor and explicit audit boolean required")
     if len(packets) != len(attentions):
         raise ValueError("complete matching source/attention sequence required")
     if engine_factory is None:
@@ -232,7 +253,12 @@ def convert(packets, attentions, *, engine_factory=None):
                 nonlocal engine
                 if engine is None:
                     engine = engine_factory(base)
-                value = fit(base, attention, engine)
+                if policy == "full":
+                    value = fit(base, attention, engine)
+                else:
+                    value = fit(base, attention, engine, direct_validation=True)
+                    if audit:
+                        verify_strides(value, attention, engine)
                 records.append(
                     dict(
                         layer=index,
@@ -254,6 +280,9 @@ def convert(packets, attentions, *, engine_factory=None):
             original_headers_codes_weights_and_positions_unchanged=True,
             engine=None if engine is None else engine.record(),
             no_labels_or_answers_used=True,
+            constructor_policy=policy,
+            full_parent_KV_word_validation=True,
+            exhaustive_stride_audit=policy == "full" or audit,
         )
     finally:
         if engine is not None:
