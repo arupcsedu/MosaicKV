@@ -298,6 +298,9 @@ def run(
         from mosaickv.evaluation.native_history_reader import transport as history_transport
 
         stack.enter_context(history_transport(adapter, cache))
+        from mosaickv.evaluation.input_norm_segment import transport as input_norm_transport
+
+        input_norm = stack.enter_context(input_norm_transport(adapter, cache))
         from mosaickv.evaluation.post_attention_segment import transport as segment_transport
 
         segment = stack.enter_context(segment_transport(adapter, cache))
@@ -332,6 +335,8 @@ def run(
         if shared_workspace:
             cache.release_workspace()
         if prompt_graph_reader:
+            if input_norm is not None:
+                input_norm.close()
             if segment is not None:
                 segment.close()
             cache.prompt_graph_pool.close()

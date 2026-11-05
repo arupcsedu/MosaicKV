@@ -17,6 +17,7 @@ import numpy as np
 import torch
 
 from mosaickv.evaluation.exact_rotary_dispatch import managed as exact_rotary_scope
+from mosaickv.evaluation.input_norm_segment import managed as input_norm_scope
 from mosaickv.evaluation.joint_incoming_projection import managed as joint_projection_scope
 from mosaickv.evaluation.native_history_reader import managed as native_history_scope
 from mosaickv.evaluation.post_attention_segment import managed as post_attention_scope
@@ -44,6 +45,7 @@ def order(seed):
 @joint_projection_scope
 @overlap_scope
 @native_history_scope
+@input_norm_scope
 @post_attention_scope
 @exact_rotary_scope
 def request(
@@ -54,6 +56,7 @@ def request(
     *,
     overlap_native_fit=False,
     native_history_reader=False,
+    input_norm_segment=False,
     minimum_only=False,
     componentwise_fitting=False,
     code_delta=False,
