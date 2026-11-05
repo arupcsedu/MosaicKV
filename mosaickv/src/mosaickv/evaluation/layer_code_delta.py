@@ -20,6 +20,7 @@ def map_bodies(packet, function):
     from mosaickv.evaluation.full_prompt_source import FullPromptSourceFormat
     from mosaickv.evaluation.head_local_precision import HeadLocalFormat
     from mosaickv.evaluation.hybrid_reader import HybridFormat
+    from mosaickv.evaluation.lt_source_format import LTSourceFormat
     from mosaickv.evaluation.precision_tier import PrecisionFormat
     from mosaickv.evaluation.shared_source_format import SharedSourceFormat
     from mosaickv.evaluation.text_source_storage import TextSourceFormat
@@ -30,7 +31,9 @@ def map_bodies(packet, function):
             if packet.base is None
             else replace(packet, base=map_bodies(packet.base, function))
         )
-    if isinstance(packet, (HeadLocalFormat, TextSourceFormat, FullPromptSourceFormat)):
+    if isinstance(
+        packet, (HeadLocalFormat, TextSourceFormat, FullPromptSourceFormat, LTSourceFormat)
+    ):
         return replace(packet, base=map_bodies(packet.base, function))
     if isinstance(packet, PrecisionFormat):
         return replace(

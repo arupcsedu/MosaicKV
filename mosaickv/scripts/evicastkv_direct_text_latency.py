@@ -126,6 +126,7 @@ def execute(
         ),
         prompt_graph_reader=record.get("prompt_graph_reader", False),
         prompt_graph_policy=record.get("prompt_graph_policy"),
+        lt_source_reader=record.get("lt_source_reader", False),
     )
     if not bits_equal(values, refs[method]["logits"]):
         raise RuntimeError("direct text construction changed parent vocabulary words")

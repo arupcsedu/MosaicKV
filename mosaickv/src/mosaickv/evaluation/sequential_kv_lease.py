@@ -23,6 +23,11 @@ from mosaickv.evaluation.text_source_storage import TextSourceFormat
 def fill_component(packet, attention, component, destination, *, source_workspace=None):
     if type(component) is not int or component not in (0, 1):
         raise ValueError("key or value component required")
+    from mosaickv.evaluation.lt_source_format import LTSourceFormat
+
+    if isinstance(packet, LTSourceFormat):
+        packet.fill_component(attention, component, destination)
+        return
     from mosaickv.evaluation.hybrid_reader import HybridFormat
 
     if isinstance(packet, HybridFormat):

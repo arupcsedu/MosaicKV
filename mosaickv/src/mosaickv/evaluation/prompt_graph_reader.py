@@ -64,6 +64,9 @@ class PromptGraphPool:
         self.checked_private_tensor_bytes = 0
         self.private_live_bytes = 0
         self.generator_addresses = ()
+        self.lt_engine = None
+        self.lt_engine_info = None
+        self.lt_workspace_bytes = self.lt_replays = self.lt_matmul_dispatches = 0
 
     def acquire(self, layer, shape, source):
         if (
@@ -132,6 +135,22 @@ class PromptGraphPool:
                 packet = bound.replay.view(bound.index)
             if bound.replay.prepared_views is None:
                 raise ValueError("prompt graphs require stable private replay descriptors")
+        from mosaickv.evaluation.lt_source_format import source_format as lt_format
+
+        native = lt_format(packet, component)
+        if native is not None:
+            if self.policy.row_major_codes:
+                raise ValueError("native Lt source and row-major code ablation cannot be mixed")
+            if self.lt_engine is None:
+                from mosaickv.evaluation.lt_source_chunks import Engine
+
+                self.lt_engine = Engine(native.base)
+                owners = (self.lt_engine.source, self.lt_engine.output)
+                self.cache.observe(owners)
+                self.cache.shared_tensors = (*self.cache.shared_tensors, *owners)
+                self.cache.shared_bytes = backing_bytes(self.cache.shared_tensors)
+                self.lt_workspace_bytes = backing_bytes(owners)
+                self.cache.observe()
         body = self._row4_body(packet) if self.policy.row_major_codes else None
         if body is not None and self.row4_workspace is None:
             from mosaickv.evaluation.row_major_source_codes import geometry
@@ -155,7 +174,12 @@ class PromptGraphPool:
                 replay.decode_for_graph(bound.index)
             if body is not None and component == 0:
                 pack_into(body, self.row4_workspace)
-            with use(body, self.row4_workspace) if body is not None else nullcontext():
+            from mosaickv.evaluation.lt_source_format import use as use_lt
+
+            with (
+                use(body, self.row4_workspace) if body is not None else nullcontext(),
+                use_lt(self.lt_engine) if native is not None else nullcontext(),
+            ):
                 fill_component(packet, layer.attention, component, self.buffer)
 
         signature = (id(packet), id(layer.attention), self.buffer.data_ptr(), self.buffer.stride())
@@ -209,6 +233,9 @@ class PromptGraphPool:
         if replay is not None and component == 0:
             self.captured_code_kernel_dispatches += len(replay.graph_bindings[bound.index])
         self.row4_replays += int(body is not None and component == 0)
+        if native is not None:
+            self.lt_replays += 1
+            self.lt_matmul_dispatches += (native.shape[2] + 127) // 128
 
     @staticmethod
     def _row4_body(packet):
@@ -268,11 +295,17 @@ class PromptGraphPool:
             if any(p in allocator_blocks() for p in self.generator_addresses):
                 raise RuntimeError("retired graph still owns a generator metadata allocation")
             self.private_live_bytes = 0
-        owners = (self.buffer, self.row4_workspace)
+        lt_owners = ()
+        if self.lt_engine is not None:
+            self.lt_engine_info = self.lt_engine.record()
+            lt_owners = (self.lt_engine.source, self.lt_engine.output)
+            self.lt_engine.close()
+        owners = (self.buffer, self.row4_workspace, *lt_owners)
         self.cache.shared_tensors = tuple(
             t for t in self.cache.shared_tensors if all(t is not x for x in owners)
         )
         self.buffer = self.row4_workspace = None
+        self.lt_engine = None
         self.cache.shared_bytes = backing_bytes(self.cache.shared_tensors)
         self.closed = True
         if PromptGraphPool._active_owner is self:
@@ -292,11 +325,27 @@ class PromptGraphPool:
             generator_scalar_allocations=len(self.generator_addresses),
             concurrent_graph_requests_supported=False,
             active_workspace_bytes=backing_bytes(
-                tuple(x for x in (self.buffer, self.row4_workspace) if x is not None)
+                tuple(
+                    x
+                    for x in (
+                        self.buffer,
+                        self.row4_workspace,
+                        *((self.lt_engine.source, self.lt_engine.output) if self.lt_engine else ()),
+                    )
+                    if x is not None
+                )
             ),
             row4_workspace_peak_bytes=self.row4_workspace_bytes,
             maximum_total_reader_workspace_bytes=self.maximum_workspace_bytes
-            + self.row4_workspace_bytes,
+            + self.row4_workspace_bytes
+            + self.lt_workspace_bytes,
+            lt_workspace_peak_bytes=self.lt_workspace_bytes,
+            lt_replays=self.lt_replays,
+            lt_matmul_dispatches=self.lt_matmul_dispatches,
+            lt_engine=self.lt_engine.record()
+            if self.lt_engine is not None
+            else self.lt_engine_info,
+            vendor_internal_peak_certified=False,
             retired=self.closed,
             only_immutable_prompt_captured=True,
             history_attention_and_ordered_replay_outside_graph=not self.policy.captured_code_replay,

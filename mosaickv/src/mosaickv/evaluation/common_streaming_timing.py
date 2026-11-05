@@ -65,6 +65,7 @@ def request(
     full_predicate_span=False,
     prompt_graph_reader=False,
     prompt_graph_policy=None,
+    lt_source_reader=False,
 ):
     from mosaickv.evaluation.lossless_prompt_cache import backing_bytes
     from mosaickv.evaluation.native_execution_plan import use as native_plan
@@ -80,6 +81,12 @@ def request(
     from mosaickv.evaluation.streaming_source_constructor import StreamingDirectSource
 
     validate(reconstruction_readers)
+    if (
+        type(lt_source_reader) is not bool
+        or (lt_source_reader
+        and (not prompt_graph_reader or full_prompt_native is not None or prompt_prefetch))
+    ):
+        raise ValueError("native Lt source reader requires its separate private graph policy")
     if prompt_graph_policy is not None:
         from mosaickv.evaluation.prompt_graph_policy import PromptGraphPolicy
 
@@ -235,6 +242,13 @@ def request(
         )
     if final_packet_validator is not None:
         final_packet_validator(packets)
+    lt_report = None
+    if lt_source_reader:
+        from mosaickv.evaluation.lt_source_format import convert as convert_lt
+
+        packets, lt_report = convert_lt(
+            packets, tuple(layer.self_attn for layer in adapter._language_layers())
+        )
     if code_delta:
         from mosaickv.evaluation.layer_code_delta import convert
 
@@ -279,6 +293,8 @@ def request(
             decode_wall_seconds=details["decode_wall_seconds"],
             decode_cuda_ms=details["decode_cuda_ms"],
             prompt_graph_reader=details["storage"].get("prompt_graph_reader", dict(enabled=False)),
+            lt_source_reader=lt_source_reader,
+            lt_source_conversion=lt_report,
             initial_encoded_bytes=details["storage"]["initial_active_kv_storage_bytes"],
             final_encoded_bytes=details["storage"]["final_active_kv_storage_bytes"],
             reported_counter_peak_bytes=details["storage"]["peak_active_kv_storage_bytes"],
