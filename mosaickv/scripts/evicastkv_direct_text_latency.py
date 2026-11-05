@@ -140,6 +140,7 @@ def execute(
         exact_rotary_dispatch=record.get("exact_rotary_dispatch", False),
         reuse_source_input_copy=record.get("reuse_source_input_copy", False),
         frozen_joint_plan=record.get("frozen_joint_plan", False),
+        overlap_native_fit=record.get("overlap_native_fit", False),
     )
     if not bits_equal(values, refs[method]["logits"]):
         raise RuntimeError("direct text construction changed parent vocabulary words")

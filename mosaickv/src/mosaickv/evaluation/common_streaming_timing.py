@@ -19,6 +19,7 @@ import torch
 from mosaickv.evaluation.exact_rotary_dispatch import managed as exact_rotary_scope
 from mosaickv.evaluation.joint_incoming_projection import managed as joint_projection_scope
 from mosaickv.evaluation.post_attention_segment import managed as post_attention_scope
+from mosaickv.evaluation.prefill_native_overlap import managed as overlap_scope
 
 METHODS = (
     "mosaickv_exact",
@@ -40,6 +41,7 @@ def order(seed):
 
 @torch.inference_mode()
 @joint_projection_scope
+@overlap_scope
 @post_attention_scope
 @exact_rotary_scope
 def request(
@@ -48,6 +50,7 @@ def request(
     profile,
     method,
     *,
+    overlap_native_fit=False,
     minimum_only=False,
     componentwise_fitting=False,
     code_delta=False,

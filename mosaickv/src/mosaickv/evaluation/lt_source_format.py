@@ -241,6 +241,12 @@ def convert(packets, attentions, *, engine_factory=None, policy="full", audit=Fa
         raise ValueError("registered full/direct constructor and explicit audit boolean required")
     if len(packets) != len(attentions):
         raise ValueError("complete matching source/attention sequence required")
+    from mosaickv.evaluation.prefill_native_overlap import current
+
+    if current() is not None:
+        if engine_factory is not None:
+            raise ValueError("overlap cannot replace a caller-supplied engine factory")
+        return current().convert(packets, attentions, policy=policy, audit=audit)
     if engine_factory is None:
         from mosaickv.evaluation.joint_incoming_projection import engine_factory
 
