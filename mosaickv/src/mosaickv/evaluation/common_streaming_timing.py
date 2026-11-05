@@ -85,6 +85,7 @@ def request(
     post_attention_segment=False,
     exact_rotary_dispatch=False,
     reuse_source_input_copy=False,
+    frozen_joint_plan=False,
 ):
     from mosaickv.evaluation.lossless_prompt_cache import backing_bytes
     from mosaickv.evaluation.native_execution_plan import use as native_plan

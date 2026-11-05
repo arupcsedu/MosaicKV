@@ -35,6 +35,9 @@ def managed(function):
         validate(policy)
         graph_plan = kwargs.get("reuse_graph_replay_plan", False)
         input_copy = kwargs.get("reuse_source_input_copy", False)
+        frozen_plan = kwargs.get("frozen_joint_plan", False)
+        if type(frozen_plan) is not bool:
+            raise ValueError("explicit frozen joint configuration boolean required")
         if type(input_copy) is not bool:
             raise ValueError("explicit once-only source-copy boolean required")
         if type(graph_plan) is not bool:
@@ -48,6 +51,8 @@ def managed(function):
             graph_plan=graph_plan,
             input_copy=input_copy,
             input_copy_reports=[],
+            frozen_plan=frozen_plan,
+            frozen_plan_engines=0,
         )
         token = _scope.set(state)
         try:
@@ -61,6 +66,9 @@ def managed(function):
                 no_placeholder_values=True,
                 no_new_selection_or_quality_claim=True,
                 source_input_copy=dict(enabled=input_copy, reports=state["input_copy_reports"]),
+                frozen_joint_plan=dict(
+                    requested=frozen_plan, actual_engines=state["frozen_plan_engines"]
+                ),
             )
             return values, packets, details
         finally:
@@ -170,14 +178,26 @@ def _decode_joint(
 
 class Engine(OriginalEngine):
     def __init__(self, packet):
-        super().__init__(packet)
+        state = _scope.get()
+        frozen = state is not None and state.get("frozen_plan", False)
+        tail = packet.shape[2] % 128
+        if not 1 <= tail < 128:
+            raise NotImplementedError("joint key requires a spare original 128-row slot")
+        if frozen:
+            from mosaickv.evaluation.frozen_joint_plan import FrozenKernelPlans
+
+            super().__init__(
+                packet,
+                plans_factory=lambda rows, width: FrozenKernelPlans((*rows, tail + 1), width),
+            )
+            state["frozen_plan_engines"] += 1
+        else:
+            super().__init__(packet)
         try:
-            n = packet.shape[2]
-            self.tail = n % 128
-            if not 1 <= self.tail < 128:
-                raise NotImplementedError("joint key requires a spare original 128-row slot")
-            self.plans.close()
-            self.plans = KernelPlans((128, self.tail, self.tail + 1))
+            self.tail = tail
+            if not frozen:
+                self.plans.close()
+                self.plans = KernelPlans((128, self.tail, self.tail + 1))
             chosen = [(a, r) for a, r in self.plans.candidates if fingerprint(r) == FROZEN]
             if len(chosen) != 1:
                 raise RuntimeError("the frozen all-layer-verified joint kernel is unavailable")

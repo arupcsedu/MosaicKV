@@ -68,14 +68,15 @@ def decode_slice(packet, target, first, take):
 
 
 class Engine:
-    def __init__(self, packet):
+    def __init__(self, packet, *, plans_factory=None):
         from mosaickv.evaluation.zero_workspace_lt import Plans
 
         started = time.perf_counter()
         _, heads, n, dim = packet.shape
         if dim != 128 or heads * dim != 4096:
             raise ValueError("registered LLaVA 4096-wide geometry required")
-        self.plans = Plans(tuple(min(128, n - first) for first in range(0, n, 128)), 4096)
+        rows = tuple(min(128, n - first) for first in range(0, n, 128))
+        self.plans = Plans(rows, 4096) if plans_factory is None else plans_factory(rows, 4096)
         try:
             self.source = torch.empty(
                 (128, 4096), device=packet.source.codes.device, dtype=torch.bfloat16
