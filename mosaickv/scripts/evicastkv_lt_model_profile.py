@@ -15,6 +15,9 @@ SOURCE, driver = common.SOURCE, common.driver
 PARENT = Path("/scratch/djy8hg/runs/evicastkv/lt-reader-consumed-20261104-v1")
 SCRIPT = SOURCE / "mosaickv/slurm/evicastkv_lt_model_profile.sbatch"
 MANIFEST_VARIANT = "consumed_native_actual_model_attribution"
+MANIFEST_TIMING_PROTOCOL = dict(
+    output_predictions=128, profiled_steps=[1, 64, 126], not_latency_evidence=True
+)
 CPU_NODE = None
 ARMS = (
     ("mosaickv_exact", "graph"),
@@ -167,9 +170,7 @@ def worker(root, expected, index):
             manifest_overrides=dict(
                 variant=MANIFEST_VARIANT,
                 methods=["mosaickv_exact", "prefixkv_reimpl"],
-                actual_timing_protocol=dict(
-                    output_predictions=128, profiled_steps=[1, 64, 126], not_latency_evidence=True
-                ),
+                actual_timing_protocol=dict(MANIFEST_TIMING_PROTOCOL),
             ),
         )
         records = driver.read(PARENT / f"workers/{index}/study.json")["records"]

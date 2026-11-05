@@ -13,6 +13,14 @@ SOURCE, PARENT, driver = controller.SOURCE, controller.PARENT, controller.driver
 NEGATIVE = Path("/scratch/djy8hg/runs/evicastkv/graph-accounting-consumed-20261105-v1")
 SCRIPT = SOURCE / "mosaickv/slurm/evicastkv_constructor_host_profile.sbatch"
 MANIFEST_VARIANT = "consumed_constructor_host_attribution"
+MANIFEST_TIMING_PROTOCOL = dict(
+    output_predictions=128,
+    CPU_profile_start="prepare_inputs",
+    CPU_profile_stop="first_decode_entry",
+    decode_excluded=True,
+    not_pure_compression_time=True,
+    not_latency_evidence=True,
+)
 
 
 def prepare(root, revision):
@@ -53,6 +61,7 @@ def prepare(root, revision):
 
 def main():
     controller.MANIFEST_VARIANT = MANIFEST_VARIANT
+    controller.MANIFEST_TIMING_PROTOCOL = MANIFEST_TIMING_PROTOCOL
     controller.CPU_NODE = "udc-aj36-3c0"
     controller.SCRIPT, controller.prepare = SCRIPT, prepare
     lt_model_profile.collect = collect

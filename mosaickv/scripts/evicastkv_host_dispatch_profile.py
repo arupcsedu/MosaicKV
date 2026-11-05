@@ -13,6 +13,12 @@ SOURCE, PARENT, driver = controller.SOURCE, controller.PARENT, controller.driver
 EVENT = Path("/scratch/djy8hg/runs/evicastkv/event-only-reader-consumed-20261105-v1")
 SCRIPT = SOURCE / "mosaickv/slurm/evicastkv_host_dispatch_profile.sbatch"
 MANIFEST_VARIANT = "consumed_host_decode_attribution"
+MANIFEST_TIMING_PROTOCOL = dict(
+    output_predictions=128,
+    CPU_profiled_decode_updates=list(range(1, 127)),
+    initial_graph_capture_excluded=True,
+    not_latency_evidence=True,
+)
 
 
 def prepare(root, revision):
@@ -55,6 +61,7 @@ def prepare(root, revision):
 
 def main():
     controller.MANIFEST_VARIANT = MANIFEST_VARIANT
+    controller.MANIFEST_TIMING_PROTOCOL = MANIFEST_TIMING_PROTOCOL
     controller.SCRIPT, controller.prepare = SCRIPT, prepare
     lt_model_profile.collect = collect
     controller.main()

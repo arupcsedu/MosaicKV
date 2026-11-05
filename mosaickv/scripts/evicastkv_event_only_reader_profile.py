@@ -10,6 +10,13 @@ from mosaickv.evaluation.fox_campaign import clean_source, sha, write_once
 SOURCE, PARENT, driver = controller.SOURCE, controller.PARENT, controller.driver
 SCRIPT = SOURCE / "mosaickv/slurm/evicastkv_event_only_reader_profile.sbatch"
 MANIFEST_VARIANT = "consumed_event_only_native_model_attribution"
+MANIFEST_TIMING_PROTOCOL = dict(
+    output_predictions=128,
+    reader_event_steps=[1, 64, 126],
+    step_event_updates=list(range(127)),
+    CUPTI_enabled=False,
+    not_latency_evidence=True,
+)
 
 
 def prepare(root, revision):
@@ -51,6 +58,7 @@ def prepare(root, revision):
 
 def main():
     controller.MANIFEST_VARIANT = MANIFEST_VARIANT
+    controller.MANIFEST_TIMING_PROTOCOL = MANIFEST_TIMING_PROTOCOL
     controller.SCRIPT, controller.prepare = SCRIPT, prepare
     lt_model_profile.collect = collect
     controller.main()

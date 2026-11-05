@@ -117,3 +117,34 @@ def test_CPU_analysis_requires_frozen_hash_before_validation(tmp_path, monkeypat
     monkeypatch.setattr(annotations, "clean_source", lambda p: "a" * 40)
     with pytest.raises(ValueError, match="immutable plan hash"):
         annotations.main()
+
+
+@pytest.mark.parametrize(
+    "module,stage",
+    [
+        ("evicastkv_event_only_reader_profile", "event_only_native_model_attribution"),
+        ("evicastkv_host_dispatch_profile", "consumed_host_decode_attribution"),
+        ("evicastkv_constructor_host_profile", "consumed_constructor_host_attribution"),
+    ],
+)
+def test_each_profile_uses_its_actual_timing_scope(module, stage):
+    wrapper = importlib.import_module(module)
+    assert annotations.timing_scope(stage) == wrapper.MANIFEST_TIMING_PROTOCOL
+    assert wrapper.MANIFEST_TIMING_PROTOCOL["not_latency_evidence"]
+    tree = ast.parse(inspect.getsource(wrapper.main))
+    assert any(
+        isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Attribute) and target.attr == "MANIFEST_TIMING_PROTOCOL"
+            for target in node.targets
+        )
+        for node in ast.walk(tree)
+    )
+    if module == "evicastkv_constructor_host_profile":
+        assert wrapper.MANIFEST_TIMING_PROTOCOL["decode_excluded"]
+        assert "profiled_steps" not in wrapper.MANIFEST_TIMING_PROTOCOL
+
+
+def test_unknown_timing_annotation_rejected():
+    with pytest.raises(ValueError):
+        annotations.timing_scope("unregistered")

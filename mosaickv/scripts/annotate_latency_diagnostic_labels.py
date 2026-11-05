@@ -34,10 +34,33 @@ SPECS = (
         "consumed_native_actual_model_attribution",
         "consumed_host_decode_attribution",
     ),
+    (
+        "constructor-host",
+        "consumed_constructor_host_attribution",
+        "consumed_constructor_host_attribution",
+        "consumed_constructor_host_attribution",
+    ),
 )
 
 
-def annotate(root, stage, original, corrected):
+def timing_scope(stage):
+    if stage == "event_only_native_model_attribution":
+        from evicastkv_event_only_reader_profile import MANIFEST_TIMING_PROTOCOL
+    elif stage == "consumed_host_decode_attribution":
+        from evicastkv_host_dispatch_profile import MANIFEST_TIMING_PROTOCOL
+    elif stage == "consumed_constructor_host_attribution":
+        from evicastkv_constructor_host_profile import MANIFEST_TIMING_PROTOCOL
+    elif stage in (
+        "deferred_exact_constructor_screen",
+        "consumed_graph_accounting_execution_screen",
+    ):
+        return dict(output_predictions=128, warmups=5, repetitions=3, not_latency_acceptance=True)
+    else:
+        raise ValueError("unregistered timing annotation stage")
+    return dict(MANIFEST_TIMING_PROTOCOL)
+
+
+def annotate(root, stage, original, corrected, *, timing=None):
     plan_path, decision_path = root / "plan.json", root / "analysis/decision.json"
     plan = json.loads(plan_path.read_text())
     decision = json.loads(decision_path.read_text())
@@ -68,6 +91,7 @@ def annotate(root, stage, original, corrected):
         decision_sha256=sha(decision_path),
         manifests=manifests,
         descriptive_variant_correction=corrected,
+        descriptive_timing_scope_correction=timing,
         raw_artifacts_and_producer_config_hashes_unchanged=True,
         numerical_controls_or_acceptance_NOT_changed=True,
         retrospective_provenance_annotation_NOT_new_measurement=True,
@@ -107,7 +131,7 @@ def main():
     if args.plan_sha is not None:
         raise ValueError("CPU plan hash supplied without CPU proof root")
     rows = [
-        annotate(RUNS / f"{name}-consumed-20261105-v1", stage, old, new)
+        annotate(RUNS / f"{name}-consumed-20261105-v1", stage, old, new, timing=timing_scope(stage))
         for name, stage, old, new in SPECS
     ]
     write_once(
