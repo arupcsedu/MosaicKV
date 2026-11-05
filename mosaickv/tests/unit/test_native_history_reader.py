@@ -21,6 +21,36 @@ def test_phase_tokens_support_inference_but_reject_replacements():
         mod.phase_guard(torch.randn((1, 16, 128)).bfloat16(), tracked, 16)
 
 
+def test_inference_phase_detection_never_reads_the_missing_counter(monkeypatch):
+    class Phase:
+        def data_ptr(self):
+            return 1234
+
+        shape = (1, 16, 128)
+
+        def stride(self):
+            return (2048, 128, 1)
+
+        @property
+        def _version(self):
+            raise AssertionError("inference counter must not be read")
+
+    monkeypatch.setattr(torch, "is_inference", lambda value: True)
+    assert mod.phase_token(Phase())[-1] == "inference_tensor_no_version_counter"
+
+
+def test_large_prompt_workspace_is_borrowed_as_a_view_without_hiding_backing_storage():
+    from mosaickv.evaluation.lossless_prompt_cache import backing_bytes
+
+    owners = tuple(torch.empty((192, 4096), dtype=torch.bfloat16) for _ in range(2))
+    borrowed = workspace_buffers("cpu", owners)
+    assert all(t.shape == (128, 4096) and t.is_contiguous() for t in borrowed)
+    assert [t.data_ptr() for t in borrowed] == [t.data_ptr() for t in owners]
+    assert backing_bytes(borrowed) == backing_bytes(owners) == 3 * 2**20
+    with pytest.raises(ValueError):
+        workspace_buffers("cpu", (owners[0], owners[1][:128]))
+
+
 def test_borrowed_workspace_validation_and_implicit_cuda_device(monkeypatch):
     buffers = tuple(torch.empty((128, 4096), dtype=torch.bfloat16) for _ in range(2))
     assert workspace_buffers("cpu", buffers) is buffers

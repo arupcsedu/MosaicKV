@@ -31,8 +31,10 @@ def validate(policy):
 def validate_source_rows(rows, policy, frozen, history):
     if type(rows) is not int or rows not in (128, 192):
         raise ValueError("explicit registered 128/192 source row capacity required")
-    if rows == 192 and (policy not in ("none", "kv") or frozen is not True or history):
-        raise NotImplementedError("source-192 requires frozen KV mode and original history")
+    if rows == 192 and (policy not in ("none", "kv") or frozen is not True):
+        raise NotImplementedError("source-192 requires frozen KV mode")
+    if type(history) is not bool:
+        raise ValueError("explicit native-history policy boolean required")
 
 
 def managed(function):

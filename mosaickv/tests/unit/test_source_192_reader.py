@@ -13,7 +13,7 @@ def test_only_explicit_capacities_accepted(rows):
 
 
 @pytest.mark.parametrize(
-    "policy,frozen,history", [("keys", True, False), ("kv", False, False), ("kv", True, True)]
+    "policy,frozen,history", [("keys", True, False), ("kv", False, False)]
 )
 def test_unsupported_combinations_fail_closed(policy, frozen, history):
     with pytest.raises(NotImplementedError):
@@ -29,6 +29,12 @@ def test_baseline_ineligibility_is_a_truthful_noop():
 def test_historical_128_policy_is_unchanged():
     for policy in ("none", "keys", "kv"):
         joint.validate_source_rows(128, policy, False, True)
+
+
+def test_history_can_borrow_a_192_row_owner_only_with_explicit_boolean():
+    joint.validate_source_rows(192, "kv", True, True)
+    with pytest.raises(ValueError, match="boolean"):
+        joint.validate_source_rows(192, "kv", True, 1)
 
 
 def test_metadata_alone_cannot_forge_new_workspace():

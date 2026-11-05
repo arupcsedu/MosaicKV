@@ -44,16 +44,19 @@ def workspace_buffers(device, buffers):
         type(buffers) is not tuple
         or len(buffers) != 2
         or any(
-            t.shape != (128, 4096)
+            t.shape not in ((128, 4096), (192, 4096))
             or t.dtype != torch.bfloat16
             or t.device != device
             or not t.is_contiguous()
             for t in buffers
         )
         or buffers[0].untyped_storage().data_ptr() == buffers[1].untyped_storage().data_ptr()
+        or buffers[0].shape != buffers[1].shape
     ):
-        raise ValueError("two distinct original 128-row BF16 workspaces required")
-    return buffers
+        raise ValueError("two distinct original 128/192-row BF16 workspaces required")
+    # Views allocate nothing; backing_bytes still charges the complete original
+    # owners. The history operator's registered row set remains <=112.
+    return buffers if buffers[0].shape[0] == 128 else tuple(t[:128] for t in buffers)
 
 
 class Engine:

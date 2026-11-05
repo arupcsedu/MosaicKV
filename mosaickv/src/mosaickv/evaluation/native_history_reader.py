@@ -35,10 +35,11 @@ def phase_guard(cos, sin, n):
 
 
 def phase_token(tensor):
-    try:
-        version = tensor._version
-    except RuntimeError:
-        version = "inference_tensor_no_version_counter"
+    # Inference tensors deliberately have no counter. Do not raise/catch a
+    # RuntimeError on every K/V reconstruction merely to discover that fact.
+    version = (
+        "inference_tensor_no_version_counter" if torch.is_inference(tensor) else tensor._version
+    )
     return (id(tensor), tensor.data_ptr(), tuple(tensor.shape), tuple(tensor.stride()), version)
 
 

@@ -154,7 +154,11 @@ def execute(adapter, refs, messages, profile, plan, method, arm, record, **kwarg
             or report["additional_owned_workspace_bytes"]
             != (0 if method == "mosaickv_exact" else 2**21)
             or report["reused_existing_prompt_workspace_bytes"]
-            != (2**21 if method == "mosaickv_exact" else 0)
+            != (
+                2 * record.get("source_tile_rows", 128) * 4096 * 2
+                if method == "mosaickv_exact"
+                else 0
+            )
         ):
             raise RuntimeError(
                 "complete real native history and exact charged/retired owners required"
