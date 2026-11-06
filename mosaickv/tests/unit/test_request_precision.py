@@ -96,6 +96,12 @@ def test_complete_request_retires_original_owner_and_measures_complete_boundary(
 
     def prefill(prepared, **kwargs):
         owner = Owner()
+        owner.layers = [
+            SimpleNamespace(
+                keys=torch.zeros(1, 2, 4, 128, dtype=torch.bfloat16),
+                values=torch.zeros(1, 2, 4, 128, dtype=torch.bfloat16),
+            )
+        ]
         references.append(weakref.ref(owner))
         state = DecodeState(owner, torch.ones(1, 4), 4, 4, 4, ())
         return PrefillOutput(
@@ -159,10 +165,20 @@ def test_complete_request_retires_original_owner_and_measures_complete_boundary(
     assert result["whole_request_allocator_peak_certified"] is True
     assert result["scored_answer"]["answer"] == "answer"
     assert result["phase_wall_seconds"]["detokenize"] >= 0
-    adapter._legacy_layers = lambda cache: (((torch.zeros(1, 2, 4, 128),) * 2,), None)
-    adapter.decode_one_token = lambda token, state, **kwargs: SimpleNamespace(
-        logits=torch.zeros(1, 1, 8), next_token_id=token, state=state
+    adapter._legacy_layers = lambda cache: (
+        tuple((layer.keys, layer.values) for layer in cache.layers),
+        None,
     )
+
+    def native_decode(token, state, **kwargs):
+        for layer in state.past_key_values.layers:
+            layer.keys = torch.cat([layer.keys, torch.zeros_like(layer.keys[..., :1, :])], dim=2)
+            layer.values = torch.cat(
+                [layer.values, torch.zeros_like(layer.values[..., :1, :])], dim=2
+            )
+        return SimpleNamespace(logits=torch.zeros(1, 1, 8), next_token_id=token, state=state)
+
+    adapter.decode_one_token = native_decode
     identity, control = module.complete_request(
         adapter,
         messages,
@@ -176,6 +192,8 @@ def test_complete_request_retires_original_owner_and_measures_complete_boundary(
     assert identity.shape == (128, 8)
     assert control["retention_one_identity"] and control["quantization_disabled"]
     assert control["online_variant"]["no_compression"]
+    assert control["native_KV_append_observations"] == 254
+    assert control["decode_owned_peak_bytes"] > control["storage"]["final_active_kv_storage_bytes"]
 
 
 def test_bounded_summaries_reproduce_full_attention_selection_without_retaining_full_maps():
