@@ -20,12 +20,14 @@ from mosaickv.evaluation.fox_campaign import clean_source, digest, sha, write_on
 from mosaickv.evaluation.paper_request_certification import (
     MECHANISMS,
     WholeRequestEnvelope,
+    certify_peak_separation,
     comparison_admission,
 )
 
 SOURCE = campaign.SOURCE
 SCRIPT = SOURCE / "mosaickv/slurm/evicastkv_paper_boundaries.sbatch"
 PARENT = Path("/scratch/djy8hg/runs/evicastkv/paper-quality-coco-20261106-guard-recovery1")
+QUALITY_ROWS_SHA256 = "368cf295415c5697e7dcd7aaa9f198f52604b3ad54454eeceae7c9a46c6e3e0c"
 METHODS = (
     "full_kv",
     "mosaickv_exact",
@@ -40,18 +42,29 @@ def submit(root, action, **kwargs):
     return campaign.submit(root, action, script=SCRIPT, **kwargs)
 
 
-def prepare(root, *, verify_initial_cap=False):
+def prepare(root, *, verify_initial_cap=False, recertify_existing_memory=False):
     if root.exists():
         raise FileExistsError("new immutable diagnostic root required")
     clean_source(SOURCE)
+    if verify_initial_cap and recertify_existing_memory:
+        raise ValueError("separate immutable scopes required")
+    if sha(PARENT / "quality/analysis/selected_quality_rows.json") != QUALITY_ROWS_SHA256:
+        raise ValueError("frozen previous prediction/byte records changed")
     # Reuse only consumed IDs, before inspecting any per-method answer.
     campaign.prepare(root, PARENT, autostart=False)
     write_once(
         root / "scope.json",
         dict(
-            consumed_sample_indices=[2],
-            methods=("mosaickv_exact", "prompt_attention_topk") if verify_initial_cap else METHODS,
+            consumed_sample_indices=list(range(2, 258)) if recertify_existing_memory else [2],
+            methods=(
+                ("mosaickv_exact",)
+                if recertify_existing_memory
+                else ("mosaickv_exact", "prompt_attention_topk")
+                if verify_initial_cap
+                else METHODS
+            ),
             verify_initial_cap=verify_initial_cap,
+            recertify_existing_memory=recertify_existing_memory,
             classification="consumed_input_representation_budget_feasibility_not_paper_comparison",
             automatic_fresh_materialization=False,
             automatic_large_campaign=False,
@@ -66,13 +79,22 @@ def prepare(root, *, verify_initial_cap=False):
 
 def check(root, expected):
     plan = campaign.checked(root, expected)
+    if sha(PARENT / "quality/analysis/selected_quality_rows.json") != QUALITY_ROWS_SHA256:
+        raise ValueError("frozen previous prediction/byte records changed")
     scope = campaign.read(root / "scope.json")
     verify_cap = scope.get("verify_initial_cap", False)
-    if type(verify_cap) is not bool:
+    recertify = scope.get("recertify_existing_memory", False)
+    if type(verify_cap) is not bool or type(recertify) is not bool or (verify_cap and recertify):
         raise ValueError("explicit budget-verification mode required")
     registered = dict(
-        consumed_sample_indices=[2],
-        methods=["mosaickv_exact", "prompt_attention_topk"] if verify_cap else list(METHODS),
+        consumed_sample_indices=list(range(2, 258)) if recertify else [2],
+        methods=(
+            ["mosaickv_exact"]
+            if recertify
+            else ["mosaickv_exact", "prompt_attention_topk"]
+            if verify_cap
+            else list(METHODS)
+        ),
         classification="consumed_input_representation_budget_feasibility_not_paper_comparison",
         automatic_fresh_materialization=False,
         automatic_large_campaign=False,
@@ -82,6 +104,8 @@ def check(root, expected):
     )
     if "verify_initial_cap" in scope:
         registered["verify_initial_cap"] = verify_cap
+    if "recertify_existing_memory" in scope:
+        registered["recertify_existing_memory"] = recertify
     if scope != registered:
         raise ValueError("scope/source binding changed")
     return plan, scope
@@ -137,7 +161,11 @@ def cpu(root, expected):
             options=options, parent_records=str(record_path), parent_records_sha256=sha(record_path)
         ),
     )
-    jobs = [dict(method=m, samples=scope["consumed_sample_indices"]) for m in scope["methods"]]
+    jobs = [
+        dict(method=m, samples=scope["consumed_sample_indices"][i : i + 16])
+        for m in scope["methods"]
+        for i in range(0, len(scope["consumed_sample_indices"]), 16)
+    ]
     campaign.launch_phase(root, "audit", jobs, submitter=submit)
 
 
@@ -163,6 +191,10 @@ def worker(root, expected, index):
     if sha(Path(sealed_options["parent_records"])) != sealed_options["parent_records_sha256"]:
         raise ValueError("frozen baseline options changed")
     plan = dict(plan, options=sealed_options["options"])
+    if sha(PARENT / "quality/analysis/selected_quality_rows.json") != QUALITY_ROWS_SHA256:
+        raise ValueError("frozen prediction/byte records changed")
+    old = campaign.read(PARENT / "quality/analysis/selected_quality_rows.json")
+    parent_rows = {(r["method"], r["sample_index"]): r for r in old}
     if scope.get("verify_initial_cap"):
         old = campaign.read(PARENT / "quality/analysis/selected_quality_rows.json")
         target = [
@@ -258,7 +290,11 @@ def worker(root, expected, index):
                     torch.cuda.empty_cache()
                     with WholeRequestEnvelope(adapter.model) as audit:
                         values, details = campaign.execute(
-                            adapter, sample, plan, job["method"], audit=True
+                            adapter,
+                            sample,
+                            plan,
+                            job["method"],
+                            audit=not scope.get("recertify_existing_memory", False),
                         )
                         # execute() has already released packets/detokenized. Its
                         # exported logits are CPU, not CUDA KV storage.
@@ -266,9 +302,36 @@ def worker(root, expected, index):
                     row.update(
                         details, status="completed", whole_request_envelope=audit.certificate
                     )
+                    if scope.get("recertify_existing_memory"):
+                        previous = parent_rows[job["method"], sample_index]
+                        if any(
+                            row[key] != previous[key]
+                            for key in (
+                                "sample_id",
+                                "generated_token_ids",
+                                "initial_encoded_bytes",
+                                "final_encoded_bytes",
+                            )
+                        ):
+                            raise RuntimeError(
+                                "memory-only rerun changed frozen prediction or storage"
+                            )
+                        row["frozen_prediction_and_endpoints_identical"] = True
+                        reference = parent_rows["full_kv", sample_index]
+                        row["peak_separation"] = certify_peak_separation(
+                            audit.certificate,
+                            candidate_final_bytes=row["final_encoded_bytes"],
+                            reference_final_bytes=reference["storage"][
+                                "final_active_kv_storage_bytes"
+                            ],
+                        )
+                        row["measurement_type"] = (
+                            "whole_request_memory_recertification_existing_quality_cohort"
+                        )
                 except Exception as error:
                     from mosaickv.evaluation.initial_byte_budget import InitialByteBudgetExceeded
 
+                    row["status"] = "failed"
                     row["error"] = traceback.format_exc()
                     if audit is not None:
                         row["whole_request_envelope"] = audit.certificate
@@ -352,6 +415,47 @@ def analyze(root, expected):
         if r["method"] == "mosaickv_exact" and r["sample_id"] in ids
     }
     compressed = [r for r in rows if r["method"] != "full_kv"]
+    if scope.get("recertify_existing_memory"):
+        import numpy as np
+
+        successful = [r for r in rows if r["status"] == "completed"]
+        complete = (
+            not failures
+            and len(rows) == 256
+            and len(successful) == 256
+            and {r["sample_index"] for r in rows} == set(range(2, 258))
+        )
+        reductions = [
+            r["peak_separation"]["peak_reduction_fraction_lower_bound"] for r in successful
+        ]
+        write_once(
+            folder / "decision.json",
+            dict(
+                complete=complete,
+                samples_planned=256,
+                samples_completed=len(successful),
+                source_sha=plan["source_sha"],
+                parent_quality_rows_sha256=QUALITY_ROWS_SHA256,
+                frozen_predictions_and_endpoints_identical=complete,
+                all_complete_request_upper_bounds_certified=complete
+                and all(
+                    r["whole_request_envelope"]["kv_peak_upper_bound_certified"] for r in successful
+                ),
+                strictly_smaller_peak_vs_FullKV_proven_for_every_sample=complete
+                and all(
+                    r["peak_separation"]["strictly_smaller_whole_request_CUDA_KV_peak_proven"]
+                    for r in successful
+                ),
+                minimum_peak_reduction_lower_bound=float(min(reductions)) if reductions else None,
+                mean_peak_reduction_lower_bound=float(np.mean(reductions)) if reductions else None,
+                exact_whole_request_KV_peak_measured=False,
+                compressed_baseline_superiority_proven=False,
+                paper_ready_full_comparison=False,
+                no_new_quality_or_freshness_claim=True,
+                producer_failures=failures,
+            ),
+        )
+        return
     if scope.get("verify_initial_cap"):
         candidate = [r for r in rows if r["method"] == "mosaickv_exact"]
         rejected = [r for r in rows if r["method"] == "prompt_attention_topk"]
@@ -436,9 +540,14 @@ def main():
     parser.add_argument("--root", required=True, type=Path)
     parser.add_argument("--plan-sha")
     parser.add_argument("--verify-initial-cap", action="store_true")
+    parser.add_argument("--recertify-existing-memory", action="store_true")
     args = parser.parse_args()
     if args.action == "prepare":
-        prepare(args.root, verify_initial_cap=args.verify_initial_cap)
+        prepare(
+            args.root,
+            verify_initial_cap=args.verify_initial_cap,
+            recertify_existing_memory=args.recertify_existing_memory,
+        )
     elif args.action == "cpu":
         cpu(args.root, args.plan_sha)
     elif args.action == "audit":

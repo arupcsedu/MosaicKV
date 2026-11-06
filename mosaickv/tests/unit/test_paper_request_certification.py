@@ -7,6 +7,7 @@ import pytest
 from mosaickv.evaluation.paper_request_certification import (
     WholeRequestEnvelope,
     allocator_envelope,
+    certify_peak_separation,
     comparison_admission,
 )
 
@@ -146,3 +147,23 @@ def test_missing_envelope_and_exact_flag_without_bytes_are_not_certificates():
     reasons = {r["reason"] for r in admit(data)["blockers"]}
     assert "missing_request_envelope" in reasons
     assert "missing_exact_KV_peak_bytes" in reasons
+
+
+def test_peak_inequality_uses_safe_opposite_sided_bounds_not_guessed_peaks():
+    result = certify_peak_separation(
+        envelope(), candidate_final_bytes=120, reference_final_bytes=200
+    )
+    assert result["peak_ratio_upper_bound"] == 0.75
+    assert result["peak_reduction_fraction_lower_bound"] == 0.25
+    assert result["strictly_smaller_whole_request_CUDA_KV_peak_proven"]
+    assert not result["exact_peak_measured"] and not result["byte_matched_comparison"]
+    uncertain = certify_peak_separation(
+        envelope(), candidate_final_bytes=120, reference_final_bytes=140
+    )
+    assert not uncertain["strictly_smaller_whole_request_CUDA_KV_peak_proven"]
+    with pytest.raises(ValueError):
+        certify_peak_separation(envelope(), candidate_final_bytes=151, reference_final_bytes=200)
+    with pytest.raises(ValueError):
+        certify_peak_separation(
+            envelope(complete_request=False), candidate_final_bytes=120, reference_final_bytes=200
+        )

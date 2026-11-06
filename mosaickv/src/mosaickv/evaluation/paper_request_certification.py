@@ -146,6 +146,36 @@ class WholeRequestEnvelope:
         return False
 
 
+def certify_peak_separation(certificate, *, candidate_final_bytes, reference_final_bytes):
+    """Certify a peak inequality, without guessing either exact peak.
+
+    candidate_peak <= upper; reference_peak >= measured reference final KV.
+    Thus candidate_peak/reference_peak <= upper/reference_final. This is not
+    an equal-byte compressed-baseline comparison.
+    """
+    upper = certificate.get("kv_peak_upper_bound_bytes")
+    if (
+        certificate.get("kv_peak_upper_bound_certified") is not True
+        or not positive_integer(upper)
+        or not positive_integer(candidate_final_bytes)
+        or not positive_integer(reference_final_bytes)
+        or candidate_final_bytes > upper
+    ):
+        raise ValueError("complete upper certificate and consistent measured KV endpoints required")
+    ratio = upper / reference_final_bytes
+    return dict(
+        candidate_peak_lower_bound_bytes=candidate_final_bytes,
+        candidate_peak_upper_bound_bytes=upper,
+        reference_peak_lower_bound_bytes=reference_final_bytes,
+        peak_ratio_upper_bound=ratio,
+        peak_reduction_fraction_lower_bound=1 - ratio,
+        strictly_smaller_whole_request_CUDA_KV_peak_proven=ratio < 1,
+        exact_peak_measured=False,
+        byte_matched_comparison=False,
+        proof="candidate_peak<=CUDA_allocator_envelope;reference_peak>=reference_final_KV",
+    )
+
+
 def comparison_admission(
     rows: Sequence[Mapping[str, Any]],
     *,

@@ -102,3 +102,27 @@ The first diagnostic's controller omitted `--apply`. Its dry-run CPU controller
 was canceled before any worker started and replaced by an apply-enabled
 controller without changing the GPU source or array. The launcher now includes
 `--apply` and has a regression preventing silent dry-run admission.
+
+## Certifying a peak inequality on the existing quality cohort
+
+An exact KV peak is not necessary to prove a conservative peak inequality.
+For each example, candidate CUDA KV peak is at most its complete-request
+allocator envelope U, while FullKV peak is at least its measured final KV F.
+Therefore the peak ratio is at most U/F, and peak reduction is at least 1-U/F.
+If U < F this proves a strict reduction without calling U an exact KV peak.
+It does not prove a reduction against compressed baselines, and cannot satisfy
+an equal-measured-peak comparison by itself.
+
+`--recertify-existing-memory` repeats only the frozen candidate's 256 existing
+quality inputs, with the unchanged 128-token generation and label-blind codec.
+The original 512 paired prediction records are SHA-256 bound in source. Every
+new row must exactly match its previous token IDs and initial/final storage.
+The new measurement covers complete requests, not just decoding. Previously
+missing exact peaks remain null; upper bounds and proven inequalities are
+separate new observations. This is memory recertification, not a new quality,
+freshness, baseline-superiority or full-six-component experiment.
+
+Sixteen one-GPU shards (16 existing inputs each) and a finite afterany analysis
+reuse the existing ledger. No benchmark scoring is repeated and no parameters
+are chosen from answer differences. Any changed prediction, endpoint, missing
+row or failed producer blocks complete-cohort certification.
