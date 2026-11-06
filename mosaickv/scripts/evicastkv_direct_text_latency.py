@@ -119,6 +119,7 @@ def execute(
             "coalesce_transport_nonzero", plan.get("coalesce_transport_nonzero", False)
         ),
         fused_transport_predicate=record.get("fused_transport_predicate", False),
+        uniform_attention_core=record.get("uniform_attention_core", False),
         batch_source_validation=record.get(
             "batch_source_validation", plan.get("batch_source_validation", False)
         ),

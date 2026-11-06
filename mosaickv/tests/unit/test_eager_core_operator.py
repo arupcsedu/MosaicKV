@@ -14,10 +14,20 @@ from mosaickv.evaluation.eager_core_operator import (
 
 @pytest.mark.parametrize("mask_dtype", [None, torch.bfloat16, torch.float32])
 @pytest.mark.parametrize("reuse_views", [False, True])
+@pytest.mark.parametrize("explicit_cast", [False, True])
 @torch.inference_mode()
-def test_out_operations_match_original_cpu_api_and_keep_one_lease(mask_dtype, reuse_views):
+def test_out_operations_match_original_cpu_api_and_keep_one_lease(
+    mask_dtype, reuse_views, explicit_cast
+):
     lease = torch.full((1, 2, 17, 128), -71.0, dtype=torch.bfloat16)
-    core = Core(lease, mask_dtype=mask_dtype, graph=False, frequencies={}, reuse_views=reuse_views)
+    core = Core(
+        lease,
+        mask_dtype=mask_dtype,
+        graph=False,
+        frequencies={},
+        reuse_views=reuse_views,
+        explicit_cast=explicit_cast,
+    )
     for length in (7, 13, 7):
         q = torch.randn(1, 2, 1, 128).bfloat16()
         k = torch.randn(1, 2, length, 128).bfloat16()
@@ -100,3 +110,19 @@ def test_replays_complete_before_graphs_reset_and_owners_retire(monkeypatch):
     assert core.closed and core.lease is None
     core.close()
     assert len(events) == 4
+
+
+@torch.inference_mode()
+def test_abort_only_retires_failed_transaction_without_allowing_resumption():
+    core = Core(
+        torch.zeros(1, 2, 17, 128, dtype=torch.bfloat16),
+        mask_dtype=None,
+        graph=False,
+        frequencies={},
+    )
+    query = torch.zeros_like(core.q)
+    core.scores_for(query, None, 8)
+    core.abort()
+    assert core.closed and core.aborted and not core.tensors()
+    with pytest.raises(ValueError, match="transaction"):
+        core.scores_for(query, None, 8)

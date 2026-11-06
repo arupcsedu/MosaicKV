@@ -33,6 +33,9 @@ def score_into(query, key, mask, scaling, views):
     if mask is not None:
         source = views.masked if mask.dtype == torch.float32 else views.scores
         torch.add(views.scores, mask, out=source)
+    if getattr(views, "explicit_cast", False) and source.dtype != torch.float32:
+        views.masked.copy_(source)  # The same exact BF16->FP32 cast, now in an owned buffer.
+        source = views.masked
     # The SAME native softmax overload/dtype as functional.softmax, with an
     # explicit output owner. Do not replace BF16 input by a different reducer.
     torch.ops.aten.softmax.int_out(source, -1, torch.float32, out=views.probabilities_float)
@@ -65,6 +68,8 @@ class Core:
         minimum_reuses=16,
         audit=False,
         reuse_views=False,
+        explicit_cast=False,
+        capture_observer=None,
     ):
         if (
             lease.ndim != 4
@@ -79,6 +84,8 @@ class Core:
             or type(graph) is not bool
             or type(audit) is not bool
             or type(reuse_views) is not bool
+            or type(explicit_cast) is not bool
+            or (capture_observer is not None and not callable(capture_observer))
             or type(minimum_reuses) is not int
             or minimum_reuses != 16
         ):
@@ -96,6 +103,8 @@ class Core:
         self.lease, self.mask_dtype = lease, mask_dtype
         self.graph, self.frequencies, self.minimum_reuses = graph, dict(frequencies), minimum_reuses
         self.audit = audit
+        self.explicit_cast, self.capture_observer = explicit_cast, capture_observer
+        self.aborted = False
         self.reuse_views, self.view_cache = reuse_views, {}
         self.view_builds = self.view_reuses = 0
         self.pool = torch.cuda.graph_pool_handle() if graph else None
@@ -106,7 +115,7 @@ class Core:
         self.scores = torch.empty(size, device=lease.device, dtype=lease.dtype)
         self.masked = (
             torch.empty(size, device=lease.device, dtype=torch.float32)
-            if mask_dtype == torch.float32
+            if mask_dtype == torch.float32 or explicit_cast
             else None
         )
         self.probabilities_float = torch.empty(size, device=lease.device, dtype=torch.float32)
@@ -148,6 +157,7 @@ class Core:
             probabilities=self.probabilities[:count].view(shape),
             mask=None if self.mask is None else self.mask[:length].view(1, 1, 1, length),
             lease=self.lease[..., :length, :],
+            explicit_cast=self.explicit_cast,
         )
         self.view_builds += 1
         if self.reuse_views:
@@ -162,10 +172,15 @@ class Core:
         # per-layout cuBLAS stream/workspace. No request tensors live there.
         stream = capture_stream(self.lease.device)
         stream.wait_stream(current)
+        if self.capture_observer is not None:
+            self.capture_observer("before_warm")
         with torch.cuda.stream(stream):
             function()
             function()
         self.warm_calls += 2
+        current.wait_stream(stream)
+        if self.capture_observer is not None:
+            self.capture_observer("after_warm")
         graph = torch.cuda.CUDAGraph()
         if self.audit:
             current.wait_stream(stream)
@@ -182,6 +197,8 @@ class Core:
             finally:
                 graph.capture_end()
         current.wait_stream(stream)
+        if self.capture_observer is not None:
+            self.capture_observer("after_capture")
         if self.audit:
             torch.cuda.synchronize()
             self.capture_transient_peak = max(
@@ -260,6 +277,12 @@ class Core:
         self.q = self.scores = self.masked = None
         self.probabilities_float = self.probabilities = self.out = self.mask = None
         self.lease = None
+        self.capture_observer = None
+
+    def abort(self):
+        self.aborted = True
+        self.pending = None  # Failed request only; never continue generation from this state.
+        self.close()
 
 
 def same_words(x, y):
@@ -301,7 +324,13 @@ def warm_backend():
 
 
 @torch.inference_mode()
-def controls(*, lengths=(601, 605, 665, 669, 727, 731, 601), capacity=731, reuse_views=False):
+def controls(
+    *,
+    lengths=(601, 605, 665, 669, 727, 731, 601),
+    capacity=731,
+    reuse_views=False,
+    explicit_cast=False,
+):
     if (
         type(capacity) is not int
         or not 1 <= capacity <= 1024
@@ -328,6 +357,7 @@ def controls(*, lengths=(601, 605, 665, 669, 727, 731, 601), capacity=731, reuse
                 frequencies=dict.fromkeys(lengths, 32),
                 audit=True,
                 reuse_views=reuse_views,
+                explicit_cast=explicit_cast,
             )
             old = active_allocations()
             checks = []
@@ -403,6 +433,7 @@ def controls(*, lengths=(601, 605, 665, 669, 727, 731, 601), capacity=731, reuse
                     generator_private_bytes=private_bytes,
                     retired=True,
                     reuse_views=reuse_views,
+                    explicit_cast=explicit_cast,
                     view_descriptor_builds=core.view_builds,
                     view_descriptor_reuses=core.view_reuses,
                     **counts,

@@ -275,10 +275,11 @@ def run(
         if shared_workspace:
             stack.callback(cache.release_workspace)
         stack.enter_context(IsolatedStorageTransport(adapter, cache))
+        sequential_transport = None
         if sequential_lease:
             from mosaickv.evaluation.sequential_kv_lease import SequentialAttentionTransport
 
-            stack.enter_context(SequentialAttentionTransport(adapter, cache))
+            sequential_transport = stack.enter_context(SequentialAttentionTransport(adapter, cache))
         from mosaickv.evaluation.exact_head_bypass import ExactHeadTransport, HeadBypassFormat
 
         bypass = None
@@ -337,6 +338,8 @@ def run(
         if shared_workspace:
             cache.release_workspace()
         if prompt_graph_reader:
+            if sequential_transport is not None:
+                sequential_transport.close_core()
             if input_norm is not None:
                 input_norm.close()
             if segment is not None:

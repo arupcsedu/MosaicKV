@@ -261,6 +261,9 @@ class SequentialAttentionTransport:
         original = llama.eager_attention_forward
         if getattr(original, "_evicastkv_sequential_private", False):
             raise RuntimeError("nested sequential request contexts unsupported")
+        from mosaickv.evaluation.uniform_core_transport import bind
+
+        self.core_binding = bind(self.cache)
 
         def forward(module, query, key, value, attention_mask, scaling, dropout=0.0, **kwargs):
             if module not in mapping:
@@ -283,6 +286,17 @@ class SequentialAttentionTransport:
                 raise RuntimeError("only isolated one-token inference may consume this lease")
             if query.device.type == "cuda" and torch.cuda.is_current_stream_capturing():
                 raise NotImplementedError("sequential diagnostic does not support CUDA graphs")
+            if self.core_binding is not None and self.core_binding.eligible:
+                mask = None if attention_mask is None else attention_mask[:, :, :, : key.shape[-2]]
+                weights = self.core_binding.scores(query, key, mask, scaling)
+                layer.materialize_component(1)
+                output = self.core_binding.values(key.shape[-2])
+                from mosaickv.evaluation.prompt_prefetch import after_attention
+                from mosaickv.evaluation.graph_lookahead import after_attention as lookahead
+
+                after_attention(layer)
+                lookahead(layer)
+                return output, weights
             # Exact pinned eager source order; native repeat_kv is identity for MHA.
             weights = torch.matmul(query, key.transpose(2, 3)) * scaling
             if attention_mask is not None:
@@ -305,8 +319,15 @@ class SequentialAttentionTransport:
         self.stack.enter_context(patch.object(llama, "eager_attention_forward", forward))
         return self
 
+    def close_core(self, *, failed=False):
+        if getattr(self, "core_binding", None) is not None:
+            self.core_binding.close(failed=failed)
+
     def __exit__(self, *args):
-        return self.stack.__exit__(*args)
+        try:
+            self.close_core(failed=bool(args and args[0] is not None))
+        finally:
+            self.stack.__exit__(*args)
 
 
 def paired_run(adapter, prefill, formats, **kwargs):
