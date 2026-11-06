@@ -50,7 +50,7 @@ def prepare(root, revision):
             resolved_arm_overrides=[
                 dict(method=m, arm=a, overrides=base.overrides(m, a)) for m, a in ARMS
             ],
-            common_prefill_owner_catalog="immutable_layer_storage_segments_v1",
+            common_prefill_owner_catalog="immutable_layer_and_extra_segments_v2",
             independent_full_owner_reconciliation_required=True,
             all_original_KV_words_and_storage_boundaries_unchanged=True,
             metadata_fix_offered_to_every_baseline=True,
@@ -73,7 +73,7 @@ def execute(*args, **kwargs):
     value = OLD_EXECUTE(*args, **kwargs)
     info = value["prefill_storage"]["ownership_catalog"]
     if (
-        info["policy"] != "immutable_layer_storage_segments_v1"
+        info["policy"] != "immutable_layer_and_extra_segments_v2"
         or info["tensor_owners_retained"]
         or info["independent_full_enumerations"] != 1
     ):

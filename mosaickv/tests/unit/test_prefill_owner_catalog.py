@@ -89,6 +89,45 @@ def test_layerwise_identity_work_is_linear_not_a_full_prefix_rescan(monkeypatch)
     assert long <= 3.1 * short
 
 
+def test_baseline_per_layer_extra_updates_do_not_invalidate_all_sealed_packets(monkeypatch):
+    original = mod.identity
+
+    def count(layers):
+        calls = 0
+
+        def spy(tensor):
+            nonlocal calls
+            calls += 1
+            return original(tensor)
+
+        monkeypatch.setattr(mod, "identity", spy)
+        cache = mod.RetiringPrefillCache(layers, audit=False)
+        extra = torch.ones(7)
+        for i in range(layers):
+            cache.layers[i].packet = packet(torch.ones(5), torch.ones(6))
+            cache.layer_owners_changed(i)
+            cache.extra_tensors = (extra[:3],)
+            cache.observe()
+        cache.record(require_complete=False)
+        return calls
+
+    short, long = count(4), count(12)
+    assert long <= 3.1 * short
+
+
+def test_extra_replacement_does_not_hide_unannounced_sealed_layer_mutation():
+    cache = mod.RetiringPrefillCache(1, audit=False)
+    cache.layers[0].packet = packet(torch.ones(5))
+    cache.layer_owners_changed(0)
+    cache.observe()
+    cache.layers[0].packet = packet(torch.ones(6))
+    cache.extra_tensors = (torch.ones(7),)
+    with pytest.raises(RuntimeError, match="independent enumeration"):
+        cache.record(require_complete=False)
+    cache.owners_changed()
+    assert cache.record(require_complete=False)["final_prefill_cache_bytes"] == 4 * (6 + 7)
+
+
 @pytest.mark.parametrize("index", [True, -1, 2, 1.0])
 def test_invalid_changed_layer_rejected(index):
     with pytest.raises(ValueError, match="valid changed"):

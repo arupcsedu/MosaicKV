@@ -8,8 +8,10 @@ RetiringPrefillCache and SelectedRetiringCache and all compared methods.
 
 Keep metadata segments for immutable sealed layers; invalidate only the known
 changed layer on native K/V installation, sealing, or lossless-archive
-replacement. Generic `owners_changed()` and extra-tensor replacement still
-invalidate everything. Recombine current segment keys to deduplicate aliases
+replacement. Generic `owners_changed()` still invalidates everything. Extra
+replacement invalidates only its own segment: StreamingBaseline calls `_extra`
+on every layer, and discarding all sealed-layer metadata there would preserve
+the baseline's quadratic rescan. Recombine current segment keys to deduplicate aliases
 across layers, extras and observed temporaries. Compute each tensor identity
 once, not twice. Segments hold only device/pointer/size tuples and byte counts,
 never tensor/view/storage owners. Peak-observation cadence is unchanged.
@@ -24,7 +26,9 @@ peak.
 
 Preserve every selected K/V word, packet digest, logical position and initial,
 final and decode-owned peak storage. CPU tests cover aliasing, invalidation,
-owner retirement, stale-owner rejection and linear identity work. The GPU
+owner retirement, stale-owner rejection and linear identity work even with
+the per-layer extra updates actually used by baselines. Extra replacement
+must never conceal an unannounced sealed-layer mutation. The GPU
 screen rechecks all 128 parent logits and the existing outer packet audits
 before five warmups and three randomized paired repetitions on the same two
 consumed inputs. Use two one-A100/twelve-CPU workers, twenty-minute limits,

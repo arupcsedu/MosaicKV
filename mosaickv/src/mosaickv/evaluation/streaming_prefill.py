@@ -86,7 +86,10 @@ class RetiringPrefillCache(Cache):
     @extra_tensors.setter
     def extra_tensors(self, tensors):
         self._extra_tensors = tuple(tensors)
-        self.owners_changed()
+        # Extra ownership can change each baseline layer. It does not mutate
+        # any immutable sealed packet; invalidate only this independent segment.
+        self._extra_storage = None
+        self._owned_storage = None
 
     def owners_changed(self):
         # Sealed packets are immutable. Cache only storage IDENTITIES/byte
@@ -215,7 +218,7 @@ class RetiringPrefillCache(Cache):
             boundary="prefill_owned_KV_encoded_payload_and_observed_encoder_overlap",
             final_prefill_cache_bytes=backing_bytes(tensors),
             ownership_catalog=dict(
-                policy="immutable_layer_storage_segments_v1",
+                policy="immutable_layer_and_extra_segments_v2",
                 tensor_owners_retained=False,
                 identity_evaluations=self._catalog_identity_calls,
                 metadata_rebuilds=self._catalog_rebuilds,

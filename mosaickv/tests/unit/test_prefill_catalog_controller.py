@@ -6,7 +6,7 @@ import pytest
 
 def test_every_arm_requires_a_real_independent_owner_check(monkeypatch):
     info = dict(
-        policy="immutable_layer_storage_segments_v1",
+        policy="immutable_layer_and_extra_segments_v2",
         tensor_owners_retained=False,
         independent_full_enumerations=1,
     )
