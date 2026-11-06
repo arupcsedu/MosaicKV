@@ -227,6 +227,8 @@ class Core:
             return
         if self.pending is not None:
             raise RuntimeError("cannot retire an incomplete K-to-V transaction")
+        if self.lease.device.type == "cuda":
+            torch.cuda.synchronize()  # Replays must complete BEFORE reset frees graph owners.
         for pair in self.entries.values():
             for graph in pair:
                 graph.reset()
@@ -280,7 +282,10 @@ def warm_backend():
 @torch.inference_mode()
 def controls():
     from mosaickv.evaluation.lossless_prompt_cache import backing_bytes
-    from mosaickv.evaluation.prompt_graph_reader import active_allocations, generator_metadata
+    from mosaickv.evaluation.prompt_graph_reader import (
+        allocator_blocks as active_allocations,
+    )
+    from mosaickv.evaluation.prompt_graph_reader import generator_metadata
 
     backend_bytes = warm_backend()
     generator = torch.Generator(device="cuda").manual_seed(20261106)
@@ -317,13 +322,19 @@ def controls():
                 if not same_words(got_weights, expected_weights) or not same_words(
                     lease[..., :length, :], k
                 ):
-                    raise RuntimeError("QK/softmax changed an original probability or key word")
+                    raise RuntimeError(
+                        f"QK/softmax words differ: graph={graph}, mask={mask_dtype}, "
+                        f"length={length}, input_index={index}"
+                    )
                 lease[..., :length, :].copy_(v)
                 got_output = core.values_for(length)
                 if not same_words(got_output, expected_output) or not same_words(
                     lease[..., :length, :], v
                 ):
-                    raise RuntimeError("PV changed an original output or value word")
+                    raise RuntimeError(
+                        f"PV words differ: graph={graph}, mask={mask_dtype}, "
+                        f"length={length}, input_index={index}"
+                    )
                 if not bool((lease[..., length:, :] == -71).all()):
                     raise RuntimeError("core touched unused physical capacity")
                 checks.append(dict(length=length, changed_inputs=index, all_words_identical=True))
@@ -336,7 +347,7 @@ def controls():
             if private_bytes:
                 generator_metadata(old, after, private_bytes)
             workspace = backing_bytes(core.tensors())
-            if workspace + core.capture_transient_peak > 384 * 1024:
+            if workspace + core.capture_transient_peak + private_bytes > 384 * 1024:
                 raise RuntimeError("fixed non-KV workspace exceeds registered bound")
             pool_reserved = (
                 sum(

@@ -52,3 +52,9 @@ afterany terminal analysis. No model weights/datasets, independent quality N=0.
 Whole-request GPU peak and paper-quality evidence remain unestablished. This
 module is not wired into model inference; common model integration would need a
 separate same-input 128-logit, packet, storage, and full-request validation.
+
+The first immutable GPU attempt stopped at the import boundary, before any
+attention calculation: the actual allocator snapshot API is `allocator_blocks`.
+A CPU-only pre-device barrier regression now exercises that import. A separate
+teardown regression requires completion synchronization before resetting graph
+owners. Preserve the failed attempt, and retry under a new immutable source/root.

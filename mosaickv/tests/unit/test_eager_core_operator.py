@@ -1,6 +1,9 @@
+from types import SimpleNamespace
+
 import pytest
 import torch
 
+from mosaickv.evaluation import eager_core_operator as operator
 from mosaickv.evaluation.eager_core_operator import (
     Core,
     opportunities,
@@ -71,3 +74,27 @@ def test_pending_transaction_cannot_be_overwritten_or_retired():
         core.close()
     core.values_for(8)
     core.close()
+
+
+def test_real_cuda_controls_resolve_imports_before_device_barrier(monkeypatch):
+    def barrier():
+        raise RuntimeError("CPU-only import boundary passed")
+
+    monkeypatch.setattr(operator, "warm_backend", barrier)
+    with pytest.raises(RuntimeError, match="CPU-only import boundary passed"):
+        operator.controls()
+
+
+def test_replays_complete_before_graphs_reset_and_owners_retire(monkeypatch):
+    events = []
+    fake_graph = SimpleNamespace(reset=lambda: events.append("reset"))
+    core = Core.__new__(Core)
+    core.closed, core.pending = False, None
+    core.lease = SimpleNamespace(device=SimpleNamespace(type="cuda"))
+    core.entries = {1: (fake_graph, fake_graph)}
+    monkeypatch.setattr(torch.cuda, "synchronize", lambda: events.append("synchronize"))
+    core.close()
+    assert events == ["synchronize", "reset", "reset", "synchronize"]
+    assert core.closed and core.lease is None
+    core.close()
+    assert len(events) == 4
