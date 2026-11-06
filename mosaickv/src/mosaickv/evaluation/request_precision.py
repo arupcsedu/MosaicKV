@@ -407,13 +407,19 @@ def complete_request(
     first_logit_ready = time.monotonic() - started
     record: dict[str, Any]
     if method == "full_kv":
+        from contextlib import nullcontext
+
+        from mosaickv.evaluation.packed_attention_decode import AppendAudit
+
+        append_audit = AppendAudit(prefill.state.past_key_values) if audit else None
 
         def ordinary() -> Any:
             logits, token = [prefill.logits.detach().reshape(-1).float()], prefill.next_token_id
-            for _ in range(127):
-                out = adapter.decode_one_token(token, prefill.state, capture_queries=False)
-                logits.append(out.logits.detach().reshape(-1).float())
-                token = out.next_token_id
+            with append_audit if append_audit is not None else nullcontext():
+                for _ in range(127):
+                    out = adapter.decode_one_token(token, prefill.state, capture_queries=False)
+                    logits.append(out.logits.detach().reshape(-1).float())
+                    token = out.next_token_id
             return torch.stack(logits).cpu()
 
         initial = sum(
@@ -433,8 +439,16 @@ def complete_request(
                 final_active_kv_storage_bytes=final,
                 peak_active_kv_storage_bytes=None,
                 boundary="ordinary_fullKV_KV_transaction_peak_not_certified",
-            )
+            ),
+            decode_owned_peak_bytes=append_audit.peak if append_audit is not None else None,
+            decode_owned_peak_boundary="native_KV_backing_and_old_new_append_result_overlap",
+            decode_owned_peak_excludes="attention_activations,weights,vendor_workspace,prefill",
+            native_KV_append_observations=append_audit.appends if append_audit is not None else 0,
         )
+        if append_audit is not None and append_audit.appends != 2 * 127 * len(
+            adapter._legacy_layers(prefill.state.past_key_values)[0]
+        ):
+            raise RuntimeError("incomplete native FullKV append audit")
         proof = dict(full_kv=True, no_compression=True)
         retired = None
     else:

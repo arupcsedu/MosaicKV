@@ -389,7 +389,7 @@ def execute(adapter, sample, plan, method, *, audit=False, original=False, reten
             precision="ordinary" if method == "full_kv" else "query3",
             profile_path=plan["profile_path"],
             ratio=1.0,
-            audit=False,
+            audit=audit,
         )
         packets = ()
     else:
