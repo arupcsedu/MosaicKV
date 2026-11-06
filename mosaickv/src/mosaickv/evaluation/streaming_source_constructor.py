@@ -34,7 +34,9 @@ class StreamingDirectSource:
         self.length, self.cache = prepared.logical_sequence_length, cache
         self.phase_identity, self.phases, self.identity, self.ids = None, None, None, None
         self.text_phases, self.memberships, self.finished = None, [], False
-        if self.length % 2:
+        from mosaickv.evaluation.paper_geometry import odd_length_allowed
+
+        if self.length % 2 and not odd_length_allowed(self.length):
             raise NotImplementedError("only audited even-length half-capacity prompts supported")
         if cache is None or len(profile) != len(cache.layers):
             raise ValueError("complete immutable global profile required")

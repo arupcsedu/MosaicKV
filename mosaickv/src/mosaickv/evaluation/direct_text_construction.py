@@ -129,6 +129,17 @@ def build(packet, pair, positions, text, modes, *, attention=None, report=None):
 
 class Construction:
     def __init__(self, policy):
+        from mosaickv.evaluation.paper_geometry import enabled
+
+        self.request_bound = (
+            enabled()
+            and set(policy) == {"modes", "maximum_added_bytes", "accounting_mode"}
+            and policy["accounting_mode"] == "request_local_base_plus_allowance"
+        )
+        if self.request_bound:
+            policy = dict(policy)
+            policy.pop("accounting_mode")
+            policy.update(base_private_bytes=0, expected_private_bytes=0)
         if (
             set(policy)
             != {"modes", "maximum_added_bytes", "base_private_bytes", "expected_private_bytes"}
@@ -152,12 +163,17 @@ class Construction:
         ):
             raise ValueError("one registered source/cached mode per layer required")
         self.policy, self.count, self.cached, self.materialized = dict(policy), 0, [], []
+        self.base_private_bytes = 0
 
     def optimize(self, packet, positions, text, pair, attention):
         if self.count >= len(self.modes):
             raise RuntimeError("more construction calls than frozen layers")
         index = self.count
         self.count += 1
+        # Before delta conversion, each layer owns its private packet. Shared
+        # rotary data are excluded by private(); do not retain any tensor owner.
+        if self.request_bound:
+            self.base_private_bytes += backing_bytes(packet.private())
         modes = self.modes[index]
         if modes == ("source", "source"):
             return packet, dict(direct_text_noop=True)
@@ -172,7 +188,10 @@ class Construction:
         if self.count != len(self.modes) or len(packets) != self.count:
             raise RuntimeError("exactly one construction call per frozen layer required")
         size = backing_bytes(tuple(t for p in packets for t in p.private()))
-        if size != self.policy["expected_private_bytes"]:
+        if self.request_bound:
+            if size > self.base_private_bytes + self.policy["maximum_added_bytes"]:
+                raise RuntimeError("request-local cached text exceeds the unchanged byte allowance")
+        elif size != self.policy["expected_private_bytes"]:
             raise RuntimeError(
                 "direct packet storage differs from frozen cached-text representation: "
                 f"expected={self.policy['expected_private_bytes']}, actual={size}"
@@ -184,6 +203,10 @@ class Construction:
             bypassed_text_fits=self.count,
             same_frozen_representation_required=True,
             no_labels_or_answers_used=True,
+            request_local_accounting=self.request_bound,
+            base_private_bytes=self.base_private_bytes
+            if self.request_bound
+            else self.policy["base_private_bytes"],
         )
 
 

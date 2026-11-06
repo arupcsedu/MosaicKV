@@ -57,7 +57,9 @@ class State:
     def begin(self, index, packet, text):
         if self.closed or index != len(self.layers) or index >= len(self.modes):
             raise RuntimeError("one ordered private constructor layer required")
-        if packet.shape not in ((1, 32, 600, 128), (1, 32, 604, 128)):
+        from mosaickv.evaluation.paper_geometry import source_shape_allowed
+
+        if not source_shape_allowed(packet.shape):
             raise NotImplementedError("only the two consumed full-MHA source geometries supported")
         text = tuple(text)
         if (

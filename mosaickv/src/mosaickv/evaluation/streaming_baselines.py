@@ -105,7 +105,9 @@ def source_capacities(profile, length, *, heads=32):
     from mosaickv.selection.profile_lifetime import allocate_profile_lifetime
 
     count, cost = len(profile), heads * 128 * 2 * 2
-    if not count or length % 2:
+    from mosaickv.evaluation.paper_geometry import odd_length_allowed
+
+    if not count or (length % 2 and not odd_length_allowed(length)):
         raise NotImplementedError("audited even-length BF16 full-MHA prompts only")
     capacity = allocate_profile_lifetime(
         tuple(profile),
