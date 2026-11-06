@@ -44,8 +44,13 @@ def test_audit_does_not_rescan_all_sealed_packet_descriptors_on_every_operation(
     extra = torch.zeros(1024)
     for _ in range(100):
         cache.observe((extra,))
-    assert len(calls) == 1
+    assert len(calls) == 0
     cache.extra_tensors = (extra[:3],)
     cache.observe()
-    assert len(calls) == 2
+    assert len(calls) == 0
     assert cache.peak_bytes == extra.untyped_storage().nbytes()
+    report = cache.record(require_complete=False)
+    assert len(calls) == 1  # The independent full scan is deferred, never removed.
+    assert report["final_prefill_cache_bytes"] == extra.untyped_storage().nbytes()
+    assert report["ownership_catalog"]["independent_full_enumerations"] == 1
+    assert report["observations"] == 101
