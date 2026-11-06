@@ -308,6 +308,18 @@ def apply_transport_patch(patch, target, *, prompt_length):
         target[0, ids // (prompt_length * d), ids // d % prompt_length, ids % d] = patch.values
 
 
+def transport_bad_mask(expected, output):
+    """Keep legacy corrections AND cover the unchanged actual/reference guard.
+
+    Relative closeness is asymmetric; BF16 verification also rounds differently
+    from the legacy FP32 mask. Only previously invalid constructions gain extra
+    repairs. Tolerances, protected-row rejection and original corrections stay.
+    """
+    legacy = ~torch.isclose(expected.float(), output.float(), rtol=0.01, atol=2**-6)
+    required = ~torch.isclose(output, expected, rtol=0.01, atol=2**-6, equal_nan=False)
+    return legacy | required
+
+
 def transport_corrections(reference, actual, protected_rows, *, chunk_scalars=None):
     """Fix only violations of the FROZEN construction envelope, not task logits."""
     from mosaickv.evaluation import fused_transport_predicate as fused_predicate
@@ -344,11 +356,22 @@ def transport_corrections(reference, actual, protected_rows, *, chunk_scalars=No
         if not enqueue(finite, "finite") and not bool(finite):
             raise ValueError("finite compatible BF16 construction pair required")
         if fused_mask is not None:
+            step = expected.numel() if quantum is None else quantum
+            for start in range(0, expected.numel(), step):
+                stop = start + step
+                required = ~torch.isclose(
+                    output.flatten()[start:stop],
+                    expected.flatten()[start:stop],
+                    rtol=0.01,
+                    atol=2**-6,
+                    equal_nan=False,
+                )
+                fused_mask.flatten()[start:stop].logical_or_(required)
             pending = None
             indices = fused_mask.flatten().nonzero().flatten()
             del fused_mask
         elif quantum is None:
-            bad = ~torch.isclose(expected.float(), output.float(), rtol=0.01, atol=2**-6)
+            bad = transport_bad_mask(expected, output)
             pending = static.build(expected, bad) if static.enabled() else None
             indices = pending.indices if pending is not None else bad.flatten().nonzero().flatten()
         else:
@@ -357,9 +380,7 @@ def transport_corrections(reference, actual, protected_rows, *, chunk_scalars=No
             parts = []
             for start in range(0, left.numel(), quantum):
                 stop = start + quantum
-                bad = ~torch.isclose(
-                    left[start:stop].float(), right[start:stop].float(), rtol=0.01, atol=2**-6
-                )
+                bad = transport_bad_mask(left[start:stop], right[start:stop])
                 if mask is None:
                     parts.append(bad.nonzero().flatten() + start)
                 else:

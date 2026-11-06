@@ -79,7 +79,7 @@ def request_options(record, plan, method, audit):
     return result
 
 
-def submit(root, action, *, array=None, dependency=None, minutes=120):
+def submit(root, action, *, array=None, dependency=None, minutes=120, script=None):
     args = ["sbatch", "--parsable", "--account=bii_dsc_community", "--nodes=1", "--ntasks=1"]
     if array is not None:
         args += [
@@ -102,13 +102,20 @@ def submit(root, action, *, array=None, dependency=None, minutes=120):
     if dependency:
         args += ["--dependency=afterany:" + str(dependency)]
     (root / "slurm").mkdir(parents=True, exist_ok=True)
-    args += [str(SCRIPT), str(SOURCE), str(root), sha(root / "plan.json"), action]
+    args += [
+        str(SCRIPT if script is None else script),
+        str(SOURCE),
+        str(root),
+        sha(root / "plan.json"),
+        action,
+    ]
     return subprocess.check_output(args, text=True).strip()
 
 
-def launch_phase(root, phase, jobs):
+def launch_phase(root, phase, jobs, *, submitter=None):
+    send = submit if submitter is None else submitter
     write_once(root / phase / "jobs.json", jobs)
-    array = submit(root, phase, array=len(jobs))
+    array = send(root, phase, array=len(jobs))
     policy = dict(
         timezone="America/New_York",
         window="all_times",
@@ -121,15 +128,15 @@ def launch_phase(root, phase, jobs):
         adopt_existing_holds=[array],
     )
     write_once(root / phase / "scheduler/policy.json", policy)
-    controller = submit(root, phase + "_controller", minutes=360)
-    analysis = submit(root, phase + "_analysis", dependency=array, minutes=60)
+    controller = send(root, phase + "_controller", minutes=360)
+    analysis = send(root, phase + "_analysis", dependency=array, minutes=60)
     write_once(
         root / phase / "submission.json",
         dict(array=array, controller=controller, analysis=analysis),
     )
 
 
-def prepare(root, reuse_ledger=None):
+def prepare(root, reuse_ledger=None, *, autostart=True):
     if root.exists():
         raise FileExistsError("new immutable root required")
     source_sha = clean_source(SOURCE)
@@ -203,7 +210,8 @@ def prepare(root, reuse_ledger=None):
             reused_ledger_parent=str(reuse_ledger) if reuse_ledger is not None else None,
         ),
     )
-    write_once(root / "submission.json", dict(cpu=submit(root, "cpu", minutes=60)))
+    if autostart:
+        write_once(root / "submission.json", dict(cpu=submit(root, "cpu", minutes=60)))
 
 
 def cpu(root, expected):
