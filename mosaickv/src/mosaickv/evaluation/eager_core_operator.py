@@ -55,7 +55,17 @@ def reference_scores(query, key, mask, scaling):
 class Core:
     """One request-private fixed workspace; graphs contain no per-N outputs."""
 
-    def __init__(self, lease, *, mask_dtype, graph, frequencies, minimum_reuses=16, audit=False):
+    def __init__(
+        self,
+        lease,
+        *,
+        mask_dtype,
+        graph,
+        frequencies,
+        minimum_reuses=16,
+        audit=False,
+        reuse_views=False,
+    ):
         if (
             lease.ndim != 4
             or lease.shape[0] != 1
@@ -68,6 +78,7 @@ class Core:
             or mask_dtype not in (None, torch.bfloat16, torch.float32)
             or type(graph) is not bool
             or type(audit) is not bool
+            or type(reuse_views) is not bool
             or type(minimum_reuses) is not int
             or minimum_reuses != 16
         ):
@@ -85,6 +96,8 @@ class Core:
         self.lease, self.mask_dtype = lease, mask_dtype
         self.graph, self.frequencies, self.minimum_reuses = graph, dict(frequencies), minimum_reuses
         self.audit = audit
+        self.reuse_views, self.view_cache = reuse_views, {}
+        self.view_builds = self.view_reuses = 0
         self.pool = torch.cuda.graph_pool_handle() if graph else None
         self.capture_transient_peak = 0
         self.capacity, self.heads = lease.shape[-2], lease.shape[1]
@@ -123,9 +136,12 @@ class Core:
         )
 
     def views(self, length):
+        if self.reuse_views and length in self.view_cache:
+            self.view_reuses += 1
+            return self.view_cache[length]
         shape = (1, self.heads, 1, length)
         count = self.heads * length
-        return SimpleNamespace(
+        views = SimpleNamespace(
             scores=self.scores[:count].view(shape),
             masked=None if self.masked is None else self.masked[:count].view(shape),
             probabilities_float=self.probabilities_float[:count].view(shape),
@@ -133,6 +149,10 @@ class Core:
             mask=None if self.mask is None else self.mask[:length].view(1, 1, 1, length),
             lease=self.lease[..., :length, :],
         )
+        self.view_builds += 1
+        if self.reuse_views:
+            self.view_cache[length] = views
+        return views
 
     def capture(self, function):
         from mosaickv.evaluation.post_attention_segment import capture_stream
@@ -233,6 +253,7 @@ class Core:
             for graph in pair:
                 graph.reset()
         self.entries.clear()
+        self.view_cache.clear()
         self.closed = True
         if self.lease.device.type == "cuda":
             torch.cuda.synchronize()
@@ -280,7 +301,14 @@ def warm_backend():
 
 
 @torch.inference_mode()
-def controls():
+def controls(*, lengths=(601, 605, 665, 669, 727, 731, 601), capacity=731, reuse_views=False):
+    if (
+        type(capacity) is not int
+        or not 1 <= capacity <= 1024
+        or not lengths
+        or any(type(n) is not int or not 1 <= n <= capacity for n in lengths)
+    ):
+        raise ValueError("bounded actual control lengths and physical lease capacity required")
     from mosaickv.evaluation.lossless_prompt_cache import backing_bytes
     from mosaickv.evaluation.prompt_graph_reader import (
         allocator_blocks as active_allocations,
@@ -291,8 +319,7 @@ def controls():
     generator = torch.Generator(device="cuda").manual_seed(20261106)
     records = []
     for mask_dtype in (None, torch.bfloat16, torch.float32):
-        lease = torch.empty(1, 32, 731, 128, device="cuda", dtype=torch.bfloat16)
-        lengths = (601, 605, 665, 669, 727, 731, 601)
+        lease = torch.empty(1, 32, capacity, 128, device="cuda", dtype=torch.bfloat16)
         for graph in (False, True):
             core = Core(
                 lease,
@@ -300,6 +327,7 @@ def controls():
                 graph=graph,
                 frequencies=dict.fromkeys(lengths, 32),
                 audit=True,
+                reuse_views=reuse_views,
             )
             old = active_allocations()
             checks = []
@@ -374,6 +402,9 @@ def controls():
                     graph_pool_reserved_bytes_NOT_active_tensor_storage=pool_reserved,
                     generator_private_bytes=private_bytes,
                     retired=True,
+                    reuse_views=reuse_views,
+                    view_descriptor_builds=core.view_builds,
+                    view_descriptor_reuses=core.view_reuses,
                     **counts,
                 )
             )

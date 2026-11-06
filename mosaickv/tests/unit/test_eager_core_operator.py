@@ -13,10 +13,11 @@ from mosaickv.evaluation.eager_core_operator import (
 
 
 @pytest.mark.parametrize("mask_dtype", [None, torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("reuse_views", [False, True])
 @torch.inference_mode()
-def test_out_operations_match_original_cpu_api_and_keep_one_lease(mask_dtype):
+def test_out_operations_match_original_cpu_api_and_keep_one_lease(mask_dtype, reuse_views):
     lease = torch.full((1, 2, 17, 128), -71.0, dtype=torch.bfloat16)
-    core = Core(lease, mask_dtype=mask_dtype, graph=False, frequencies={})
+    core = Core(lease, mask_dtype=mask_dtype, graph=False, frequencies={}, reuse_views=reuse_views)
     for length in (7, 13, 7):
         q = torch.randn(1, 2, 1, 128).bfloat16()
         k = torch.randn(1, 2, length, 128).bfloat16()
@@ -92,6 +93,7 @@ def test_replays_complete_before_graphs_reset_and_owners_retire(monkeypatch):
     core.closed, core.pending = False, None
     core.lease = SimpleNamespace(device=SimpleNamespace(type="cuda"))
     core.entries = {1: (fake_graph, fake_graph)}
+    core.view_cache = {}
     monkeypatch.setattr(torch.cuda, "synchronize", lambda: events.append("synchronize"))
     core.close()
     assert events == ["synchronize", "reset", "reset", "synchronize"]
