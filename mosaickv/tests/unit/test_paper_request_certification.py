@@ -137,3 +137,12 @@ def test_control_mismatch_or_fullkv_latency_comparison_rejected():
             methods=["full_kv", "mosaickv_exact"],
             cap_bytes_by_sample={"a": 100},
         )
+
+
+def test_missing_envelope_and_exact_flag_without_bytes_are_not_certificates():
+    data = rows()
+    data[0]["whole_request_envelope"] = None
+    data[1]["whole_request_envelope"]["exact_kv_peak_certified"] = True
+    reasons = {r["reason"] for r in admit(data)["blockers"]}
+    assert "missing_request_envelope" in reasons
+    assert "missing_exact_KV_peak_bytes" in reasons

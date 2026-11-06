@@ -80,3 +80,25 @@ not meet the shared physical budget, a separately versioned byte-driven codec
 allocator is required. If exact whole-request KV peaks remain unknown, complete
 allocation ownership/lifetime instrumentation is required. Neither issue can
 be resolved by renaming the existing measurements.
+
+## Physical cap enforcement
+
+`initial_physical_byte_cap` is an optional runtime guard, disabled in historical
+requests. It independently enumerates the bound cache **after** delta-code
+binding and **before** the first decode, rather than checking serialized packet
+size. Binding can add live owners, so packet bytes alone are insufficient.
+On an exceeded cap, private graph/workspace owners are retired and a structured
+`InitialByteBudgetExceeded.evidence` record preserves attempted bytes, cap,
+excess, and the before-decode boundary. No FullKV fallback occurs.
+
+Enforcement does not resize the baseline or certify its largest feasible
+allocation. An over-budget frozen baseline is unsupported, not a smaller-cache
+performance result. The dedicated `--verify-initial-cap` consumed-input mode
+checks both an exactly fitting candidate and expected pre-decode baseline
+rejection. A rejection is explicitly labeled correctness evidence, not a failed
+benchmark score or successful quality prediction.
+
+The first diagnostic's controller omitted `--apply`. Its dry-run CPU controller
+was canceled before any worker started and replaced by an apply-enabled
+controller without changing the GPU source or array. The launcher now includes
+`--apply` and has a regression preventing silent dry-run admission.

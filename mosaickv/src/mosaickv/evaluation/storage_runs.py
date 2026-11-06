@@ -204,11 +204,19 @@ def run(
     sequential_source_history: bool = False,
     prompt_graph_reader: bool = False,
     prompt_graph_policy=None,
+    initial_physical_byte_cap=None,
 ) -> tuple[Any, dict[str, Any]]:
     import time
 
     from mosaickv.adapters.huggingface.types import DecodeState
+    from mosaickv.evaluation.initial_byte_budget import (
+        InitialByteBudgetExceeded,
+        inspect_initial_budget,
+        validate_cap,
+    )
     from mosaickv.evaluation.lossless_prompt_cache import IsolatedStorageTransport
+
+    validate_cap(initial_physical_byte_cap)
 
     if (
         type(tokens) is not int
@@ -240,6 +248,28 @@ def run(
         prompt_graph_reader=prompt_graph_reader,
         prompt_graph_policy=prompt_graph_policy,
     )
+    initial_budget = None
+    if initial_physical_byte_cap is not None:
+
+        def retire_unsupported():
+            # No generation state or first decode has been created. Retire any
+            # private pool even on this expected unsupported-budget path.
+            if prompt_graph_reader:
+                cache.prompt_graph_pool.close()
+            if shared_workspace:
+                cache.release_workspace()
+
+        try:
+            initial_budget = inspect_initial_budget(cache, initial_physical_byte_cap)
+        except BaseException:
+            retire_unsupported()
+            raise
+        if not initial_budget["within_cap"]:
+            retire_unsupported()
+            del retire_unsupported
+            del cache
+            raise InitialByteBudgetExceeded(initial_budget)
+        del retire_unsupported
     length = max(f.shape[-2] for f in formats)
     state = DecodeState(
         cache,
@@ -398,6 +428,7 @@ def run(
         raise RuntimeError("cache state/lease isolation failure")
     return logits, dict(
         storage=record,
+        initial_physical_byte_budget=initial_budget,
         decode_wall_seconds=wall,
         decode_cuda_ms=milliseconds,
         audit_enabled=audit,

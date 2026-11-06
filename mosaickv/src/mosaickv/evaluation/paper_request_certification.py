@@ -197,7 +197,7 @@ def comparison_admission(
                 controls.add(fingerprint)
             if row.get("used_fullkv_fallback") is not False:
                 blockers.append(dict(sample_id=sid, method=method, reason="fallback_or_unknown"))
-            certificate = row.get("whole_request_envelope", {})
+            certificate = row.get("whole_request_envelope") or {}
             if certificate.get("kv_peak_upper_bound_certified") is not True:
                 blockers.append(
                     dict(sample_id=sid, method=method, reason="missing_request_envelope")
@@ -215,10 +215,21 @@ def comparison_admission(
                 blockers.append(
                     dict(sample_id=sid, method=method, reason="whole_request_KV_peak_not_exact")
                 )
+            elif not positive_integer(certificate.get("exact_kv_peak_bytes")):
+                blockers.append(
+                    dict(sample_id=sid, method=method, reason="missing_exact_KV_peak_bytes")
+                )
+            else:
+                values["whole_request_KV_peak_bytes"] = certificate["exact_kv_peak_bytes"]
             observed[method] = values
         if len(controls) > 1:
             blockers.append(dict(sample_id=sid, reason="controls_differ"))
-        for name in ("initial_encoded_bytes", "final_encoded_bytes", "decode_owned_peak_bytes"):
+        for name in (
+            "initial_encoded_bytes",
+            "final_encoded_bytes",
+            "decode_owned_peak_bytes",
+            "whole_request_KV_peak_bytes",
+        ):
             actual = {m: v[name] for m, v in observed.items() if name in v}
             if len(set(actual.values())) > 1:
                 blockers.append(dict(sample_id=sid, reason="unmatched_" + name, bytes=actual))

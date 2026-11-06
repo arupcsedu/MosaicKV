@@ -40,7 +40,7 @@ def submit(root, action, **kwargs):
     return campaign.submit(root, action, script=SCRIPT, **kwargs)
 
 
-def prepare(root):
+def prepare(root, *, verify_initial_cap=False):
     if root.exists():
         raise FileExistsError("new immutable diagnostic root required")
     clean_source(SOURCE)
@@ -50,7 +50,8 @@ def prepare(root):
         root / "scope.json",
         dict(
             consumed_sample_indices=[2],
-            methods=METHODS,
+            methods=("mosaickv_exact", "prompt_attention_topk") if verify_initial_cap else METHODS,
+            verify_initial_cap=verify_initial_cap,
             classification="consumed_input_representation_budget_feasibility_not_paper_comparison",
             automatic_fresh_materialization=False,
             automatic_large_campaign=False,
@@ -66,9 +67,12 @@ def prepare(root):
 def check(root, expected):
     plan = campaign.checked(root, expected)
     scope = campaign.read(root / "scope.json")
+    verify_cap = scope.get("verify_initial_cap", False)
+    if type(verify_cap) is not bool:
+        raise ValueError("explicit budget-verification mode required")
     registered = dict(
         consumed_sample_indices=[2],
-        methods=list(METHODS),
+        methods=["mosaickv_exact", "prompt_attention_topk"] if verify_cap else list(METHODS),
         classification="consumed_input_representation_budget_feasibility_not_paper_comparison",
         automatic_fresh_materialization=False,
         automatic_large_campaign=False,
@@ -76,6 +80,8 @@ def check(root, expected):
         source_plan_sha256=expected,
         original_mechanism_activity={name: False for name in MECHANISMS},
     )
+    if "verify_initial_cap" in scope:
+        registered["verify_initial_cap"] = verify_cap
     if scope != registered:
         raise ValueError("scope/source binding changed")
     return plan, scope
@@ -131,7 +137,7 @@ def cpu(root, expected):
             options=options, parent_records=str(record_path), parent_records_sha256=sha(record_path)
         ),
     )
-    jobs = [dict(method=m, samples=scope["consumed_sample_indices"]) for m in METHODS]
+    jobs = [dict(method=m, samples=scope["consumed_sample_indices"]) for m in scope["methods"]]
     campaign.launch_phase(root, "audit", jobs, submitter=submit)
 
 
@@ -157,6 +163,18 @@ def worker(root, expected, index):
     if sha(Path(sealed_options["parent_records"])) != sealed_options["parent_records_sha256"]:
         raise ValueError("frozen baseline options changed")
     plan = dict(plan, options=sealed_options["options"])
+    if scope.get("verify_initial_cap"):
+        old = campaign.read(PARENT / "quality/analysis/selected_quality_rows.json")
+        target = [
+            r["initial_encoded_bytes"]
+            for r in old
+            if r["method"] == "mosaickv_exact" and r["sample_index"] == 2
+        ]
+        if len(target) != 1:
+            raise ValueError("unique frozen physical cap required")
+        plan["options"] = {
+            m: dict(v, initial_physical_byte_cap=target[0]) for m, v in plan["options"].items()
+        }
     ledger = campaign.load_ledger(root)
     job = campaign.read(root / "audit/jobs.json")[index]
     folder = root / f"audit/workers/{index}"
@@ -248,11 +266,25 @@ def worker(root, expected, index):
                     row.update(
                         details, status="completed", whole_request_envelope=audit.certificate
                     )
-                except Exception:
+                except Exception as error:
+                    from mosaickv.evaluation.initial_byte_budget import InitialByteBudgetExceeded
+
                     row["error"] = traceback.format_exc()
                     if audit is not None:
                         row["whole_request_envelope"] = audit.certificate
-                    errors.append(row["error"])
+                    if (
+                        scope.get("verify_initial_cap")
+                        and job["method"] == "prompt_attention_topk"
+                        and isinstance(error, InitialByteBudgetExceeded)
+                    ):
+                        row.update(
+                            status="unsupported_at_cap",
+                            expected_before_decode_rejection=True,
+                            initial_physical_byte_budget=error.evidence,
+                            measurement_type="correctness_expected_rejection_not_quality_result",
+                        )
+                    else:
+                        errors.append(row["error"])
                 stream.write(json.dumps(row, allow_nan=False) + "\n")
                 stream.flush()
     except Exception:
@@ -320,6 +352,34 @@ def analyze(root, expected):
         if r["method"] == "mosaickv_exact" and r["sample_id"] in ids
     }
     compressed = [r for r in rows if r["method"] != "full_kv"]
+    if scope.get("verify_initial_cap"):
+        candidate = [r for r in rows if r["method"] == "mosaickv_exact"]
+        rejected = [r for r in rows if r["method"] == "prompt_attention_topk"]
+        passed = (
+            not failures
+            and len(candidate) == len(rejected) == 1
+            and candidate[0]["status"] == "completed"
+            and candidate[0]["initial_encoded_bytes"] == caps[candidate[0]["sample_id"]]
+            and candidate[0].get("initial_physical_byte_budget", {}).get("within_cap") is True
+            and rejected[0].get("expected_before_decode_rejection") is True
+            and rejected[0].get("initial_physical_byte_budget", {}).get("before_first_decode")
+            is True
+            and "generated_token_ids" not in rejected[0]
+        )
+        write_once(
+            folder / "decision.json",
+            dict(
+                initial_physical_cap_enforcement_verified=passed,
+                source_sha=plan["source_sha"],
+                producer_failures=failures,
+                expected_rejection_is_not_a_failed_quality_sample_or_baseline_result=True,
+                paper_ready=False,
+                byte_driven_baseline_allocation_still_required=True,
+                whole_request_exact_KV_peak_still_required=True,
+                original_six_component_claim_supported=False,
+            ),
+        )
+        return
     decision = comparison_admission(
         compressed, sample_ids=ids, methods=list(METHODS[1:]), cap_bytes_by_sample=caps
     )
@@ -375,9 +435,10 @@ def main():
     )
     parser.add_argument("--root", required=True, type=Path)
     parser.add_argument("--plan-sha")
+    parser.add_argument("--verify-initial-cap", action="store_true")
     args = parser.parse_args()
     if args.action == "prepare":
-        prepare(args.root)
+        prepare(args.root, verify_initial_cap=args.verify_initial_cap)
     elif args.action == "cpu":
         cpu(args.root, args.plan_sha)
     elif args.action == "audit":
@@ -394,6 +455,7 @@ def main():
                 str(args.root / "audit/scheduler/policy.json"),
                 "--state",
                 str(args.root / "audit/scheduler/state.json"),
+                "--apply",
                 "--watch",
             ],
             check=True,

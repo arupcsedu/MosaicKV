@@ -104,7 +104,9 @@ def request(
     exact_rotary_dispatch=False,
     reuse_source_input_copy=False,
     frozen_joint_plan=False,
+    initial_physical_byte_cap=None,
 ):
+    from mosaickv.evaluation.initial_byte_budget import validate_cap
     from mosaickv.evaluation.lossless_prompt_cache import backing_bytes
     from mosaickv.evaluation.native_execution_plan import use as native_plan
     from mosaickv.evaluation.prompt_prefetch import use as prefetch_plan
@@ -117,6 +119,8 @@ def request(
     from mosaickv.evaluation.streaming_baselines import SelectedRetiringCache, StreamingBaseline
     from mosaickv.evaluation.streaming_prefill import RetiringPrefillCache, SealAfterAttention
     from mosaickv.evaluation.streaming_source_constructor import StreamingDirectSource
+
+    validate_cap(initial_physical_byte_cap)
 
     validate(reconstruction_readers)
     if type(exact_rotary_dispatch) is not bool or (
@@ -411,6 +415,7 @@ def request(
             consolidated_history=True,
             prompt_graph_reader=prompt_graph_reader,
             prompt_graph_policy=prompt_graph_policy,
+            initial_physical_byte_cap=initial_physical_byte_cap,
         )
     end.record()
     torch.cuda.synchronize()
@@ -442,6 +447,7 @@ def request(
             ),
             lt_source_conversion=lt_report,
             initial_encoded_bytes=details["storage"]["initial_active_kv_storage_bytes"],
+            initial_physical_byte_budget=details.get("initial_physical_byte_budget"),
             final_encoded_bytes=details["storage"]["final_active_kv_storage_bytes"],
             reported_counter_peak_bytes=details["storage"]["peak_active_kv_storage_bytes"],
             peak_measurement_admissible=details["storage"][
