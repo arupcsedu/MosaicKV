@@ -31,6 +31,7 @@ ARMS = (
 CANDIDATE_ARM, POLICY = "joint-keys", "keys"
 VARIANT = "consumed_joint_key_paired_screen"
 JOB_NAME = "mk-joint-K-time"
+SCREEN_REPETITIONS = 3
 DOC = SOURCE / "mosaickv/docs/joint_key_latency.md"
 GATE_FIELD = "joint_key_128_vector_parity_and_isolation"
 AUXILIARY_PROFILE_ARMS = frozenset()
@@ -91,9 +92,9 @@ def execute(adapter, refs, messages, profile, plan, method, arm, record, **kwarg
 def summary(rows, audited):
     keys = [(r["method"], r["arm"], r["trial"]) for r in rows]
     if len(keys) != len(set(keys)) or set(keys) != {
-        (m, a, t) for m, a in ARMS for t in range(-5, 3)
+        (m, a, t) for m, a in ARMS for t in range(-5, SCREEN_REPETITIONS)
     }:
-        raise ValueError("complete unique five-warmup/three-trial paired screen required")
+        raise ValueError("complete unique five-warmup/registered-trial paired screen required")
     for row in rows:
         measured = row["measurement"]
         if (
@@ -178,11 +179,12 @@ def worker(root, expected, index):
                 methods=["mosaickv_exact", "prefixkv_reimpl"],
                 actual_timing_protocol=dict(
                     warmups=5,
-                    repetitions=3,
+                    repetitions=SCREEN_REPETITIONS,
                     output_predictions=128,
                     randomized_paired_order=True,
                     complete_prefill_construction_capture_decode_retirement_included=True,
-                    NOT_formal_latency_acceptance=True,
+                    NOT_formal_latency_acceptance=SCREEN_REPETITIONS < 20,
+                    engineering_latency_only=True,
                     auxiliary_requests_per_arm=int(bool(AUXILIARY_PROFILE_ARMS)),
                     separate_auxiliary_profile_arms=sorted(AUXILIARY_PROFILE_ARMS),
                 ),
@@ -228,7 +230,7 @@ def worker(root, expected, index):
                 else:
                     call()  # Identical auxiliary count, never a timed repetition.
         rows, rng = [], random.Random(plan["seed"])
-        for trial in range(-5, 3):
+        for trial in range(-5, SCREEN_REPETITIONS):
             order = list(ARMS)
             rng.shuffle(order)
             for place, (m, a) in enumerate(order):
@@ -284,7 +286,7 @@ def main():
     parent.DOC = DOC
     parent.EXTRA_PLAN = dict(
         warmups=5,
-        repetitions=3,
+        repetitions=SCREEN_REPETITIONS,
         arms=ARMS,
         no_runtime_change_from_passed_key_transaction=True,
         acceptance_ratio_upper_bound=0.96,

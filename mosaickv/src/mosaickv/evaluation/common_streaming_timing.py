@@ -22,8 +22,8 @@ from mosaickv.evaluation.joint_incoming_projection import managed as joint_proje
 from mosaickv.evaluation.native_history_reader import managed as native_history_scope
 from mosaickv.evaluation.post_attention_segment import managed as post_attention_scope
 from mosaickv.evaluation.prefill_native_overlap import managed as overlap_scope
-from mosaickv.evaluation.verified_constructor import managed as verified_scope
 from mosaickv.evaluation.uniform_core_transport import managed as uniform_core_scope
+from mosaickv.evaluation.verified_constructor import managed as verified_scope
 
 METHODS = (
     "mosaickv_exact",

@@ -291,8 +291,8 @@ class SequentialAttentionTransport:
                 weights = self.core_binding.scores(query, key, mask, scaling)
                 layer.materialize_component(1)
                 output = self.core_binding.values(key.shape[-2])
-                from mosaickv.evaluation.prompt_prefetch import after_attention
                 from mosaickv.evaluation.graph_lookahead import after_attention as lookahead
+                from mosaickv.evaluation.prompt_prefetch import after_attention
 
                 after_attention(layer)
                 lookahead(layer)

@@ -22,6 +22,7 @@ ARMS = (
 )
 OLD_OVERRIDES, OLD_EXECUTE = prior.overrides, prior.execute
 _checked = set()
+GPU_MINUTES = 20
 
 
 def submit(root, action, dependency=None):
@@ -37,7 +38,7 @@ def submit(root, action, dependency=None):
             "--cpus-per-task=12",
             "--mem=48G",
             "--array=0-1%2",
-            "--time=00:20:00",
+            f"--time=00:{GPU_MINUTES:02d}:00",
         ]
     else:
         args += [
