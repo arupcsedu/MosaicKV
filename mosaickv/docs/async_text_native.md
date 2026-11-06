@@ -48,3 +48,15 @@ audits all arms BEFORE five warmups and three paired timed repetitions. Use
 12 CPUs and a twenty-minute limit, then afterany terminal CPU analysis. Keep
 the all-input <=0.96 point screen and the subsequent adjusted twenty-repeat
 gate distinct. No fresh cohort, quality sweep or paper campaign is released.
+
+## Launcher repair
+
+The first immutable screen stopped before inference in both workers because
+the inherited configuration function read newly rebound output-arm names from
+its parent module. This was a launcher failure, not a numerical result.
+Configuration now requests canonical parent arms within a scoped binding before
+applying constructor overrides. A CPU regression traverses the real inherited
+configuration chain with the same launcher bindings and checks all four arms,
+packet identities, shared controls, and restoration of the parent binding.
+Retry only the same consumed inputs under a new immutable output root; preserve
+the original failed artifacts and all original acceptance gates.

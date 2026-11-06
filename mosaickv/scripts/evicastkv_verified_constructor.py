@@ -90,7 +90,17 @@ def prepare(root, revision):
 
 
 def configurations(records):
-    original = OLD_CONFIGURATIONS(records)
+    # main() installs this controller's output arms in the parent module.
+    # The captured parent function still reads that module's globals: ask it
+    # for canonical parent arms, not the newly named constructor variants.
+    parent_arms = tuple(
+        dict.fromkeys(
+            (method, "joint-history-graph" if method == "mosaickv_exact" else arm)
+            for method, arm in ARMS
+        )
+    )
+    with patch.object(base, "ARMS", parent_arms):
+        original = OLD_CONFIGURATIONS(records)
     values = {}
     for method, arm in ARMS:
         key = "joint-history-graph" if method == "mosaickv_exact" else arm

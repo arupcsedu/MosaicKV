@@ -12,6 +12,34 @@ def test_async_is_separate_keeps_common_controls_and_the_original_overlap():
     }
 
 
+def test_real_configuration_chain_after_launcher_installs_variant_arms(monkeypatch):
+    # Reproduce main()'s rebinding without loading weights or submitting jobs.
+    # No mocked configuration function: traverse every inherited adapter.
+    monkeypatch.setattr(control.base, "ARMS", control.ARMS)
+    monkeypatch.setattr(control.base.base, "ARMS", control.ARMS)
+    monkeypatch.setattr(control.base, "overrides", control.overrides)
+    records = {
+        method: {arm: dict(packet_sha256=f"{method}:{arm}") for arm in arms}
+        for method, arms in (
+            ("mosaickv_exact", ("graph-lt",)),
+            ("prefixkv_reimpl", ("graph", "graph-original")),
+        )
+    }
+    values = control.base.configurations(records)
+    assert tuple(values) == control.ARMS
+    assert control.base.base.ARMS == control.ARMS  # Scoped parent mapping restored.
+    for (method, arm), value in values.items():
+        assert value["native_history_reader"] is True
+        assert value["native_history_graph"] is True
+        assert value["overlap_native_fit"] is True
+        canonical = "graph-lt" if method == "mosaickv_exact" else arm.removesuffix("-history-graph")
+        assert value["packet_sha256"] == records[method][canonical]["packet_sha256"]
+    assert (
+        values["mosaickv_exact", "joint-async-handoff"]["verified_constructor"] == "async_handoff"
+    )
+    assert values["mosaickv_exact", "joint-same-buffer"]["verified_constructor"] == "same_buffer"
+
+
 def test_missing_real_native_callbacks_cannot_be_published(monkeypatch):
     report = dict(
         completed=True,
