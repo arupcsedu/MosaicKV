@@ -95,6 +95,10 @@ class StreamingDirectSource:
             self.identity,
             exclude_global_exact=True,
         )
+        from mosaickv.evaluation.verified_constructor import current as verified_state
+
+        if verified_state() is not None:
+            verified_state().begin(index, packet, self.positions)
         packet, _ = fit_transport(packet, attention)
         if self.construction_geometry is not None:
             from mosaickv.evaluation.source_row_geometry import geometry

@@ -28,6 +28,7 @@ ARMS = (
 )
 DEBUG_ARMS = (ARMS[0], ARMS[1], ARMS[3], ARMS[5])
 PREPARE_SCREEN = False
+DEBUG_VARIANT = "consumed_immutable_history_graph_correctness"
 ORIGINAL_WORKER, ORIGINAL_SUMMARY = prior.prior.ORIGINAL_WORKER, control.summary
 
 
@@ -151,7 +152,7 @@ def debug_worker(root, expected, index):
             expected,
             index,
             manifest_overrides=dict(
-                variant="consumed_immutable_history_graph_correctness",
+                variant=DEBUG_VARIANT,
                 methods=["mosaickv_exact", "prefixkv_reimpl"],
                 actual_timing_protocol=dict(
                     audited_requests_per_arm=1,

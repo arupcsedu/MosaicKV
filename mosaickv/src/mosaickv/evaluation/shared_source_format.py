@@ -310,13 +310,13 @@ def apply_transport_patch(patch, target, *, prompt_length):
 
 def transport_corrections(reference, actual, protected_rows, *, chunk_scalars=None):
     """Fix only violations of the FROZEN construction envelope, not task logits."""
+    from mosaickv.evaluation import static_transport_patches as static
     from mosaickv.evaluation.deferred_transport_checks import (
         correction_mask,
         enqueue,
         predicate_span,
     )
     from mosaickv.evaluation.exact_storage import SparseBitPatch
-    from mosaickv.evaluation import static_transport_patches as static
 
     patches = []
     if chunk_scalars is not None and (type(chunk_scalars) is not int or chunk_scalars < 1):
@@ -515,13 +515,26 @@ def fit_transport_components(packet, attention):
         patch = transport_corrections(
             (reference,), (actual,), packet.row_positions, chunk_scalars=524288
         )[0]
-        del actual
-        temporary = replace(
-            packet, transport_patches=tuple(patch if j == component else dummy for j in range(2))
-        )
-        verified = torch.empty_like(reference)
-        fill_component(temporary, attention, component, verified)
+        from mosaickv.evaluation.verified_constructor import correct_same_buffer, current
+
+        reuse = current()
+        if reuse is None:
+            del actual
+            temporary = replace(
+                packet,
+                transport_patches=tuple(patch if j == component else dummy for j in range(2)),
+            )
+            verified = torch.empty_like(reference)
+            fill_component(temporary, attention, component, verified)
+        else:
+            temporary = None
+            verified = correct_same_buffer(
+                packet, attention, component, patch, actual, audit=reuse.audit
+            )
+            del actual
         assert_transport_close(verified, reference)
+        if reuse is not None:
+            reuse.capture(packet, attention, component, patch, verified)
         patches.append(patch)
         del reference, verified, temporary
     result = replace(packet, transport_patches=tuple(patches), protected_patches_disjoint=True)

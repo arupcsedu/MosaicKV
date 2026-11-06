@@ -43,6 +43,11 @@ def build(packet, pair, positions, text, modes, *, attention=None, report=None):
         )
     ):
         raise ValueError("actual selected/merged BF16 pair with original shape required")
+    from mosaickv.evaluation.verified_constructor import current as verified_state
+
+    verified = verified_state()
+    if verified is not None and verified.mode == "handoff":
+        return verified.text_packet(packet, positions, text, modes, report)
     slots = text_slots(positions, tuple(text))
     flat = torch.tensor(
         [head * n + slot for head, row in enumerate(slots) for slot in row if slot >= 0],

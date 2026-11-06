@@ -22,6 +22,7 @@ from mosaickv.evaluation.joint_incoming_projection import managed as joint_proje
 from mosaickv.evaluation.native_history_reader import managed as native_history_scope
 from mosaickv.evaluation.post_attention_segment import managed as post_attention_scope
 from mosaickv.evaluation.prefill_native_overlap import managed as overlap_scope
+from mosaickv.evaluation.verified_constructor import managed as verified_scope
 
 METHODS = (
     "mosaickv_exact",
@@ -43,6 +44,7 @@ def order(seed):
 
 @torch.inference_mode()
 @joint_projection_scope
+@verified_scope
 @overlap_scope
 @native_history_scope
 @input_norm_scope
@@ -57,6 +59,7 @@ def request(
     overlap_native_fit=False,
     native_history_reader=False,
     native_history_graph=False,
+    verified_constructor="none",
     input_norm_segment=False,
     reuse_norm_input=False,
     source_tile_rows=128,

@@ -241,6 +241,13 @@ def convert(packets, attentions, *, engine_factory=None, policy="full", audit=Fa
         raise ValueError("registered full/direct constructor and explicit audit boolean required")
     if len(packets) != len(attentions):
         raise ValueError("complete matching source/attention sequence required")
+    from mosaickv.evaluation.verified_constructor import current as verified_state
+
+    verified = verified_state()
+    if verified is not None and verified.mode == "handoff":
+        if engine_factory is not None:
+            raise ValueError("verified handoff cannot replace its private engine factory")
+        return verified.convert(packets, attentions, policy=policy, audit=audit)
     from mosaickv.evaluation.prefill_native_overlap import current
 
     if current() is not None:
