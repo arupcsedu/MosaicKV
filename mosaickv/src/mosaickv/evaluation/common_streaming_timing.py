@@ -290,6 +290,9 @@ def request(
         encoder.finish() if method == "mosaickv_exact" else encoder.finish(adapter)
         packets = static_patches.finalize(cache.formats(), static_state)
     direct_report = direct_state.finish(packets) if direct_state is not None else None
+    # Exact full-catalog reconciliation remains charged identically to every
+    # method. Store metadata only, never keep the retired cache alive.
+    prefill_storage = cache.record()
     runtime = replace(pref, state=replace(pref.state, past_key_values=None), attention_weights=())
     prepared.model_inputs.clear()
     del pref, fresh, cache, encoder, prepared
@@ -430,6 +433,7 @@ def request(
             original_precompression_packet_bytes=original_packet_bytes,
             source_code_delta=code_delta,
             common_componentwise_fitting=componentwise_fitting,
+            prefill_storage=prefill_storage,
             source_geometry=source_geometry,
             source_num_warps=source_num_warps,
             construction_geometry=construction_geometry,

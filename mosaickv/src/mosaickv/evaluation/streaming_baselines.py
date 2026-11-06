@@ -97,7 +97,7 @@ class SelectedRetiringCache(RetiringPrefillCache):
                 raise RuntimeError("selected archive aliases decoded temporary source")
             self.observe((*original, *packet.tensors()))
         layer.packet = packet
-        self.owners_changed()
+        self.layer_owners_changed(index)
         self.observe(original)
 
 

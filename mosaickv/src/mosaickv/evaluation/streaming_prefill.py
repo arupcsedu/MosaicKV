@@ -49,7 +49,7 @@ class RetiringLayer(DynamicLayer):
                 self.owner.original_refs.append(weakref.ref(tensor))
                 tensor = tensor._base
         self.length = key_states.shape[-2]
-        self.owner.owners_changed()
+        self.owner.layer_owners_changed(self.index)
         self.owner.observe()
         return self.keys, self.values
 
@@ -73,6 +73,9 @@ class RetiringPrefillCache(Cache):
         self.next_layer, self.peak_bytes, self.audit, self.observations = 0, 0, audit, 0
         self.original_refs, self._extra_tensors, self._owned_storage = [], (), None
         self._owned_device_bytes, self.peak_device_bytes = {}, {}
+        # Metadata only. Never retain a tensor/view/storage owner here.
+        self._layer_storage, self._extra_storage = {}, None
+        self._catalog_rebuilds = self._catalog_identity_calls = self._independent_checks = 0
         for index, layer in enumerate(self.layers):
             layer.owner, layer.index = self, index
 
@@ -89,6 +92,42 @@ class RetiringPrefillCache(Cache):
         # Sealed packets are immutable. Cache only storage IDENTITIES/byte
         # counts, not tensors: a per-operation audit must not pin dead buffers.
         self._owned_storage = None
+        self._layer_storage.clear()
+        self._extra_storage = None
+
+    def layer_owners_changed(self, index):
+        if type(index) is not int or not 0 <= index < len(self.layers):
+            raise ValueError("one valid changed prefill layer required")
+        self._layer_storage.pop(index, None)
+        self._owned_storage = None
+
+    def _catalog(self, tensors):
+        result = {}
+        for tensor in tensors:
+            owner = identity(tensor)
+            self._catalog_identity_calls += 1
+            result[owner] = owner[2]
+        return result
+
+    def _refresh_owned(self):
+        if self._owned_storage is not None:
+            return
+        if self._extra_storage is None:
+            self._extra_storage = self._catalog(self.extra_tensors)
+        owned = dict(self._extra_storage)
+        for index, layer in enumerate(self.layers):
+            if index not in self._layer_storage:
+                tensors = (
+                    *(() if layer.keys is None else (layer.keys, layer.values)),
+                    *(() if layer.packet is None else layer.packet.tensors()),
+                )
+                self._layer_storage[index] = self._catalog(tensors)
+            owned.update(self._layer_storage[index])
+        self._owned_storage = owned
+        self._owned_device_bytes = {}
+        for owner, size in owned.items():
+            self._owned_device_bytes[owner[0]] = self._owned_device_bytes.get(owner[0], 0) + size
+        self._catalog_rebuilds += 1
 
     def owned_tensors(self):
         return (
@@ -104,14 +143,8 @@ class RetiringPrefillCache(Cache):
         )
 
     def observe(self, extra=()):
-        if self._owned_storage is None:
-            self._owned_storage = {identity(t): identity(t)[2] for t in self.owned_tensors()}
-            self._owned_device_bytes = {}
-            for owner, size in self._owned_storage.items():
-                self._owned_device_bytes[owner[0]] = (
-                    self._owned_device_bytes.get(owner[0], 0) + size
-                )
-        temporary = {identity(t): identity(t)[2] for t in extra}
+        self._refresh_owned()
+        temporary = self._catalog(extra)
         current = dict(self._owned_device_bytes)
         for owner, size in temporary.items():
             if owner not in self._owned_storage:
@@ -149,7 +182,7 @@ class RetiringPrefillCache(Cache):
         layer.packet = packet
         layer.keys = layer.values = None
         self.next_layer += 1
-        self.owners_changed()
+        self.layer_owners_changed(index)
         self.observe(original)
         from mosaickv.evaluation.prefill_native_overlap import sealed
 
@@ -170,9 +203,24 @@ class RetiringPrefillCache(Cache):
     def record(self, *, require_complete=True):
         if require_complete:
             self.formats()
+        self._refresh_owned()
+        tensors = self.owned_tensors()
+        # Independent original slow enumeration remains at the phase boundary.
+        # An unannounced owner mutation must fail, not silently undercount.
+        independent = {identity(t): identity(t)[2] for t in tensors}
+        if independent != self._owned_storage:
+            raise RuntimeError("prefill ownership catalog differs from independent enumeration")
+        self._independent_checks += 1
         return dict(
             boundary="prefill_owned_KV_encoded_payload_and_observed_encoder_overlap",
-            final_prefill_cache_bytes=backing_bytes(self.owned_tensors()),
+            final_prefill_cache_bytes=backing_bytes(tensors),
+            ownership_catalog=dict(
+                policy="immutable_layer_storage_segments_v1",
+                tensor_owners_retained=False,
+                identity_evaluations=self._catalog_identity_calls,
+                metadata_rebuilds=self._catalog_rebuilds,
+                independent_full_enumerations=self._independent_checks,
+            ),
             observed_prefill_cache_peak_bytes=self.peak_bytes,
             observed_prefill_peak_bytes_by_device=dict(self.peak_device_bytes),
             observed_prefill_cuda_peak_bytes=max(
