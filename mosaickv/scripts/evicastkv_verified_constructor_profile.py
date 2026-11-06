@@ -42,7 +42,21 @@ def attribution(stats, limit=30):
             rows, key=lambda r: (-r["exclusive_host_seconds"], r["file"], r["line"])
         )[:limit],
         constructor=[r for r in rows if r["file"].endswith("/verified_constructor.py")],
-        torch_equal=[r for r in rows if "equal of" in r["function"]],
+        torch_equal=[
+            r
+            for r in rows
+            if "equal of" in r["function"] or r["function"] == "<built-in method torch.equal>"
+        ],
+        jit_compilation=[
+            r
+            for r in rows
+            if ("triton._C.libtriton" in r["function"])
+            or (
+                "triton" in r["file"]
+                and r["function"]
+                in ("compile", "compile_ir", "make_llir", "make_ptx", "make_cubin")
+            )
+        ],
         instrumented_NOT_latency_acceptance=True,
         background_thread_CPU_not_attributed=True,
     )
@@ -80,6 +94,8 @@ def prepare(root, revision):
             warmups=0,
             repetitions=0,
             profile_requests_per_arm=1,
+            untimed_warmups_per_arm=1,
+            steady_profile_must_not_compile=True,
             main_thread_only=True,
             source_runtime_unchanged=True,
             instrumentation_NOT_latency_acceptance=True,
@@ -116,6 +132,8 @@ def worker(root, expected, index):
                 actual_timing_protocol=dict(
                     output_predictions=128,
                     profile_requests_per_arm=1,
+                    untimed_warmups_per_arm=1,
+                    steady_profile_must_not_compile=True,
                     construction="prepare_inputs_to_first_decode_entry",
                     decode_updates=list(range(1, 127)),
                     initial_capture_excluded=True,
@@ -138,6 +156,7 @@ def worker(root, expected, index):
                     adapter, refs, messages, profile, plan, method, arm, records[method, arm]
                 )
 
+            call()  # Identical untimed warmup for every arm, including ineligible baselines.
             value = collect(adapter, call, folder)
             write_once(folder / "profile.json", value)
             phases = {}
@@ -146,6 +165,8 @@ def worker(root, expected, index):
                 if sha(path) != item["profile_sha256"]:
                     raise ValueError("profile changed before attribution")
                 phases[phase] = attribution(pstats.Stats(str(path)).stats)
+                if phases[phase]["jit_compilation"]:
+                    raise RuntimeError("profile still includes cold JIT compilation after warmup")
             rows.append(
                 dict(
                     method=method,

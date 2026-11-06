@@ -21,3 +21,21 @@ def test_runtime_cannot_change_and_only_consumed_arms_are_profiled():
     expected = (*control.base.ARMS[:3], control.base.ARMS[3])
     assert expected == control.ARMS
     assert len(control.ARMS) == 4
+
+
+def test_installed_equal_spelling_and_actual_cold_compiler_are_not_missed():
+    stats = {
+        ("~", 0, "<built-in method torch.equal>"): (1, 64, 0.1, 0.1, {}),
+        ("~", 0, "<built-in method triton._C.libtriton.llvm.optimize_module>"): (
+            1,
+            4,
+            0.3,
+            0.3,
+            {},
+        ),
+        ("/env/triton/runtime/jit.py", 547, "run"): (1, 64, 0.01, 0.4, {}),
+    }
+    value = control.attribution(stats)
+    assert value["torch_equal"][0]["calls"] == 64
+    assert len(value["jit_compilation"]) == 1
+    assert value["jit_compilation"][0]["calls"] == 4
