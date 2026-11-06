@@ -6,7 +6,12 @@ from unittest.mock import patch
 import pytest
 import torch
 
-from mosaickv.evaluation.coco_all_methods import complete_grid, endpoints, validate_row
+from mosaickv.evaluation.coco_all_methods import (
+    caption_text,
+    complete_grid,
+    endpoints,
+    validate_row,
+)
 from mosaickv.evaluation.lossless_prompt_cache import backing_bytes
 from mosaickv.evaluation.packed_attention_decode import AppendAudit
 
@@ -17,7 +22,14 @@ def row(**changes):
             status="completed",
             used_fullkv_fallback=False,
             generated_token_ids=[1] * 128,
-            answer="",
+            answer=dict(
+                answer="caption",
+                answer_tokens=1,
+                stopped_by_eos=True,
+                output_limit_reached=False,
+                prefix_token_cap=128,
+                token_ids=[1],
+            ),
             end_to_end_seconds=1.0,
             initial_encoded_bytes=100,
             final_encoded_bytes=120,
@@ -54,6 +66,18 @@ def test_fullkv_and_encoded_endpoints_and_unaudited_unknown_peak():
             decode_owned_peak_bytes=15,
         )
     ) == (10, 12, 15)
+
+
+def test_structured_eos_caption_and_legacy_text_are_scored_without_losing_metadata():
+    record = row()
+    before = dict(record["answer"])
+    assert caption_text(record) == "caption"
+    assert record["answer"] == before and record["answer"]["stopped_by_eos"]
+    assert caption_text(row(answer="legacy")) == "legacy"
+    assert caption_text(row(answer={"answer": ""})) == ""
+    for invalid in (None, {}, {"answer": None}, {"answer": ["caption"]}):
+        with pytest.raises(ValueError, match="caption text required"):
+            caption_text(row(answer=invalid))
 
 
 def test_exact_grid_rejects_missing_duplicate_and_extra_trials():

@@ -5,6 +5,16 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 
+def caption_text(row: Mapping[str, Any]) -> str:
+    """Read EOS-aware request records without discarding their raw metadata."""
+    value = row.get("answer")
+    if isinstance(value, Mapping):
+        value = value.get("answer")
+    if not isinstance(value, str):
+        raise ValueError("caption text required, including explicitly empty captions")
+    return value
+
+
 def endpoints(row: Mapping[str, Any]) -> tuple[int, int, int | None]:
     storage = row.get("storage", {})
     initial = row.get("initial_encoded_bytes", storage.get("initial_active_kv_storage_bytes"))
@@ -22,8 +32,7 @@ def validate_row(row: Mapping[str, Any], *, audited: bool) -> None:
         raise ValueError("complete, non-fallback prediction required")
     if len(row.get("generated_token_ids", ())) != 128:
         raise ValueError("all 128 fixed predictions must be preserved")
-    if not isinstance(row.get("answer"), str):
-        raise ValueError("caption text required, including explicitly empty captions")
+    caption_text(row)
     initial, final, peak = endpoints(row)
     if final < initial or (audited and peak is None):
         raise ValueError("append-only endpoint and actual audited peak required")

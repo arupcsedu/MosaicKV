@@ -15,7 +15,12 @@ from unittest.mock import patch
 import evicastkv_paper_boundaries as boundaries
 import evicastkv_paper_precision as campaign
 
-from mosaickv.evaluation.coco_all_methods import complete_grid, endpoints, validate_row
+from mosaickv.evaluation.coco_all_methods import (
+    caption_text,
+    complete_grid,
+    endpoints,
+    validate_row,
+)
 from mosaickv.evaluation.fox_campaign import digest, sha, write_once
 
 SOURCE = campaign.SOURCE
@@ -424,7 +429,7 @@ def final_analysis(root, expected):
         (m, None): [
             MetricSample(
                 r["sample_id"],
-                r["answer"],
+                caption_text(r),
                 tuple(ledger["samples"][r["sample_index"]]["references"]),
             )
             for r in memory
