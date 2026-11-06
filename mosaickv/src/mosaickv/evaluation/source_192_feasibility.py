@@ -26,7 +26,14 @@ WIDTH = 4096
 
 
 def ranges(n, capacity=CAPACITY):
-    if type(n) is not int or n not in (600, 604) or capacity not in (128, CAPACITY):
+    from mosaickv.evaluation.paper_geometry import source_shape_allowed
+
+    if (
+        type(n) is not int
+        or not source_shape_allowed((1, 32, n, 128))
+        or type(capacity) is not int
+        or capacity not in (128, CAPACITY)
+    ):
         raise ValueError(
             "only the two consumed source geometries and registered capacities supported"
         )

@@ -48,7 +48,9 @@ class FrozenKernelPlans(KernelPlans):
             or width != 4096
         ):
             raise ValueError("explicit full-width integer frozen geometry required")
-        if set(rows) not in ({88, 89, 128}, {92, 93, 128}):
+        from mosaickv.evaluation.paper_geometry import frozen_rows_allowed
+
+        if set(rows) not in ({88, 89, 128}, {92, 93, 128}) and not frozen_rows_allowed(rows):
             raise NotImplementedError(
                 "only the two all-layer-audited frozen geometries are enabled"
             )

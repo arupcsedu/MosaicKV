@@ -230,3 +230,52 @@ def test_failed_producer_rows_remain_in_attempted_denominator(tmp_path, monkeypa
     assert not decision["complete"]
     assert decision["attempted"] == decision["expected"] == 2
     assert decision["successful"] == decision["failed_or_missing"] == 1
+
+
+def test_registered_tail_ranges_and_frozen_plan_frontend(monkeypatch):
+    from mosaickv.evaluation.frozen_joint_plan import FrozenKernelPlans, Plans
+    from mosaickv.evaluation.source_192_feasibility import ranges
+
+    with pytest.raises(ValueError):
+        ranges(603)
+    with pytest.raises(NotImplementedError):
+        FrozenKernelPlans((128, 91, 92))
+
+    class ReachedLibraryBoundary(Exception):
+        pass
+
+    def stop_before_cuda(*args):
+        raise ReachedLibraryBoundary
+
+    monkeypatch.setattr(Plans, "__init__", stop_before_cuda)
+    with registered_geometry(603):
+        assert ranges(603) == ((0, 192), (192, 192), (384, 192), (576, 27))
+        assert ranges(603, 128)[-1] == (512, 91)
+        with pytest.raises(ReachedLibraryBoundary):
+            FrozenKernelPlans((128, 91, 92))
+        with pytest.raises(NotImplementedError):
+            FrozenKernelPlans((128, 90, 91))
+        with pytest.raises(ValueError):
+            ranges(605)
+
+
+def test_geometry_crosses_worker_boundary_without_scope_or_owner_leaks():
+    from concurrent.futures import ThreadPoolExecutor
+
+    from mosaickv.evaluation.paper_geometry import current_length, inherit_worker_geometry
+    from mosaickv.evaluation.source_192_feasibility import ranges
+
+    @inherit_worker_geometry
+    def task(owner):
+        return ranges(603), current_length()
+
+    with registered_geometry(603):
+        owner = SimpleNamespace(paper_prompt_length=current_length())
+    assert not enabled()
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        result, length = executor.submit(task, owner).result()
+        assert result[-1] == (576, 27) and length == 603
+        assert executor.submit(enabled).result() is False
+        with pytest.raises(ValueError):
+            executor.submit(task, SimpleNamespace(paper_prompt_length=None)).result()
+        assert executor.submit(enabled).result() is False

@@ -13,6 +13,8 @@ from functools import wraps
 
 import torch
 
+from mosaickv.evaluation.paper_geometry import current_length, inherit_worker_geometry
+
 _scope = ContextVar("evicastkv_prefill_native_overlap", default=None)
 
 
@@ -73,6 +75,7 @@ class Pipeline:
         if type(deferred_text) is not bool:
             raise ValueError("explicit deferred text policy required")
         self.audit, self.frozen = audit, frozen
+        self.paper_prompt_length = current_length()
         self.deferred_text = deferred_text
         self.cache, self.prepared = None, {}
         self.text_ready = False
@@ -87,6 +90,7 @@ class Pipeline:
         self.complete = False
 
     @torch.inference_mode()
+    @inherit_worker_geometry
     def fit(self, index, item):
         from mosaickv.evaluation.joint_incoming_projection import _scope as joint_scope
         from mosaickv.evaluation.joint_incoming_projection import engine_factory

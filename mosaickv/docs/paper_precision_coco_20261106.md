@@ -109,3 +109,14 @@ only for the exact new array submitted with `--hold`. No other holds are adopted
 It reuses the already sealed ledger byte-for-byte after checking identical
 protocol, model/dataset configuration and frozen runtime options. No reference,
 identity, threshold, arithmetic or candidate policy is changed by the retry.
+
+The first admitted new-geometry canary passed both FullKV controls but stopped
+the two compressed requests before decoding: the source-192 reader and frozen
+tail-plan frontend still only admitted 600/604-token shapes. Its background
+fitter also needs explicit propagation of the geometry integer, because Python
+ContextVars are not inherited by ThreadPoolExecutor. The correction admits only
+the scoped 603-token ranges and (128,91,92) original-tail plans, preserving the
+same frozen algorithm descriptor, zero-workspace API checks and numerical caps.
+Only that integer crosses the worker boundary; no KV owner or unrelated scope
+is captured. Reuse the same two consumed canaries and the unscored frozen 256-ID
+cohort, without inspecting or tuning from their answers.
