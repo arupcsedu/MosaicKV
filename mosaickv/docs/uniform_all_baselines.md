@@ -35,3 +35,12 @@ attempts. No paper campaign, new dataset access, fresh identity, task-score
 tuning or benchmark-quality inference is authorized by this finite chain.
 Independent quality N=0. In particular, exact agreement with a method's own
 frozen compressed parent does not establish equality to FullKV or LOOK-M.
+
+The first six canaries (22537555/57/59) stopped before model inference because
+the new standalone launcher inherited legacy keys/False module defaults.
+Preserve that negative attempt. The corrected launcher derives the source's
+segment/rotary/copy/frozen/overlap and norm settings from the immutable passed
+plan, binds the registered KV transaction explicitly, and invokes the real
+192-row validation on both cases during CPU preparation. This changes launch
+configuration recovery, not the frozen numerical implementation. Retry only
+these canaries under a new immutable output root; retain conditional timing.

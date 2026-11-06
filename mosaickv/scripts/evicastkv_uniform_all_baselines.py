@@ -30,7 +30,7 @@ DOC = SOURCE / "mosaickv/docs/uniform_all_baselines.md"
 CANDIDATE = ("mosaickv_exact", "joint-async-uniform-core")
 
 
-def configurations(records, method):
+def configurations(records, method, plan):
     if method not in METHODS:
         raise ValueError("registered baseline required")
     with (
@@ -39,6 +39,29 @@ def configurations(records, method):
         patch.object(screen.base, "overrides", screen.overrides),
     ):
         source = screen.base.configurations(records)[CANDIDATE]
+    # The original source worker initialized several historical controllers
+    # from this immutable plan before constructing options. A standalone
+    # launcher must not inherit their import-time keys/False defaults.
+    policies = plan["frozen_runtime_policies"]
+    source = dict(
+        source,
+        joint_incoming_projection="kv",
+        post_attention_segment=policies["segment"],
+        exact_rotary_dispatch=policies["rotary"],
+        reuse_source_input_copy=policies["copy"],
+        frozen_joint_plan=policies["frozen"],
+        overlap_native_fit=policies["overlap"],
+        input_norm_segment=plan["common_original_norm_replay"],
+        reuse_norm_input=plan["selected_common_input_reuse"],
+    )
+    from mosaickv.evaluation.joint_incoming_projection import validate_source_rows
+
+    validate_source_rows(
+        source["source_tile_rows"],
+        source["joint_incoming_projection"],
+        source["frozen_joint_plan"],
+        source["native_history_reader"],
+    )
     result = {CANDIDATE: source}
     for arm in ("graph", "graph-original"):
         result[method, arm] = dict(
@@ -103,6 +126,10 @@ def prepare(root, revision):
     if root.exists() or clean_source(SOURCE) != revision:
         raise ValueError("new root and clean immutable source required")
     old = driver.read(PARENT / "plan.json")
+    for index in (0, 1):
+        records = driver.read(screen.parent.PARENT / f"workers/{index}/study.json")["records"]
+        for method in METHODS:
+            configurations(records, method, old)  # Real CPU-only launch-boundary check.
     for filename in paired.RUNTIME:
         rel = "mosaickv/src/mosaickv/evaluation/" + filename
         original = subprocess.check_output(
@@ -111,6 +138,11 @@ def prepare(root, revision):
         if paired.semantic(original) != paired.semantic((SOURCE / rel).read_text()):
             raise ValueError("all-baseline engineering study must freeze runtime semantics")
     bound = dict(old["bound_files"])
+    failed = Path(
+        "/scratch/djy8hg/runs/evicastkv/uniform-core-all-baselines-consumed-20261106-v1/canary/analysis/decision.json"
+    )
+    if failed.exists():
+        bound[str(failed)] = sha(failed)
     for path in (DOC, PARENT / "plan.json", PARENT / "profile_submission.json"):
         bound[str(path)] = sha(path)
     write_once(
@@ -324,6 +356,7 @@ def worker(root, expected, index):
         config = configurations(
             driver.read(screen.parent.PARENT / f"workers/{index}/study.json")["records"],
             plan["baseline_method"],
+            plan,
         )
         audited = {}
 
