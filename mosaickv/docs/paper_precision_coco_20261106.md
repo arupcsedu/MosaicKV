@@ -98,3 +98,14 @@ separate physically matched lanes and fidelity controls. This run cannot
 establish superiority over the strongest compressed baseline, a 30% advantage,
 official-paper reproduction, or complete six-component EviCastKV performance.
 Successful execution alone must never be called a positive paper result.
+
+## Admission-only retry
+
+The original canary array 22540573 never entered GPU inference: its controller
+correctly rejected adoption of unowned user holds, because the launcher omitted
+the receipt-bound ownership field. Preserve the canceled unstarted array and
+its failed controller logs. The replacement registers `adopt_existing_holds`
+only for the exact new array submitted with `--hold`. No other holds are adopted.
+It reuses the already sealed ledger byte-for-byte after checking identical
+protocol, model/dataset configuration and frozen runtime options. No reference,
+identity, threshold, arithmetic or candidate policy is changed by the retry.

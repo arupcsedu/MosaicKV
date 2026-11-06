@@ -116,6 +116,9 @@ def launch_phase(root, phase, jobs):
         maximum_a100s=6,
         six_a100s_explicitly_authorized=True,
         arrays=[array],
+        # submit() created this exact array with --hold. Never adopt another
+        # user's/manual hold; ownership is limited to our new sbatch receipt.
+        adopt_existing_holds=[array],
     )
     write_once(root / phase / "scheduler/policy.json", policy)
     controller = submit(root, phase + "_controller", minutes=360)
@@ -126,7 +129,7 @@ def launch_phase(root, phase, jobs):
     )
 
 
-def prepare(root):
+def prepare(root, reuse_ledger=None):
     if root.exists():
         raise FileExistsError("new immutable root required")
     source_sha = clean_source(SOURCE)
@@ -166,6 +169,17 @@ def prepare(root):
             SOURCE / "mosaickv/env/common/requirements.lock",
         )
     }
+    if reuse_ledger is not None:
+        parent = read(reuse_ledger / "plan.json")
+        if (
+            parent["protocol"] != protocol
+            or parent["config"] != cfg
+            or parent["options"] != options
+        ):
+            raise ValueError("ledger reuse requires identical registered execution policies")
+        load_ledger(reuse_ledger)
+        for name in ("plan.json", "ledger.json", "ledger_seal.json"):
+            bound[str(reuse_ledger / name)] = sha(reuse_ledger / name)
     write_once(
         root / "plan.json",
         dict(
@@ -186,6 +200,7 @@ def prepare(root):
             },
             profile_path=runtime["profile_path"],
             profile_sha256=sha(Path(runtime["profile_path"])),
+            reused_ledger_parent=str(reuse_ledger) if reuse_ledger is not None else None,
         ),
     )
     write_once(root / "submission.json", dict(cpu=submit(root, "cpu", minutes=60)))
@@ -212,8 +227,24 @@ def cpu(root, expected):
     write_once(root / "cpu.json", dict(passed=result.returncode == 0, log_sha256=sha(log)))
     if result.returncode:
         return
-    materialize(root, expected)
-    p = read(root / "plan.json")["protocol"]
+    plan = read(root / "plan.json")
+    if plan.get("reused_ledger_parent"):
+        parent = Path(plan["reused_ledger_parent"])
+        ledger = load_ledger(parent)
+        if (
+            len(ledger["samples"])
+            != plan["protocol"]["canary_samples"] + plan["protocol"]["evaluation_samples"]
+        ):
+            raise ValueError("reused cohort size differs")
+        write_once(root / "ledger.json", ledger)
+        write_once(
+            root / "ledger_seal.json", dict(read(parent / "ledger_seal.json"), plan_sha256=expected)
+        )
+        if sha(root / "ledger.json") != sha(parent / "ledger.json"):
+            raise ValueError("reused ledger content changed")
+    else:
+        materialize(root, expected)
+    p = plan["protocol"]
     launch_phase(
         root,
         "canary",
@@ -626,10 +657,17 @@ def analyze(root, expected, phase):
                 result["source_sha"] != plan["source_sha"]
                 or result["plan_sha256"] != expected
                 or result["job"] != job
-                or result["status"] != "completed"
-                or result["failures"]
             ):
                 raise ValueError(f"invalid producer {index}: {result['failures']}")
+            # Keep verified failed rows in attempted denominators too.
+            if (folder / "raw.jsonl").exists():
+                if result["raw_sha256"] != sha(folder / "raw.jsonl"):
+                    raise ValueError("raw producer hash mismatch")
+                rows.extend(
+                    json.loads(line) for line in (folder / "raw.jsonl").read_text().splitlines()
+                )
+            if result["status"] != "completed" or result["failures"]:
+                raise ValueError(f"failed producer {index}: {result['failures']}")
             if result["raw_sha256"] != sha(folder / "raw.jsonl") or result[
                 "manifest_sha256"
             ] != sha(folder / "manifest.json"):
@@ -640,9 +678,6 @@ def analyze(root, expected, phase):
                 and result["parity_sha256"] != sha(folder / "parity.json")
             ):
                 raise ValueError("FullKV parity artifact changed")
-            rows.extend(
-                json.loads(line) for line in (folder / "raw.jsonl").read_text().splitlines()
-            )
         except Exception as error:
             failures.append(str(error))
     scored = [r for r in rows if not r["warmup"]]
@@ -879,9 +914,10 @@ def main():
     parser.add_argument("action")
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--plan-sha")
+    parser.add_argument("--reuse-ledger", type=Path)
     args = parser.parse_args()
     if args.action == "prepare":
-        prepare(args.root)
+        prepare(args.root, args.reuse_ledger)
     elif args.action == "cpu":
         cpu(args.root, args.plan_sha)
     elif args.action.endswith("_controller"):

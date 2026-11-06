@@ -153,3 +153,80 @@ def test_real_launch_plan_recovery_without_gpu_or_submission(tmp_path, monkeypat
     assert source["joint_incoming_projection"] == "kv"
     assert source["reuse_source_input_copy"] is False
     assert source["verified_constructor"] == "async_handoff"
+
+
+def test_only_our_new_held_array_is_adopted(tmp_path, monkeypatch):
+    import evicastkv_paper_precision as campaign
+
+    receipts = iter(("900", "901", "902"))
+    monkeypatch.setattr(campaign, "submit", lambda *args, **kwargs: next(receipts))
+    campaign.launch_phase(tmp_path, "canary", [dict(method="full_kv", samples=[0])])
+    policy = campaign.read(tmp_path / "canary/scheduler/policy.json")
+    assert policy["adopt_existing_holds"] == policy["arrays"] == ["900"]
+    assert policy["maximum_a100s"] == 6
+
+
+def test_ledger_reuse_is_bound_and_policy_checked(tmp_path, monkeypatch):
+    import evicastkv_paper_precision as campaign
+
+    monkeypatch.setattr(campaign, "clean_source", lambda *args: "a" * 40)
+    monkeypatch.setattr(campaign, "submit", lambda *args, **kwargs: "CPU_NOT_SUBMITTED")
+    parent = tmp_path / "parent"
+    campaign.prepare(parent)
+    campaign.write_once(parent / "ledger.json", dict(samples=[]))
+    campaign.write_once(
+        parent / "ledger_seal.json", dict(ledger_sha256=campaign.sha(parent / "ledger.json"))
+    )
+    retry = tmp_path / "retry"
+    campaign.prepare(retry, parent)
+    plan = campaign.read(retry / "plan.json")
+    assert plan["reused_ledger_parent"] == str(parent)
+    assert plan["bound_files"][str(parent / "ledger.json")] == campaign.sha(parent / "ledger.json")
+    changed = dict(campaign.read(campaign.CONFIG), output_tokens=64)
+    path = tmp_path / "changed.json"
+    campaign.write_once(path, changed)
+    monkeypatch.setattr(campaign, "CONFIG", path)
+    with pytest.raises(ValueError, match="identical registered"):
+        campaign.prepare(tmp_path / "reject", parent)
+
+
+def test_failed_producer_rows_remain_in_attempted_denominator(tmp_path, monkeypatch):
+    import json
+
+    import evicastkv_paper_precision as campaign
+
+    plan = dict(source_sha="a" * 40, protocol=dict(methods=["full_kv", "mosaickv_exact"]))
+    monkeypatch.setattr(campaign, "checked", lambda *args: plan)
+    jobs = [dict(method=m, samples=[0]) for m in plan["protocol"]["methods"]]
+    campaign.write_once(tmp_path / "quality/jobs.json", jobs)
+    for i, job in enumerate(jobs):
+        folder = tmp_path / f"quality/workers/{i}"
+        campaign.write_once(folder / "manifest.json", dict(synthetic_test_fixture=True))
+        row = dict(
+            sample_index=0,
+            sample_id="toy",
+            method=job["method"],
+            trial=0,
+            warmup=False,
+            status="completed" if i == 0 else "failed",
+            generated_token_ids=[1] * 128 if i == 0 else [],
+            used_fullkv_fallback=False,
+        )
+        (folder / "raw.jsonl").write_text(json.dumps(row) + "\n")
+        campaign.write_once(
+            folder / "result.json",
+            dict(
+                source_sha=plan["source_sha"],
+                plan_sha256="p",
+                job=job,
+                status=row["status"],
+                failures=[] if i == 0 else ["synthetic numerical failure"],
+                raw_sha256=campaign.sha(folder / "raw.jsonl"),
+                manifest_sha256=campaign.sha(folder / "manifest.json"),
+            ),
+        )
+    campaign.analyze(tmp_path, "p", "quality")
+    decision = campaign.read(tmp_path / "quality/analysis/decision.json")
+    assert not decision["complete"]
+    assert decision["attempted"] == decision["expected"] == 2
+    assert decision["successful"] == decision["failed_or_missing"] == 1
