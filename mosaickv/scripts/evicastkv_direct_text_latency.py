@@ -118,6 +118,7 @@ def execute(
         coalesce_transport_nonzero=record.get(
             "coalesce_transport_nonzero", plan.get("coalesce_transport_nonzero", False)
         ),
+        fused_transport_predicate=record.get("fused_transport_predicate", False),
         batch_source_validation=record.get(
             "batch_source_validation", plan.get("batch_source_validation", False)
         ),

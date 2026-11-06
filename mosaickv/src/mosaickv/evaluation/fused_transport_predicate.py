@@ -1,18 +1,23 @@
-"""Operator-only closeness-mask study. NOT wired into an inference runtime.
+"""Exact closeness-mask operator and default-off private constructor scope.
 
 Retain canonical dynamic torch.nonzero and exact BF16 repair words. Only fuse
 the FP32 isclose predicate and output-finiteness scan; never change tolerances.
+The only runtime scope is an explicitly registered consumed-input diagnostic.
 """
 
 import random
 import statistics
 import time
+from contextlib import contextmanager
+from contextvars import ContextVar
 
 import torch
 import triton
 import triton.language as tl
 
 LIMIT = 4 * 1024 * 1024
+_ABSENT = object()
+_scope = ContextVar("evicastkv_fused_transport_predicate", default=_ABSENT)
 
 
 @triton.jit
@@ -47,15 +52,75 @@ def validate(reference, actual):
         raise NotImplementedError("CUDA-only diagnostic operator; no CPU imitation")
 
 
-def fused(reference, actual):
+def fused(reference, actual, *, out=None):
     validate(reference, actual)
     count = reference.numel()
-    bad = torch.empty(reference.shape, device=reference.device, dtype=torch.bool)
+    bad = out
+    if bad is None:
+        bad = torch.empty(reference.shape, device=reference.device, dtype=torch.bool)
+    elif (
+        bad.dtype != torch.bool
+        or bad.device != reference.device
+        or bad.numel() != count
+        or not bad.is_contiguous()
+        or bad.untyped_storage().data_ptr()
+        in (reference.untyped_storage().data_ptr(), actual.untyped_storage().data_ptr())
+    ):
+        raise ValueError("independent contiguous same-device Boolean correction mask required")
     flags = torch.empty(triton.cdiv(count, 1024), device=reference.device, dtype=torch.bool)
     _mask[(flags.numel(),)](
         reference, actual, bad, flags, count, 1024, enable_fp_fusion=False, num_warps=4
     )
     return bad, flags.all()
+
+
+class Transaction:
+    def __init__(self):
+        self.calls, self.maximum_scalars, self.closed = 0, 0, False
+
+    def report(self):
+        return dict(
+            enabled=True,
+            calls=self.calls,
+            maximum_scalars=self.maximum_scalars,
+            hard_bound_scalars=LIMIT,
+            closed_before_decode=self.closed,
+            original_canonical_nonzero_and_BF16_words=True,
+            retained_tensor_owners=0,
+            unchanged_finite_protected_and_close_commit=True,
+        )
+
+
+def active():
+    return isinstance(_scope.get(), Transaction)
+
+
+def fill_mask(reference, actual, mask, *, quantum):
+    state = _scope.get()
+    if not isinstance(state, Transaction) or state.closed:
+        raise RuntimeError("private active fused predicate transaction required")
+    if quantum != reference.numel() or mask is None:
+        raise ValueError("unchanged bounded full-span coalesced correction mask required")
+    bad, finite = fused(reference, actual, out=mask)
+    if bad is not mask:
+        raise RuntimeError("fused predicate must use the original coalesced mask owner")
+    state.calls += 1
+    state.maximum_scalars = max(state.maximum_scalars, reference.numel())
+    return finite
+
+
+@contextmanager
+def use(enabled):
+    if type(enabled) is not bool or _scope.get() is not _ABSENT:
+        raise ValueError("explicit nonnested fused predicate transaction required")
+    state = Transaction() if enabled else None
+    token = _scope.set(state)
+    try:
+        yield state
+    finally:
+        if state is not None:
+            state.closed = True
+        _scope.reset(token)
 
 
 def original(reference, actual):

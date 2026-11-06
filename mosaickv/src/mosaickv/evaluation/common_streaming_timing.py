@@ -85,6 +85,7 @@ def request(
     coalesce_transport_nonzero=False,
     batch_source_validation=False,
     full_predicate_span=False,
+    fused_transport_predicate=False,
     prompt_graph_reader=False,
     prompt_graph_policy=None,
     lt_source_reader=False,
@@ -203,6 +204,18 @@ def request(
         coalesce_transport_nonzero or batch_source_validation or full_predicate_span
     ) and not defer_transport_validation:
         raise ValueError("construction optimizations require the private validation transaction")
+    if type(fused_transport_predicate) is not bool or (
+        fused_transport_predicate
+        and method == "mosaickv_exact"
+        and (
+            not componentwise_fitting
+            or not defer_transport_validation
+            or not coalesce_transport_nonzero
+            or not full_predicate_span
+            or static_transport_patches
+        )
+    ):
+        raise ValueError("fused predicate needs the unchanged componentwise full-span transaction")
     if hybrid_reader_policy is not None and full_prompt_native is not None:
         raise ValueError("hybrid and native projection policies are separate variants")
     if type(prompt_prefetch) is not bool or (
@@ -274,6 +287,9 @@ def request(
                 full_predicate_span=full_predicate_span,
             )
         )
+        from mosaickv.evaluation.fused_transport_predicate import use as fused_predicate_scope
+
+        fused_state = stack.enter_context(fused_predicate_scope(fused_transport_predicate))
         direct_state = stack.enter_context(direct_text(direct_text_policy))
         if componentwise_fitting:
             from mosaickv.evaluation import shared_source_format
@@ -452,6 +468,9 @@ def request(
             transport_validation=transport_state.report()
             if transport_state is not None
             else dict(enabled=False),
+            fused_transport_predicate=fused_state.report()
+            if fused_state is not None
+            else dict(enabled=False, calls=0),
             prompt_prefetch=prompt_prefetch,
             prefetch_hits=prefetched["hits"],
             prefetch_misses=prefetched["misses"],

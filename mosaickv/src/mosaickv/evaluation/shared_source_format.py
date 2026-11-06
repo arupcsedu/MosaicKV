@@ -310,6 +310,7 @@ def apply_transport_patch(patch, target, *, prompt_length):
 
 def transport_corrections(reference, actual, protected_rows, *, chunk_scalars=None):
     """Fix only violations of the FROZEN construction envelope, not task logits."""
+    from mosaickv.evaluation import fused_transport_predicate as fused_predicate
     from mosaickv.evaluation import static_transport_patches as static
     from mosaickv.evaluation.deferred_transport_checks import (
         correction_mask,
@@ -330,10 +331,23 @@ def transport_corrections(reference, actual, protected_rows, *, chunk_scalars=No
         ):
             raise ValueError("finite compatible BF16 construction pair required")
         quantum = predicate_span(expected.numel(), chunk_scalars, kind="corrections")
-        finite = torch.isfinite(output).all()
+        fused_mask = None
+        if fused_predicate.active():
+            if static.enabled():
+                raise ValueError(
+                    "fused predicate retains canonical dynamic nonzero, not static patches"
+                )
+            fused_mask = correction_mask(expected.numel(), expected.device)
+            finite = fused_predicate.fill_mask(expected, output, fused_mask, quantum=quantum)
+        else:
+            finite = torch.isfinite(output).all()
         if not enqueue(finite, "finite") and not bool(finite):
             raise ValueError("finite compatible BF16 construction pair required")
-        if quantum is None:
+        if fused_mask is not None:
+            pending = None
+            indices = fused_mask.flatten().nonzero().flatten()
+            del fused_mask
+        elif quantum is None:
             bad = ~torch.isclose(expected.float(), output.float(), rtol=0.01, atol=2**-6)
             pending = static.build(expected, bad) if static.enabled() else None
             indices = pending.indices if pending is not None else bad.flatten().nonzero().flatten()
