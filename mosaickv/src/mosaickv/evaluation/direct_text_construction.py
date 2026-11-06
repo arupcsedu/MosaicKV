@@ -48,6 +48,16 @@ def build(packet, pair, positions, text, modes, *, attention=None, report=None):
     verified = verified_state()
     if verified is not None and verified.mode == "handoff":
         return verified.text_packet(packet, positions, text, modes, report)
+    if verified is not None and verified.mode == "async_handoff":
+        if tuple(map(tuple, positions)) != (tuple(range(n)),) * h:
+            raise ValueError("async handoff requires the original complete source positions")
+        if report is not None:
+            report.update(
+                borrowed_only_parent_exact=False,
+                original_parent_materialized=True,
+                parent_materialization_extent="deferred_shared_native_reference",
+            )
+        return packet  # Canonical cached text is published before the commit/hash barrier.
     slots = text_slots(positions, tuple(text))
     flat = torch.tensor(
         [head * n + slot for head, row in enumerate(slots) for slot in row if slot >= 0],

@@ -160,7 +160,7 @@ def map_sources(packet, function):
 
 
 @torch.inference_mode()
-def fit(base, attention, engine, *, direct_validation=False):
+def fit(base, attention, engine, *, direct_validation=False, on_reference=None):
     from mosaickv.evaluation.full_prompt_source import restore_projected
     from mosaickv.evaluation.sequential_kv_lease import fill_component
 
@@ -173,6 +173,8 @@ def fit(base, attention, engine, *, direct_validation=False):
         reference = torch.empty(base.shape, device=base.cos.device, dtype=torch.bfloat16)
         actual = torch.empty_like(reference)
         fill_component(base, attention, component, reference)
+        if on_reference is not None:
+            on_reference(component, reference)
         engine.project(base, attention, component, actual)
         restore_projected(base, component, actual)
         new = SparseBitPatch.build(reference, actual)

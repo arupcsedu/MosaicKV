@@ -189,7 +189,7 @@ class RetiringPrefillCache(Cache):
         self.observe(original)
         from mosaickv.evaluation.prefill_native_overlap import sealed
 
-        sealed(index, packet, attention)
+        sealed(index, packet, attention, cache=self)
 
     def validate_encoding(self, index, packet, original):
         if tuple(packet.shape) != tuple(original[0].shape):

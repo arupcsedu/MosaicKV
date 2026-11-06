@@ -103,6 +103,7 @@ def test_identity_mismatch_is_not_silently_recomputed(monkeypatch):
             return original, object()
 
     state = mod.Pipeline.__new__(mod.Pipeline)
+    state.deferred_text = False
     state.audit, state.queue = False, Queue()
     with pytest.raises(RuntimeError, match="was replaced"):
         state.convert((changed,), (object(),), policy="direct", audit=False)

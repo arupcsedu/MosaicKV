@@ -20,8 +20,8 @@ def current():
 
 
 def validate(mode):
-    if type(mode) is not str or mode not in ("none", "same_buffer", "handoff"):
-        raise ValueError("explicit none/same_buffer/handoff constructor required")
+    if type(mode) is not str or mode not in ("none", "same_buffer", "handoff", "async_handoff"):
+        raise ValueError("explicit none/same_buffer/handoff/async_handoff constructor required")
 
 
 def correct_same_buffer(packet, attention, component, patch, actual, *, audit):
@@ -172,6 +172,12 @@ class State:
             )
         return CachedTextFormat(base, row["flat"], bodies)
 
+    def deferred_plan(self, index):
+        if self.mode != "async_handoff" or not 0 <= index < len(self.layers):
+            raise RuntimeError("one private async handoff layer required")
+        row = self.layers[index]
+        return dict(text=row["text"], modes=self.modes[index])
+
     def convert(self, packets, attentions, *, policy, audit):
         from mosaickv.evaluation.lossless_prompt_cache import backing_bytes
         from mosaickv.evaluation.lt_source_format import LTSourceFormat, map_sources, use
@@ -304,6 +310,19 @@ def managed(function):
             raise NotImplementedError(
                 "handoff requires private frozen 192-row direct native fitting"
             )
+        if (
+            active
+            and mode == "async_handoff"
+            and (
+                kwargs.get("overlap_native_fit") is not True
+                or kwargs.get("lt_source_reader") is not True
+                or kwargs.get("lt_fit_policy") != "direct"
+                or kwargs.get("source_tile_rows") != 192
+                or kwargs.get("frozen_joint_plan") is not True
+                or tuple(kwargs.get("construction_geometry") or ()) != (16, 4)
+            )
+        ):
+            raise NotImplementedError("async handoff requires the private frozen overlap pipeline")
         state = (
             State(
                 mode,
@@ -319,6 +338,11 @@ def managed(function):
             values, packets, details = function(*args, **kwargs)
             if state is not None and state.mode == "handoff" and not state.converted:
                 raise RuntimeError("native handoff was never consumed")
+            if state is not None and state.mode == "async_handoff":
+                info = details["overlapping_native_construction"]["report"]
+                if not info["completed"] or not info["deferred_text_ready"]:
+                    raise RuntimeError("async text/native handoff was not completed")
+                state.converted = True
             if state is not None:
                 state.close()
             details["verified_constructor"] = dict(

@@ -69,8 +69,14 @@ class OrderedQueue:
 
 
 class Pipeline:
-    def __init__(self, *, audit, frozen, source_rows=128):
+    def __init__(self, *, audit, frozen, source_rows=128, deferred_text=False):
+        if type(deferred_text) is not bool:
+            raise ValueError("explicit deferred text policy required")
         self.audit, self.frozen = audit, frozen
+        self.deferred_text = deferred_text
+        self.cache, self.prepared = None, {}
+        self.text_ready = False
+        self.text_callbacks = self.text_published = self.text_cached_layers = self.outer_checks = 0
         self.source_rows = source_rows
         self.stream = self.engine = None
         self.queue = OrderedQueue(self.fit, self.retire)
@@ -88,7 +94,8 @@ class Pipeline:
         from mosaickv.evaluation.lt_source_format import fit, verify_strides
         from mosaickv.evaluation.projection_cache import ScratchAudit, identity
 
-        base, attention, ready = item
+        base, attention, ready = item[:3]
+        text_capture = None
         started = time.monotonic()
         if self.stream is None:
             self.stream = torch.cuda.Stream(device=base.cos.device)
@@ -103,6 +110,13 @@ class Pipeline:
         try:
             with torch.cuda.device(base.cos.device), torch.cuda.stream(self.stream):
                 self.stream.wait_event(ready)
+                if self.deferred_text:
+                    from mosaickv.evaluation.async_text_handoff import Capture
+
+                    text_capture = Capture(base, **item[3])
+                    for tensor in base.tensors():
+                        if tensor.device.type == "cuda":
+                            tensor.record_stream(self.stream)
                 if self.engine is None:
                     self.engine = engine_factory(base)
                     self.engines += 1
@@ -112,6 +126,11 @@ class Pipeline:
                     extra = (
                         *tensors,
                         *self.retained_repairs,
+                        *(
+                            ()
+                            if text_capture is None or text_capture.flat is None
+                            else (text_capture.flat,)
+                        ),
                         self.engine.source,
                         self.engine.output,
                         *self.engine.extra_tensors,
@@ -122,19 +141,48 @@ class Pipeline:
                 from contextlib import nullcontext
 
                 with mode if mode is not None else nullcontext():
-                    candidate = fit(base, attention, self.engine, direct_validation=True)
+                    candidate = (
+                        fit(
+                            base,
+                            attention,
+                            self.engine,
+                            direct_validation=True,
+                            on_reference=text_capture.capture,
+                        )
+                        if text_capture is not None
+                        else fit(base, attention, self.engine, direct_validation=True)
+                    )
                     if self.audit:
                         verify_strides(candidate, attention, self.engine)
+                    if text_capture is not None:
+                        from mosaickv.evaluation.async_text_handoff import verify_outer
+
+                        prepared, native = text_capture.finish(candidate)
+                        self.text_callbacks += len(text_capture.calls)
+                        self.text_cached_layers += int(text_capture.flat is not None)
+                        if self.audit:
+                            self.outer_checks += verify_outer(
+                                prepared, native, attention, self.engine
+                            )
                 self.audit_operations += 0 if mode is None else mode.operations
                 self.retained_repairs.extend(t for p in candidate.repairs for t in p.tensors)
                 self.completed_repair_bytes = backing_bytes(tuple(self.retained_repairs))
                 self.layers += 1
                 self.fit_wall += time.monotonic() - started
+                if text_capture is not None:
+                    done = torch.cuda.Event()
+                    done.record(self.stream)
+                    patch_bytes = backing_bytes(
+                        tuple(t for p in candidate.repairs for t in p.tensors)
+                    )
+                    if patch_bytes > 32768:
+                        raise RuntimeError("unchanged per-layer numerical correction cap exceeded")
+                    return base, prepared, native, patch_bytes, done
                 return base, candidate
         finally:
             joint_scope.reset(token)
 
-    def submit(self, index, packet, attention):
+    def submit(self, index, packet, attention, *, cache=None):
         from mosaickv.evaluation.lt_source_format import map_sources
 
         bases = []
@@ -148,7 +196,61 @@ class Pipeline:
             raise NotImplementedError("exactly one finalized CUDA source per sealed layer required")
         ready = torch.cuda.Event()
         ready.record(torch.cuda.current_stream(bases[0].cos.device))
-        self.queue.submit(index, (bases[0], attention, ready))
+        item = (bases[0], attention, ready)
+        if self.deferred_text:
+            from mosaickv.evaluation.verified_constructor import current
+
+            state = current()
+            if (
+                state is None
+                or state.mode != "async_handoff"
+                or cache is None
+                or (self.cache is not None and self.cache is not cache)
+            ):
+                raise RuntimeError("same-request cache and private async text plan required")
+            self.cache = cache
+            item = (*item, state.deferred_plan(index))
+        self.queue.submit(index, item)
+        if self.deferred_text:
+            self.publish_ready(cache, final=False)
+
+    def publish_ready(self, cache, *, final):
+        from mosaickv.evaluation.async_text_handoff import publish
+
+        if cache is not self.cache:
+            raise RuntimeError("async text cannot cross request cache ownership")
+        while self.queue.taken < self.queue.submitted:
+            index = self.queue.taken
+            if not final and index not in self.queue.results:
+                if self.queue.pending and self.queue.pending[0][1].done():
+                    self.queue.drain_one()
+                else:
+                    break
+            original, prepared, native, patch_bytes, ready = self.queue.take(index)
+            stream = torch.cuda.current_stream(original.cos.device)
+            stream.wait_event(ready)
+            for tensor in (*prepared.tensors(), *native.tensors()):
+                if tensor.device.type == "cuda":
+                    tensor.record_stream(stream)
+            publish(cache, index, original, prepared)
+            self.prepared[index] = prepared, native, patch_bytes
+            self.text_published += 1
+
+    def prepare_text(self, packets, cache):
+        if (
+            not self.deferred_text
+            or self.text_ready
+            or cache is not self.cache
+            or len(packets) != self.queue.submitted
+            or any(p is not layer.packet for p, layer in zip(packets, cache.layers, strict=True))
+        ):
+            raise RuntimeError("complete original async text commit required")
+        self.publish_ready(cache, final=True)
+        output = tuple(self.prepared[i][0] for i in range(len(packets)))
+        if any(p is not layer.packet for p, layer in zip(output, cache.layers, strict=True)):
+            raise RuntimeError("prepared text was not actually published to its cache")
+        self.text_ready, self.cache = True, None
+        return output
 
     @torch.inference_mode()
     def retire(self):
@@ -161,6 +263,8 @@ class Pipeline:
             self.stream.synchronize()
             self.stream = None
         self.retained_repairs.clear()
+        self.cache = None
+        self.prepared.clear()
 
     def convert(self, packets, attentions, *, policy, audit):
         from mosaickv.evaluation.joint_incoming_projection import _scope as joint_scope
@@ -171,6 +275,17 @@ class Pipeline:
             raise ValueError("unchanged complete direct-fit controls required")
         started, records, result = time.monotonic(), [], []
         for index, packet in enumerate(packets):
+            if self.deferred_text:
+                if not self.text_ready:
+                    raise RuntimeError(
+                        "text/native commit must precede payload hashing and conversion"
+                    )
+                prepared, native, patch_bytes = self.prepared.pop(index)
+                if packet is not prepared:
+                    raise RuntimeError("a prepared text packet was replaced before conversion")
+                result.append(native)
+                records.append(dict(layer=index, added_patch_bytes=patch_bytes))
+                continue
             original, candidate = self.queue.take(index)
 
             def restore(base, original=original, candidate=candidate):
@@ -207,6 +322,7 @@ class Pipeline:
             full_parent_KV_word_validation=True,
             exhaustive_stride_audit=audit,
             overlapping_native_construction=True,
+            deferred_text_native_reference_reuse=self.deferred_text,
         )
 
     def record(self):
@@ -224,13 +340,27 @@ class Pipeline:
             final_conversion_join_wall_seconds=self.join_wall,
             worker_time_NOT_additive_to_request_wall=True,
             whole_request_GPU_peak_certified=False,
+            deferred_text=self.deferred_text,
+            deferred_text_ready=self.text_ready,
+            native_reference_callbacks=self.text_callbacks,
+            cached_text_layers=self.text_cached_layers,
+            published_text_layers=self.text_published,
+            outer_stride_word_checks=self.outer_checks,
+            explicit_temporary_peak_excludes_other_pending_text_outputs=self.deferred_text,
         )
 
 
-def sealed(index, packet, attention):
+def sealed(index, packet, attention, *, cache=None):
     state = _scope.get()
     if state is not None:
-        state.submit(index, packet, attention)
+        state.submit(index, packet, attention, cache=cache)
+
+
+def prepare_text(packets, cache):
+    state = current()
+    return (
+        state.prepare_text(packets, cache) if state is not None and state.deferred_text else packets
+    )
 
 
 def current():
@@ -263,6 +393,7 @@ def managed(function):
                 audit=kwargs.get("audit_decode_storage", False),
                 frozen=kwargs.get("frozen_joint_plan", False),
                 source_rows=kwargs.get("source_tile_rows", 128),
+                deferred_text=kwargs.get("verified_constructor") == "async_handoff",
             )
         token = _scope.set(state)
         try:

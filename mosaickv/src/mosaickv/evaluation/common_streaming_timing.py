@@ -289,6 +289,9 @@ def request(
             pref = adapter.prefill(fresh, capture_queries=False, capture_attentions=False)
         encoder.finish() if method == "mosaickv_exact" else encoder.finish(adapter)
         packets = static_patches.finalize(cache.formats(), static_state)
+    from mosaickv.evaluation.prefill_native_overlap import prepare_text
+
+    packets = prepare_text(packets, cache)
     direct_report = direct_state.finish(packets) if direct_state is not None else None
     # Exact full-catalog reconciliation remains charged identically to every
     # method. Store metadata only, never keep the retired cache alive.
