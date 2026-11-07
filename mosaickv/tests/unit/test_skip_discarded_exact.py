@@ -127,3 +127,30 @@ def test_conditional_runtime_followup_cannot_broaden_the_graph_study(tmp_path):
             graph_runtime_study=True,
             paired_after_graph_root=tmp_path / "existing",
         )
+
+
+def test_inactive_reservation_control_has_no_fitting_evidence_and_reads_no_payload(monkeypatch):
+    from test_storage_error_aware import arguments
+
+    import mosaickv.evaluation.precision_transaction_study as module
+    from mosaickv.evaluation.storage_six_overlay import _bytes, plan_layer
+
+    def must_not_run(*args, **kwargs):
+        raise AssertionError("inactive control must not fit a prototype")
+
+    monkeypatch.setattr(module, "plan_precision_transaction", must_not_run)
+    args, parent = arguments()
+    policy = OverlayPolicy(
+        component_mode="parent_reserved",
+        skip_discarded_exact=True,
+        precision_transaction="prototype",
+        prototype_representation="parent_residual_delta",
+        forecast_distribution="individual_queries",
+        record_phase_timings=True,
+    )
+    actual = plan_layer(*args, policy, pin_residuals=False, parent_pair=parent)
+    assert "precision_transaction_evidence" not in actual.evidence
+    assert _bytes(actual.gpu_tensors()) == 6713
+    value = parent[0].clone()
+    actual.fill(0, value)
+    assert torch.equal(value, parent[0])

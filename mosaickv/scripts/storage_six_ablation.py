@@ -679,12 +679,49 @@ def worker(root, expected):
         )
         # Cold-start warmup is identical and not a measured comparison arm.
         warm, _ = campaign.execute(adapter, inputs, transport, "mosaickv_exact", audit=False)
+        reused = plan.get("reused_controls", {}).get(str(index), {})
+        if reused:
+            control = read(Path(reused["parent"]))
+            if not torch.equal(
+                warm.cpu(),
+                torch.load(control["logits_path"], weights_only=True, map_location="cpu"),
+            ):
+                raise RuntimeError("current-source parent warmup differs from reused control")
+            write_once(
+                folder / "current_source_parent_reuse_parity.json",
+                dict(
+                    all_128_logits_bitwise=True,
+                    reused_row_sha256=sha(Path(reused["parent"])),
+                    model_weights_reloaded_current_source=True,
+                ),
+            )
         del warm
         # Reverse component order on worker 1; fixed controls always first.
         policies = plan.get("component_policies", component_policies())
         component_names = tuple(policies)
         components = component_names if index % 2 == 0 else tuple(reversed(component_names))
         for arm in ("full_kv", "parent", *components):
+            if arm in reused:
+                row = read(Path(reused[arm]))
+                if (
+                    row["status"] != "completed"
+                    or row["arm"] != arm
+                    or row["sample_id"] != inputs["sample_id"]
+                    or sha(Path(row["logits_path"])) != row["logits_sha256"]
+                ):
+                    raise ValueError("changed or incompatible reused control")
+                values_by_arm[arm] = torch.load(
+                    row["logits_path"], weights_only=True, map_location="cpu"
+                )
+                row = dict(
+                    row,
+                    reused_without_inference=True,
+                    original_measured_row_path=reused[arm],
+                    original_measured_row_sha256=sha(Path(reused[arm])),
+                )
+                write_once(folder / f"{len(rows):02}-{arm}.json", row)
+                rows.append(row)
+                continue
             gc.collect()
             row = dict(
                 arm=arm,
@@ -753,9 +790,13 @@ def worker(root, expected):
                             adapter, inputs, transport, "mosaickv_exact", audit=False
                         )
                     row["mechanism_evidence"] = proof
-                    if policy.skip_discarded_exact and any(
-                        p["precision_transaction_evidence"]["discarded_exact_search_evaluated"]
-                        for p in proof["layers"].values()
+                    if (
+                        policy.skip_discarded_exact
+                        and policy.component_mode != "parent_reserved"
+                        and any(
+                            p["precision_transaction_evidence"]["discarded_exact_search_evaluated"]
+                            for p in proof["layers"].values()
+                        )
                     ):
                         raise RuntimeError(
                             "configured discarded-search optimization did not engage"
@@ -859,7 +900,9 @@ def worker(root, expected):
         if all(a in completed for a in component_names):
             matched = storage_match([completed[a] for a in component_names])
             write_once(folder / "storage_matching.json", matched)
-            if not torch.equal(values_by_arm["exact_members"], values_by_arm["forced_repair"]):
+            if {"exact_members", "forced_repair"} <= values_by_arm.keys() and not torch.equal(
+                values_by_arm["exact_members"], values_by_arm["forced_repair"]
+            ):
                 errors.append(
                     "preloaded exact-members control differs from forced original restoration"
                 )
