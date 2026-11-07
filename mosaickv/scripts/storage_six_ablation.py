@@ -9,8 +9,10 @@ import json
 import os
 import subprocess
 import traceback
+from contextlib import ExitStack
 from dataclasses import asdict, replace
 from pathlib import Path
+from unittest.mock import patch
 
 from mosaickv.evaluation.fox_campaign import clean_source, digest, sha, write_once
 from mosaickv.evaluation.storage_six_overlay import COMPONENT_MODES, OverlayPolicy
@@ -45,7 +47,23 @@ def component_policies(
     readout_study=False,
     readout_selection_study=False,
     global_draft_study=False,
+    horizon_study=False,
 ):
+    if horizon_study:
+        policies = component_policies(global_draft_study=True)
+        keys = (
+            "full",
+            "source_replaced",
+            "source_replaced_parent",
+            "parent_reserved",
+            "exact_members",
+            "forced_repair",
+            "readout_joint",
+        )
+        return {
+            **{key: policies[key] for key in keys},
+            **{f"controlled_plan_{i}": policies["readout_joint"] for i in range(10)},
+        }
     readout_selection_study = readout_selection_study or global_draft_study
     base = OverlayPolicy(record_phase_timings=True)
     if readout_selection_study:
@@ -245,7 +263,9 @@ def prepare(
     readout_study=False,
     readout_selection_study=False,
     global_draft_study=False,
+    horizon_study=False,
 ):
+    global_draft_study = global_draft_study or horizon_study
     readout_selection_study = readout_selection_study or global_draft_study
     replacement_study = (
         replacement_study or transaction_study or readout_study or readout_selection_study
@@ -265,6 +285,25 @@ def prepare(
     paths = [PARENT / n for n in ("plan.json", "options.json", "ledger.json")]
     paths += [PREVIOUS / "inputs.json", Path(parent["profile_path"])]
     paths += [Path(m["path"]) for s in inputs for m in s["media"]]
+    fixed_plans = {}
+    if horizon_study:
+        completed = Path("/scratch/djy8hg/runs/evicastkv/offloaded-fullkv-draft-20261107-v1")
+        decision = completed / "analysis/decision.json"
+        if read(decision).get("execution_passed") is not True:
+            raise ValueError("actual FullKV forecast/isolation controls must pass first")
+        paths.append(decision)
+        for i in (0, 1):
+            p = next((completed / f"workers/{i}").glob("[0-9][0-9]-readout_joint.json"))
+            row = read(p)
+            if not row.get("online_fullkv_draft_bitwise_parity"):
+                raise ValueError("ordinary FullKV forecast parity required")
+            plans = row["mechanism_evidence"]["conditional_readout_selection"]["plans"]
+            if len(plans) != 10:
+                raise ValueError("exactly the existing ten fixed plans required")
+            fixed_plans[str(i)] = [
+                {k: r[k] for k in ("name", "ordinal", "exact_ids", "restore")} for r in plans
+            ]
+            paths.append(p)
     if readout_selection_study:
         gate = Path("/scratch/djy8hg/runs/evicastkv/exact-last-layer-readout-20261107-v2")
         decision = gate / "analysis/decision.json"
@@ -342,6 +381,7 @@ def prepare(
                 "mosaickv/tests/unit/test_exact_last_layer_readout.py",
                 "mosaickv/tests/unit/test_conditional_readout_selection.py",
                 "mosaickv/tests/unit/test_offloaded_fullkv_draft.py",
+                "mosaickv/tests/unit/test_readout_horizon_audit.py",
                 "mosaickv/tests/unit/test_opportunity_demand.py",
                 "mosaickv/tests/unit/test_bounded_probe_horizon.py",
                 "mosaickv/tests/unit/test_streaming_source_constructor.py",
@@ -396,6 +436,7 @@ def prepare(
                     readout_study,
                     readout_selection_study,
                     global_draft_study,
+                    horizon_study,
                 ),
             ),
             component_policies=component_policies(
@@ -406,11 +447,15 @@ def prepare(
                 readout_study,
                 readout_selection_study,
                 global_draft_study,
+                horizon_study,
             ),
             source_replacement_study=replacement_study,
             exact_last_layer_readout_study=readout_study,
             conditional_readout_selection_study=readout_selection_study,
             offloaded_online_fullkv_draft_study=global_draft_study,
+            evaluation_only_fixed_plan_horizon_audit=horizon_study,
+            oracle_horizon_audit_not_online_selection=horizon_study,
+            fixed_consumed_counterfactual_plans=fixed_plans,
             storage_boundary_version="shared_initial_final_peak_v2",
             component_reference_arm=(
                 "transaction_joint_guarded"
@@ -556,20 +601,50 @@ def worker(root, expected):
                             else "evaluation_capture"
                         ] = dict(path=str(path), sha256=sha(path))
 
-                    with integrated_storage(
-                        adapter,
-                        policy,
-                        reader_options=options,
-                        diagnostic_capture=capture
-                        if arm in ("full", "all_adaptive", "readout_joint")
-                        or policy.readout_control
-                        or policy.readout_selection != "none"
-                        else None,
-                    ) as proof:
+                    with ExitStack() as scope:
+                        if plan.get("evaluation_only_fixed_plan_horizon_audit") and arm.startswith(
+                            "controlled_plan_"
+                        ):
+                            from mosaickv.evaluation import (
+                                conditional_readout_selection as selection,
+                            )
+                            from mosaickv.evaluation.readout_horizon_audit import forced_plan
+
+                            ordinal = int(arm.rsplit("_", 1)[1])
+
+                            def force(records, index=ordinal):
+                                return forced_plan(records, index)
+
+                            scope.enter_context(patch.object(selection, "choose", force))
+                        proof = scope.enter_context(
+                            integrated_storage(
+                                adapter,
+                                policy,
+                                reader_options=options,
+                                diagnostic_capture=capture
+                                if arm in ("full", "all_adaptive", "readout_joint")
+                                or policy.readout_control
+                                or policy.readout_selection != "none"
+                                else None,
+                            )
+                        )
                         values, detail = campaign.execute(
                             adapter, inputs, transport, "mosaickv_exact", audit=False
                         )
                     row["mechanism_evidence"] = proof
+                    if (
+                        plan.get("evaluation_only_fixed_plan_horizon_audit")
+                        and policy.readout_selection != "none"
+                    ):
+                        actual_plans = [
+                            {
+                                k: list(r[k]) if k == "exact_ids" else r[k]
+                                for k in ("name", "ordinal", "exact_ids", "restore")
+                            }
+                            for r in proof["conditional_readout_selection"]["plans"]
+                        ]
+                        if actual_plans != plan["fixed_consumed_counterfactual_plans"][str(index)]:
+                            raise RuntimeError("frozen counterfactual candidate pool changed")
                     if detail["prefill_storage"]["original_KV_tensor_objects_alive"] != 0:
                         raise RuntimeError("original dense KV owner survived")
                     if not proof["all_residuals_pinned"] or proof["extra_gpu_bytes"] != (
@@ -652,6 +727,10 @@ def worker(root, expected):
                 values_by_arm["readout_control"], values_by_arm["source_replaced"]
             ):
                 errors.append("readout diagnostic leaked into the final decode state")
+            if plan.get("evaluation_only_fixed_plan_horizon_audit") and not torch.equal(
+                values_by_arm["controlled_plan_0"], values_by_arm["source_replaced"]
+            ):
+                errors.append("controlled identity changed a final decode logit bit")
             if "individual_delta_fast_graph" in values_by_arm and not torch.equal(
                 values_by_arm["individual_delta_fast_graph"], values_by_arm["individual_delta"]
             ):
@@ -695,7 +774,11 @@ def analyze(root, expected):
     from mosaickv.evaluation.coco_all_methods import caption_text
     from mosaickv.evaluation.coco_shared_bytes import TokenizedCider
     from mosaickv.evaluation.metrics.types import MetricSample
-    from mosaickv.evaluation.storage_component_gate import precision_evidence, stage_effect
+    from mosaickv.evaluation.storage_component_gate import (
+        precision_evidence,
+        stage_effect,
+        storage_match,
+    )
 
     plan = checked(root, expected)
     arms = plan.get("arms", ARMS)
@@ -811,6 +894,28 @@ def analyze(root, expected):
                 evaluation_only_not_proposal_input=True,
             )
     scores = {}
+    horizon_proof = {}
+    if plan.get("evaluation_only_fixed_plan_horizon_audit") and not errors:
+        from mosaickv.evaluation.readout_horizon_audit import audit as horizon_audit
+
+        for sample in read(root / "inputs.json"):
+            by_arm = {r["arm"]: r for r in rows if r["sample_id"] == sample["sample_id"]}
+            reference = torch.load(
+                by_arm["full_kv"]["logits_path"], weights_only=True, map_location="cpu"
+            )
+            candidates = {}
+            for i in range(10):
+                record = by_arm[f"controlled_plan_{i}"]
+                name = "identity" if i == 0 else f"plan_{i}"
+                candidates[name] = torch.load(
+                    record["logits_path"], weights_only=True, map_location="cpu"
+                )
+            proof = horizon_audit(reference, candidates)
+            proof["measured_storage_matching"] = storage_match(
+                [by_arm[f"controlled_plan_{i}"] for i in range(10)]
+            )
+            horizon_proof[sample["sample_id"]] = proof
+        write_once(out / "evaluation_only_horizon_audit.json", horizon_proof)
     if not errors:
         refs = {
             s["sample_id"]: tuple(s["references"]) for s in read(PARENT / "ledger.json")["samples"]
@@ -839,6 +944,7 @@ def analyze(root, expected):
             common_prefix_effects=aligned,
             precision_decomposition=precision,
             diagnostic_cider=scores,
+            evaluation_only_horizon_audit=horizon_proof,
             all_parent_stability_guards_passed=all(
                 r.get("parent_guard_passed", False) for r in rows if r["arm"] in component_names
             )
@@ -936,6 +1042,7 @@ def main():
     p.add_argument("--readout-study", action="store_true")
     p.add_argument("--readout-selection-study", action="store_true")
     p.add_argument("--global-draft-study", action="store_true")
+    p.add_argument("--horizon-study", action="store_true")
     a = p.parse_args()
     if a.action == "prepare":
         prepare(
@@ -947,6 +1054,7 @@ def main():
             a.readout_study,
             a.readout_selection_study,
             a.global_draft_study,
+            a.horizon_study,
         )
     elif a.action == "worker":
         return worker(a.root, a.plan_sha)

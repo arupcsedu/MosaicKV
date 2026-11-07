@@ -1106,7 +1106,11 @@ def integrated_storage(
                         event,
                         layer=index,
                         trigger_reason=(
-                            "controlled_entropy_zero"
+                            "controlled_readout_plan_enumeration"
+                            if report.get("conditional_readout_selection", {})
+                            .get("selected", {})
+                            .get("evaluation_only_forced_plan")
+                            else "controlled_entropy_zero"
                             if forced
                             else "conditional_readout_uncertainty_reduction"
                             if readout_trigger
@@ -1115,7 +1119,12 @@ def integrated_storage(
                             else "entropy"
                         ),
                         current_token_recomputed_once=True,
-                        stress_control=forced,
+                        stress_control=forced
+                        or bool(
+                            report.get("conditional_readout_selection", {})
+                            .get("selected", {})
+                            .get("evaluation_only_forced_plan")
+                        ),
                     )
                 )
             report["provisional_first_decode_logit_sha"] = None
