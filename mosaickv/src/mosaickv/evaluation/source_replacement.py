@@ -145,6 +145,7 @@ def replace_with_codec(packets, codec):
     import weakref
 
     from mosaickv.evaluation.layer_code_delta import map_bodies
+    from mosaickv.evaluation.lossless_prompt_cache import backing_bytes
 
     state = _scope.get()
     if state is None:
@@ -156,11 +157,25 @@ def replace_with_codec(packets, codec):
     state["common_omitted_positions"] = omitted.nonzero().flatten().tolist()
     baseline, before = codec(packets)
     records, refs = [], []
+    shared_map = None
 
     def replace_body(role, body):
+        nonlocal shared_map
+
         if role != "source":
             raise NotImplementedError("source-only joint replacement transaction")
         smaller, record = compact(body, omitted)
+        if record["replaced"]:
+            # Same original shape and COMMON omitted mask => identical map.
+            # Share its actual backing owner across layers, not 32 copies of
+            # the same metadata. The whole-packet accountant deduplicates it.
+            if shared_map is None:
+                shared_map = smaller.row_map
+            else:
+                if smaller.row_map.shape != shared_map.shape:
+                    raise RuntimeError("common source map changed logical shape")
+                smaller = replace(smaller, row_map=shared_map)
+            record["row_map_shared_across_layers"] = True
         records.append(record)
         if record["replaced"]:
             refs.append(weakref.ref(body.codes))
@@ -170,7 +185,10 @@ def replace_with_codec(packets, codec):
     candidate, after = codec(smaller)
     state["parent_codec_net_bytes"] = before["net_active_bytes"]
     state["candidate_codec_net_bytes"] = after["net_active_bytes"]
-    state["raw_code_saved_bytes"] = sum(r["saved_bytes"] for r in records)
+    state["raw_code_saved_bytes"] = backing_bytes(
+        tuple(t for p in packets for t in p.tensors())
+    ) - backing_bytes(tuple(t for p in smaller for t in p.tensors()))
+    state["unique_source_map_bytes"] = backing_bytes(() if shared_map is None else (shared_map,))
     if not all(r["replaced"] for r in records) or (
         after["net_active_bytes"] >= before["net_active_bytes"]
     ):

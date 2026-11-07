@@ -81,6 +81,9 @@ def test_real_retirement_audit_checks_objects_and_counts_map_bytes(monkeypatch):
     class Packet:
         source: object
 
+        def tensors(self):
+            return self.source.tensors()
+
     monkeypatch.setattr(layer_code_delta, "map_bodies", lambda p, f: Packet(f("source", p.source)))
 
     def codec(packets):
@@ -114,6 +117,9 @@ def test_joint_codec_rolls_back_if_old_delta_codec_is_smaller(monkeypatch):
     class Packet:
         source: object
 
+        def tensors(self):
+            return self.source.tensors()
+
     monkeypatch.setattr(layer_code_delta, "map_bodies", lambda p, f: Packet(f("source", p.source)))
     body = pack(torch.zeros(1, 1, 32, 128).bfloat16(), bits=3, axis=2)
     original = (Packet(body),)
@@ -131,6 +137,42 @@ def test_joint_codec_rolls_back_if_old_delta_codec_is_smaller(monkeypatch):
         assert not proof["replacement_accepted"]
         assert proof["saved_gpu_bytes"] == 0
         assert proof["raw_code_saved_bytes"] > 0  # cannot be called NET savings
+
+
+def test_common_map_has_one_physical_owner_not_one_copy_per_layer(monkeypatch):
+    from dataclasses import dataclass
+
+    from mosaickv.evaluation import layer_code_delta
+    from mosaickv.evaluation.source_replacement import replace_with_codec
+
+    @dataclass
+    class Packet:
+        source: object
+
+        def tensors(self):
+            return self.source.tensors()
+
+    monkeypatch.setattr(layer_code_delta, "map_bodies", lambda p, f: Packet(f("source", p.source)))
+    bodies = tuple(pack(torch.zeros(1, 1, 32, 128).bfloat16(), bits=3, axis=2) for _ in range(3))
+    original = tuple(Packet(body) for body in bodies)
+
+    def codec(packets):
+        return packets, dict(
+            enabled=False,
+            net_active_bytes=backing_bytes(tuple(t for p in packets for t in p.tensors())),
+        )
+
+    with use(True) as proof:
+        for body in bodies:
+            maybe_compact(body, torch.ones(32, dtype=torch.bool))
+        actual, _ = replace_with_codec(original, codec)
+        assert proof["replacement_accepted"]
+        assert len({p.source.row_map.data_ptr() for p in actual}) == 1
+        assert proof["unique_source_map_bytes"] == 32 * 4
+        assert proof["raw_code_saved_bytes"] == (
+            backing_bytes(tuple(t for p in original for t in p.tensors()))
+            - backing_bytes(tuple(t for p in actual for t in p.tensors()))
+        )
 
 
 def test_replacement_variants_are_isolated_and_common_parent_is_measured():

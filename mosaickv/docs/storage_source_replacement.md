@@ -21,6 +21,9 @@ existing lossless cross-layer codec. Evaluate original-plus-codec and
 replacement-plus-codec, charging replay scratch in BOTH. Accept only a strict
 net saving; otherwise retain the original codec explicitly. Raw omitted-code
 bytes alone are not evidence of net storage reduction.
+The common row map has ONE backing owner shared across layers. Duplicating it
+per layer can outweigh small code savings; verify actual alias identity and
+global storage deduplication, not merely equal map contents.
 
 The old code owner must die before decoding. Weak references audit original
 tensor retirement; the new payload must own separate, smaller backing storage.
