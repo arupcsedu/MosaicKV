@@ -47,10 +47,13 @@ def prepare(
     shared_suffix=False,
     planner_exact_fast=False,
     cpu_torch_threads=12,
+    guard_tail=False,
 ):
     import all_head_native_source as infra
 
     source = clean_source(SOURCE)
+    if guard_tail and (not shared_suffix or not planner_exact_fast or reuse_anchor_readout):
+        raise ValueError("native tail diagnostic requires the exact planner/shared suffix controls")
     parent = read(PARENT / "plan.json")
     if not read(PARENT / "analysis/decision.json")["model_parity_gate_passed"]:
         raise ValueError("pretrained all-head retirement and logit parity must pass first")
@@ -93,6 +96,7 @@ def prepare(
             graph_spatial_search="zero_overlap" if planner_exact_fast else "reference",
             reuse_precision_targets=planner_exact_fast,
             prototype_anchor_scope="selected" if planner_exact_fast else "legacy",
+            anchor_tail="cuda_graph" if guard_tail else "reference",
         ),
     }
     compact = reuse_anchor_readout or shared_suffix or planner_exact_fast
@@ -116,6 +120,7 @@ def prepare(
                 "mosaickv/tests/unit/test_live_anchor_guard.py",
                 "mosaickv/tests/unit/test_guard_readout_reuse.py",
                 "mosaickv/tests/unit/test_guard_suffix_replay.py",
+                "mosaickv/tests/unit/test_guard_tail_graph.py",
                 "mosaickv/tests/unit/test_zero_overlap_spatial.py",
                 "mosaickv/tests/unit/test_precision_target_reuse.py",
                 "mosaickv/tests/unit/test_source_hybrid_validation.py",
@@ -157,6 +162,10 @@ def prepare(
             shared_suffix=shared_suffix,
             planner_exact_fast=planner_exact_fast,
             cpu_torch_threads=cpu_torch_threads,
+            guard_tail=guard_tail,
+            tail_operator_gate="bitwise_native_then_capture_inclusive_128_call_ratio_below_0.95"
+            if guard_tail
+            else "not_used",
             profile_and_verify_suffix_before_timed_trials=shared_suffix,
             independent_quality_or_superiority_established=False,
             fresh_or_paper_campaign_authorized=False,
@@ -270,14 +279,7 @@ def worker(root, expected):
     folder.mkdir(parents=True, exist_ok=False)
     errors, count = [], 0
     try:
-        write_once(folder / "operator.json", operator_controls(plan["source_codes"][str(i)]))
         cfg = RunConfig.from_mapping(plan["parent"]["config"])
-        adapter = load_hf_adapter(
-            cfg.model.id,
-            revision=cfg.model.revision,
-            model_kwargs=_model_kwargs(cfg, local_files_only=True),
-            processor_kwargs={"local_files_only": True},
-        )
         write_once(
             folder / "manifest.json",
             dict(
@@ -299,6 +301,20 @@ def worker(root, expected):
                 fixed_clocks_applied=False,
                 **scheduler_identity({}),
             ),
+        )
+        write_once(folder / "operator.json", operator_controls(plan["source_codes"][str(i)]))
+        if plan.get("guard_tail"):
+            from mosaickv.evaluation.guard_tail_diagnostic import run as tail_diagnostic
+
+            operator = tail_diagnostic()
+            write_once(folder / "tail_operator.json", operator)
+            if not operator["passed"]:
+                raise RuntimeError("native guard-tail operator did not pass; no model benchmark")
+        adapter = load_hf_adapter(
+            cfg.model.id,
+            revision=cfg.model.revision,
+            model_kwargs=_model_kwargs(cfg, local_files_only=True),
+            processor_kwargs={"local_files_only": True},
         )
         refs = {
             k: torch.load(p, map_location="cpu", weights_only=True)
@@ -414,6 +430,10 @@ def worker(root, expected):
                                 and evidence["live_anchor_guard"]["suffix_graph_replays"] != 127
                             ):
                                 raise RuntimeError("shared suffix did not engage on every update")
+                            if arm == "hybrid_fast" and plan.get("guard_tail"):
+                                tail = evidence["live_anchor_guard"]["tail_graph"]
+                                if tail["replays"] != 127 or tail["captures"] != 1:
+                                    raise RuntimeError("native guard-tail replay did not engage")
                             if arm == "hybrid_fast" and plan["reuse_anchor_readout"]:
                                 reuse = evidence["live_anchor_guard"]["readout_reuse"]
                                 if any(
@@ -564,6 +584,7 @@ def main():
     p.add_argument("--shared-suffix", action="store_true")
     p.add_argument("--planner-exact-fast", action="store_true")
     p.add_argument("--cpu-torch-threads", type=int, choices=(1, 2, 12), default=12)
+    p.add_argument("--guard-tail", action="store_true")
     a = p.parse_args()
     if a.action == "prepare":
         return prepare(
@@ -573,6 +594,7 @@ def main():
             shared_suffix=a.shared_suffix,
             planner_exact_fast=a.planner_exact_fast,
             cpu_torch_threads=a.cpu_torch_threads,
+            guard_tail=a.guard_tail,
         )
     if a.action == "worker":
         return worker(a.root, a.plan_sha)

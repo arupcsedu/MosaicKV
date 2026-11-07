@@ -70,8 +70,16 @@ class OverlayPolicy:
     graph_spatial_search: str = "reference"
     reuse_precision_targets: bool = False
     prototype_anchor_scope: str = "legacy"
+    anchor_tail: str = "reference"
 
     def __post_init__(self):
+        if self.anchor_tail not in ("reference", "cuda_graph") or (
+            self.anchor_tail == "cuda_graph"
+            and (not self.live_anchor_guard or self.anchor_risk_repair or self.reuse_anchor_readout)
+        ):
+            raise ValueError(
+                "guard-tail graph requires live guard without readout reuse/risk repair"
+            )
         if self.prototype_anchor_scope not in ("legacy", "selected", "matched_groups"):
             raise ValueError("explicit prototype anchor scope required")
         if self.graph_spatial_search not in ("reference", "zero_overlap"):

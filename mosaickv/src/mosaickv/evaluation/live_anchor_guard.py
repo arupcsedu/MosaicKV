@@ -31,6 +31,11 @@ def decision(parent, candidate):
     finite = p.isfinite().all() & c.isfinite().all()
     if not bool(finite):
         raise ValueError("nonfinite logits are an execution failure, not a successful veto")
+    return decision_tensors(p, c, finite)
+
+
+def decision_tensors(p, c, finite):
+    """The original FP64 operations, without a host synchronization in capture."""
     kl = (p.softmax(-1) * (p.log_softmax(-1) - c.log_softmax(-1))).sum()
     maximum = (p - c).abs().max()
     same = p.argmax() == c.argmax()
@@ -45,6 +50,7 @@ class LiveAnchorGuard:
         self.repair_enabled = bool(policy and policy.anchor_risk_repair)
         self.single_head = bool(policy and policy.anchor_counterfactual == "single_head")
         self.readout = None
+        self.tail = None
         self.suffix_replays = self.suffix_verifications = self.suffix_activation_bytes = 0
         self.stack, self.records, self.parent_logits = ExitStack(), [], []
         self.parent_key = self.parent_value = self.probabilities = self.heads = None
@@ -100,6 +106,13 @@ class LiveAnchorGuard:
         self.token = _current.set(self)
         score, values, epilogue = Binding.scores, Binding.values, Transport.run
         owner = self
+        if self.policy and self.policy.anchor_tail == "cuda_graph":
+            from mosaickv.evaluation.guard_tail_graph import GuardTail
+
+            self.tail = GuardTail(
+                self.adapter.model.model.language_model.norm,
+                self.adapter.model.get_output_embeddings(),
+            )
         if self.policy and self.policy.reuse_anchor_readout:
             from mosaickv.evaluation.guard_readout_reuse import ReadoutReuse
 
@@ -202,6 +215,16 @@ class LiveAnchorGuard:
                 parent_hidden = hidden_after_attention(layer, original_residual, owner.heads)
             norm = owner.adapter.model.model.language_model.norm
             head = owner.adapter.model.get_output_embeddings()
+            if owner.tail is not None:
+                # The opt-in graph path forbids repair/readout-reuse branches.
+                # It retains their original reference path when disabled.
+                output, parent_logits, record = owner.tail.run(parent_hidden, active_hidden)
+                owner.records.append(record)
+                owner.parent_logits.append(parent_logits.detach().cpu())
+                owner.heads = None
+                owner.active_key = owner.active_value = owner.active_heads = None
+                owner.query = owner.mask = owner.prototype_mass = None
+                return output
             parent_norm, active_norm = norm(parent_hidden), norm(active_hidden)
             parent_native, active_native = head(parent_norm), head(active_norm)
             parent_logits = parent_native.float().reshape(-1)
@@ -303,6 +326,7 @@ class LiveAnchorGuard:
                 reference="live_parent_storage_variant_not_FullKV",
                 counterfactual_scope="single_head" if self.single_head else "full_heads",
                 readout_reuse=self.readout.report() if self.readout is not None else None,
+                tail_graph=self.tail.report() if self.tail is not None else None,
                 suffix_graph_replays=self.suffix_replays,
                 early_middle_late_native_suffix_verifications=self.suffix_verifications,
                 suffix_saved_hidden_activation_bytes=self.suffix_activation_bytes,
@@ -329,6 +353,8 @@ class LiveAnchorGuard:
             self.layer = None
             self.active_key = self.active_value = self.active_heads = self.query = None
             self.prototype_mass = None
+            if self.tail is not None:
+                self.tail.close()
 
 
 def head_mask(mask, head):
