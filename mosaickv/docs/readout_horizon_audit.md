@@ -33,3 +33,13 @@ If none consistently improves later-prefix fidelity, stop this substitution
 direction rather than increase the beam or tune against sample answers.
 Fresh-cohort evaluation and larger campaigns remain blocked. Temporary CPU
 FullKV snapshots and readout workspaces retain their explicit cost accounting.
+
+## Separate retrospective EOS-boundary correction
+
+`analyze_readout_horizon_eos.py` leaves the registered full-128-step analysis
+unchanged. It validates each model-generated caption's stop against saved
+logits and the pinned model configuration's EOS IDs, then measures future
+fidelity only through the first EOS. Post-EOS logit agreement is an engineering
+diagnostic, not evidence about caption quality. This derived audit is labeled
+retrospective; no GPU inference or original result is overwritten. The same
+32-token engineering guards remain, even when the caption ends earlier.

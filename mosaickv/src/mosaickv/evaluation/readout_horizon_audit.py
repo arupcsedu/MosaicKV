@@ -11,12 +11,16 @@ def forced_plan(records, ordinal):
     return dict(records[ordinal], evaluation_only_forced_plan=True)
 
 
-def audit(reference, candidates, horizons=(1, 2, 3, 7), *, guard_predictions=32):
+def audit(
+    reference, candidates, horizons=(1, 2, 3, 7), *, guard_predictions=32, semantic_predictions=128
+):
     if (
         reference.ndim != 2
         or len(reference) != 128
         or not candidates
         or "identity" not in candidates
+        or type(semantic_predictions) is not int
+        or not 2 <= semantic_predictions <= 128
         or any(t.shape != reference.shape for t in candidates.values())
         or any(type(h) is not int or not 1 <= h < guard_predictions for h in horizons)
         or any(not bool(t.isfinite().all()) for t in (reference, *candidates.values()))
@@ -32,9 +36,11 @@ def audit(reference, candidates, horizons=(1, 2, 3, 7), *, guard_predictions=32)
         divergence = (~matches).nonzero().flatten()
         # The first mismatching prediction still has identical input tokens;
         # later predictions are not at a comparable autoregressive prefix.
-        support = int(divergence[0]) + 1 if len(divergence) else 128
+        engineering_support = int(divergence[0]) + 1 if len(divergence) else 128
+        support = min(engineering_support, semantic_predictions)
         rows[name] = dict(
             shared_prefix_predictions=support,
+            engineering_shared_prefix_predictions=engineering_support,
             full_token_agreement=float(matches.double().mean()),
             all_128_tokens_equal=bool(matches.all()),
             kl_by_prediction=kl[:support].tolist() + [None] * (128 - support),
@@ -92,4 +98,21 @@ def audit(reference, candidates, horizons=(1, 2, 3, 7), *, guard_predictions=32)
         oracle_future_logits_evaluation_only=True,
         superiority_established=False,
         new_cohort_authorized=False,
+        semantic_prediction_limit=semantic_predictions,
     )
+
+
+def eos_boundary(reference, answer, eos_ids):
+    """Validate the recorded first-EOS caption boundary against actual logits."""
+    ids = reference.argmax(-1).tolist()
+    if len(ids) != 128 or not eos_ids:
+        raise ValueError("complete generated prediction IDs and pinned model EOS IDs required")
+    stops = [i for i, token in enumerate(ids) if token in eos_ids]
+    if answer["stopped_by_eos"]:
+        count = answer["answer_tokens"]
+        if not stops or stops[0] != count or ids[:count] != answer["token_ids"]:
+            raise ValueError("reported caption/EOS boundary disagrees with saved model logits")
+        return count + 1
+    if stops or answer["answer_tokens"] != 128 or ids != answer["token_ids"]:
+        raise ValueError("full-length caption disagrees with saved model logits")
+    return 128

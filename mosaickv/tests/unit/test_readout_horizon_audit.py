@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from mosaickv.evaluation.readout_horizon_audit import audit, forced_plan
+from mosaickv.evaluation.readout_horizon_audit import audit, eos_boundary, forced_plan
 
 
 def test_fixed_plans_are_explicitly_controlled_and_bounded():
@@ -41,3 +41,23 @@ def test_failed_token_guard_is_not_a_useful_plan_and_incomplete_data_fail_closed
     assert all(r["selected"] == "identity" for r in result["horizons"].values())
     with pytest.raises(ValueError):
         audit(reference[:20], dict(identity=reference[:20]))
+
+
+def test_post_eos_improvement_cannot_masquerade_as_answer_prefix_improvement():
+    reference = torch.tensor([[3.0, 1.0, 0.0]]).expand(128, -1).clone()
+    identity = reference + torch.tensor([0.0, 0.1, 0.0])
+    changed = identity.clone()
+    changed[8:] = reference[8:]
+    result = audit(reference, dict(identity=identity, tail_only=changed), semantic_predictions=8)
+    assert all(r["selected"] == "identity" for r in result["horizons"].values())
+    assert result["candidate_diagnostics"]["tail_only"]["kl_by_prediction"][8:] == [None] * 120
+
+
+def test_caption_boundary_must_agree_with_generated_logits_and_pinned_eos():
+    logits = torch.zeros(128, 4)
+    logits[:5, 1] = 3
+    logits[5:, 2] = 3
+    answer = dict(stopped_by_eos=True, answer_tokens=5, token_ids=[1] * 5)
+    assert eos_boundary(logits, answer, {2}) == 6
+    with pytest.raises(ValueError):
+        eos_boundary(logits, dict(answer, answer_tokens=6), {2})
