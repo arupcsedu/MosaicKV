@@ -39,17 +39,37 @@ def decision(parent, candidate):
 
 
 class LiveAnchorGuard:
-    def __init__(self, adapter, overlay, report):
+    def __init__(self, adapter, overlay, report, *, policy=None, inline_owner=None):
         self.adapter, self.overlay, self.report = adapter, overlay, report
+        self.policy, self.inline_owner = policy, inline_owner
+        self.repair_enabled = bool(policy and policy.anchor_risk_repair)
         self.stack, self.records, self.parent_logits = ExitStack(), [], []
         self.parent_key = self.parent_value = self.probabilities = self.heads = None
         self.layer = self.query = self.key = self.value = None
         self.peak_temporary_kv_bytes = 0
+        self.active_key = self.active_value = self.active_heads = None
+        self.repair_events = []
+        self.coexisting_temporary_kv_peak_bytes = 0
 
     def charge(self, *extra):
-        tensors = tuple(t for t in (self.parent_key, self.parent_value, *extra) if t is not None)
+        tensors = tuple(
+            t
+            for t in (
+                self.parent_key,
+                self.parent_value,
+                self.active_key,
+                self.active_value,
+                *extra,
+            )
+            if t is not None
+        )
         self.peak_temporary_kv_bytes = max(self.peak_temporary_kv_bytes, backing_bytes(tensors))
-        self.layer.observe(tensors)
+        coexisting = getattr(self.inline_owner, "key", None)
+        combined = (*tensors, *((coexisting,) if coexisting is not None else ()))
+        self.coexisting_temporary_kv_peak_bytes = max(
+            self.coexisting_temporary_kv_peak_bytes, backing_bytes(combined)
+        )
+        self.layer.observe(combined)
 
     def record_component(self, layer, component):
         if component not in (0, 1) or layer.attention.layer_idx != 31:
@@ -86,13 +106,25 @@ class LiveAnchorGuard:
             h = owner.overlay.head
             active = key[:, h : h + 1].clone()
             owner.charge(active)
+            if owner.repair_enabled:
+                owner.active_key, owner.query, owner.mask, owner.scaling = (
+                    active,
+                    query,
+                    mask,
+                    scaling,
+                )
             try:
                 key[:, h : h + 1].copy_(owner.parent_key)
                 owner.probabilities = reference_scores(query, key, mask, scaling)
             finally:
                 key[:, h : h + 1].copy_(active)
             owner.parent_key = None
-            return score(binding, query, key, mask, scaling)
+            weights = score(binding, query, key, mask, scaling)
+            if owner.repair_enabled:
+                owner.prototype_mass = (
+                    weights[0, h, 0].index_select(0, owner.overlay.positions).float().sum()
+                )
+            return weights
 
         def observe_values(binding, length):
             result = values(binding, length)
@@ -103,6 +135,9 @@ class LiveAnchorGuard:
             h = owner.overlay.head
             active = owner.value[:, h : h + 1].clone()
             owner.charge(active)
+            if owner.repair_enabled:
+                owner.active_value = active
+                owner.active_heads = result.reshape(1, 1, -1).clone()
             try:
                 owner.value[:, h : h + 1].copy_(owner.parent_value)
                 owner.heads = torch.matmul(owner.probabilities, owner.value).transpose(1, 2)
@@ -125,11 +160,74 @@ class LiveAnchorGuard:
             parent_logits = head(norm(parent_hidden)).float().reshape(-1)
             active_logits = head(norm(active_hidden)).float().reshape(-1)
             passed, record = decision(parent_logits, active_logits)
+            forced = bool(owner.policy and owner.policy.anchor_repair_stress and not owner.records)
+            eligible = (
+                owner.repair_enabled
+                and not owner.overlay.repair_count
+                and owner.policy.component_mode
+                not in ("no_repair", "exact_members", "parent_reserved")
+            )
+            if eligible and (forced or not bool(passed)):
+                begin, end = (torch.cuda.Event(enable_timing=True) for _ in range(2))
+                event = owner.overlay.promote()
+                begin.record()
+                for target, source in zip(
+                    (owner.active_key, owner.active_value), owner.overlay.promotion, strict=True
+                ):
+                    target[0, 0].index_copy_(0, owner.overlay.positions, source)
+                revised_heads = repaired_head_outputs(
+                    owner.query,
+                    owner.active_key,
+                    owner.active_value,
+                    owner.mask,
+                    owner.scaling,
+                    owner.active_heads,
+                    owner.overlay.head,
+                )
+                repaired_hidden = hidden_after_attention(layer, original_residual, revised_heads)
+                repaired_logits = head(norm(repaired_hidden)).float().reshape(-1)
+                revised_passed, revised_record = decision(parent_logits, repaired_logits)
+                end.record()
+                end.synchronize()
+                detail = dict(
+                    event,
+                    layer=31,
+                    trigger_step=len(owner.records) + 1,
+                    trigger_reason="controlled_anchor_repair"
+                    if forced
+                    else "live_parent_decision_risk",
+                    stress_control=forced,
+                    current_token_recomputed_once=True,
+                    whole_model_redecode_performed=False,
+                    re_decode_cuda_ms=begin.elapsed_time(end),
+                    before_parent_kl=float(record[0]),
+                    after_parent_kl=float(revised_record[0]),
+                    before_parent_logit_difference=float(record[1]),
+                    after_parent_logit_difference=float(revised_record[1]),
+                    parent_token_recovered=not bool(record[2]) and bool(revised_record[2]),
+                    quality_recovery_metric="parent_token_not_benchmark_score",
+                    repaired_plan_passed=bool(revised_passed),
+                    repair_logit_max_change=float((repaired_logits - active_logits).abs().max()),
+                    before_token_id=int(active_logits.argmax()),
+                    repaired_token_id=int(repaired_logits.argmax()),
+                    parent_token_id=int(parent_logits.argmax()),
+                    token_changed=int(active_logits.argmax()) != int(repaired_logits.argmax()),
+                    prototype_cluster_anchor=owner.overlay.anchor,
+                    restored_modality="image",
+                    prototype_attention_mass=float(owner.prototype_mass),
+                    prototype_attention_mass_times_dispersion=float(owner.prototype_mass)
+                    * owner.overlay.dispersion,
+                )
+                owner.report["repair_events"].append(detail)
+                owner.repair_events.append(detail)
+                active_hidden, passed, record = repaired_hidden, revised_passed, revised_record
             # Report the safety veto separately; never call it a FullKV repair.
             output = torch.where(passed, active_hidden, parent_hidden)
             owner.records.append(record.detach().cpu())
             owner.parent_logits.append(parent_logits.detach().cpu())
             owner.heads = None
+            owner.active_key = owner.active_value = owner.active_heads = None
+            owner.query = owner.mask = owner.prototype_mass = None
             return output
 
         try:
@@ -163,8 +261,74 @@ class LiveAnchorGuard:
                 benchmark_labels_accessed=False,
                 parent_counterfactual_parity_not_assumed=True,
                 whole_request_peak_certified=False,
+                decision_risk_repair_enabled=self.repair_enabled,
+                decision_risk_repair_events=self.repair_events,
+                coexisting_temporary_kv_peak_bytes=self.coexisting_temporary_kv_peak_bytes,
             )
             self.parent_key = self.parent_value = self.value = self.probabilities = self.heads = (
                 None
             )
             self.layer = None
+            self.active_key = self.active_value = self.active_heads = self.query = None
+            self.prototype_mass = None
+
+
+def repaired_head_outputs(query, key, value, mask, scaling, active_heads, head):
+    """Current routed-head attention; untouched heads stay bitwise unchanged."""
+    from mosaickv.evaluation.eager_core_operator import reference_scores
+
+    if (
+        type(head) is not int
+        or not 0 <= head < 32
+        or query.shape != (1, 32, 1, 128)
+        or key.ndim != 4
+        or key.shape[:2] != (1, 1)
+        or key.shape[-1] != 128
+        or value.shape != key.shape
+        or active_heads.shape != (1, 1, 4096)
+        or any(
+            t.dtype != torch.bfloat16 or t.device != query.device
+            for t in (query, key, value, active_heads)
+        )
+    ):
+        raise ValueError(
+            "actual BF16 last-layer head, complete routed KV and native outputs required"
+        )
+    probability = reference_scores(query[:, head : head + 1], key, mask, scaling)
+    revised = torch.matmul(probability, value).reshape(1, 1, -1)
+    result = active_heads.clone().view(1, 1, 32, 128)
+    result[:, :, head] = revised
+    return result.reshape(1, 1, -1)
+
+
+@torch.inference_mode()
+def repair_operator_controls(device="cuda"):
+    """Before model loading: prove single-head and full-MHA attention agree."""
+    from mosaickv.evaluation.eager_core_operator import reference_scores
+
+    generator = torch.Generator(device=device).manual_seed(20261107)
+    cases = []
+    for length in (603, 604, 730):
+        q = torch.randn(1, 32, 1, 128, generator=generator, device=device).bfloat16()
+        key, value = tuple(
+            torch.randn(1, 32, length, 128, generator=generator, device=device).bfloat16()
+            for _ in range(2)
+        )
+        for dtype in (None, torch.bfloat16, torch.float32):
+            mask = (
+                None if dtype is None else torch.zeros(1, 1, 1, length, device=device, dtype=dtype)
+            )
+            if mask is not None:
+                mask[..., 2] = -torch.inf
+            weights = reference_scores(q, key, mask, 128**-0.5)
+            expected = torch.matmul(weights, value).transpose(1, 2).contiguous().reshape(1, 1, -1)
+            observed = repaired_head_outputs(
+                q, key[:, 4:5], value[:, 4:5], mask, 128**-0.5, expected, 4
+            )
+            passed = torch.equal(expected, observed)
+            cases.append(dict(length=length, mask_dtype=str(dtype), bitwise=passed))
+            if not passed:
+                raise RuntimeError(
+                    "single-head repair attention differs from actual full-MHA operator"
+                )
+    return dict(passed=True, cases=cases, model_or_labels_used=False)

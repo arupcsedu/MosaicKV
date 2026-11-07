@@ -60,6 +60,8 @@ class OverlayPolicy:
     graph_cosine_topk: str = "stable_sort"
     skip_discarded_exact: bool = False
     live_anchor_guard: bool = False
+    anchor_risk_repair: bool = False
+    anchor_repair_stress: bool = False
 
     def __post_init__(self):
         if not self.layers or tuple(sorted(set(self.layers))) != self.layers:
@@ -128,6 +130,14 @@ class OverlayPolicy:
             self.live_anchor_guard and (not self.inline_repair or self.layers != (31,))
         ):
             raise ValueError("live parent guard requires registered final-layer inline transport")
+        if type(self.anchor_risk_repair) is not bool or (
+            self.anchor_risk_repair and not self.live_anchor_guard
+        ):
+            raise ValueError("decision-risk repair requires the verified live parent guard")
+        if type(self.anchor_repair_stress) is not bool or (
+            self.anchor_repair_stress and not self.anchor_risk_repair
+        ):
+            raise ValueError("explicit controlled stress requires decision-risk repair")
         if type(self.skip_discarded_exact) is not bool or (
             self.skip_discarded_exact and self.precision_transaction != "prototype"
         ):
@@ -1025,7 +1035,9 @@ def integrated_storage(
                 if policy.live_anchor_guard:
                     from mosaickv.evaluation.live_anchor_guard import LiveAnchorGuard
 
-                    with LiveAnchorGuard(adapter, overlays[31], report) as guarded:
+                    with LiveAnchorGuard(
+                        adapter, overlays[31], report, policy=policy, inline_owner=inline
+                    ) as guarded:
                         inline_result = original_run(*args, **kwargs)
                     if len(guarded.parent_logits) != kwargs["tokens"] - 1:
                         raise RuntimeError("live parent guard did not observe every decode update")

@@ -51,7 +51,18 @@ def component_policies(
     inline_study=False,
     graph_runtime_study=False,
     live_anchor_study=False,
+    anchor_repair_study=False,
 ):
+    if anchor_repair_study:
+        policies = component_policies(live_anchor_study=True)
+        seed = dict(policies["guarded_full"], anchor_risk_repair=True)
+        return {
+            **policies,
+            "anchor_risk_repair": seed,
+            "anchor_repair_disabled": dict(seed, component_mode="no_repair"),
+            "anchor_repair_preloaded": dict(seed, component_mode="exact_members"),
+            "anchor_repair_forced": dict(seed, anchor_repair_stress=True),
+        }
     if live_anchor_study:
         policies = component_policies(graph_runtime_study=True)
         return {
@@ -317,7 +328,9 @@ def prepare(
     after_gpu_job=None,
     paired_after_graph_root=None,
     live_anchor_study=False,
+    anchor_repair_study=False,
 ):
+    live_anchor_study = live_anchor_study or anchor_repair_study
     graph_runtime_study = graph_runtime_study or live_anchor_study
     if paired_after_graph_root is not None and (
         not graph_runtime_study or Path(paired_after_graph_root).exists()
@@ -345,6 +358,13 @@ def prepare(
     paths = [PARENT / n for n in ("plan.json", "options.json", "ledger.json")]
     paths += [PREVIOUS / "inputs.json", Path(parent["profile_path"])]
     paths += [Path(m["path"]) for s in inputs for m in s["media"]]
+    if anchor_repair_study:
+        safety = Path(
+            "/scratch/djy8hg/runs/evicastkv/live-anchor-consumed-panel-20261107-v1/analysis/safety_decision.json"
+        )
+        if read(safety).get("passed") is not True:
+            raise ValueError("sixteen-consumed-input live-parent safety gate must pass first")
+        paths.append(safety)
     cross_source = {}
     if external_graph_parity_root is not None:
         gate = Path(external_graph_parity_root)
@@ -475,6 +495,7 @@ def prepare(
                 "mosaickv/tests/unit/test_partition_graph_topk.py",
                 "mosaickv/tests/unit/test_skip_discarded_exact.py",
                 "mosaickv/tests/unit/test_live_anchor_guard.py",
+                "mosaickv/tests/unit/test_anchor_risk_repair.py",
                 "mosaickv/tests/unit/test_opportunity_demand.py",
                 "mosaickv/tests/unit/test_bounded_probe_horizon.py",
                 "mosaickv/tests/unit/test_streaming_source_constructor.py",
@@ -533,6 +554,7 @@ def prepare(
                     inline_study,
                     graph_runtime_study,
                     live_anchor_study,
+                    anchor_repair_study,
                 ),
             ),
             component_policies=component_policies(
@@ -547,6 +569,7 @@ def prepare(
                 inline_study,
                 graph_runtime_study,
                 live_anchor_study,
+                anchor_repair_study,
             ),
             source_replacement_study=replacement_study,
             exact_last_layer_readout_study=readout_study,
@@ -558,6 +581,7 @@ def prepare(
             inline_first_step_repair_study=inline_study,
             indexed_positional_graph_runtime_study=graph_runtime_study,
             live_last_layer_parent_guard_study=live_anchor_study,
+            live_parent_decision_risk_repair_study=anchor_repair_study,
             external_graph_parity=cross_source,
             gpu_start_after_any_job=after_gpu_job,
             paired_after_graph_root=str(paired_after_graph_root)
@@ -637,6 +661,10 @@ def worker(root, expected):
     cfg = RunConfig.from_mapping(plan["parent"]["config"])
     rows, errors, values_by_arm = [], [], {}
     try:
+        if plan.get("live_parent_decision_risk_repair_study"):
+            from mosaickv.evaluation.live_anchor_guard import repair_operator_controls
+
+            write_once(folder / "repair_operator_controls.json", repair_operator_controls())
         if plan.get("source_replacement_study"):
             from mosaickv.evaluation.source_replacement_controls import gpu_controls
 
@@ -898,6 +926,16 @@ def worker(root, expected):
             # Preserve every attempted row; continue independent ablations.
         completed = {r["arm"]: r for r in rows if r["status"] == "completed"}
         if all(a in completed for a in component_names):
+            if {"anchor_repair_forced", "anchor_repair_preloaded"} <= values_by_arm.keys():
+                if not torch.equal(
+                    values_by_arm["anchor_repair_forced"], values_by_arm["anchor_repair_preloaded"]
+                ):
+                    errors.append(
+                        "actual routed-head repair differs from preloaded original members"
+                    )
+                events = completed["anchor_repair_forced"]["mechanism_evidence"]["repair_events"]
+                if len(events) != 1 or not events[0]["stress_control"]:
+                    errors.append("one actual separately labeled controlled promotion required")
             matched = storage_match([completed[a] for a in component_names])
             write_once(folder / "storage_matching.json", matched)
             if {"exact_members", "forced_repair"} <= values_by_arm.keys() and not torch.equal(
@@ -1264,6 +1302,7 @@ def main():
     p.add_argument("--after-gpu-job")
     p.add_argument("--paired-after-graph-root", type=Path)
     p.add_argument("--live-anchor-study", action="store_true")
+    p.add_argument("--anchor-repair-study", action="store_true")
     a = p.parse_args()
     if a.action == "prepare":
         prepare(
@@ -1282,6 +1321,7 @@ def main():
             a.after_gpu_job,
             a.paired_after_graph_root,
             a.live_anchor_study,
+            a.anchor_repair_study,
         )
     elif a.action == "worker":
         return worker(a.root, a.plan_sha)
