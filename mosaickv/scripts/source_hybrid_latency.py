@@ -40,7 +40,7 @@ def checked(root, expected):
     return plan
 
 
-def prepare(root, bitmap_prefix=False):
+def prepare(root, bitmap_prefix=False, reuse_anchor_readout=False):
     import all_head_native_source as infra
 
     source = clean_source(SOURCE)
@@ -78,8 +78,12 @@ def prepare(root, bitmap_prefix=False):
         "codec_reference": storage,
         "codec_fast": storage,
         "hybrid_reference": hybrid,
-        "hybrid_fast": dict(hybrid, anchor_counterfactual="single_head"),
+        "hybrid_fast": dict(
+            hybrid, anchor_counterfactual="single_head", reuse_anchor_readout=reuse_anchor_readout
+        ),
     }
+    arms = ("storage_only", "codec_fast", "hybrid_fast") if reuse_anchor_readout else ARMS
+    policies = {arm: policies[arm] for arm in arms}
     for p in policies.values():
         OverlayPolicy(**dict(p, layers=tuple(p["layers"])))
     root.mkdir(parents=True)
@@ -96,6 +100,7 @@ def prepare(root, bitmap_prefix=False):
                 "mosaickv/tests/unit/test_all_head_source_gpu.py",
                 "mosaickv/tests/unit/test_all_head_source_codec.py",
                 "mosaickv/tests/unit/test_live_anchor_guard.py",
+                "mosaickv/tests/unit/test_guard_readout_reuse.py",
                 "mosaickv/tests/unit/test_source_hybrid_validation.py",
                 "mosaickv/tests/unit/test_storage_six_overlay.py",
             ],
@@ -117,9 +122,9 @@ def prepare(root, bitmap_prefix=False):
             inputs=str(PARENT / "inputs.json"),
             references=refs,
             source_codes=codes,
-            warmups=5,
-            repetitions=20,
-            arms=list(ARMS),
+            warmups=6 if reuse_anchor_readout else 5,
+            repetitions=21 if reuse_anchor_readout else 20,
+            arms=list(arms),
             seed=20261107,
             baseline="evicastkv_storage_only",
             optimized_common_control="codec_fast",
@@ -127,10 +132,11 @@ def prepare(root, bitmap_prefix=False):
             comparison="same_source_KV_values_lossless_representation_not_byte_matched_selection",
             prototype_hybrid="guarded_precision_overlay_not_original_all_layer_slot_merging",
             bootstrap_replicates=10000,
-            multiplicity_comparisons=10,
+            multiplicity_comparisons=6 if reuse_anchor_readout else 10,
             source_codec_optimization="count_both_pack_only_identical_winner",
             hybrid_optimization="one_changed_head_parent_counterfactual",
             fast_decoder="bitmap_prefix" if bitmap_prefix else "reference",
+            reuse_anchor_readout=reuse_anchor_readout,
             independent_quality_or_superiority_established=False,
             fresh_or_paper_campaign_authorized=False,
         ),
@@ -284,7 +290,8 @@ def worker(root, expected):
         rng = random.Random(plan["seed"] + i)
         with (folder / "raw.jsonl").open("x") as log:
             for phase, n in (("warmup", plan["warmups"]), ("timed", plan["repetitions"])):
-                orders = [list(ARMS[t % len(ARMS) :] + ARMS[: t % len(ARMS)]) for t in range(n)]
+                arms = tuple(plan["arms"])
+                orders = [list(arms[t % len(arms) :] + arms[: t % len(arms)]) for t in range(n)]
                 rng.shuffle(orders)
                 for trial, order in enumerate(orders):
                     for arm in order:
@@ -330,6 +337,15 @@ def worker(root, expected):
                             if not torch.equal(values.cpu(), wanted):
                                 raise RuntimeError("128-token model-logit bitwise parity failed")
                             proof = codec.report()
+                            if arm == "hybrid_fast" and plan["reuse_anchor_readout"]:
+                                reuse = evidence["live_anchor_guard"]["readout_reuse"]
+                                if any(
+                                    reuse[k] != 127
+                                    for k in ("staged", "normalization_reuses", "vocabulary_reuses")
+                                ):
+                                    raise RuntimeError(
+                                        "guarded readout did not reuse every actual step"
+                                    )
                             if arm != "storage_only" and (
                                 not proof["all_shared_source_consumers_covered"]
                                 or proof["compressed_replacements"]
@@ -385,9 +401,16 @@ def analyze(root, expected):
             if read(folder / "result.json")["status"] != "completed":
                 raise ValueError(read(folder / "result.json")["errors"])
             rows = [json.loads(line) for line in (folder / "raw.jsonl").read_text().splitlines()]
-            timed = ordered_trials(rows)
+            timed = ordered_trials(
+                rows,
+                warmups=plan["warmups"],
+                repetitions=plan["repetitions"],
+                arms=tuple(plan["arms"]),
+            )
             result = dict(comparisons={}, storage={}, baseline="storage_only")
             for old, new in COMPARISONS:
+                if old not in timed or new not in timed:
+                    continue
                 result["comparisons"][f"{new}_versus_{old}"] = paired_summary(
                     [r["request_wall_seconds"] for r in timed[old]],
                     [r["request_wall_seconds"] for r in timed[new]],
@@ -395,7 +418,7 @@ def analyze(root, expected):
                     replicates=plan["bootstrap_replicates"],
                     comparisons=plan["multiplicity_comparisons"],
                 )
-            for arm in ARMS:
+            for arm in plan["arms"]:
                 result["storage"][arm] = {
                     key: sorted({r["detail"][key] for r in timed[arm]}) for key in BOUNDARIES
                 }
@@ -444,8 +467,9 @@ def analyze(root, expected):
             )
     lines += [
         "",
-        "Five warmups; twenty balanced paired repetitions; adjusted one-sided latency "
-        "intervals cover ten registered comparisons. See decision.json for all failed gates.",
+        f"{plan['warmups']} warmups; {plan['repetitions']} balanced paired repetitions; "
+        f"adjusted one-sided intervals cover {plan['multiplicity_comparisons']} comparisons. "
+        "See decision.json for all failed gates.",
         "",
         str(errors),
     ]
@@ -459,9 +483,12 @@ def main():
     p.add_argument("--root", type=Path, required=True)
     p.add_argument("--plan-sha")
     p.add_argument("--bitmap-prefix", action="store_true")
+    p.add_argument("--reuse-anchor-readout", action="store_true")
     a = p.parse_args()
     if a.action == "prepare":
-        return prepare(a.root, bitmap_prefix=a.bitmap_prefix)
+        return prepare(
+            a.root, bitmap_prefix=a.bitmap_prefix, reuse_anchor_readout=a.reuse_anchor_readout
+        )
     if a.action == "worker":
         return worker(a.root, a.plan_sha)
     if a.action == "analyze":

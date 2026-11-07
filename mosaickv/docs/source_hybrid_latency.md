@@ -23,6 +23,22 @@ Only a passed native decision allows `source_hybrid_latency.py prepare
 The common storage control receives the same optimized decoder as the hybrid.
 Operator timing alone is not an end-to-end latency claim.
 
+`--reuse-anchor-readout` tests one further default-off hybrid optimization.
+The guard already evaluates the final normalization and vocabulary projection
+for both candidate and parent. The outer model can consume the selected native
+readout instead of evaluating it a third time. This uses no approximate Jacobian,
+new attention formula, changed guard threshold or parameter update. Request-local
+hooks enforce normalization-before-projection and exactly one consumption per
+guarded step; pending outputs are retired on failure. Additional temporary
+activation backing bytes are reported separately, never counted as KV savings.
+Model-level 128-logit bitwise checks and 127 actual reuse records per request are
+required before any latency interpretation.
+The follow-up uses only storage-only, optimized-codec storage-only, and optimized
+hybrid: six warmups and twenty-one timed trials give balanced three-arm orders.
+The older factorial arms are not rerun; their saved logits remain immutable
+correctness references. Six registered input/comparison pairs share familywise
+alpha .05. This does not reuse old timings as if they were newly paired trials.
+
 Two default-off optimizations retain the existing reference paths:
 
 - `all_head_source_gpu.use(construction="pack_selected")` counts both lossless

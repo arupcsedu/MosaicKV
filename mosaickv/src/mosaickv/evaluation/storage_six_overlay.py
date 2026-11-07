@@ -64,8 +64,13 @@ class OverlayPolicy:
     anchor_repair_stress: bool = False
     quality_objective: str = "legacy_diagnostic"
     anchor_counterfactual: str = "full_heads"
+    reuse_anchor_readout: bool = False
 
     def __post_init__(self):
+        if type(self.reuse_anchor_readout) is not bool or (
+            self.reuse_anchor_readout and not self.live_anchor_guard
+        ):
+            raise ValueError("readout reuse requires the live parent guard")
         if self.anchor_counterfactual not in ("full_heads", "single_head") or (
             self.anchor_counterfactual == "single_head" and not self.live_anchor_guard
         ):

@@ -44,6 +44,7 @@ class LiveAnchorGuard:
         self.policy, self.inline_owner = policy, inline_owner
         self.repair_enabled = bool(policy and policy.anchor_risk_repair)
         self.single_head = bool(policy and policy.anchor_counterfactual == "single_head")
+        self.readout = None
         self.stack, self.records, self.parent_logits = ExitStack(), [], []
         self.parent_key = self.parent_value = self.probabilities = self.heads = None
         self.layer = self.query = self.key = self.value = None
@@ -98,6 +99,15 @@ class LiveAnchorGuard:
         self.token = _current.set(self)
         score, values, epilogue = Binding.scores, Binding.values, Transport.run
         owner = self
+        if self.policy and self.policy.reuse_anchor_readout:
+            from mosaickv.evaluation.guard_readout_reuse import ReadoutReuse
+
+            self.readout = self.stack.enter_context(
+                ReadoutReuse(
+                    self.adapter.model.model.language_model.norm,
+                    self.adapter.model.get_output_embeddings(),
+                )
+            )
 
         def observe_scores(binding, query, key, mask, scaling):
             if binding.calls % 32 != 31:
@@ -172,8 +182,10 @@ class LiveAnchorGuard:
             parent_hidden = hidden_after_attention(layer, original_residual, owner.heads)
             norm = owner.adapter.model.model.language_model.norm
             head = owner.adapter.model.get_output_embeddings()
-            parent_logits = head(norm(parent_hidden)).float().reshape(-1)
-            active_logits = head(norm(active_hidden)).float().reshape(-1)
+            parent_norm, active_norm = norm(parent_hidden), norm(active_hidden)
+            parent_native, active_native = head(parent_norm), head(active_norm)
+            parent_logits = parent_native.float().reshape(-1)
+            active_logits = active_native.float().reshape(-1)
             passed, record = decision(parent_logits, active_logits)
             forced = bool(owner.policy and owner.policy.anchor_repair_stress and not owner.records)
             eligible = (
@@ -200,7 +212,9 @@ class LiveAnchorGuard:
                     owner.overlay.head,
                 )
                 repaired_hidden = hidden_after_attention(layer, original_residual, revised_heads)
-                repaired_logits = head(norm(repaired_hidden)).float().reshape(-1)
+                repaired_norm = norm(repaired_hidden)
+                repaired_native = head(repaired_norm)
+                repaired_logits = repaired_native.float().reshape(-1)
                 revised_passed, revised_record = decision(parent_logits, repaired_logits)
                 end.record()
                 end.synchronize()
@@ -236,8 +250,11 @@ class LiveAnchorGuard:
                 owner.report["repair_events"].append(detail)
                 owner.repair_events.append(detail)
                 active_hidden, passed, record = repaired_hidden, revised_passed, revised_record
+                active_norm, active_native = repaired_norm, repaired_native
             # Report the safety veto separately; never call it a FullKV repair.
             output = torch.where(passed, active_hidden, parent_hidden)
+            if owner.readout is not None:
+                owner.readout.stage(passed, parent_norm, active_norm, parent_native, active_native)
             owner.records.append(record.detach().cpu())
             owner.parent_logits.append(parent_logits.detach().cpu())
             owner.heads = None
@@ -265,6 +282,7 @@ class LiveAnchorGuard:
                 steps=len(self.records),
                 reference="live_parent_storage_variant_not_FullKV",
                 counterfactual_scope="single_head" if self.single_head else "full_heads",
+                readout_reuse=self.readout.report() if self.readout is not None else None,
                 kl_threshold=0.02,
                 logit_threshold=1.0,
                 greedy_token_required=True,

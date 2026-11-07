@@ -56,3 +56,13 @@ def test_strict_latency_uses_registered_family_not_old_five_percent_tradeoff():
     assert good["paired_latency_engineering_gate"]
     assert not bad["paired_latency_engineering_gate"]
     assert "10 registered" in good["adjustment"]
+
+
+def test_compact_followup_cannot_omit_either_storage_control_or_hybrid():
+    arms = ("storage_only", "codec_fast", "hybrid_fast")
+    rows = [r for r in fixture() if r["arm"] in arms]
+    for r in rows:
+        r["method_order"] = list(arms)
+    assert set(ordered_trials(rows, arms=arms)) == set(arms)
+    with pytest.raises(ValueError, match="storage-controlled"):
+        ordered_trials(rows, arms=("hybrid_fast",))
