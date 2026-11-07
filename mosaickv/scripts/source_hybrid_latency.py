@@ -40,7 +40,7 @@ def checked(root, expected):
     return plan
 
 
-def prepare(root, bitmap_prefix=False, reuse_anchor_readout=False):
+def prepare(root, bitmap_prefix=False, reuse_anchor_readout=False, shared_suffix=False):
     import all_head_native_source as infra
 
     source = clean_source(SOURCE)
@@ -79,10 +79,14 @@ def prepare(root, bitmap_prefix=False, reuse_anchor_readout=False):
         "codec_fast": storage,
         "hybrid_reference": hybrid,
         "hybrid_fast": dict(
-            hybrid, anchor_counterfactual="single_head", reuse_anchor_readout=reuse_anchor_readout
+            hybrid,
+            anchor_counterfactual="single_head",
+            reuse_anchor_readout=reuse_anchor_readout,
+            anchor_suffix="shared_graph" if shared_suffix else "reference",
         ),
     }
-    arms = ("storage_only", "codec_fast", "hybrid_fast") if reuse_anchor_readout else ARMS
+    compact = reuse_anchor_readout or shared_suffix
+    arms = ("storage_only", "codec_fast", "hybrid_fast") if compact else ARMS
     policies = {arm: policies[arm] for arm in arms}
     for p in policies.values():
         OverlayPolicy(**dict(p, layers=tuple(p["layers"])))
@@ -101,6 +105,7 @@ def prepare(root, bitmap_prefix=False, reuse_anchor_readout=False):
                 "mosaickv/tests/unit/test_all_head_source_codec.py",
                 "mosaickv/tests/unit/test_live_anchor_guard.py",
                 "mosaickv/tests/unit/test_guard_readout_reuse.py",
+                "mosaickv/tests/unit/test_guard_suffix_replay.py",
                 "mosaickv/tests/unit/test_source_hybrid_validation.py",
                 "mosaickv/tests/unit/test_storage_six_overlay.py",
             ],
@@ -122,8 +127,8 @@ def prepare(root, bitmap_prefix=False, reuse_anchor_readout=False):
             inputs=str(PARENT / "inputs.json"),
             references=refs,
             source_codes=codes,
-            warmups=6 if reuse_anchor_readout else 5,
-            repetitions=21 if reuse_anchor_readout else 20,
+            warmups=6 if compact else 5,
+            repetitions=21 if compact else 20,
             arms=list(arms),
             seed=20261107,
             baseline="evicastkv_storage_only",
@@ -132,11 +137,13 @@ def prepare(root, bitmap_prefix=False, reuse_anchor_readout=False):
             comparison="same_source_KV_values_lossless_representation_not_byte_matched_selection",
             prototype_hybrid="guarded_precision_overlay_not_original_all_layer_slot_merging",
             bootstrap_replicates=10000,
-            multiplicity_comparisons=6 if reuse_anchor_readout else 10,
+            multiplicity_comparisons=6 if compact else 10,
             source_codec_optimization="count_both_pack_only_identical_winner",
             hybrid_optimization="one_changed_head_parent_counterfactual",
             fast_decoder="bitmap_prefix" if bitmap_prefix else "reference",
             reuse_anchor_readout=reuse_anchor_readout,
+            shared_suffix=shared_suffix,
+            profile_and_verify_suffix_before_timed_trials=shared_suffix,
             independent_quality_or_superiority_established=False,
             fresh_or_paper_campaign_authorized=False,
         ),
@@ -287,6 +294,49 @@ def worker(root, expected):
         options = campaign.request_options(
             plan["options"]["mosaickv_exact"], transport, "mosaickv_exact", False
         )
+        if plan["profile_and_verify_suffix_before_timed_trials"]:
+            import cProfile
+            import pstats
+
+            profile_policy = OverlayPolicy(
+                **dict(
+                    plan["policies"]["hybrid_fast"],
+                    layers=tuple(plan["policies"]["hybrid_fast"]["layers"]),
+                    verify_anchor_suffix=True,
+                    record_phase_timings=True,
+                )
+            )
+            profiler = cProfile.Profile()
+            with (
+                source_codec(True, construction="pack_selected", decoder=plan["fast_decoder"]),
+                integrated_storage(adapter, profile_policy, reader_options=options) as evidence,
+            ):
+                values, detail = profiler.runcall(
+                    campaign.execute, adapter, features, transport, "mosaickv_exact", audit=False
+                )
+            if not torch.equal(values.cpu(), refs["hybrid"]):
+                raise RuntimeError("profiled suffix model-logit parity failed")
+            guard = evidence["live_anchor_guard"]
+            if (
+                guard["suffix_graph_replays"] != 127
+                or guard["early_middle_late_native_suffix_verifications"] != 3
+            ):
+                raise RuntimeError("actual early/middle/late native suffix controls missing")
+            profiler.dump_stats(str(folder / "profile.pstats"))
+            with (folder / "profile.txt").open("x") as stream:
+                pstats.Stats(profiler, stream=stream).sort_stats("cumulative").print_stats(100)
+            write_once(
+                folder / "profile.json",
+                dict(
+                    classification="consumed_input_instrumented_profile_excluded_from_latency_trials",
+                    all_128_logits_bitwise=True,
+                    detail=detail,
+                    mechanism_evidence=evidence,
+                    profiled_source_sha=plan["source_sha"],
+                    labels_accessed=False,
+                ),
+            )
+            del values
         rng = random.Random(plan["seed"] + i)
         with (folder / "raw.jsonl").open("x") as log:
             for phase, n in (("warmup", plan["warmups"]), ("timed", plan["repetitions"])):
@@ -337,6 +387,12 @@ def worker(root, expected):
                             if not torch.equal(values.cpu(), wanted):
                                 raise RuntimeError("128-token model-logit bitwise parity failed")
                             proof = codec.report()
+                            if (
+                                arm == "hybrid_fast"
+                                and plan["shared_suffix"]
+                                and evidence["live_anchor_guard"]["suffix_graph_replays"] != 127
+                            ):
+                                raise RuntimeError("shared suffix did not engage on every update")
                             if arm == "hybrid_fast" and plan["reuse_anchor_readout"]:
                                 reuse = evidence["live_anchor_guard"]["readout_reuse"]
                                 if any(
@@ -484,10 +540,14 @@ def main():
     p.add_argument("--plan-sha")
     p.add_argument("--bitmap-prefix", action="store_true")
     p.add_argument("--reuse-anchor-readout", action="store_true")
+    p.add_argument("--shared-suffix", action="store_true")
     a = p.parse_args()
     if a.action == "prepare":
         return prepare(
-            a.root, bitmap_prefix=a.bitmap_prefix, reuse_anchor_readout=a.reuse_anchor_readout
+            a.root,
+            bitmap_prefix=a.bitmap_prefix,
+            reuse_anchor_readout=a.reuse_anchor_readout,
+            shared_suffix=a.shared_suffix,
         )
     if a.action == "worker":
         return worker(a.root, a.plan_sha)

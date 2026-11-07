@@ -65,8 +65,18 @@ class OverlayPolicy:
     quality_objective: str = "legacy_diagnostic"
     anchor_counterfactual: str = "full_heads"
     reuse_anchor_readout: bool = False
+    anchor_suffix: str = "reference"
+    verify_anchor_suffix: bool = False
 
     def __post_init__(self):
+        if self.anchor_suffix not in ("reference", "shared_graph") or (
+            self.anchor_suffix == "shared_graph" and not self.live_anchor_guard
+        ):
+            raise ValueError("shared suffix graph requires the live parent guard")
+        if type(self.verify_anchor_suffix) is not bool or (
+            self.verify_anchor_suffix and self.anchor_suffix != "shared_graph"
+        ):
+            raise ValueError("suffix verification requires the explicit shared-graph path")
         if type(self.reuse_anchor_readout) is not bool or (
             self.reuse_anchor_readout and not self.live_anchor_guard
         ):

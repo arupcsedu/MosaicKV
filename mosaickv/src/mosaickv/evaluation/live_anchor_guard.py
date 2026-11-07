@@ -45,6 +45,7 @@ class LiveAnchorGuard:
         self.repair_enabled = bool(policy and policy.anchor_risk_repair)
         self.single_head = bool(policy and policy.anchor_counterfactual == "single_head")
         self.readout = None
+        self.suffix_replays = self.suffix_verifications = self.suffix_activation_bytes = 0
         self.stack, self.records, self.parent_logits = ExitStack(), [], []
         self.parent_key = self.parent_value = self.probabilities = self.heads = None
         self.layer = self.query = self.key = self.value = None
@@ -179,7 +180,26 @@ class LiveAnchorGuard:
                 raise RuntimeError("parent attention counterfactual did not engage")
             original_residual = residual.clone()
             active_hidden = epilogue(transport, layer, index, residual, attention)
-            parent_hidden = hidden_after_attention(layer, original_residual, owner.heads)
+            if owner.policy and owner.policy.anchor_suffix == "shared_graph":
+                from mosaickv.evaluation.guard_suffix_replay import replay
+
+                verify = owner.policy.verify_anchor_suffix and len(owner.records) in (0, 63, 126)
+                reference_hidden = (
+                    hidden_after_attention(layer, original_residual, owner.heads)
+                    if verify
+                    else None
+                )
+                active_hidden, parent_hidden, extra = replay(
+                    transport, layer, original_residual, owner.heads, active_hidden
+                )
+                owner.suffix_replays += 1
+                owner.suffix_activation_bytes = max(owner.suffix_activation_bytes, extra)
+                if verify:
+                    if not torch.equal(parent_hidden, reference_hidden):
+                        raise RuntimeError("parent shared-graph suffix differs bitwise from native")
+                    owner.suffix_verifications += 1
+            else:
+                parent_hidden = hidden_after_attention(layer, original_residual, owner.heads)
             norm = owner.adapter.model.model.language_model.norm
             head = owner.adapter.model.get_output_embeddings()
             parent_norm, active_norm = norm(parent_hidden), norm(active_hidden)
@@ -283,6 +303,10 @@ class LiveAnchorGuard:
                 reference="live_parent_storage_variant_not_FullKV",
                 counterfactual_scope="single_head" if self.single_head else "full_heads",
                 readout_reuse=self.readout.report() if self.readout is not None else None,
+                suffix_graph_replays=self.suffix_replays,
+                early_middle_late_native_suffix_verifications=self.suffix_verifications,
+                suffix_saved_hidden_activation_bytes=self.suffix_activation_bytes,
+                suffix_additional_persistent_KV_bytes=0,
                 kl_threshold=0.02,
                 logit_threshold=1.0,
                 greedy_token_required=True,

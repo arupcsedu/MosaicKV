@@ -255,6 +255,8 @@ class Transport:
             calls=self.calls,
             captures=self.captures,
             replays=self.replays,
+            guard_counterfactual_replays=getattr(self, "guard_counterfactual_replays", 0),
+            total_graph_replays=self.replays + getattr(self, "guard_counterfactual_replays", 0),
             explicit_workspace_bytes=self.bytes,
             additional_graph_tensor_bytes=self.extra_graph_bytes,
             backend_warm_allocation_bytes=self.backend_warm_allocation_bytes,
