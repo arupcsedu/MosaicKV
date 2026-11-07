@@ -73,9 +73,14 @@ class OverlayPolicy:
     anchor_tail: str = "reference"
     export_parent_logits: bool = True
     graph_structural_templates: bool = False
+    graph_direct_metadata_key: bool = False
     device_guard_records: bool = False
 
     def __post_init__(self):
+        if type(self.graph_direct_metadata_key) is not bool or (
+            self.graph_direct_metadata_key and not self.graph_structural_templates
+        ):
+            raise ValueError("direct metadata keys require structural templates")
         if type(self.device_guard_records) is not bool or (
             self.device_guard_records
             and (
@@ -542,7 +547,10 @@ def plan_layer(
         positional_search(policy.graph_positional_search),
         cosine_search(policy.graph_cosine_topk),
         spatial_search(policy.graph_spatial_search),
-        activate_templates(policy.graph_structural_templates),
+        activate_templates(
+            policy.graph_structural_templates,
+            direct_metadata=policy.graph_direct_metadata_key,
+        ),
     ):
         graph = build_evidence_graph(
             full,

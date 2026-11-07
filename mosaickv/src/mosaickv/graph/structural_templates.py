@@ -11,21 +11,35 @@ import sys
 from collections import OrderedDict
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import asdict, astuple
+from dataclasses import asdict, astuple, fields
 
 import numpy as np
 
-from mosaickv.graph.types import EdgeType
+from mosaickv.graph.types import BlockEvidenceMetadata, EdgeType
 
 _bank = ContextVar("evicastkv_structural_template_bank", default=None)
 _enabled = ContextVar("evicastkv_structural_template_activation", default=False)
+_direct_metadata = ContextVar("evicastkv_structural_template_direct_metadata", default=False)
+_METADATA_FIELDS = tuple(f.name for f in fields(BlockEvidenceMetadata))
 STRUCTURAL = frozenset(EdgeType) - {
     EdgeType.SEMANTIC_SIMILARITY,
     EdgeType.ATTENTION_COACTIVATION,
 }
 
 
-def cache_key(nodes, config, eligible, execution):
+def _metadata_tuple(metadata, direct):
+    # Only this frozen, scalar/tuple-only schema is eligible. Unknown subclasses
+    # keep the existing generic dataclass semantics. JSON consumes the same
+    # values synchronously; no metadata owner is retained by the template bank.
+    if direct and type(metadata) is BlockEvidenceMetadata:
+        return tuple(getattr(metadata, name) for name in _METADATA_FIELDS)
+    return astuple(metadata)
+
+
+def cache_key(nodes, config, eligible, execution, *, direct_metadata=None):
+    direct = _direct_metadata.get() if direct_metadata is None else direct_metadata
+    if type(direct) is not bool:
+        raise ValueError("explicit metadata-key serialization policy required")
     data = dict(
         config=asdict(config),
         eligible=None if eligible is None else sorted(eligible),
@@ -37,7 +51,7 @@ def cache_key(nodes, config, eligible, execution):
                 n.block.kv_head,
                 n.block.modality.value,
                 n.block.original_logical_positions,
-                astuple(n.evidence),
+                _metadata_tuple(n.evidence, direct),
             )
             for n in nodes
         ],
@@ -148,11 +162,18 @@ def engine_scope(maximum_bytes=4 * 2**20):
 
 
 @contextmanager
-def activate(enabled):
-    if type(enabled) is not bool or (enabled and _bank.get() is None):
+def activate(enabled, *, direct_metadata=False):
+    if (
+        type(enabled) is not bool
+        or type(direct_metadata) is not bool
+        or (direct_metadata and not enabled)
+        or (enabled and _bank.get() is None)
+    ):
         raise ValueError("explicit template activation requires an engine scope")
     token = _enabled.set(enabled)
+    direct_token = _direct_metadata.set(direct_metadata)
     try:
         yield
     finally:
+        _direct_metadata.reset(direct_token)
         _enabled.reset(token)

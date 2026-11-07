@@ -1,4 +1,4 @@
-from dataclasses import replace
+from dataclasses import fields, replace
 from unittest.mock import patch
 
 import pytest
@@ -7,7 +7,13 @@ import torch
 from mosaickv.cache_state import FullKVState, Modality, ModalitySpan
 from mosaickv.config import GraphConfig
 from mosaickv.graph import build_evidence_graph, builder
-from mosaickv.graph.structural_templates import TemplateBank, activate, current, engine_scope
+from mosaickv.graph.structural_templates import (
+    TemplateBank,
+    activate,
+    cache_key,
+    current,
+    engine_scope,
+)
 from mosaickv.graph.types import BlockEvidenceMetadata, EdgeType
 
 
@@ -139,3 +145,60 @@ def test_oversized_entry_is_not_retained():
     edges = (tuple(range(n)), tuple(range(1, n + 1)), (1.0,) * n, (EdgeType.SPATIAL_ADJACENCY,) * n)
     bank.put("key", edges, n + 1, 1)
     assert not bank.entries and bank.skipped == 1
+
+
+@pytest.mark.parametrize("seed", range(7))
+def test_direct_metadata_key_matches_generic_deepcopy_for_every_field(seed):
+    state, metadata, cfg = fixture(seed)
+    rich = BlockEvidenceMetadata(
+        image_index=seed,
+        frame_index=2,
+        page_index=3,
+        clip_index=4,
+        normalized_box=(0.1, 0.2, 0.8, 0.9),
+        ocr_text="A\u03a9\nquestion",
+        row_index=6,
+        column_index=7,
+        page_region="page",
+        evidence_region="region",
+        alignment_ids=("a", "b"),
+    )
+    graph = build_evidence_graph(state, cfg, metadata_by_node=metadata)
+    nodes = [replace(n, evidence=rich) for n in graph.nodes]
+
+    def key(items, direct):
+        return cache_key(items, cfg, {0, 1}, ("indexed", "zero_overlap"), direct_metadata=direct)
+
+    base = key(nodes, False)
+    assert key(nodes, True) == base
+    assert len(base) == 64
+    for f in fields(BlockEvidenceMetadata):
+        changed = list(nodes)
+        value = getattr(rich, f.name)
+        new = None if value is not None and f.name != "alignment_ids" else ("other",)
+        changed[0] = replace(nodes[0], evidence=replace(rich, **{f.name: new}))
+        assert key(changed, True) == key(changed, False)
+        assert key(changed, True) != base
+
+
+def test_direct_policy_preserves_complete_graph_and_restores_context():
+    state, metadata, cfg = fixture()
+    reference = build_evidence_graph(state, cfg, metadata_by_node=metadata)
+    with engine_scope() as bank:
+        with activate(True, direct_metadata=True):
+            direct = build_evidence_graph(state, cfg, metadata_by_node=metadata)
+        with activate(True):
+            legacy = build_evidence_graph(state, cfg, metadata_by_node=metadata)
+        assert bank.hits == 1 and bank.misses == 1
+        equal_graph(reference, direct)
+        equal_graph(reference, legacy)
+    with pytest.raises(ValueError), activate(False, direct_metadata=True):
+        pass
+
+
+def test_direct_key_is_explicitly_gated_by_overlay_policy():
+    from mosaickv.evaluation.storage_six_overlay import OverlayPolicy
+
+    with pytest.raises(ValueError, match="require structural"):
+        OverlayPolicy(graph_direct_metadata_key=True)
+    assert OverlayPolicy(graph_structural_templates=True, graph_direct_metadata_key=True)
