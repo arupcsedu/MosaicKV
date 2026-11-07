@@ -54,6 +54,7 @@ class OverlayPolicy:
     precision_transaction: str = "none"
     readout_control: bool = False
     readout_selection: str = "none"
+    readout_target: str = "conditional_head"
 
     def __post_init__(self):
         if not self.layers or tuple(sorted(set(self.layers))) != self.layers:
@@ -112,6 +113,10 @@ class OverlayPolicy:
             raise ValueError("explicit readout control flag required")
         if self.readout_selection not in ("none", "exact", "repair", "joint"):
             raise ValueError("registered conditional-readout selection variant required")
+        if self.readout_target not in ("conditional_head", "fullkv_draft"):
+            raise ValueError("registered conditional-head or actual FullKV draft target required")
+        if self.readout_target == "fullkv_draft" and self.readout_selection == "none":
+            raise ValueError("FullKV draft target requires active readout selection")
         if (self.readout_control or self.readout_selection != "none") and (
             self.layers != (31,) or self.provisional_tokens != 2 or not self.enabled
         ):
@@ -813,6 +818,7 @@ def integrated_storage(
             component_mode=policy.component_mode,
         ),
     )
+    fullkv_snapshots = {}
     original_constructor = constructor.StreamingDirectSource
     original_fill = SequentialSourceHistoryLayer.materialize_component
     original_cache, original_run = storage_runs.cache_from_formats, storage_runs.run
@@ -824,6 +830,21 @@ def integrated_storage(
 
         def __call__(self, index, attention, original, args, kwargs, output):
             packet = super().__call__(index, attention, original, args, kwargs, output)
+            if policy.readout_target == "fullkv_draft":
+                from time import perf_counter
+
+                from mosaickv.evaluation.offloaded_fullkv_draft import snapshot
+
+                if index in fullkv_snapshots:
+                    raise RuntimeError("one original prefill snapshot per layer required")
+                torch.cuda.synchronize()
+                snapshot_started = perf_counter()
+                fullkv_snapshots[index] = snapshot(original)
+                report["fullkv_cpu_snapshot_construction_seconds"] = (
+                    report.get("fullkv_cpu_snapshot_construction_seconds", 0.0)
+                    + perf_counter()
+                    - snapshot_started
+                )
             if policy.enabled and index in policy.layers:
                 approximation = None
                 if (
@@ -945,6 +966,38 @@ def integrated_storage(
             if reader_options is None:
                 raise ValueError("frozen parent reader options required for the private probe")
             probe_kwargs = dict(kwargs, tokens=policy.provisional_tokens)
+            fullkv_draft_logits = None
+            if policy.readout_target == "fullkv_draft":
+                import gc
+                import weakref
+
+                from mosaickv.evaluation.offloaded_fullkv_draft import run as exact_draft
+
+                if set(fullkv_snapshots) != set(range(32)):
+                    raise RuntimeError("complete original FullKV prefill snapshots required")
+                owners = [weakref.ref(t) for pair in fullkv_snapshots.values() for t in pair]
+                fullkv_draft_logits, draft_evidence = exact_draft(
+                    adapter, args[1], tuple(fullkv_snapshots[i] for i in range(32))
+                )
+                fullkv_snapshots.clear()
+                gc.collect()
+                draft_evidence["cpu_original_tensor_objects_alive_after_draft"] = sum(
+                    ref() is not None for ref in owners
+                )
+                if draft_evidence["cpu_original_tensor_objects_alive_after_draft"]:
+                    raise RuntimeError("temporary CPU FullKV snapshots survived forecast")
+                report["fullkv_draft_forecast"] = draft_evidence
+                if diagnostic_capture is not None:
+                    diagnostic_capture(
+                        dict(
+                            capture_kind="fullkv_draft",
+                            layer=31,
+                            logits=fullkv_draft_logits,
+                            evidence=draft_evidence,
+                            evaluation_only=True,
+                            labels_accessed=False,
+                        )
+                    )
 
             def observe(weights):
                 for layer, overlay in overlays.items():
@@ -996,6 +1049,9 @@ def integrated_storage(
                         overlays[31].readout_original,
                         before[1],
                         mode=policy.readout_selection,
+                        target_logits=None
+                        if fullkv_draft_logits is None
+                        else fullkv_draft_logits[1],
                     )
                     report["conditional_readout_selection"] = proof
                     readout_trigger = proof["requested_residual_restoration"]
@@ -1100,6 +1156,7 @@ def integrated_storage(
         report["source_replacement"] = stack.enter_context(
             source_replacement(policy.replace_source_codes)
         )
+        stack.callback(fullkv_snapshots.clear)
         stack.enter_context(patch.object(constructor, "StreamingDirectSource", Encoder))
         stack.enter_context(
             patch.object(SequentialSourceHistoryLayer, "materialize_component", fill)

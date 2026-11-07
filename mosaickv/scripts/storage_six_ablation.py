@@ -44,7 +44,9 @@ def component_policies(
     transaction_study=False,
     readout_study=False,
     readout_selection_study=False,
+    global_draft_study=False,
 ):
+    readout_selection_study = readout_selection_study or global_draft_study
     base = OverlayPolicy(record_phase_timings=True)
     if readout_selection_study:
         seed = replace(
@@ -55,7 +57,9 @@ def component_policies(
             precision_transaction="prototype",
         )
         replaced = replace(seed, replace_source_codes=True)
-        joint = replace(replaced, readout_selection="joint")
+        target = "fullkv_draft" if global_draft_study else "conditional_head"
+        active = replace(replaced, readout_selection="joint", readout_target=target)
+        joint = active
         return {
             "full": asdict(seed),
             "source_replaced": asdict(replaced),
@@ -65,8 +69,8 @@ def component_policies(
             "parent_reserved": asdict(replace(replaced, component_mode="parent_reserved")),
             "exact_members": asdict(replace(replaced, component_mode="exact_members")),
             "forced_repair": asdict(replace(replaced, component_mode="forced_repair")),
-            "readout_exact": asdict(replace(replaced, readout_selection="exact")),
-            "readout_repair": asdict(replace(replaced, readout_selection="repair")),
+            "readout_exact": asdict(replace(active, readout_selection="exact")),
+            "readout_repair": asdict(replace(active, readout_selection="repair")),
             "readout_joint": asdict(joint),
             **{
                 name: asdict(
@@ -79,6 +83,7 @@ def component_policies(
                         else "exact"
                         if name == "no_repair"
                         else "joint",
+                        readout_target="conditional_head" if name == "no_forecast" else target,
                     )
                 )
                 for name in (
@@ -239,7 +244,9 @@ def prepare(
     transaction_study=False,
     readout_study=False,
     readout_selection_study=False,
+    global_draft_study=False,
 ):
+    readout_selection_study = readout_selection_study or global_draft_study
     replacement_study = (
         replacement_study or transaction_study or readout_study or readout_selection_study
     )
@@ -334,6 +341,7 @@ def prepare(
                 "mosaickv/tests/unit/test_precision_transaction_study.py",
                 "mosaickv/tests/unit/test_exact_last_layer_readout.py",
                 "mosaickv/tests/unit/test_conditional_readout_selection.py",
+                "mosaickv/tests/unit/test_offloaded_fullkv_draft.py",
                 "mosaickv/tests/unit/test_opportunity_demand.py",
                 "mosaickv/tests/unit/test_bounded_probe_horizon.py",
                 "mosaickv/tests/unit/test_streaming_source_constructor.py",
@@ -387,6 +395,7 @@ def prepare(
                     transaction_study,
                     readout_study,
                     readout_selection_study,
+                    global_draft_study,
                 ),
             ),
             component_policies=component_policies(
@@ -396,10 +405,12 @@ def prepare(
                 transaction_study,
                 readout_study,
                 readout_selection_study,
+                global_draft_study,
             ),
             source_replacement_study=replacement_study,
             exact_last_layer_readout_study=readout_study,
             conditional_readout_selection_study=readout_selection_study,
+            offloaded_online_fullkv_draft_study=global_draft_study,
             storage_boundary_version="shared_initial_final_peak_v2",
             component_reference_arm=(
                 "transaction_joint_guarded"
@@ -537,9 +548,13 @@ def worker(root, expected):
                         if path.exists():
                             raise FileExistsError("immutable routed capture already exists")
                         torch.save(payload, path)
-                        record["readout_capture" if kind else "evaluation_capture"] = dict(
-                            path=str(path), sha256=sha(path)
-                        )
+                        record[
+                            "fullkv_draft_capture"
+                            if kind == "fullkv_draft"
+                            else "readout_capture"
+                            if kind
+                            else "evaluation_capture"
+                        ] = dict(path=str(path), sha256=sha(path))
 
                     with integrated_storage(
                         adapter,
@@ -607,6 +622,17 @@ def worker(root, expected):
                     row["readout_control_passed"] = proof["exact_last_layer_readout"]["passed"]
                     if not row["readout_control_passed"]:
                         errors.append("actual last-layer counterfactual numerical controls failed")
+                if arm in policies and policy.readout_target == "fullkv_draft":
+                    forecast = torch.load(
+                        row["fullkv_draft_capture"]["path"], weights_only=True, map_location="cpu"
+                    )
+                    row["online_fullkv_draft_bitwise_parity"] = torch.equal(
+                        forecast["logits"], values_by_arm["full_kv"][:2]
+                    )
+                    if not row["online_fullkv_draft_bitwise_parity"]:
+                        errors.append(
+                            "online CPU-offloaded FullKV draft differs from ordinary FullKV"
+                        )
                 del values
             except Exception:
                 row["error"] = traceback.format_exc()
@@ -909,6 +935,7 @@ def main():
     p.add_argument("--transaction-study", action="store_true")
     p.add_argument("--readout-study", action="store_true")
     p.add_argument("--readout-selection-study", action="store_true")
+    p.add_argument("--global-draft-study", action="store_true")
     a = p.parse_args()
     if a.action == "prepare":
         prepare(
@@ -919,6 +946,7 @@ def main():
             a.transaction_study,
             a.readout_study,
             a.readout_selection_study,
+            a.global_draft_study,
         )
     elif a.action == "worker":
         return worker(a.root, a.plan_sha)

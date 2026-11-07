@@ -87,7 +87,7 @@ def choose(records):
 
 
 @torch.inference_mode()
-def select(adapter, capture, overlay, original_prompt, reference, *, mode):
+def select(adapter, capture, overlay, original_prompt, reference, *, mode, target_logits=None):
     if mode not in ("exact", "repair", "joint"):
         raise ValueError("explicit exact/repair/joint conditional-readout variant required")
     n, head = len(original_prompt[0]), overlay.head
@@ -124,6 +124,8 @@ def select(adapter, capture, overlay, original_prompt, reference, *, mode):
     for t, source in zip((key, value), full, strict=True):
         t[0, head, :n] = source
     conditional = predict()
+    if target_logits is not None:
+        conditional = target_logits.to(device=conditional.device, dtype=conditional.dtype)
     exact = tuple(overlay.exact_ids.cpu().tolist())
     members = tuple(overlay.positions.cpu().tolist())
     protected = tuple(overlay.evidence["original_protected_positions"])
@@ -200,9 +202,15 @@ def select(adapter, capture, overlay, original_prompt, reference, *, mode):
         meaningful_exact_change=revised != exact,
         requested_residual_restoration=selected["restore"],
         benchmark_labels_accessed=False,
-        global_fullkv_logits_used=False,
-        conditional_target="same_state_routed_head_original_prefill_only",
-        prompt_query_surrogate_is_only_a_shortlist=True,
+        global_fullkv_logits_used=target_logits is not None,
+        reference_decode_artifacts_accessed=False,
+        target_is_online_forecast_not_evaluation_oracle=target_logits is not None,
+        conditional_target=(
+            "same_state_routed_head_original_prefill_only"
+            if target_logits is None
+            else "actual_online_FullKV_draft_same_prefill_first_update"
+        ),
+        attention_output_surrogate_is_only_a_shortlist=True,
         actual_frozen_suffix_evaluations=len(plans) + 2,
         selection_wall_seconds=perf_counter() - started,
         persistent_storage_unchanged=True,
