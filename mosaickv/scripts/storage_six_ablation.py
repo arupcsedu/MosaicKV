@@ -9,7 +9,7 @@ import json
 import os
 import subprocess
 import traceback
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 
 from mosaickv.evaluation.fox_campaign import clean_source, digest, sha, write_once
@@ -37,7 +37,28 @@ def checked(root, expected):
     return plan
 
 
-def prepare(root):
+def component_policies(proposal_study=False):
+    base = OverlayPolicy(record_phase_timings=True)
+    if not proposal_study:
+        return {mode: asdict(replace(base, component_mode=mode)) for mode in COMPONENT_MODES}
+    return {
+        "full": asdict(base),
+        "parent_reserved": asdict(replace(base, component_mode="parent_reserved")),
+        "individual_forecast": asdict(replace(base, forecast_distribution="individual_queries")),
+        "delta_prototype": asdict(replace(base, prototype_representation="parent_residual_delta")),
+        "individual_delta": asdict(
+            replace(
+                base,
+                forecast_distribution="individual_queries",
+                prototype_representation="parent_residual_delta",
+            )
+        ),
+        "exact_members": asdict(replace(base, component_mode="exact_members")),
+        "forced_repair": asdict(replace(base, component_mode="forced_repair")),
+    }
+
+
+def prepare(root, proposal_study=False):
     if root.exists():
         raise FileExistsError("new immutable component output root required")
     source_sha = clean_source(SOURCE)
@@ -54,6 +75,43 @@ def prepare(root):
     paths += [Path(m["path"]) for s in inputs for m in s["media"]]
     root.mkdir(parents=True)
     write_once(root / "inputs.json", inputs)
+    if proposal_study:
+        import torch
+
+        from mosaickv.evaluation.residual_delta_prototype import study
+
+        torch.set_num_threads(2)
+        previous_ablation = Path(
+            "/scratch/djy8hg/runs/evicastkv/storage-six-component-ablation-20261106-v1"
+        )
+        proof = {}
+        for worker in (0, 1):
+            row_path = next(
+                p for p in (previous_ablation / f"workers/{worker}").glob("[0-9][0-9]-full.json")
+            )
+            row = read(row_path)
+            capture = row["evaluation_capture"]
+            if sha(Path(capture["path"])) != capture["sha256"]:
+                raise ValueError("reviewed consumed precision capture changed")
+            result = study(torch.load(capture["path"], weights_only=True, map_location="cpu"))
+            variants = result["variants"]
+            for boundary in ("first_prefix_half_mean_error", "later_prefix_half_mean_error"):
+                if not variants["prototype_only"][boundary] < variants["parent"][boundary]:
+                    raise ValueError(
+                        "residual prototype has no consistent local improvement; stop GPU follow-up"
+                    )
+            proof[str(worker)] = result
+            paths += [row_path, Path(capture["path"])]
+        write_once(
+            root / "cpu_precision_feasibility.json",
+            dict(
+                source_sha=source_sha,
+                consumed_only=True,
+                results=proof,
+                no_benchmark_answers_used=True,
+            ),
+        )
+        paths += [root / "cpu_precision_feasibility.json"]
     with (root / "cpu.txt").open("x") as stream:
         result = subprocess.run(
             [
@@ -65,6 +123,7 @@ def prepare(root):
                 "addopts=",
                 "mosaickv/tests/unit/test_storage_six_overlay.py",
                 "mosaickv/tests/unit/test_storage_component_gate.py",
+                "mosaickv/tests/unit/test_residual_delta_prototype.py",
                 "mosaickv/tests/unit/test_bounded_probe_horizon.py",
                 "mosaickv/tests/unit/test_streaming_source_constructor.py",
                 "mosaickv/tests/unit/test_prototype_rope.py",
@@ -87,7 +146,8 @@ def prepare(root):
             parent=parent,
             options=options,
             bound_files={str(p): sha(p) for p in paths},
-            arms=ARMS,
+            arms=("full_kv", "parent", *component_policies(proposal_study)),
+            component_policies=component_policies(proposal_study),
             overlay_policy=asdict(OverlayPolicy(record_phase_timings=True)),
             output_predictions=128,
             guard_predictions=32,
@@ -178,7 +238,9 @@ def worker(root, expected):
         warm, _ = campaign.execute(adapter, inputs, transport, "mosaickv_exact", audit=False)
         del warm
         # Reverse component order on worker 1; fixed controls always first.
-        components = COMPONENT_MODES if index == 0 else tuple(reversed(COMPONENT_MODES))
+        policies = plan.get("component_policies", component_policies())
+        component_names = tuple(policies)
+        components = component_names if index == 0 else tuple(reversed(component_names))
         for arm in ("full_kv", "parent", *components):
             gc.collect()
             row = dict(
@@ -188,12 +250,11 @@ def worker(root, expected):
                 manifest_path=str(folder / "manifest.json"),
             )
             try:
-                if arm in COMPONENT_MODES:
+                if arm in policies:
                     policy = OverlayPolicy(
                         **dict(
-                            plan["overlay_policy"],
-                            layers=tuple(plan["overlay_policy"]["layers"]),
-                            component_mode=arm,
+                            policies[arm],
+                            layers=tuple(policies[arm]["layers"]),
                         )
                     )
 
@@ -243,7 +304,7 @@ def worker(root, expected):
                 values_by_arm[arm] = actual
                 if arm != "full_kv":
                     row["fullkv_readout"] = logit_diagnostics(values_by_arm["full_kv"], actual)
-                if arm in COMPONENT_MODES:
+                if arm in policies:
                     row["parent_guard"] = logit_diagnostics(values_by_arm["parent"], actual)
                     row["parent_guard_passed"] = (
                         row["parent_guard"]["maximum_kl"] <= plan["guard_kl"]
@@ -268,8 +329,8 @@ def worker(root, expected):
             rows.append(row)
             # Preserve every attempted row; continue independent ablations.
         completed = {r["arm"]: r for r in rows if r["status"] == "completed"}
-        if all(a in completed for a in COMPONENT_MODES):
-            matched = storage_match([completed[a] for a in COMPONENT_MODES])
+        if all(a in completed for a in component_names):
+            matched = storage_match([completed[a] for a in component_names])
             write_once(folder / "storage_matching.json", matched)
             if not torch.equal(values_by_arm["exact_members"], values_by_arm["forced_repair"]):
                 errors.append(
@@ -300,6 +361,8 @@ def analyze(root, expected):
     from mosaickv.evaluation.storage_component_gate import precision_evidence, stage_effect
 
     plan = checked(root, expected)
+    arms = plan.get("arms", ARMS)
+    component_names = tuple(plan.get("component_policies", component_policies()))
     rows, errors, matches = [], [], {}
     for index in (0, 1):
         folder = root / f"workers/{index}"
@@ -309,7 +372,7 @@ def analyze(root, expected):
         rows += [read(p) for p in sorted(folder.glob("[0-9][0-9]-*.json"))]
         if (folder / "storage_matching.json").exists():
             matches[str(index)] = read(folder / "storage_matching.json")
-    expected_rows = 2 * len(ARMS)
+    expected_rows = 2 * len(arms)
     if len(rows) != expected_rows:
         errors.append(f"incomplete rows {len(rows)}/{expected_rows}")
     for row in rows:
@@ -336,14 +399,14 @@ def analyze(root, expected):
             effects[sample["sample_id"]] = {
                 arm: stage_effect(by_arm["full"]["fullkv_readout"], row["fullkv_readout"])
                 for arm, row in by_arm.items()
-                if arm in COMPONENT_MODES and arm != "full"
+                if arm in component_names and arm != "full"
             }
             from mosaickv.evaluation.storage_component_gate import logit_diagnostics
 
             support = min(
                 r["fullkv_readout"]["shared_prefix_prediction_count"]
                 for a, r in by_arm.items()
-                if a in COMPONENT_MODES
+                if a in component_names
             )
             reference = torch.load(
                 by_arm["full_kv"]["logits_path"], map_location="cpu", weights_only=True
@@ -355,7 +418,7 @@ def analyze(root, expected):
                     horizon=support,
                 )
                 for a, r in by_arm.items()
-                if a in COMPONENT_MODES
+                if a in component_names
             }
             aligned[sample["sample_id"]] = dict(
                 common_fullkv_prefix_predictions=support,
@@ -374,7 +437,7 @@ def analyze(root, expected):
                 for r in rows
                 if r["arm"] == arm
             ]
-            for arm in ARMS
+            for arm in arms
         }
         scorer = TokenizedCider([s for part in groups.values() for s in part])
         scores = {arm: scorer(part) for arm, part in groups.items()}
@@ -391,6 +454,10 @@ def analyze(root, expected):
             common_prefix_effects=aligned,
             precision_decomposition=precision,
             diagnostic_cider=scores,
+            all_parent_stability_guards_passed=all(
+                r.get("parent_guard_passed", False) for r in rows if r["arm"] in component_names
+            )
+            and len(rows) == expected_rows,
             replacement_gpu_authorized=False,
             fresh_evaluation_authorized=False,
             superiority_established=False,
@@ -413,7 +480,7 @@ def analyze(root, expected):
         "Mean FullKV shared-prefix KL | Request s |",
         "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
-    for arm in ARMS:
+    for arm in arms:
         group = [r for r in rows if r["arm"] == arm and r["status"] == "completed"]
         if not group:
             continue
@@ -467,9 +534,10 @@ def main():
     p.add_argument("--root", type=Path, required=True)
     p.add_argument("--plan-sha")
     p.add_argument("--phase", default="components")
+    p.add_argument("--proposal-study", action="store_true")
     a = p.parse_args()
     if a.action == "prepare":
-        prepare(a.root)
+        prepare(a.root, a.proposal_study)
     elif a.action == "worker":
         return worker(a.root, a.plan_sha)
     elif a.action == "analyze":

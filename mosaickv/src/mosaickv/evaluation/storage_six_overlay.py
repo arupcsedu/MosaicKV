@@ -42,6 +42,8 @@ class OverlayPolicy:
     provisional_tokens: int = 2
     component_mode: str = "full"
     record_phase_timings: bool = False
+    forecast_distribution: str = "mean_query"
+    prototype_representation: str = "absolute_kv"
 
     def __post_init__(self):
         if not self.layers or tuple(sorted(set(self.layers))) != self.layers:
@@ -66,6 +68,10 @@ class OverlayPolicy:
             raise ValueError("explicit phase timing flag required")
         if self.component_mode != "full" and not self.enabled:
             raise ValueError("component ablations require allocated, enabled overlay state")
+        if self.forecast_distribution not in ("mean_query", "individual_queries"):
+            raise ValueError("registered mean-query or individual-query forecast required")
+        if self.prototype_representation not in ("absolute_kv", "parent_residual_delta"):
+            raise ValueError("registered absolute or parent-residual prototype required")
 
 
 class _Phases:
@@ -149,6 +155,7 @@ class LayerOverlay:
         self.repair_count = 0
         self.attention_mass = 0.0
         self.component_mode = "full"
+        self.prototype_representation = "absolute_kv"
 
     def gpu_tensors(self):
         return (
@@ -187,6 +194,12 @@ class LayerOverlay:
         )
         # All outputs/reservations are charged before graph capture. Promotion
         # changes data and one device flag, never a captured Python branch.
+        if self.prototype_representation == "parent_residual_delta":
+            torch.index_select(
+                destination[0, self.head], 0, self.positions, out=self.mixed[component]
+            )
+            self.mixed[component].add_(proto)
+            proto = self.mixed[component]
         torch.where(self.promoted, self.promotion[component], proto, out=self.mixed[component])
         destination[0, self.head].index_copy_(0, self.positions, self.mixed[component])
         self.actual_fills.add_(1)
@@ -235,6 +248,7 @@ def plan_layer(
     policy,
     *,
     pin_residuals=True,
+    parent_pair=None,
 ):
     """Reuse the original forecast/graph/utility/selector/prototype functions."""
     from mosaickv.adapters.huggingface.types import CachedKeyState
@@ -304,11 +318,18 @@ def plan_layer(
             original_logical_sequence_length=n,
             draft_cache_isolated=True,
         )
-        prediction = torch.softmax(
-            (forecast.layers[0][0].prompt_mean.float().reshape(1, d) @ pair[0][0, 0].float().T)
-            / d**0.5,
-            -1,
-        ).reshape(-1)
+        if policy.forecast_distribution == "individual_queries":
+            # Forecast attention from the distribution, not attention of its
+            # mean query. Individual observations survive the nonlinearity.
+            prediction = torch.softmax(
+                (query[0, 0].float() @ pair[0][0, 0].float().T) / d**0.5, -1
+            ).mean(0)
+        else:
+            prediction = torch.softmax(
+                (forecast.layers[0][0].prompt_mean.float().reshape(1, d) @ pair[0][0, 0].float().T)
+                / d**0.5,
+                -1,
+            ).reshape(-1)
         forecast_mode = forecast.provenance.mode.value
     timer.mark("prompt_queries_and_forecast")
     graph = build_evidence_graph(
@@ -410,6 +431,20 @@ def plan_layer(
         constructed.state.prototypes.prototype_keys[0],
         constructed.state.prototypes.prototype_values[0],
     )
+    dispersion = record.diagnostics.dispersion
+    if policy.prototype_representation == "parent_residual_delta":
+        from mosaickv.evaluation.residual_delta_prototype import construct
+
+        if parent_pair is None:
+            raise ValueError("actual parent reconstruction required for residual prototypes")
+        proto_pair, dispersion = construct(
+            tuple(t[0, head] for t in original),
+            tuple(t[0, head] for t in parent_pair),
+            tuple(t[0] for t in phases),
+            ids,
+            record.anchor_logical_position,
+            (1.0,) * len(ids),
+        )
     phase_ids = torch.tensor((*ids, record.anchor_logical_position), device=pair[0].device)
     phase_subset = tuple(t[0].index_select(0, phase_ids).contiguous() for t in phases)
     evidence = dict(
@@ -433,6 +468,11 @@ def plan_layer(
         forecast_is_prompt_only=True,
         prototype_policy="shared_KV_overlay_at_original_member_phases_not_token_compaction",
         component_mode=policy.component_mode,
+        forecast_distribution=policy.forecast_distribution,
+        prototype_representation=policy.prototype_representation,
+        prototype_anchor_position=record.anchor_logical_position,
+        delta_prototype_uniform_weights=policy.prototype_representation == "parent_residual_delta",
+        parent_source_storage_retired=False,
         disabled_components={
             "parent_reserved": ["all_overlay_reads"],
             "no_forecast": ["future_query_forecast"],
@@ -453,12 +493,13 @@ def plan_layer(
         phases=phase_subset,
         residual_pair=tuple(t[0, 0].index_select(0, member_index) for t in pair),
         anchor=record.anchor_logical_position,
-        dispersion=record.diagnostics.dispersion,
+        dispersion=dispersion,
         evidence=evidence,
     )
     if _bytes(overlay.gpu_tensors()) > policy.maximum_extra_gpu_bytes:
         raise RuntimeError("overlay including repair reservation exceeds hard auxiliary cap")
     overlay.component_mode = policy.component_mode
+    overlay.prototype_representation = policy.prototype_representation
     if policy.component_mode == "exact_members":
         # Reuse already charged promotion buffers. A preparation control,
         # explicitly NOT an uncertainty-triggered repair event.
@@ -570,6 +611,15 @@ def integrated_storage(
         def __call__(self, index, attention, original, args, kwargs, output):
             packet = super().__call__(index, attention, original, args, kwargs, output)
             if policy.enabled and index in policy.layers:
+                approximation = None
+                if policy.prototype_representation == "parent_residual_delta":
+                    from time import perf_counter
+
+                    torch.cuda.synchronize()
+                    started = perf_counter()
+                    approximation = packet.materialize(attention)
+                    torch.cuda.synchronize()
+                    report["parent_reference_materialization_seconds"] = perf_counter() - started
                 overlays[index] = plan_layer(
                     self.model_adapter,
                     self.prepared_for_overlay,
@@ -580,7 +630,9 @@ def integrated_storage(
                     output[1],
                     self.memberships[index],
                     policy,
+                    parent_pair=approximation,
                 )
+                del approximation
                 report["layers"][str(index)] = overlays[index].evidence
                 if diagnostic_capture is not None:
                     # Evaluation-only export, never queried by the planner.
