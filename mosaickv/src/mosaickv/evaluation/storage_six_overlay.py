@@ -62,8 +62,31 @@ class OverlayPolicy:
     live_anchor_guard: bool = False
     anchor_risk_repair: bool = False
     anchor_repair_stress: bool = False
+    quality_objective: str = "legacy_diagnostic"
 
     def __post_init__(self):
+        if self.quality_objective not in (
+            "legacy_diagnostic",
+            "bitwise_storage_only",
+            "fullkv_draft_improvement",
+        ):
+            raise ValueError(
+                "explicit storage-preservation or FullKV-draft quality objective required"
+            )
+        if self.quality_objective == "bitwise_storage_only" and self.enabled:
+            raise ValueError(
+                "bitwise source-only objective cannot silently activate lossy head overlays"
+            )
+        if self.quality_objective == "fullkv_draft_improvement" and (
+            self.live_anchor_guard
+            or not self.enabled
+            or self.readout_target != "fullkv_draft"
+            or self.readout_selection == "none"
+        ):
+            raise ValueError(
+                "quality-improvement candidate requires actual FullKV draft evidence, "
+                "not a storage-parent greedy-token lock"
+            )
         if not self.layers or tuple(sorted(set(self.layers))) != self.layers:
             raise ValueError("unique sorted routed layers required")
         if any(type(x) is not int or not 0 <= x < 32 for x in self.layers):
@@ -879,6 +902,8 @@ def integrated_storage(
             original_compaction_design_reproduction=False,
             benchmark_labels_accessed=False,
             component_mode=policy.component_mode,
+            quality_objective=policy.quality_objective,
+            quality_improvement_claim_authorized=False,
         ),
     )
     fullkv_snapshots = {}

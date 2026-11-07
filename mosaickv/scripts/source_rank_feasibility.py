@@ -61,7 +61,7 @@ def submit(root, worker, after=None):
     return subprocess.check_output(args, text=True).strip()
 
 
-def prepare(root, *, refined_source=False, mixed_source=False):
+def prepare(root, *, refined_source=False, mixed_source=False, all_head_source=False):
     from evicastkv_projection_source_cpu import metadata_features
 
     from mosaickv.adapters.huggingface.registry import _resolve_model_source
@@ -72,7 +72,9 @@ def prepare(root, *, refined_source=False, mixed_source=False):
     parent = read(PARENT / "plan.json")
     codec_study = refined_source or mixed_source
     protocol = (
-        "mixed_source_feasibility.md"
+        "all_head_source_replacement.md"
+        if all_head_source
+        else "mixed_source_feasibility.md"
         if mixed_source
         else "refined_source_feasibility.md"
         if refined_source
@@ -165,6 +167,7 @@ def prepare(root, *, refined_source=False, mixed_source=False):
                     else []
                 ),
                 *(["mosaickv/tests/unit/test_mixed_source_feasibility.py"] if mixed_source else []),
+                *(["mosaickv/tests/unit/test_all_head_source_codec.py"] if all_head_source else []),
             ],
             cwd=SOURCE,
             stdout=stream,
@@ -181,7 +184,9 @@ def prepare(root, *, refined_source=False, mixed_source=False):
             bound_files={str(p): sha(p) for p in paths},
             jobs=jobs,
             ranks=[96, 128],
-            source_family="mixed_source"
+            source_family="all_head_lossless"
+            if all_head_source
+            else "mixed_source"
             if mixed_source
             else "refined_source"
             if refined_source
@@ -191,13 +196,24 @@ def prepare(root, *, refined_source=False, mixed_source=False):
             else ["lut2", "spatial4_binary_residual", "spatial8_binary_residual"]
             if refined_source
             else [],
-            expected_cases_per_worker=32 if mixed_source else 96 if refined_source else 64,
+            expected_cases_per_worker=32
+            if mixed_source or all_head_source
+            else 96
+            if refined_source
+            else 64,
             prior_negative_root=str(prior) if codec_study else None,
             layers=list(range(32)),
             checkpoint=str(checkpoint),
-            minimum_net_cpu_payload_reduction=0.10,
-            source_mse_slack=1e-12,
-            numerical_rule="every_nonexact_image_row_source_mse_not_greater_than_existing_three_bit"
+            minimum_net_cpu_payload_reduction=0.0 if all_head_source else 0.10,
+            strictly_positive_storage_saving_required=all_head_source,
+            source_code_symbols_per_block=512 if all_head_source else None,
+            all_head_consumers=64 if all_head_source else None,
+            baseline_method="evicastkv_storage_only",
+            baseline_storage_source_sha="a6f689fcdfae2b9023045aa412c6d90d8ce79012",
+            source_mse_slack=None if all_head_source else 1e-12,
+            numerical_rule="bitwise_every_original_source_code_for_all_heads"
+            if all_head_source
+            else "every_nonexact_image_row_source_mse_not_greater_than_existing_three_bit"
             if codec_study
             else "actual_factor_source_mse_not_greater_than_existing_three_bit",
             literal_refinement="minimal_largest_scalar_errors_or_full_row_charged"
@@ -207,7 +223,9 @@ def prepare(root, *, refined_source=False, mixed_source=False):
             mixed_group_width=8 if mixed_source else None,
             lp_seconds_per_layer=20 if mixed_source else None,
             maximum_monotone_group_upgrades=128 if mixed_source else None,
-            source_choice_rule="globally_minimum_cpu_codec_payload_with_parent_fallback"
+            source_choice_rule="minimum_legacy_or_lossless_symbol_packet_same_decoded_bytes"
+            if all_head_source
+            else "globally_minimum_cpu_codec_payload_with_parent_fallback"
             if codec_study
             else "minimum_rank_raw_payload",
             model_weights_loaded=False,
@@ -298,14 +316,24 @@ def worker(root, expected):
             previous.load_messages(features),
             expected_length=capture["phases"][0].shape[1],
         )
-        baseline, adaptive, chosen, alternatives = [], [], [], []
+        baseline, adaptive, chosen, alternatives, codec_packets = [], [], [], [], []
         for layer in plan["layers"]:
             x = capture["normalized"][layer]
             exact = protected_positions(
                 capture["source_memberships"][layer], text, length=x.shape[1]
             ).all(0)
             codec_study = plan.get("source_family") in ("refined_source", "mixed_source")
-            if plan.get("source_family") == "mixed_source":
+            if plan.get("source_family") == "all_head_lossless":
+                from mosaickv.evaluation.all_head_source_codec import screen_lossless
+
+                part = screen_lossless(
+                    x,
+                    exact,
+                    layer=layer,
+                    previous=baseline[-1]["codes"].numpy() if baseline else None,
+                )
+                codec_packets.append(part["selected_packet"])
+            elif plan.get("source_family") == "mixed_source":
                 from mosaickv.evaluation.mixed_source_feasibility import screen_mixed
 
                 part = screen_mixed(x, exact, text)
@@ -340,12 +368,30 @@ def worker(root, expected):
             )
             adaptive.append(part["baseline"] if rank is None else part["candidates"][rank])
             chosen.append(rank)
+            if plan.get("source_family") == "all_head_lossless":
+                chosen[-1] = (
+                    "source_symbols" if part["selected_codec"] == "source_symbols" else None
+                )
             write_once(folder / f"layer-{layer:02}.json", dict(rows=part["rows"], chosen_rank=rank))
         raw_minimum = cpu_serialized_storage(adaptive)
         if plan.get("source_family") in ("refined_source", "mixed_source"):
             adaptive, selected = choose_codec_coupled(alternatives)
             chosen = [None if name == "parent" else name for name in selected]
         old, new = cpu_serialized_storage(baseline), cpu_serialized_storage(adaptive)
+        if plan.get("source_family") == "all_head_lossless":
+            from mosaickv.evaluation.all_head_source_codec import selected_cpu_storage
+
+            new = selected_cpu_storage(baseline, codec_packets)
+            torch.save({i: b["codes"] for i, b in enumerate(baseline)}, folder / "source_codes.pt")
+            write_once(
+                folder / "source_codes.json",
+                dict(
+                    source_codes_sha256=sha(folder / "source_codes.pt"),
+                    actual_original_code_layout=True,
+                    model_and_benchmark_labels_not_included=True,
+                    producer_source_sha=plan["source_sha"],
+                ),
+            )
         if plan.get("source_family") in ("refined_source", "mixed_source"):
             prior = read(Path(plan["prior_negative_root"]) / f"workers/{i}/result.json")
             if old != prior["result"]["baseline"]:
@@ -360,6 +406,7 @@ def worker(root, expected):
             numerical_eligible_layers=sum(x is not None for x in chosen),
             original_tokenization_sha256=token_hash,
             local_screen_passed=reduction >= plan["minimum_net_cpu_payload_reduction"]
+            and (reduction > 0 if plan.get("strictly_positive_storage_saving_required") else True)
             and any(x is not None for x in chosen),
         )
     except Exception:
@@ -440,9 +487,17 @@ def main():
     group = p.add_mutually_exclusive_group()
     group.add_argument("--refined-source", action="store_true", help="CPU-only source-codec study")
     group.add_argument("--mixed-source", action="store_true", help="CPU-only group-precision study")
+    group.add_argument(
+        "--all-head-source", action="store_true", help="CPU exact all-consumer codec"
+    )
     a = p.parse_args()
     return (
-        prepare(a.root, refined_source=a.refined_source, mixed_source=a.mixed_source)
+        prepare(
+            a.root,
+            refined_source=a.refined_source,
+            mixed_source=a.mixed_source,
+            all_head_source=a.all_head_source,
+        )
         if a.action == "prepare"
         else worker(a.root, a.plan_sha)
         if a.action == "worker"
