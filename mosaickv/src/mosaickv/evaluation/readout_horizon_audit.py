@@ -12,8 +12,15 @@ def forced_plan(records, ordinal):
 
 
 def audit(
-    reference, candidates, horizons=(1, 2, 3, 7), *, guard_predictions=32, semantic_predictions=128
+    reference,
+    candidates,
+    horizons=(1, 2, 3, 7),
+    *,
+    guard_predictions=32,
+    semantic_predictions=128,
+    guard_reference=None,
 ):
+    guard_reference = reference if guard_reference is None else guard_reference
     if (
         reference.ndim != 2
         or len(reference) != 128
@@ -22,15 +29,21 @@ def audit(
         or type(semantic_predictions) is not int
         or not 2 <= semantic_predictions <= 128
         or any(t.shape != reference.shape for t in candidates.values())
+        or guard_reference.shape != reference.shape
         or any(type(h) is not int or not 1 <= h < guard_predictions for h in horizons)
-        or any(not bool(t.isfinite().all()) for t in (reference, *candidates.values()))
+        or any(
+            not bool(t.isfinite().all()) for t in (reference, guard_reference, *candidates.values())
+        )
     ):
         raise ValueError("finite complete 128-prediction reference/identity/plans required")
     target = reference.double().log_softmax(-1)
     probability = target.exp()
+    guard_target = guard_reference.double().log_softmax(-1)
     rows = {}
     for name, logits in candidates.items():
         candidate = logits.double()
+        candidate_log = candidate.log_softmax(-1)
+        guard_kl = (guard_target.exp() * (guard_target - candidate_log)).sum(-1)
         kl = (probability * (target - candidate.log_softmax(-1))).sum(-1)
         matches = candidate.argmax(-1) == reference.argmax(-1)
         divergence = (~matches).nonzero().flatten()
@@ -54,13 +67,28 @@ def audit(
                 )
                 <= 1.0
             ),
+            registered_32_token_guard_passed=(
+                bool(
+                    (
+                        candidate[:guard_predictions].argmax(-1)
+                        == guard_reference[:guard_predictions].argmax(-1)
+                    ).all()
+                )
+                and float(guard_kl[:guard_predictions].max()) <= 0.02
+                and float(
+                    (candidate[:guard_predictions] - guard_reference[:guard_predictions].double())
+                    .abs()
+                    .max()
+                )
+                <= 1.0
+            ),
         )
     selected = {}
     for h in horizons:
         eligible = [
             name
             for name, r in rows.items()
-            if r["shared_prefix_predictions"] > h and r["absolute_32_token_guard_passed"]
+            if r["shared_prefix_predictions"] > h and r["registered_32_token_guard_passed"]
         ]
         if not eligible:
             selected[str(h)] = dict(eligible=False)

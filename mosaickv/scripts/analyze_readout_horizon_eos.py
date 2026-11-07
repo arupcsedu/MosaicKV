@@ -8,6 +8,7 @@ from pathlib import Path
 import torch
 from transformers import AutoConfig
 
+from mosaickv.adapters.huggingface.registry import _resolve_model_source
 from mosaickv.evaluation.fox_campaign import clean_source, sha, write_once
 from mosaickv.evaluation.readout_horizon_audit import audit, eos_boundary
 from mosaickv.evaluation.storage_component_gate import storage_match
@@ -33,9 +34,8 @@ def main():
         if sha(Path(path)) != expected:
             raise ValueError("producer input/provenance changed")
     model = plan["parent"]["config"]["model"]
-    config = AutoConfig.from_pretrained(
-        model["id"], revision=model["revision"], local_files_only=True
-    )
+    snapshot = _resolve_model_source(model["id"], model["revision"], local_files_only=True)
+    config = AutoConfig.from_pretrained(snapshot, local_files_only=True)
     eos = getattr(config, "eos_token_id", None)
     eos = eos if eos is not None else config.text_config.eos_token_id
     eos = set(eos if isinstance(eos, list) else [eos])
@@ -64,7 +64,22 @@ def main():
         candidates = {
             "identity" if i == 0 else f"plan_{i}": values[f"controlled_plan_{i}"] for i in range(10)
         }
-        proof = audit(reference, candidates, semantic_predictions=boundary)
+        if (plan["guard_predictions"], plan["guard_kl"], plan["guard_logit"]) != (32, 0.02, 1.0):
+            raise ValueError("unchanged registered 32-token parent guard required")
+        proof = audit(
+            reference, candidates, semantic_predictions=boundary, guard_reference=values["parent"]
+        )
+        proof["guard_reference"] = "original_storage_parent_as_recorded_by_gpu_workers"
+        for i in range(10):
+            key = "identity" if i == 0 else f"plan_{i}"
+            if (
+                proof["candidate_diagnostics"][key]["registered_32_token_guard_passed"]
+                != rows[f"controlled_plan_{i}"]["parent_guard_passed"]
+            ):
+                raise ValueError("recomputed parent guard disagrees with immutable GPU record")
+        proof["full_128_step_audit_with_registered_parent_guard"] = audit(
+            reference, candidates, guard_reference=values["parent"]
+        )["horizons"]
         proof["storage_matching"] = storage_match([rows[f"controlled_plan_{i}"] for i in range(10)])
         if not proof["storage_matching"]["all_boundaries_matched"]:
             raise ValueError("counterfactual storage boundaries differ")
@@ -89,6 +104,8 @@ def main():
             plan_sha256=sha(args.root / "plan.json"),
             source_artifacts=artifacts,
             model=model,
+            pinned_model_config_path=str(Path(snapshot) / "config.json"),
+            pinned_model_config_sha256=sha(Path(snapshot) / "config.json"),
             pinned_eos_ids=sorted(eos),
             results=results,
             retrospectively_corrected_semantic_boundary=True,
@@ -121,6 +138,9 @@ def main():
         "",
         "Full 128-step numerical/storage checks remain separate. Post-EOS KL is not "
         "caption-quality evidence. No benchmark labels enter this audit.",
+        "The unchanged registered guard is recomputed against the original storage parent "
+        "and checked against every saved GPU flag. Additional FullKV absolute deviations "
+        "remain in the JSON; they are not silently discarded or relaxed.",
     ]
     (args.output / "report.md").write_text("\n".join(lines) + "\n")
 

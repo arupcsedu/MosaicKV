@@ -61,3 +61,13 @@ def test_caption_boundary_must_agree_with_generated_logits_and_pinned_eos():
     assert eos_boundary(logits, answer, {2}) == 6
     with pytest.raises(ValueError):
         eos_boundary(logits, dict(answer, answer_tokens=6), {2})
+
+
+def test_registered_parent_guard_is_distinct_from_additional_global_deviation():
+    fullkv = torch.tensor([[4.0, 1.0, 0.0]]).expand(128, -1).clone()
+    parent = fullkv + torch.tensor([0.0, 2.0, 0.0])
+    result = audit(fullkv, dict(identity=parent), guard_reference=parent)
+    row = result["candidate_diagnostics"]["identity"]
+    assert not row["absolute_32_token_guard_passed"]
+    assert row["registered_32_token_guard_passed"]
+    assert result["horizons"]["1"]["selected"] == "identity"

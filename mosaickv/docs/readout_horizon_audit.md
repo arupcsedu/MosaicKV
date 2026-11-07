@@ -43,3 +43,12 @@ fidelity only through the first EOS. Post-EOS logit agreement is an engineering
 diagnostic, not evidence about caption quality. This derived audit is labeled
 retrospective; no GPU inference or original result is overwritten. The same
 32-token engineering guards remain, even when the caption ends earlier.
+
+The initial horizon analyzer incorrectly applied those thresholds to global
+FullKV, rather than the registered storage parent used by every producer's
+`parent_guard_passed` field. Corrected derived analysis recomputes the ORIGINAL
+parent-relative guard and requires exact agreement with those immutable flags.
+It also retains the additional global-FullKV threshold result explicitly;
+the two references must not be conflated. Neither threshold is relaxed.
+Resolve the pinned model snapshot through the same offline HF cache resolver
+as the workers, and hash its actual config when validating EOS.

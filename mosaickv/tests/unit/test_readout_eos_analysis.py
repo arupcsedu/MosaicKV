@@ -10,12 +10,15 @@ def test_write_once_cpu_analysis_uses_real_eos_boundary_and_measured_storage(tmp
 
     root, output = tmp_path / "producer", tmp_path / "derived"
     root.mkdir()
-    arms = ["full_kv", *(f"controlled_plan_{i}" for i in range(10))]
+    arms = ["full_kv", "parent", *(f"controlled_plan_{i}" for i in range(10))]
     plan = dict(
         source_sha="producer",
         evaluation_only_fixed_plan_horizon_audit=True,
         arms=arms,
         bound_files={},
+        guard_predictions=32,
+        guard_kl=0.02,
+        guard_logit=1.0,
         parent=dict(config=dict(model=dict(id="fixture", revision="pinned"))),
     )
     (root / "plan.json").write_text(json.dumps(plan))
@@ -34,6 +37,7 @@ def test_write_once_cpu_analysis_uses_real_eos_boundary_and_measured_storage(tmp
             row = dict(
                 arm=arm,
                 status="completed",
+                parent_guard_passed=True,
                 logits_path=str(path),
                 logits_sha256=script.sha(path),
                 detail=dict(
@@ -45,6 +49,8 @@ def test_write_once_cpu_analysis_uses_real_eos_boundary_and_measured_storage(tmp
             )
             (folder / f"{i:02}-{arm}.json").write_text(json.dumps(row))
     monkeypatch.setattr(script, "clean_source", lambda path: "analysis")
+    (root / "config.json").write_text(json.dumps(dict(eos_token_id=2)))
+    monkeypatch.setattr(script, "_resolve_model_source", lambda *a, **k: str(root))
     monkeypatch.setattr(
         script.AutoConfig, "from_pretrained", lambda *a, **k: SimpleNamespace(eos_token_id=2)
     )
