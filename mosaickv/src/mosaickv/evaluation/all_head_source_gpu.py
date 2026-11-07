@@ -78,6 +78,70 @@ def encode(previous, current):
     return DeviceSymbols(current.numel(), payload, offsets, previous is not None)
 
 
+def encode_best(previous, current):
+    """Count both formats, synchronize once, and pack only the identical winner.
+
+    This changes construction work, not serialized bytes, tie-breaking, source
+    quantization or the replay decoder. Count workspaces are temporary and must
+    remain visible to allocator-peak measurements.
+    """
+    from mosaickv.evaluation.all_head_source_kernel import count, pack
+    from mosaickv.evaluation.lossless_code_delta_gpu import DeviceCodes, validate_bytes
+    from mosaickv.evaluation.lossless_code_delta_kernel import count as byte_count
+    from mosaickv.evaluation.lossless_code_delta_kernel import pack as byte_pack
+
+    validate_bytes(current)
+    if current.numel() % 384:
+        raise ValueError("complete source and original byte-codec groups required")
+    if previous is not None:
+        validate_bytes(previous)
+        if previous.shape != current.shape or previous.device != current.device:
+            raise ValueError("unchanged complete predecessor layout required")
+    groups = current.numel() // 192
+    sizes = torch.empty(groups, dtype=torch.int32, device=current.device)
+    modes = torch.empty_like(sizes)
+    parent = previous if previous is not None else current
+    count[(groups,)](parent, current, sizes, modes, HAS_PREVIOUS=previous is not None)
+    ends = sizes.cumsum(0, dtype=torch.int32)
+    byte_groups = current.numel() // 128
+    if previous is not None:
+        byte_sizes = torch.empty(byte_groups, dtype=torch.int32, device=current.device)
+        byte_count[(byte_groups,)](previous, current, byte_sizes)
+        byte_ends = byte_sizes.cumsum(0, dtype=torch.int32)
+        length, byte_length = torch.stack((ends[-1], byte_ends[-1])).cpu().tolist()
+    else:
+        length, byte_length = int(ends[-1].item()), current.numel()
+    symbol_bytes = length + 4 * (groups + 1)
+    byte_bytes = byte_length + 4 * (byte_groups + 1)
+    legacy_bytes = min(current.numel(), byte_bytes) if previous is not None else current.numel()
+    selected = symbol_bytes < legacy_bytes
+    if selected:
+        payload = torch.empty(length, dtype=torch.uint8, device=current.device)
+        offsets = torch.empty(groups + 1, dtype=torch.int32, device=current.device)
+        pack[(groups,)](
+            parent,
+            current,
+            sizes,
+            modes,
+            ends,
+            payload,
+            offsets,
+            GROUPS=groups,
+            HAS_PREVIOUS=previous is not None,
+        )
+        packet = DeviceSymbols(current.numel(), payload, offsets, previous is not None)
+    elif previous is not None and byte_bytes < current.numel():
+        payload = torch.empty(byte_length, dtype=torch.uint8, device=current.device)
+        offsets = torch.empty(byte_groups + 1, dtype=torch.int32, device=current.device)
+        byte_pack[(byte_groups,)](
+            previous, current, byte_sizes, byte_ends, payload, offsets, GROUPS=byte_groups
+        )
+        packet = DeviceCodes(current.numel(), payload, offsets)
+    else:
+        packet = DeviceCodes(current.numel(), current)
+    return packet, selected, legacy_bytes
+
+
 def decode(previous, packet, destination=None):
     from mosaickv.evaluation.all_head_source_kernel import unpack
     from mosaickv.evaluation.lossless_code_delta_gpu import validate_bytes
@@ -128,14 +192,16 @@ def decode(previous, packet, destination=None):
 
 
 class CodecState:
-    def __init__(self):
+    def __init__(self, construction="both"):
         self.records, self.references = [], []
         self.coverage = []
+        self.construction = construction
 
     def report(self):
         return dict(
             variant="all_head_lossless_source_codec_v1",
             default_off=True,
+            construction=self.construction,
             records=self.records,
             compressed_replacements=sum(r["symbol_codec_selected"] for r in self.records),
             original_owners_retired=sum(ref() is None for ref in self.references),
@@ -149,14 +215,16 @@ class CodecState:
 
 
 @contextmanager
-def use(enabled=True):
+def use(enabled=True, *, construction="both"):
     """Scope new packet types/decoder to one private runtime, never globally on."""
     import weakref
 
     from mosaickv.evaluation import layer_code_delta as runtime
     from mosaickv.evaluation.all_head_source_codec import SourceCoverage
 
-    state = CodecState()
+    if type(enabled) is not bool or construction not in ("both", "pack_selected"):
+        raise ValueError("explicit activation and audited source construction required")
+    state = CodecState(construction)
     if not enabled:
         yield state
         return
@@ -171,15 +239,21 @@ def use(enabled=True):
         active = _scope.get()
         if active is None:
             return original_encode(previous, current)
-        legacy = original_encode(previous, current)
-        alternate = encode(previous, current)
-        selected = alternate is not None and alternate.serialized_bytes < legacy.serialized_bytes
-        packet = alternate if selected else legacy
+        if construction == "pack_selected":
+            packet, selected, legacy_bytes = encode_best(previous, current)
+        else:
+            legacy = original_encode(previous, current)
+            alternate = encode(previous, current)
+            selected = (
+                alternate is not None and alternate.serialized_bytes < legacy.serialized_bytes
+            )
+            packet = alternate if selected else legacy
+            legacy_bytes = legacy.serialized_bytes
         selector = torch.tensor([int(selected)], dtype=torch.uint8, device=current.device)
         active.records.append(
             dict(
                 source_code_bytes=current.numel(),
-                legacy_serialized_bytes=legacy.serialized_bytes,
+                legacy_serialized_bytes=legacy_bytes,
                 selected_serialized_bytes=packet.serialized_bytes + 1,
                 symbol_codec_selected=selected,
             )

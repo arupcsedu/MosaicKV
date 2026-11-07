@@ -57,3 +57,43 @@ def test_parent_snapshots_own_only_one_head_and_do_not_alias_the_live_lease():
     assert observed and g.peak_temporary_kv_bytes == 7 * 128 * 2
     with pytest.raises(RuntimeError, match="not consumed"):
         g.record_component(layer, 0)
+
+
+@pytest.mark.parametrize("per_head", [False, True])
+def test_single_head_counterfactual_preserves_native_head_values_and_masks(per_head):
+    from mosaickv.evaluation.eager_core_operator import reference_scores
+    from mosaickv.evaluation.live_anchor_guard import head_mask, replace_head_output
+
+    generator = torch.Generator().manual_seed(71)
+    query = torch.randn(1, 32, 1, 128, generator=generator).bfloat16()
+    key = torch.randn(1, 32, 33, 128, generator=generator).bfloat16()
+    value = torch.randn(1, 32, 33, 128, generator=generator).bfloat16()
+    mask = torch.zeros(1, 32 if per_head else 1, 1, 33).bfloat16()
+    mask[..., -3:] = float("-inf")
+    scores = reference_scores(query, key, mask, 128**-0.5)
+    original = torch.matmul(scores, value).transpose(1, 2).contiguous().reshape(1, 1, -1)
+    parent_key, parent_value = key[:, 4:5] + 0.1, value[:, 4:5] - 0.1
+    key[:, 4:5], value[:, 4:5] = parent_key, parent_value
+    reference = torch.matmul(reference_scores(query, key, mask, 128**-0.5), value)
+    reference = reference.transpose(1, 2).contiguous().reshape(1, 1, -1)
+    single = reference_scores(query[:, 4:5], parent_key, head_mask(mask, 4), 128**-0.5)
+    actual = replace_head_output(original, single, parent_value, 4)
+    assert torch.equal(actual, reference)
+    assert not torch.equal(actual, original)
+    assert head_mask(None, 4) is None
+    with pytest.raises(ValueError, match="mask"):
+        head_mask(torch.zeros(1, 2, 1, 33), 4)
+    with pytest.raises(ValueError, match="head/output"):
+        replace_head_output(original, single, parent_value, 32)
+
+
+def test_single_head_scope_is_explicit_and_defaults_to_reference():
+    assert OverlayPolicy().anchor_counterfactual == "full_heads"
+    with pytest.raises(ValueError, match="counterfactual"):
+        OverlayPolicy(anchor_counterfactual="single_head")
+    policy = OverlayPolicy(
+        inline_repair=True, live_anchor_guard=True, anchor_counterfactual="single_head"
+    )
+    assert LiveAnchorGuard(
+        SimpleNamespace(), SimpleNamespace(head=0), {}, policy=policy
+    ).single_head

@@ -63,8 +63,13 @@ class OverlayPolicy:
     anchor_risk_repair: bool = False
     anchor_repair_stress: bool = False
     quality_objective: str = "legacy_diagnostic"
+    anchor_counterfactual: str = "full_heads"
 
     def __post_init__(self):
+        if self.anchor_counterfactual not in ("full_heads", "single_head") or (
+            self.anchor_counterfactual == "single_head" and not self.live_anchor_guard
+        ):
+            raise ValueError("single-head counterfactual requires the live parent guard")
         if self.quality_objective not in (
             "legacy_diagnostic",
             "bitwise_storage_only",

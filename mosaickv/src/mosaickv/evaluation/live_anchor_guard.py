@@ -43,6 +43,7 @@ class LiveAnchorGuard:
         self.adapter, self.overlay, self.report = adapter, overlay, report
         self.policy, self.inline_owner = policy, inline_owner
         self.repair_enabled = bool(policy and policy.anchor_risk_repair)
+        self.single_head = bool(policy and policy.anchor_counterfactual == "single_head")
         self.stack, self.records, self.parent_logits = ExitStack(), [], []
         self.parent_key = self.parent_value = self.probabilities = self.heads = None
         self.layer = self.query = self.key = self.value = None
@@ -104,8 +105,10 @@ class LiveAnchorGuard:
             if owner.parent_key is None or query.shape != (1, 32, 1, 128):
                 raise RuntimeError("actual original last-layer observations required")
             h = owner.overlay.head
-            active = key[:, h : h + 1].clone()
-            owner.charge(active)
+            active = None
+            if not owner.single_head or owner.repair_enabled:
+                active = key[:, h : h + 1].clone()
+                owner.charge(active)
             if owner.repair_enabled:
                 owner.active_key, owner.query, owner.mask, owner.scaling = (
                     active,
@@ -113,11 +116,16 @@ class LiveAnchorGuard:
                     mask,
                     scaling,
                 )
-            try:
-                key[:, h : h + 1].copy_(owner.parent_key)
-                owner.probabilities = reference_scores(query, key, mask, scaling)
-            finally:
-                key[:, h : h + 1].copy_(active)
+            if owner.single_head:
+                owner.probabilities = reference_scores(
+                    query[:, h : h + 1], owner.parent_key, head_mask(mask, h), scaling
+                )
+            else:
+                try:
+                    key[:, h : h + 1].copy_(owner.parent_key)
+                    owner.probabilities = reference_scores(query, key, mask, scaling)
+                finally:
+                    key[:, h : h + 1].copy_(active)
             owner.parent_key = None
             weights = score(binding, query, key, mask, scaling)
             if owner.repair_enabled:
@@ -133,17 +141,24 @@ class LiveAnchorGuard:
             if owner.parent_value is None or owner.probabilities is None:
                 raise RuntimeError("complete parent probability/V transaction required")
             h = owner.overlay.head
-            active = owner.value[:, h : h + 1].clone()
-            owner.charge(active)
+            active = None
+            if not owner.single_head or owner.repair_enabled:
+                active = owner.value[:, h : h + 1].clone()
+                owner.charge(active)
             if owner.repair_enabled:
                 owner.active_value = active
                 owner.active_heads = result.reshape(1, 1, -1).clone()
-            try:
-                owner.value[:, h : h + 1].copy_(owner.parent_value)
-                owner.heads = torch.matmul(owner.probabilities, owner.value).transpose(1, 2)
-                owner.heads = owner.heads.contiguous().reshape(1, 1, -1)
-            finally:
-                owner.value[:, h : h + 1].copy_(active)
+            if owner.single_head:
+                owner.heads = replace_head_output(
+                    result.reshape(1, 1, -1), owner.probabilities, owner.parent_value, h
+                )
+            else:
+                try:
+                    owner.value[:, h : h + 1].copy_(owner.parent_value)
+                    owner.heads = torch.matmul(owner.probabilities, owner.value).transpose(1, 2)
+                    owner.heads = owner.heads.contiguous().reshape(1, 1, -1)
+                finally:
+                    owner.value[:, h : h + 1].copy_(active)
             owner.parent_value = owner.value = owner.probabilities = None
             return result
 
@@ -249,6 +264,7 @@ class LiveAnchorGuard:
             self.report["live_anchor_guard"] = dict(
                 steps=len(self.records),
                 reference="live_parent_storage_variant_not_FullKV",
+                counterfactual_scope="single_head" if self.single_head else "full_heads",
                 kl_threshold=0.02,
                 logit_threshold=1.0,
                 greedy_token_required=True,
@@ -271,6 +287,32 @@ class LiveAnchorGuard:
             self.layer = None
             self.active_key = self.active_value = self.active_heads = self.query = None
             self.prototype_mass = None
+
+
+def head_mask(mask, head):
+    """Preserve shared masks, narrow real per-head masks; reject ambiguity."""
+    if mask is None:
+        return None
+    if mask.ndim != 4 or mask.shape[1] not in (1, 32):
+        raise ValueError("audited shared or full-MHA four-dimensional mask required")
+    return mask if mask.shape[1] == 1 else mask[:, head : head + 1]
+
+
+def replace_head_output(active, probabilities, value, head):
+    if (
+        type(head) is not int
+        or not 0 <= head < 32
+        or active.shape != (1, 1, 4096)
+        or probabilities.ndim != 4
+        or probabilities.shape[:3] != (1, 1, 1)
+        or value.shape != (1, 1, probabilities.shape[-1], 128)
+        or any(t.dtype != active.dtype or t.device != active.device for t in (probabilities, value))
+    ):
+        raise ValueError("complete matching actual attention head/output required")
+    revised = torch.matmul(probabilities, value).reshape(1, 1, 128)
+    result = active.clone().view(1, 1, 32, 128)
+    result[:, :, head] = revised
+    return result.reshape(1, 1, 4096)
 
 
 def repaired_head_outputs(query, key, value, mask, scaling, active_heads, head):

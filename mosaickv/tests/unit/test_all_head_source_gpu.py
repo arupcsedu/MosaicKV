@@ -22,3 +22,17 @@ def test_forged_cpu_or_incomplete_descriptor_rejected_before_kernel_launch():
         decode(None, packet)
     with pytest.raises(ValueError, match="source symbol packet"):
         decode(None, object())
+
+
+def test_codec_construction_policy_is_explicit_and_default_off_on_cpu():
+    import pytest
+
+    from mosaickv.evaluation.all_head_source_gpu import use
+
+    with pytest.raises(ValueError, match="construction"), use(False, construction="guess"):
+        pass
+    with use(False, construction="pack_selected") as state:
+        report = state.report()
+        assert report["construction"] == "pack_selected"
+        assert report["compressed_replacements"] == 0
+        assert not report["all_shared_source_consumers_covered"]
