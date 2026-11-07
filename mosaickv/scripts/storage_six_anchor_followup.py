@@ -15,17 +15,21 @@ GATE = Path("/scratch/djy8hg/runs/evicastkv/live-anchor-guard-20261107-v1")
 PANEL = Path("/scratch/djy8hg/runs/evicastkv/six-component-consumed-panel-20261107-v1")
 RETRY = Path("/scratch/djy8hg/runs/evicastkv/live-anchor-control-retry-20261107-v1")
 GUARDED_PANEL = Path("/scratch/djy8hg/runs/evicastkv/live-anchor-consumed-panel-20261107-v1")
+RISK_GATE = Path("/scratch/djy8hg/runs/evicastkv/live-anchor-risk-repair-20261107-v1")
 
 
-def prepare(root, *, panel=False):
+def prepare(root, *, panel=False, risk_repair=False):
+    if risk_repair and not panel:
+        raise ValueError("decision-risk extension is restricted to the fixed consumed panel")
     source = clean_source(SOURCE)
     if root.exists():
         raise FileExistsError("new immutable selective-retry root required")
     parent_root = PANEL if panel else GATE
     parent = base.read(parent_root / "plan.json")
     inputs = base.read(parent_root / "inputs.json")
-    gate = base.read(GATE / "plan.json")
-    paths = [parent_root / "plan.json", parent_root / "inputs.json", GATE / "plan.json"]
+    gate_root = RISK_GATE if risk_repair else GATE
+    gate = base.read(gate_root / "plan.json")
+    paths = [parent_root / "plan.json", parent_root / "inputs.json", gate_root / "plan.json"]
     if digest(parent["parent"]["config"]) != digest(gate["parent"]["config"]):
         raise ValueError("unchanged pinned model and controls required")
     if panel:
@@ -35,10 +39,21 @@ def prepare(root, *, panel=False):
                 "actual corrected control gate required before consumed-panel extension"
             )
         paths.append(repaired)
-        policies = {
-            name: gate["component_policies"][name]
-            for name in ("guarded_full", "guarded_parent_reserved")
-        }
+        if risk_repair:
+            risk = RISK_GATE / "analysis/decision.json"
+            safety = GUARDED_PANEL / "analysis/safety_decision.json"
+            if (
+                base.read(risk).get("execution_passed") is not True
+                or base.read(safety).get("passed") is not True
+            ):
+                raise ValueError("actual repair/preloaded parity and previous safety must pass")
+            paths += [risk, safety]
+        selected = (
+            ("anchor_risk_repair", "anchor_repair_disabled")
+            if risk_repair
+            else ("guarded_full", "guarded_parent_reserved")
+        )
+        policies = {name: gate["component_policies"][name] for name in selected}
     else:
         if len(inputs) != 2:
             raise ValueError("only two existing missing inactive-control rows may be retried")
@@ -82,6 +97,7 @@ def prepare(root, *, panel=False):
                 "mosaickv/tests/unit/test_live_anchor_guard.py",
                 "mosaickv/tests/unit/test_skip_discarded_exact.py",
                 "mosaickv/tests/unit/test_storage_six_overlay.py",
+                "mosaickv/tests/unit/test_anchor_risk_repair.py",
             ],
             cwd=SOURCE,
             stdout=output,
@@ -103,7 +119,13 @@ def prepare(root, *, panel=False):
             reused_controls=reused,
             component_policies=policies,
             arms=["full_kv", "parent", *policies],
-            component_reference_arm="guarded_full" if panel else "full",
+            component_reference_arm="anchor_risk_repair"
+            if risk_repair
+            else "guarded_full"
+            if panel
+            else "full",
+            live_parent_decision_risk_repair_study=risk_repair,
+            risk_repair=risk_repair,
             storage_boundary_version="shared_initial_final_peak_v2",
             guard_predictions=32,
             guard_kl=0.02,
@@ -159,7 +181,7 @@ def analyze(root, expected):
     plan = base.checked(root, expected)
     decision = base.read(root / "analysis/decision.json")
     rows = base.read(root / "analysis/rows.json")
-    guards = [r for r in rows if r["arm"].startswith("guarded_")]
+    guards = [r for r in rows if r["arm"].startswith(("guarded_", "anchor_"))]
     passed = decision["execution_passed"] and all(
         r.get("all_parent_counterfactual_logits_bitwise")
         and r.get("all_128_emitted_parent_tokens_identical")
@@ -205,8 +227,25 @@ def analyze(root, expected):
         proof["veto_counts"] = [
             r["mechanism_evidence"]["live_anchor_guard"]["prototype_or_exact_changes_vetoed"]
             for r in guards
-            if r["arm"] == "guarded_full"
+            if r["arm"] == ("anchor_risk_repair" if plan.get("risk_repair") else "guarded_full")
         ]
+        if plan.get("risk_repair"):
+            proof["natural_repairs"] = [
+                event
+                for r in guards
+                if r["arm"] == "anchor_risk_repair"
+                for event in r["mechanism_evidence"]["repair_events"]
+                if not event["stress_control"]
+            ]
+            proof["no_repair_control_events"] = sum(
+                len(r["mechanism_evidence"]["repair_events"])
+                for r in guards
+                if r["arm"] == "anchor_repair_disabled"
+            )
+            proof["passed"] &= proof["no_repair_control_events"] == 0
+        proof["passed"] &= all(
+            x["all_boundaries_matched"] for x in decision["storage_matching"].values()
+        )
         write_once(root / "analysis/safety_decision.json", proof)
 
 
@@ -216,10 +255,11 @@ def main():
     p.add_argument("--root", required=True, type=Path)
     p.add_argument("--plan-sha")
     p.add_argument("--phase", default="anchor")
+    p.add_argument("--risk-repair", action="store_true")
     a = p.parse_args()
     base.SOURCE = SOURCE
     if a.action == "prepare":
-        prepare(a.root)
+        prepare(a.root, panel=a.risk_repair, risk_repair=a.risk_repair)
     elif a.action == "worker":
         return base.worker(a.root, a.plan_sha)
     elif a.action == "analyze":

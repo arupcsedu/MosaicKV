@@ -35,3 +35,10 @@ def test_coexisting_inline_and_guard_kv_owners_are_observed_together():
     assert guard.peak_temporary_kv_bytes == 7 * 128 * 2
     assert guard.coexisting_temporary_kv_peak_bytes == 2 * 7 * 128 * 2
     assert len(observed[-1]) == 2
+
+
+def test_risk_panel_cannot_create_an_unreviewed_fresh_cohort(tmp_path):
+    from storage_six_anchor_followup import prepare
+
+    with pytest.raises(ValueError, match="fixed consumed panel"):
+        prepare(tmp_path / "not_panel", risk_repair=True)
