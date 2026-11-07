@@ -6,6 +6,7 @@ import torch
 from mosaickv.evaluation.exact_last_layer_readout import (
     ReadoutCapture,
     attention_output,
+    compare_logits,
     record_component,
     suffix,
 )
@@ -78,3 +79,14 @@ def test_missing_observations_and_unsupported_layers_fail_closed():
         ReadoutCapture(0, layer=30)
     with pytest.raises(RuntimeError, match="missing real"):
         ReadoutCapture(0).validate(603)
+
+
+def test_cpu_owned_probe_logits_compare_without_a_gpu_device_assumption():
+    actual = torch.tensor([2.0, 3.0, 1.0])
+    result = compare_logits(actual.reshape(1, -1), actual)
+    assert result == dict(logits_bitwise=True, maximum_logit_difference=0.0, token_agreement=True)
+    assert not compare_logits(actual + 1.0, actual)["logits_bitwise"]
+    with pytest.raises(ValueError, match="finite"):
+        compare_logits(actual, actual[:2])
+    with pytest.raises(ValueError, match="finite"):
+        compare_logits(actual, torch.tensor([float("nan"), 0.0, 1.0]))

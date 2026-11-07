@@ -131,6 +131,18 @@ def _cuda_copy(value, stride=None):
     return result
 
 
+def compare_logits(predicted, actual):
+    """Probe outputs are CPU-owned; comparisons must not depend on producer device."""
+    left, right = (_snapshot(t).float().reshape(-1) for t in (predicted, actual))
+    if left.shape != right.shape or not all(bool(t.isfinite().all()) for t in (left, right)):
+        raise ValueError("matching finite vocabulary logits required")
+    return dict(
+        logits_bitwise=torch.equal(left, right),
+        maximum_logit_difference=float((left - right).abs().max()),
+        token_agreement=int(left.argmax()) == int(right.argmax()),
+    )
+
+
 @torch.inference_mode()
 def verify_controls(adapter, capture, overlay, original_prompt, reference, probe):
     """Verify predicted versus ACTUAL isolated model probes, then restore buffers.
@@ -241,9 +253,7 @@ def verify_controls(adapter, capture, overlay, original_prompt, reference, probe
             controls.append(
                 dict(
                     control=name,
-                    logits_bitwise=torch.equal(predicted, actual),
-                    maximum_logit_difference=float((predicted - actual).abs().max()),
-                    token_agreement=int(predicted.argmax()) == int(actual.argmax()),
+                    **compare_logits(predicted, actual),
                     fixed_original_positions=True,
                     exact_capacity_unchanged=True,
                     benchmark_labels_used=False,
