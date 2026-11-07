@@ -20,7 +20,16 @@ def main():
     paths += [a.panel_root / "analysis/panel_stopping_decision.json"]
     paths += [a.latency_root / "analysis/decision.json"]
     profiles = [json.loads(path.read_text()) for path in paths[:2]]
-    audit = build(profiles, json.loads(paths[2].read_text()), json.loads(paths[3].read_text()))
+    historical_path = a.panel_root / "analysis/rows.json"
+    historical_rows = json.loads(historical_path.read_text())
+    audit = build(
+        profiles,
+        json.loads(paths[2].read_text()),
+        json.loads(paths[3].read_text()),
+        historical_rows,
+    )
+    paths.append(historical_path)
+    paths += sorted({Path(row["manifest_path"]) for row in historical_rows})
     manifests = [a.latency_root / f"workers/{i}/manifest.json" for i in (0, 1)]
     paths += [a.latency_root / "plan.json", a.panel_root / "plan.json", *manifests]
     audit["paired_profile_provenance"] = [json.loads(p.read_text()) for p in manifests]

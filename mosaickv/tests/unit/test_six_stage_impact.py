@@ -71,6 +71,30 @@ def test_known_temporary_buffers_are_not_promoted_to_stage_peak_or_kv_storage():
     assert "not stage peak" in markdown(result)
 
 
+def test_historical_memory_is_paired_and_not_mistaken_for_stage_peak():
+    rows = [
+        dict(
+            arm=arm,
+            sample_id=str(i),
+            status="completed",
+            detail=dict(initial_encoded_bytes=100, final_encoded_bytes=200 + int(arm == "full")),
+        )
+        for arm in ("full", *(ablation for _, _, ablation in STAGES))
+        for i in range(16)
+    ]
+    result = build(*fixtures(), historical_rows=rows)
+    for row in result["stages"]:
+        memory = row["historical_16_image_unguarded_ablation"]["paired_memory"]
+        assert memory["initial_encoded_bytes_full_minus_ablated_bytes"] == [0] * 16
+        assert memory["final_encoded_bytes_full_minus_ablated_bytes"] == [1] * 16
+        assert row["separately_audited_stage_KV_bytes"] is None
+    assert "Final differences can arise" in markdown(result)
+    with pytest.raises(ValueError, match="identical identities"):
+        build(*fixtures(), historical_rows=rows[:-1])
+    with pytest.raises(ValueError, match="unique complete"):
+        build(*fixtures(), historical_rows=[*rows, rows[0]])
+
+
 @pytest.mark.parametrize("failure", ("missing_phase", "nan", "invalid_parity", "incomplete"))
 def test_bad_profiles_cannot_generate_measured_report(failure):
     p, panel, latency = fixtures()

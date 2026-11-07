@@ -17,7 +17,7 @@ STAGES = (
 )
 
 
-def build(profiles, panel, latency):
+def build(profiles, panel, latency, historical_rows=None):
     if len(profiles) != 2 or panel.get("execution_passed") is not True:
         raise ValueError("two complete profiles and the completed consumed ablation required")
     if latency.get("complete") is not True:
@@ -61,9 +61,36 @@ def build(profiles, panel, latency):
             )
         )
     rows = []
+    historic = None
+    if historical_rows is not None:
+        historic = {}
+        for row in historical_rows:
+            key = (row["arm"], row["sample_id"])
+            if key in historic or row["status"] != "completed":
+                raise ValueError("unique complete historical ablation rows required")
+            historic[key] = row
+        ids = {sid for arm, sid in historic if arm == "full"}
+        if len(ids) != 16:
+            raise ValueError("complete sixteen-input historical memory cohort required")
     for name, phases, ablation in STAGES:
         effect = panel["effects"][ablation]
         values = [sum(p[k] for k in phases) for p in phase_rows] if phases else []
+        memory = None
+        if historic is not None:
+            ablated_ids = {sid for arm, sid in historic if arm == ablation}
+            if ablated_ids != ids:
+                raise ValueError("historical memory comparisons require identical identities")
+            memory = {}
+            for key in ("initial_encoded_bytes", "final_encoded_bytes"):
+                pairs = [
+                    (historic["full", sid]["detail"][key], historic[ablation, sid]["detail"][key])
+                    for sid in sorted(ids)
+                ]
+                if any(type(v) is not int or v <= 0 for pair in pairs for v in pair):
+                    raise ValueError("positive integer historical cache backing required")
+                memory[key + "_full_minus_ablated_bytes"] = [a - b for a, b in pairs]
+            memory["matched_reserved_allocation_not_a_component_savings_claim"] = True
+            memory["reported_counter_peak_not_promoted_to_audited_peak"] = True
         rows.append(
             dict(
                 stage=name,
@@ -84,6 +111,7 @@ def build(profiles, panel, latency):
                     changed_captions=effect["full_minus_arm_caption_changes"],
                     same_version_as_latency_run=False,
                     independent_quality_evidence=False,
+                    paired_memory=memory,
                 ),
             )
         )
@@ -152,6 +180,27 @@ def markdown(audit):
         "Natural repair did not occur in the historical panel; forced restoration tested "
         "mechanics, not quality recovery. Matched reserved allocations do not prove "
         "individual mechanisms save KV bytes.",
+    ]
+    if audit["stages"][0]["historical_16_image_unguarded_ablation"]["paired_memory"] is not None:
+        lines += [
+            "",
+            "# Historical matched-allocation memory differences",
+            "",
+            "Same earlier sixteen inputs and ablation version as the CIDEr deltas; "
+            "not measurements of the new guarded variant. Zero initial difference is "
+            "intentional allocation matching, not proof a component is memory-free. "
+            "Final differences can arise from different generated history. Earlier "
+            "reported peak counters were not certified and are excluded here.",
+            "",
+            "| Stage | Full minus ablation initial bytes | Full minus ablation final bytes |",
+            "| --- | ---: | ---: |",
+        ]
+        for row in audit["stages"]:
+            memory = row["historical_16_image_unguarded_ablation"]["paired_memory"]
+            initial = sorted(set(memory["initial_encoded_bytes_full_minus_ablated_bytes"]))
+            final = sorted(set(memory["final_encoded_bytes_full_minus_ablated_bytes"]))
+            lines.append(f"| {row['stage']} | {initial} | {final} |")
+    lines += [
         "",
         "# Latest unprofiled paired request measurements",
         "",
