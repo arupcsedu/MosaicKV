@@ -52,6 +52,25 @@ def test_missing_stage_memory_and_repair_latency_remain_unknown_not_zero():
     assert "-1.00000" in text
 
 
+def test_known_temporary_buffers_are_not_promoted_to_stage_peak_or_kv_storage():
+    profiles, panel, latency = fixtures()
+    for p in profiles:
+        p["mechanism_evidence"]["inline_first_step_repair"] = dict(
+            temporary_key_clone_backing_bytes=99, temporary_attention_residual_backing_bytes=8
+        )
+        p["mechanism_evidence"]["live_anchor_guard"] = dict(
+            tail_graph=dict(record_buffer_activation_bytes=40)
+        )
+    result = build(profiles, panel, latency)
+    repair = result["stages"][-1]
+    assert repair["separately_audited_stage_KV_bytes"] is None
+    assert all(
+        v["stage_peak_certified"] is False for v in repair["known_first_step_repair_buffers"]
+    )
+    assert result["per_input_guard_activation_buffers"][0]["not_KV_bytes"] is True
+    assert "not stage peak" in markdown(result)
+
+
 @pytest.mark.parametrize("failure", ("missing_phase", "nan", "invalid_parity", "incomplete"))
 def test_bad_profiles_cannot_generate_measured_report(failure):
     p, panel, latency = fixtures()

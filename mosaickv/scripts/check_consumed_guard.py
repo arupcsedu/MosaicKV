@@ -16,6 +16,7 @@ from mosaickv.evaluation.consumed_guard_check import (
     compare,
     consumed_inputs,
     finite_fault,
+    full_head_parity_gate,
     parent_export,
     same_storage,
 )
@@ -46,7 +47,7 @@ def checked(root, expected):
     return p
 
 
-def prepare(root):
+def prepare(root, full_head_parent=False):
     source = clean_source(SOURCE)
     if root.exists():
         raise FileExistsError("new immutable correctness-only output root required")
@@ -65,6 +66,9 @@ def prepare(root):
         "mosaickv/src/mosaickv/evaluation/consumed_guard_check.py",
         "mosaickv/tests/unit/test_consumed_guard_check.py",
         "mosaickv/docs/consumed_guard_check.md",
+        "mosaickv/scripts/debug_guard_counterfactual.py",
+        "mosaickv/slurm/debug_guard_counterfactual.sbatch",
+        "mosaickv/tests/unit/test_guard_counterfactual_debug.py",
     }
     if not set(diff) <= allowed:
         raise ValueError("candidate source changed outside correctness harness")
@@ -74,6 +78,13 @@ def prepare(root):
     bound += [PANEL / "inputs.json", PANEL / "analysis/panel_stopping_decision.json"]
     bound += [Path(v) for v in parent["bound_files"]]
     bound += [Path(m["path"]) for s in inputs for m in s["media"]]
+    policies = {k: dict(v) for k, v in parent["policies"].items()}
+    if full_head_parent:
+        debug = Path("/scratch/djy8hg/runs/evicastkv/guard-counterfactual-debug-20261107-v1")
+        full_head_parity_gate(read(debug / "analysis/decision.json"))
+        bound += [debug / "plan.json", debug / "analysis/decision.json"]
+        for arm in ("hybrid_reference", "hybrid_fast"):
+            policies[arm]["anchor_counterfactual"] = "full_heads"
     root.mkdir(parents=True)
     (root / "logs").mkdir()
     with (root / "cpu.txt").open("x") as log:
@@ -108,7 +119,7 @@ def prepare(root):
             bound_files={str(p): sha(p) for p in bound},
             parent=parent["parent"],
             options=parent["options"],
-            policies=parent["policies"],
+            policies=policies,
             inputs=str(root / "inputs.json"),
             expected_samples=16,
             samples_per_worker=8,
@@ -122,6 +133,8 @@ def prepare(root):
             fault_not_a_quality_or_repair_claim=True,
             timed_latency_claim_authorized=False,
             graph_template_CPU_limit=4 * 2**20,
+            full_head_parent=full_head_parent,
+            single_head_numerical_optimization_promoted=False,
         ),
     )
     import all_head_native_source as infra
@@ -362,9 +375,10 @@ def main():
     parser.add_argument("action", choices=("prepare", "worker", "analyze", "controller"))
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--plan-sha")
+    parser.add_argument("--full-head-parent", action="store_true")
     a = parser.parse_args()
     if a.action == "prepare":
-        return prepare(a.root)
+        return prepare(a.root, a.full_head_parent)
     if a.action == "worker":
         return worker(a.root, a.plan_sha)
     if a.action == "analyze":

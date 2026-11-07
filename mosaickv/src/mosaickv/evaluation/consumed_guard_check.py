@@ -20,6 +20,17 @@ def consumed_inputs(rows):
     return result
 
 
+def full_head_parity_gate(decision):
+    if decision.get("complete") is not True or set(decision.get("results", {})) != {"0", "1"}:
+        raise ValueError("both complete consumed full-head controls required")
+    for row in decision["results"].values():
+        parity = row["full_counterfactual_vs_parent"]
+        if parity["all_vectors_bitwise"] is not True or parity["maximum_absolute_difference"] != 0:
+            raise ValueError("full-head counterfactual must be bitwise ordinary parent")
+        if row["full_output_vs_parent"]["changed_greedy_prefix_indices"]:
+            raise ValueError("full-head guard must preserve parent greedy tokens")
+
+
 def compare(parent, host, device, parent_counterfactual, host_report, device_report):
     """Require exact numeric/decision parity, not a claim about reference answers."""
     if parent.ndim != 2 or parent.shape[0] != 128:

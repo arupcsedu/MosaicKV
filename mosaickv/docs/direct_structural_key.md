@@ -24,3 +24,11 @@ initial/final/decode-owned-peak cache storage. The strict adjusted upper ratio
 must be at most 1.00 for a latency improvement; a neutral result is not a win.
 This changes execution only and cannot establish improved benchmark quality,
 additional KV savings, whole-request peak certification or six-stage superiority.
+
+The initial sixteen-input counterfactual check exposed rare single-head
+rounding discrepancies. Both failing consumed inputs passed the full-head
+counterfactual exactly. The next timing study therefore requires
+`--full-head-parent` and a complete sixteen-input full-head counterfactual,
+finite-veto and A-B-A check before submission. Both reference and direct-key
+hybrids use that corrected full-head policy; older single-head timings are not
+substituted for the new control.

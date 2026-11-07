@@ -29,3 +29,14 @@ No thresholds, K/V data, source memberships or model weights are changed.
 
 All new output paths are immutable. Existing predictions and paper files remain
 untouched. No automatic fresh-cohort or larger-run continuation is permitted.
+
+The first consumed panel attempt exposed a single-head numerical discrepancy,
+not a device-record discrepancy. The follow-up saved complete logits on its two
+numerical-failure inputs. The full-head counterfactual matched all 127 ordinary
+parent vectors exactly, whereas the single-head counterfactual differed at one
+prefix each (maximum 0.03125 and 0.125). Neither changed greedy tokens. This is
+not grounds to relax bitwise controls. `--full-head-parent` explicitly replaces
+the shortcut with the validated full-head counterfactual for both transports,
+requiring that bound two-input diagnostic first. Previous single-head timings
+must not be silently reused for this corrected configuration. Production code,
+thresholds, cache values and source memberships remain unchanged.

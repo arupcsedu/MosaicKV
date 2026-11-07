@@ -22,7 +22,7 @@ def build(profiles, panel, latency):
         raise ValueError("two complete profiles and the completed consumed ablation required")
     if latency.get("complete") is not True:
         raise ValueError("complete paired unprofiled latency artifact required")
-    phase_rows, overhead = [], []
+    phase_rows, overhead, repair_buffers, guard_buffers = [], [], [], []
     for p in profiles:
         if p.get("all_128_logits_bitwise") is not True or p.get("labels_accessed") is not False:
             raise ValueError("numerically valid, label-blind phase profiles required")
@@ -39,6 +39,27 @@ def build(profiles, panel, latency):
         overhead.append(
             dict(gpu_bytes=evidence["extra_gpu_bytes"], cpu_bytes=evidence["residual_cpu_bytes"])
         )
+        inline = evidence.get("inline_first_step_repair", {})
+        repair_buffers.append(
+            dict(
+                first_update_key_snapshot_GPU_bytes=inline.get("temporary_key_clone_backing_bytes"),
+                first_update_residual_GPU_bytes=inline.get(
+                    "temporary_attention_residual_backing_bytes"
+                ),
+                stage_peak_certified=False,
+            )
+        )
+        tail = evidence.get("live_anchor_guard", {}).get("tail_graph", {})
+        guard_buffers.append(
+            dict(
+                record_activation_bytes=tail.get("record_buffer_activation_bytes"),
+                explicit_activation_backing_bytes=tail.get("explicit_activation_backing_bytes"),
+                observed_graph_allocator_increment_bytes=tail.get(
+                    "observed_graph_allocator_increment_bytes"
+                ),
+                not_KV_bytes=True,
+            )
+        )
     rows = []
     for name, phases, ablation in STAGES:
         effect = panel["effects"][ablation]
@@ -52,6 +73,9 @@ def build(profiles, panel, latency):
                 separately_audited_stage_KV_bytes=None,
                 whole_overlay_storage=overhead
                 if name == "exact_prototype_residual_tiers"
+                else None,
+                known_first_step_repair_buffers=repair_buffers
+                if name == "uncertainty_repair"
                 else None,
                 historical_16_image_unguarded_ablation=dict(
                     compared_arm=ablation,
@@ -72,6 +96,7 @@ def build(profiles, panel, latency):
         latest_paired_result=latency,
         stage_memory_not_separately_audited=True,
         per_token_guard_not_a_six_component_construction_phase=True,
+        per_input_guard_activation_buffers=guard_buffers,
         profile_costs_not_valid_timed_trial_latencies=True,
         historical_ablation_not_a_gate_for_current_guarded_variant=True,
         whole_request_peak_certified=False,
@@ -100,6 +125,13 @@ def markdown(audit):
                 f"input {i}: +{v['gpu_bytes']} GPU / +{v['cpu_bytes']} CPU bytes"
                 for i, v in enumerate(entries)
             )
+        if r.get("known_first_step_repair_buffers"):
+            known = [
+                v["first_update_key_snapshot_GPU_bytes"]
+                for v in r["known_first_step_repair_buffers"]
+            ]
+            if all(type(v) is int for v in known):
+                memory = f"known key snapshots {known} GPU bytes; not stage peak"
         lines.append(
             f"| {r['stage']} | {ms:.3f} | {memory} | "
             f"{r['historical_16_image_unguarded_ablation']['full_minus_ablated_cider']:+.5f} |"
@@ -112,6 +144,9 @@ def markdown(audit):
         f"Routing/descriptors add {audit['routing_descriptor_mean_ms']:.3f} profiled ms. "
         "The per-token live-parent guard is additional to these six construction stages. "
         "Temporary CPU graph/descriptor/score peaks were not separately audited.",
+        "The repair key snapshot is a known temporary buffer, not the complete repair-stage "
+        "or whole-request peak. Guard-record buffers are activations, not KV; their explicit "
+        "backing and observed allocator increments remain separately recorded in audit.json.",
         "",
         "Negative full-minus-ablation CIDEr means the full arm scored lower. "
         "Natural repair did not occur in the historical panel; forced restoration tested "

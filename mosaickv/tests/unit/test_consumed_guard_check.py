@@ -8,6 +8,7 @@ from mosaickv.evaluation.consumed_guard_check import (
     compare,
     consumed_inputs,
     finite_fault,
+    full_head_parity_gate,
     parent_export,
     same_storage,
 )
@@ -109,3 +110,20 @@ def test_parent_export_is_independent_and_patch_restores_on_error():
         assert LiveAnchorGuard.__exit__ is original
     owner.parent_logits[0].zero_()
     assert captured["logits"].tolist() == [[1.0], [2.0]]
+
+
+def test_full_head_gate_does_not_accept_small_nonzero_error_or_missing_worker():
+    from copy import deepcopy
+
+    row = dict(
+        full_counterfactual_vs_parent=dict(all_vectors_bitwise=True, maximum_absolute_difference=0),
+        full_output_vs_parent=dict(changed_greedy_prefix_indices=[]),
+    )
+    d = dict(complete=True, results={"0": deepcopy(row), "1": deepcopy(row)})
+    full_head_parity_gate(d)
+    d["results"]["1"]["full_counterfactual_vs_parent"]["maximum_absolute_difference"] = 0.00001
+    with pytest.raises(ValueError):
+        full_head_parity_gate(d)
+    d["results"].pop("1")
+    with pytest.raises(ValueError):
+        full_head_parity_gate(d)

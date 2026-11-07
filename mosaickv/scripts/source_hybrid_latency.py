@@ -54,6 +54,7 @@ def prepare(
     structural_templates=False,
     device_guard_records=False,
     direct_metadata_key=False,
+    full_head_parent=False,
 ):
     import all_head_native_source as infra
 
@@ -70,6 +71,8 @@ def prepare(
         raise ValueError("device records require the validated structural-template controls")
     if direct_metadata_key and not device_guard_records:
         raise ValueError("direct key study requires validated device-record controls")
+    if direct_metadata_key and not full_head_parent:
+        raise ValueError("direct-key timing must use the corrected full-head counterfactual")
     parent = read(PARENT / "plan.json")
     if not read(PARENT / "analysis/decision.json")["model_parity_gate_passed"]:
         raise ValueError("pretrained all-head retirement and logit parity must pass first")
@@ -96,6 +99,32 @@ def prepare(
         gate = Path("/scratch/djy8hg/runs/evicastkv/device-guard-records-20261107-v1")
         if read(gate / "analysis/decision.json")["complete"] is not True:
             raise ValueError("complete device-record model/storage evidence required first")
+        paths += [gate / "plan.json", gate / "analysis/decision.json"]
+        cpu = Path(
+            "/scratch/djy8hg/runs/evicastkv/direct-structural-key-CPU-20261107-v1/decision.json"
+        )
+        operator = read(cpu)
+        if not all(
+            operator[k] is True
+            for k in (
+                "CPU_operator_gate_passed",
+                "all_hashes_identical",
+                "complete_graph_identical",
+            )
+        ):
+            raise ValueError("hash-identical, graph-identical CPU operator gate required")
+        paths.append(cpu)
+    if full_head_parent:
+        gate = Path(
+            "/scratch/djy8hg/runs/evicastkv/device-guard-consumed-full-head-check-20261107-v1"
+        )
+        decision = read(gate / "analysis/decision.json")
+        if (
+            decision["complete"] is not True
+            or decision["completed_denominator"] != 16
+            or read(gate / "plan.json")["full_head_parent"] is not True
+        ):
+            raise ValueError("full sixteen-input counterfactual/veto/isolation controls required")
         paths += [gate / "plan.json", gate / "analysis/decision.json"]
     if bitmap_prefix:
         native_gate = Path("/scratch/djy8hg/runs/evicastkv/source-bitmap-prefix-20261107-v1")
@@ -157,6 +186,9 @@ def prepare(
     if direct_metadata_key:
         policies["hybrid_reference"] = dict(policies["hybrid_fast"])
         policies["hybrid_fast"] = dict(policies["hybrid_fast"], graph_direct_metadata_key=True)
+    if full_head_parent:
+        for arm in ("hybrid_reference", "hybrid_fast"):
+            policies[arm]["anchor_counterfactual"] = "full_heads"
     policies = {arm: policies[arm] for arm in arms}
     for p in policies.values():
         OverlayPolicy(**dict(p, layers=tuple(p["layers"])))
@@ -226,6 +258,7 @@ def prepare(
             structural_templates=structural_templates,
             device_guard_records=device_guard_records,
             direct_metadata_key=direct_metadata_key,
+            full_head_parent=full_head_parent,
             structural_template_maximum_CPU_bytes=4 * 2**20,
             tail_operator_gate="bitwise_native_then_capture_inclusive_128_call_ratio_below_0.95"
             if guard_tail
@@ -695,6 +728,7 @@ def main():
     p.add_argument("--structural-templates", action="store_true")
     p.add_argument("--device-guard-records", action="store_true")
     p.add_argument("--direct-metadata-key", action="store_true")
+    p.add_argument("--full-head-parent", action="store_true")
     a = p.parse_args()
     if a.action == "prepare":
         return prepare(
@@ -710,6 +744,7 @@ def main():
             structural_templates=a.structural_templates,
             device_guard_records=a.device_guard_records,
             direct_metadata_key=a.direct_metadata_key,
+            full_head_parent=a.full_head_parent,
         )
     if a.action == "worker":
         return worker(a.root, a.plan_sha)
