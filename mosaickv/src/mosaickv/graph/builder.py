@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import math
+from bisect import bisect_left, bisect_right
 from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
 from itertools import pairwise
 from typing import Any
 
@@ -20,6 +23,52 @@ from mosaickv.graph.types import (
     PooledBlockDescriptor,
     SparseEvidenceGraph,
 )
+
+_positional_search = ContextVar("evicastkv_positional_graph_search", default="reference")
+
+
+@contextmanager
+def positional_search(mode):
+    """Execution-only policy: both paths must produce exactly the same edges."""
+    if mode not in ("reference", "indexed"):
+        raise ValueError("registered reference/indexed positional search required")
+    token = _positional_search.set(mode)
+    try:
+        yield
+    finally:
+        _positional_search.reset(token)
+
+
+def _nearest_center_indices(centers, source_index, count, span):
+    """Exact distance/index top-k on sorted centers, including duplicate centers.
+
+    Consume equal-center groups in ascending index order. A naive adjacent
+    two-pointer walk gets duplicate-center ties WRONG on the left side.
+    Only selected groups/indices are visited; do not scan every target per node.
+    """
+    center = centers[source_index]
+    first, last = bisect_left(centers, center), bisect_right(centers, center)
+    chosen = []
+    for index in range(first, last):
+        if index != source_index:
+            chosen.append(index)
+            if len(chosen) == count:
+                return tuple(chosen)
+    left, right = first - 1, last
+    while len(chosen) < count and (left >= 0 or right < len(centers)):
+        left_distance = abs(center - centers[left]) if left >= 0 else math.inf
+        right_distance = abs(center - centers[right]) if right < len(centers) else math.inf
+        distance = min(left_distance, right_distance)
+        if span is not None and distance > span:
+            break
+        if left_distance <= right_distance:
+            start, end = bisect_left(centers, centers[left], 0, left + 1), left + 1
+            left = start - 1
+        else:
+            start, end = right, bisect_right(centers, centers[right], right, len(centers))
+            right = end
+        chosen.extend(range(start, min(end, start + count - len(chosen))))
+    return tuple(chosen)
 
 
 class _EdgeAccumulator:
@@ -186,10 +235,8 @@ class _EdgeAccumulator:
                 weights.append(weight)
         if not rows and not self._segmented_preselected:
             return (), (), (), ()
-        type_codes = {
-            edge_type: index
-            for index, edge_type in enumerate(sorted(EdgeType, key=lambda item: item.value))
-        }
+        ordered_edge_types = tuple(sorted(EdgeType, key=lambda item: item.value))
+        type_codes = {edge_type: index for index, edge_type in enumerate(ordered_edge_types)}
         row_segments: list[np.ndarray[Any, Any]] = [np.asarray(rows, dtype=np.int64)]
         column_segments: list[np.ndarray[Any, Any]] = [np.asarray(columns, dtype=np.int64)]
         weight_segments: list[np.ndarray[Any, Any]] = [np.asarray(weights, dtype=np.float64)]
@@ -209,9 +256,7 @@ class _EdgeAccumulator:
             row_segments.append(segment_rows)
             column_segments.append(segment_columns)
             weight_segments.append(segment_weights)
-            type_segments.append(
-                np.full(segment_rows.shape, type_codes[edge_type], dtype=np.int16)
-            )
+            type_segments.append(np.full(segment_rows.shape, type_codes[edge_type], dtype=np.int16))
         row_array = np.concatenate(row_segments)
         column_array = np.concatenate(column_segments)
         weight_array = np.concatenate(weight_segments)
@@ -223,10 +268,7 @@ class _EdgeAccumulator:
                 row_array,
             )
         )
-        ordered_types = tuple(
-            sorted(EdgeType, key=lambda item: item.value)[int(type_array[int(index)])]
-            for index in order
-        )
+        ordered_types = tuple(ordered_edge_types[int(type_array[int(index)])] for index in order)
         return (
             tuple(int(value) for value in row_array[order]),
             tuple(int(value) for value in column_array[order]),
@@ -746,28 +788,38 @@ def _add_fallback_edges(
                 template_targets: list[int] = []
                 template_scores: list[float] = []
                 for index, source_center in enumerate(centers):
-                    neighbor_candidates = tuple(
-                        sorted(
-                            (
-                                (abs(source_center - target_center), target_index)
-                                for target_index, target_center in enumerate(centers)
-                                if target_index != index
-                                and (
-                                    config.fallback_max_position_span is None
-                                    or abs(source_center - target_center)
-                                    <= config.fallback_max_position_span
-                                )
-                            ),
-                            key=lambda item: (item[0], item[1]),
-                        )[: config.max_neighbors]
+                    neighbor_candidates = (
+                        tuple(
+                            (abs(source_center - centers[target]), target)
+                            for target in _nearest_center_indices(
+                                centers,
+                                index,
+                                config.max_neighbors,
+                                config.fallback_max_position_span,
+                            )
+                        )
+                        if _positional_search.get() == "indexed"
+                        else tuple(
+                            sorted(
+                                (
+                                    (abs(source_center - target_center), target_index)
+                                    for target_index, target_center in enumerate(centers)
+                                    if target_index != index
+                                    and (
+                                        config.fallback_max_position_span is None
+                                        or abs(source_center - target_center)
+                                        <= config.fallback_max_position_span
+                                    )
+                                ),
+                                key=lambda item: (item[0], item[1]),
+                            )[: config.max_neighbors]
+                        )
                     )
                     for distance, target_index in neighbor_candidates:
                         template_sources.append(index)
                         template_targets.append(target_index)
                         span = config.fallback_max_position_span
-                        template_scores.append(
-                            1.0 if span is None else 1.0 - distance / (span + 1)
-                        )
+                        template_scores.append(1.0 if span is None else 1.0 - distance / (span + 1))
                 template = (
                     tuple(template_sources),
                     tuple(template_targets),
@@ -947,9 +999,7 @@ def _diagnostics(
         edge_counts=tuple((edge_type, edge_counts[edge_type]) for edge_type in EdgeType),
         maximum_out_degree=int(out_degrees.max(initial=0)),
         fallback_used=fallback_used,
-        candidate_node_count=(
-            None if candidate_node_ids is None else len(candidate_node_ids)
-        ),
+        candidate_node_count=(None if candidate_node_ids is None else len(candidate_node_ids)),
         candidate_fraction=(
             None
             if candidate_node_ids is None or not nodes
@@ -1043,8 +1093,7 @@ def build_evidence_graph(
     if unknown_sources:
         raise ValueError(f"graph contains unknown source nodes: {sorted(unknown_sources)}")
     source_to_local = {
-        source_node_id: local_node_id
-        for local_node_id, source_node_id in enumerate(source_table)
+        source_node_id: local_node_id for local_node_id, source_node_id in enumerate(source_table)
     }
     similarity_source_candidates = (
         None
@@ -1187,9 +1236,7 @@ def build_evidence_graph(
     # path even when learned descriptors select mutually dissimilar neighbors.
     # Each source still contributes at most ``max_neighbors`` outgoing edges,
     # so the graph remains O(n*d).
-    fallback_used = bool(
-        config.candidate_graph_mode == "full" and config.fallback_weight > 0
-    )
+    fallback_used = bool(config.candidate_graph_mode == "full" and config.fallback_weight > 0)
     if config.candidate_graph_mode == "full":
         _add_fallback_edges(nodes, config, accumulator)
     rows, columns, weights, edge_types = accumulator.finalize()

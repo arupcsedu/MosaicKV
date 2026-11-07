@@ -40,13 +40,19 @@ def checked(root, expected):
     return plan
 
 
-def prepare(root):
+def prepare(root, indexed_graph=False):
     source = clean_source(SOURCE)
     if root.exists():
         raise FileExistsError("new immutable paired root required")
     decision = read(GATE / "analysis/decision.json")
     if not decision["execution_passed"]:
         raise ValueError("bitwise inline/forced parity gate must pass before timing")
+    if indexed_graph:
+        gate = Path(
+            "/scratch/djy8hg/runs/evicastkv/indexed-positional-graph-20261107-v1/analysis/decision.json"
+        )
+        if read(gate).get("execution_passed") is not True:
+            raise ValueError("actual graph/logit parity gate must pass first")
     parent = read(GATE / "plan.json")
     paths = [
         GATE / "plan.json",
@@ -70,6 +76,9 @@ def prepare(root):
         name: dict(parent["component_policies"]["full"], inline_repair=inline)
         for name, inline in (("original_probe", False), ("inline", True))
     }
+    if indexed_graph:
+        policies["inline"]["graph_positional_search"] = "indexed"
+        paths.append(gate)
     root.mkdir(parents=True)
     write_once(root / "inputs.json", read(GATE / "inputs.json"))
     with (root / "cpu.txt").open("x") as output:
@@ -113,6 +122,7 @@ def prepare(root):
             classification="two_consumed_input_randomized_paired_runtime_engineering_validation",
             original_source_codec_unchanged=True,
             optional_zero_row_codec_enabled=False,
+            indexed_positional_graph_in_inline_arm=indexed_graph,
             source_codec_decision=(
                 "retain validated default; optional zero-row codec remains "
                 "a disclosed storage/latency tradeoff"
@@ -373,9 +383,10 @@ def main():
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--plan-sha")
     parser.add_argument("--phase", default="inline_pair")
+    parser.add_argument("--indexed-graph", action="store_true")
     args = parser.parse_args()
     if args.action == "prepare":
-        return prepare(args.root)
+        return prepare(args.root, args.indexed_graph)
     if args.action == "worker":
         return worker(args.root, args.plan_sha)
     if args.action == "analyze":

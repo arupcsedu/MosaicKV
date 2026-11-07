@@ -49,7 +49,17 @@ def component_policies(
     global_draft_study=False,
     horizon_study=False,
     inline_study=False,
+    graph_runtime_study=False,
 ):
+    if graph_runtime_study:
+        policies = component_policies(inline_study=True)
+        return {
+            **policies,
+            "full_indexed": dict(policies["full"], graph_positional_search="indexed"),
+            "inline_indexed": dict(
+                policies["full"], graph_positional_search="indexed", inline_repair=True
+            ),
+        }
     if inline_study:
         policies = component_policies(readout_study=True)
         keep = (
@@ -283,8 +293,10 @@ def prepare(
     global_draft_study=False,
     horizon_study=False,
     inline_study=False,
+    graph_runtime_study=False,
 ):
-    replacement_study = replacement_study or inline_study
+    inline_study = inline_study or graph_runtime_study
+    replacement_study = replacement_study or inline_study or graph_runtime_study
     global_draft_study = global_draft_study or horizon_study
     readout_selection_study = readout_selection_study or global_draft_study
     replacement_study = (
@@ -403,6 +415,8 @@ def prepare(
                 "mosaickv/tests/unit/test_offloaded_fullkv_draft.py",
                 "mosaickv/tests/unit/test_readout_horizon_audit.py",
                 "mosaickv/tests/unit/test_inline_first_step_repair.py",
+                "mosaickv/tests/unit/test_indexed_positional_graph.py",
+                "mosaickv/tests/unit/test_graph.py",
                 "mosaickv/tests/unit/test_opportunity_demand.py",
                 "mosaickv/tests/unit/test_bounded_probe_horizon.py",
                 "mosaickv/tests/unit/test_streaming_source_constructor.py",
@@ -459,6 +473,7 @@ def prepare(
                     global_draft_study,
                     horizon_study,
                     inline_study,
+                    graph_runtime_study,
                 ),
             ),
             component_policies=component_policies(
@@ -471,6 +486,7 @@ def prepare(
                 global_draft_study,
                 horizon_study,
                 inline_study,
+                graph_runtime_study,
             ),
             source_replacement_study=replacement_study,
             exact_last_layer_readout_study=readout_study,
@@ -480,6 +496,7 @@ def prepare(
             oracle_horizon_audit_not_online_selection=horizon_study,
             fixed_consumed_counterfactual_plans=fixed_plans,
             inline_first_step_repair_study=inline_study,
+            indexed_positional_graph_runtime_study=graph_runtime_study,
             storage_boundary_version="shared_initial_final_peak_v2",
             component_reference_arm=(
                 "transaction_joint_guarded"
@@ -765,6 +782,18 @@ def worker(root, expected):
                     evidence = completed[arm]["mechanism_evidence"]["inline_first_step_repair"]
                     if not evidence["completed"] or evidence["retained_private_tensor_owners"]:
                         errors.append("inline observation did not engage or retire")
+            if plan.get("indexed_positional_graph_runtime_study"):
+                expected_graph = completed["full"]["mechanism_evidence"]["layers"]["31"][
+                    "graph_coo_sha256"
+                ]
+                for arm in ("full_indexed", "inline_indexed"):
+                    if not torch.equal(values_by_arm[arm], values_by_arm["full"]):
+                        errors.append(f"indexed graph changed a final logit bit: {arm}")
+                    if (
+                        completed[arm]["mechanism_evidence"]["layers"]["31"]["graph_coo_sha256"]
+                        != expected_graph
+                    ):
+                        errors.append(f"indexed graph changed an actual edge/weight: {arm}")
             if "individual_delta_fast_graph" in values_by_arm and not torch.equal(
                 values_by_arm["individual_delta_fast_graph"], values_by_arm["individual_delta"]
             ):
@@ -1078,6 +1107,7 @@ def main():
     p.add_argument("--global-draft-study", action="store_true")
     p.add_argument("--horizon-study", action="store_true")
     p.add_argument("--inline-study", action="store_true")
+    p.add_argument("--graph-runtime-study", action="store_true")
     a = p.parse_args()
     if a.action == "prepare":
         prepare(
@@ -1091,6 +1121,7 @@ def main():
             a.global_draft_study,
             a.horizon_study,
             a.inline_study,
+            a.graph_runtime_study,
         )
     elif a.action == "worker":
         return worker(a.root, a.plan_sha)

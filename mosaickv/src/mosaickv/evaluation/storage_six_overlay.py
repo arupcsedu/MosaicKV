@@ -56,6 +56,7 @@ class OverlayPolicy:
     readout_selection: str = "none"
     readout_target: str = "conditional_head"
     inline_repair: bool = False
+    graph_positional_search: str = "reference"
 
     def __post_init__(self):
         if not self.layers or tuple(sorted(set(self.layers))) != self.layers:
@@ -120,6 +121,8 @@ class OverlayPolicy:
             raise ValueError("FullKV draft target requires active readout selection")
         if type(self.inline_repair) is not bool:
             raise ValueError("explicit inline repair activation required")
+        if self.graph_positional_search not in ("reference", "indexed"):
+            raise ValueError("registered positional-graph execution policy required")
         if self.inline_repair and (
             self.layers != (31,)
             or not self.enabled
@@ -419,17 +422,20 @@ def plan_layer(
             ).reshape(-1)
         forecast_mode = forecast.provenance.mode.value
     timer.mark("prompt_queries_and_forecast")
-    graph = build_evidence_graph(
-        full,
-        GraphConfig(
-            enabled=policy.component_mode != "no_graph",
-            max_neighbors=4,
-            similarity_chunk_size=128,
-            edge_accumulation_mode=policy.graph_accumulation,
-        ),
-        prompt_attentions=(probabilities[:, head : head + 1],),
-        prompt_attention_query_window=window,
-    )
+    from mosaickv.graph.builder import positional_search
+
+    with positional_search(policy.graph_positional_search):
+        graph = build_evidence_graph(
+            full,
+            GraphConfig(
+                enabled=policy.component_mode != "no_graph",
+                max_neighbors=4,
+                similarity_chunk_size=128,
+                edge_accumulation_mode=policy.graph_accumulation,
+            ),
+            prompt_attentions=(probabilities[:, head : head + 1],),
+            prompt_attention_query_window=window,
+        )
     timer.mark("sparse_graph")
     utility_graph = graph
     if policy.utility_signal == "parent_reconstruction_error":
@@ -599,6 +605,7 @@ def plan_layer(
         forecast_mode=forecast_mode,
         graph_nodes=len(graph.nodes),
         graph_edges=len(graph.weights),
+        graph_positional_search=policy.graph_positional_search,
         cross_modal_edges=sum(
             graph.nodes[a].block.modality != graph.nodes[b].block.modality
             for a, b in zip(graph.row_indices, graph.column_indices, strict=True)
@@ -638,6 +645,17 @@ def plan_layer(
             "no_repair": ["uncertainty_promotion"],
         }.get(policy.component_mode, []),
     )
+    if policy.record_phase_timings:
+        from mosaickv.evaluation.fox_campaign import digest
+
+        evidence["graph_coo_sha256"] = digest(
+            dict(
+                rows=graph.row_indices,
+                columns=graph.column_indices,
+                weights=graph.weights,
+                types=tuple(e.value for e in graph.edge_types),
+            )
+        )
     if policy.readout_selection != "none":
         # The original graph/forecast/value/submodular seed remains operative.
         # Only its bounded neighboring receiver pool enters draft reranking.
