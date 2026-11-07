@@ -33,13 +33,26 @@ def native_tail(norm, head, parent, active, *, include_readout=False):
 
 
 class GuardTail:
-    def __init__(self, norm, head, *, capture_mode="context_manager", reuse_readout=False):
+    def __init__(
+        self,
+        norm,
+        head,
+        *,
+        capture_mode="context_manager",
+        reuse_readout=False,
+        device_records=False,
+        maximum_updates=127,
+    ):
         if capture_mode not in ("context_manager", "manual_shared_stream"):
             raise ValueError("explicit registered graph-capture implementation required")
         self.capture_mode = capture_mode
         if type(reuse_readout) is not bool:
             raise ValueError("explicit native-readout reuse boolean required")
         self.reuse_readout = reuse_readout
+        if type(device_records) is not bool:
+            raise ValueError("explicit request-level record transport required")
+        self.device_records, self.maximum_updates = device_records, maximum_updates
+        self.records = None
         self.norm, self.head = norm, head
         self.inputs = self.outputs = self.graph = None
         self.calls = self.replays = self.captures = 0
@@ -49,6 +62,8 @@ class GuardTail:
     def _validate(self, parent, active):
         if (
             self.closed
+            or (self.device_records and self.calls >= self.maximum_updates)
+            or (self.records is not None and self.records.failed)
             or parent.shape != (1, 1, 4096)
             or active.shape != parent.shape
             or parent.dtype != torch.bfloat16
@@ -61,6 +76,10 @@ class GuardTail:
     def _capture(self, parent, active):
         torch.cuda.synchronize(parent.device)
         before = torch.cuda.memory_allocated(parent.device)
+        if self.device_records:
+            from mosaickv.evaluation.device_guard_records import DeviceRecords
+
+            self.records = DeviceRecords(self.maximum_updates, parent.device)
         self.inputs = (parent.clone(), active.clone())
         current = torch.cuda.current_stream(parent.device)
         if self.capture_mode == "manual_shared_stream":
@@ -103,7 +122,13 @@ class GuardTail:
                 )
         current.wait_stream(stream)
         torch.cuda.synchronize(parent.device)
-        self.explicit_bytes = backing_bytes((*self.inputs, *self.outputs))
+        self.explicit_bytes = backing_bytes(
+            (
+                *self.inputs,
+                *self.outputs,
+                *((self.records.data,) if self.records is not None else ()),
+            )
+        )
         self.observed_allocator_increment = max(
             0, torch.cuda.memory_allocated(parent.device) - before
         )
@@ -119,11 +144,19 @@ class GuardTail:
         self.calls += 1
         self.replays += 1
         output, logits, stats = self.outputs[:3]
+        if self.records is not None:
+            self.records.append(stats)
+            return output, logits, None
         cpu = stats.detach().cpu()
         if not bool(cpu[4]):
             raise ValueError("nonfinite logits are an execution failure, not a successful veto")
         # Borrowed output/logits last until the next call. The record is CPU-owned.
         return output, logits, cpu[:4].clone()
+
+    def recorded_statistics(self):
+        if self.records is None:
+            raise ValueError("explicit device record transport required")
+        return self.records.snapshot()
 
     def selected_readout(self):
         if not self.reuse_readout or self.closed or self.outputs is None:
@@ -135,6 +168,12 @@ class GuardTail:
             calls=self.calls,
             capture_mode=self.capture_mode,
             selected_native_readout_in_graph=self.reuse_readout,
+            device_buffered_records=self.device_records,
+            record_buffer_activation_bytes=self.records.bytes if self.records is not None else 0,
+            recorded_steps=self.records.used if self.records is not None else self.calls,
+            records_validated=self.records.checked if self.records is not None else True,
+            record_validation_failed=self.records.failed if self.records is not None else False,
+            invalid_record_steps=self.records.invalid_steps if self.records is not None else [],
             replays=self.replays,
             captures=self.captures,
             explicit_activation_backing_bytes=self.explicit_bytes,
@@ -147,11 +186,19 @@ class GuardTail:
         )
 
     def close(self):
-        if self.graph is not None:
-            self.graph.reset()
-        self.inputs = self.outputs = self.graph = None
-        self.norm = self.head = None
-        self.closed = True
+        try:
+            if self.records is not None and not self.records.checked:
+                self.records.snapshot()
+        finally:
+            try:
+                if self.graph is not None:
+                    self.graph.reset()
+            finally:
+                self.inputs = self.outputs = self.graph = None
+                self.norm = self.head = None
+                if self.records is not None:
+                    self.records.release()
+                self.closed = True
 
 
 def retire_after_final_update(tail, completed, expected):

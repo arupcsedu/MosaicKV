@@ -73,8 +73,21 @@ class OverlayPolicy:
     anchor_tail: str = "reference"
     export_parent_logits: bool = True
     graph_structural_templates: bool = False
+    device_guard_records: bool = False
 
     def __post_init__(self):
+        if type(self.device_guard_records) is not bool or (
+            self.device_guard_records
+            and (
+                self.anchor_tail != "manual_shared_stream"
+                or not self.reuse_anchor_readout
+                or self.export_parent_logits
+                or self.anchor_risk_repair
+            )
+        ):
+            raise ValueError(
+                "device records require native handoff, no parent export or risk repair"
+            )
         if type(self.graph_structural_templates) is not bool:
             raise ValueError("explicit structural graph-template activation required")
         if type(self.export_parent_logits) is not bool:

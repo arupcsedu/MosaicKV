@@ -62,7 +62,8 @@ class LiveAnchorGuard:
         self.coexisting_temporary_kv_peak_bytes = 0
 
     def record_readout(self, parent_logits, record):
-        self.records.append(record.detach().cpu())
+        if record is not None:
+            self.records.append(record.detach().cpu())
         self.observed_parent_logit_steps += 1
         if self.policy is None or self.policy.export_parent_logits:
             self.parent_logits.append(parent_logits.detach().cpu())
@@ -114,7 +115,10 @@ class LiveAnchorGuard:
         score, values, epilogue = Binding.scores, Binding.values, Transport.run
         owner = self
         if self.policy and self.policy.anchor_tail != "reference":
+            from mosaickv.evaluation.bounded_probe_horizon import expected_updates
+            from mosaickv.evaluation.device_guard_records import retire_before_pool
             from mosaickv.evaluation.guard_tail_graph import GuardTail
+            from mosaickv.evaluation.prompt_graph_reader import PromptGraphPool
 
             self.tail = GuardTail(
                 self.adapter.model.model.language_model.norm,
@@ -123,7 +127,15 @@ class LiveAnchorGuard:
                 if self.policy.anchor_tail == "manual_shared_stream"
                 else "context_manager",
                 reuse_readout=self.policy.reuse_anchor_readout,
+                device_records=self.policy.device_guard_records,
+                maximum_updates=expected_updates(),
             )
+            close_pool = PromptGraphPool.close
+
+            def retire_pool(pool):
+                return retire_before_pool(pool, owner.tail, close_pool)
+
+            self.stack.enter_context(patch.object(PromptGraphPool, "close", retire_pool))
         if self.policy and self.policy.reuse_anchor_readout:
             from mosaickv.evaluation.guard_readout_reuse import ReadoutReuse
 
@@ -207,7 +219,10 @@ class LiveAnchorGuard:
             if owner.policy and owner.policy.anchor_suffix == "shared_graph":
                 from mosaickv.evaluation.guard_suffix_replay import replay
 
-                verify = owner.policy.verify_anchor_suffix and len(owner.records) in (0, 63, 126)
+                verify = (
+                    owner.policy.verify_anchor_suffix
+                    and owner.observed_parent_logit_steps in (0, 63, 126)
+                )
                 reference_hidden = (
                     hidden_after_attention(layer, original_residual, owner.heads)
                     if verify
@@ -239,7 +254,18 @@ class LiveAnchorGuard:
                 from mosaickv.evaluation.bounded_probe_horizon import expected_updates
                 from mosaickv.evaluation.guard_tail_graph import retire_after_final_update
 
-                retire_after_final_update(owner.tail, len(owner.records), expected_updates())
+                if (
+                    owner.observed_parent_logit_steps == expected_updates()
+                    and owner.tail.device_records
+                ):
+                    try:
+                        owner.records = list(owner.tail.recorded_statistics()[:, :4])
+                    finally:
+                        owner.tail.close()
+                else:
+                    retire_after_final_update(
+                        owner.tail, owner.observed_parent_logit_steps, expected_updates()
+                    )
                 return output
             parent_norm, active_norm = norm(parent_hidden), norm(active_hidden)
             parent_native, active_native = head(parent_norm), head(active_norm)

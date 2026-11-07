@@ -52,6 +52,7 @@ def prepare(
     manual_guard_capture=False,
     native_readout_handoff=False,
     structural_templates=False,
+    device_guard_records=False,
 ):
     import all_head_native_source as infra
 
@@ -64,6 +65,8 @@ def prepare(
         raise ValueError("native readout handoff requires validated manual capture")
     if structural_templates and not native_readout_handoff:
         raise ValueError("structural template study requires the validated native-handoff controls")
+    if device_guard_records and not structural_templates:
+        raise ValueError("device records require the validated structural-template controls")
     parent = read(PARENT / "plan.json")
     if not read(PARENT / "analysis/decision.json")["model_parity_gate_passed"]:
         raise ValueError("pretrained all-head retirement and logit parity must pass first")
@@ -80,6 +83,11 @@ def prepare(
         gate = Path("/scratch/djy8hg/runs/evicastkv/native-readout-handoff-20261107-v1")
         if read(gate / "analysis/decision.json")["complete"] is not True:
             raise ValueError("complete handoff model parity/storage evidence required first")
+        paths += [gate / "plan.json", gate / "analysis/decision.json"]
+    if device_guard_records:
+        gate = Path("/scratch/djy8hg/runs/evicastkv/structural-edge-templates-20261107-v1")
+        if read(gate / "analysis/decision.json")["complete"] is not True:
+            raise ValueError("complete template model parity/storage evidence required first")
         paths += [gate / "plan.json", gate / "analysis/decision.json"]
     if bitmap_prefix:
         native_gate = Path("/scratch/djy8hg/runs/evicastkv/source-bitmap-prefix-20261107-v1")
@@ -135,6 +143,9 @@ def prepare(
     if structural_templates:
         policies["hybrid_reference"] = dict(policies["hybrid_fast"])
         policies["hybrid_fast"] = dict(policies["hybrid_fast"], graph_structural_templates=True)
+    if device_guard_records:
+        policies["hybrid_reference"] = dict(policies["hybrid_fast"])
+        policies["hybrid_fast"] = dict(policies["hybrid_fast"], device_guard_records=True)
     policies = {arm: policies[arm] for arm in arms}
     for p in policies.values():
         OverlayPolicy(**dict(p, layers=tuple(p["layers"])))
@@ -156,6 +167,7 @@ def prepare(
                 "mosaickv/tests/unit/test_guard_suffix_replay.py",
                 "mosaickv/tests/unit/test_guard_tail_graph.py",
                 "mosaickv/tests/unit/test_structural_templates.py",
+                "mosaickv/tests/unit/test_device_guard_records.py",
                 "mosaickv/tests/unit/test_zero_overlap_spatial.py",
                 "mosaickv/tests/unit/test_precision_target_reuse.py",
                 "mosaickv/tests/unit/test_source_hybrid_validation.py",
@@ -201,6 +213,7 @@ def prepare(
             manual_guard_capture=manual_guard_capture,
             native_readout_handoff=native_readout_handoff,
             structural_templates=structural_templates,
+            device_guard_records=device_guard_records,
             structural_template_maximum_CPU_bytes=4 * 2**20,
             tail_operator_gate="bitwise_native_then_capture_inclusive_128_call_ratio_below_0.95"
             if guard_tail
@@ -357,6 +370,7 @@ def worker(root, expected):
                 if plan.get("manual_guard_capture")
                 else "context_manager",
                 reuse_readout=plan.get("native_readout_handoff", False),
+                device_records=plan.get("device_guard_records", False),
             )
             write_once(folder / "tail_operator.json", operator)
             if not operator["passed"]:
@@ -484,6 +498,14 @@ def worker(root, expected):
                                 tail = evidence["live_anchor_guard"]["tail_graph"]
                                 if tail["replays"] != 127 or tail["captures"] != 1:
                                     raise RuntimeError("native guard-tail replay did not engage")
+                                if plan.get("device_guard_records") and (
+                                    tail["recorded_steps"] != 127
+                                    or tail["records_validated"] is not True
+                                    or tail["record_validation_failed"] is not False
+                                ):
+                                    raise RuntimeError(
+                                        "complete finite guard-record validation required"
+                                    )
                             if arm == "hybrid_fast" and (
                                 plan["reuse_anchor_readout"] or plan.get("native_readout_handoff")
                             ):
@@ -659,6 +681,7 @@ def main():
     p.add_argument("--manual-guard-capture", action="store_true")
     p.add_argument("--native-readout-handoff", action="store_true")
     p.add_argument("--structural-templates", action="store_true")
+    p.add_argument("--device-guard-records", action="store_true")
     a = p.parse_args()
     if a.action == "prepare":
         return prepare(
@@ -672,6 +695,7 @@ def main():
             manual_guard_capture=a.manual_guard_capture,
             native_readout_handoff=a.native_readout_handoff,
             structural_templates=a.structural_templates,
+            device_guard_records=a.device_guard_records,
         )
     if a.action == "worker":
         return worker(a.root, a.plan_sha)
