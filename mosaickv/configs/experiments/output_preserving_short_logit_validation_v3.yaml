@@ -1,0 +1,98 @@
+schema_version: 1
+protocol_id: output_preserving_short_logit_validation_v3
+classification: preregistered_fresh_development_validation_not_paper_evidence
+candidate_retuning_authorized: false
+paper_claim_authorized: false
+paper_campaign_submission_authorized: false
+
+candidate:
+  effective_method: mosaickv_exact__output_preserving_v1__draft_joint__short_logit
+  cap_mib: 25.5
+  query_evidence: individual
+  max_routed_heads: 16
+  max_swaps_per_head: 2
+  shortlist_size: 16
+  pair_chunk_size: 64
+  draft_steps: 4
+  draft_ranking_mode: joint_normalized
+  reconstruction_prompt_weights: [0.25, 0.50, 0.75]
+  prompt_topk_anchor_included: true
+  selection: bounded_equal_byte_short_horizon_logit_reranking
+  logit_probe:
+    trajectory: fullkv_teacher_forced
+    horizon: 2
+    require_greedy_token_match: true
+    maximum_kl: 0.02
+    maximum_absolute_logit_difference: 1.0
+    reuse_original_fullkv_prefill: true
+    second_prefill_forbidden: true
+    discard_probe_states_before_measured_decode: true
+    benchmark_labels_accessed: false
+    ranking: minimum_normalized_kl_plus_absolute_logit_difference
+    no_passing_candidate: deterministic_prompt_topk_anchor
+
+quality_reference:
+  method: full_kv
+  latency_comparison: false
+
+comparators:
+  - {method: prompt_attention_topk, cap_mib: 25.5}
+  - {method: prompt_attention_topk, cap_mib: 40.0}
+
+cohort:
+  task: coco_caption
+  dataset_id: lmms-lab/COCO-Caption
+  dataset_revision: c3213b54e173ae86517d481de17f31439d6f8c72
+  split: val
+  sample_count: 128
+  construction: deterministic_hash_selection_from_frozen_4096_pool
+  selection_seed: 20271016
+  exclude_all_prior_output_preserving_development_cohorts: true
+  never_tune_from_prior_or_current_validation_answers_or_failure_identities: true
+  historical_pool_use_disclosed: true
+  heldout_claim: false
+
+controls:
+  model_id: llava-hf/llava-v1.6-mistral-7b-hf
+  model_revision: 2424fdd47412fccc66d91719126b420e9fbd7065
+  precision: fp16
+  backend: huggingface
+  attention_implementation: eager
+  deterministic_generation: true
+  max_new_tokens: 64
+  warmups: 5
+  seed: 20271014
+  block_size: 1
+  mandatory_policy: last_token
+  require_identical_processor_prompt_media_and_tokenization: true
+  require_exact_realized_initial_byte_caps: true
+  require_identical_sample_ids: true
+
+gates:
+  retention_one_token_agreement: 1.0
+  retention_one_maximum_logit_difference: 1.0e-5
+  minimum_memory_reduction: 0.30
+  memory_boundaries: [initial, final, peak]
+  memory_scope: every_sample_and_boundary
+  quality_metric: cider
+  paired_bootstrap_resamples: 10000
+  paired_bootstrap_confidence: 0.95
+  quality_noninferiority_margin: 0.0
+  required_ci_lower_bound: 0.0
+  require_complete_rows_traces_manifests_and_provenance: true
+  require_label_blind_logit_probe_trace: true
+
+resources:
+  partition: bii-gpu
+  reservation: bi_fox_dgx
+  maximum_global_a100s: 4
+  workers: 4
+  gpus_per_worker: 1
+  cpus_per_worker: 12
+  memory_per_worker_gib: 96
+  shard_time_limit: '02:00:00'
+
+decision:
+  on_pass: create_clean_immutable_candidate_commit_before_any_paper_campaign
+  on_fail: seal_as_negative_and_do_not_tune_from_sample_level_outcomes
+  automatic_paper_campaign_submission: false

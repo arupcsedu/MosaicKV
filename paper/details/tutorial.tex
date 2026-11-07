@@ -1,0 +1,133 @@
+\section{A Guided Explanation and Notation}
+\label{app:tutorial}
+\subsection{The problem in plain language}
+Imagine answering a question while looking at a long collection of notes.
+Keeping every note makes it easy to look things up but fills the desk.
+Throwing away the least-used notes saves space, yet a rarely used note might
+contain the one number needed for the final answer. MosaicKV is a way of
+choosing which internal notes a vision--language model keeps on its GPU.
+The analogy has a limit: the cache does not contain human-readable facts.
+It contains learned numerical vectors whose importance can be difficult to
+interpret.
+
+A \emph{token} is one model input position. Text can be split into pieces of
+words. An image is converted into visual features that contribute many input
+positions. A \emph{key} helps decide whether a position is relevant to the
+current request; a \emph{value} is the information mixed into the attention
+output if that position is attended to. A \emph{query} is the vector asking
+what information is useful now. These descriptions are intuitions, not literal
+symbols stored in memory.
+
+During \emph{prefill}, the model reads the image and prompt. During
+\emph{decoding}, it predicts one output token at a time. Caching saves the
+model from re-reading the entire prefix at every step. Compression inserts a
+decision between these stages: keep a smaller useful state while preserving
+the model's ability to answer.
+
+\subsection{Why each component exists}
+\paragraph{Forecasting: anticipate the next question.}
+Prompt attention says what mattered while reading the input. Future-query
+forecasting tries to estimate what will matter while producing the answer.
+A draft is like briefly rehearsing an answer without committing it. Its
+cost is real and must be included in runtime.
+
+\paragraph{Graph: keep related pieces together.}
+A document answer may need both a row label and its number. Selecting each
+block independently can preserve one and discard the other. The graph makes
+relationships available to selection. It cannot recover OCR text or geometry
+that the model adapter never exposed.
+
+\paragraph{Value awareness: importance is more than attention.}
+Two blocks might receive the same attention but produce very different value
+vectors. Conversely, two frequently attended blocks may carry nearly duplicate
+values. A value-aware score tries to distinguish contribution from repetition.
+It is still a surrogate for final answer correctness.
+
+\paragraph{Budgeted selection: make the decision fit.}
+The selector must solve a constrained choice, not merely rank items and hope
+the result fits. The budget includes physical allocation effects. Mandatory
+tokens and protected regions consume capacity before optional choices.
+
+\paragraph{Tiers: distinguish preservation, approximation, and recovery.}
+Exact storage keeps originals. Prototypes summarize compatible discarded
+members. Residual storage retains originals for potential recovery. A summary
+can be wrong; an original on the CPU still occupies memory and needs time to
+transfer. None of these costs disappears because a tier has a different name.
+
+\paragraph{Repair: spend extra work only when useful.}
+Repair attempts to recover evidence when a provisional step appears uncertain.
+An uncertainty signal is not an oracle. A confident wrong answer may never
+trigger, and an uncertain correct answer may cause unnecessary restoration.
+Both false positives and missed beneficial repairs belong in the evaluation.
+
+\subsection{Glossary}
+\begin{table}[h]
+\caption{Abbreviations used throughout the manuscript.}
+\small\begin{tabularx}{\columnwidth}{lY}\toprule
+Term & Meaning\\\midrule
+KV & Key--value; stored attention keys and values\\
+VLM / LLM & Vision--language / large language model\\
+GPU / CPU & Graphics / central processing unit\\
+HBM & High-bandwidth memory on the accelerator\\
+HF & Hugging Face model/runtime ecosystem\\
+GQA & Grouped-query attention\\
+MHA & Multi-head attention\\
+RoPE & Rotary position embedding\\
+SDPA & Scaled dot-product attention\\
+OCR & Optical character recognition\\
+CSR / COO & Compressed sparse row / coordinate storage\\
+FP32 / FP16 & 32-bit / 16-bit floating point\\
+BF16 & Brain floating point, a 16-bit format\\
+TTFT & Time to first generated token\\
+ITL & Inter-token latency\\
+KL & Kullback--Leibler divergence\\
+ANLS & Average normalized Levenshtein similarity\\
+PPL / NLL & Perplexity / negative log-likelihood\\
+CI & Confidence interval\\
+MiB / GiB & $2^{20}$ / $2^{30}$ bytes\\
+SHA & Secure hash algorithm; artifact/source identifier\\
+JSONL & One JSON record per line\\
+\bottomrule\end{tabularx}
+\end{table}
+
+\subsection{Notation}
+\begin{table}[h]
+\caption{Core mathematical symbols.}
+\small\begin{tabularx}{\columnwidth}{lY}\toprule
+Symbol & Definition\\\midrule
+$\ell,h$ & Layer and KV-head index\\
+$N,n$ & Source token count and number of blocks\\
+$b,d,s$ & Batch size, head dimension, element bytes\\
+$z$ & Configured token-block size\\
+$\mathcal B,\mathcal M$ & Source blocks and mandatory subset\\
+$S,C$ & Selected set and per-sample byte cap\\
+$w,r$ & Prompt-window length and draft steps\\
+$a_i,c_i^v,n_i$ & Attention, value contribution, novelty\\
+$w_{ij}$ & Sparse nonnegative graph edge weight\\
+$P,B_{\mathrm{active}}(P)$ & Cache plan and its physical active bytes\\
+$p_j,\pi(j)$ & Logical position and physical-to-logical map\\
+$R$ & Maximum residual blocks restored per event\\
+\bottomrule\end{tabularx}
+\end{table}
+
+\subsection{A position example, not an experimental result}
+Figure~\ref{fig:logical} shows eight illustrative source positions and four
+retained entries. This is a schematic, not a measurement. After compaction,
+physical slot one contains original position two. The next generated token
+still uses logical position eight. Renumbering retained entries as positions
+zero through three would change their positional meaning.
+
+\begin{figure}[h]
+\centering\input{figures/logical_positions}
+\caption{Illustrative physical compaction with original positions preserved.
+The numeric labels describe a toy layout only.}
+\label{fig:logical}
+\end{figure}
+
+\subsection{What training-free does and does not mean}
+The compression path does not optimize model weights or train an adapter.
+It may select fixed hyperparameters on a disjoint calibration set. Such
+selection must be disclosed and frozen before evaluation. No task-label fitting
+or gradient updates are introduced under the MosaicKV name. Access to a
+FullKV reference for a bounded online diagnostic must also be disclosed: it
+adds inference work even though it is not training.

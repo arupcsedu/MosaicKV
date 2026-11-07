@@ -1,0 +1,76 @@
+\section{Background, Motivation and Problem}
+\label{sec:motivation}
+\subsection{What the decoder caches}
+Let $X_\ell\in\mathbb{R}^{n\times d}$ be the normalized input of attention
+layer $\ell$. In the full-MHA configuration studied here,
+\begin{align}
+ K_\ell &= \Rope(X_\ell W^K_\ell;P),\qquad
+ V_\ell = X_\ell W^V_\ell, \label{eq:projections}\\
+ A_{\ell,t} &= \softmax\!\left(
+ Q_{\ell,t}K_{\ell,\leq t}^{\mathsf T}/\sqrt{d_h}+M_t\right),\nonumber\\
+ O_{\ell,t} &= A_{\ell,t} V_{\ell,\leq t}. \label{eq:attention}
+\end{align}
+$P$ contains original logical positions, $M_t$ is the causal/validity mask,
+$d_h$ is head dimension, and $W^K_\ell,W^V_\ell$ are frozen projections.
+Rotary position embeddings (RoPE) make preserving positions part of the
+representation contract, rather than a bookkeeping detail
+\citep{su2021rope}.
+
+For $L$ layers, batch size $B$, $H_{\mathrm{KV}}$ KV heads, sequence length
+$n$ and $b$ bytes per scalar, a dense K/V pair occupies
+\begin{equation}
+ B_{\mathrm{dense}}(n)=2LBH_{\mathrm{KV}}nd_hb.
+ \label{eq:densebytes}
+\end{equation}
+This expression is exact only for genuinely dense independent storage.
+Views, shared buffers, padding and preallocation require backing-allocation
+accounting. Our configuration has $L=32$, $H_{\mathrm{KV}}=32$, $d_h=128$,
+$B=1$ and $b=2$. One processed token adds 0.50~MiB of dense KV. Producing
+128 predictions from a prefilled prompt requires 127 further forwards;
+thus FullKV grows by 63.50~MiB, not 64~MiB.
+
+\subsection{Why source storage is attractive, and where it is not}
+In full MHA, $H_{\mathrm{KV}}d_h=d$, so two projected arrays contain
+$2nd$ scalars while their common input contains $nd$. The algebraic
+opportunity precedes quantization: one source can supply both projections.
+Quantizing that source offers additional storage reduction, at the price of
+projection recomputation, quantization error and correction metadata.
+There is no free latency benefit. A codec can save persistent bytes while
+repeated unpacking, projection and synchronization cost more than ordinary
+cache reads.
+
+The dimensional argument changes under grouped-query attention (GQA):
+$H_{\mathrm{KV}}d_h$ may be much smaller than $d$
+\citep{ainslie2023gqa}. Storing the full normalized source can then be less
+attractive. The current implementation explicitly restricts its geometry;
+we do not extrapolate this study to Qwen, GQA, video or multiple images.
+
+\subsection{Evidence loss and numerical error are different}
+Token eviction removes a position from attention normalization. Source
+quantization can instead retain a position with approximate K/V. Neither is
+guaranteed to preserve the answer. Our protection policy assigns exact
+storage to selected head-position regions while retaining the remaining
+prompt positions through the source representation. A protected entry is
+bitwise preserved; this does not imply that all evidence or downstream
+logits are unchanged.
+
+There is a second, distinct numerical issue: a custom reconstruction kernel
+may differ from native projection of the \emph{same decoded source}. Our
+construction checks and sparse numerical corrections address this transport
+error. They do not remove the source quantization error relative to
+unrestricted FullKV. Confusing those two reference boundaries would turn a
+kernel-equivalence check into an unsupported answer-quality guarantee.
+
+\subsection{The measured optimization problem}
+We study a frozen request representation $R$ through four observables:
+\begin{equation}
+ \big(B_0(R),B_f(R),B_{\mathrm{dec,peak}}(R),T_{\mathrm{req}}(R)\big),
+ \label{eq:observables}
+\end{equation}
+alongside corpus caption quality. $B_0$ and $B_f$ are initial and final
+persistent decode-owned backing; $B_{\mathrm{dec,peak}}$ additionally
+charges observed reconstruction/append overlap. It excludes vision/prefill
+transients and is not a whole-request KV peak or process-HBM measurement.
+The present study reports frozen operating points. It does not solve the
+separate experiment of finding every method's smallest cache meeting a
+common independently specified quality target.

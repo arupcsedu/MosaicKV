@@ -1,0 +1,17 @@
+\begin{tikzpicture}[node distance=5mm]
+\node[box,text width=2.5cm] (input) {Prompt + media\\Full-cache prefill};
+\node[box,text width=2.5cm,right=of input] (forecast) {Last 16 prompt queries\\Forecast + block metadata};
+\node[box,text width=2.7cm,right=9mm of forecast,yshift=8mm] (stable) {Stable heads\\Vectorized prompt ranking};
+\node[box,text width=2.7cm,below=4mm of stable] (graph) {Routed heads ($1/256$)\\Sparse graph + value/coverage};
+\node[box,text width=2.5cm,right=9mm of stable,yshift=-8mm] (pack) {Shared capacity transaction\\Exact physical KV packing};
+\draw[flow] (input)--(forecast);
+\draw[flow] (forecast.east)--++(3mm,0)|-(stable.west);
+\draw[flow] (forecast.east)--++(3mm,0)|-(graph.west);
+\draw[flow] (stable.east)--++(3mm,0)|-(pack.west);
+\draw[flow] (graph.east)--++(3mm,0)|-(pack.west);
+\node[box,text width=2.5cm,below=17mm of pack] (decode) {Explicit greedy decode\\Original logical positions};
+\draw[flow] (pack)--(decode);
+\node[optbox,text width=5.0cm,left=9mm of decode] (optional) {Prototype / residual / uncertainty repair\\Specified extensions; inactive in this evaluation};
+\draw[optional] (optional)--(decode);
+\node[font=\scriptsize,align=center,below=8mm of input,text width=2.6cm] {Retained K/V are unchanged.\\Planning enters request latency.};
+\end{tikzpicture}

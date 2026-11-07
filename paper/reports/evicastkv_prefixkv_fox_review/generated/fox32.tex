@@ -1,0 +1,14 @@
+% Derived from immutable measured artifacts by export_report.py.
+\begin{tabular}{rlrrrr}
+\toprule
+Initial MiB & Method & CIDEr & Final/peak MiB & Mean s & Empirical p95 s\\\midrule
+20 & Prompt Top-K & 129.56 & 27.875 & 13.28 & 15.80\\
+20 & VL-Cache (R) & 110.26 & 27.875 & 16.48 & 21.15\\
+20 & \textbf{EviCastKV complete} & 129.56 & 27.875 & 12.50 & 14.78\\
+20 & EviCastKV + guard & 129.56 & 27.875 & 12.54 & 14.91\\
+40 & Prompt Top-K & 128.13 & 47.875 & 14.83 & 17.37\\
+40 & VL-Cache (R) & 118.79 & 47.875 & 18.49 & 22.77\\
+40 & \textbf{EviCastKV complete} & 128.13 & 47.875 & 14.02 & 16.07\\
+40 & EviCastKV + guard & 128.13 & 47.875 & 14.23 & 16.29\\
+\bottomrule
+\end{tabular}

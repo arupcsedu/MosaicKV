@@ -1,0 +1,18 @@
+% Derived from immutable measured artifacts by export_report.py.
+\begin{tabular}{llrrl}
+\toprule
+Task & Path & Model-ref. R-L & Token agreement \% & 128 logits bitwise\\\midrule
+Description & All-position lossless control & 100.00 & 100.00 & Yes\\
+Description & Prompt Top-K & 72.73 & 28.12 & Yes\\
+Description & PrefixKV adaptation (R) & 100.00 & 100.00 & Yes\\
+Description & VL-Cache adaptation (R) & 100.00 & 100.00 & Yes\\
+Description & LOOK-M (R) & 100.00 & 100.00 & Yes\\
+Description & \textbf{EviCastKV exact} & 100.00 & 100.00 & Yes\\
+MM-Vet route & All-position lossless control & 100.00 & 100.00 & Yes\\
+MM-Vet route & Prompt Top-K & 92.68 & 87.50 & Yes\\
+MM-Vet route & PrefixKV adaptation (R) & 61.90 & 21.88 & Yes\\
+MM-Vet route & VL-Cache adaptation (R) & 68.57 & 53.12 & Yes\\
+MM-Vet route & LOOK-M (R) & 90.00 & 87.50 & Yes\\
+MM-Vet route & \textbf{EviCastKV exact} & 92.68 & 87.50 & Yes\\
+\bottomrule
+\end{tabular}

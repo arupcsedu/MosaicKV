@@ -1,0 +1,131 @@
+\section{Baseline Designs and Comparison Boundaries}
+\label{app:baselines}
+This section explains why a baseline's paper-native setting and its local
+shared-byte variant are different experiments. The equations summarize the
+interpretations documented in the repository's baseline specifications; the
+original papers remain the authority for reproduction
+\citep{wang2025prefixkv,tu2025vlcache,wan2024lookm}.
+
+\subsection{Prompt Top-K and simple controls}
+Prompt Top-K ranks a block by attention accumulated over a declared prompt
+window, then retains the highest-ranked feasible blocks after the common
+mandatory policy. Random KV uses a recorded random seed, and uniform KV divides
+capacity across declared layer/head/modality strata. Value Top-K uses only the
+value-novelty signal. These controls isolate whether MosaicKV benefits from
+forecasting, coverage, or value information rather than merely from a different
+budget or a larger mandatory suffix.
+
+At retention one, all source K/V entries are preserved. In a shared-byte lane,
+these controls use the same source cache, block granularity, and physical
+packing contract as MosaicKV. Prototype merging and repair are disabled unless
+explicitly part of a named control. Seeded random selection must not change
+with shard scheduling order.
+
+\subsection{PrefixKV: adaptive importance prefixes}
+``Prefix'' refers to the highest-importance part of a sorted priority sequence,
+not the earliest original positions. For layer $\ell$, the documented scorer
+averages attention over heads and sums over prompt queries. Sorting gives
+$s_{\ell,(1)}\ge\cdots\ge s_{\ell,(N)}$, with cumulative information
+\begin{equation}
+ P_\ell(k)=\frac{\sum_{j=1}^{k}s_{\ell,(j)}}{\sum_{j=1}^{N}s_{\ell,(j)}}.
+\end{equation}
+A common threshold $p$ induces the smallest $k_\ell$ satisfying
+$P_\ell(k_\ell)\ge p$. Searching for $p$ allocates capacity across layers under
+the global retention target. Offline profile provenance and integer rounding
+are therefore part of the method, not incidental preprocessing.
+
+The repository's interpretation shares retained positions across KV heads
+within a layer, protects configured boundaries, and preserves selected K/V
+unchanged. Its legacy decode eviction schedule maintains the layer-wise
+allocation. Independent per-layer lengths require a compatible transport.
+Padding every layer to a common length can defeat compression or invalidate
+legacy mask/position assumptions.
+
+The paper's retained ratio and the official code's forgotten ratio are
+complements. Confusing them can turn mild compression into aggressive eviction.
+For a shared cap, preserve the profile's relative layer shape but deterministically
+apportion integer positions under the physical-byte constraint. Label this
+\texttt{prefixkv\_reimpl}, byte-matched variant; it is not a newly discovered
+official setting. First establish native-metric reproduction at a registered
+operating point.
+
+\subsection{VL-Cache: post-vision demand and layer sparsity}
+Let $P$ be the text-query positions after the last visual token. For causal
+attention matrix $A$, a row-relative filter keeps entries satisfying
+$A_{qj}\ge p\max_{j'}A_{qj'}$. The paper uses $p=0.01$; this is an algorithm
+parameter, not a result. Let $\gamma'_\ell$ be the head-averaged fraction of
+filtered-out valid causal entries and $d_\ell=1-\gamma'_\ell$.
+The documented allocation is
+\begin{equation}
+ \beta_\ell=\operatorname{clip}\!\left(
+ \frac{d_\ell}{\sum_u d_u}\alpha L,\;0.01,\;1\right),
+\end{equation}
+where $\alpha$ is global retention. Token importance is
+$s_j^{(\ell,h)}=\sum_{q\in P}A_{qj}^{(\ell,h)}$.
+Modality awareness lies in the query boundary, not a fixed image/text-key
+multiplier.
+
+The local implementation records causal counting, clipping, integer apportionment,
+recent-token protection, and query-window interpretation. Clipping need not
+preserve the global sum, and nominal layer ratios need not match physical
+storage after head packing. This prompt-adaptive method does not require an
+offline learned profile. Disjoint calibration of ambiguous local settings is
+a research control, not training claimed for the original algorithm.
+
+In the unified lane, the physical target governs allocation. Running a
+convenient paper ratio does not make its resulting cache byte-matched. The
+local method remains \texttt{vl\_cache\_reimpl}; its scoring is distinct from
+MosaicKV's forecast, graph, prototypes, and repair.
+
+\subsection{LOOK-M: text prior and pivot merging}
+For cumulative attention $s_j=\sum_q A_{qj}$ and text-key indices $T$, the
+paper-derived text prior is
+\begin{equation}
+ \widetilde s_j=s_j+\mathbf1\{j\in T\}\max_u s_u.
+\end{equation}
+Retain a recent window and the highest-ranked remaining positions. Each evicted
+key chooses a retained pivot by maximum cosine similarity within its layer/head.
+The repository documents averaged, pivotal, and weighted merges. For retained
+pivot $x$ and assigned members $y_1,\ldots,y_n$, the pivotal expression is
+\begin{equation}
+ x'=\frac{x+\sum_{i=1}^n(y_i+x)/2}{n+1}.
+\end{equation}
+The key-derived assignment is also used for values.
+
+This is not MosaicKV's prototype tier: the pivot is modified, there is no
+distinct residual recovery tier, and MosaicKV's modality/span filters do not
+define LOOK-M pivoting. The pinned source has shortcuts differing from the
+paper expression; the specification records them rather than claiming automatic
+parity. A unified mandatory-token policy can also differ from the native recent
+window. Enforcing it for fairness produces an explicit unified variant; the
+native reproduction lane preserves the original policy.
+
+\subsection{Architecture comparison, not a results table}
+\begin{table*}[t]
+\caption{Qualitative method distinctions. Entries describe design, not
+measured superiority or blanket implementation support.}
+\small\begin{tabularx}{\textwidth}{P{2cm}YYYY}\toprule
+Property & Prompt Top-K & PrefixKV & VL-Cache & MosaicKV architecture\\\midrule
+Demand & Fixed prompt window & Prompt importance ordering & Post-vision text attention & Prompt, isolated draft, or hybrid forecast\\
+Allocation & Configured block budget & Offline layer-profile shape & Online sparsity-adaptive layers & Physical-feasible utility/coverage; routed variants labeled\\
+Relations & No explicit graph & No MosaicKV graph & No MosaicKV graph & Sparse cross-modal graph\\
+Representation & Exact retained K/V & Exact retained K/V & Exact retained K/V & Exact plus optional prototypes/residuals\\
+Recovery & None & Eviction, not recovery & None & Optional uncertainty-triggered restoration\\
+Hard-byte variant & Feasible selection & Rescaled profile needs named variant & Physical allocation overrides ratio & Transaction includes padding\\
+\bottomrule\end{tabularx}
+\end{table*}
+
+The distinctive hypothesis is the combination of forecasted demand, relational
+coverage, value contribution, and recoverable representations under an explicit
+physical contract. Attention scoring, greedy selection, layer adaptation, and
+KV merging have precedents. The thesis does not claim to invent them individually.
+Ablations and matched-budget curves must establish whether their combination
+is useful.
+
+\subsection{Secondary baseline provenance}
+H2O, StreamingLLM, PyramidKV, Elastic Cache, SnapKV, and RoCo form an optional
+audited union, not an automatic list of supported model combinations. Include
+a method only after pinning its repository revision, preserving its license,
+verifying its cache policy, and establishing relevant metric and identity
+parity. Local ports use \texttt{\_reimpl} names. More baselines do not permit
+weaker sample, byte, or generation controls.

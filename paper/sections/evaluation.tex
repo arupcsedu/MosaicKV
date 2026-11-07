@@ -1,0 +1,252 @@
+\section{Evaluation}
+\label{sec:evaluation}
+We test quality at fixed physical memory, complete request latency, and quality
+preservation at smaller measured points. All MosaicKV results execute
+\mexact; prototypes, residual storage, and repair are disabled. Baselines
+marked R are local reimplementations.
+
+\subsection{Setup, controls, and metrics}
+\begin{table*}[t]
+\caption{Completed evaluation strata. Native-retention and shared-byte lanes
+are separate. Revisions are abbreviated; full identifiers are in the artifact.
+Each GPU worker uses one A100-SXM4-80GB and 12 CPU cores.}
+\label{tab:completed-setup}
+\centering\small
+\begin{tabularx}{\textwidth}{P{2.2cm}P{3.3cm}P{3.2cm}Y}
+\toprule
+Lane / cohort & Model revision & Measured operating points & Samples and metrics\\\midrule
+COCO & LLaVA-v1.6-Mistral-7B, \texttt{2424fdd4} & 10/20/40/80 MiB, FP16 & 256 images; corpus CIDEr\\
+MileBench E6 & LLaVA-1.5-7B, \texttt{b234b804} & 16/20/28/40/80 MiB, FP16 & 192 total; 48 per subtask; Accuracy / ROUGE-L\\
+MileBench earlier & Same LLaVA-1.5 revision & 10/20/40/80 MiB, FP16 & 256 total; 64 per subtask; separate appendix tables\\
+PrefixKV native & Same LLaVA-1.5 revision & Nominal retention 0.5, BF16 & 1,000 descriptions; 218 paper-style MM-Vet; PPL / reference ROUGE-L\\
+PrefixKV shared & Same LLaVA-1.5 revision & Exactly 40 MiB, FP16 & Same 1,218 inputs; precision-matched FullKV reference\\
+\bottomrule
+\end{tabularx}
+\end{table*}
+
+\paragraph{Inputs and execution.}
+COCO Caption uses revision \texttt{c3213b54}; MileBench uses
+\texttt{53c7a580} \citep{lin2014coco,song2024milebench}. MileBench includes
+ActionPrediction, ActionSequence, CLEVR-Change, and Spot-the-Diff: two temporal
+Accuracy subtasks and two semantic ROUGE-L subtasks. This is a representative
+selection, not the complete benchmark. Multi-image inputs use frozen
+materialized preprocessing, including merged-image transport where required;
+all methods receive identical processed content. PrefixKV uses its original
+description and 218-question routes, not judge-scored MM-Vet
+\citep{wang2025prefixkv,yu2023mmvet}.
+
+Within each shared-byte lane, checkpoint/revision, processor/chat template,
+prompts, media, tokenization, deterministic greedy generation, precision, eager
+attention, one-token blocks, mandatory tokens, and output length are fixed.
+COCO/MileBench generate 64 tokens; PrefixKV routes generate 1,024.
+COCO protects the last prompt token; MileBench and shared PrefixKV use the
+first/last policy. Native PrefixKV preserves its method-specific maintenance,
+so its native comparison is not byte-matched. Runs use the pinned common
+environment (PyTorch 2.8.0, Transformers 4.55.2) and five warmups.
+Times are means over requests with one measured quality trial, not repeated
+microbenchmarks or production throughput.
+
+\paragraph{Physical memory.}
+Shared-byte analysis verifies equal initial, final, and peak live KV storage
+per sample and the largest feasible allocation below each cap. Configured caps
+alone are insufficient. COCO decoding adds 7.875 MiB; MileBench adds 31.5 MiB;
+the PrefixKV append-only shared lane adds 511.5 MiB. Thus the same 40 MiB
+initial cap yields 47.875, 71.5, or 551.5 MiB after generation.
+FullKV supplies identity and quality references and is excluded from latency
+comparisons.
+
+\paragraph{Metrics and uncertainty.}
+COCO uses the pinned lmms-eval PTB tokenizer and CIDEr implementation
+\citep{vedantam2015cider}. Corpus CIDEr is recomputed over the complete cohort
+and inside every one of 10,000 paired bootstrap replicates; shard scores are
+never averaged. MileBench recomputes its equal-dataset category hierarchy in
+every replicate, keeping Accuracy and ROUGE-L separate. PrefixKV reports
+\begin{equation}
+ {\rm PPL}=\exp\!\left(\frac{\sum_s{\rm NLL}_s}{\sum_s T_s}\right)
+\end{equation}
+and mean FullKV-reference ROUGE-L F1 \citep{lin2004rouge}. PPL covers all
+138,905 description tokens and 20,949 question-answer tokens. Teacher-forced
+annotation targets differ from free-running generation outputs.
+We report paired 95\% intervals \citep{efron1979bootstrap} and family-wise
+adjusted intervals for the registered MileBench lower-memory tests.
+No average mixes different metric units.
+
+\paragraph{Completeness and evidence status.}
+COCO contains 3,328 complete rows, MileBench E6 3,072, the earlier MileBench
+cohort 3,328, and PrefixKV 8,526 across seven arms. Numerical exports contain
+no failed or duplicate rows. COCO and the earlier MileBench pool have prior
+protocol use and are not pristine held-out evidence. E6 uses an
+exclusion-reviewed new cohort relative to its bound ledgers; cohorts are
+reported separately. Numerical export independently checks completeness and
+per-example shared storage; artifact details appear in the separate appendix.
+
+\subsection{COCO: shared-byte quality and runtime}
+\begin{table}[t]
+\caption{COCO at 40 MiB. Storage is MiB; times are seconds. FullKV is a
+quality reference. R denotes a local reimplementation.}
+\label{tab:coco-measured}
+\centering\small\resizebox{\columnwidth}{!}{\input{generated/coco40}}
+\end{table}
+
+At identical 40 MiB initial and 47.875 MiB final/peak cache,
+MosaicKV scores 111.48 CIDEr versus 107.84 for VL-Cache (R), a 3.64-point
+gain with paired interval $[0.53,7.06]$. Mean request time falls from
+20.75 to 16.68 s (19.65\%); the paired absolute reduction is
+$[3.92,4.24]$ s. Decode falls from 3.12 to 2.95 s (5.53\%).
+Most of the 4.08 s request-time difference occurs outside decode.
+
+Prompt Top-K is a stronger quality competitor: it scores 111.59.
+MosaicKV's difference is $-0.11$ CIDEr, interval $[-0.63,0.31]$, with
+3.14\% lower mean request time. Quality ordering is unresolved.
+Against FullKV, the difference is $+0.24$, interval $[-3.74,4.51]$.
+The cache is 86.0\% smaller initially and 83.7\% smaller after decoding than
+FullKV, but those point estimates do not establish a zero-loss quality guarantee.
+
+\begin{figure*}[t]
+\centering\input{figures/measured_curves}
+\caption{Measured fixed-budget curves. Left: COCO, 256 images; center/right:
+the separate 192-example MileBench E6 cohort. Every compressed method runs at
+every displayed cap. Lines connect measured points, without establishing
+quality between them. ROUGE-L is scaled by 100; Accuracy and CIDEr retain
+their respective meanings.}
+\label{fig:curves}
+\end{figure*}
+
+Figure~\ref{fig:curves} retains every tested point. At 10 MiB, MosaicKV
+improves CIDEr over VL-Cache (R) by 11.34, interval $[6.55,16.49]$;
+at 20 MiB the gain is 4.35, interval $[0.01,8.90]$. At 80 MiB the
+0.75-point gain is unresolved. Prompt Top-K tracks MosaicKV closely.
+The result supports advantages over this VL-Cache port under tight capacity,
+rather than universal dominance over selectors.
+
+\subsection{MileBench: complementary evidence at fixed memory}
+At 16 MiB, MosaicKV reaches 21.88\% Accuracy and 14.52 ROUGE-L points,
+versus LOOK-M (R)'s 3.12\% and 12.31. Paired gains are $+18.75$ Accuracy
+points, interval $[10.42,27.08]$, and $+2.21$ ROUGE-L points,
+interval $[0.80,3.62]$. Mean request time falls from 24.36 to 14.95 s
+(38.6\%). This tight-budget collapse concerns the byte-capped
+reimplementation regime, not official LOOK-M's original paper setting.
+
+\begin{table}[t]
+\caption{MileBench E6 at 40 MiB initial / 71.5 MiB final and peak cache.
+ROUGE-L is scaled by 100. Each metric covers its 96 applicable examples.}
+\label{tab:mile40}
+\centering\small\resizebox{\columnwidth}{!}{\input{generated/mile40}}
+\end{table}
+
+At 40 MiB, MosaicKV improves ROUGE-L over LOOK-M (R) by 1.36 points,
+interval $[0.15,2.55]$, while Accuracy is 2.08 points lower,
+interval $[-7.29,3.12]$. Its Accuracy matches Prompt Top-K on paired
+correctness; its ROUGE-L difference is $-0.04$, interval $[-0.25,0.17]$.
+Mean time is 51.2\% lower than LOOK-M (R) and 7.33\% lower than Top-K.
+Across E6 caps, MosaicKV is 38.6--58.4\% faster than LOOK-M (R) and
+5.6--7.5\% faster than Top-K.
+
+The earlier 256-example cohort measured a similar trade-off at 40 MiB:
+equal Accuracy point estimates against LOOK-M (R), $+0.98$ ROUGE-L points
+with interval $[0.01,2.01]$, and 50.9\% lower mean time.
+At 80 MiB, however, LOOK-M (R)'s Accuracy point estimate was higher.
+The appendix preserves both cohorts' complete and unfavorable points;
+they are not pooled.
+
+\subsection{PrefixKV: native fidelity and shared capacity}
+\begin{table*}[t]
+\caption{Completed PrefixKV native-retention lane, BF16, registered nominal
+retention 0.5. R-L is FullKV-reference ROUGE-L scaled by 100; PPL is corpus
+perplexity. Storage is MiB. Unequal realized bytes and decode maintenance make
+this a native operating-point comparison, not an equal-budget policy comparison.}
+\label{tab:prefixnative}
+\centering\small\input{generated/prefix_paper_native}
+\end{table*}
+
+The four-example official-path gate passed position, per-layer-length,
+retained-byte, token, NLL, and ROUGE-L parity. The large comparison uses the
+pinned profile through a local port; it is not an official 1,218-example
+execution. Native PrefixKV retains ongoing eviction.
+
+On LLaVA-Description, MosaicKV improves PPL from 3.0889 to 2.9620 and
+ROUGE-L from 63.42 to 71.09. The paired PPL difference is $-0.1269$,
+interval $[-0.1328,-0.1211]$; the ROUGE-L gain is 7.67 points,
+interval $[6.62,8.70]$. On MM-Vet, ROUGE-L improves from 64.97 to 79.03
+(gain 14.04, interval $[11.22,16.76]$). PPL improves from 5.3339 to
+5.2775 in point estimate, but its paired interval crosses zero.
+
+MosaicKV uses about 31.4\% less initial KV at these native points.
+The saving reverses during generation: its append-only peak is
+614--615 MiB; PrefixKV's ongoing eviction limits its peak to 406--408 MiB.
+MosaicKV's mean request time is 20.7--20.9\% higher. Thus this comparison
+supports stronger fidelity at the registered point, not lower final memory
+or latency.
+
+In the separate FP16 shared 40 MiB lane, compressed methods finish at
+551.5 MiB. MosaicKV and Top-K have close quality: description ROUGE-L is
+63.09 versus 63.20; question ROUGE-L is 72.71 versus 72.62.
+Description PPL is slightly but significantly worse for MosaicKV
+($+0.0015$); question PPL differences are unresolved.
+MosaicKV lowers mean time by 0.75--0.89\%.
+The byte-rescaled PrefixKV adaptation collapses to roughly 14 ROUGE-L points.
+The appendix reports it as an adaptation stress test; it does not characterize
+native PrefixKV.
+
+\subsection{Lower-memory quality equivalence: measured limits}
+\begin{figure}[t]
+\centering\input{figures/memory_boundaries}
+\caption{Native PrefixKV lane on LLaVA-Description: memory ordering reverses
+after long decoding. Lines connect accounting boundaries, not time samples.
+Smaller initial KV is insufficient to claim smaller final KV.}
+\label{fig:boundaries}
+\end{figure}
+
+The E6 protocol chose cross-budget pairs using storage before opening quality.
+MosaicKV 16 versus baseline 40 MiB saves 60\% initially and 33.57\%
+at final/peak; 40 versus 80 MiB saves 50\% initially and 35.87\%
+at final/peak. All tested pairs pass memory but fail zero-margin quality
+non-inferiority after family-wise correction. Against LOOK-M (R) 80 MiB,
+MosaicKV 40 MiB has positive point differences on both metrics, yet adjusted
+intervals cross zero. Quality preservation remains unresolved.
+
+COCO has an exploratory point-estimate example: MosaicKV 20 MiB scores
+107.97 versus VL-Cache (R) 40 MiB at 107.84, with 41.8\% lower final KV.
+The artifact has no registered cross-budget confidence test proving
+equivalence, and Top-K also reaches that quality at 20 MiB.
+The larger VL-Cache point is therefore not the nearest quality-eligible
+competitor. Figure~\ref{fig:boundaries} shows another limit: maintenance
+policy can outweigh initial savings. All registered outcomes appear in
+the appendix.
+
+\subsection{Why these operating regimes favor MosaicKV}
+\begin{table}[t]
+\caption{MileBench E6 phase means at 40 MiB. Compression includes recorded
+planning and construction work. Other request phases account for the
+difference between compression plus decode and end-to-end time.}
+\label{tab:phases}
+\centering\small\resizebox{\columnwidth}{!}{\input{generated/mile_phases}}
+\end{table}
+At equal bytes, quality differences reflect retained evidence and
+transformations, not extra storage. Prompt queries emphasize current demand;
+graph coverage discourages redundant neighborhoods; value signals distinguish
+information beyond attention mass. Exact retention avoids errors from unsafe
+merging. These mechanisms are consistent with COCO gains over VL-Cache (R)
+and tight-budget MileBench gains over LOOK-M (R). The near tie with Top-K
+also shows how much useful signal prompt attention already captures.
+
+The execution explanation is more direct: most heads bypass graph work;
+one-token selection, sparse edge assembly, and packing avoid full-source
+Python planning. Figure~\ref{fig:latency} includes complete compression costs.
+The VL-Cache port's absent fused kernels and LOOK-M port's merge/construction
+work also affect runtime. At equal bytes, decode gains cannot be credited to
+reading fewer KV bytes; layout and implementation differ. These are
+mechanistic interpretations, not causal ablations of each component.
+Table~\ref{tab:phases} makes the bottleneck explicit: MosaicKV compression is
+10.50 s versus 11.63 s for Top-K and 26.36 s for LOOK-M (R), while their
+decode means are close (2.77--2.80 s). Thus most of the measured advantage
+comes from planning/construction and other pre-decode work. Compression still
+dominates MosaicKV itself; reducing it remains an important systems target.
+
+\begin{figure}[t]
+\centering\input{figures/measured_latency}
+\caption{MileBench E6 mean request latency at identical physical cache sizes,
+including compression. Request-level observations use one quality trial per
+sample and are not throughput measurements.}
+\label{fig:latency}
+\end{figure}

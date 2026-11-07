@@ -1,0 +1,26 @@
+\section{Related Work}
+\paragraph{KV selection and allocation.}
+H2O retains heavy hitters and recency; StreamingLLM emphasizes attention sinks;
+SnapKV uses an observation window; PyramidKV adapts layer capacity
+\citep{zhang2023h2o,xiao2024streaming,li2024snapkv,cai2024pyramidkv}.
+They establish that importance, protected context, and allocation granularity
+matter. MosaicKV combines evidence relationships with routed execution and a
+physical capacity transaction; attention-based selection itself is not novel.
+
+\paragraph{Multimodal compression.}
+LOOK-M uses text-prior selection and compensatory merging; PrefixKV searches
+layer-specific importance-prefix configurations; VL-Cache uses modality-aware
+attention and sparsity-driven allocation
+\citep{wan2024lookm,wang2025prefixkv,tu2025vlcache}. We distinguish native
+conventions from common-byte adaptations. Attention-output matching also has
+prior work \citep{attentionmatching2026}; our development diagnostics do not
+claim that reconstructing attention output guarantees answer preservation.
+
+\paragraph{Execution and evaluation.}
+FlashAttention improves attention IO; PagedAttention addresses allocation and
+sharing \citep{dao2022flash,dao2023flash2,kwon2023paged}. Both can complement
+semantic eviction but change bottlenecks. CIDEr, ANLS, ROUGE-L, and Accuracy
+measure distinct properties
+\citep{vedantam2015cider,mathew2021docvqa,lin2004rouge,song2024milebench}.
+Our analysis uses native reducers and paired identities rather than a
+cross-metric average.

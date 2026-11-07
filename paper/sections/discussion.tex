@@ -1,0 +1,34 @@
+\section{Discussion and Limitations}
+\label{sec:discussion}
+\paragraph{Claim scope.}
+The fixed-byte studies establish useful regimes: better CIDEr than VL-Cache
+(R), stronger tight-budget quality than LOOK-M (R), and lower HF eager mean
+request time. Native PrefixKV improves reference-output fidelity, but unequal
+bytes and decode maintenance prevent attribution solely to selection.
+FullKV-reference ROUGE-L measures output agreement, not necessarily answer
+correctness. Near-FullKV PPL does not guarantee free-running answer quality.
+
+\paragraph{Memory boundaries.}
+Active-cache savings do not imply equal process-HBM savings. All paths start
+from full prefill; source allocations can remain during planning. Peak here
+is live decode-cache storage at transaction boundaries, not transient process
+peak. Append-only growth can dominate long outputs; ongoing eviction can
+lower final memory while altering outputs. A smaller-at-equal-quality claim
+needs a separate paired test and a named competitor. E6's strict test failed.
+
+\paragraph{Generality and attribution.}
+Main results use batch-one HF eager and two LLaVA checkpoints. Eager attention
+materializes scores and softmax across positions; fused/paged kernels change
+that cost \citep{dao2022flash,dao2023flash2,kwon2023paged}. We make no
+serving-scale speed claim. Baseline ports and common-byte adaptations differ
+from official native implementations; the four-example PrefixKV parity gate
+is limited evidence. Its shared-byte collapse does not describe the native
+paper setting.
+
+\paragraph{Remaining research.}
+MileBench covers four subtasks, with 96 or 128 applicable examples per metric.
+Uncertainty remains substantial. Prior development use is disclosed; E6
+outcomes do not retune the candidate. Future work should use larger untouched
+cohorts and isolate routing, forecast, and value/coverage effects.
+Prototype merging and residual repair require separate adapter parity and
+quality studies; their specifications appear as extensions in the appendix.

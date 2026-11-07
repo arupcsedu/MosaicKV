@@ -1,0 +1,48 @@
+\section{Introduction}
+\label{sec:introduction}
+Vision--language models expand images into many prefix tokens before generating
+an answer \citep{liu2023llava,liu2024improved,bai2025qwen}. Their key--value
+(KV) caches retain these states at every transformer layer. Compression reduces
+active state, but useful evidence is uneven: an object relation, a single
+word, or an earlier frame can determine an answer. Average attention does not
+identify every such piece of evidence, and a small logical selection does
+not necessarily reduce the allocated cache.
+
+LOOK-M combines text-prior selection with merging; PrefixKV allocates
+layer-specific budgets; VL-Cache uses attention sparsity and post-vision
+queries \citep{wan2024lookm,wang2025prefixkv,tu2025vlcache}. These approaches
+motivate two questions. Can a selector preserve complementary evidence at
+fixed physical capacity? Can it do so without spending more time planning
+than execution saves? Equal nominal retention is insufficient to answer
+either question: protected tokens, layer allocation, padding, and decode-time
+eviction can produce different storage trajectories.
+
+MosaicKV addresses selection and execution together. Prompt queries forecast
+future demand, a sparse graph relates compatible evidence blocks, and a
+budgeted objective combines attention, value information, and coverage.
+A routed policy sends a small fraction of heads through this planner and
+handles remaining heads with a vectorized prompt selector. One physical
+capacity transaction reconciles both paths and packs original K/V values
+while preserving logical positions.
+
+The architecture defines exact, prototype, and residual tiers. This paper
+evaluates only \mexact. Merging rotary-position keys and restoring residuals
+require additional compatibility evidence; inactive tiers receive no credit
+for measured results. Exact retention guarantees the numerical integrity of
+kept states, not preservation of evidence in evicted states.
+
+We evaluate three separate baseline lanes: COCO/CIDEr with LLaVA-v1.6-Mistral;
+MileBench Accuracy/ROUGE-L with LLaVA-1.5; and PrefixKV's description/question
+routes with teacher-forced perplexity and FullKV-reference ROUGE-L.
+At 40 MiB, MosaicKV improves COCO CIDEr by 3.64 and lowers mean request time
+by 19.65\% relative to the local VL-Cache port. A separate 192-example
+MileBench study shows 5.6--7.5\% lower mean latency than Prompt Top-K across
+tested caps, although their quality is close. Native PrefixKV results favor
+MosaicKV's output fidelity but reveal that ongoing eviction can reverse the
+ordering of final memory.
+
+Our contributions are: (1) query-conditioned, evidence-aware exact selection
+with explicit position and storage semantics; (2) routed planning reconciled
+with dense physical capacity; and (3) controlled quality--memory curves and
+paired metric-specific analysis. The evidence supports improvements over
+named local baselines in specific regimes and identifies their limits.

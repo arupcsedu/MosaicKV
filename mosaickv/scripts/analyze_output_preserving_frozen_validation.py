@@ -129,32 +129,22 @@ def analyze(args: argparse.Namespace) -> int:
             if manifest["model"]["revision"] != plan["model_revision"]:
                 raise ValueError("model revision differs from plan")
 
-        candidate = "output_preserving_draft_gate"
+        candidate = str(plan.get("candidate_analysis_label", "output_preserving_draft_gate"))
         prompt25 = "prompt_attention_topk_25p5"
         prompt40 = "prompt_attention_topk_40p0"
-        # The two Prompt Top-K jobs share a method name, so preparation gives
-        # their analysis labels distinct cap-qualified names.
-        remap = {
-            "full_kv": "full_kv",
-            "prompt_attention_topk_25p5": prompt25,
-            "prompt_attention_topk_40p0": prompt40,
-            "output_preserving_draft4_25p5": candidate,
-        }
-        normalized_rows = {}
-        normalized_traces = {}
-        for job in plan["jobs"]:
-            source_label = job["analysis_label"]
-            target_label = remap[job["label"]]
-            for sid in ids:
-                normalized_rows[target_label, sid] = rows[source_label, sid]
-                normalized_traces[target_label, sid] = traces[source_label, sid]
-        rows, traces = normalized_rows, normalized_traces
+        expected_labels = {"full_kv", prompt25, prompt40, candidate}
+        if set(manifests) != expected_labels:
+            raise ValueError(
+                f"analysis labels differ from the registered four arms: {set(manifests)}"
+            )
 
         cap25 = round(25.5 * 2**20)
         cap40 = round(40.0 * 2**20)
         byte_records = []
         memory_pass = True
         same_budget_pass = True
+        logit_trace_pass = True
+        fail_closed_count = 0
         for sid in ids:
             if rows[candidate, sid]["initial_active_kv_storage_bytes"] != cap25:
                 raise ValueError(f"candidate missed the exact initial cap: {sid}")
@@ -180,14 +170,125 @@ def analyze(args: argparse.Namespace) -> int:
                     }
                 )
             trace = traces[candidate, sid]
+            reconstruction = trace.get("output_reconstruction", {})
+            expected_method = plan["fixed_candidate"]["effective_method"]
+            expected_ranking = plan["fixed_candidate"].get("draft_ranking_mode", "veto")
             if (
-                trace.get("effective_method")
-                != "mosaickv_exact__output_preserving_v1__draft_gate"
+                trace.get("effective_method") != expected_method
                 or trace.get("forecast_statistics", {}).get("draft_cache_isolated") is not True
-                or trace.get("output_reconstruction", {}).get("draft_validation") is not True
+                or reconstruction.get("draft_validation") is not True
+                or reconstruction.get("draft_ranking_mode") != expected_ranking
                 or trace.get("residual_kv_bytes") != 0
             ):
                 raise ValueError(f"candidate trace contract failed: {sid}")
+            if expected_ranking == "joint_normalized":
+                swaps = [
+                    swap
+                    for route in reconstruction.get("routes", ())
+                    for swap in route.get("swaps", ())
+                ]
+                if any(
+                    not isinstance(swap.get("joint_normalized_gain"), (float, int))
+                    or swap["joint_normalized_gain"] <= 0
+                    for swap in swaps
+                ):
+                    raise ValueError(f"nonpositive joint swap in candidate trace: {sid}")
+            if plan["fixed_candidate"].get("short_horizon_logit_reranking") is True:
+                stability = trace.get("short_horizon_logit_stability", {})
+                evaluations = stability.get("evaluated_candidates", ())
+                strategy = plan["fixed_candidate"].get("logit_candidate_strategy", "weight_grid")
+                if strategy in {
+                    "route_exchange_beam",
+                    "layer_capacity_beam",
+                    "layer_capacity_surrogate_beam",
+                    "layer_capacity_vectorized_surrogate_beam",
+                    "layer_capacity_directional_single_beam",
+                    "within_route_position_beam",
+                }:
+                    candidate_count_valid = (
+                        len(evaluations) == (4 if strategy == "within_route_position_beam" else 2)
+                        if strategy
+                        in {
+                            "layer_capacity_surrogate_beam",
+                            "layer_capacity_vectorized_surrogate_beam",
+                            "layer_capacity_directional_single_beam",
+                            "within_route_position_beam",
+                        }
+                        else (
+                            (8 if strategy == "layer_capacity_beam" else 1)
+                            <= len(evaluations)
+                            <= plan["fixed_candidate"]["logit_route_candidate_limit"]
+                        )
+                    )
+                    strategy_trace_valid = bool(
+                        stability.get("candidate_strategy") == strategy
+                        and stability.get("batched_probe_execution") is True
+                        and isinstance(stability.get("probe_batch_count"), int)
+                        and stability["probe_batch_count"] >= 1
+                    )
+                    if strategy == "layer_capacity_beam":
+                        strategy_trace_valid &= bool(
+                            stability.get("extended_horizon")
+                            == plan["fixed_candidate"]["logit_extended_horizon"]
+                            and 2 <= len(stability.get("extended_candidate_ids", ())) <= 4
+                            and stability.get("layer_capacity_candidate_count")
+                            == plan["fixed_candidate"]["logit_layer_transfer_limit"]
+                        )
+                    elif strategy in {
+                        "layer_capacity_surrogate_beam",
+                        "layer_capacity_vectorized_surrogate_beam",
+                        "layer_capacity_directional_single_beam",
+                        "within_route_position_beam",
+                    }:
+                        timings = stability.get("probe_phase_timings", ())
+                        timing_stages = {
+                            item.get("stage") for item in timings if isinstance(item, dict)
+                        }
+                        strategy_trace_valid &= bool(
+                            stability.get("extended_horizon")
+                            == plan["fixed_candidate"]["logit_extended_horizon"]
+                            and len(stability.get("extended_candidate_ids", ()))
+                            <= (2 if strategy == "within_route_position_beam" else 1)
+                            and (
+                                stability.get("single_route_candidate_count")
+                                == plan["fixed_candidate"]["logit_route_candidate_limit"]
+                                if strategy == "within_route_position_beam"
+                                else stability.get("layer_capacity_candidate_count")
+                                == plan["fixed_candidate"]["logit_layer_transfer_limit"]
+                            )
+                            and stability.get("surrogate_candidate_count")
+                            == (
+                                plan["fixed_candidate"]["logit_route_candidate_limit"]
+                                if strategy == "within_route_position_beam"
+                                else plan["fixed_candidate"]["logit_layer_transfer_limit"]
+                            )
+                            and stability.get("model_probed_candidate_count")
+                            == (4 if strategy == "within_route_position_beam" else 2)
+                            and "surrogate_generation" in timing_stages
+                            and (
+                                "short_four_candidate_probe"
+                                if strategy == "within_route_position_beam"
+                                else "short_two_candidate_probe"
+                            )
+                            in timing_stages
+                        )
+                else:
+                    candidate_count_valid = 2 <= len(evaluations) <= 4
+                    strategy_trace_valid = True
+                fail_closed_count += int(stability.get("used_fail_closed_scalar_anchor") is True)
+                logit_trace_pass &= bool(
+                    stability.get("status") == "completed_label_blind"
+                    and stability.get("benchmark_labels_accessed") is False
+                    and stability.get("fullkv_prefill_reused") is True
+                    and stability.get("second_prefill_performed") is False
+                    and stability.get("probe_states_discarded_before_measured_decode") is True
+                    and stability.get("horizon")
+                    == plan["fixed_candidate"]["logit_stability_horizon"]
+                    and candidate_count_valid
+                    and strategy_trace_valid
+                    and reconstruction.get("selected_candidate_id")
+                    == stability.get("selected_candidate_id")
+                )
         if not same_budget_pass:
             raise ValueError("candidate and Prompt Top-K do not have identical 25.5 MiB storage")
 
@@ -244,14 +345,21 @@ def analyze(args: argparse.Namespace) -> int:
             "minimum_30_percent_reduction_at_every_sample_and_boundary": memory_pass,
             "paired_cider_zero_margin_noninferiority_vs_prompt40": quality_pass,
             "retention_one_parity_artifact_required": True,
+            "complete_label_blind_logit_probe_trace": logit_trace_pass,
         }
+        fallback_limit = plan["fixed_candidate"].get("maximum_fail_closed_fraction")
+        if isinstance(fallback_limit, (float, int)):
+            gates["maximum_fail_closed_fraction"] = fail_closed_count / len(ids) <= float(
+                fallback_limit
+            )
         parity = list(root.glob("outputs/*/attempt-*/retention-one-parity.json"))
         parity_pass = len(parity) == 1
         if parity_pass:
             payload = json.loads(parity[0].read_text())
-            parity_pass = payload.get("token_agreement") == 1.0 and payload.get(
-                "maximum_logit_difference"
-            ) <= 1e-5
+            parity_pass = (
+                payload.get("token_agreement") == 1.0
+                and payload.get("maximum_logit_difference") <= 1e-5
+            )
         gates["retention_one_parity_artifact_required"] = parity_pass
         passed = all(gates.values())
 
@@ -274,6 +382,7 @@ def analyze(args: argparse.Namespace) -> int:
                 if passed
                 else "fresh_development_validation_failed_no_paper_campaign"
             ),
+            candidate_analysis_label=candidate,
             gates=gates,
             aggregates=aggregates,
             quality_comparisons=comparison_rows,
@@ -285,6 +394,8 @@ def analyze(args: argparse.Namespace) -> int:
             minimum_observed_memory_reduction=min(
                 record["reduction_vs_40_mib"] for record in byte_records
             ),
+            fail_closed_count=fail_closed_count,
+            fail_closed_fraction=fail_closed_count / len(ids),
         )
     except Exception as error:
         report.update(

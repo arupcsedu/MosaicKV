@@ -1,0 +1,135 @@
+\section{Forecasting and Evidence Construction in Detail}
+\label{app:forecast}
+\subsection{Forecast statistics}
+For one layer and KV head, let $q_1,\ldots,q_w$ be compatible prompt-window
+queries. When multiple query heads share one KV head, the adapter records the
+mapping and aggregation rather than assuming one-to-one correspondence.
+The population statistics are
+\begin{align}
+ \mu&=\frac1w\sum_{t=1}^w q_t,\\
+ \Sigma&=\frac1w\sum_{t=1}^w(q_t-\mu)(q_t-\mu)^\top.
+\end{align}
+A diagonal variance approximation stores only the diagonal of $\Sigma$.
+This reduces auxiliary storage from quadratic to linear in head dimension.
+The approximation loses cross-coordinate correlation and is labeled as such.
+
+The draft produces query samples $q'_1,\ldots,q'_r$. A hybrid empirical forecast
+can be represented as a weighted mixture
+\begin{equation}
+ \widehat{\mathcal Q}
+ =\eta\widehat{\mathcal Q}_{\mathrm{prompt}}
+ +(1-\eta)\widehat{\mathcal Q}_{\mathrm{draft}},\quad 0\le\eta\le1.
+\end{equation}
+The mixture weight, window length, rollout length, centroid count, and query
+normalization policy are resolved configuration fields. The implementation
+must record the actual weights rather than assume equal mixture components.
+
+For low-memory forecasting, assign queries to a fixed number $k$ of centroids,
+maintain counts and sums, and normalize each nonzero centroid. Cluster counts
+induce empirical weights. This reduces auxiliary representation storage to
+$O(kd)$; it does not necessarily remove the cost of capturing queries.
+Zero-norm queries need an explicit finite fallback. Empty prompt windows are
+valid for draft-only mode with $r>0$; empty drafts are valid for prompt-only
+mode with $w>0$. A requested hybrid with neither source is invalid.
+
+\subsection{Estimating block demand}
+Let $\widehat q_j$ denote a forecast sample or centroid with weight $\omega_j$.
+For token $t$, a model-compatible attention estimate is
+\begin{equation}
+ \widehat a_t=\sum_j\omega_j
+ \frac{\exp(\langle\widetilde q_j,\widetilde k_t\rangle/\sqrt d)}
+ {\sum_{u\in\mathcal V_j}\exp(\langle\widetilde q_j,\widetilde k_u\rangle/\sqrt d)},
+\end{equation}
+where $\mathcal V_j$ is the causally valid set and tildes indicate compatible
+positional transforms. Block mass is $a_i=\sum_{t\in i}\widehat a_t$.
+The denominator cannot silently omit competing blocks merely because they
+were excluded from a planner shortlist. Native attention observations can
+replace this estimate if their scope and normalization are recorded.
+
+For multimodal RoPE, position may be a tuple of temporal, height, and width
+coordinates. A scalar-token de-rotation rule is not automatically valid.
+The adapter is the authority on position representation, not the generic
+forecast module.
+
+\subsection{Isolated draft execution}
+An isolated handle includes the cache, original lengths, next positions,
+attention masks, media-derived state needed by decode, and any mutable model
+cache metadata. A shallow Python copy is insufficient if tensors or internal
+lists can be mutated. Safe implementations clone mutable state or apply a
+verified copy-on-write contract. They compare source state before and after
+the rollout and account for temporary memory.
+
+Greedy decoding uses a deterministic tie rule and disabled sampling. The
+initial draft token is predicted from prefill logits; subsequent tokens are
+fed through one-token forward steps. All queries must be associated with their
+actual predicted/consumed positions to avoid an off-by-one forecast error.
+The final run begins from the original prefill, not the draft's terminal state.
+
+\subsection{Forecast diagnostics}
+True future queries are collected from a separate FullKV evaluation decode.
+They are never supplied to the online compressor. Useful diagnostics include:
+\begin{itemize}
+\item Cosine similarity between forecast representatives and future queries,
+with alignment and aggregation specified.
+\item Rank correlation between predicted and actual block attention. The
+definition must specify tie handling and blocks with zero mass.
+\item Recall of oracle-selected blocks at the same feasible byte budget,
+including whether recall is block-count- or byte-weighted.
+\item Forecast regret under a fixed true-future utility:
+$F_{\mathrm{true}}(S^*)-F_{\mathrm{true}}(\widehat S)$, where $S^*$ is an
+oracle optimum only when actually solved exactly. Otherwise it is an oracle
+heuristic gap, not certified regret.
+\end{itemize}
+These diagnostics explain selection behavior; they are not substitutes for
+official task quality. Oracle traces, draft traces, and online forecast traces
+must have distinct provenance labels.
+
+\subsection{Graph descriptors and edges}
+For each block, pooled representations may concatenate or separately normalize
+mean keys, mean values, and optional hidden states. Feature choice and scaling
+must be fixed across compared variants. Post-RoPE key pooling has a positional
+component; a large cosine similarity is not automatically semantic equivalence.
+
+\begin{figure}[h]
+\centering\input{figures/evidence_graph}
+\caption{An illustrative document-evidence graph. Layout can connect a label
+and its value even when neither is independently the largest-attention block.}
+\label{fig:evidence}
+\end{figure}
+
+Each edge source answers a different question. Semantic similarity asks whether
+representations are close. Co-activation asks whether prompt queries jointly
+attend to two blocks. Spatial edges use normalized image coordinates so that
+pixel resolution changes do not silently change thresholds. OCR/layout edges
+use recognized boxes, rows, columns, and page regions only when available.
+Temporal edges use frame or clip indices. Same-region edges bind observations
+of a shared evidence unit. Cross-modal alignment links textual demand with
+visual evidence under explicit compatibility rules.
+
+An edge weight can combine source-specific contributions,
+$w_{ij}=\sum_e\alpha_e w_{ij}^{(e)}$, with separately configured nonnegative
+weights and normalization. The total retained degree must be bounded after
+combining sources; retaining $d$ edges from every source without documenting
+the resulting degree is a different memory budget. Directed versus symmetrized
+storage and duplicate coalescing must be specified.
+
+\subsection{Sparse storage, dense work, and execution policy}
+For $n$ nodes and bounded degree $d_g$, a coordinate or compressed-sparse-row
+representation requires $O(nd_g)$ edges. Computing similarity in tiles avoids
+$O(n^2)$ temporary storage. Exact all-pairs search in tiles still performs
+$O(n^2)$ comparisons; approximate search or structured candidate neighborhoods
+are different policies and need quality checks.
+
+The routed implementation can reduce graph work by selecting a deterministic
+fraction of heads for graph-based optimization. Stable heads use a simpler
+per-head attention selector and remain outside the graph/objective. A policy
+such as one routed head per 256 heads is a configuration choice, not a theorem
+that all other heads are unimportant. Report eligible head count, actual
+routed count, rounding, node/edge counts, planning preparation time, and selected
+bytes for both routes.
+
+Diagnostics include connected components, mean degree, modality mixing,
+isolated-node fraction, and evidence-cluster coverage. Removing one edge source
+should leave independently constructed sources intact. A graph that improves
+coverage but does not improve score is a valid negative result; coverage alone
+does not justify a structured-task advantage.

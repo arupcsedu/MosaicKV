@@ -1,0 +1,46 @@
+\section{Background and Motivation}
+\label{sec:background}
+\subsection{Attention, prefill, and decoding}
+For one attention head, an input representation $X$ produces queries $Q=XW_Q$,
+keys $K=XW_K$, and values $V=XW_V$. Scaled dot-product attention is
+\begin{equation}
+ O=\softmax\!\left(QK^\top/\sqrt{d}+M\right)V,
+\end{equation}
+where $d$ is the head dimension and $M$ masks unavailable positions
+\citep{vaswani2017attention}. Prefill processes the input prefix. Each later
+decode step creates one new query and appends new keys and values. Grouped-query
+attention (GQA) shares a KV head among several query heads
+\citep{ainslie2023gqa}; compression must respect that mapping.
+
+With batch size $b$, $L$ layers, $H_{kv}$ KV heads, sequence length $N$, head
+dimension $d$, and element width $s$ bytes, a homogeneous dense cache occupies
+\begin{equation}
+ B_{\mathrm{dense}}=2bLH_{kv}Nds.
+ \label{eq:dense}
+\end{equation}
+The factor two counts keys and values. Images can contribute many positions,
+but visual tokens and text tokens are not equally important for every question.
+
+\subsection{Why physical bytes and positions matter}
+Two implementations with the same nominal retention ratio may retain different
+token classes or allocate different padding. Removing indices logically does
+not free a tensor's underlying storage if a view still holds the original
+allocation. We therefore distinguish logical selection, allocated active KV
+storage, and total device memory. GPU KV tensors reside in high-bandwidth
+memory (HBM); hardware caches may accelerate accesses, but MosaicKV does not
+choose L1, L2, or shared memory as a persistent KV store.
+
+Rotary position embedding (RoPE) encodes position into keys and queries
+\citep{su2021rope}. A token at original position $p$ must not become position
+$p'$ merely because earlier physical entries were removed. Likewise, averaging
+keys rotated at unrelated positions is not generally meaningful. These are
+correctness requirements, independent of a method's task score.
+
+\subsection{Why smaller is not automatically faster}
+FlashAttention reduces attention's memory traffic through tiled computation,
+while PagedAttention manages KV storage in physical blocks
+\citep{dao2022flash,dao2023flash2,kwon2023paged}. At short contexts and small
+batches, weight reads and kernel launch costs can dominate KV reads. An eager
+attention speedup is therefore not transferable to a fused or paged backend
+without measurement. Forecasting, graph construction, selection, packing, and
+host transfers must all be included in the end-to-end accounting.

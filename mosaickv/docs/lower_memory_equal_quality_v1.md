@@ -95,7 +95,7 @@ Historical nominal-retention rows are not reused. Existing FullKV predictions
 may be reused only if source, model and processor revisions, prompts, media,
 generation, precision, evaluator, and all control hashes match exactly.
 
-Each worker requests one A100, 12 CPUs, and at most two hours. At most four
+Each worker requests one A100, 12 CPUs, and at most two hours. At most six
 A100s may be occupied by MosaicKV jobs in aggregate. The running PrefixKV jobs
 take precedence; this protocol does not authorize a submission while they are
 active.

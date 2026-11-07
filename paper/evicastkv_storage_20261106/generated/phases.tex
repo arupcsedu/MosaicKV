@@ -1,0 +1,12 @@
+% Exported from hash-verified measured records; do not hand edit.
+\begin{tabular}{lrrrrr}
+\toprule
+Method & Prepare & Prefill/construct/retire & Decode & Full request & Replay eligible\\
+\midrule
+\textbf{EviCastKV-S} & 0.011 & 0.802 & 5.701 & 6.568 & 256/256\\
+Prompt Top-K (A) & 0.011 & 0.799 & 6.642 & 7.508 & 0/256\\
+PrefixKV (R+A) & 0.011 & 0.688 & 6.641 & 7.395 & 0/256\\
+VL-Cache (R+A) & 0.011 & 5.336 & 7.911 & 13.349 & 0/256\\
+LOOK-M (R+A) & 0.011 & 42.051 & 6.640 & 48.742 & 0/256\\
+\bottomrule
+\end{tabular}

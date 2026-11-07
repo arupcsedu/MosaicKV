@@ -1,0 +1,15 @@
+\begin{tikzpicture}[node distance=6mm]
+\node[box,text width=6.2cm] (ledger) {Immutable samples, prompts, generation settings,\\ model revision, backend, and physical-byte cap};
+\node[box,text width=1.5cm,below=of ledger.south west,anchor=north west] (a) {Prompt Top-K};
+\node[box,text width=1.5cm,below=of ledger] (b) {Audited lane baseline};
+\node[box,text width=1.5cm,below=of ledger.south east,anchor=north east] (c) {MosaicKV variant};
+\node[box,text width=6.2cm,below=25mm of ledger] (gate) {Check same IDs, realized bytes, controls, failures\\ Keep incompatible rows in separate strata};
+\node[box,text width=6.2cm,below=of gate] (stats) {Official task scorer + paired corpus-aware bootstrap\\ Quality--memory frontier and compressed-only latency};
+\draw[flow] (ledger.south west)++(0.85,0)--(a.north);
+\draw[flow] (ledger)--(b);
+\draw[flow] (ledger.south east)++(-0.85,0)--(c.north);
+\draw[flow] (a)--(a.south|-gate.north);
+\draw[flow] (b)--(gate);
+\draw[flow] (c)--(c.south|-gate.north);
+\draw[flow] (gate)--(stats);
+\end{tikzpicture}

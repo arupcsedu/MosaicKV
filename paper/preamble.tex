@@ -1,0 +1,61 @@
+% MLSys 2027 explicitly adopts the official 2025 submission style.
+% Do not change margins, font sizes, line spacing, or the vendored style.
+\usepackage{microtype}
+\usepackage[T1]{fontenc}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{amsmath,amssymb,mathtools}
+\usepackage{array,tabularx,multirow}
+\usepackage{xcolor}
+\usepackage{url}
+\newcommand{\theHalgorithm}{\arabic{algorithm}}
+\usepackage{mlsys2025}
+\usepackage{hyperref}
+% Move float hyperlinks out of the style's caption-width measuring box.
+\usepackage[all]{hypcap}
+\usepackage{tikz}
+\usepackage{pgfplots}
+\usepgfplotslibrary{groupplots}
+\pgfplotsset{compat=1.18}
+\usetikzlibrary{arrows.meta,positioning,fit,backgrounds,calc,shapes.geometric}
+\hypersetup{pdftitle={MosaicKV: Query-Forecasted Cross-Modal KV-Cache Compression},
+  pdfsubject={MLSys 2027 anonymous research draft},pdfauthor={Anonymous Authors},
+  colorlinks=true,linkcolor=black,citecolor=black,urlcolor=black,pdfborder={0 0 0}}
+\mlsystitlerunning{MosaicKV: Query-Forecasted Cross-Modal KV-Cache Compression}
+\mlsyskeywords{multimodal inference, KV cache, memory management, compression}
+\definecolor{exactblue}{HTML}{235789}
+\definecolor{forecastgreen}{HTML}{177E65}
+\definecolor{protogold}{HTML}{9B6500}
+\definecolor{riskred}{HTML}{AA3434}
+\tikzset{box/.style={draw=exactblue,rounded corners=2pt,align=center,
+  fill=exactblue!5,inner sep=5pt,font=\small},
+  optbox/.style={box,draw=protogold,dashed,fill=protogold!6},
+  flow/.style={-{Latex[length=2mm]},thick,draw=exactblue},
+  optional/.style={flow,dashed,draw=protogold}}
+\newcommand{\mosaic}{MosaicKV}
+\newcommand{\fullkv}{FullKV}
+\newcommand{\topk}{Prompt Top-K}
+\newcommand{\mexact}{\texttt{mosaickv\_exact}}
+\newcommand{\mproto}{\texttt{mosaickv\_proto}}
+\newcommand{\mfull}{\texttt{mosaickv\_full}}
+\newcommand{\method}[1]{\texttt{#1}}
+\newcommand{\bytes}{\operatorname{bytes}}
+\newcommand{\softmax}{\operatorname{softmax}}
+\newcommand{\KL}{\operatorname{KL}}
+\newcommand{\argmax}{\operatorname*{arg\,max}}
+\newcommand{\argmin}{\operatorname*{arg\,min}}
+\newcommand{\ResultBlank}{\mbox{\hspace{0.9em}}}
+\newcommand{\pendingresults}{\emph{Planned table: measured cells are intentionally blank.}}
+\newcommand{\codepath}[1]{\texttt{\path{#1}}}
+\newcolumntype{Y}{>{\raggedright\arraybackslash}X}
+\newcolumntype{P}[1]{>{\raggedright\arraybackslash}p{#1}}
+\newcommand{\manuscripttitle}{MosaicKV: Query-Forecasted Cross-Modal KV-Cache Compression}
+\newcommand{\anonymoustitle}[1]{%
+  \twocolumn[\mlsystitle{#1}
+  \begin{mlsysauthorlist}\mlsysauthor{Anonymous Authors}{anon}\end{mlsysauthorlist}
+  \mlsysaffiliation{anon}{Anonymous Institution}
+  \mlsyscorrespondingauthor{Anonymous Authors}{anonymous@example.invalid}
+  \vskip 0.3in
+  \begin{abstract}\input{sections/abstract}\end{abstract}]
+  \printAffiliationsAndNotice{}
+}

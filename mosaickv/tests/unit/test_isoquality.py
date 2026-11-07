@@ -214,6 +214,7 @@ def test_execution_contract_is_unsealed_and_uses_registered_curve_caps():
     )
     contract = load_contract(path)
     assert not contract["execution_authorized"]
+    assert contract["resources"]["max_global_a100s"] == 6
     assert contract["candidate"]["base_commit"] is None
     assert contract["candidate"]["content_sha256"] is None
     assert contract["lanes"]["vl_cache"]["caps_mib"] == [10, 20, 25, 40, 80]

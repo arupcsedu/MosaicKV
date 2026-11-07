@@ -79,13 +79,18 @@ def load_contract(path: Path) -> dict[str, Any]:
     contract = cast("dict[str, Any]", yaml.safe_load(path.read_text()))
     if contract.get("schema_version") != 2:
         raise ValueError("unrecognized comparison contract")
-    if contract["resources"] != {
-        "max_global_a100s": 4,
+    resources = contract["resources"]
+    if resources.get("max_global_a100s") not in {4, 6} or {
+        key: value for key, value in resources.items() if key != "max_global_a100s"
+    } != {
         "gpus_per_worker": 1,
         "cpus_per_worker": 12,
         "time_limit_seconds": 7200,
     }:
-        raise ValueError("require global four A100s, one GPU/12 CPUs/two hours per worker")
+        raise ValueError(
+            "require an approved four- or six-A100 global limit and "
+            "one GPU/12 CPUs/two hours per worker"
+        )
     if contract["execution_authorized"] or contract["fullkv_latency_comparison"]:
         raise ValueError("rules registration does not authorize execution or FullKV latency")
     for lane in contract["lanes"].values():

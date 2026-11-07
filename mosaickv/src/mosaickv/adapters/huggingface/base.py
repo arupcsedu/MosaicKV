@@ -861,7 +861,9 @@ class HuggingFaceMultimodalAdapter(ABC):
 
         packed_validity = state.model_state.get("mosaickv_validity_masks")
         packed_all_valid = state.model_state.get("mosaickv_packed_all_valid") is True
-        ragged = state.model_state.get("prefixkv_ragged") is True
+        prefixkv_ragged = state.model_state.get("prefixkv_ragged") is True
+        layerwise_exact = state.model_state.get("mosaickv_layerwise_exact") is True
+        bounded_history = state.model_state.get("mosaickv_bounded_history") is True
         if (
             state.active_cache_length != state.logical_sequence_length
             and packed_validity is None
@@ -885,10 +887,20 @@ class HuggingFaceMultimodalAdapter(ABC):
         layer_masks = (
             self._packed_decode_masks(state, token_id) if packed_validity is not None else ()
         )
-        if ragged:
+        if bounded_history:
+            from mosaickv.adapters.huggingface.bounded_history_cache import bounded_history_masks
+
+            layer_masks = bounded_history_masks(state)
+        elif prefixkv_ragged:
             from mosaickv.adapters.huggingface.prefixkv_cache import ragged_decode_masks
 
             layer_masks = ragged_decode_masks(self, state)
+        elif layerwise_exact:
+            from mosaickv.adapters.huggingface.layerwise_exact_cache import (
+                layerwise_exact_decode_masks,
+            )
+
+            layer_masks = layerwise_exact_decode_masks(self, state)
         query_capture = None
         attention_capture = None
         if not capture_queries and not capture_attentions and not layer_masks:
@@ -932,13 +944,22 @@ class HuggingFaceMultimodalAdapter(ABC):
         cache = self.extract_past_key_values(output, clone=False)
         active_length = self._cache_length(cache)
         expected_active = state.active_cache_length + 1
+        if bounded_history:
+            expected_active = min(
+                expected_active, int(state.model_state["mosaickv_bounded_history_capacity"])
+            )
         if active_length != expected_active:
             raise RuntimeError(f"decode cache grew to {active_length}; expected {expected_active}")
         model_state = state.model_state
-        if ragged:
+        if prefixkv_ragged:
             model_state["prefixkv_logical_positions"] = tuple(
                 (*positions, state.next_decode_position)
                 for positions in model_state["prefixkv_logical_positions"]
+            )
+        elif layerwise_exact:
+            model_state["mosaickv_layerwise_exact_logical_positions"] = tuple(
+                tuple((*positions, state.next_decode_position) for positions in layer)
+                for layer in model_state["mosaickv_layerwise_exact_logical_positions"]
             )
         model_state.update(self._capture_decode_model_state(output))
         if packed_validity is not None:
@@ -953,7 +974,9 @@ class HuggingFaceMultimodalAdapter(ABC):
         # allocation and a model-state dictionary copy per token. Repair and
         # draft paths pass cloned states at this boundary.
         state.past_key_values = cache
-        state.attention_mask = attention_mask
+        state.attention_mask = (
+            attention_mask[..., :active_length] if bounded_history else attention_mask
+        )
         state.active_cache_length = active_length
         state.logical_sequence_length += 1
         state.next_decode_position += 1
@@ -964,6 +987,86 @@ class HuggingFaceMultimodalAdapter(ABC):
             state,
             query_vectors,
             attention_weights,
+        )
+
+    def decode_token_batch(self, token_ids: Any, state: DecodeState) -> DecodeOutput:
+        """Decode one shared-position token for an all-valid candidate batch.
+
+        This narrow path exists for label-blind cache-plan probes. Every batch
+        member must have the same physical and logical lengths, no ragged or
+        validity-mask metadata, and an independently owned cache. It deliberately
+        exposes neither query nor attention hooks.
+        """
+
+        torch = _torch()
+        if getattr(token_ids, "ndim", None) == 1:
+            token_ids = token_ids.unsqueeze(-1)
+        if getattr(token_ids, "ndim", None) != 2 or int(token_ids.shape[1]) != 1:
+            raise ValueError("decode_token_batch expects token_ids shape [batch, 1]")
+        batch = int(token_ids.shape[0])
+        if batch < 1 or tuple(int(value) for value in state.attention_mask.shape[:-1]) != (batch,):
+            raise ValueError("candidate-batch tokens and attention mask disagree")
+        packed_validity = state.model_state.get("mosaickv_validity_masks")
+        if (
+            state.model_state.get("mosaickv_packed_all_valid") is not True
+            and packed_validity is None
+        ) or state.model_state.get("mosaickv_bounded_history") is True or (
+            state.model_state.get("prefixkv_ragged") is True
+        ) or (
+            state.model_state.get("mosaickv_layerwise_exact") is True
+        ):
+            raise NotImplementedError(
+                "candidate-batch decoding requires a uniform cache tensor layout"
+            )
+        attention_mask = self._append_decode_attention_mask(state)
+        cache_position = self._decode_cache_position(state, token_ids.device)
+        self._restore_model_state(state)
+        layer_masks = (
+            self._packed_decode_masks(state, token_ids)
+            if packed_validity is not None
+            else ()
+        )
+        with torch.inference_mode(), ExitStack() as stack:
+            if layer_masks:
+                if self._packed_mask_dispatcher is None:
+                    self._packed_mask_dispatcher = LayerAttentionMaskOverride(
+                        tuple(layer.self_attn for layer in self._language_layers())
+                    )
+                stack.enter_context(self._packed_mask_dispatcher.activate(layer_masks))
+            output = self._decode_forward(
+                token_ids,
+                state,
+                None,
+                cache_position,
+                output_attentions=False,
+            )
+        logits = output.logits[:, -1, :]
+        cache = self.extract_past_key_values(output, clone=False)
+        active_length = self._cache_length(cache)
+        expected_active = state.active_cache_length + 1
+        if active_length != expected_active:
+            raise RuntimeError(
+                f"batched decode cache grew to {active_length}; expected {expected_active}"
+            )
+        state.past_key_values = cache
+        state.attention_mask = attention_mask
+        state.active_cache_length = active_length
+        state.logical_sequence_length += 1
+        state.next_decode_position += 1
+        state.model_state.update(self._capture_decode_model_state(output))
+        if packed_validity is not None:
+            buffers = state.model_state.get("mosaickv_validity_buffers")
+            if not isinstance(buffers, tuple):
+                raise RuntimeError("batched packed validity buffers were not initialized")
+            state.model_state["mosaickv_validity_masks"] = tuple(
+                buffer[..., :active_length] for buffer in buffers
+            )
+        return DecodeOutput(
+            logits,
+            self._greedy_token(logits),
+            state,
+            QueryVectors(()),
+            (),
         )
 
     @staticmethod
@@ -1038,36 +1141,50 @@ class HuggingFaceMultimodalAdapter(ABC):
             ):
                 if (
                     getattr(validity, "dtype", None) != torch.bool
-                    or getattr(validity, "ndim", 0) != 2
+                    or getattr(validity, "ndim", 0) not in {2, 3}
                 ):
-                    raise RuntimeError(f"packed validity mask {layer_index} must be rank-2 bool")
+                    raise RuntimeError(
+                        f"packed validity mask {layer_index} must be rank-2/3 bool"
+                    )
                 if int(validity.shape[-1]) != state.active_cache_length:
                     raise RuntimeError(
                         f"packed validity mask {layer_index} has the wrong cache length"
                     )
                 attention = layer.self_attn
-                kv_heads = int(validity.shape[0])
+                kv_heads = int(validity.shape[-2])
+                mask_batch = 1 if validity.ndim == 2 else int(validity.shape[0])
+                token_batch = int(token_id.shape[0])
+                if mask_batch != token_batch:
+                    raise RuntimeError("packed validity batch does not match decode tokens")
                 query_heads = int(
                     getattr(attention, "num_heads", attention.config.num_attention_heads)
                 )
                 if query_heads % kv_heads:
                     raise RuntimeError("query heads are not divisible by packed KV heads")
                 validity_buffer = torch.ones(
-                    (kv_heads, capacity), dtype=torch.bool, device=validity.device
+                    (*validity.shape[:-1], capacity),
+                    dtype=torch.bool,
+                    device=validity.device,
                 )
                 validity_buffer[..., : state.active_cache_length].copy_(validity)
-                expanded = validity_buffer.repeat_interleave(query_heads // kv_heads, dim=0)
+                expanded = validity_buffer.repeat_interleave(
+                    query_heads // kv_heads,
+                    dim=-2,
+                )
                 dtype = next(attention.parameters()).dtype
                 additive = torch.zeros(
-                    (1, query_heads, 1, capacity), dtype=dtype, device=token_id.device
+                    (mask_batch, query_heads, 1, capacity),
+                    dtype=dtype,
+                    device=token_id.device,
                 )
                 additive[..., : state.active_cache_length].masked_fill_(
                     ~expanded[..., : state.active_cache_length]
                     .to(device=token_id.device)
-                    .unsqueeze(0)
                     .unsqueeze(-2),
                     torch.finfo(dtype).min,
                 )
+                if validity.ndim == 3 and prototype_biases:
+                    raise RuntimeError("batched packed probes do not support prototype biases")
                 group = query_heads // kv_heads
                 for raw in prototype_biases:
                     if not isinstance(raw, tuple) or len(raw) != 5:
@@ -1098,8 +1215,12 @@ class HuggingFaceMultimodalAdapter(ABC):
         for layer_index, (layer, validity) in enumerate(
             zip(self._language_layers(), validity_masks, strict=True)
         ):
-            if getattr(validity, "dtype", None) != torch.bool or getattr(validity, "ndim", 0) != 2:
-                raise RuntimeError(f"packed validity mask {layer_index} must be rank-2 bool")
+            if getattr(validity, "dtype", None) != torch.bool or getattr(
+                validity, "ndim", 0
+            ) not in {2, 3}:
+                raise RuntimeError(
+                    f"packed validity mask {layer_index} must be rank-2/3 bool"
+                )
             if int(validity.shape[-1]) != state.active_cache_length:
                 raise RuntimeError(f"packed validity mask {layer_index} has the wrong cache length")
             del layer
@@ -1166,6 +1287,11 @@ class HuggingFaceMultimodalAdapter(ABC):
             if cache is None:
                 raise RuntimeError("forward output did not contain past_key_values")
             return cache
+        if getattr(cache, "_mosaickv_bounded_history", False):
+            raise NotImplementedError(
+                "generic snapshot/reinjection would lose bounded ring ownership and positions; "
+                "construct a separate bounded cache from an isolated prefill instead"
+            )
         legacy, source_kind = self._legacy_layers(cache)
         independent = getattr(cache, "_mosaickv_independent_layer_lengths", False) is True
         layers: list[CacheLayerSnapshot] = []
@@ -1251,6 +1377,8 @@ class HuggingFaceMultimodalAdapter(ABC):
 
         if additional_positions < 1:
             return False
+        if state.model_state.get("mosaickv_bounded_history") is True:
+            raise RuntimeError("append-only preallocation would erase bounded-history eviction")
         layers, source_kind = self._legacy_layers(state.past_key_values)
         if source_kind not in {"cache_object", "cache_layers"}:
             return False

@@ -1,0 +1,184 @@
+\section{Selection, Physical Feasibility, and Three-Tier State}
+\label{app:selection}
+\subsection{Blockization and invariants}
+A \texttt{KVBlockDescriptor} records layer, KV head, modality, physical source
+indices, original logical positions, token IDs when available, image/frame/page/
+region metadata, K/V dtype and device, payload bytes, and a mandatory flag.
+Fixed-size token blockization never mixes layers or KV heads. A tail or
+modality boundary can produce a shorter block, so actual cost is recorded
+rather than inferred from the configured size alone.
+
+Every source position in each layer/head belongs to exactly one source block.
+Logical positions are monotone within a block. Mandatory source blocks cannot
+be removed by a later feasibility fill, prototype reassignment, or repair
+eviction. The membership rules require care: exact members and prototype
+source members are disjoint, while residuals intentionally duplicate the
+original members represented by prototypes. Calling this intentional overlap
+a membership conflict would make recovery impossible. Exact-only eviction can
+leave unrepresented source blocks, which are recorded as discarded rather
+than silently counted as residuals.
+
+\subsection{Utility components and signed weights}
+Within one layer/head stratum, each nonnegative signal is independently
+normalized to unit sum when its sum is nonzero. Attention contribution is
+estimated from forecast mass; a simple value contribution is
+$c_i^v=a_i\lVert\bar v_i\rVert_2$. Value novelty is
+\begin{equation}
+ n_i=1-\max_{j\in\mathcal N(i)}\max\{0,\cos(\bar v_i,\bar v_j)\}.
+\end{equation}
+An empty neighborhood requires a declared convention. Raw terms are retained
+so the normalized score can be audited. Centrality, modality rarity, redundancy,
+and mandatory priority are additional diagnostics or configured policy inputs;
+they must not be claimed as extra additive terms if the selected objective
+does not actually use them.
+
+The implementation uses literal minus signs for the value and novelty terms
+and for coverage. Negative coefficients turn these terms into rewards.
+For explanatory purposes one may set $\alpha_v=-\lambda_v$ and
+$\alpha_g=-\lambda_g$ and discuss nonnegative reward coefficients, but the
+manifest must retain the actual resolved values. Changing sign in prose
+without changing the configuration would describe a different method.
+
+\subsection{Greedy selection and its limits}
+Mandatory blocks are selected in deterministic order before optional choices.
+For feasible candidate $i$, the marginal gain is
+$\Delta_i(S)=F(S\cup\{i\})-F(S)$. In a byte budget, a greedy priority can use
+$\Delta_i/c_i$. Ties are resolved by raw gain, lower cost, then stable block ID.
+Cached marginal bounds are valid only for the relevant diminishing-returns
+objective. Positive coverage penalties violate the intended lazy-greedy
+condition and must not be silently accepted.
+
+The unconstrained-cardinality approximation result for normalized monotone
+submodular maximization \citep{nemhauser1978} does not establish optimality for
+mandatory, per-head, padded, modality-constrained byte packing. Tiny synthetic
+graphs can be exhaustively enumerated to report an objective gap and test
+diminishing returns. This is an algorithm test, not a benchmark score.
+
+The production execution variant may use vectorized per-route top-k for
+single-token equal-cost blocks. It preserves deterministic ordering and avoids
+general per-head dynamic programming. It is not automatically an exact
+optimizer of graph coverage. The trace must identify which selector ran, which
+heads entered it, the selected marginal/reason for each block, and any fallback.
+
+\subsection{Why the largest feasible cache is not simply the cap}
+For equal-width dense heads with lengths $n_{\ell h}$, a layer may allocate
+storage according to $\max_h n_{\ell h}$. The selected-source sum can then be
+smaller than actual storage. In a uniform-layer layout, an illustrative formula
+is
+\begin{equation}
+ B_{\mathrm{physical}}=2bsd\sum_{\ell}H_{kv,\ell}\max_h n_{\ell h}.
+\end{equation}
+This formula is layout-specific; tuple caches or native paged layouts need
+their own accounting. It explains why a route-local choice can fit in isolation
+and still cause the complete cache transaction to exceed its cap.
+
+Let $\mathcal P(C)$ be the set of physically feasible cache plans under cap $C$.
+The shared-byte protocol asks a method to reach its largest attainable storage
+level $B^*(C)=\max_{P\in\mathcal P(C)}B_{\mathrm{active}}(P)$, then optimize its
+selection policy within that level. A greedy method's nonpositive marginal-gain
+stopping rule is not an excuse to underfill this experimental control.
+Mandatory, prompt, evidence, prototype-anchor, and per-head minimum reservations
+must be reconciled in one feasibility transaction. Optional reservations can
+be reduced deterministically; mandatory state and the hard cap cannot.
+
+If two methods have different attainable lattices, the protocol either chooses
+a common attainable target or reports the discrepancy and excludes the pair
+from strict same-byte claims. It does not silently compare the nominal cap
+while hiding different actual sizes. Native engine block boundaries are an
+important source of such differences.
+
+\subsection{Storage audit and atomic construction}
+Before committing a plan, record knapsack-estimated bytes, unique selected-source
+bytes, planner-tier bytes, external-exact bytes, constructed active bytes, and
+physical padding bytes. These are related diagnostics, not six disjoint terms
+to add. For a defined layout, constructed bytes must equal actual unique
+active KV allocation; padding is the difference from populated active payload
+under the same storage boundary.
+
+Construct a new cache in isolation, verify its validity masks and logical
+position map, then publish it to decode. Do not partially update a live cache
+and leave scheduler or position state pointing at the old layout. A rejected
+compressed proposal retains its accounting separately from any FullKV fallback.
+A fallback has different memory and cannot satisfy the compression gate.
+
+\subsection{Prototype construction}
+For compatible source token vectors $k_j,v_j$ assigned weights
+$\alpha_j\ge0$, $\sum_j\alpha_j=1$, a phase-neutral construction is
+\begin{align}
+ \bar k&=\sum_{j\in\mathcal C}\alpha_j R(p_j)^{-1}k_j,\\
+ k_{\mathcal C}&=R(p_*)\bar k,\qquad
+ v_{\mathcal C}=\sum_{j\in\mathcal C}\alpha_j v_j.
+\end{align}
+This expression applies only when $R$ is the adapter's verified invertible
+RoPE transform and the key's cached representation is known. Partial rotary
+dimensions, scaling variants, and multimodal coordinates need adapter-specific
+handling. Non-rotated value vectors are averaged directly. Accumulation uses
+FP32 before casting to the original cache dtype.
+
+An anchor is a selected exact block used for assignment and position selection;
+it is not silently mixed into the prototype and counted a second time. Merges
+stay within a layer/head and enforce configured modality and positional-span
+limits. Diagnostics record members, weights, modality composition, span,
+key/value dispersion, and physical bytes saved after adding prototype slots.
+
+\paragraph{Why phase safety is not equivalence.}
+Original attention includes several exponentials,
+$\sum_j\exp(q^\top k_j/\sqrt d)$, whereas a single prototype contributes one.
+Averaging keys does not preserve that sum or its value-weighted numerator.
+Even identical keys with multiple members need a multiplicity treatment to
+preserve their mass relative to other tokens. MosaicKV therefore treats
+prototype merging as a lossy approximation, never as a consequence-free
+deduplication. Disable merging if representation compatibility cannot be
+established. At retention one, return the unchanged full cache.
+
+\subsection{Residual storage and recovery}
+Residual storage maps layer, head, prototype ID, and original position to
+original source blocks. The conservative format is lossless in the source
+dtype and pinned on the CPU where supported. FP16, BF16, FP8, and INT8 variants
+need explicit dtype/scale metadata and separate quality validation; lower byte
+width is not automatically lower latency. Host pinning can consume scarce
+locked memory and must have an error policy.
+
+For next-token probabilities $p_v$, normalized entropy is
+\begin{equation}
+ H(p)=-\frac{\sum_{v=1}^{|V|}p_v\log p_v}{\log|V|}.
+\end{equation}
+A prototype-risk policy uses cluster mass $a_{\mathcal C}$ and dispersion
+$D_{\mathcal C}$, with score
+$\rho_{\mathcal C}=a_{\mathcal C}D_{\mathcal C}$. The manifest defines how key
+and value dispersion combine, how heads/layers aggregate, and whether a cheap
+draft KL is also used. An entropy-only policy need not inspect prototypes but
+still requires available residual evidence to restore.
+
+\begin{figure*}[t]
+\centering\input{figures/tiers_repair}
+\caption{Compatibility-gated repair transaction. The current token is
+provisional until transfer, budget enforcement, and at most one re-decode
+complete. Dashed stages require separate validation.}
+\label{fig:repair}
+\end{figure*}
+
+Asynchronous transfers use a stream/event dependency before restored blocks
+are consumed. Promotion persists for later steps. If only some members of a
+prototype are restored, its remaining membership and weights must be updated
+or the prototype removed with explicit accounting; keeping a stale prototype
+can double-count restored evidence. Non-promoted prototype eviction must not
+remove mandatory or newly promoted exact states. Policy \texttt{none} executes
+no repair. Each event records trigger reason, step, clusters, restored IDs and
+bytes, transfer time, re-decode time, logit/token change, and evaluation-only
+quality benefit.
+
+\subsection{Bounded logit-safe probing as a separate variant}
+The repository also contains exploratory hierarchical search and cache-isolation
+machinery. A bounded probe can compare candidate next-token distributions to
+FullKV using a fixed KL/logit threshold and greedy-token agreement. Route
+ladders must contain only physically feasible levels. A byte allocator then
+chooses route levels, followed by a final joint probe: individually safe changes
+need not be safe together.
+
+This is not a zero-cost verification oracle or a guarantee about the entire
+answer. Probe count, horizon, rollback, failed candidate accounting, and
+fallback status are part of the effective method. Repeated failed refinements
+can make planning far more expensive than decode. Such a variant must be
+preregistered and compared with the same byte and generation controls; it is
+not silently substituted for the frozen primary candidate.

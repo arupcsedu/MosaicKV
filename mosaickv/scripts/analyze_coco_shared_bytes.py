@@ -15,6 +15,11 @@ import time
 from dataclasses import asdict, replace
 from pathlib import Path
 
+from isoquality_gate import (
+    QualityDirection,
+    choose_candidate_cap_without_quality,
+    evaluate_isoquality_pair,
+)
 from run_coco_shared_bytes import completed_sample
 from run_prefixkv_decode_preflight import digest, write_once
 
@@ -118,7 +123,12 @@ def comparison_scope(plan, stage, *, requested_methods=None, requested_caps=None
     ):
         raise ValueError("analysis methods must be a registered subset containing FullKV/MosaicKV")
     registered_caps = tuple(plan.get("caps_mib", (40,)))
-    caps = (40,) if stage == "validation" else tuple(requested_caps or registered_caps)
+    default_caps = (
+        tuple(plan.get("validation_caps_mib", (40,)))
+        if stage == "validation"
+        else registered_caps
+    )
+    caps = tuple(requested_caps or default_caps)
     if (
         len(caps) != len(set(caps))
         or any(cap not in registered_caps for cap in caps)
@@ -243,6 +253,7 @@ def analyze(args):
         complete_cohort_cider=True,
         bootstrap_resamples=plan["bootstrap_resamples"],
         comparisons=[],
+        isoquality_tests=[],
         gates=[],
     )
     try:
@@ -266,10 +277,13 @@ def analyze(args):
         if missing:
             raise ValueError("incomplete paired cohort; metrics intentionally withheld")
         ids = sorted(samples)
-        denominator = (
-            (32 if args.stage == "validation" else 256)
-            if args.stage != "final"
-            else plan["final_sample_count"]
+        denominator = plan.get("stage_sample_counts", {}).get(
+            args.stage,
+            (
+                (32 if args.stage == "validation" else 256)
+                if args.stage != "final"
+                else plan["final_sample_count"]
+            ),
         )
         if len(ids) != denominator:
             raise ValueError("wrong preregistered stage denominator")
@@ -381,12 +395,52 @@ def analyze(args):
             for reference in methods
             if reference != "mosaickv_exact"
         ]
+        isoquality_pairs = []
+        if len(caps) > 1:
+            for reference in (
+                name for name in methods if name not in {"full_kv", "mosaickv_exact"}
+            ):
+                for reference_cap in caps:
+                    candidate_cap = choose_candidate_cap_without_quality(
+                        baseline_rows=[rows[reference, reference_cap, sid] for sid in ids],
+                        candidates={
+                            cap: [rows["mosaickv_exact", cap, sid] for sid in ids]
+                            for cap in caps
+                            if cap < reference_cap
+                        },
+                        baseline_cap_mib=reference_cap,
+                        minimum_memory_reduction=plan.get(
+                            "isoquality_minimum_memory_reduction", 0.30
+                        ),
+                    )
+                    if candidate_cap is None:
+                        report["isoquality_tests"].append(
+                            dict(
+                                baseline=reference,
+                                baseline_cap_mib=reference_cap,
+                                candidate="mosaickv_exact",
+                                candidate_cap_mib=None,
+                                metric_name="cider",
+                                status="physically_infeasible_on_registered_grid",
+                                joint_pass=False,
+                            )
+                        )
+                    else:
+                        isoquality_pairs.append(
+                            ((reference, reference_cap), ("mosaickv_exact", candidate_cap))
+                        )
+        all_cider_pairs = list(dict.fromkeys([*cider_pairs, *isoquality_pairs]))
+        # The cross-budget family is selected from storage alone. Use one
+        # conservative Bonferroni interval across every registered comparison
+        # rather than selecting a favorable pointwise 95% interval afterward.
+        family_confidence = 1.0 - 0.05 / max(1, len(isoquality_pairs))
         cider_comparisons = bootstrap_cider_curve(
             metric_samples,
-            cider_pairs,
+            all_cider_pairs,
             resamples=plan["bootstrap_resamples"],
             seed=plan["bootstrap_seed"],
             workers=getattr(args, "bootstrap_workers", 1),
+            confidence=family_confidence,
         )
         for cap in caps:
             for reference in (name for name in methods if name != "mosaickv_exact"):
@@ -441,6 +495,32 @@ def analyze(args):
                             **asdict(latency),
                         )
                     )
+        for reference, candidate in isoquality_pairs:
+            reference_method, reference_cap = reference
+            _candidate_method, candidate_cap = candidate
+            comparison = cider_comparisons[reference, candidate]
+            gate = evaluate_isoquality_pair(
+                baseline_method=reference_method,
+                baseline_cap_mib=reference_cap,
+                baseline_rows=[rows[reference_method, reference_cap, sid] for sid in ids],
+                candidate_method="mosaickv_exact",
+                candidate_cap_mib=candidate_cap,
+                candidate_rows=[rows["mosaickv_exact", candidate_cap, sid] for sid in ids],
+                comparison=comparison,
+                direction=QualityDirection.HIGHER,
+                quality_margin=plan.get("isoquality_quality_margin", 0.0),
+                minimum_memory_reduction=plan.get(
+                    "isoquality_minimum_memory_reduction", 0.30
+                ),
+            )
+            report["isoquality_tests"].append(
+                {
+                    **gate.to_dict(),
+                    "status": "passed" if gate.joint_pass else "failed",
+                    "quality_comparison": asdict(comparison),
+                    "familywise_confidence": family_confidence,
+                }
+            )
         output.mkdir(parents=True, exist_ok=True)
         pd.DataFrame(
             [
@@ -452,13 +532,21 @@ def analyze(args):
         pd.DataFrame(report["comparisons"]).to_parquet(
             output / "paired_comparisons.parquet", index=False
         )
+        if report["isoquality_tests"]:
+            pd.DataFrame(report["isoquality_tests"]).to_parquet(
+                output / "isoquality_tests.parquet", index=False
+            )
         plot_curves(aggregates, output)
         report["aggregates"] = aggregates
         report["derived_artifact_hashes"] = {
             str(p): digest(p) for p in output.iterdir() if p.suffix in {".parquet", ".svg"}
         }
         report["status"] = "passed"
-        report["interpretation"] = "execution/byte/metric gate only; not a superiority gate"
+        report["interpretation"] = (
+            "lower_memory_equal_quality_demonstrated_for_at_least_one_named_pair"
+            if any(item.get("joint_pass") for item in report["isoquality_tests"])
+            else "execution_byte_metric_complete_but_lower_memory_equal_quality_not_demonstrated"
+        )
     except Exception as error:
         report["error"] = f"{type(error).__name__}: {error}"
     write_once(output / "report.json", report)

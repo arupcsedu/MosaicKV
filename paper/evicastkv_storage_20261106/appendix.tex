@@ -1,0 +1,461 @@
+\documentclass{article}
+\input{preamble}
+\begin{document}
+\twocolumn[
+\mlsystitle{\texorpdfstring{EviCastKV: Shared-Source Storage for Multimodal KV Caches\\Supplementary Material}{EviCastKV: Supplementary Material}}
+\begin{mlsysauthorlist}\mlsysauthor{Anonymous Authors}{anon}\end{mlsysauthorlist}
+\mlsysaffiliation{anon}{Anonymous Institution}
+\mlsyscorrespondingauthor{Anonymous Authors}{anonymous@example.invalid}
+\vskip .2in
+]
+\printAffiliationsAndNotice{}
+\appendix
+\section{Reading guide and claim boundary}
+This supplement expands the representation, execution and measurement
+contracts of the accompanying paper. The evaluated system is \Evi{}, the
+shared-source precision/storage variant. The suffix S distinguishes its
+scope; it does not introduce a second measured competitor. Its legacy
+machine-readable method identifier is \texttt{mosaickv\_exact}. That identifier
+must not be read as evidence that all prompt K/V are bitwise exact or that
+the original six-component EviCastKV/MosaicKV compressor ran.
+
+The experiment establishes completed operating points on an inspected
+256-image COCO cohort. It does not establish an independent confirmation,
+a physical-byte-matched selection-policy comparison, an equal-quality
+memory frontier, a whole-request peak certificate, or performance of
+inactive mechanisms. A coherent interpretation of the main paper requires
+all of these restrictions; they are not exceptions hidden by an average.
+
+\section{Executed configuration}
+\begin{table*}[t]
+\centering\small\input{generated/environment}
+\caption{Executed configuration and complete immutable revisions. The source
+revision belongs to the measured producer, not the later paper-writing
+worktree. Installed serving packages are explicitly not exercised.}
+\label{tab:environment}
+\end{table*}
+Table~\ref{tab:environment} records the executed environment. The workload
+uses one image and one request per GPU. The checkpoint has 32 layers, 32
+KV heads and head dimension 128. All weights are BF16. Original decoder
+K/V are BF16; the prompt source has its separately declared three-bit
+representation. Mixed precision at the representation boundary must not be
+described as a lower-precision model.
+
+Every worker uses one A100-SXM4-80GB and 12 CPU cores. The campaign admits
+at most six workers concurrently, not six GPUs per request. Its execution
+passes ran separately. GPU sharing on the node is recorded; clocks and
+power state are observations, not proof of exclusive node ownership or
+fixed-frequency execution. The deterministic setup sets
+\texttt{CUBLAS\_WORKSPACE\_CONFIG=:4096:8} before Python, records the seed and
+uses greedy token selection. Determinism checks remain empirical under
+the pinned software rather than a promise across arbitrary CUDA versions.
+
+The exact prompt is: ``Provide a one-sentence caption for the provided
+image.'' The common processor and chat template produce an unpadded
+603-position decoder prefix. Every method computes 128 predictions. The
+first comes from original prefill logits; predictions 2--128 require 127
+additional decoder forwards. Consequently 128 predictions are not 128
+new cache positions.
+
+\section{Representation and storage layout}
+\subsection{Why a common source can reduce persistence}
+In a multi-head-attention layer, both key and value projections consume
+the same normalized hidden input $X_\ell\in\mathbb R^{n\times d}$.
+Their dense BF16 outputs occupy $2nd$ words, whereas a single source
+requires $nd$ words before compression. Reusing this algebraic input is
+not a new general principle: latent-cache and low-rank projection systems
+also exploit reconstruction opportunities \citep{chang2024palu}. The
+specific questions here are whether the measured format can retain all
+prompt positions, protect selected exact entries, encode the generated
+history, and reconstruct fast enough under an explicit ownership boundary.
+
+For grouped-query attention, $d$ can be much larger than the combined K/V
+width. The same dimensional argument can then become unfavorable. The
+present measurements do not establish a useful GQA format, Qwen support,
+or cross-family portability \citep{ainslie2023gqa}.
+
+\subsection{Prompt-source format}
+The prompt packet contains grouped affine three-bit source codes, scale
+and offset metadata, exact protected K/V payloads, positional information,
+numerical patches, index metadata and applicable lossless code transforms.
+Groups have 128 elements along the configured source axis. The constant
+group case uses a guarded scale rather than division by zero. Padding and
+allocation slack remain part of the backing storage, even when no logical
+element reads them.
+
+The source approximation affects unprotected entries across the full
+prompt. Exact overlays overwrite only their protected head-position
+locations. Globally exact rows can be excluded from the lossy payload to
+avoid duplicate persistence; this does not remove their logical positions.
+The representation is therefore neither a pure token subset nor a
+prototype-merged cache. No averaging across incompatible rotary phases is
+performed: original phases are retained and applied during reconstruction
+\citep{su2021rope}.
+
+\subsection{Protection rule and its limits}
+The frozen protection rule combines a head-local mean over the last 16
+prompt-query positions with a shared prompt prior, at weights 0.5 and
+0.5. The prior is formed from original prompt attention, not generated
+answers or benchmark references. Deterministic ranking and the registered
+source-slot allocation produce a selected set; the last prompt position
+is mandatory. The first four and last eight selected positions and
+selected text positions form head-local exact regions.
+
+This rule does not guarantee that every answer-critical visual or OCR
+entry is protected. Nor is the historical half-source-slot convention
+equivalent to half the physical bytes. Different exact overlays,
+adaptive layer quotas, merge payloads and metadata explain why the six
+methods in this study do not produce equal encoded caches.
+
+\subsection{Two distinct numerical references}
+Let $X$ be the original source and $\widehat X$ its decoded approximation.
+There are two different comparisons:
+\begin{enumerate}
+\item \emph{Quantization/task distortion}: compare computation from
+      $\widehat X$ and protected overlays with unrestricted computation
+      from $X$. This is a lossy modeling change; caption quality must be
+      measured. Numerical patches do not eliminate this distortion.
+\item \emph{Transport distortion}: compare a custom reconstruction
+      kernel with native frozen-weight projection of the same
+      $\widehat X$, the same overlays and the same original rotary phases.
+      This checks the arithmetic implementation of a chosen representation.
+\end{enumerate}
+The registered prompt transport envelope uses relative tolerance 0.01 and
+absolute tolerance $2^{-6}$ under the pinned dtype predicate. Sparse
+native-reference words repair violations that the format explicitly
+permits. Protected-row mismatches are rejected. This is construction-time
+numerical handling, not uncertainty-guided decode repair, learned value
+fitting or benchmark-label calibration.
+
+The generated-history path has a stricter, bitwise BF16 K/V contract.
+Source and correction coding can be lossless even though the prompt that
+caused those generated forward passes was approximate. These two
+statements are consistent and must not be collapsed into a claim that
+the entire request equals FullKV.
+
+\subsection{History sealing and unfinished tails}
+Each generated token contributes its actual normalized input and original
+logical position. The current path seals 16-token chunks, retains the
+unfinished tail, and preserves continuity when consolidating archived
+chunks. Native projections and original rotary phases reconstruct the
+history. Sparse exact-word corrections are checked through BF16 word
+identity. Lossless payload coding falls back to raw storage when coding
+would expand it.
+
+There is no generated-token history eviction in this study. Capacity is
+not kept constant by discarding old answers. An append-only logical cache
+can nevertheless have compressed physical backing. The final and peak
+measurements include the accumulated history; reporting the initial
+prompt packet alone would overstate the lifecycle benefit.
+
+\section{Request lifecycle and cache ownership}
+\subsection{Construction and publication}
+The following lifecycle describes the implementation, not a second model
+prefill or an offline preprocessing stage:
+\begin{enumerate}
+\item Enter the ordinary multimodal request and process its image/text.
+\item During the one original prefill, capture the layer source, original
+      K/V, prompt attention needed by that policy, and rotary metadata.
+\item Construct a private encoded packet; validate shape, finite values,
+      protected entries and the numerical predicate before publication.
+\item Retire superseded dense cache owners. Bind the packet and charge
+      the live metadata introduced by binding.
+\item At each generated forward, reconstruct the current layer into a
+      bounded lease, consume it through attention and retire or reuse
+      only request-private transient storage.
+\item Append the actual generated-history source at its original logical
+      next position; seal chunks under the declared lossless contract.
+\item Export logits, derive the EOS-aware caption, retire private replay
+      state and return. End-to-end timing includes these steps.
+\end{enumerate}
+
+Publication is a state transaction. A serializable packet size is not the
+same as initial bound-cache storage, and a tensor view's logical size is
+not the size of its backing allocation. No uncharged full-cache owner may
+remain resident merely to make a later correction easier.
+
+\subsection{First-token boundary}
+The evaluated boundary uses the original complete prompt prefill. Its
+last logits determine the first generated token, then the encoded cache
+supports subsequent forwards. All six methods therefore share their
+first predicted token for each image; the exporter checks this invariant.
+That token is not evidence of approximate-cache output parity.
+
+A different historical diagnostic withheld the final prompt token and
+then evaluated it against a compressed prefix. That boundary needs its
+own FullKV numerical control, observation mask and no-double-feed checks.
+It is not silently substituted here, and earlier failures at that boundary
+are not resolved by the present boundary's successful execution. No
+streamed first-token emission was measured; prefill-logit availability
+must not be labeled a measured user-visible TTFT.
+
+\subsection{Conditional uniform-layout replay}
+The acceleration predicate requires the supported 32-layer configuration,
+uniform layer prompt lengths and the bounded prompt-plus-update extent
+of the current eager core. For the present 603-position prompt and 127
+updates, that extent is below its 1,024-position limit. Eligible requests
+use private split execution graphs with explicit dtype handling. Ineligible
+adaptive layouts use their ordinary eager path without quota changes or
+padding solely to qualify for replay.
+
+The common capability was requested for all compressed methods, but all
+256 \Evi{} layouts qualified and all four frozen baseline layouts failed
+the shape predicate. This is a material implementation difference. The
+latency result is for complete representation/layout/runtime operating
+points; it is not a causal estimate of the source codec alone. Graph setup,
+capture, retirement and charged workspace remain inside the request.
+CUDA execution graphs do not constitute the historical semantic evidence
+graph, and their activity cannot validate that inactive algorithm component.
+
+\section{Measurement definitions and accounting exclusions}
+\subsection{Persistent and decode-owned storage}
+For live tensors $\mathcal T(t)$ at a declared boundary, define
+\begin{equation}
+ B(t)=\sum_{s\in\mathrm{unique\_backings}(\mathcal T(t))}
+       \mathrm{allocation\_bytes}(s).
+\end{equation}
+Deduplication uses storage identity, not tensor-object identity. A view
+does not create a second charged owner, and a small view does not shrink
+the charge of a larger retained backing. Codes, headers, exact overlays,
+patches, stored positions and relevant metadata are included.
+
+Initial storage is measured after construction and binding; final storage
+after the prescribed generated forwards. The audited decode-owned peak
+observes reconstruction leases and other live cache tensors, including
+native append overlap where relevant. Means of per-request peaks and the
+maximum observed request peak are different statistics and both are
+reported.
+
+The audit does not certify a whole-request KV peak spanning every prefill
+and construction transient, nor total process GPU memory. It excludes
+model weights, general attention activations, vendor-internal resources
+and unrelated process allocations. CUDA allocator reserved memory is not
+the same quantity as unique live cache backing. Memory percentages in
+the paper must not be translated into an identical percentage of GPU HBM
+capacity or a proven serving-batch increase.
+
+\begin{table*}[t]
+\centering\small\input{generated/memory_reductions}
+\caption{Reduction of \Evi{} relative to each measured operating point.
+All percentages are computed from measured cohort means. These are
+different-byte comparisons, not matched-budget or equal-quality results.}
+\label{tab:reductions}
+\end{table*}
+
+\subsection{Full-request and phase time}
+The headline latency is synchronized completed-request wall time, measured
+without the storage observer. It includes actual media handling,
+preprocessing, prefill, construction, graph setup, decode, CPU logits
+export, EOS-aware detokenization and private-state retirement. Model
+loading, writing artifacts and evaluating CIDEr are excluded. A request
+does not reuse another timed request's prefill or captured graphs.
+
+\begin{table*}[t]
+\centering\small\setlength{\tabcolsep}{4pt}
+\input{generated/phases}
+\caption{Mean recorded phase wall times (seconds), over the uninstrumented
+256-image pass. Prefill/construct/retire is a combined region, not a
+compression-only measurement. The full request contains additional
+operations and is not defined by summing these columns. Replay eligibility
+is actual engagement under the shared predicate.}
+\label{tab:phases}
+\end{table*}
+The phase table is deliberately limited to the compressed paths, whose
+recorded keys define compatible regions. FullKV uses a different diagnostic
+phase dictionary; absent regions are not filled with invented zeros.
+Inclusive host and device intervals can overlap. In particular, a CUDA
+stream interval containing gaps is not exclusively GPU kernel time, and
+its sum with nested host durations would double-count work
+\citep{pytorch2025cuda}.
+
+\subsection{Correctness checks are not benchmark wins}
+The canonical CPU suite records 4,548 passing tests and two deselected GPU
+tests. GPU execution then validates six audit/non-audit canaries, with all
+128 exported logits bitwise equal for each method's instrumented and fast
+path. The complete memory and timing passes additionally have identical
+token IDs and storage endpoints for every method--image pair. The repeated
+study preserves those tokens and endpoints as well.
+
+These checks rule out the measured instrumentation changing outputs, and
+help detect state or accounting drift. They do not prove that lossy
+prompt-source K/V equal FullKV, that another backend is supported, that
+all possible requests are isolated, or that every numerical threshold in
+the original six-component design passed. At retention one, the declared
+identity path must bypass lossy conversion; that general contract is not
+replaced by the audit/non-audit comparison.
+
+\section{Captions, references and denominators}
+\begin{table*}[t]
+\centering\small\input{generated/caption_lengths}
+\caption{Caption parsing over all 256 images per method. A limit-hit caption
+remains in the metric denominator and is not an execution failure silently
+discarded. The fixed-work decode still computes 128 predictions after an
+early EOS; scoring uses the EOS-aware prefix.}
+\label{tab:captions}
+\end{table*}
+Every row retains its generated token IDs, caption, reference list, terminal
+metadata, timing and storage endpoints. Some COCO records provide more
+than five captions; all supplied references are accepted. Empty captions
+would be scored and recorded, not removed. The accepted study has none.
+
+The PrefixKV precision/storage adaptation reaches the prediction limit in
+42 of 256 captions; all five other methods do so in zero cases.
+Its observed caption length and quality therefore cannot establish that
+official PrefixKV fails at its published VQA or PPL operating point. No
+PrefixKV teacher-forced PPL or native FullKV-reference ROUGE-L is measured
+by this COCO experiment. Likewise, CIDEr cannot substitute for MileBench
+Accuracy/ROUGE-L or VL-Cache's other paper-native routes.
+
+\section{Statistical procedures}
+\subsection{Corpus CIDEr is not a mean of shard scores}
+Let $I$ denote an image multiset, $y^m_i$ method $m$'s caption and
+$R_i$ its references. Write the complete evaluator as
+\begin{equation}
+ C_m(I)=\mathcal C\bigl(\{(y^m_i,R_i):i\in I\}\bigr).
+\end{equation}
+The reducer includes reference document frequencies and TF--IDF weights
+\citep{vedantam2015cider}. A bootstrap draw $I_b$ resamples 256 paired
+image indices with replacement, including multiplicities. It recomputes
+the corpus quantities on $I_b$ and forms
+$D_b=C_{\mathrm{Evi}}(I_b)-C_m(I_b)$. Averaging precomputed shard scores
+or original-corpus per-image CIDEr values is not this procedure.
+
+The point estimate uses the original complete cohort. We use 10,000 draws
+and seed 20261106. The unadjusted interval uses the 0.025 and 0.975
+quantiles. For the five registered quality contrasts, Bonferroni intervals
+use tail probability $0.05/(2\cdot5)$ per contrast, producing a familywise
+95\% interval family \citep{efron1979bootstrap}.
+
+Positive point estimates do not establish superiority when the lower
+bound remains negative. Intervals crossing zero do not establish
+equivalence. A zero-margin preservation claim needs its own justified
+test and a nonnegative lower bound under the stated multiplicity control.
+The present inspected cohort cannot be relabeled untouched confirmation
+by a different statistical reducer.
+
+\subsection{Repeated request-time ratios}
+The separate repeated experiment contains six preregistered image indices,
+20 repetitions per compressed method and five warmups. It has 600 measured
+rows. Methods are ordered under the registered randomized schedule, and
+model loading remains outside the timer. For each reference adaptation,
+the ratio is mean \Evi{} request time divided by mean baseline request
+time. Nested paired resampling retains the image/repetition structure;
+four contrast intervals are familywise adjusted.
+
+\begin{table*}[t]
+\centering\small\input{generated/paired_latency}
+\caption{Separate six-image repeated study. ``Lower time'' is $100(1-r)$,
+where $r$ is the ratio of means, not the mean of per-request ratios. FullKV
+is excluded from compressed-method latency inference.}
+\label{tab:repeated}
+\end{table*}
+The 256-image p50/p95 describe a broader distribution with one timed
+observation per method--image pair. They are not 20-repeat quantiles for
+all 256 images, and are not pooled with the six-image repeated study.
+This distinction particularly matters when local construction cost varies
+substantially across images.
+
+\section{Active and inactive design components}
+\begin{table*}[t]
+\centering\small
+\begin{tabularx}{\textwidth}{l c Y}
+\toprule
+Historical mechanism & Active? & Interpretation of this study\\
+\midrule
+Future-query forecasting & No & Prompt protection is not a temporary future rollout.\\
+Sparse cross-modal evidence graph & No & CUDA replay graphs are execution objects, not semantic edges.\\
+Value-aware block utility & No & Native-projection numerical patches do not evaluate that utility.\\
+Budgeted submodular selection & No & A source-slot convention is not an evaluated submodular selector.\\
+Exact/prototype/residual tiers & No & Exact overlays and sparse arithmetic patches are a different format.\\
+Uncertainty-guided residual repair & No & History reconstruction is unconditional, not a repair policy.\\
+\bottomrule
+\end{tabularx}
+\caption{Explicit scope of the current variant. Existing modules, CPU tests
+or historical diagrams cannot turn an inactive mechanism into measured
+evidence. These mechanisms remain research directions, not contributions
+validated by the current performance table.}
+\end{table*}
+
+\section{Baseline provenance and historical evidence}
+The current labels distinguish FullKV reference, Prompt Top-K adaptation,
+and the PrefixKV, VL-Cache and LOOK-M reimplementation-plus-adaptation
+paths. Their paper citations identify algorithmic origins, not ownership
+of the present code or a claim that those papers used this codec
+\citep{wang2025prefixkv,tu2025vlcache,wan2024lookm}.
+
+The repository also preserves separate historical studies: native
+PrefixKV Description/MM-Vet PPL and ROUGE-L routes; shared-byte FP16
+comparisons; LLaVA-v1.6-Mistral COCO/CIDEr runs; and representative
+MileBench Accuracy/ROUGE-L evaluations. They differ in checkpoints,
+precision, outputs, budgets, variants or dataset routes. Their quality
+numbers cannot be pooled with this BF16 LLaVA-1.5 storage study, and their
+official-path checks do not automatically validate this new adaptation.
+The main result table does not import those historical values.
+
+In particular, a published result is neither a measured local row nor an
+automatic comparator at the same actual bytes. Reproduction deltas require
+their own identical native controls. The general lower-memory-at-equal-quality
+question requires budget curves and an independently frozen eligibility
+rule; comparing the current isolated operating points cannot answer it.
+
+\section{Artifact verification and source map}
+The paper exporter reads the immutable plan, source/ledger seals, every
+worker manifest/result/raw record, phase decisions and the completed
+statistical summary. It checks 124 producer workers, unique row keys,
+complete sample grids, no FullKV fallback, identical paired tokens,
+storage endpoints and source revisions. It independently recalculates
+memory means/maxima and the timing mean/p50/p95. It binds the resulting
+tables and plot data to SHA-256 hashes. Statistical intervals are exported
+from the completed corpus/bootstrap analysis, not fabricated from rounded
+table entries.
+
+The exact producer is listed in Table~\ref{tab:environment}. Relevant
+modules under \texttt{src/mosaickv/} include:
+\begin{itemize}
+\item \smallpath{evaluation/common_streaming_timing.py}: common explicit
+      request lifecycle and measurement path;
+\item \smallpath{evaluation/streaming_source_constructor.py}: layer-local
+      source construction during the one prefill;
+\item \smallpath{evaluation/shared_source_format.py}: persistent format
+      and reconstruction contract;
+\item the precision-tier, direct-text-construction, source-history and
+      native-history-reader modules: payload coding, exact overlays,
+      history sealing and bitwise checks;
+\item the uniform-eager-core and transport modules: layout eligibility,
+      request-private eager replay and retirement.
+\end{itemize}
+This map describes the measured immutable worktree. Unrelated newer or
+dirty source edits are not implied to have produced the results.
+
+Earlier fixture/schema failures remain separate from the accepted third
+attempt. A scheduler completion code alone is insufficient: the exporter
+also requires successful result decisions and complete raw denominators.
+No unfavorable accepted row is dropped, and no GPU work is performed by
+the document exporter or TeX build.
+
+\section{Review-derived concern map and remaining work}
+The supplied review-derived instructions requested complete-path timing,
+physical ownership accounting, independent transport checks, faithful
+baseline comparisons, boundary controls, mechanism ablations, fresh
+confirmation and metric-aware uncertainty. The current paper addresses
+some measurement concerns within a changed scope and explicitly withdraws
+claims that would require the other experiments.
+
+A separate private response gives a point-by-point account without
+pretending that the unavailable original assessment is quoted verbatim.
+No reviewer identity is required in the anonymous paper. Withdrawal of a
+claim is not completion of the experiment that would have justified it.
+
+Before broader conclusions, the remaining work is to match measured bytes,
+certify whole-request cache peaks, validate native baseline fidelity for
+the present adaptation, measure additional models/tasks and independently
+confirm quality. For the historical architecture, each of its six active
+components would additionally require correctness and causal-ablation
+evidence. Multi-request serving, long contexts, GQA, lower-bit portability,
+batch scaling and energy remain unmeasured opportunities, not established
+benefits.
+
+\clearpage
+\bibliographystyle{mlsys2025}
+\bibliography{references}
+\end{document}

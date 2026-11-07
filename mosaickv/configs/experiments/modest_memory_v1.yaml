@@ -1,0 +1,105 @@
+schema_version: 1
+experiment_id: modest_memory_v1
+classification: prospective_budget_calibration_then_independent_confirmation
+algorithm_changes_authorized: false
+calibration_execution_authorized: true
+confirmation_requires_successful_calibration_and_frozen_pair: true
+paper_campaign_execution_authorized: false
+
+resources:
+  aggregate_a100_ceiling: 6
+  gpus_per_worker: 1
+  cpus_per_worker: 12
+  shard_size: 16
+  time_limit_seconds: 7200
+  admission: shared_controller_counts_all_user_a100_jobs
+  preserve_running_jobs: true
+
+controls:
+  precision: fp16
+  backend: huggingface
+  attention: eager
+  block_size: 1
+  output_tokens: 64
+  generation: {do_sample: false, temperature: 0.0, top_p: 1.0}
+  warmups: 5
+  seed: 20271014
+  CUBLAS_WORKSPACE_CONFIG: ':4096:8'
+  prototypes: false
+  residuals: false
+  repair: false
+  fullkv: quality_reference_only_not_a_latency_comparator
+  physical_boundaries: [initial, final, peak]
+  same_budget_byte_tolerance: 0
+  no_fullkv_fallback: true
+
+lanes:
+  coco:
+    source_root: /sfs/weka/scratch/djy8hg/worktrees/mosaickv-coco-shared-retry1-20261014
+    source_sha: edb6edfaf50f4539c9c1969371fefecf0eabccbf
+    parent_plan: /scratch/djy8hg/runs/mosaickv/coco-shared-32-edb6edf-retry1-20261014/plan.json
+    parent_plan_sha256: 26340c27b6986a931e97c781d1702a33dcdad97670d01547da00a24ef8158210
+    model: llava-hf/llava-v1.6-mistral-7b-hf
+    model_revision: 2424fdd47412fccc66d91719126b420e9fbd7065
+    dataset: lmms-lab/COCO-Caption
+    dataset_revision: c3213b54e173ae86517d481de17f31439d6f8c72
+    split: val
+    mandatory_policy: last_token
+    methods: [full_kv, prompt_attention_topk, vl_cache_reimpl, mosaickv_exact]
+    caps_mib: [28, 32, 35, 40]
+    calibration_samples: 128
+    confirmation_initial_samples: 512
+    confirmation_sample_size: calibration_paired_variance_power_0.8_alpha_adjusted
+    disjointness: exclude_all_prior_materialized_or_reserved_project_identities
+  milebench:
+    model: llava-hf/llava-1.5-7b-hf
+    model_revision: b234b804b114d9e37bb655e11cbbb5f5e971b7a9
+    dataset: MileBench/MileBench
+    dataset_revision: 53c7a58051ef88bacf76541d91f03f5ba2d71e7d
+    methods: [full_kv, prompt_attention_topk, lookm_reimpl, mosaickv_exact]
+    caps_mib: [28, 32, 35, 40]
+    mandatory_policy: first_and_last
+    subtasks: [ActionPrediction, ActionSequence, CLEVR-Change, Spot-the-Diff]
+    execution: blocked_pending_identity_availability_and_separate_subtask_registration_if_needed
+    joint_quality_rule: accuracy_and_rouge_l_must_both_pass
+
+calibration_selection:
+  quality_target: calibration_fullkv_corpus_cider
+  target_note: absolute_calibration_FullKV_value_frozen_before_confirmation_not_a_relaxed_quality_margin
+  baseline_eligibility: calibration_corpus_cider_at_least_target
+  competitor: smallest_measured_baseline_cache_meeting_target_across_both_baseline_methods
+  baseline_tie_break: [prompt_attention_topk, vl_cache_reimpl]
+  candidate_eligibility: strictly_smaller_all_measured_boundaries_and_cider_difference_nonnegative
+  candidate_choice: largest_eligible_mosaickv_budget_then_largest_paired_cider_difference
+  stop_if_no_eligible_baseline_or_candidate: true
+  no_algorithm_retuning_on_this_cohort: true
+  freeze_fields:
+    - source_sha_and_content_hash
+    - resolved_configuration_and_hash
+    - candidate_and_competitor_method_and_budget
+    - quality_target
+    - competitor_selection_rule
+    - power_calculation_and_confirmation_size
+    - statistical_tests_and_stopping_rules
+
+confirmation:
+  freeze_required_before_materialization: true
+  independent_id_only_reservation: 512
+  include_all_baseline_budgets: true
+  include_frozen_candidate: true
+  include_fullkv_quality_reference: true
+  fixed_timing_subset_samples: 16
+  timed_repetitions: 20
+  randomized_method_order: seed_bound_independent_of_answers
+  warmups: 5
+  no_optional_stopping_or_sample_size_change_after_unblinding: true
+  quality_margin: 0.0
+  quality_gate: adjusted_paired_cider_difference_lower_bound_at_least_zero
+  latency_gate: adjusted_paired_ratio_of_means_upper_bound_at_most_one
+  memory_gate: strictly_smaller_measured_initial_final_peak_for_every_paired_sample
+  nearest_competitor_gate: selected_baseline_meets_frozen_target_and_no_cheaper_baseline_qualifies
+  bootstrap_replicates: 10000
+  cider_reducer: complete_corpus_recomputed_per_draw_including_document_frequencies
+  multiplicity: bonferroni_over_all_confirmation_quality_eligibility_and_latency_tests
+  failure_policy: retain_all_failed_rows_and_block_claim_no_sample_dropping
+  historical_reuse: never_across_disjoint_calibration_confirmation_or_incompatible_controls

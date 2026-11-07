@@ -1,0 +1,18 @@
+% Derived from immutable measured artifacts by export_report.py.
+\begin{tabular}{llrrrrrrr}
+\toprule
+Task & Path & Init. & Final KV & Final source & Saving \% & Peak KV & Peak source & Saving \%\\\midrule
+Description & All-position lossless control & 107.585 & 155.317 & 139.830 & 9.97 & 166.676 & 151.189 & 9.29\\
+Description & Prompt Top-K & 75.564 & 123.272 & 107.808 & 12.54 & 133.475 & 118.011 & 11.59\\
+Description & PrefixKV adaptation (R) & 53.551 & 101.275 & 85.798 & 15.28 & 111.478 & 96.001 & 13.88\\
+Description & VL-Cache adaptation (R) & 69.221 & 116.950 & 101.467 & 13.24 & 128.309 & 112.826 & 12.07\\
+Description & LOOK-M (R) & 105.652 & 153.369 & 137.898 & 10.09 & 160.010 & 144.539 & 9.67\\
+Description & \textbf{EviCastKV exact} & 61.543 & 109.271 & 93.787 & 14.17 & 119.474 & 103.990 & 12.96\\
+MM-Vet route & All-position lossless control & 108.309 & 155.997 & 140.542 & 9.91 & 167.419 & 151.963 & 9.23\\
+MM-Vet route & Prompt Top-K & 77.307 & 124.999 & 109.541 & 12.37 & 135.202 & 119.744 & 11.43\\
+MM-Vet route & PrefixKV adaptation (R) & 53.556 & 101.263 & 85.795 & 15.27 & 111.466 & 95.999 & 13.88\\
+MM-Vet route & VL-Cache adaptation (R) & 72.209 & 119.902 & 104.445 & 12.89 & 131.324 & 115.867 & 11.77\\
+MM-Vet route & LOOK-M (R) & 105.650 & 153.348 & 137.885 & 10.08 & 159.988 & 144.526 & 9.66\\
+MM-Vet route & \textbf{EviCastKV exact} & 61.688 & 109.377 & 93.920 & 14.13 & 119.580 & 104.123 & 12.93\\
+\bottomrule
+\end{tabular}

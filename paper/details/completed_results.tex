@@ -1,0 +1,131 @@
+\section{Complete Measured Results}
+\label{app:results}
+This appendix preserves all operating points from the completed COCO frontier,
+the 192-example MileBench E6 lower-memory campaign, the earlier 256-example
+MileBench fixed-budget campaign, and the 1,218-example PrefixKV campaign.
+R means local reimplementation; MosaicKV exact and Prompt Top-K are locally
+measured methods. None of these tables contains external paper-reported
+numbers. FullKV is a quality reference and its latency is omitted.
+ROUGE-L is scaled by 100, as explicitly labeled; raw metric exports retain
+the native $[0,1]$ values.
+
+\subsection{COCO: every shared-byte point}
+\begin{table*}[t]
+\caption{COCO Caption, 256 images. Each method uses the same measured
+initial cap and final/peak storage per sample. CIDEr is a corpus score, not
+an average of shard scores. All method--sample rows completed.}
+\centering\small\input{generated/coco_all}
+\end{table*}
+The common FullKV reference scores 111.2424 CIDEr, with 285.6064 MiB
+mean initial and 293.4814 MiB final live cache. The 64-token output schedule
+produces 7.875 MiB decode growth. At 10, 20, 40, and 80 MiB initial,
+MosaicKV--VL-Cache CIDEr differences are respectively 11.34, 4.35, 3.64,
+and 0.75; paired 95\% intervals are $[6.55,16.49]$, $[0.01,8.90]$,
+$[0.53,7.06]$, and $[-3.09,4.33]$. The last point is unresolved.
+At 40 MiB, Prompt Top-K's 111.59 exceeds MosaicKV's 111.48 in point
+estimate, with an unresolved paired difference. Results therefore distinguish
+the published-method port from the strongest simple selector.
+
+\subsection{MileBench E6: every fixed-budget point}
+\begin{table*}[t]
+\caption{MileBench E6: 192 unique examples, 48 per declared subtask; 96
+applicable examples per metric family. Final storage equals peak storage.
+All 3,072 rows completed with no fallback, target shortfall, or duplicate.}
+\centering\small\input{generated/mile192_all}
+\end{table*}
+\begin{table*}[t]
+\caption{E6 subtask scores at 40 MiB; 48 examples each. Temporal rows use
+Accuracy (\%); semantic rows use ROUGE-L $\times100$. The columns are
+not averaged across metric families.}
+\centering\small\input{generated/mile_subtasks}
+\end{table*}
+The FullKV category references are 22.9167\% Accuracy and 15.9631 ROUGE-L
+points. Its mean initial storage is 315.4688 MiB and final storage is
+346.9688 MiB. Accuracy is low even without compression; this limits the
+precision and breadth of conclusions about high-level temporal reasoning.
+
+\subsection{MileBench: separate earlier 256-example cohort}
+\begin{table*}[t]
+\caption{Earlier fixed-budget cohort: 64 examples per subtask, 256 total,
+128 per metric family. Its prior use is disclosed. These measurements are
+not pooled with E6 or relabeled as the same cohort.}
+\centering\small\input{generated/mile256_all}
+\end{table*}
+At 40 MiB, the earlier cohort's MosaicKV--LOOK-M ROUGE-L gain is 0.9846
+points, interval $[0.0075,2.0091]$; Accuracy ties in point estimate with
+interval $[-5.4688,5.4688]$ percentage points. At 80 MiB LOOK-M's Accuracy
+point estimate exceeds MosaicKV by 3.125 points. The earlier FullKV category
+scores are 32.8125\% Accuracy and 16.8532 ROUGE-L points, demonstrating
+why cross-cohort point estimates cannot be treated as a single curve.
+
+\subsection{Registered lower-memory tests}
+\begin{table*}[t]
+\caption{All feasible E6 lower-memory comparisons. B/M indicates baseline
+initial cap / MosaicKV initial cap. Each interval is the paired quality
+difference, MosaicKV minus baseline, using 98.75\% per-comparison confidence
+for the registered family-wise correction. Quality margin is zero.
+Memory passes at initial, final, and peak boundaries; quality does not.}
+\centering\scriptsize\resizebox{\textwidth}{!}{\input{generated/isoquality}}
+\end{table*}
+Baseline caps 16, 20, and 28 MiB have no eligible smaller MosaicKV point on
+the registered grid after the 31.5 MiB decode growth is included. They are
+recorded as physically infeasible comparisons, not omitted or interpolated.
+Both metric families must pass on the same pair for a lane-wide claim.
+The 16-example execution validation produced some metric-specific positives;
+the larger 192-example campaign did not confirm the joint claim. The larger
+result takes precedence; execution success is distinct from quality success.
+
+The COCO 20-versus-40 MiB example is descriptive only: candidate CIDEr
+107.9651 versus baseline 107.8443 and final storage 27.875 versus 47.875 MiB.
+Its 41.78\% reduction is measured; equal-quality inference is not established
+by those point estimates. A zero-margin confidence test cannot be replaced
+by observing a positive mean. Prompt Top-K's 20 MiB score is also 108.1280.
+
+\subsection{PrefixKV: every native and common-byte result}
+\begin{table*}[t]
+\caption{PrefixKV campaign: 1,000 descriptions and 218 paper-style MM-Vet
+questions, 8,526 rows, no failed or duplicate rows. Native is BF16 at nominal
+ratio 0.5 with method-specific maintenance. The separate 40 MiB lane is FP16
+with append-only compressed decoding. Its FullKV reference is distinct.}
+\centering\scriptsize\resizebox{\textwidth}{!}{\input{generated/prefix_all}}
+\end{table*}
+All 153 GPU shard jobs completed. The original analyzer wrote numerical
+Parquet and LaTeX outputs before failing on a missing optional plotting
+package. Paper export rechecks 8,526 rows, exactly 1,000/218 per arm,
+zero duplicates/failures, and equal per-sample initial/final/peak bytes in
+the shared lane. This is independent numerical verification, not a fabricated
+successful original report.
+
+The native PrefixKV path uses the pinned 0.5 profile, upstream rounding,
+protected boundaries, and profile-ratio decode maintenance. Four-example
+official/local parity evidence is preserved separately. It does not establish
+a universal checkpoint/environment equivalence or a numerical reproduction of
+an unregistered published ROUGE-L target. Common-byte rescaling and append-only
+maintenance are explicit adaptations; their output collapse is evidence about
+that adaptation regime, not an intrinsic failure of original PrefixKV.
+
+\section{Interpreting Time and Cache Growth}
+End-to-end observations include planning. On COCO at 40 MiB, only 0.1724 s
+of the 4.0776 s MosaicKV--VL-Cache reduction lies in decode. At equal bytes,
+cache volume alone cannot explain that difference. A missing upstream fused
+kernel, differing packing paths, and host-side planning affect local ports.
+No result here implies superiority over authors' optimized kernel timings.
+
+At 1,024 generated tokens, the common PrefixKV lane grows by 511.5 MiB;
+a 40 MiB initial saving is therefore a small share of the final cache.
+Maintaining the native eviction policy changes both bytes and output behavior.
+The manuscript reports both, rather than describing a nominal retention
+comparison as equal physical capacity.
+
+\section{Exploratory Algorithms and Inactive Extensions}
+Prompt-output reconstruction, bounded corrective swaps, draft-query vetoes,
+joint draft ranking, and short-horizon logit checks were explored during
+development. They address a real limitation of prompt attention: reconstruction
+error can improve without preserving autoregressive answers. Attention matching
+is related prior work \citep{attentionmatching2026}. These development
+candidates are not the frozen 1/256-routed policy used in the measured tables;
+their inspected cohorts cannot serve as untouched validation of that policy.
+No exploratory algorithm receives a measured gain by association with the
+completed campaigns. Likewise, prototype and residual-repair specifications
+in the following sections are architectural extensions rather than evaluated
+performance claims.

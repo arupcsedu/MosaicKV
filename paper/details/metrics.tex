@@ -1,0 +1,183 @@
+\section{Metric Definitions and Statistical Analysis}
+\label{app:metrics}
+\subsection{A backward-compatible metric schema}
+The existing \texttt{task\_score} remains readable, but its meaning is determined
+by task and scorer, not by the column name alone. A long-form observation stores
+run ID, sample ID, task, metric name/value/direction, sample or corpus scope,
+implementation and version, evaluator commit, reference-artifact hash,
+evaluated-token count, and measurement type. Corpus observations must not be
+misrepresented as independent per-sample scores. Raw predictions remain JSONL;
+metric observations and aggregates are separate Parquet artifacts.
+
+\subsection{Accuracy and TextVQA consensus}
+For a normalized predicted answer $\widehat y_i$ and a valid reference set
+$\mathcal R_i$, exact accuracy is
+$s_i=\mathbf1\{\widehat y_i\in\mathcal R_i\}$.
+Multiple-choice accuracy must use the task's declared extraction and option
+mapping. A generic substring search can incorrectly reward an answer that
+mentions several choices. Normalization rules, punctuation handling, and case
+conversion are evaluator-specific and pinned.
+
+TextVQA's consensus score is not simply exact match to one string. With ten
+annotator answers, the standard leave-one-out score is
+\begin{equation}
+ s_i=\frac1{10}\sum_{j=1}^{10}
+ \min\!\left(1,\frac{\sum_{k\ne j}\mathbf1\{\widehat y_i=r_{ik}\}}3\right),
+\end{equation}
+after official answer normalization. The actual annotation list, not a template
+field name such as ``answer,'' must be stored as reference provenance.
+The implementation should delegate to the pinned official-compatible evaluator
+and test fixed fixtures with repeated annotations and normalization edge cases.
+
+\subsection{DocVQA ANLS}
+Let $D(a,r)$ be Levenshtein edit distance and
+$d(a,r)=D(a,r)/\max(|a|,|r|)$. For nonempty comparison strings,
+\begin{equation}
+ \operatorname{ANLS}(a,\mathcal R)
+ =\max_{r\in\mathcal R}
+ \begin{cases}1-d(a,r),&d(a,r)<0.5,\\0,&\text{otherwise}.
+ \end{cases}
+\end{equation}
+String normalization, empty-string handling, and the strict threshold follow
+the pinned DocVQA evaluator \citep{mathew2021docvqa}. Small spelling errors may
+receive partial credit; a wrong numerical value can still be a serious semantic
+error even when its character edit distance is small. Qualitative analysis
+should acknowledge that limitation without replacing the official metric.
+
+\subsection{ROUGE-L F1}
+For tokenized prediction $a$ and reference $r$, let
+$\operatorname{LCS}(a,r)$ be the longest common subsequence length. Define
+$P=\operatorname{LCS}/|a|$, $R=\operatorname{LCS}/|r|$, and
+\begin{equation}
+ \operatorname{ROUGE\mbox{-}L}_{F1}=\frac{2PR}{P+R},
+\end{equation}
+with declared zero-denominator behavior \citep{lin2004rouge}. The tokenization,
+stemming, multi-reference reduction, and implementation must match the intended
+paper route. Two functions both named ROUGE-L can differ on these choices.
+For PrefixKV's reference-output lane, freeze one FullKV prediction artifact
+before comparing compressed outputs. Its hash identifies exactly which text
+is the reference. This measures preservation of FullKV behavior, not truth.
+
+\subsection{Teacher-forced perplexity}
+For target tokens $y_{i1},\ldots,y_{in_i}$, with the same preceding target
+tokens supplied to every method, record
+\begin{align}
+ \operatorname{NLL}_i&=-\sum_{t=1}^{n_i}\log p(y_{it}\mid x_i,y_{i,<t}),\\
+ \operatorname{PPL}_{\mathrm{corpus}}
+ &=\exp\!\left(\frac{\sum_i\operatorname{NLL}_i}{\sum_i n_i}\right).
+\end{align}
+Padding and masked prompt tokens do not enter the denominator. Target
+truncation, EOS inclusion, tokenizer, and teacher-forcing limit are frozen.
+A limit shorter than the reference silently changes the question and is not
+paper-faithful reproduction. Averaging per-example PPL is incorrect because
+exponentiation is nonlinear and examples have different token counts.
+Teacher forcing also evaluates a different trajectory from free generation;
+both can be useful but must be labeled separately.
+
+\subsection{CIDEr and caption evaluation}
+CIDEr compares caption n-grams with references using term-frequency/inverse-
+document-frequency representations \citep{vedantam2015cider}. Its corpus
+statistics and reference handling mean that an arbitrary average of cached
+sample scores need not reproduce the intended corpus evaluator. Use the
+evaluator supplied through the pinned lmms-eval/COCO path, with documented
+tokenization, document-frequency source, CIDEr versus CIDEr-D choice, and
+score scale. Do not turn a raw score into a percentage without identifying
+the scaling convention.
+
+COCO Caption \citep{lin2014coco} contributes a complementary generation task,
+not an interchangeable substitute for DocVQA. Caption correctness over several
+descriptions differs from extracting one exact document answer. This is why
+the native VL-Cache lane retains separate CIDEr and ANLS columns and does not
+claim improvement from their numerical average.
+
+\subsection{MileBench and judge-based tasks}
+MileBench tasks route to their declared Accuracy or ROUGE-L scorer, then use
+the pinned official subtask hierarchy \citep{song2024milebench}. The local
+implementation must retain dataset-to-subtask membership and weights. A
+sample-weighted global mean can overweight large datasets and disagree with
+the official hierarchy. Report the separate metric families and official
+subtask summaries rather than inventing a new mixed-metric headline score.
+
+Paper-style MM-Vet and MathVista \citep{lu2024mathvista} answer extraction may involve an external
+judge. A route is not executable merely because its dataset loads. Judge
+model/version, extraction prompt, evaluator commit, authorized environment-only
+credentials, caching behavior, and scoring determinism must be explicit.
+A validated local route is a separate configuration. Missing judge access
+means unsupported evidence, not a zero score or a silent exact-match fallback.
+
+\subsection{Agreement and numerical fidelity}
+Sequence agreement is one only if generated token sequences match under the
+declared EOS/padding policy. Token agreement requires a specified denominator;
+if outputs have different lengths, count missing tokens as disagreements or
+use a preregistered alignment, rather than comparing only the matching prefix.
+String agreement is a separate diagnostic from token agreement.
+
+On a fixed diagnostic subset, compare next-token distributions using
+\begin{equation}
+ \KL(p_{\mathrm{Full}}\Vert p_m)
+ =\sum_v p_{\mathrm{Full}}(v)
+ \log\frac{p_{\mathrm{Full}}(v)}{p_m(v)}.
+\end{equation}
+Temperature, precision, vocabulary, teacher-forced prefix, and numerical
+stabilization are identical. Logit comparisons after different generated
+prefixes conflate cache error with trajectory divergence. Attention-output
+relative error can be
+$\lVert O_m-O_{\mathrm{Full}}\rVert_F/
+\max(\lVert O_{\mathrm{Full}}\rVert_F,\epsilon)$, with recorded layers, heads,
+positions, and $\epsilon$. This is not the same quantity as logit KL.
+
+\subsection{Memory and compression metrics}
+Report bytes before converting to MiB. For an explicitly chosen reference,
+\begin{align}
+ \mathrm{retention}_{\mathrm{physical}}&=B_m/B_{\mathrm{reference}},\\
+ \mathrm{reduction}&=1-B_m/B_{\mathrm{reference}},\\
+ \mathrm{compression\ factor}&=B_{\mathrm{reference}}/B_m.
+\end{align}
+The denominator may be FullKV for storage diagnostics or a quality-eligible
+compressed competitor for a comparative claim; these must not be confused.
+Total KV storage includes active GPU and CPU residual storage, with their
+locations separately reported. Request metadata and temporary workspace are
+additional memory, not hidden in a headline compression factor.
+
+For a shared target $C$, record $C-B_m$, the attainable lattice, and the
+realized-byte mismatch between paired methods. ``Both fit below 40 MiB'' is
+weaker than ``both occupy exactly the same physical bytes.''
+
+\subsection{Paired bootstrap with metric-aware reducers}
+Let the immutable paired sample ledger contain $n$ IDs. For replicate $b$, draw
+indices $I_b=(i_1,\ldots,i_n)$ with replacement and apply the same draw to all
+methods. Let $T_m(I_b)$ be the correct metric reducer. The replicate difference
+is $\Delta_b=T_{\mathrm{Mosaic}}(I_b)-T_{\mathrm{baseline}}(I_b)$.
+Percentile intervals use its 2.5th and 97.5th percentiles with a fixed bootstrap
+seed and declared replicate count \citep{efron1979bootstrap}.
+
+For accuracy, ANLS, and sample ROUGE-L, $T$ averages sample scores. For PPL it
+sums NLL and target-token counts before exponentiating. For CIDEr it reruns the
+declared corpus reducer, preserving duplicate draws as distinct bootstrap
+observations rather than overwriting repeated IDs. For MileBench it recomputes
+the official hierarchy inside each replicate. Cluster resampling is required
+when the preregistered independent unit is an image/document rather than an
+individual question.
+
+Report absolute differences and relative differences only when meaningful and
+the denominator is nonzero. A difference in percentage points is not a percent
+relative improvement. Lower-is-better metrics such as PPL and latency retain
+their direction; do not silently flip signs in a table. Bootstrap uncertainty
+does not remove bias from a nonrepresentative subset or an incorrectly
+implemented scorer.
+
+\subsection{Failure denominators and non-inferiority}
+Failed samples stay in raw output. Report attempted, completed, validly scored,
+and paired counts. A primary claim should be blocked by incomplete required
+rows rather than made on a favorable surviving intersection. If a benchmark
+defines failure-as-zero, retain that task score and the failure flag; otherwise
+do not invent a numerical score. Timing failures are not zero-latency samples.
+
+Define a task-specific quality margin $\delta$ before running. A score
+non-inferiority claim requires the lower paired CI bound to be at least
+$-\delta$ for higher-is-better metrics, not merely a positive point estimate.
+A five-percentage-point fidelity development gate is not automatically
+``identical quality'' in a paper. Exact answer parity, score parity, and
+statistical non-inferiority are different tests and must be named accurately.
+Multiple budgets, tasks, or selected nearest competitors require a declared
+multiplicity/selection policy to avoid optimistic post hoc claims.

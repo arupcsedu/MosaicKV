@@ -1,0 +1,26 @@
+\begin{tikzpicture}[
+  font=\footnotesize, >=Latex,
+  box/.style={draw,rounded corners=2pt,align=center,minimum height=1.25cm,text width=3.0cm,inner sep=5pt},
+  flow/.style={->,thick},
+  note/.style={align=center,font=\scriptsize,text=muted}]
+\node[box,fill=eviblue!7,draw=eviblue] (prefill) at (0,0)
+  {\textbf{1. Original prefill}\\Capture normalized layer inputs\\Keep original logical positions};
+\node[box,fill=eviblue!7,draw=eviblue] (store) at (4.1,0)
+  {\textbf{2. Persistent packet}\\3-bit shared source\\Exact overlays + numeric patches};
+\node[box,fill=exactgreen!7,draw=exactgreen] (lease) at (8.2,0)
+  {\textbf{3. Layer-local lease}\\Frozen $W_K,W_V$ + original RoPE\\Reconstruct transient K and V};
+\node[box,fill=exactgreen!7,draw=exactgreen] (attend) at (12.3,0)
+  {\textbf{4. Eager attention}\\Consume reconstructed K/V\\Replay only if layout is eligible};
+\draw[flow] (prefill) -- (store);
+\draw[flow] (store) -- (lease);
+\draw[flow] (lease) -- (attend);
+\node[box,fill=patchorange!8,draw=patchorange,text width=6.0cm,minimum height=.95cm] (history) at (8.2,-2.5)
+  {\textbf{5. Generated-history source}\\Lossless encoding of this request's own normalized inputs\\Raw tail + sealed chunks + exact numerical patches};
+\draw[flow] (attend.south) |- (history.east);
+\draw[flow] (history.north) -- (lease.south);
+\node[note,text width=5.8cm] at (1.8,-2.0)
+  {One original prefill; no duplicate full-cache owner survives binding.\\Quantized prompt state is approximate, not lossless FullKV.};
+\node[note,text width=14.8cm] at (6.15,-4.0)
+  {All codes, headers, overlays, patches, padding, index storage and live reconstruction buffers are charged at their stated boundaries.\\
+  Solid boxes are active. Forecasting, semantic evidence graph, submodular planning, prototypes and uncertainty repair are \emph{not} evaluated here.};
+\end{tikzpicture}

@@ -1,0 +1,14 @@
+\section{Conclusion}
+\label{sec:conclusion}
+We presented the implemented EviCastKV-S storage path: one encoded shared
+prompt source, protected exact regions, position-correct reconstruction and
+lossless generated history. On 256 COCO images, it uses
+\EviInitial/\EviFinal~MiB initial/final storage and \EviPeak~MiB mean
+audited decode-owned peak, with \EviCider{} CIDEr and
+\EviMedian~s median completed-request time. The current operating point is
+smaller and faster than the measured local compressed adaptations, but
+does not establish quality preservation against the strongest compressed
+points or byte-matched superiority. The contribution is a concrete
+representation and auditable systems study, not validation of the
+inactive six-component architecture. Broader claims require separately
+controlled evidence rather than extrapolation from these measurements.

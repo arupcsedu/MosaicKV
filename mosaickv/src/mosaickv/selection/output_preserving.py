@@ -35,6 +35,8 @@ class SwapResult:
     validation_initial_error: float | None = None
     validation_final_error: float | None = None
     rejected_validation_pairs: int = 0
+    rejected_joint_pairs: int = 0
+    draft_ranking_mode: str = "veto"
 
 
 def prepare_evidence(attention: Any, values: Any, *, pooled: bool = False) -> tuple[Any, Any]:
@@ -132,8 +134,11 @@ def corrective_swaps(
     validation_target = (
         None if validation_attention is None else validation_attention @ values
     )
+    joint_mode = config.draft_ranking_mode == "joint_normalized"
+    if joint_mode and validation_current is None:
+        raise ValueError("joint draft ranking requires validation attention")
     swaps: list[dict[str, int | float]] = []
-    evaluated = rejected = rejected_validation = 0
+    evaluated = rejected = rejected_validation = rejected_joint = 0
     all_positions = torch.arange(values.shape[0], device=values.device)
     for _ in range(config.max_swaps_per_head):
         mask = torch.zeros(values.shape[0], dtype=torch.bool, device=values.device)
@@ -150,9 +155,36 @@ def corrective_swaps(
             ((attention.T @ (error / current.mass[:, None])) * values).sum(-1)
             - attention.T @ ((error * current.output).sum(-1) / current.mass)
         )
+        ranking_sensitivity = sensitivity
+        if joint_mode:
+            assert validation_attention is not None
+            assert validation_current is not None
+            assert validation_target is not None
+            validation_error = validation_current.output - validation_target
+            validation_sensitivity = 2 * (
+                (
+                    (
+                        validation_attention.T
+                        @ (validation_error / validation_current.mass[:, None])
+                    )
+                    * values
+                ).sum(-1)
+                - validation_attention.T
+                @ (
+                    (validation_error * validation_current.output).sum(-1)
+                    / validation_current.mass
+                )
+            )
+            epsilon = torch.finfo(sensitivity.dtype).eps
+            prompt_scale = sensitivity.abs().amax().clamp_min(epsilon)
+            draft_scale = validation_sensitivity.abs().amax().clamp_min(epsilon)
+            ranking_sensitivity = (
+                config.prompt_objective_weight * sensitivity / prompt_scale
+                + config.draft_objective_weight * validation_sensitivity / draft_scale
+            )
         donors = (
             donors[
-                torch.argsort(sensitivity[donors], descending=True, stable=True)[
+                torch.argsort(ranking_sensitivity[donors], descending=True, stable=True)[
                     : config.shortlist_size
                 ]
             ]
@@ -160,12 +192,17 @@ def corrective_swaps(
             .values
         )
         recipients = (
-            recipients[torch.argsort(sensitivity[recipients], stable=True)[: config.shortlist_size]]
+            recipients[
+                torch.argsort(ranking_sensitivity[recipients], stable=True)[
+                    : config.shortlist_size
+                ]
+            ]
             .sort()
             .values
         )
         pairs = torch.cartesian_prod(donors, recipients).reshape(-1, 2)
         best_error = current.error
+        best_joint_score = float("-inf")
         best_pair: tuple[int, int] | None = None
         for start in range(0, int(pairs.shape[0]), config.pair_chunk_size):
             chunk = pairs[start : start + config.pair_chunk_size]
@@ -220,7 +257,49 @@ def corrective_swaps(
                     )
                 )
                 prompt_improves = losses < current.error - config.minimum_improvement
-                rejected_validation += int((prompt_improves & ~validation_improves).sum().item())
+                if joint_mode:
+                    epsilon = torch.finfo(losses.dtype).eps
+                    prompt_denominator = max(current.error, float(epsilon))
+                    draft_denominator = max(validation_current.error, float(epsilon))
+                    prompt_gain = (current.error - losses) / prompt_denominator
+                    draft_gain = (
+                        validation_current.error - validation_losses
+                    ) / draft_denominator
+                    joint_scores = (
+                        config.prompt_objective_weight * prompt_gain
+                        + config.draft_objective_weight * draft_gain
+                    )
+                    jointly_valid = (
+                        valid
+                        & validation_valid
+                        & torch.isfinite(losses)
+                        & torch.isfinite(validation_losses)
+                        & torch.isfinite(joint_scores)
+                    )
+                    rejected_joint += int(
+                        (
+                            jointly_valid
+                            & (joint_scores <= config.minimum_joint_improvement)
+                        ).sum().item()
+                    )
+                    joint_scores = torch.where(
+                        jointly_valid
+                        & (joint_scores > config.minimum_joint_improvement),
+                        joint_scores,
+                        -torch.inf,
+                    )
+                    evaluated += int(chunk.shape[0])
+                    index = int(joint_scores.argmax().item())
+                    score = float(joint_scores[index].item())
+                    if score > best_joint_score:
+                        best_joint_score = score
+                        best_error = float(losses[index].item())
+                        donor, recipient = chunk[index].tolist()
+                        best_pair = (int(donor), int(recipient))
+                    continue
+                rejected_validation += int(
+                    (prompt_improves & ~validation_improves).sum().item()
+                )
                 losses = torch.where(validation_improves, losses, torch.inf)
             evaluated += int(chunk.shape[0])
             index = int(losses.argmin().item())
@@ -234,7 +313,7 @@ def corrective_swaps(
         donor, recipient = best_pair
         proposal = tuple(sorted((set(selected) - {donor}) | {recipient}))
         verified = reconstruct(attention, values, proposal, minimum_mass=config.minimum_query_mass)
-        if verified.error >= current.error - config.minimum_improvement:
+        if not joint_mode and verified.error >= current.error - config.minimum_improvement:
             break
         validation_verified = (
             None
@@ -246,12 +325,29 @@ def corrective_swaps(
                 minimum_mass=config.minimum_query_mass,
             )
         )
-        if validation_current is not None and (
+        if not joint_mode and validation_current is not None and (
             validation_verified is None
             or validation_verified.error
             >= validation_current.error - config.minimum_improvement
         ):
             raise RuntimeError("joint draft validation changed between proposal and verification")
+        joint_score: float | None = None
+        prompt_gain: float | None = None
+        draft_gain: float | None = None
+        if joint_mode:
+            assert validation_current is not None
+            assert validation_verified is not None
+            epsilon = torch.finfo(attention.dtype).eps
+            prompt_gain = (current.error - verified.error) / max(current.error, float(epsilon))
+            draft_gain = (
+                validation_current.error - validation_verified.error
+            ) / max(validation_current.error, float(epsilon))
+            joint_score = (
+                config.prompt_objective_weight * prompt_gain
+                + config.draft_objective_weight * draft_gain
+            )
+            if joint_score <= config.minimum_joint_improvement:
+                raise RuntimeError("joint draft ranking changed between proposal and verification")
         swaps.append(
             {
                 "removed_position": donor,
@@ -264,6 +360,15 @@ def corrective_swaps(
                     else {
                         "draft_error_before": validation_current.error,
                         "draft_error_after": validation_verified.error,
+                        **(
+                            {}
+                            if joint_score is None
+                            else {
+                                "normalized_prompt_gain": prompt_gain,
+                                "normalized_draft_gain": draft_gain,
+                                "joint_normalized_gain": joint_score,
+                            }
+                        ),
                     }
                 ),
             }
@@ -271,21 +376,23 @@ def corrective_swaps(
         selected, current = proposal, verified
         validation_current = validation_verified
     return SwapResult(
-        selected,
-        initial.error,
-        current.error,
-        tuple(swaps),
-        evaluated,
-        rejected,
-        (
+        positions=selected,
+        initial_error=initial.error,
+        final_error=current.error,
+        swaps=tuple(swaps),
+        evaluated_pairs=evaluated,
+        rejected_zero_mass_pairs=rejected,
+        validation_initial_error=(
             None
             if validation_initial is None
             else validation_initial.error
         ),
-        (
+        validation_final_error=(
             None
             if validation_current is None
             else validation_current.error
         ),
-        rejected_validation,
+        rejected_validation_pairs=rejected_validation,
+        rejected_joint_pairs=rejected_joint,
+        draft_ranking_mode=config.draft_ranking_mode,
     )

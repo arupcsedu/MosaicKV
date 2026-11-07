@@ -95,6 +95,38 @@ def test_job_scope_and_finite_duration():
     assert API["gpu_count"]("N/A") == 0
 
 
+@pytest.mark.parametrize(
+    ("value", "minutes"),
+    [("00:00", 0), ("00:01", 1), ("45:00", 45), ("45:01", 46),
+     ("59:59", 60), ("00:45:00", 45), ("2:00:01", 121), ("1-02:03:04", 1564)],
+)
+def test_squeue_short_duration_and_rounding(value, minutes):
+    assert API["duration_minutes"](value) == minutes
+
+
+@pytest.mark.parametrize(
+    "value", ["UNLIMITED", "Partition_Limit", "N/A", "", "45", "-1:00",
+              "1-45:00", "00:60", "1:60:00", "0:00:60"],
+)
+def test_invalid_duration_fails_closed(value):
+    with pytest.raises(ValueError, match="finite Slurm"):
+        API["duration_minutes"](value)
+
+
+def test_short_quality_jobs_do_not_stall_other_arrays(tmp_path, monkeypatch):
+    namespace = API["tick"].__globals__
+    rows = [row(1, i) for i in range(3)] + [row(2, i) for i in range(2)]
+    rows[3]["limit"] = rows[4]["limit"] = "45:00"
+    calls = []
+    monkeypatch.setitem(namespace, "read_queue", lambda: rows)
+    monkeypatch.setitem(namespace, "command", lambda *args: calls.append(args) or "")
+    policy = {"arrays": [1, 2], "adopt_existing_holds": [1, 2], "maximum_worker_minutes": 120}
+    result = API["tick"](policy, {}, tmp_path / "state.json", True)
+    assert len(result["released"]) == 4
+    assert set(result["released"]) == {"1_0", "1_1", "2_0", "2_1"}
+    assert not any(call[0] == "scancel" for call in calls)
+
+
 def test_hold_barrier_precedes_throttle_and_release(tmp_path, monkeypatch):
     namespace = API["tick"].__globals__
     rows = [row(1, 0, held=False), row(2, 0)]

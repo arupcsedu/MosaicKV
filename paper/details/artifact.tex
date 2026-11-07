@@ -1,0 +1,135 @@
+\section{Reproducibility, Limitations, and Completion Checklist}
+\label{app:artifact}
+\subsection{Provenance required for every experimental row}
+A row links to an immutable manifest recording git SHA, resolved config SHA,
+model ID and revision, processor revision, dataset ID/configuration/revision/
+split, prompt and media hashes, seed, measurement type, backend, attention
+implementation, precision, GPU type/count, driver, CUDA, PyTorch, Transformers,
+vLLM, and SGLang versions. Unused packages are marked \texttt{not\_used}.
+The worktree state is explicit. Canonical results require a clean source
+snapshot; development runs with patches are labeled exploratory.
+
+Metric provenance adds scorer version, evaluator commit, reference-artifact
+hash, evaluated token counts, and sample/corpus scope. Baselines add upstream
+commit, license, local patch hashes, official versus reimplementation identity,
+and any generalized/byte-rescaled variant. A published table is an external
+reference, not a measured row in the local run database.
+
+\subsection{Environment and data handling}
+Use the project's pinned environment and its scratch-based cache setup. Model,
+dataset, compiler, package-manager, and temporary caches must not write into
+the home directory. Access tokens are accepted only through environment
+variables and are never written to manifests or shell logs. Large model weights,
+private media, and generated artifacts do not belong in source control.
+
+Legacy official baseline environments remain isolated when the upstream code
+requires incompatible libraries. Their exact locks and patches are part of
+reproduction evidence; such a lane is not silently described as the same
+runtime as the common package. Containers need the corresponding host-driver
+compatibility and a real import/CUDA smoke check. A Dockerfile alone is not a
+validated container execution.
+
+\subsection{Correctness and acceptance checklist}
+Before admitting any new comparative row, require:
+\begin{enumerate}
+\item Real-checkpoint retention-one token/logit parity and extraction/reinjection
+parity for its exact model/backend/precision combination.
+\item Official evaluator agreement on fixed fixtures, including corpus and
+hierarchical reducers where relevant.
+\item A pinned baseline operating-point reproduction within a preregistered
+tolerance before making paper-faithful reproduction claims.
+\item Identical sample IDs, prompts/media, generation settings, and comparison
+controls across methods.
+\item Physical byte accounting, feasibility, mandatory preservation, and
+realized-byte matching under the shared-cap protocol.
+\item Complete attempted/completed/failed denominators and trace coverage;
+fallbacks must not masquerade as compressed successes.
+\item Unambiguous metric names, directions, scales, evaluator/reference hashes,
+and method provenance labels.
+\item Paired CIs and a declared non-inferiority/competitor-selection rule before
+quality-matched memory claims.
+\end{enumerate}
+Some checks require GPU evidence or published operating-point artifacts; CPU
+tests alone cannot complete them. The completed COCO and MileBench tables in
+the main paper are derived from immutable measured artifacts and pass their
+row-completeness and byte-matching gates. Extended results in this appendix
+include negative quality gates as well as successful execution checks.
+
+\subsection{Completed-result provenance}
+The COCO frontier is bound to source revision \texttt{edb6edfa}, model revision
+\texttt{2424fdd4}, and dataset revision \texttt{c3213b54}. MileBench E6 uses
+source \texttt{fdeca177}; the earlier cohort uses \texttt{c4d733b7}.
+Both use model \texttt{b234b804} and dataset \texttt{53c7a580}.
+The PrefixKV large campaign uses source \texttt{e4de3900}, a frozen candidate
+algorithm revision \texttt{95887454}, and upstream PrefixKV \texttt{597f1ab0}.
+The paper's generated provenance ledger hashes all consumed numerical files.
+These shortened hashes
+are presentation labels; the machine-readable manifests retain their full
+SHA-256 values, per-sample input hashes, configuration hashes, package versions,
+and raw-output hashes. COCO's full curves contain 3,328 rows; MileBench E6
+contains 3,072; the earlier MileBench cohort contains 3,328; PrefixKV contains
+8,526. All numerical exports have complete successful sample rows.
+
+\subsection{Threats to validity}
+\paragraph{Construct validity.}
+Task scores reward a specific answer format and may miss factual errors or
+partial reasoning. ROUGE-L agreement can preserve a wrong FullKV answer. PPL
+measures likelihood under teacher forcing, not free-running accuracy. Memory
+reduction must name its boundary, and throughput must name its load/concurrency.
+
+\paragraph{Internal validity.}
+Incorrect cache positions, padded layouts, extra image preprocessing, different
+EOS handling, unsynchronized CUDA work, stale profiles, and metric extraction
+differences can create apparent algorithmic effects. Per-sample pairing and
+manifests make these problems observable but do not automatically prevent them.
+Checkpoint conversion and legacy transport are particularly important for
+published baseline reproduction.
+
+\paragraph{External validity.}
+One model and three datasets do not establish universal multimodal compression.
+Short single-image prompts may not predict multi-page or video behavior.
+Batch-one eager timing does not predict production paged serving. Optional
+prototype/repair designs require active-path evidence before conclusions extend
+to the full architecture.
+
+\paragraph{Statistical validity.}
+Small pilots, repeated tuning, correlated questions, choosing the nearest
+competitor after observing outcomes, and excluding failed rows can all make
+claims optimistic. Freeze protocols, distinguish calibration and held-out
+evidence, report all eligible points, and use metric-aware paired uncertainty.
+A nonsignificant difference is not automatically equivalence.
+
+\subsection{Claim ledger for the final thesis}
+\begin{table*}[t]
+\caption{Claim-to-evidence ledger. Required evidence is specified, not yet
+certified by this draft.}
+\small\begin{tabularx}{\textwidth}{P{3.5cm}YY}\toprule
+Potential claim & Required evidence & Disallowed shortcut\\\midrule
+Same-budget quality advantage & Same realized physical bytes, paired task score/CI, identical controls & Compare arbitrary nominal retention ratios\\
+At least 30\% smaller at matched quality & Measured quality-eligible frontier and preregistered threshold/competitor rule & Choose a failed or quality-ineligible baseline\\
+Lower compressed-method latency & Paired synchronized wall time, same output workload and realized bytes & Exclude planning or use FullKV as requested latency competitor\\
+Paper-faithful baseline reproduction & Checkpoint/data/metric/budget/environment match and registered tolerance & Treat anomalous OCR collapse as a published-method result\\
+Native vLLM integration & Real cache transaction, parity, accounting, A--B--A isolation, exact source version & Label external simulation as native execution\\
+Three-tier advantage & Safe, active prototypes and repair with quality/memory/cost evidence & Count exact-only fallback as prototype/repair success\\
+Generalization & Frozen settings and separately validated model/backend/task strata & Transfer one adapter's evidence to another\\
+\bottomrule\end{tabularx}
+\end{table*}
+
+\subsection{Future-work priorities}
+The immediate research priorities are preserving answer-critical OCR/text
+evidence within a hard physical cap and reducing planner overhead without
+changing comparison controls. Longer term, an allocator-aware optimizer could
+jointly reason about semantic utility and physical storage lattices. Better
+uncertainty calibration may help repair target genuinely recoverable failures.
+Serving APIs that expose atomic ownership/position/cache-table transactions
+would make integration less version-specific. None of these directions should
+be written as an achieved contribution before implementation and evaluation.
+
+\subsection{What must be completed before submission}
+The manuscript now includes measured tables, curves, denominators, and
+negative results from the completed campaigns. Before upload, authors must
+review technical and bibliographic accuracy, audit anonymization, and verify
+that the uploaded main PDF and separate appendix match the intended evidence.
+The expanded thesis
+is a reading edition, not a substitute for the conference's page-limited
+manuscript and separately uploaded supplement.

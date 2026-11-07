@@ -1,0 +1,46 @@
+\section{Related Work}
+\label{sec:related}
+\paragraph{Retention and allocation.}
+H$_2$O retains heavy-hitter and recent tokens; StreamingLLM protects
+attention sinks with a bounded recent window
+\citep{zhang2023h2o,xiao2024streaming}. SnapKV uses prompt observations to
+identify useful KV entries \citep{li2024snapkv}. These works motivate
+questioning whether prompt observations predict later demand, but our
+study does not validate a new eviction policy. PrefixKV searches for a
+layer-wise importance-prefix allocation rather than interpreting
+``prefix'' as simply the first positions in sequence order
+\citep{wang2025prefixkv}. We preserve this distinction and label our
+profile/codec combination as an adaptation.
+
+\paragraph{Multimodal compression.}
+VL-Cache uses attention sparsity and modality-aware scoring with adaptive
+layer budgets \citep{tu2025vlcache}. LOOK-M combines text-prior selection
+with KV merging for multimodal long contexts \citep{wan2024lookm}.
+Their published methods and native evaluations are distinct from the
+single-image precision/storage ports measured here. In particular, the
+ICLR compression method VL-Cache is not a similarly named recurring-image
+cache-reuse system. MileBench provides long-context multimodal tasks
+\citep{song2024milebench}; our current COCO study neither replaces nor
+constitutes representative MileBench confirmation.
+
+\paragraph{Quantization and latent representations.}
+KIVI shows that keys and values can benefit from asymmetric quantization
+axes \citep{liu2024kivi}. Our baseline precision infrastructure incorporates
+axis-aware storage ideas, but no row is labeled official KIVI. Palu
+decomposes projection operators, retains low-rank intermediate states and
+reconstructs K/V using optimized kernels \citep{chang2024palu}.
+Our representation retains the frozen model's common normalized input
+with quantization, exact overlays and a lossless history path, rather than
+claiming low-rank factorization or latent-cache recomputation as a new
+general principle. The tested full-MHA geometry is an important restriction.
+
+\paragraph{Serving and operator execution.}
+FlashAttention reduces memory traffic through tiled attention computation,
+while PagedAttention addresses allocation and sharing in serving
+\citep{dao2022flashattention,kwon2023paged}. These are different boundaries
+from compressing persistent representation. Our HF eager execution and
+request-private CUDA replay do not establish native serving integration,
+prefix-cache benefits or throughput scaling. PyTorch allocator counters
+and synchronization semantics also distinguish allocated tensor memory,
+reserved capacity and device timing \citep{pytorch2025cuda}; those
+distinctions are preserved in the artifact and reported claims.

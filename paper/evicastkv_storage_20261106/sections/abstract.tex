@@ -1,0 +1,18 @@
+The key--value (KV) cache of a vision--language model stores two projections
+of a common attention input. We study EviCastKV-S, a training-free storage
+variant of EviCastKV that retains a quantized shared source, protects selected
+KV regions exactly, and reconstructs layer-local attention operands using
+the unchanged model weights. Generated history uses a lossless source-based
+representation with numerical corrections. Request-private reconstruction
+buffers and eligible eager-attention replay reduce persistent storage without
+requiring a new serving engine. On 256 COCO images with LLaVA-1.5-7B,
+EviCastKV-S uses \EviInitial~MiB initially, \EviFinal~MiB finally, and
+\EviPeak~MiB mean audited decode-owned peak storage, and scores
+\EviCider~CIDEr. Its measured operating point is smaller and faster than
+four local compressed adaptations, but has lower point-estimate quality than
+VL-Cache and LOOK-M adaptations. Paired intervals do not establish quality
+preservation against those methods. We distinguish operating-point evidence
+from byte-matched superiority, decode-owned peaks from whole-request memory,
+and the evaluated storage path from inactive forecasting, graph-selection,
+prototype and repair mechanisms. The result is an auditable account of the
+benefits and remaining limits of shared-source multimodal cache storage.

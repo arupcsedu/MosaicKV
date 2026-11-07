@@ -1,0 +1,337 @@
+\documentclass[11pt]{article}
+\usepackage[T1]{fontenc}
+\usepackage[margin=1in]{geometry}
+\usepackage{microtype,graphicx,booktabs,tabularx,array,amsmath,amssymb,xcolor,url}
+\usepackage[authoryear,round]{natbib}
+\usepackage[colorlinks=true,linkcolor=black,citecolor=black,urlcolor=blue]{hyperref}
+\newcolumntype{Y}{>{\raggedright\arraybackslash}X}
+\input{generated/macros}
+\title{Response to Prof. Fox's Review-Derived Experimental Requirements\\
+\large Current EviCastKV Storage-Variant Draft, 6 November 2026}
+\author{Private working response for the authors; not the anonymous paper}
+\date{}
+\begin{document}
+\maketitle
+\begin{abstract}
+This response accompanies a revised manuscript focused on the implemented
+shared-source storage variant, EviCastKV-S. It identifies what the completed
+256-image COCO study establishes, what was addressed by narrowing the
+paper, and what remains experimentally unresolved. It does not assert
+universal superiority, byte-matched quality preservation, or validation of
+the historical six-component architecture.
+\end{abstract}
+
+\section{Source of the concerns and scope of the response}
+The available record is the supplied numbered experiment-instruction
+package and its description of Prof. Fox's 24 October 2026 assessment,
+together with the repository's earlier Fox-review report. The original
+private assessment PDF was not available in the inspected files. The
+concerns below are therefore \emph{paraphrases of the available
+review-derived requirements}, not invented quotations, a verbatim review,
+or an official conference rebuttal. Each instruction file is hash-bound
+in the paper export's provenance ledger.
+
+The original instructions concern exact prompt selection with unchanged
+retained KV entries and append-only decoding. The current implementation
+is materially different: it quantizes a shared prompt source, restores
+protected exact entries, reconstructs K/V through frozen projections, and
+losslessly codes its own generated-history state. The revised paper calls
+this the storage variant and makes that change visible in the title,
+abstract, design, tables and limitations. It does not say that running
+this new study completed the original exact-selection experiment matrix.
+
+The legacy identifier \texttt{mosaickv\_exact} is retained only to locate
+raw records. EviCastKV and MosaicKV name the same research project;
+EviCastKV-S distinguishes the evaluated variant, not another competing
+system. Its prompt approximation is not lossless FullKV, and its native
+projection corrections are not uncertainty-guided residual repair.
+
+\section{Completed evidence at a glance}
+The immutable producer revision is
+\nolinkurl{a6f689fcdfae2b9023045aa412c6d90d8ce79012}.
+The common checkpoint is \texttt{llava-hf/llava-1.5-7b-hf}, revision
+\nolinkurl{b234b804b114d9e37bb655e11cbbb5f5e971b7a9}.
+COCO Caption revision is
+\nolinkurl{c3213b54e173ae86517d481de17f31439d6f8c72}.
+All methods receive the same 256 images, processor, prompt, BF16 model,
+eager backend and 128-prediction fixed schedule. The accepted study
+contains 1,536 audited memory rows, 1,536 uninstrumented timing rows,
+600 repeated timing rows and six canary workers, for 124 completed GPU
+workers. There is no failed accepted sample or FullKV fallback.
+
+\begin{table}[ht]
+\centering\small\setlength{\tabcolsep}{4pt}
+\resizebox{\textwidth}{!}{\input{generated/operating_points}}
+\caption{Measured operating points. Memory is MiB; latency is seconds.
+R+A means a local reimplementation plus precision/storage adaptation;
+A means an adaptation. The measured byte budgets differ.}
+\end{table}
+
+EviCastKV-S has the smallest measured initial, final and mean decode-owned
+peak among these compressed points, and lower observed request time.
+Its CIDEr is above Prompt Top-K's point estimate, but below VL-Cache's
+and LOOK-M's adaptations. The adjusted quality intervals do not establish
+preservation against those stronger points. The manuscript reports both
+positive and negative findings rather than calling every gate passed.
+
+\section{Point-by-point response}
+\subsection{Concern: complete request timing, not selector-only timing}
+\textbf{Response: addressed within the current workload.}
+The revised evaluation uses complete recomputed requests. Media handling,
+processor work, prefill, representation construction, CUDA replay setup,
+decode, logits export, detokenization and private-state retirement are
+inside the synchronized wall timer. Loaded model weights, writing result
+files and evaluating CIDEr are outside it. No timed request borrows
+another method's prefill or a graph captured in a previous request.
+
+There are five warmups per method per worker, randomized method order
+within each image, and a separate six-image study with 20 paired timed
+repetitions. Memory-instrumented timings are not substituted for latency.
+The phase table calls its combined region
+``prefill/construction/retirement'' rather than presenting it as an
+isolated compression kernel. Overlapping host/device intervals are not
+summed as exclusive costs.
+
+\textbf{Remaining restriction.} This is single-request HF eager on one
+checkpoint. It is not a production-serving or cross-backend timing claim.
+The 256-image distributions and six-image repeat intervals are different
+experiments and remain separately labeled.
+
+\subsection{Concern: physical storage, padding and ownership must be counted}
+\textbf{Response: addressed for the stated initial/final and audited
+decode-owned tensor boundaries; incomplete for a whole-request peak.}
+The revised storage definition deduplicates backing allocations and
+charges headers, exact overlays, patches, index metadata, padding and
+live reconstruction buffers. The initial value is measured after cache
+binding, not merely from a serialized packet. The final value includes
+generated-history growth. The decode audit observes native append overlap
+and encoded reconstruction leases, with their distinct observer scopes
+recorded explicitly.
+
+The current source result is \EviInitial{} MiB initially,
+\EviFinal{} MiB finally and \EviPeak{} MiB mean decode-owned peak,
+maximum \EviMaxPeak{} MiB. These are not whole-process allocated or
+reserved HBM. We explicitly exclude a complete prefill/construction
+KV-peak certificate and do not convert a KV percentage into an identical
+total-GPU-memory percentage.
+
+\textbf{Remaining restriction.} A full ownership audit spanning prefill,
+construction and vendor-internal resources is still needed for the broad
+peak claim. The draft says so rather than marking this item universally
+resolved.
+
+\subsection{Concern: equal nominal retention is not an equal-byte comparison}
+\textbf{Response: the unsupported claim is withdrawn, not experimentally
+resolved by this study.}
+The frozen source-slot convention does not produce identical encoded
+bytes. EviCastKV-S initially uses 41.14 MiB; the compressed adaptations
+use approximately 45.70--53.31 MiB, with different final/peak values.
+The paper therefore presents separate operating points. It does not
+describe these rows as byte-matched, a swept Pareto frontier, or proof
+that the selection policy wins under an identical storage constraint.
+
+The largest initial advantage over a compressed point is approximately
+22.82\%, not 30\%. Against the closest-memory PrefixKV adaptation the
+final and mean peak differences are only 5.85\% and 2.90\%. Thus no
+``30\% smaller at equal quality than every baseline'' statement remains.
+
+\textbf{Remaining restriction.} A shared realized-byte experiment and a
+separately registered equal-quality memory analysis remain necessary to
+establish those claims. Historical shared-byte selection experiments
+cannot be silently transferred to this different storage variant.
+
+\subsection{Concern: representation correctness must be separated from quality}
+\textbf{Response: reference distinctions are explicit.}
+The paper defines native projection of the same decoded prompt source
+as the transport reference. It does not compare a lossy source with
+FullKV and call an expected modeling difference a transport defect. The
+prompt transport envelope is relative tolerance 0.01 and absolute tolerance
+$2^{-6}$ under the pinned dtype predicate. Protected entries cannot hide
+mismatches in approximate patches. Generated-history corrections have a
+bitwise BF16-word contract relative to the variant's own forward passes.
+
+Six method canaries check all 128 exported logits bitwise between memory
+instrumentation and the uninstrumented path. All 1,536 memory/timing
+pairs also preserve token IDs and storage endpoints. These tests validate
+the observer and runtime path; they are not a proof that prompt quantization
+preserves unrestricted FullKV answers.
+
+\textbf{Remaining restriction.} The original masked-subset reference and
+retention-one tests answer a different exact-selection contract. The
+current numerical envelope must not be presented as an unexplained
+relaxation of that contract. Broader adapters need independent checks.
+
+\subsection{Concern: first-token boundary, information access and TTFT}
+\textbf{Response: boundary A is declared; boundary B is not claimed.}
+The current full-prompt prefill produces the first prediction. Its original
+cache is then replaced by the constructed representation for subsequent
+forwards. The exporter checks identical first predictions across all
+methods. Those first tokens do not demonstrate the compressed cache's
+quality. Prompt attention used for protection is available from that one
+prefill; benchmark captions and generated-answer correctness do not enter
+construction.
+
+Historical final-prompt-token-withheld diagnostics have separate numerical
+and no-double-feed requirements. Their failures remain separate; this
+paper does not declare them fixed. The present API returns completed
+requests rather than streamed tokens, so user-visible emission TTFT is
+not reported from an internal prefill-logit timestamp.
+
+\subsection{Concern: faithful and efficient published baselines}
+\textbf{Response: provenance and limitations are explicit; native fidelity
+is not established for these adaptations.}
+Every measured local port is labeled reimplementation plus adaptation.
+The additional source/history codec, shape policy and captioning workload
+are not the original PrefixKV, VL-Cache or LOOK-M setup. We cite their
+papers for the policies but do not attribute the current implementation
+cost or failure modes to the published algorithms
+\citep{wang2025prefixkv,tu2025vlcache,wan2024lookm}.
+
+There is an especially important quality confound: 42/256 PrefixKV-adaptation
+captions reach the fixed output limit; no other method does. Every such
+caption remains scored and included. The positive adjusted CIDEr
+difference against that adaptation cannot be promoted into a statement
+that official PrefixKV loses at its own native PPL or ROUGE-L point.
+
+Likewise, approximately 42.05 seconds in LOOK-M's local combined
+prefill/construction region is not evidence that the published LOOK-M
+algorithm inherently has that cost. Historical official-path reproduction
+and byte-matched results use different configurations and are preserved,
+not pooled into this table.
+
+\textbf{Remaining restriction.} Strong original-method comparisons need
+efficient faithful paths and native reproduction at their own checkpoint,
+metric and operating point. The present paper offers an engineering study
+of explicitly adapted local paths, not that broader conclusion.
+
+\subsection{Concern: common optimizations should not favor only EviCastKV}
+\textbf{Response: common capability, actual engagement and causal limitation
+are all reported.}
+All compressed methods request the same uniform-layout replay capability.
+The implementation does not silently change adaptive quotas or introduce
+padding to make them eligible. The result is that EviCastKV-S engages
+the fast path on 256/256 requests and every compressed baseline engages
+it on 0/256. This is a genuine layout/runtime difference, not an identical
+operator-path experiment.
+
+The new text attributes latency to the combined representation, layout
+and execution policy. It does not say that saving a small number of KV
+bytes alone explains the gain, nor that a serving engine with paged or
+fused attention will achieve the same result. Execution replay graphs
+are not the semantic evidence graph.
+
+\textbf{Remaining restriction.} Isolating codec benefit requires additional
+layout/execution ablations. Current complete-request latency is useful
+but cannot identify that causal contribution by itself.
+
+\subsection{Concern: six-component claims need mechanism ablations}
+\textbf{Response: the inactive-design performance claim is removed.}
+The historical architecture comprises future-query forecasting, a sparse
+cross-modal graph, value-aware utility, budgeted submodular selection,
+exact/prototype/residual tiers and uncertainty-guided repair. All six are
+inactive in the present study. The paper no longer leads with a three-tier
+performance claim or uses CUDA graphs/numerical patches as substitutes
+for graph evidence/uncertainty repair.
+
+Its measured contribution is a shared-source format, protected exceptions,
+lossless coding of its generated history, and an audited reconstruction
+runtime. Existing six-component modules or CPU tests do not validate their
+task-quality benefit. Consequently the original routing-fraction,
+cross-modal-edge and scoring-component ablation requirements are not
+marked completed.
+
+\textbf{Remaining restriction.} Those ablations and model-level numerical
+controls are still required if the original algorithmic claims return.
+This is a scope correction, not a successful six-component experiment.
+
+\subsection{Concern: confirmation must be fresh at ID and media/source level}
+\textbf{Response: not resolved; the experiment is development evidence.}
+The 256 images are a frozen, inspected cohort. A historical exclusion
+inventory is retained, but global underlying-media/source-group freshness
+has not been certified. The original MileBench pools and replacement
+source-group uncertainties are not repaired by measuring COCO again.
+
+The revised abstract/evaluation/discussion do not call the result untouched
+confirmation. The original proposed COCO-plus-MileBench matrix and the
+current six-method, 1,536-row study have different purposes and cannot be
+equated because both contain many requests.
+
+\textbf{Remaining restriction.} An ID- and media-audited, preregistered
+independent cohort remains necessary before confirmatory generalization
+or superiority language. More bootstrap draws cannot create freshness.
+
+\subsection{Concern: corpus statistics, multiplicity and failure denominators}
+\textbf{Response: implemented and reported within the inspected cohort.}
+All supplied lists of five, six or seven captions are retained. The pinned COCO
+evaluator/tokenization ecosystem supplies corpus CIDEr. The 10,000-draw
+paired bootstrap recomputes corpus reference document frequencies and
+TF--IDF reduction for every resampled image multiset. Shard CIDEr scores
+are not averaged. Five quality contrasts use familywise-adjusted intervals.
+
+\begin{table}[ht]
+\centering\small\setlength{\tabcolsep}{3pt}
+\input{generated/quality_intervals}
+\caption{All registered quality contrasts, including negative and
+inconclusive results.}
+\end{table}
+
+Only the PrefixKV-adaptation contrast has a positive familywise lower
+bound. EviCastKV-S versus Prompt Top-K, VL-Cache and LOOK-M does not
+establish zero-margin preservation. These are not equivalence tests, and
+confidence intervals crossing zero are not called ties or passes.
+
+The six-image repeated study separately reports nested paired timing
+ratios and four-contrast adjusted intervals. Its lower time does not
+override a failed quality inference. All raw failures from earlier
+attempts remain preserved, and accepted denominators are checked rather
+than inferred from scheduler exit status alone.
+
+\subsection{Concern: batching, serving throughput and full reproducibility}
+\textbf{Response: the artifact is bound; unmeasured scope is excluded.}
+The paper exporter verifies producer SHA, immutable ledger, configuration,
+raw/manifests, row pairing and generated-table hashes. It independently
+recomputes storage endpoints and timing quantiles. No new GPU inference
+or manual editing of raw numbers occurs during paper construction.
+
+Batch one is the only model workload. Six concurrent single-GPU jobs
+are not batch six, serving throughput or a shared-prefix system. The
+optional B=2/4 capacity study, multi-model validation, vLLM/SGLang native
+transport and production kernel conclusions remain unmeasured by this
+experiment and are not claimed.
+
+\section{Claim changes made in the revised paper}
+\begin{enumerate}
+\item Replace the historical full six-component performance narrative with
+      an explicitly labeled shared-source storage-variant design.
+\item Report all six operating points with measured initial, final and
+      audited decode-owned peak storage, not nominal ratios alone.
+\item Remove same-budget, universal Pareto dominance, 30\% equal-quality
+      compression and whole-request peak-certification statements.
+\item Retain positive storage and measured local-runtime results, while
+      reporting higher VL-Cache/LOOK-M CIDEr and nonconfirmatory intervals.
+\item Disclose actual replay engagement, PrefixKV limit-hit captions,
+      local baseline adaptations, inspected-cohort status and batch-one
+      eager-only hardware/software scope.
+\item Keep numerical patches, source quantization, exact overlays and
+      lossless generated-history coding conceptually distinct.
+\end{enumerate}
+
+\section{What would still be needed for a stronger paper claim?}
+The current evidence supports a bounded storage/runtime engineering claim,
+not superiority over the strongest baseline. A stronger submission would
+need a faithful efficient baseline set at common realized bytes; a complete
+whole-request ownership audit; independently audited confirmation; and
+quality/memory curves under frozen operating-point rules. Six-component,
+multi-model and serving claims additionally need their corresponding
+active-path tests and causal ablations. No amount of rewording changes
+those empirical requirements.
+
+This response is intentionally candid: some concerns are addressed by new
+measurement, some by narrowing the claim, and some remain unresolved.
+The authors must review both the scientific interpretation and the
+AI-assistance disclosure before using the draft in a submission or
+circulating this response as their final position.
+
+\bibliographystyle{plainnat}
+\bibliography{references}
+\end{document}

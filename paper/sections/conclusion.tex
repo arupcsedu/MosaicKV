@@ -1,0 +1,10 @@
+\section{Conclusion}
+MosaicKV couples query-conditioned exact selection with sparse evidence
+coverage, routed planning, and explicit storage semantics. Completed COCO and
+MileBench studies show quality and request-time improvements over local
+VL-Cache and LOOK-M ports at matched memory; Prompt Top-K remains a close
+quality competitor. Native PrefixKV results improve output fidelity but show
+that continuing eviction can reverse initial savings. The contribution is a
+measured exact-selection system with transparent quality--memory trade-offs,
+not a universal smaller-memory or serving-latency guarantee. Complete curves
+and negative outcomes define the boundary for future extensions.

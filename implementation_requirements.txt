@@ -150,3 +150,190 @@ Before using any new comparison in the paper:
 - Evaluator version, reference-output hash, model revision, dataset revision, and baseline commit are in the manifest.
 
 Recommended order: schema and metric registry → PrefixKV metrics → VL-Cache metrics → LOOK-M/MileBench → recurring secondary baselines → GPU pilots → paper-scale runs. No repository files were changed during this assessment.
+
+
+Required apples-to-apples controls
+Every direct comparison must hold fixed:
+- model checkpoint and revision;
+- processor/chat template, prompts, media preprocessing, and tokenization;
+- deterministic generation settings and output limit;
+- block size and mandatory-token policy;
+- backend, precision, attention implementation, warmups, repetitions, and GPU controls;
+- identical sample IDs;
+- per-sample physical active-KV-byte cap.
+For each cap, each method must retain the largest feasible cache at or below the cap and report actual achieved bytes. Quality and latency should then be compared only among compressed methods at that shared realized budget.
+
+
+The right order is: **finish baseline fidelity → complete shared-byte quality–memory curves → test the 30% claim → separately validate latency and three-tier features.**
+
+The four PrefixKV validation workers are currently running; analyzer `21370058` is waiting for them. No jobs or files were changed for this planning request.
+
+## 1. Freeze the comparison rules
+
+Before further large runs:
+
+1. Retain all original results as historical nominal-ratio curves.
+2. Freeze one candidate implementation for the new comparisons.
+3. Use identical model revision, processor, prompts, media, generation, precision, backend, block size, and mandatory-token policy **within each lane**.
+4. Register physical byte targets and require matching realized bytes—not merely matching configured caps.
+5. Record initial, final, and peak active KV storage. Append-only decoding increases storage after prefill.
+6. Keep FullKV as a quality reference; exclude it from compressed-method latency comparisons.
+7. Reconcile older protocol placeholders with the actual dataset routes and immutable ledgers before submission.
+
+The new lanes should remain separate:
+
+| Lane | Model | Primary datasets | Metrics |
+|---|---|---|---|
+| PrefixKV | LLaVA-1.5-7B | LLaVA-Description; paper-style MM-Vet | Corpus PPL; FullKV-reference ROUGE-L |
+| VL-Cache | LLaVA-v1.6-Mistral-7B | COCO Caption; existing DocVQA evidence where compatible | CIDEr; ANLS |
+| LOOK-M | LLaVA-1.5-7B | Representative MileBench subtasks | Accuracy; ROUGE-L; subtask summaries |
+
+Do not combine these different metrics into one average.
+
+## 2. Finish PrefixKV fidelity before its large comparison
+
+**Important:** passing the current OCR validation will validate the corrected local variant—not automatically paper-faithful PrefixKV.
+
+### Step-by-step tasks
+
+1. **Analyze the running four-worker validation.**
+   Check completeness, exact initial/final byte matching, append-only behavior, task scores, paired intervals, and variant labels.
+
+2. **Preserve the existing official reproduction.**
+   The official 1,000-example PPL result is already available. Its ROUGE-L result is also measured, but lacks a preregistered published numeric target; do not describe that as a separate numerical reproduction pass.
+
+3. **Validate the faithful local implementation against the official execution path.**
+   On identical checkpoint, inputs, profile, and decoding controls, compare:
+   - selected positions and per-layer lengths;
+   - decode-time evictions;
+   - generated tokens and logits;
+   - teacher-forced NLL and token counts;
+   - ROUGE-L against the same frozen reference.
+
+   Different checkpoints or environments cannot silently be treated as parity.
+
+4. **Keep C-only separate.**
+   `prefixkv_question_scored_selection_only_reimpl` changes scoring and decoding policy. Report it as an adaptation, not as evidence that original PrefixKV has been reproduced.
+
+5. **Complete the unified PPL/ROUGE-L route.**
+   Extend the materialized unified-comparison runner to these PrefixKV datasets, including Prompt Top-K. Verify teacher-forcing masks, target lengths, reference hashes, and dataset provenance. The old MM-Vet protocol still needs its revision reconciled with the actual materialized artifact.
+
+6. **Run a small shared-byte native-metric validation.**
+   Start with approximately 32 examples per route. Use common physically feasible caps; the existing native-route proposal is 40/80/120/160/240 MiB. Finalize the grid before the large evaluation.
+
+7. **Run the large comparison only after fidelity passes.**
+   Target the original 1,000 LLaVA-Description examples and 218 paper-style MM-Vet examples. Compare the fidelity-validated byte-rescaled PrefixKV variant, Prompt Top-K, and MosaicKV.
+
+**Completion condition:** a faithful baseline is validated, and the large comparison has complete, byte-matched PPL/ROUGE-L results. A successful OCR adaptation alone does not meet this condition.
+
+See [PrefixKV specification](/scratch/djy8hg/workdir/MosaicKV/mosaickv/docs/baselines/prefixkv_spec.md).
+
+## 3. Complete large shared-byte COCO/CIDEr evaluation
+
+### Step-by-step tasks
+
+1. Freeze COCO IDs, references, preprocessing, and the pinned LLaVA-v1.6-Mistral checkpoint.
+2. Complete the one-method-per-shard execution and aggregation path around the existing preparation tooling.
+3. Run the planned **32-example, 40 MiB validation**:
+   - FullKV quality reference;
+   - Prompt Top-K;
+   - `vl_cache_reimpl`;
+   - `mosaickv_exact`.
+4. Check FullKV parity, complete captions/references, exact byte matching, timing fields, and corpus CIDEr.
+5. Run the **256-example intermediate curves** at shared 10/20/40/80 MiB caps.
+6. Use pilot variance and runtime to preregister the final sample size. The existing **4,096-example cohort** is a reasonable large-run target, but its prior use must be disclosed.
+7. Recompute CIDEr over the complete cohort and inside every paired-bootstrap replicate. **Never average shard CIDEr scores.**
+
+Reuse existing FullKV predictions only when all controls match. Historical BF16 predictions are not interchangeable with new FP16 references.
+
+**Completion condition:** large, paired CIDEr-versus-measured-memory curves—not another nominal-retention comparison.
+
+## 4. Build representative MileBench evidence
+
+The current 20-example ActionSequence pilot is insufficient.
+
+### Step-by-step tasks
+
+1. Complete and hash the actual media—not just annotation previews.
+2. Verify that the adapter preserves image ordering, multiple-image semantics, and context length. If combined images are used, label the experiment as that adaptation rather than native multi-image reproduction.
+3. Freeze four complementary subtasks:
+   - ActionSequence: temporal reasoning;
+   - CLEVR-Change: semantic comparison;
+   - Spot-the-Diff: semantic comparison;
+   - TextNeedleInAHaystack: diagnostic retrieval.
+4. Run **eight examples per subtask**, 32 total, at 40 MiB.
+5. Validate the applicable Accuracy/ROUGE-L scorers and official aggregation hierarchy.
+6. Run the **256-example intermediate comparison**, balanced across subtasks.
+7. Expand to all eligible examples in the selected subtasks, or a preregistered precision-powered subset after auditing availability.
+
+Compare `lookm_reimpl`, Prompt Top-K, and MosaicKV, with FullKV as the quality reference.
+
+**Completion condition:** representative, byte-matched results with separate metric columns and subgroup results. Do not call four-subtask coverage the full MileBench suite, and do not label `lookm_reimpl` official.
+
+## 5. Establish—or reject—the “30% smaller at equal quality” claim
+
+This requires two distinct experiments:
+
+- **Same bytes:** does MosaicKV preserve more quality?
+- **Same quality:** does MosaicKV need less memory?
+
+The second question necessarily compares different memory points, but only after establishing controlled curves for every method.
+
+### Step-by-step tasks
+
+1. Define the target quality and acceptable non-inferiority margin **before confirmation results are inspected**.
+2. Run every method on a common byte grid.
+3. Identify each method’s smallest measured cache satisfying the quality requirement.
+4. Define the nearest competitor as the **best qualifying non-MosaicKV method**, not the weakest baseline.
+5. Calculate:
+   \[
+   \text{memory saving}
+   =1-\frac{M_{\text{MosaicKV}}}{M_{\text{best qualifying competitor}}}.
+   \]
+6. If the grid is too coarse, register additional shared caps for all methods—for example, 28/40 or 56/80 MiB comparisons.
+7. Confirm selected operating points on a separate, uninspected confirmation cohort where available. Otherwise label the evidence retrospective.
+8. Report paired uncertainty and account for selecting among multiple methods/caps. No unsupported interpolation.
+
+**The existing five-percentage-point development allowance is not proof of “same quality.”** Paper wording must state the actual non-inferiority margin.
+
+A cross-lane claim requires support in every named lane. If only COCO passes, claim a COCO result—not universal superiority.
+
+## 6. Treat latency as a separate systems experiment
+
+Quality runs provide useful timings, but not a general latency result.
+
+1. Freeze quality-valid configurations first.
+2. Benchmark compressed methods at identical realized bytes.
+3. Use isolated GPUs, five warmups, and at least 20 timed repetitions.
+4. Separate prefill, forecasting, graph construction, selection, packing, decode, and total time.
+5. Report paired latency ratios, confidence intervals, p50, and p95.
+6. Test eager and any independently parity-validated optimized attention paths.
+7. Include longer contexts or larger batches only where supported and identically configured.
+
+**Completion condition:** a reproducible latency advantage in explicitly identified regimes. An eager-only gain cannot support a general serving-speed claim.
+
+## 7. Validate prototypes and repair independently
+
+These features should not delay an otherwise defensible exact-selection paper.
+
+1. Audit adapter-specific RoPE/cache compatibility; retain fail-closed behavior.
+2. Validate prototype construction numerically on controlled fixtures.
+3. Compare exact-only versus prototypes at the same active-byte budget.
+4. Add lossless residual storage first; report active, residual, and total storage separately.
+5. Validate repair isolation, one-time re-decoding, promotion/eviction, and budget enforcement.
+6. Measure beneficial repairs, harmful repairs, recovery rate, transfer cost, and net latency.
+7. Run controlled quality ablations before making three-tier performance claims.
+
+**Completion condition:** measured benefit attributable to prototypes or repair—not merely successful execution or an exact-only fallback.
+
+## Execution order
+
+1. Finish current PrefixKV OCR analysis.
+2. Prepare COCO inputs and representative MileBench media.
+3. Resolve PrefixKV’s native fidelity and PPL/ROUGE-L comparison path.
+4. Run the small validations, then freeze larger protocols.
+5. Execute large shared-byte curves.
+6. Test the 30% equal-quality conclusion.
+7. Run dedicated latency and three-tier studies separately.
+
+Use at most **four A100s total**, one GPU and 12 CPUs per worker, with two-hour shard limits. Reuse compatible completed work and retry only missing/failed shards. **Do not rerun the entire original nominal-ratio campaign.**

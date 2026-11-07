@@ -1,0 +1,13 @@
+% Exported from hash-verified measured records; do not hand edit.
+\begin{tabular}{lrrrrrr}
+\toprule
+Method & Initial & \shortstack{Decode-owned peak\\mean/max} & Final & CIDEr $\uparrow$ & p50 $\downarrow$ & p95 $\downarrow$\\
+\midrule
+FullKV reference & 301.50 & 370.70/370.70 & 365.00 & 116.83 & 5.85 & 5.97\\
+\textbf{EviCastKV-S} & 41.14 & 83.52/84.24 & 73.22 & 119.77 & 6.55 & 6.72\\
+Prompt Top-K (A) & 50.73 & 92.83/92.95 & 82.80 & 118.33 & 7.50 & 7.66\\
+PrefixKV (R+A) & 45.70 & 86.01/86.56 & 77.78 & 103.10 & 7.38 & 7.54\\
+VL-Cache (R+A) & 53.31 & 94.39/94.64 & 85.39 & 122.16 & 13.25 & 17.66\\
+LOOK-M (R+A) & 50.72 & 92.82/92.83 & 82.80 & 120.96 & 48.86 & 51.59\\
+\bottomrule
+\end{tabular}

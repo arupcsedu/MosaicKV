@@ -265,7 +265,7 @@ def prepare(args: argparse.Namespace) -> dict:
         "caps_mib": list(caps),
         "validation_caps_mib": list(caps),
         "stage_sample_counts": {name: len(values) for name, values in stages.items()},
-        "max_global_a100s": 4,
+        "max_global_a100s": 6,
         "a100s_per_worker": 1,
         "cpus_per_worker": 12,
         "time_limit": "02:00:00",

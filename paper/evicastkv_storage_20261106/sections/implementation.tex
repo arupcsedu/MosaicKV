@@ -1,0 +1,79 @@
+\section{Implementation}
+\label{sec:implementation}
+\subsection{Supported execution and data ownership}
+The evaluated implementation is a single-request, single-GPU Hugging Face
+path for the pinned LLaVA-1.5-7B checkpoint. The model and its projections
+remain BF16; prompt-source storage has its separately declared lower
+precision. The adapter exposes an explicit prefill and token-by-token loop,
+original logical positions, model-produced RoPE phases and layer cache
+ownership. The compressed path does not call \texttt{model.generate()}.
+Ordinary generation remains a reference/control API, not the compressor.
+
+Persistent payloads and reconstructible GPU tensor state reside in GPU
+high-bandwidth memory (HBM), allocated through PyTorch. L1/L2 cache and
+kernel shared memory are hardware-managed execution resources, not the
+system's declared storage tiers. CPU index metadata is not residual KV
+offloading. We do not retain a full hidden copy of original K/V while
+reporting only the encoded payload.
+
+The common request path is in
+\smallpath{evaluation/common_streaming_timing.py}; layer-local source
+construction is in \smallpath{evaluation/streaming_source_constructor.py}.
+The representation and transport predicates are implemented in
+\smallpath{evaluation/shared_source_format.py}. Generated-history sealing,
+native reconstruction and exact-word checks use the source-history and
+native-history modules. Custom GPU kernels, cuBLASLt projection descriptors
+and request-private CUDA replay are implementation choices, not changes to
+the frozen model weights.
+
+\subsection{Publication and retirement transactions}
+Construction operates on the single original prefill. A private layer
+transaction captures required source information, constructs codes and
+exact payloads, verifies finite values and the numerical contract, and only
+then publishes its representation. The packet must not alias an original
+full-cache owner that should have been retired. Bound-cache initial storage
+is measured after binding adds its actual live metadata; serialized packet
+size alone is not used as the initial-cache measurement.
+
+The pinned text-storage policy independently chooses source, encoded or
+resident handling for eligible layer/component regions. Descriptor reuse,
+bounded validation buffers and batched checks avoid needless host objects
+and synchronization without omitting predicate coverage. Code deltas and
+literal coding are lossless transforms of their already chosen payloads;
+they must not be mistaken for correction of source quantization error.
+
+At each decode step, reconstruction populates the appropriate lease, eager
+attention consumes it, and ownership returns to the request-local pool.
+History append uses the unchanged logical next position. Before a request
+returns, its replay graphs and private owners are retired. Canonical runs
+reject a surviving request-private graph owner rather than silently reusing
+that state across requests.
+
+\subsection{Common baseline interface and explicit restrictions}
+The four compressed comparators use local policy implementations and the
+common precision/storage infrastructure where compatible. Prompt Top-K
+ranks prompt-window attention; PrefixKV uses its pinned layer-profile
+shape; VL-Cache uses modality/sparsity-aware scoring and adaptive allocation;
+LOOK-M adds its local text-prior selection and merge construction. This
+study's codec, history path, shape and output policy make these
+\emph{adaptations}, not official reproductions of the corresponding papers.
+
+The uniform replay capability is requested for every compressed method, but
+executes only when its layout satisfies the same eligibility predicate.
+Unsupported adaptive layouts pass through unchanged. We report actual
+engagement instead of claiming that all methods took an identical optimized
+operator path. No vLLM, SGLang, FlashAttention-2, multi-request batching,
+cross-request prefix sharing, semantic evidence graph, prototype tier or
+uncertainty-guided residual repair is used in the reported study.
+
+\subsection{Reproducibility and failure handling}
+Producer revision \SourceRev{} is immutable. Every worker records the
+resolved configuration hash, model/processor and dataset revisions,
+environment versions, GPU telemetry, scheduler identity and raw-output hash.
+The common environment is not upgraded between methods. All model,
+compiler, evaluator and temporary caches are rooted on scratch storage;
+credentials, if required, are environmental rather than serialized.
+Finite dependency-chained analyses run even after failed producers. Early
+CPU-fixture and caption-schema failures remain preserved in separate
+attempt directories; the accepted campaign uses its corrected source and
+requires complete rows rather than selecting favorable survivors.

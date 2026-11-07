@@ -1,0 +1,38 @@
+{
+  "checks": {
+    "fullkv_latency_competitor": false,
+    "lower_memory_equal_quality_milebench": false,
+    "milebench_192_complete": true,
+    "official_lookm_execution": false,
+    "prefixkv_1218_complete": true,
+    "prefixkv_original_plotting_failure": "matplotlib missing; numerical exports complete",
+    "shared_initial_final_peak_bytes_match": true
+  },
+  "notes": [
+    "All figures connect measured points only; no interpolation is evidence.",
+    "The 256- and 192-example MileBench cohorts are reported separately.",
+    "Paired hypothesis intervals are copied from the registered reducers.",
+    "No model inference or benchmark rescoring was performed for this export."
+  ],
+  "schema_version": 1,
+  "sources": {
+    "/scratch/djy8hg/runs/mosaickv/coco-shared-32-edb6edf-retry1-20261014/analysis/lower-memory-frontier-21636391/cider_memory.svg": "ead971769c97f55f6bf57fd0f1b4523ea77350b653ac6a914eb91d258e656e00",
+    "/scratch/djy8hg/runs/mosaickv/coco-shared-32-edb6edf-retry1-20261014/analysis/lower-memory-frontier-21636391/compressed_latency_memory.svg": "9c425f721b6961fc87c4c66b200d8c3634b57fd67ec16774a2c9bf53713b6106",
+    "/scratch/djy8hg/runs/mosaickv/coco-shared-32-edb6edf-retry1-20261014/analysis/lower-memory-frontier-21636391/corpus_metrics.parquet": "418993ce890806050cc922044c32b27a51bab636cc5419ab7935aefc9404cbed",
+    "/scratch/djy8hg/runs/mosaickv/coco-shared-32-edb6edf-retry1-20261014/analysis/lower-memory-frontier-21636391/paired_comparisons.parquet": "0bee3c452a299e4bfedd0b918c6faace61700fdc600a6061882d095b6474aec7",
+    "/scratch/djy8hg/runs/mosaickv/coco-shared-32-edb6edf-retry1-20261014/analysis/lower-memory-frontier-21636391/paired_samples.parquet": "99c6b451a3d91146d2e66904e62e21ea8edb0cc0b314cb82ee5bd3aea18214e4",
+    "/scratch/djy8hg/runs/mosaickv/coco-shared-32-edb6edf-retry1-20261014/analysis/lower-memory-frontier-21636391/report.json": "d174bab34cdcece8f455db5ec46cb95685dfeb08fccf1afdfabe78d55cf106d6",
+    "/scratch/djy8hg/runs/mosaickv/milebench-isoquality-e6-fdeca17-20261020/analysis/larger/report.json": "60a7c44824ae616e1823a73a3234e6e83b5edb32d383ab5aa7da2313d1167a4c",
+    "/scratch/djy8hg/runs/mosaickv/milebench-lookm-retry-c4d733b-20261019-v2/analysis/recovered-larger/aggregates.parquet": "a535904ce8493a33021cdbcbbd39e5307b0b6e73ada32b313a201df6e4247910",
+    "/scratch/djy8hg/runs/mosaickv/milebench-lookm-retry-c4d733b-20261019-v2/analysis/recovered-larger/derived_rows.parquet": "629617d54108b409df874c762a8ca2d4ba1c8c81ec6f9fe3d556f3dee557967f",
+    "/scratch/djy8hg/runs/mosaickv/milebench-lookm-retry-c4d733b-20261019-v2/analysis/recovered-larger/report.json": "24967149ebcc0a24199e1be46fa098dba6a98be3bbc28b2a9eee167c1978e84b",
+    "/scratch/djy8hg/runs/mosaickv/prefixkv/full-campaign-e4de390-20261019-v6/analysis/final/metrics.parquet": "71354277657a911ef102a0a978a888906a12cb50bedad036c43922288df35c53",
+    "/scratch/djy8hg/runs/mosaickv/prefixkv/full-campaign-e4de390-20261019-v6/analysis/final/paired_comparisons.parquet": "6ebf8e572bae7ba861d86ddd7e940d3e989eaa943ab96e8e9b9a2238808cf6b9",
+    "/scratch/djy8hg/runs/mosaickv/prefixkv/full-campaign-e4de390-20261019-v6/analysis/final/sample_rows.parquet": "a4211a22bf51bbd108d861b60e00755f13cd037317fc77d857f48ce7d051f6db",
+    "/scratch/djy8hg/runs/mosaickv/prefixkv/full-campaign-e4de390-20261019-v6/authorization/full-campaign.json": "5494e0af80125acaa934b81c318282e078d6611426ebb5b328af176ade74585c",
+    "/scratch/djy8hg/runs/mosaickv/prefixkv/full-campaign-e4de390-20261019-v6/plan.json": "2500e5773cfb98c6d5aee8eda69359dd9fed77d5fc117dbec6af8654a73dc704",
+    "/sfs/weka/scratch/djy8hg/runs/mosaickv/milebench-isoquality-e6-fdeca17-20261020/analysis/larger/aggregates.parquet": "d695651dc0514ad86f983a0b2df9a48b6021d58005bb6a9375414fb563db8fd4",
+    "/sfs/weka/scratch/djy8hg/runs/mosaickv/milebench-isoquality-e6-fdeca17-20261020/analysis/larger/derived_rows.parquet": "1eae77c8cc58fa28169d183360080fa355347ea6f49e9e81d89640c3f35e5158",
+    "/sfs/weka/scratch/djy8hg/runs/mosaickv/milebench-isoquality-e6-fdeca17-20261020/analysis/larger/isoquality_tests.parquet": "ba2cf110d23560a442c2e94408963b5b550985458b13c82627c27b4ef9773c17"
+  }
+}

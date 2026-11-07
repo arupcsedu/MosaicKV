@@ -1,0 +1,46 @@
+\section{Implementation}
+\label{sec:implementation}
+The Python package separates configuration, adapters, planning, packing,
+measurement, and scoring. Adapters expose prefill, one-token decode, query
+capture, extraction/reinjection, modality maps, and cache layouts. The compressed
+path uses an explicit loop rather than \texttt{model.generate()}, placing the
+cache transaction between prefill and decoding. Ordinary generation supplies
+the FullKV correctness reference.
+
+\paragraph{Planner execution.}
+The frozen path uses contiguous prompt-score arrays, deferred transfers per
+layer, segmented tensor top-$k$ edge assembly, and vectorized one-token
+selection instead of per-head dynamic programming. Stable exact blocks remain
+outside the graph. Routed descriptors and preselected edges are reused before
+one packing transaction. These choices bound planner work; the experiments
+do not isolate the causal contribution of every optimization.
+
+\paragraph{Storage and correctness.}
+Accounting deduplicates live backing allocations by device/storage identity
+and charges padding and oversized views. KV tensors reside in GPU HBM.
+Planner workspace, weights, and allocator-reserved memory are separate.
+Retention one bypasses lossy transforms. COCO/MileBench workers compare at
+least 16 greedy tokens with ordinary generation and cache reinjection,
+requiring token agreement of one and absolute logit error at most $10^{-4}$.
+
+\paragraph{Timing and provenance.}
+CUDA events and synchronization delimit GPU phases; wall timing captures
+host planning and complete request latency. Records retain prefill,
+compression, decode, and end-to-end time. Immutable manifests bind source and
+config hashes, model/dataset revisions, evaluator/reference hashes, software
+versions, hardware, seeds, and measurement type. Sample-level resume retains
+failures and retries missing work.
+
+\paragraph{Baseline transports.}
+PrefixKV's independent layer lengths and ongoing eviction use a validated
+ragged LLaMA eager-attention transport, upstream rounding, and profile-ratio
+maintenance. Its shared-byte adaptation rescales the profile and uses
+append-only decoding. A four-example differential gate checks positions,
+lengths, bytes, outputs, and likelihood against a pinned official path.
+The large comparison remains a local \texttt{prefixkv\_reimpl} execution.
+
+LOOK-M and VL-Cache are local ports. LOOK-M's pin establishes attribution,
+not official execution. The VL-Cache port does not implement the paper's
+specialized fused kernels; its timing comparison concerns the measured port.
+Version-specific vLLM integration and other attention backends do not establish
+that HF eager results transfer to serving kernels.

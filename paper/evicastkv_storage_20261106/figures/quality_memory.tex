@@ -1,0 +1,26 @@
+\begin{tikzpicture}
+\begin{axis}[
+ width=\columnwidth,height=5.6cm,
+ xlabel={Initial encoded storage (MiB)},ylabel={Corpus CIDEr},
+ xmin=39,xmax=56,ymin=99,ymax=125,
+ grid=major,grid style={gray!15},tick label style={font=\scriptsize},
+ label style={font=\small},
+ legend style={at={(.5,1.04)},anchor=south,legend columns=2,draw=none,font=\scriptsize},
+ legend cell align=left]
+\addplot[only marks,mark=star,mark size=3pt,color=eviblue]
+ table[x=initial,y=cider]{generated/point_EviCastKV.dat};
+\addlegendentry{EviCastKV-S}
+\addplot[only marks,mark=square*,mark size=2.4pt,color=exactgreen]
+ table[x=initial,y=cider]{generated/point_TopK.dat};
+\addlegendentry{Prompt Top-K (A)}
+\addplot[only marks,mark=triangle*,mark size=2.6pt,color=patchorange]
+ table[x=initial,y=cider]{generated/point_PrefixKV.dat};
+\addlegendentry{PrefixKV (R+A)}
+\addplot[only marks,mark=diamond*,mark size=2.5pt,color=riskred]
+ table[x=initial,y=cider]{generated/point_VLCache.dat};
+\addlegendentry{VL-Cache (R+A)}
+\addplot[only marks,mark=*,mark size=2.3pt,color=violet]
+ table[x=initial,y=cider]{generated/point_LOOKM.dat};
+\addlegendentry{LOOK-M (R+A)}
+\end{axis}
+\end{tikzpicture}

@@ -1,0 +1,13 @@
+\begin{tikzpicture}[node distance=9mm]
+\node[box,text width=2cm] (q) {Text block\\``total cost?''};
+\node[box,text width=2cm,right=16mm of q] (label) {Visual block\\``Total'' region};
+\node[box,text width=2cm,below=16mm of label] (value) {Visual block\\number region};
+\node[box,text width=2cm,left=16mm of value] (other) {Visual block\\unrelated logo};
+\draw[flow,<->] (q)--node[above,font=\scriptsize]{alignment}(label);
+\draw[flow,<->] (label)--node[right,font=\scriptsize,align=left]{layout /\\same row}(value);
+\draw[flow,dashed,<->] (q)--node[above,sloped,font=\scriptsize]{co-activation}(value);
+\draw[draw=gray,dotted] (other)--(label);
+\node[below=8mm of other.south west,anchor=west,align=left,font=\scriptsize,text width=6.1cm]
+ {Illustrative relations only; not measured attention or a real dataset item.\\
+ Nodes shown belong to one layer and KV head.};
+\end{tikzpicture}

@@ -1,0 +1,20 @@
+% Generated from hash-verified measured artifacts by scripts/export_results.py.
+\begin{tabular}{lllrrrrr}
+\toprule
+Task & Lane & Method & PPL $\downarrow$ & R-L $\uparrow$ & Initial MiB & Peak MiB & E2E s\\\midrule
+LLaVA-Desc. & Native & FullKV & 2.9555 & 100.00 & 298.83 & 810.33 & ---\\
+LLaVA-Desc. & Native & PrefixKV (R) & 3.0889 & 63.42 & 149.70 & 406.42 & 52.96\\
+LLaVA-Desc. & Native & MosaicKV exact & 2.9620 & 71.09 & 102.62 & 614.12 & 63.91\\
+MM-Vet & Native & FullKV & 5.2778 & 100.00 & 301.42 & 812.92 & ---\\
+MM-Vet & Native & PrefixKV (R) & 5.3339 & 64.97 & 151.01 & 407.74 & 52.96\\
+MM-Vet & Native & MosaicKV exact & 5.2775 & 79.03 & 103.63 & 615.13 & 64.03\\
+LLaVA-Desc. & 40 MiB & FullKV & 2.9540 & 100.00 & 298.83 & 810.33 & ---\\
+LLaVA-Desc. & 40 MiB & Prompt Top-K & 3.0017 & 63.20 & 40.00 & 551.50 & 59.37\\
+LLaVA-Desc. & 40 MiB & PrefixKV (R) & 3.3780 & 13.99 & 40.00 & 551.50 & 53.23\\
+LLaVA-Desc. & 40 MiB & MosaicKV exact & 3.0033 & 63.09 & 40.00 & 551.50 & 58.93\\
+MM-Vet & 40 MiB & FullKV & 5.2714 & 100.00 & 301.42 & 812.92 & ---\\
+MM-Vet & 40 MiB & Prompt Top-K & 5.2735 & 72.62 & 40.00 & 551.50 & 59.46\\
+MM-Vet & 40 MiB & PrefixKV (R) & 5.7577 & 13.52 & 40.00 & 551.50 & 53.23\\
+MM-Vet & 40 MiB & MosaicKV exact & 5.2726 & 72.71 & 40.00 & 551.50 & 58.93\\
+\bottomrule
+\end{tabular}

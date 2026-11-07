@@ -1,0 +1,78 @@
+\section{Introduction}
+\label{sec:intro}
+Vision--language models (VLMs) turn image features and text into a shared
+autoregressive decoder context \citep{liu2023llava,liu2024improved}.
+The decoder repeatedly attends to previously computed keys and values;
+caching these tensors avoids repeating the full prefix computation
+\citep{vaswani2017attention}. Visual token expansion makes this cache
+substantial even for a single image. The pinned LLaVA-1.5 configuration in
+our study has 603 prompt positions and a 301.50~MiB uncompressed BF16 cache.
+Longer contexts and generated continuations increase this state further.
+
+Existing approaches reduce token membership, adapt per-layer capacities,
+merge representations, or lower precision
+\citep{zhang2023h2o,li2024snapkv,wang2025prefixkv,tu2025vlcache,wan2024lookm,liu2024kivi}.
+These approaches optimize different quantities. A nominal fraction of
+retained tokens is not a physical-byte budget when implementations differ
+in metadata, precision, padding, generated history and reconstruction
+workspace. Likewise, reducing persistent prompt storage does not by itself
+establish lower peak memory or faster completed requests.
+
+We investigate a different representation boundary: the common normalized
+attention input from which the frozen model computes both K and V. In
+full multi-head attention (MHA), this source has one model-width vector per
+position, whereas the materialized K/V pair has two. Retaining an encoded
+source permits the runtime to reconstruct layer-local K/V operands using
+the original projection weights. This follows the broad recomputation
+principle explored by latent-cache methods such as Palu
+\citep{chang2024palu}; it is not a claim that storing intermediate states
+or reconstructing KV is novel in isolation.
+
+Our evaluated system, \Evi{}, combines three-bit prompt-source storage,
+exactly protected regions, lossless generated-history construction and a
+request-local GPU execution path. It does not fine-tune weights, average
+incompatible rotary phases or feed benchmark references into construction.
+Importantly, it does not claim that an approximate prompt representation
+is identical to unrestricted FullKV. We validate representation and execution
+controls separately from task quality.
+
+\paragraph{Scope and naming.}
+EviCastKV is the paper name for the MosaicKV repository. We use the suffix
+\emph{S} to identify the storage variant evaluated here, rather than a
+second competing method. The larger research architecture includes
+forecasting, evidence graphs, value-aware utility, submodular selection,
+three-tier construction and uncertainty-guided repair. Those six mechanisms
+are inactive in this study. Its historical method ID,
+\texttt{mosaickv\_exact}, is retained for provenance but is not a claim that
+all prompt state is stored losslessly. This manuscript supersedes the
+broader architectural interpretation of these particular measurements,
+not the historical artifacts themselves.
+
+\paragraph{Findings.}
+On the same 256 COCO images, \Evi{} uses \EviInitial~MiB initially and
+\EviFinal~MiB finally, versus 301.50 and 365.00~MiB for FullKV. The audited
+\emph{decode-owned} peak averages \EviPeak~MiB. It scores
+\EviCider~CIDEr versus \FullCider{} for the uncompressed reference.
+Against Prompt Top-K's observed point, initial and final storage are
+\TopInitialReduction\% and \TopFinalReduction\% lower. A repeated
+six-image experiment measures \TopFaster\% lower request time. These are
+\emph{operating-point comparisons}: realized bytes differ, the cohort has
+been inspected, and quality non-inferiority against the strongest compressed
+points is not established. The highest point-estimate CIDEr belongs to the
+VL-Cache adaptation, not \Evi{}.
+
+Our contributions are therefore specific:
+\begin{enumerate}
+\item A concrete shared-source cache representation with protected exact
+regions, original-position reconstruction and a lossless history path for
+the supported full-MHA geometry.
+\item A request-local implementation that retires source owners, reuses
+bounded reconstruction buffers and conditionally replays eligible eager
+attention, with instrumentation excluded from headline timing.
+\item A complete, hash-bound evaluation of six frozen operating points,
+including unfavorable quality outcomes, paired uncertainty and explicit
+memory-boundary and baseline-fidelity limitations.
+\end{enumerate}
+We do not claim state-of-the-art compression, universal lower-memory
+quality preservation, a validated six-component algorithm, or production
+serving throughput improvement.

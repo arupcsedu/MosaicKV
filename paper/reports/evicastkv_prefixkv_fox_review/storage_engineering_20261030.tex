@@ -1,0 +1,155 @@
+% Narrative companion to hash-bound export_report.py tables.
+\section{Lossless storage and history engineering: October 30 update}
+\label{sec:historyengineering}
+\subsection{Scope and correctness}
+The final engineering source is
+\nolinkurl{d8eb51be69c5d6469ba12283f0cf811ba352345c}, local branch
+\nolinkurl{evicastkv/storage-transport-20261030}. The sealed CPU suite records
+2,631 passing tests, no failures/errors/skips. Both six-path GPU comparisons
+complete all 12 workers and pass registered numerical/storage controls.
+This is engineering readiness, not independent paper-quality confirmation.
+
+All measurements reuse two consumed inputs: Description
+\texttt{000000532947} and MM-Vet-route \texttt{v1\_197}, logical lengths
+600/604. They use the pinned LLaVA-1.5 model in Section~\ref{sec:setup},
+BF16, HF eager, batch one, one A100 per worker. The fixed 128-token schedule
+uses the prefill prediction plus 127 decode forwards without early EOS stop.
+Five warmups and 20 timed repetitions randomize paired format order within
+each method/input worker. Intervals resample technical pairs, not independent
+examples. No new benchmark identities or selection policies are introduced.
+
+The six paths are an all-position lossless control, Prompt Top-K, local
+append-only PrefixKV/VL-Cache adaptations, LOOK-M (R), and frozen
+\path{mosaickv_exact}. LOOK-M retains its actual merged prompt K/V. The
+all-position control retains every source position but encodes storage;
+its memory is not ordinary uncompressed FullKV memory. Ordinary FullKV
+remains the separate numerical/quality reference, excluded from latency.
+
+\subsection{Mechanism: save a shared source, reconstruct exact K/V}
+Source history stores encoded normalized layer inputs, logical maps, rotary
+phases, and sparse bit corrections restoring original cached bits. A short
+raw K/V tail and an additional normalized-input tail support online sealing.
+Sealing commits transactionally only after original-K/V checks pass. Model
+projections reconstruct unchanged values and positions. Sharing a projection
+source saves history bytes without removing evidence, but costs recomputation.
+This is a separately labeled lossless representation experiment, not prototype
+merging or residual repair. The direct constructor removes an intermediate
+format, reducing projection passes nine to four while retaining three final
+original-K/V checks. The same optimization applies to the baseline paths.
+
+\begin{table}[htbp]
+\caption{Consumed-input storage in MiB. KV means ordinary lossless K/V
+history within the same encoded-prompt path, not FullKV; source means
+source-sealed history. Initial bytes are unchanged within each pair. Peak is
+observed decode-owned storage, not whole-request HBM peak. These are format
+differentials, not byte-matched selector comparisons.}
+\label{tab:historystorage}
+\resulttable{\linewidth}{history_storage}
+\end{table}
+
+For \Evi{}, final bytes fall 109.271 to 93.787~MiB on Description and
+109.377 to 93.920~MiB on MM-Vet, approximately 14.2\%/14.1\%. Observed
+decode-owned peak falls 119.474 to 103.990~MiB and 119.580 to 104.123~MiB,
+approximately 13.0\%/12.9\%. Initial stays 61.543/61.688~MiB. This improves
+final/peak storage within the same selection, not initial bytes or selection
+quality.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}
+\begin{groupplot}[group style={group size=2 by 1,horizontal sep=1.2cm},
+width=0.46\linewidth,height=5.0cm,ylabel={Owned storage (MiB)},
+xtick={1,2,3},xticklabels={Initial,Final,Decode peak},ymin=0,ymax=130,
+grid=major,legend style={font=\scriptsize,at={(0.03,0.97)},anchor=north west}]
+\nextgroupplot[title={Consumed Description input}]
+\addplot+[thick,color=prefixorange,mark=square*] table[x=boundary,y=ordinary] {generated/history_boundaries_llava_description.dat};
+\addlegendentry{Ordinary lossless K/V history}
+\addplot+[thick,color=eviblue,mark=*] table[x=boundary,y=source] {generated/history_boundaries_llava_description.dat};
+\addlegendentry{Lossless source history}
+\nextgroupplot[title={Consumed MM-Vet input},ylabel={}]
+\addplot+[thick,color=prefixorange,mark=square*] table[x=boundary,y=ordinary] {generated/history_boundaries_mmvet_prefixkv.dat};
+\addplot+[thick,color=eviblue,mark=*] table[x=boundary,y=source] {generated/history_boundaries_mmvet_prefixkv.dat};
+\end{groupplot}
+\end{tikzpicture}
+\caption{EviCastKV format differential at unchanged selected evidence.
+Lines identify accounting boundaries, not measurements over time.}
+\label{fig:historyboundaries}
+\end{figure}
+
+The boundary charges payloads, source packets, corrections, phases, maps,
+raw/normalized tails, layer leases, and observed constructor/reconstruction
+tensors. It excludes inactive original prefill/captures, weights, attention
+activations, internal GEMM workspace, and allocator reserve. Original prefill
+can determine whole-request peak, which remains uncertified. Source-slot
+capacity is fixed across paths but realized encoded bytes differ: this is
+not a new common-physical-byte selection-policy comparison.
+
+\subsection{Latency: constructor improvement within a slower storage path}
+\begin{table}[htbp]
+\caption{Fixed-schedule decode seconds. Source/KV comes from the K/V versus
+source-history study; remaining columns come from a separate reference-source
+versus direct-source constructor study. Do not combine medians across studies.
+Intervals are ordinary technical-pair 95\% intervals, not population or
+multiplicity-adjusted intervals.}
+\label{tab:historylatency}
+\resulttable{\linewidth}{history_latency}
+\end{table}
+
+Reference source history is 29.6--29.7\% slower than ordinary lossless K/V
+history for \Evi{} here, roughly 29--36\% slower across compressed paths.
+The direct constructor improves on that source-history reference: \Evi{}
+p50 changes 11.742 to 11.282 seconds and 11.765 to 11.300 seconds, paired
+reductions about 3.9--4.0\%, with identical initial/final/observed-peak bytes.
+All ten within-path/input direct/reference upper confidence bounds are below
+one. This does not prove no-slower execution against ordinary K/V history.
+
+Timing includes online sealing/reconstruction but excludes original prefill,
+selection, and initial prompt construction. Different methods use separate
+GPU workers; cross-method medians are not paired latency wins. Earlier
+roughly 12\% dual-projection decode and 57\% direct prompt-construction
+improvements concern distinct references/phases; do not add their percentages
+or subtract them from old end-to-end campaign times.
+
+\subsection{What remains negative}
+All 128 logits/tokens remain bitwise unchanged relative to each path's own
+original selected/merged-cache transport, not necessarily FullKV. The
+original 32-token model-reference outcomes remain different across selectors.
+
+\begin{table}[htbp]
+\caption{Consumed-input controls: R-L is model-generated FullKV-reference
+ROUGE-L $\times100$, not annotation accuracy, corpus PPL, or standard MM-Vet
+judge scoring. Bitwise preservation concerns 128 logits relative to each
+path's original transport.}
+\label{tab:historyquality}
+\resulttable{0.95\linewidth}{history_quality_controls}
+\end{table}
+
+Description is a counterexample to universal superiority: the PrefixKV
+adaptation has smaller final storage than \Evi{} with tied model-reference
+quality. MM-Vet retains a quality deficit relative to FullKV for several
+selections, including \Evi{}. The codec preserves, rather than repairs,
+these outcomes. Negative quality interventions, short-history feasibility,
+and the unpromoted checkpoint latency failure remain preserved. No fresh
+campaign follows from the engineering pass alone.
+
+\section{Paper-writing priorities}
+\label{sec:writingactions}
+\begin{enumerate}
+\item Lead with the completed 256-image shared-byte COCO curves and separate
+1,000/218 PrefixKV native/shared-byte tables. Retain all points and intervals,
+Top-K ties/losses, and native final-memory/latency disadvantages. Do not use
+the anomalous byte-rescaled adaptation as original-PrefixKV quality evidence.
+\item Separate same-budget quality, equal-quality memory, initial savings,
+and lifetime savings. A general ``30\% smaller than the nearest competitor
+at preserved quality'' headline is not supported.
+\item Put representation results in an engineering subsection/appendix with
+the consumed identities, exact boundaries, lossless controls, and slower
+ordinary-history comparison. Do not replace benchmark tables with diagnostics.
+\item Keep claims limited to exact selection and separately labeled lossless
+variants. Prototype/repair, other architectures, and native serving gain no
+performance validation from this work.
+\item Broader claims require a frozen candidate, certified memory boundary,
+and disjoint paired native-metric validation, with common optimizations also
+applied to competitors. These remain research requirements, not experiments
+launched by this writing update.
+\end{enumerate}

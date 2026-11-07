@@ -13,6 +13,7 @@ from collections import Counter, defaultdict, deque
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import ExitStack
 from dataclasses import asdict, dataclass, replace
+from itertools import combinations
 from pathlib import Path
 from typing import Any, cast
 
@@ -468,6 +469,11 @@ class ShortHorizonLogitCandidateEvaluation:
     maximum_kl: float
     maximum_logit_difference: float
     evaluated_steps: int
+    kl_sum: float = 0.0
+    logit_difference_sum: float = 0.0
+    token_mismatches: int = 0
+    objective_value: float = 0.0
+    exchange_routes: tuple[tuple[int, int], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -487,6 +493,18 @@ class ShortHorizonLogitStabilityDecision:
     second_prefill_performed: bool = False
     probe_states_discarded_before_measured_decode: bool = True
     benchmark_labels_accessed: bool = False
+    candidate_strategy: str = "weight_grid"
+    probe_batch_count: int = 0
+    batched_probe_execution: bool = False
+    single_route_candidate_count: int = 0
+    composite_candidate_count: int = 0
+    route_contributions: tuple[tuple[int, int, float], ...] = ()
+    extended_horizon: int = 0
+    extended_candidate_ids: tuple[str, ...] = ()
+    layer_capacity_candidate_count: int = 0
+    surrogate_candidate_count: int = 0
+    model_probed_candidate_count: int = 0
+    probe_phase_timings: tuple[dict[str, Any], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -600,6 +618,7 @@ class PackedRuntimeCache:
     prototype_attention_biases: tuple[tuple[int, int, int, int, float], ...]
     slot_records: tuple[JsonObject, ...]
     layerwise_logical_positions: tuple[tuple[int, ...], ...] = ()
+    layerwise_exact_logical_positions: tuple[tuple[tuple[int, ...], ...], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -4968,6 +4987,118 @@ def _pack_exact_runtime_blocks(
     )
 
 
+def _pack_layerwise_exact_runtime_cache(
+    adapter: HuggingFaceMultimodalAdapter,
+    full_state: FullKVState,
+    state: MosaicKVState,
+) -> PackedRuntimeCache:
+    """Pack complete dense layer slots with independently sized layers."""
+
+    from mosaickv.adapters.huggingface.layerwise_exact_cache import (
+        assert_layerwise_exact_support,
+    )
+
+    assert_layerwise_exact_support(adapter)
+    torch = _torch()
+    entries: dict[tuple[int, int], list[tuple[int, int, int]]] = defaultdict(list)
+    for node_id, block in enumerate(state.exact.blocks):
+        for logical, physical in zip(
+            block.original_logical_positions,
+            block.physical_cache_indices,
+            strict=True,
+        ):
+            entries[(block.layer, block.kv_head)].append((logical, physical, node_id))
+    for values in entries.values():
+        values.sort(key=lambda item: (item[0], item[2]))
+
+    layers: list[CacheLayerSnapshot] = []
+    logical_by_layer: list[tuple[tuple[int, ...], ...]] = []
+    slot_records: list[JsonObject] = []
+    finite_flags: list[Any] = []
+    layer_capacities: list[int] = []
+    for layer_index, source_layer in enumerate(full_state.layers):
+        rows = [entries.get((layer_index, head), []) for head in range(source_layer.kv_heads)]
+        counts = {len(row) for row in rows}
+        if len(counts) != 1 or not counts or next(iter(counts)) < 1:
+            raise HuggingFaceRuntimeError(
+                "layerwise exact packing requires one positive capacity shared by every "
+                f"KV head in layer {layer_index}"
+            )
+        capacity = next(iter(counts))
+        layer_capacities.append(capacity)
+        physical_rows = [tuple(item[1] for item in row) for row in rows]
+        logical_rows = tuple(tuple(item[0] for item in row) for row in rows)
+        packed_key, key_validity = _gather_dense_heads(
+            source_layer.key,
+            head_axis=source_layer.key_head_dimension,
+            sequence_axis=source_layer.key_sequence_dimension,
+            positions=physical_rows,
+            prompt_capacity=capacity,
+            tail_tensor=None,
+            old_prompt_capacity=None,
+        )
+        packed_value, value_validity = _gather_dense_heads(
+            source_layer.value,
+            head_axis=source_layer.value_head_dimension,
+            sequence_axis=source_layer.value_sequence_dimension,
+            positions=physical_rows,
+            prompt_capacity=capacity,
+            tail_tensor=None,
+            old_prompt_capacity=None,
+        )
+        if not bool(key_validity.all().item()) or not bool(value_validity.all().item()):
+            raise HuggingFaceRuntimeError("layerwise exact packing unexpectedly introduced padding")
+        finite_flags.extend((torch.isfinite(packed_key).all(), torch.isfinite(packed_value).all()))
+        layers.append(
+            CacheLayerSnapshot(
+                packed_key,
+                packed_value,
+                source_layer.key_sequence_dimension,
+            )
+        )
+        logical_by_layer.append(logical_rows)
+        for kv_head, row in enumerate(rows):
+            slot_records.extend(
+                {
+                    "layer": layer_index,
+                    "kv_head": kv_head,
+                    "slot": slot,
+                    "logical_position": item[0],
+                    "tier": "exact",
+                    "source_id": item[2],
+                    "layer_capacity": capacity,
+                    "padding_bytes": 0,
+                }
+                for slot, item in enumerate(row)
+            )
+    if not bool(torch.stack(finite_flags).all().item()):
+        raise HuggingFaceRuntimeError("layerwise exact cache contains NaN or infinity")
+    snapshot = CacheSnapshot(
+        tuple(layers),
+        full_state.source_class,
+        full_state.source_kind,
+        max(layer_capacities),
+        adapter.capabilities.cached_key_state,
+        independent_layer_lengths=True,
+    )
+    actual_bytes = _cache_payload_bytes(adapter, snapshot)
+    if actual_bytes != state.statistics.active_kv_bytes:
+        raise HuggingFaceRuntimeError(
+            "layerwise exact physical storage differs from selected source bytes: "
+            f"physical={actual_bytes}, selected={state.statistics.active_kv_bytes}"
+        )
+    return PackedRuntimeCache(
+        snapshot=snapshot,
+        validity_masks=(),
+        prompt_capacity=max(layer_capacities),
+        all_slots_valid=True,
+        prototype_slots=(),
+        prototype_attention_biases=(),
+        slot_records=tuple(slot_records),
+        layerwise_exact_logical_positions=tuple(logical_by_layer),
+    )
+
+
 def pack_runtime_cache(
     adapter: HuggingFaceMultimodalAdapter,
     full_state: FullKVState,
@@ -5086,6 +5217,10 @@ def _packed_model_state(original: DecodeState, packed: PackedRuntimeCache) -> di
         "mosaickv_validity_buffers",
         "mosaickv_additive_mask_buffers",
         "mosaickv_mask_capacity",
+        "prefixkv_ragged",
+        "prefixkv_logical_positions",
+        "mosaickv_layerwise_exact",
+        "mosaickv_layerwise_exact_logical_positions",
     ):
         model_state.pop(stale_key, None)
     model_state.update(
@@ -5104,6 +5239,13 @@ def _packed_model_state(original: DecodeState, packed: PackedRuntimeCache) -> di
     if packed.layerwise_logical_positions:
         model_state["prefixkv_ragged"] = True
         model_state["prefixkv_logical_positions"] = packed.layerwise_logical_positions
+    if packed.layerwise_exact_logical_positions:
+        if packed.layerwise_logical_positions:
+            raise HuggingFaceRuntimeError("packed cache cannot use two ragged transports")
+        model_state["mosaickv_layerwise_exact"] = True
+        model_state["mosaickv_layerwise_exact_logical_positions"] = (
+            packed.layerwise_exact_logical_positions
+        )
     return model_state
 
 
@@ -5130,6 +5272,167 @@ def construct_isolated_packed_decode_state(
         ),
         active_cache_length=packed.snapshot.active_sequence_length,
         model_state=_packed_model_state(reference, packed),
+    )
+
+
+def construct_isolated_packed_decode_state_batch(
+    adapter: HuggingFaceMultimodalAdapter,
+    reference: DecodeState,
+    packed_candidates: Sequence[PackedRuntimeCache],
+    *,
+    candidate_ids: Sequence[str],
+) -> IsolatedDecodeStateHandle:
+    """Pad and stack exact caches into one independently owned probe batch.
+
+    Padding exists only in this disposable probe state and is masked per
+    candidate/head.  Each candidate's measured cache remains exact-sized.
+    """
+
+    torch = _torch()
+    if not 1 <= len(packed_candidates) <= 16 or len(candidate_ids) != len(packed_candidates):
+        raise HuggingFaceRuntimeError("candidate probe batch must contain 1-16 aligned plans")
+    if len(set(candidate_ids)) != len(candidate_ids) or any(not value for value in candidate_ids):
+        raise HuggingFaceRuntimeError("candidate probe batch IDs must be nonempty and unique")
+    first = packed_candidates[0]
+    if any(
+        not packed.all_slots_valid
+        or packed.prototype_slots
+        or packed.prototype_attention_biases
+        or packed.layerwise_logical_positions
+        for packed in packed_candidates
+    ):
+        raise HuggingFaceRuntimeError(
+            "batched logit probes require all-valid exact cache candidates"
+        )
+    if any(
+        packed.snapshot.source_class is not first.snapshot.source_class
+        or packed.snapshot.source_kind != first.snapshot.source_kind
+        or packed.snapshot.cached_key_state != first.snapshot.cached_key_state
+        or len(packed.snapshot.layers) != len(first.snapshot.layers)
+        for packed in packed_candidates
+    ):
+        raise HuggingFaceRuntimeError("candidate probe caches do not share one cache type")
+
+    layers: list[CacheLayerSnapshot] = []
+    validity_masks: list[Any] = []
+    global_length = max(
+        int(layer.key.shape[layer.sequence_dimension])
+        for packed in packed_candidates
+        for layer in packed.snapshot.layers
+    )
+    for layer_index in range(len(first.snapshot.layers)):
+        candidates = tuple(packed.snapshot.layers[layer_index] for packed in packed_candidates)
+        reference_layer = candidates[0]
+        reference_key_shape = list(int(value) for value in reference_layer.key.shape)
+        reference_value_shape = list(int(value) for value in reference_layer.value.shape)
+        if (
+            reference_layer.sequence_dimension == 0
+            or not reference_key_shape
+            or not reference_value_shape
+            or reference_key_shape[0] != 1
+            or reference_value_shape[0] != 1
+        ):
+            raise HuggingFaceRuntimeError(
+                "candidate probe batching requires a leading singleton cache batch axis"
+            )
+        sequence_dimension = reference_layer.sequence_dimension
+        padded_keys: list[Any] = []
+        padded_values: list[Any] = []
+        validity_rows: list[Any] = []
+        for layer in candidates:
+            key_shape = list(int(value) for value in layer.key.shape)
+            value_shape = list(int(value) for value in layer.value.shape)
+            expected_key = list(reference_key_shape)
+            expected_value = list(reference_value_shape)
+            expected_key[sequence_dimension] = key_shape[sequence_dimension]
+            expected_value[sequence_dimension] = value_shape[sequence_dimension]
+            if (
+                layer.sequence_dimension != sequence_dimension
+                or key_shape != expected_key
+                or value_shape != expected_value
+            ):
+                raise HuggingFaceRuntimeError("candidate probe non-sequence layouts differ")
+            length = key_shape[sequence_dimension]
+            if value_shape[sequence_dimension] != length:
+                raise HuggingFaceRuntimeError("candidate probe K/V lengths differ")
+            pad_length = global_length - length
+            key_pad_shape = list(key_shape)
+            value_pad_shape = list(value_shape)
+            key_pad_shape[sequence_dimension] = pad_length
+            value_pad_shape[sequence_dimension] = pad_length
+            padded_keys.append(
+                torch.cat(
+                    (
+                        layer.key,
+                        torch.zeros(key_pad_shape, dtype=layer.key.dtype, device=layer.key.device),
+                    ),
+                    dim=sequence_dimension,
+                )
+                if pad_length
+                else layer.key
+            )
+            padded_values.append(
+                torch.cat(
+                    (
+                        layer.value,
+                        torch.zeros(
+                            value_pad_shape,
+                            dtype=layer.value.dtype,
+                            device=layer.value.device,
+                        ),
+                    ),
+                    dim=sequence_dimension,
+                )
+                if pad_length
+                else layer.value
+            )
+            kv_heads = int(key_shape[1])
+            validity = torch.zeros(
+                (kv_heads, global_length), dtype=torch.bool, device=layer.key.device
+            )
+            validity[:, :length] = True
+            validity_rows.append(validity)
+        layers.append(
+            CacheLayerSnapshot(
+                key=torch.cat(tuple(padded_keys), dim=0),
+                value=torch.cat(tuple(padded_values), dim=0),
+                sequence_dimension=sequence_dimension,
+            )
+        )
+        validity_masks.append(torch.stack(validity_rows, dim=0))
+    snapshot = CacheSnapshot(
+        tuple(layers),
+        first.snapshot.source_class,
+        first.snapshot.source_kind,
+        global_length,
+        first.snapshot.cached_key_state,
+    )
+    batched_packed = PackedRuntimeCache(
+        snapshot=snapshot,
+        validity_masks=tuple(validity_masks),
+        prompt_capacity=global_length,
+        all_slots_valid=False,
+        prototype_slots=(),
+        prototype_attention_biases=(),
+        slot_records=(),
+    )
+    model_state = _packed_model_state(reference, batched_packed)
+    model_state["mosaickv_probe_candidate_ids"] = tuple(candidate_ids)
+    model_state["mosaickv_probe_batch_size"] = len(candidate_ids)
+    device = snapshot.layers[0].key.device
+    batch_identifier = hashlib.sha256("\n".join(candidate_ids).encode()).hexdigest()[:16]
+    return construct_isolated_decode_state(
+        adapter,
+        reference,
+        candidate_id=f"probe_batch:{batch_identifier}",
+        cache_snapshot=snapshot,
+        attention_mask=torch.ones(
+            (len(candidate_ids), snapshot.active_sequence_length),
+            dtype=reference.attention_mask.dtype,
+            device=device,
+        ),
+        active_cache_length=snapshot.active_sequence_length,
+        model_state=model_state,
     )
 
 
@@ -5603,6 +5906,8 @@ def _short_horizon_candidate_evaluation(
     greedy_token_matches: Sequence[bool],
     maximum_kl_threshold: float,
     maximum_logit_difference_threshold: float,
+    objective_weights: tuple[float, float, float] = (0.0, 0.0, 0.0),
+    exchange_routes: Sequence[tuple[int, int]] = (),
 ) -> ShortHorizonLogitCandidateEvaluation:
     """Apply the preregistered V98 gate without benchmark labels."""
 
@@ -5616,6 +5921,12 @@ def _short_horizon_candidate_evaluation(
     maximum_kl = max(float(value) for value in kl_values)
     maximum_difference = max(float(value) for value in maximum_logit_differences)
     token_match = all(bool(value) for value in greedy_token_matches)
+    token_mismatches = sum(not bool(value) for value in greedy_token_matches)
+    objective = (
+        objective_weights[0] * sum(float(value) for value in kl_values)
+        + objective_weights[1] * sum(float(value) for value in maximum_logit_differences)
+        + objective_weights[2] * token_mismatches
+    )
     return ShortHorizonLogitCandidateEvaluation(
         candidate_id=candidate_id,
         passed=bool(
@@ -5627,6 +5938,11 @@ def _short_horizon_candidate_evaluation(
         maximum_kl=maximum_kl,
         maximum_logit_difference=maximum_difference,
         evaluated_steps=len(kl_values),
+        kl_sum=sum(float(value) for value in kl_values),
+        logit_difference_sum=sum(float(value) for value in maximum_logit_differences),
+        token_mismatches=token_mismatches,
+        objective_value=objective,
+        exchange_routes=tuple(exchange_routes),
     )
 
 
@@ -5686,6 +6002,158 @@ def probe_isolated_packed_candidate(
         maximum_absolute_logit_difference=max(differences),
         evaluated_steps=len(divergences),
     )
+
+
+def _probe_output_preserving_candidates_batched(
+    adapter: HuggingFaceMultimodalAdapter,
+    reference_state: DecodeState,
+    full_state: FullKVState,
+    candidates: Sequence[Any],
+    *,
+    teacher_forced_inputs: Sequence[Any],
+    reference_logits: Sequence[Any],
+    physical_prompt_capacity: int,
+    packing_mode: str,
+    batch_size: int,
+    maximum_kl: float,
+    maximum_logit_difference: float,
+    objective_weights: tuple[float, float, float],
+    probe_stage: str = "unspecified",
+    phase_timings: list[dict[str, Any]] | None = None,
+) -> tuple[tuple[ShortHorizonLogitCandidateEvaluation, ...], int]:
+    """Evaluate equal-layout exact candidates in bounded true model batches."""
+
+    torch = _torch()
+    if not candidates or not 1 <= batch_size <= 16:
+        raise HuggingFaceRuntimeError("batched output-preserving probe configuration is empty")
+    if not teacher_forced_inputs or len(teacher_forced_inputs) != len(reference_logits):
+        raise HuggingFaceRuntimeError("batched probe reference trajectory is incomplete")
+    evaluations: list[ShortHorizonLogitCandidateEvaluation] = []
+    batch_count = 0
+    exemplar = reference_logits[0]
+    for start in range(0, len(candidates), batch_size):
+        chunk_started = time.perf_counter()
+        chunk = tuple(candidates[start : start + batch_size])
+        packed_candidates: list[PackedRuntimeCache] = []
+        construction_seconds = 0.0
+        packing_seconds = 0.0
+        for candidate in chunk:
+            state, elapsed = _timed(
+                exemplar,
+                lambda candidate=candidate, full_state=full_state: candidate.construct(full_state),
+            )
+            construction_seconds += elapsed
+            packed, elapsed = _timed(
+                exemplar,
+                lambda candidate=candidate, state=state: (
+                    _pack_layerwise_exact_runtime_cache(adapter, full_state, state)
+                    if candidate.layer_capacities
+                    else pack_runtime_cache(
+                        adapter,
+                        full_state,
+                        state,
+                        (),
+                        (),
+                        physical_prompt_capacity=physical_prompt_capacity,
+                        packing_mode=packing_mode,
+                    )
+                ),
+            )
+            packing_seconds += elapsed
+            packed_candidates.append(packed)
+        identifiers = tuple(candidate.candidate_id for candidate in chunk)
+        kl_values: list[list[float]] = [[] for _ in chunk]
+        difference_values: list[list[float]] = [[] for _ in chunk]
+        token_matches: list[list[bool]] = [[] for _ in chunk]
+        manager = construct_isolated_packed_decode_state_batch(
+            adapter,
+            reference_state,
+            packed_candidates,
+            candidate_ids=identifiers,
+        )
+        handle, state_seconds = _timed(exemplar, manager.__enter__)
+        decode_seconds = 0.0
+        metric_seconds = 0.0
+        cleanup_seconds = 0.0
+        try:
+            for teacher_input, full_logits in zip(
+                teacher_forced_inputs,
+                reference_logits,
+                strict=True,
+            ):
+                token = teacher_input.detach().reshape(1, 1).expand(len(chunk), 1).clone()
+                output, elapsed = _timed(
+                    exemplar,
+                    lambda token=token, handle=handle: adapter.decode_token_batch(
+                        token, handle.state
+                    ),
+                )
+                decode_seconds += elapsed
+                handle.adopt(output.state)
+
+                def reduce_metrics(
+                    output: Any = output,
+                    full_logits: Any = full_logits,
+                ) -> tuple[Any, Any, Any]:
+                    candidate_logits = output.logits.detach().float()
+                    reference = (
+                        full_logits.detach().float().reshape(1, -1).expand_as(candidate_logits)
+                    )
+                    reference_log_probability = torch.log_softmax(reference, dim=-1)
+                    candidate_log_probability = torch.log_softmax(candidate_logits, dim=-1)
+                    divergence = torch.sum(
+                        reference_log_probability.exp()
+                        * (reference_log_probability - candidate_log_probability),
+                        dim=-1,
+                    ).clamp_min(0)
+                    difference = torch.max(torch.abs(reference - candidate_logits), dim=-1).values
+                    matches = reference.argmax(dim=-1) == candidate_logits.argmax(dim=-1)
+                    return divergence, difference, matches
+
+                (divergence, difference, matches), elapsed = _timed(exemplar, reduce_metrics)
+                metric_seconds += elapsed
+                for index in range(len(chunk)):
+                    kl_values[index].append(float(divergence[index].item()))
+                    difference_values[index].append(float(difference[index].item()))
+                    token_matches[index].append(bool(matches[index].item()))
+        finally:
+            _unused, cleanup_seconds = _timed(
+                exemplar,
+                lambda manager=manager: manager.__exit__(None, None, None),
+            )
+        batch_count += 1
+        evaluations.extend(
+            _short_horizon_candidate_evaluation(
+                candidate.candidate_id,
+                kl_values=tuple(kl_values[index]),
+                maximum_logit_differences=tuple(difference_values[index]),
+                greedy_token_matches=tuple(token_matches[index]),
+                maximum_kl_threshold=maximum_kl,
+                maximum_logit_difference_threshold=maximum_logit_difference,
+                objective_weights=objective_weights,
+                exchange_routes=candidate.exchange_routes,
+            )
+            for index, candidate in enumerate(chunk)
+        )
+        if phase_timings is not None:
+            phase_timings.append(
+                {
+                    "stage": probe_stage,
+                    "chunk_index": batch_count - 1,
+                    "configured_batch_size": batch_size,
+                    "realized_batch_size": len(chunk),
+                    "horizon": len(teacher_forced_inputs),
+                    "candidate_ids": list(identifiers),
+                    "candidate_construction_seconds": construction_seconds,
+                    "cache_packing_seconds": packing_seconds,
+                    "batch_state_construction_seconds": state_seconds,
+                    "layerwise_decode_seconds": decode_seconds,
+                    "metric_reduction_seconds": metric_seconds,
+                    "state_cleanup_seconds": cleanup_seconds,
+                    "total_seconds": time.perf_counter() - chunk_started,
+                }
+            )
+    return tuple(evaluations), batch_count
 
 
 def _run_short_horizon_logit_stability(
@@ -5840,6 +6308,799 @@ def _run_short_horizon_logit_stability(
         maximum_logit_difference_threshold=(
             config.selection.stable_head_logit_stability_maximum_logit_difference
         ),
+    )
+
+
+def _select_output_preserving_logit_candidate(
+    evaluations: Sequence[ShortHorizonLogitCandidateEvaluation],
+    *,
+    maximum_kl: float,
+    maximum_logit_difference: float,
+) -> tuple[ShortHorizonLogitCandidateEvaluation, bool]:
+    """Rank passing plans by normalized logit instability or fail closed."""
+
+    if maximum_kl <= 0 or maximum_logit_difference <= 0:
+        raise ValueError("logit reranking thresholds must be positive")
+    if len({item.candidate_id for item in evaluations}) != len(evaluations):
+        raise ValueError("logit reranking candidate IDs must be unique")
+    anchor = next(
+        (item for item in evaluations if item.candidate_id == "prompt_topk_anchor"),
+        None,
+    )
+    if anchor is None:
+        raise ValueError("logit reranking evaluations lack the deterministic anchor")
+    eligible = [evaluation for evaluation in evaluations if evaluation.passed]
+    if not eligible:
+        return anchor, True
+    return (
+        min(
+            eligible,
+            key=lambda item: (
+                item.maximum_kl / maximum_kl
+                + item.maximum_logit_difference / maximum_logit_difference,
+                item.maximum_kl,
+                item.maximum_logit_difference,
+                item.candidate_id,
+            ),
+        ),
+        False,
+    )
+
+
+def _run_output_preserving_short_horizon_logit_reranking(
+    adapter: HuggingFaceMultimodalAdapter,
+    prefill: PrefillOutput,
+    full_state: FullKVState,
+    candidates: Sequence[Any],
+    config: RunConfig,
+    *,
+    physical_prompt_capacity: int,
+) -> tuple[Any, ShortHorizonLogitStabilityDecision]:
+    """Select one equal-byte exact plan using bounded, label-blind logit probes."""
+
+    options = config.output_preserving
+    if options is None or not options.short_horizon_logit_reranking:
+        raise HuggingFaceRuntimeError("output-preserving logit reranking is not configured")
+    if not 2 <= len(candidates) <= 4:
+        raise HuggingFaceRuntimeError("output-preserving logit shortlist must contain 2-4 plans")
+    if len({candidate.candidate_id for candidate in candidates}) != len(candidates):
+        raise HuggingFaceRuntimeError("output-preserving logit candidate IDs must be unique")
+    if "prompt_topk_anchor" not in {candidate.candidate_id for candidate in candidates}:
+        raise HuggingFaceRuntimeError("output-preserving logit shortlist lacks its anchor")
+    if len({candidate.selected_bytes for candidate in candidates}) != 1:
+        raise HuggingFaceRuntimeError("output-preserving logit plans are not equal-byte")
+    if any(candidate.target_bytes != candidates[0].target_bytes for candidate in candidates):
+        raise HuggingFaceRuntimeError("output-preserving logit plans use different byte caps")
+
+    # Duplicated position sets add no evidence. Keep the first preregistered
+    # plan deterministically while preserving the anchor even when it aliases
+    # a reconstruction plan.
+    unique: list[Any] = []
+    seen: set[tuple[int, ...]] = set()
+    for candidate in candidates:
+        identity = tuple(candidate.selected_node_ids)
+        if identity in seen and candidate.candidate_id != "prompt_topk_anchor":
+            continue
+        unique.append(candidate)
+        seen.add(identity)
+    candidates = tuple(unique)
+
+    horizon = options.logit_stability_horizon
+    reference_state = _clone_decode_state(adapter, prefill.state)
+    reference_input = prefill.next_token_id.detach().clone()
+    teacher_forced_inputs: list[Any] = []
+    reference_logits: list[Any] = []
+    for _step in range(horizon):
+        teacher_forced_inputs.append(reference_input.detach().clone())
+        output = adapter.decode_one_token(
+            reference_input,
+            reference_state,
+            capture_queries=False,
+            capture_attentions=False,
+        )
+        reference_state = output.state
+        reference_logits.append(output.logits.detach().clone())
+        reference_input = output.next_token_id.detach().clone()
+
+    evaluations: list[ShortHorizonLogitCandidateEvaluation] = []
+    for candidate in candidates:
+        state = candidate.construct(full_state)
+        packed = pack_runtime_cache(
+            adapter,
+            full_state,
+            state,
+            (),
+            (),
+            physical_prompt_capacity=physical_prompt_capacity,
+            packing_mode=config.cache.packing_mode,
+        )
+        probe = probe_isolated_packed_candidate(
+            adapter,
+            prefill.state,
+            packed,
+            candidate_id=candidate.candidate_id,
+            teacher_forced_inputs=teacher_forced_inputs,
+            reference_logits=reference_logits,
+        )
+        passed = bool(
+            probe.greedy_token_match
+            and probe.maximum_forward_kl <= options.logit_stability_maximum_kl + 1e-12
+            and probe.maximum_absolute_logit_difference
+            <= options.logit_stability_maximum_logit_difference + 1e-12
+        )
+        evaluations.append(
+            ShortHorizonLogitCandidateEvaluation(
+                candidate_id=candidate.candidate_id,
+                passed=passed,
+                greedy_token_match=probe.greedy_token_match,
+                maximum_kl=probe.maximum_forward_kl,
+                maximum_logit_difference=probe.maximum_absolute_logit_difference,
+                evaluated_steps=probe.evaluated_steps,
+            )
+        )
+
+    selected_evaluation, used_fallback = _select_output_preserving_logit_candidate(
+        evaluations,
+        maximum_kl=options.logit_stability_maximum_kl,
+        maximum_logit_difference=options.logit_stability_maximum_logit_difference,
+    )
+    selected = next(
+        candidate
+        for candidate in candidates
+        if candidate.candidate_id == selected_evaluation.candidate_id
+    )
+    selected = replace(
+        selected,
+        effective_method=options.effective_method,
+        short_horizon_logit_reranking=True,
+    )
+    return selected, ShortHorizonLogitStabilityDecision(
+        enabled=True,
+        shortlist_size=len(candidates),
+        evaluated_candidates=tuple(evaluations),
+        selected_candidate_id=selected_evaluation.candidate_id,
+        selected_candidate_passed=selected_evaluation.passed,
+        used_fail_closed_scalar_anchor=used_fallback,
+        horizon=horizon,
+        maximum_kl_threshold=options.logit_stability_maximum_kl,
+        maximum_logit_difference_threshold=(options.logit_stability_maximum_logit_difference),
+    )
+
+
+def _run_output_preserving_route_exchange_reranking(
+    adapter: HuggingFaceMultimodalAdapter,
+    prefill: PrefillOutput,
+    full_state: FullKVState,
+    anchor: Any,
+    proposal: Any,
+    config: RunConfig,
+    *,
+    physical_prompt_capacity: int,
+) -> tuple[Any, ShortHorizonLogitStabilityDecision]:
+    """Probe route-local exchanges, then a bounded equal-byte combination beam."""
+
+    from mosaickv.backends.output_preserving import (
+        compose_route_exchange_candidate,
+        route_exchange_single_candidates,
+    )
+
+    options = config.output_preserving
+    if (
+        options is None
+        or not options.short_horizon_logit_reranking
+        or options.logit_candidate_strategy != "route_exchange_beam"
+    ):
+        raise HuggingFaceRuntimeError("route-exchange logit reranking is not configured")
+    if anchor.candidate_id != "prompt_topk_anchor":
+        raise HuggingFaceRuntimeError("route-exchange beam lacks its Prompt Top-K anchor")
+    if anchor.selected_bytes != proposal.selected_bytes or (
+        anchor.target_bytes != proposal.target_bytes
+    ):
+        raise HuggingFaceRuntimeError("route-exchange source plans are not exactly byte matched")
+
+    horizon = options.logit_stability_horizon
+    reference_state = _clone_decode_state(adapter, prefill.state)
+    reference_input = prefill.next_token_id.detach().clone()
+    teacher_forced_inputs: list[Any] = []
+    reference_logits: list[Any] = []
+    for _step in range(horizon):
+        teacher_forced_inputs.append(reference_input.detach().clone())
+        output = adapter.decode_one_token(
+            reference_input,
+            reference_state,
+            capture_queries=False,
+            capture_attentions=False,
+        )
+        reference_state = output.state
+        reference_logits.append(output.logits.detach().clone())
+        reference_input = output.next_token_id.detach().clone()
+
+    singles = route_exchange_single_candidates(
+        full_state,
+        anchor,
+        proposal,
+        limit=options.logit_route_single_candidates,
+    )
+    first_round = (anchor, *singles)
+    objective_weights = (
+        options.logit_objective_kl_weight,
+        options.logit_objective_logit_weight,
+        options.logit_objective_token_weight,
+    )
+    first_evaluations, first_batches = _probe_output_preserving_candidates_batched(
+        adapter,
+        prefill.state,
+        full_state,
+        first_round,
+        teacher_forced_inputs=teacher_forced_inputs,
+        reference_logits=reference_logits,
+        physical_prompt_capacity=physical_prompt_capacity,
+        packing_mode=config.cache.packing_mode,
+        batch_size=options.logit_probe_batch_size,
+        maximum_kl=options.logit_stability_maximum_kl,
+        maximum_logit_difference=options.logit_stability_maximum_logit_difference,
+        objective_weights=objective_weights,
+    )
+    anchor_evaluation = first_evaluations[0]
+    single_records = list(zip(singles, first_evaluations[1:], strict=True))
+    single_records.sort(
+        key=lambda item: (
+            -(anchor_evaluation.objective_value - item[1].objective_value),
+            item[1].candidate_id,
+        )
+    )
+    route_contributions = tuple(
+        (
+            candidate.exchange_routes[0][0],
+            candidate.exchange_routes[0][1],
+            anchor_evaluation.objective_value - evaluation.objective_value,
+        )
+        for candidate, evaluation in single_records
+    )
+
+    remaining = options.logit_route_candidate_limit - len(first_round)
+    composite_candidates: list[Any] = []
+    if remaining > 0:
+        improving_routes = tuple(
+            candidate.exchange_routes[0]
+            for candidate, evaluation in single_records
+            if evaluation.objective_value < anchor_evaluation.objective_value - 1e-12
+        )
+        seen_positions = {tuple(candidate.selected_node_ids) for candidate in first_round}
+        for width in range(2, options.logit_route_max_combination_width + 1):
+            for route_set in combinations(improving_routes, width):
+                route_key = "_".join(f"l{layer:02d}h{head:02d}" for layer, head in route_set)
+                candidate = compose_route_exchange_candidate(
+                    full_state,
+                    anchor,
+                    proposal,
+                    route_set,
+                    candidate_id=f"beam_{route_key}",
+                )
+                identity = tuple(candidate.selected_node_ids)
+                if identity in seen_positions:
+                    continue
+                composite_candidates.append(candidate)
+                seen_positions.add(identity)
+                if len(composite_candidates) == remaining:
+                    break
+            if len(composite_candidates) == remaining:
+                break
+
+    composite_evaluations: tuple[ShortHorizonLogitCandidateEvaluation, ...] = ()
+    composite_batches = 0
+    if composite_candidates:
+        composite_evaluations, composite_batches = _probe_output_preserving_candidates_batched(
+            adapter,
+            prefill.state,
+            full_state,
+            composite_candidates,
+            teacher_forced_inputs=teacher_forced_inputs,
+            reference_logits=reference_logits,
+            physical_prompt_capacity=physical_prompt_capacity,
+            packing_mode=config.cache.packing_mode,
+            batch_size=options.logit_probe_batch_size,
+            maximum_kl=options.logit_stability_maximum_kl,
+            maximum_logit_difference=options.logit_stability_maximum_logit_difference,
+            objective_weights=objective_weights,
+        )
+    candidates = (*first_round, *composite_candidates)
+    evaluations = (*first_evaluations, *composite_evaluations)
+    eligible = tuple(evaluation for evaluation in evaluations if evaluation.passed)
+    used_fallback = not eligible
+    selected_evaluation = (
+        anchor_evaluation
+        if used_fallback
+        else min(
+            eligible,
+            key=lambda item: (
+                item.objective_value,
+                item.maximum_kl,
+                item.maximum_logit_difference,
+                item.candidate_id,
+            ),
+        )
+    )
+    selected = next(
+        candidate
+        for candidate in candidates
+        if candidate.candidate_id == selected_evaluation.candidate_id
+    )
+    selected = replace(
+        selected,
+        effective_method=options.effective_method,
+        short_horizon_logit_reranking=True,
+    )
+    return selected, ShortHorizonLogitStabilityDecision(
+        enabled=True,
+        shortlist_size=len(evaluations),
+        evaluated_candidates=tuple(evaluations),
+        selected_candidate_id=selected_evaluation.candidate_id,
+        selected_candidate_passed=selected_evaluation.passed,
+        used_fail_closed_scalar_anchor=used_fallback,
+        horizon=horizon,
+        maximum_kl_threshold=options.logit_stability_maximum_kl,
+        maximum_logit_difference_threshold=(options.logit_stability_maximum_logit_difference),
+        candidate_strategy="route_exchange_beam",
+        probe_batch_count=first_batches + composite_batches,
+        batched_probe_execution=True,
+        single_route_candidate_count=len(singles),
+        composite_candidate_count=len(composite_candidates),
+        route_contributions=route_contributions,
+    )
+
+
+def _run_output_preserving_layer_capacity_reranking(
+    adapter: HuggingFaceMultimodalAdapter,
+    prefill: PrefillOutput,
+    full_state: FullKVState,
+    anchor: Any,
+    proposal: Any,
+    config: RunConfig,
+    *,
+    physical_prompt_capacity: int,
+) -> tuple[Any, ShortHorizonLogitStabilityDecision]:
+    """Probe route risk, then rank exact-byte complete-layer reallocations."""
+
+    from mosaickv.backends.output_preserving import (
+        layer_capacity_transfer_candidates,
+        route_exchange_single_candidates,
+    )
+
+    options = config.output_preserving
+    if (
+        options is None
+        or not options.short_horizon_logit_reranking
+        or options.logit_candidate_strategy != "layer_capacity_beam"
+    ):
+        raise HuggingFaceRuntimeError("layer-capacity logit reranking is not configured")
+    if anchor.candidate_id != "prompt_topk_anchor":
+        raise HuggingFaceRuntimeError("layer-capacity beam lacks its Prompt Top-K anchor")
+    if anchor.selected_bytes != proposal.selected_bytes or (
+        anchor.target_bytes != proposal.target_bytes
+    ):
+        raise HuggingFaceRuntimeError("layer-capacity source plans are not exactly byte matched")
+
+    extended_horizon = options.logit_extended_horizon
+    reference_state = _clone_decode_state(adapter, prefill.state)
+    reference_input = prefill.next_token_id.detach().clone()
+    teacher_forced_inputs: list[Any] = []
+    reference_logits: list[Any] = []
+    for _step in range(extended_horizon):
+        teacher_forced_inputs.append(reference_input.detach().clone())
+        output = adapter.decode_one_token(
+            reference_input,
+            reference_state,
+            capture_queries=False,
+            capture_attentions=False,
+        )
+        reference_state = output.state
+        reference_logits.append(output.logits.detach().clone())
+        reference_input = output.next_token_id.detach().clone()
+
+    objective_weights = (
+        options.logit_objective_kl_weight,
+        options.logit_objective_logit_weight,
+        options.logit_objective_token_weight,
+    )
+    route_singles = route_exchange_single_candidates(
+        full_state,
+        anchor,
+        proposal,
+        limit=options.logit_route_single_candidates,
+    )
+    route_round = (anchor, *route_singles)
+    route_evaluations, route_batches = _probe_output_preserving_candidates_batched(
+        adapter,
+        prefill.state,
+        full_state,
+        route_round,
+        teacher_forced_inputs=teacher_forced_inputs[: options.logit_stability_horizon],
+        reference_logits=reference_logits[: options.logit_stability_horizon],
+        physical_prompt_capacity=physical_prompt_capacity,
+        packing_mode=config.cache.packing_mode,
+        batch_size=options.logit_probe_batch_size,
+        maximum_kl=options.logit_stability_maximum_kl,
+        maximum_logit_difference=options.logit_stability_maximum_logit_difference,
+        objective_weights=objective_weights,
+    )
+    anchor_route_evaluation = route_evaluations[0]
+    route_contributions = tuple(
+        (
+            candidate.exchange_routes[0][0],
+            candidate.exchange_routes[0][1],
+            anchor_route_evaluation.objective_value - evaluation.objective_value,
+        )
+        for candidate, evaluation in zip(
+            route_singles,
+            route_evaluations[1:],
+            strict=True,
+        )
+    )
+    transfers = layer_capacity_transfer_candidates(
+        full_state,
+        anchor,
+        route_contributions,
+        limit=options.logit_layer_transfer_limit,
+    )
+    final_candidates = (anchor, *transfers)
+    if not 8 <= len(final_candidates) <= 16:
+        raise HuggingFaceRuntimeError(
+            "layer-capacity beam did not produce the registered 8-16 distinct plans"
+        )
+    if len(final_candidates) > options.logit_route_candidate_limit:
+        raise HuggingFaceRuntimeError("layer-capacity beam exceeded its candidate limit")
+    short_evaluations, short_batches = _probe_output_preserving_candidates_batched(
+        adapter,
+        prefill.state,
+        full_state,
+        final_candidates,
+        teacher_forced_inputs=teacher_forced_inputs[: options.logit_stability_horizon],
+        reference_logits=reference_logits[: options.logit_stability_horizon],
+        physical_prompt_capacity=physical_prompt_capacity,
+        packing_mode=config.cache.packing_mode,
+        batch_size=options.logit_probe_batch_size,
+        maximum_kl=options.logit_stability_maximum_kl,
+        maximum_logit_difference=options.logit_stability_maximum_logit_difference,
+        objective_weights=objective_weights,
+    )
+    by_id = {candidate.candidate_id: candidate for candidate in final_candidates}
+    short_by_id = {evaluation.candidate_id: evaluation for evaluation in short_evaluations}
+    ranked_transfers = sorted(
+        (
+            evaluation
+            for evaluation in short_evaluations
+            if evaluation.candidate_id != anchor.candidate_id
+        ),
+        key=lambda evaluation: (
+            evaluation.objective_value,
+            evaluation.maximum_kl,
+            evaluation.maximum_logit_difference,
+            evaluation.candidate_id,
+        ),
+    )
+    extended_ids = [anchor.candidate_id]
+    extended_ids.extend(
+        evaluation.candidate_id
+        for evaluation in ranked_transfers[: options.logit_extended_candidate_limit - 1]
+    )
+    extended_candidates = tuple(by_id[candidate_id] for candidate_id in extended_ids)
+    extended_evaluations, extended_batches = _probe_output_preserving_candidates_batched(
+        adapter,
+        prefill.state,
+        full_state,
+        extended_candidates,
+        teacher_forced_inputs=teacher_forced_inputs,
+        reference_logits=reference_logits,
+        physical_prompt_capacity=physical_prompt_capacity,
+        packing_mode=config.cache.packing_mode,
+        batch_size=options.logit_probe_batch_size,
+        maximum_kl=options.logit_stability_maximum_kl,
+        maximum_logit_difference=options.logit_stability_maximum_logit_difference,
+        objective_weights=objective_weights,
+    )
+    eligible = tuple(
+        evaluation
+        for evaluation in extended_evaluations
+        if evaluation.passed and evaluation.candidate_id != anchor.candidate_id
+    )
+    used_fallback = not eligible
+    selected_evaluation = (
+        next(
+            evaluation
+            for evaluation in extended_evaluations
+            if evaluation.candidate_id == anchor.candidate_id
+        )
+        if used_fallback
+        else min(
+            eligible,
+            key=lambda evaluation: (
+                evaluation.objective_value,
+                evaluation.maximum_kl,
+                evaluation.maximum_logit_difference,
+                evaluation.candidate_id,
+            ),
+        )
+    )
+    selected = replace(
+        by_id[selected_evaluation.candidate_id],
+        effective_method=options.effective_method,
+        short_horizon_logit_reranking=True,
+    )
+    # Keep the full short-stage evidence and replace extended entries by their
+    # definitive eight-token measurements in the emitted decision.
+    extended_by_id = {evaluation.candidate_id: evaluation for evaluation in extended_evaluations}
+    recorded = tuple(
+        extended_by_id.get(candidate.candidate_id, short_by_id[candidate.candidate_id])
+        for candidate in final_candidates
+    )
+    return selected, ShortHorizonLogitStabilityDecision(
+        enabled=True,
+        shortlist_size=len(final_candidates),
+        evaluated_candidates=recorded,
+        selected_candidate_id=selected_evaluation.candidate_id,
+        selected_candidate_passed=selected_evaluation.passed,
+        used_fail_closed_scalar_anchor=used_fallback,
+        horizon=options.logit_stability_horizon,
+        maximum_kl_threshold=options.logit_stability_maximum_kl,
+        maximum_logit_difference_threshold=(options.logit_stability_maximum_logit_difference),
+        candidate_strategy="layer_capacity_beam",
+        probe_batch_count=route_batches + short_batches + extended_batches,
+        batched_probe_execution=True,
+        single_route_candidate_count=len(route_singles),
+        composite_candidate_count=0,
+        route_contributions=route_contributions,
+        extended_horizon=extended_horizon,
+        extended_candidate_ids=tuple(extended_ids),
+        layer_capacity_candidate_count=len(transfers),
+    )
+
+
+def _run_output_preserving_surrogate_layer_capacity_reranking(
+    adapter: HuggingFaceMultimodalAdapter,
+    prefill: PrefillOutput,
+    full_state: FullKVState,
+    anchor: Any,
+    proposal: Any,
+    config: RunConfig,
+    *,
+    physical_prompt_capacity: int,
+) -> tuple[Any, ShortHorizonLogitStabilityDecision]:
+    """Rank layer reallocations by prompt/draft evidence, then probe only two.
+
+    Unlike V5, this path performs no preliminary model probe to estimate route
+    impact.  It creates 8--15 exact-byte candidates from reconstruction-only
+    telemetry, model-probes the two highest-ranked plans for two tokens, and
+    extends only the best passing plan to the registered eight-token horizon.
+    """
+
+    from mosaickv.backends.output_preserving import (
+        layer_capacity_directional_single_candidates,
+        layer_capacity_surrogate_candidates,
+        prompt_draft_route_risk,
+        within_route_position_candidates,
+    )
+
+    options = config.output_preserving
+    if (
+        options is None
+        or not options.short_horizon_logit_reranking
+        or options.logit_candidate_strategy
+        not in {
+            "layer_capacity_surrogate_beam",
+            "layer_capacity_vectorized_surrogate_beam",
+            "layer_capacity_directional_single_beam",
+            "within_route_position_beam",
+        }
+    ):
+        raise HuggingFaceRuntimeError("surrogate layer-capacity reranking is not configured")
+    if anchor.candidate_id != "prompt_topk_anchor":
+        raise HuggingFaceRuntimeError("surrogate layer-capacity beam lacks its anchor")
+    if anchor.selected_bytes != proposal.selected_bytes or (
+        anchor.target_bytes != proposal.target_bytes
+    ):
+        raise HuggingFaceRuntimeError("surrogate source plans are not exactly byte matched")
+
+    reference_state = _clone_decode_state(adapter, prefill.state)
+    reference_input = prefill.next_token_id.detach().clone()
+    teacher_forced_inputs: list[Any] = []
+    reference_logits: list[Any] = []
+    for _step in range(options.logit_extended_horizon):
+        teacher_forced_inputs.append(reference_input.detach().clone())
+        output = adapter.decode_one_token(
+            reference_input,
+            reference_state,
+            capture_queries=False,
+            capture_attentions=False,
+        )
+        reference_state = output.state
+        reference_logits.append(output.logits.detach().clone())
+        reference_input = output.next_token_id.detach().clone()
+
+    surrogate_started = time.perf_counter()
+    transfers = (
+        within_route_position_candidates(
+            full_state,
+            anchor,
+            proposal,
+            limit=options.logit_route_candidate_limit,
+        )
+        if options.logit_candidate_strategy == "within_route_position_beam"
+        else layer_capacity_directional_single_candidates(
+            full_state,
+            anchor,
+            proposal,
+            limit=options.logit_layer_transfer_limit,
+        )
+        if options.logit_candidate_strategy == "layer_capacity_directional_single_beam"
+        else layer_capacity_surrogate_candidates(
+            full_state,
+            anchor,
+            proposal,
+            limit=options.logit_layer_transfer_limit,
+            maximum_width=options.logit_route_max_combination_width,
+        )
+    )
+    surrogate_seconds = time.perf_counter() - surrogate_started
+    maximum_registered_plans = (
+        16 if options.logit_candidate_strategy == "within_route_position_beam" else 15
+    )
+    if not 8 <= len(transfers) <= maximum_registered_plans:
+        raise HuggingFaceRuntimeError(
+            "surrogate layer-capacity beam did not produce its registered plan count"
+        )
+    short_candidate_count = (
+        min(4, len(transfers))
+        if options.logit_candidate_strategy == "within_route_position_beam"
+        else 2
+    )
+    short_candidates = transfers[:short_candidate_count]
+    phase_timings: list[dict[str, Any]] = [
+        {
+            "stage": "surrogate_generation",
+            "candidate_count": len(transfers),
+            "route_risk_count": len(prompt_draft_route_risk(proposal)),
+            "total_seconds": surrogate_seconds,
+        }
+    ]
+    objective_weights = (
+        options.logit_objective_kl_weight,
+        options.logit_objective_logit_weight,
+        options.logit_objective_token_weight,
+    )
+    short_evaluations, short_batches = _probe_output_preserving_candidates_batched(
+        adapter,
+        prefill.state,
+        full_state,
+        short_candidates,
+        teacher_forced_inputs=teacher_forced_inputs[: options.logit_stability_horizon],
+        reference_logits=reference_logits[: options.logit_stability_horizon],
+        physical_prompt_capacity=physical_prompt_capacity,
+        packing_mode=config.cache.packing_mode,
+        batch_size=short_candidate_count,
+        maximum_kl=options.logit_stability_maximum_kl,
+        maximum_logit_difference=options.logit_stability_maximum_logit_difference,
+        objective_weights=objective_weights,
+        probe_stage=(
+            "short_four_candidate_probe"
+            if options.logit_candidate_strategy == "within_route_position_beam"
+            else "short_two_candidate_probe"
+        ),
+        phase_timings=phase_timings,
+    )
+    short_eligible = tuple(evaluation for evaluation in short_evaluations if evaluation.passed)
+    extended_evaluations: tuple[ShortHorizonLogitCandidateEvaluation, ...] = ()
+    extended_batches = 0
+    extended_ids: tuple[str, ...] = ()
+    selected_evaluation: ShortHorizonLogitCandidateEvaluation | None = None
+    if short_eligible:
+        short_best = tuple(
+            sorted(
+                short_eligible,
+                key=lambda evaluation: (
+                    evaluation.objective_value,
+                    evaluation.maximum_kl,
+                    evaluation.maximum_logit_difference,
+                    evaluation.candidate_id,
+                ),
+            )
+        )[: options.logit_extended_candidate_limit]
+        extended_ids = tuple(evaluation.candidate_id for evaluation in short_best)
+        extended_candidates = tuple(
+            candidate for candidate in short_candidates if candidate.candidate_id in extended_ids
+        )
+        extended_evaluations, extended_batches = _probe_output_preserving_candidates_batched(
+            adapter,
+            prefill.state,
+            full_state,
+            extended_candidates,
+            teacher_forced_inputs=teacher_forced_inputs,
+            reference_logits=reference_logits,
+            physical_prompt_capacity=physical_prompt_capacity,
+            packing_mode=config.cache.packing_mode,
+            batch_size=len(extended_candidates),
+            maximum_kl=options.logit_stability_maximum_kl,
+            maximum_logit_difference=options.logit_stability_maximum_logit_difference,
+            objective_weights=objective_weights,
+            probe_stage=(
+                "extended_two_candidate_probe"
+                if options.logit_candidate_strategy == "within_route_position_beam"
+                else "extended_one_candidate_probe"
+            ),
+            phase_timings=phase_timings,
+        )
+        extended_eligible = tuple(
+            evaluation for evaluation in extended_evaluations if evaluation.passed
+        )
+        if extended_eligible:
+            selected_evaluation = min(
+                extended_eligible,
+                key=lambda evaluation: (
+                    evaluation.objective_value,
+                    evaluation.maximum_kl,
+                    evaluation.maximum_logit_difference,
+                    evaluation.candidate_id,
+                ),
+            )
+
+    used_fallback = selected_evaluation is None
+    if selected_evaluation is None:
+        selected = replace(
+            anchor,
+            effective_method=options.effective_method,
+            short_horizon_logit_reranking=True,
+        )
+        selected_candidate_id = anchor.candidate_id
+    else:
+        selected = next(
+            candidate
+            for candidate in short_candidates
+            if candidate.candidate_id == selected_evaluation.candidate_id
+        )
+        selected = replace(
+            selected,
+            effective_method=options.effective_method,
+            short_horizon_logit_reranking=True,
+        )
+        selected_candidate_id = selected_evaluation.candidate_id
+
+    extended_by_id = {evaluation.candidate_id: evaluation for evaluation in extended_evaluations}
+    recorded = tuple(
+        extended_by_id.get(evaluation.candidate_id, evaluation) for evaluation in short_evaluations
+    )
+    route_risk = prompt_draft_route_risk(proposal)
+    return selected, ShortHorizonLogitStabilityDecision(
+        enabled=True,
+        shortlist_size=len(transfers),
+        evaluated_candidates=recorded,
+        selected_candidate_id=selected_candidate_id,
+        selected_candidate_passed=selected_evaluation is not None,
+        used_fail_closed_scalar_anchor=used_fallback,
+        horizon=options.logit_stability_horizon,
+        maximum_kl_threshold=options.logit_stability_maximum_kl,
+        maximum_logit_difference_threshold=(options.logit_stability_maximum_logit_difference),
+        candidate_strategy=options.logit_candidate_strategy,
+        probe_batch_count=short_batches + extended_batches,
+        batched_probe_execution=True,
+        single_route_candidate_count=(
+            len(transfers)
+            if options.logit_candidate_strategy == "within_route_position_beam"
+            else 0
+        ),
+        composite_candidate_count=sum(
+            len(candidate.surrogate_transactions) > 1 for candidate in transfers
+        ),
+        route_contributions=route_risk,
+        extended_horizon=options.logit_extended_horizon,
+        extended_candidate_ids=extended_ids,
+        layer_capacity_candidate_count=(
+            0
+            if options.logit_candidate_strategy == "within_route_position_beam"
+            else len(transfers)
+        ),
+        surrogate_candidate_count=len(transfers),
+        model_probed_candidate_count=len(short_candidates),
+        probe_phase_timings=tuple(phase_timings),
     )
 
 
@@ -8799,6 +10060,11 @@ class HuggingFaceMosaicKVModel:
                 "JsonObject",
                 asdict(self.config.output_preserving),
             )
+        if self.config.bounded_decode is not None:
+            trace["bounded_decode_config"] = cast(
+                "JsonObject", asdict(self.config.bounded_decode)
+            )
+            trace["bounded_decode"] = {"status": "not_yet_constructed"}
         started = time.perf_counter()
         raw_teacher_ids = request.generation_kwargs.get("_mosaickv_teacher_forced_token_ids")
         if raw_teacher_ids is None:
@@ -9019,6 +10285,8 @@ class HuggingFaceMosaicKVModel:
             vl_cache_plan: VLCacheCompressionPlan | None = None
             published_kv_plan: PublishedKVCompressionPlan | None = None
             state = prefill.state
+            bounded_budget = None
+            bounded_decode_trace: JsonObject | None = None
             if not is_full_cache and not retention_one_identity:
                 cache_state_started = time.perf_counter()
                 snapshot = self.adapter.extract_past_key_values(prefill.state.past_key_values)
@@ -9078,7 +10346,54 @@ class HuggingFaceMosaicKVModel:
                     mandatory_logical_positions=mandatory_positions,
                 )
                 cache_state_construction_seconds = time.perf_counter() - cache_state_started
-                dense_budget = _dense_physical_cache_budget(full_state, self.config)
+                prompt_budget_config = self.config
+                if self.config.bounded_decode is not None:
+                    from mosaickv.adapters.huggingface.bounded_history_cache import (
+                        assert_bounded_history_support,
+                        bounded_history_budget,
+                    )
+
+                    assert_bounded_history_support(self.adapter)
+                    source_layers = self.adapter._legacy_layers(prefill.state.past_key_values)[0]
+                    bytes_per_position = sum(
+                        (
+                            int(key.numel()) * key.element_size()
+                            + int(value.numel()) * value.element_size()
+                        )
+                        // int(key.shape[-2])
+                        for key, value in source_layers
+                    )
+                    bounded_budget = bounded_history_budget(
+                        self.config.cache.budget_value,
+                        bytes_per_position,
+                        self.config.bounded_decode.generated_capacity,
+                        max(
+                            0,
+                            (
+                                len(teacher_forced_ids)
+                                if teacher_forced_ids
+                                else self.config.generation.max_new_tokens
+                            )
+                            - 1,
+                        ),
+                    )
+                    trace["bounded_decode"] = {
+                        "status": "generation_reserve_planned_before_prompt_selection",
+                        "budget_reservation": cast("JsonObject", asdict(bounded_budget)),
+                        "prefill_selection_budget_semantics": "bytes_only_not_nominal_retention",
+                    }
+                    prompt_budget_config = replace(
+                        self.config,
+                        cache=replace(
+                            self.config.cache,
+                            budget_value=bounded_budget.prompt_budget_bytes,
+                            # This opt-in variant is driven by physical bytes,
+                            # not a second nominal-ratio bound. 1.0 itself is
+                            # reserved for the untouched identity control.
+                            retention_ratio=math.nextafter(1.0, 0.0),
+                        ),
+                    )
+                dense_budget = _dense_physical_cache_budget(full_state, prompt_budget_config)
                 physical_prompt_capacity = (
                     None if dense_budget is None else dense_budget.prompt_capacity
                 )
@@ -9088,7 +10403,7 @@ class HuggingFaceMosaicKVModel:
                     else replace(
                         self.config,
                         cache=replace(
-                            self.config.cache,
+                            prompt_budget_config.cache,
                             budget_value=dense_budget.target_bytes,
                         ),
                     )
@@ -9116,25 +10431,29 @@ class HuggingFaceMosaicKVModel:
                             rollout.cache_clone_seconds + rollout.draft_decode_seconds
                         )
 
-                    def select_output_preserving_plan() -> Any:
-                        prompt_scores = _block_attention_values_from_token_attention(
+                    prompt_scores = _block_attention_values_from_token_attention(
+                        full_state,
+                        _prompt_token_attention_by_head(
                             full_state,
-                            _prompt_token_attention_by_head(
-                                full_state,
-                                replace(
-                                    prefill,
-                                    attention_weights=topk_anchor_capture(
-                                        full_state,
-                                        prefill.attention_weights,
-                                    ),
+                            replace(
+                                prefill,
+                                attention_weights=topk_anchor_capture(
+                                    full_state,
+                                    prefill.attention_weights,
                                 ),
-                                prompt_window=self.config.forecasting.prompt_window,
                             ),
-                        )
+                            prompt_window=self.config.forecasting.prompt_window,
+                        ),
+                    )
+
+                    def select_output_preserving_plan(
+                        candidate_config: RunConfig,
+                        candidate_id: str,
+                    ) -> Any:
                         return select_output_preserving(
                             full_state,
                             prefill.attention_weights,
-                            self.config,
+                            candidate_config,
                             position_limits=dense_budget.position_limits,
                             target_bytes=dense_budget.target_bytes,
                             prompt_attention_scores=prompt_scores,
@@ -9144,12 +10463,148 @@ class HuggingFaceMosaicKVModel:
                             draft_cache_isolated=(
                                 True if rollout is None else rollout.original_cache_unchanged
                             ),
+                            candidate_id=candidate_id,
                         )
 
-                    output_preserving_plan, selection_seconds = _timed(
-                        prefill.logits,
-                        select_output_preserving_plan,
-                    )
+                    options = self.config.output_preserving
+                    assert options is not None
+                    if options.short_horizon_logit_reranking:
+
+                        def without_logit_controls(**changes: Any) -> RunConfig:
+                            return replace(
+                                self.config,
+                                output_preserving=replace(
+                                    options,
+                                    short_horizon_logit_reranking=False,
+                                    logit_candidate_strategy="weight_grid",
+                                    logit_candidate_prompt_weight_low=0.0,
+                                    logit_candidate_prompt_weight_high=0.0,
+                                    logit_route_single_candidates=0,
+                                    logit_route_candidate_limit=0,
+                                    logit_route_max_combination_width=0,
+                                    logit_probe_batch_size=0,
+                                    logit_objective_kl_weight=0.0,
+                                    logit_objective_logit_weight=0.0,
+                                    logit_objective_token_weight=0.0,
+                                    logit_stability_horizon=0,
+                                    logit_extended_horizon=0,
+                                    logit_extended_candidate_limit=0,
+                                    logit_layer_transfer_limit=0,
+                                    logit_stability_maximum_kl=0.0,
+                                    logit_stability_maximum_logit_difference=0.0,
+                                    **changes,
+                                ),
+                            )
+
+                        if options.logit_candidate_strategy in {
+                            "route_exchange_beam",
+                            "layer_capacity_beam",
+                            "layer_capacity_surrogate_beam",
+                            "layer_capacity_vectorized_surrogate_beam",
+                            "layer_capacity_directional_single_beam",
+                            "within_route_position_beam",
+                        }:
+
+                            def build_route_exchange_sources() -> tuple[Any, Any]:
+                                return (
+                                    select_output_preserving_plan(
+                                        without_logit_controls(max_swaps_per_head=0),
+                                        "prompt_topk_anchor",
+                                    ),
+                                    select_output_preserving_plan(
+                                        without_logit_controls(),
+                                        "route_exchange_source",
+                                    ),
+                                )
+
+                            route_sources, selection_seconds = _timed(
+                                prefill.logits,
+                                build_route_exchange_sources,
+                            )
+                            reranker = {
+                                "route_exchange_beam": (
+                                    _run_output_preserving_route_exchange_reranking
+                                ),
+                                "layer_capacity_beam": (
+                                    _run_output_preserving_layer_capacity_reranking
+                                ),
+                                "layer_capacity_surrogate_beam": (
+                                    _run_output_preserving_surrogate_layer_capacity_reranking
+                                ),
+                                "layer_capacity_vectorized_surrogate_beam": (
+                                    _run_output_preserving_surrogate_layer_capacity_reranking
+                                ),
+                                "layer_capacity_directional_single_beam": (
+                                    _run_output_preserving_surrogate_layer_capacity_reranking
+                                ),
+                                "within_route_position_beam": (
+                                    _run_output_preserving_surrogate_layer_capacity_reranking
+                                ),
+                            }[options.logit_candidate_strategy]
+                            stability_result, logit_stability_seconds = _timed(
+                                prefill.logits,
+                                lambda: reranker(
+                                    self.adapter,
+                                    prefill,
+                                    full_state,
+                                    route_sources[0],
+                                    route_sources[1],
+                                    self.config,
+                                    physical_prompt_capacity=dense_budget.prompt_capacity,
+                                ),
+                            )
+                        else:
+
+                            def build_logit_shortlist() -> tuple[Any, ...]:
+                                anchor_config = without_logit_controls(max_swaps_per_head=0)
+                                plans = [
+                                    select_output_preserving_plan(
+                                        anchor_config,
+                                        "prompt_topk_anchor",
+                                    )
+                                ]
+                                weights = (
+                                    options.logit_candidate_prompt_weight_low,
+                                    options.prompt_objective_weight,
+                                    options.logit_candidate_prompt_weight_high,
+                                )
+                                for weight in weights:
+                                    candidate_config = without_logit_controls(
+                                        prompt_objective_weight=weight,
+                                        draft_objective_weight=1.0 - weight,
+                                    )
+                                    plans.append(
+                                        select_output_preserving_plan(
+                                            candidate_config,
+                                            f"joint_prompt_weight_{weight:.2f}",
+                                        )
+                                    )
+                                return tuple(plans)
+
+                            shortlist, selection_seconds = _timed(
+                                prefill.logits,
+                                build_logit_shortlist,
+                            )
+                            stability_result, logit_stability_seconds = _timed(
+                                prefill.logits,
+                                lambda: _run_output_preserving_short_horizon_logit_reranking(
+                                    self.adapter,
+                                    prefill,
+                                    full_state,
+                                    shortlist,
+                                    self.config,
+                                    physical_prompt_capacity=dense_budget.prompt_capacity,
+                                ),
+                            )
+                        output_preserving_plan, logit_stability_decision = stability_result
+                    else:
+                        output_preserving_plan, selection_seconds = _timed(
+                            prefill.logits,
+                            lambda: select_output_preserving_plan(
+                                self.config,
+                                "configured_reconstruction",
+                            ),
+                        )
                     packed_state, tier_seconds = _timed(
                         prefill.logits,
                         lambda: output_preserving_plan.construct(full_state),
@@ -9821,14 +11276,23 @@ class HuggingFaceMosaicKVModel:
                         raise HuggingFaceRuntimeError("runtime cache plan has no active state")
                     packed, packing_seconds = _timed(
                         prefill.logits,
-                        lambda: pack_runtime_cache(
-                            self.adapter,
-                            full_state,
-                            packed_state,
-                            prototype_records,
-                            tuple(record.prototype_id for record in prototype_records),
-                            physical_prompt_capacity=physical_prompt_capacity,
-                            packing_mode=self.config.cache.packing_mode,
+                        lambda: (
+                            _pack_layerwise_exact_runtime_cache(
+                                self.adapter,
+                                full_state,
+                                packed_state,
+                            )
+                            if output_preserving_plan is not None
+                            and output_preserving_plan.layer_capacities
+                            else pack_runtime_cache(
+                                self.adapter,
+                                full_state,
+                                packed_state,
+                                prototype_records,
+                                tuple(record.prototype_id for record in prototype_records),
+                                physical_prompt_capacity=physical_prompt_capacity,
+                                packing_mode=self.config.cache.packing_mode,
+                            )
                         ),
                     )
                 state = _state_from_packed(self.adapter, prefill.state, packed)
@@ -10076,7 +11540,42 @@ class HuggingFaceMosaicKVModel:
             else:
                 trace["fidelity_diagnostic"] = {"status": "disabled"}
 
-            # Observe before preallocation so unused backing capacity is not
+            if bounded_budget is not None and bounded_budget.generated_positions:
+                from mosaickv.adapters.huggingface.bounded_history_cache import (
+                    install_bounded_history,
+                )
+
+                assert self.config.bounded_decode is not None
+                bounded_record, bounded_setup_seconds = _timed(
+                    prefill.logits,
+                    lambda: install_bounded_history(
+                        self.adapter,
+                        state,
+                        generated_capacity=bounded_budget.generated_positions,
+                        sink_tokens=min(
+                            self.config.bounded_decode.sink_tokens,
+                            bounded_budget.generated_positions - 1,
+                        ),
+                        cap_bytes=bounded_budget.cap_bytes,
+                    ),
+                )
+                packing_seconds += bounded_setup_seconds
+                bounded_decode_trace = cast("JsonObject", bounded_record)
+                bounded_decode_trace["budget_reservation"] = cast(
+                    "JsonObject", asdict(bounded_budget)
+                )
+                bounded_decode_trace["setup_seconds"] = bounded_setup_seconds
+                trace["bounded_decode"] = bounded_decode_trace
+            elif self.config.bounded_decode is not None:
+                bounded_decode_trace = {
+                    "status": (
+                        "bypassed_retention_one_identity"
+                        if retention_one_identity
+                        else "no_decode_updates"
+                    )
+                }
+
+            # Observe before append-only preallocation so unused backing capacity is not
             # confused with the post-compression byte target. All methods use
             # the same metadata-only instrumentation (no device copies/sync).
             cache_accounting_started = time.perf_counter()
@@ -10085,7 +11584,11 @@ class HuggingFaceMosaicKVModel:
             )
             trace_instrumentation_seconds += time.perf_counter() - cache_accounting_started
             preallocated_decode_cache = False
-            if prefixkv_plan is None:
+            if (
+                prefixkv_plan is None
+                and not state.model_state.get("mosaickv_layerwise_exact")
+                and not state.model_state.get("mosaickv_bounded_history")
+            ):
                 preallocated_decode_cache = self.adapter.preallocate_decode_cache(
                     state,
                     self.config.generation.max_new_tokens - 1,
@@ -10094,9 +11597,13 @@ class HuggingFaceMosaicKVModel:
             cache_lifecycle.observe(self.adapter._legacy_layers(state.past_key_values)[0])
             trace_instrumentation_seconds += time.perf_counter() - cache_accounting_started
             decode_runtime_policy["kv_growth"] = (
-                "preallocated_append_only_views"
-                if preallocated_decode_cache
-                else "backend_native_dynamic_growth"
+                "bounded_generated_ring_v1"
+                if state.model_state.get("mosaickv_bounded_history")
+                else (
+                    "preallocated_append_only_views"
+                    if preallocated_decode_cache
+                    else "backend_native_dynamic_growth"
+                )
             )
             decode_attention = (
                 self.config.execution.decode_attention_implementation
@@ -10508,6 +12015,23 @@ class HuggingFaceMosaicKVModel:
                 else:
                     trace["trace_detail"] = "full_debug"
                 trace_instrumentation_seconds += time.perf_counter() - trace_started
+            if bounded_decode_trace is not None:
+                from mosaickv.adapters.huggingface.bounded_history_cache import (
+                    bounded_history_record,
+                )
+
+                if state.model_state.get("mosaickv_bounded_history"):
+                    bounded_decode_trace.update(bounded_history_record(state))
+                    if cache_lifecycle.peak_storage_bytes > self.config.cache.budget_value:
+                        raise HuggingFaceRuntimeError(
+                            "bounded history exceeded lifetime storage cap"
+                        )
+                trace["bounded_decode"] = bounded_decode_trace
+                if not retention_one_identity:
+                    trace["effective_method"] = (
+                        f"{trace.get('effective_method', method.value)}"
+                        "__bounded_generated_history_v1"
+                    )
             repair_transfer = sum(event.transfer_time_ms for event in repair_events) / 1000.0
             repair_redecode = sum(event.re_decode_time_ms for event in repair_events) / 1000.0
             first_decode_step = per_token_decode_seconds[0] if per_token_decode_seconds else None
@@ -11024,7 +12548,11 @@ class HuggingFaceMosaicKVModel:
                             "counterfactual_draft_head_routing": bool(counterfactual_head_shifts),
                         },
                     ),
-                    "active_kv_bytes": packed_prefill_active_kv_bytes,
+                    "active_kv_bytes": (
+                        cache_lifecycle.initial_storage_bytes
+                        if state.model_state.get("mosaickv_bounded_history")
+                        else packed_prefill_active_kv_bytes
+                    ),
                     "final_active_kv_bytes": active_bytes,
                     "cache_lifecycle": cache_lifecycle.record(),
                     "residual_kv_bytes": residual_bytes,
@@ -11033,7 +12561,12 @@ class HuggingFaceMosaicKVModel:
                     ),
                     "gpu_rescue_initial_kv_bytes": gpu_rescue_initial_bytes,
                     "initial_total_gpu_kv_bytes": (
-                        packed_prefill_active_kv_bytes + gpu_rescue_initial_bytes
+                        (
+                            cache_lifecycle.initial_storage_bytes
+                            if state.model_state.get("mosaickv_bounded_history")
+                            else packed_prefill_active_kv_bytes
+                        )
+                        + gpu_rescue_initial_bytes
                     ),
                     "gpu_rescue_staging": {
                         "configured_max_blocks": self.config.residual.gpu_rescue_max_blocks,
@@ -11091,7 +12624,11 @@ class HuggingFaceMosaicKVModel:
                     decode_time=decode_seconds,
                     end_to_end_time=total_seconds,
                     generated_tokens=int(token_ids.numel()),
-                    active_kv_bytes=packed_prefill_active_kv_bytes,
+                    active_kv_bytes=(
+                        cache_lifecycle.initial_storage_bytes
+                        if state.model_state.get("mosaickv_bounded_history")
+                        else packed_prefill_active_kv_bytes
+                    ),
                     initial_active_kv_storage_bytes=cache_lifecycle.initial_storage_bytes,
                     final_active_kv_storage_bytes=cache_lifecycle.final_storage_bytes,
                     peak_active_kv_storage_bytes=cache_lifecycle.peak_storage_bytes,

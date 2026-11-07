@@ -1,0 +1,122 @@
+\section{EviCastKV-S Design}
+\label{sec:design}
+Figure~\ref{fig:architecture} shows the evaluated path. Its organizing
+principle is to store reusable source information and protected exceptions,
+then reconstruct only the layer-local operands needed by attention.
+
+\begin{figure*}[t]
+\centering
+\input{figures/architecture}
+\caption{Evaluated storage path. Solid boxes are active. The source, protected
+regions, numerical patches, history and metadata all count toward persistent
+storage. Reconstruction and attention use request-private transient buffers.
+CUDA execution replay is active where eligible; it is not an evidence graph.
+The historical six-component selection/prototype/repair architecture is not
+part of this execution path.}
+\label{fig:architecture}
+\end{figure*}
+
+\subsection{Shared prompt source and protected exact regions}
+\label{sec:source}
+During the single original prefill, forward hooks observe $X_\ell$, original
+K/V and model-generated RoPE phases. The stored source is a grouped affine
+three-bit representation, with groups of 128 along the configured source
+axis. For a group $G$, the reference quantizer uses
+\begin{equation}
+\begin{aligned}
+ m_G&=\min G,\qquad s_G=\frac{\max G-m_G}{7},\\
+ c_x&=\operatorname{clip}_{[0,7]}
+ \!\left(\operatorname{round}\frac{x-m_G}{s_G}\right),
+\end{aligned}
+ \label{eq:quant}
+\end{equation}
+with a guarded scale for constant groups. Decoding yields
+$\widehat{x}=m_G+s_Gc_x$, cast according to the frozen BF16 contract.
+The payload includes codes, headers, padding and applicable code-delta
+metadata; ``three-bit'' is not a complete byte count.
+
+Protection is chosen from original prompt observations, not reference
+captions. The frozen rule combines each head's last-16-position attention
+mean with a shared full-prompt prior at weights $0.5/0.5$. It ranks
+positions deterministically, retains the last prompt position, and derives
+head-local protected regions from selected text positions plus the first
+four and last eight selected positions. These are exact KV overlays, not
+prototype clusters. A historical half-source-slot capacity policy bounds
+this selection; it is explicitly not a 50\% encoded-byte claim. Actual
+packet and bound-cache storage are measured independently.
+
+Using the frozen model weights, the conceptual reconstructed prompt is
+\begin{align}
+ \widetilde K_\ell &= \Rope(\widehat X_\ell W^K_\ell;P), &
+ \widetilde V_\ell &= \widehat X_\ell W^V_\ell. \label{eq:reconstruct}
+\end{align}
+At protected head-position entries $\mathcal E_\ell$, exact original values
+replace these approximations. Rows exact for all heads need not also occupy
+the lossy source payload. Original logical positions, causal order and all
+prompt positions remain represented. The source is stored once; this does
+not assert that the implementation unpacks it only once for both projections.
+
+\subsection{A numerical contract for reconstruction}
+\label{sec:numerics}
+The transport reference is native projection of $\widehat X_\ell$, with the
+same exact overlays and original RoPE phases. It is not projection of the
+unquantized $X_\ell$. Construction records sparse native-reference words
+where the custom transport would violate its registered closeness predicate.
+The current envelope is an absolute tolerance $2^{-6}$ plus a relative
+tolerance $0.01$, evaluated in the pinned implementation's dtype contract.
+Protected-row mismatches are rejected rather than hidden by patches.
+
+These patches address implementation arithmetic and have explicit storage
+cost. They are computed during construction, not triggered by uncertainty
+during decoding. No weights are updated, and neither labels nor FullKV
+answer logits are fitting targets. Later kernel optimizations must preserve
+the accepted representation and its declared numerical checks; a tolerance
+pass is not a proof of unrestricted FullKV equivalence.
+
+\subsection{Lossless generated-history storage}
+\label{sec:history}
+Generated K/V would otherwise grow linearly throughout the request.
+Our history path retains actual normalized inputs and original rotary
+positions, seals bounded chunks and reconstructs their K/V through the
+frozen projections. Sparse exact-word corrections preserve the generated
+history's BF16 K/V bits. The current path seals 16-token chunks, retains
+the unfinished tail explicitly and consolidates archived chunks while
+checking token/position continuity. Exact payload coding has a raw-storage
+fallback for incompressible data; it never silently evicts generated tokens.
+
+``Lossless history'' is relative to the forward passes executed by the
+variant. If prompt approximation changes a generated token, its subsequent
+history need not equal unrestricted FullKV's history. Source tails, stored
+phases, corrections, unused preallocated backing and reconstruction scratch
+are charged at their declared boundaries.
+
+\subsection{Layer-local leases and source retirement}
+The prefill constructor publishes a completed layer representation and
+retires superseded original owners. During decoding, a bounded lease
+materializes the active layer's K and V in the required order, allowing
+sequential reuse instead of retaining a dense reconstructed cache for every
+layer. Request-private indices and view descriptors are prepared once where
+valid and reused across tokens. Shared storage is deduplicated by backing
+identity, not by counting views independently.
+
+This schedule trades compute for persistence. Its peak includes the encoded
+state and simultaneously live reconstruction operands; final encoded size
+alone would miss that overlap. A separate broad whole-request peak audit
+would additionally need to cover prefill, construction, vendor resources
+and all relevant ownership lifetimes. We do not claim that certification.
+
+\subsection{Conditional eager replay, not a new evidence graph}
+\label{sec:replay}
+The runtime offers the same uniform-layout acceleration capability to all
+compatible compressed methods. It replays request-private eager-attention
+segments with explicit dtype behavior and charged workspace. Nonuniform
+per-layer layouts retain their original eager path: the implementation
+does not pad or change their quotas merely to enable replay.
+
+This distinction matters empirically. All 256 \Evi{} requests are eligible;
+none of the four compressed baseline adaptations are eligible under their
+frozen layouts. Thus measured latency combines representation, allocation
+and execution-policy effects. Merely offering the same capability does not
+make this an isolated codec or selector experiment. Graph capture, replay
+setup and retirement remain inside each timed request, and graph objects
+cannot survive into the next request.

@@ -51,7 +51,7 @@ controls:
   seed: 20271014
 
 resources:
-  max_global_a100s: 4
+  max_global_a100s: 6
   gpus_per_worker: 1
   cpus_per_worker: 12
   time_limit_seconds: 7200

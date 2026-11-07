@@ -1,0 +1,25 @@
+\begin{tikzpicture}
+\begin{groupplot}[group style={group size=3 by 1,horizontal sep=13mm},
+ width=0.31\textwidth,height=4.7cm,
+ xlabel={Initial active KV (MiB)},grid=major,grid style={gray!18},
+ tick label style={font=\scriptsize},label style={font=\small},
+ title style={font=\small},legend style={font=\scriptsize},
+ legend columns=3]
+\nextgroupplot[title={COCO: 256 images},ylabel={CIDEr $\uparrow$},xtick={10,20,40,80},ymin=88,ymax=114,legend to name=qualitylegend]
+\addplot[exactblue,thick,mark=*] table[x=cap,y=score]{generated/coco_mosaickv_exact.dat};
+\addlegendentry{MosaicKV exact}
+\addplot[black,dashed,mark=square*] table[x=cap,y=score]{generated/coco_prompt_attention_topk.dat};
+\addlegendentry{Prompt Top-K}
+\addplot[protogold,thick,mark=triangle*] table[x=cap,y=score]{generated/coco_vl_cache_reimpl.dat};
+\addlegendentry{VL-Cache / LOOK-M (R)}
+\nextgroupplot[title={MileBench E6: semantic},ylabel={ROUGE-L $\times100$ $\uparrow$},xtick={16,40,80},ymin=11,ymax=17]
+\addplot[exactblue,thick,mark=*] table[x=cap,y=rouge]{generated/mile192_mosaickv_exact.dat};
+\addplot[black,dashed,mark=square*] table[x=cap,y=rouge]{generated/mile192_prompt_attention_topk.dat};
+\addplot[protogold,thick,mark=triangle*] table[x=cap,y=rouge]{generated/mile192_lookm_reimpl.dat};
+\nextgroupplot[title={MileBench E6: temporal},ylabel={Accuracy (\%) $\uparrow$},xtick={16,40,80},ymin=0,ymax=29]
+\addplot[exactblue,thick,mark=*] table[x=cap,y=accuracy]{generated/mile192_mosaickv_exact.dat};
+\addplot[black,dashed,mark=square*] table[x=cap,y=accuracy]{generated/mile192_prompt_attention_topk.dat};
+\addplot[protogold,thick,mark=triangle*] table[x=cap,y=accuracy]{generated/mile192_lookm_reimpl.dat};
+\end{groupplot}
+\node[anchor=north] at ($(group c1r1.south)!0.5!(group c3r1.south)+(0,-10mm)$) {\pgfplotslegendfromname{qualitylegend}};
+\end{tikzpicture}

@@ -1,0 +1,16 @@
+% Derived from immutable measured artifacts by export_report.py.
+\begin{tabular}{llrrrrrl}
+\toprule
+Task & Path & Source/KV & Ref. p50 & Direct p50 & Direct p95 & Direct/ref. & Paired 95\% CI\\\midrule
+Description & Prompt Top-K & 1.3055 & 11.741 & 11.283 & 11.288 & 0.9609 & [0.9607, 0.9610]\\
+Description & PrefixKV adaptation (R) & 1.3571 & 11.665 & 11.209 & 11.214 & 0.9609 & [0.9607, 0.9611]\\
+Description & VL-Cache adaptation (R) & 1.2914 & 11.284 & 10.820 & 10.826 & 0.9589 & [0.9584, 0.9590]\\
+Description & LOOK-M (R) & 1.2887 & 10.666 & 10.208 & 10.223 & 0.9569 & [0.9566, 0.9575]\\
+Description & \textbf{EviCastKV exact} & 1.2974 & 11.742 & 11.282 & 11.288 & 0.9608 & [0.9607, 0.9610]\\
+MM-Vet route & Prompt Top-K & 1.2886 & 11.738 & 11.268 & 11.273 & 0.9600 & [0.9598, 0.9602]\\
+MM-Vet route & PrefixKV adaptation (R) & 1.3639 & 11.567 & 11.108 & 11.111 & 0.9603 & [0.9602, 0.9604]\\
+MM-Vet route & VL-Cache adaptation (R) & 1.2862 & 11.232 & 10.772 & 10.801 & 0.9590 & [0.9585, 0.9595]\\
+MM-Vet route & LOOK-M (R) & 1.3044 & 10.702 & 10.235 & 10.241 & 0.9563 & [0.9562, 0.9568]\\
+MM-Vet route & \textbf{EviCastKV exact} & 1.2960 & 11.765 & 11.300 & 11.304 & 0.9604 & [0.9601, 0.9606]\\
+\bottomrule
+\end{tabular}

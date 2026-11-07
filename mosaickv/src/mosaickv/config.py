@@ -375,6 +375,39 @@ class AblationConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class BoundedDecodeConfig:
+    """Opt-in exact prompt + sink/recent generated-history variant.
+
+    The ordinary cache byte budget becomes a lifetime backing-storage cap.
+    Generated slots are reserved BEFORE prompt selection, never added above it.
+    This changes the eviction algorithm, not just the allocation strategy.
+    """
+
+    generated_capacity: int = 32
+    sink_tokens: int = 4
+
+    def __post_init__(self) -> None:
+        if type(self.generated_capacity) is not int or self.generated_capacity < 1:
+            raise ConfigurationError("bounded_decode.generated_capacity must be an integer >= 1")
+        if (
+            type(self.sink_tokens) is not int
+            or not 0 <= self.sink_tokens < self.generated_capacity
+        ):
+            raise ConfigurationError(
+                "bounded_decode.sink_tokens must be an integer in [0, generated_capacity)"
+            )
+
+    @classmethod
+    def from_mapping(cls, value: object) -> BoundedDecodeConfig:
+        data = _mapping(value, "bounded_decode")
+        _reject_unknown(data, {"generated_capacity", "sink_tokens"}, "bounded_decode")
+        return cls(
+            generated_capacity=_int(data, "generated_capacity", 32, "bounded_decode"),
+            sink_tokens=_int(data, "sink_tokens", 4, "bounded_decode"),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class CacheConfig:
     """Cache budget and block layout."""
 
@@ -1683,9 +1716,7 @@ class SelectionConfig:
                 )
             reservation = self.stable_head_hierarchical_reserved_reallocation_evaluations
             beam_width = self.stable_head_hierarchical_reallocation_beam_width
-            combination_width = (
-                self.stable_head_hierarchical_reallocation_maximum_combination_width
-            )
+            combination_width = self.stable_head_hierarchical_reallocation_maximum_combination_width
             restore_donor = self.stable_head_hierarchical_logit_feedback_restore_donor
             if reservation:
                 if not 2 <= beam_width <= 8:
@@ -1703,9 +1734,7 @@ class SelectionConfig:
                         "at least one combination"
                     )
                 if (
-                    self.stable_head_hierarchical_partition_count
-                    + 1
-                    + reservation
+                    self.stable_head_hierarchical_partition_count + 1 + reservation
                     > self.stable_head_hierarchical_maximum_candidate_evaluations
                 ):
                     raise ConfigurationError(
@@ -3617,6 +3646,27 @@ class OutputPreservingConfig:
     minimum_improvement: float = 1e-7
     minimum_query_mass: float = 1e-8
     draft_validation: bool = False
+    draft_ranking_mode: str = "veto"
+    prompt_objective_weight: float = 0.5
+    draft_objective_weight: float = 0.5
+    minimum_joint_improvement: float = 1e-7
+    short_horizon_logit_reranking: bool = False
+    logit_candidate_strategy: str = "weight_grid"
+    logit_candidate_prompt_weight_low: float = 0.0
+    logit_candidate_prompt_weight_high: float = 0.0
+    logit_route_single_candidates: int = 0
+    logit_route_candidate_limit: int = 0
+    logit_route_max_combination_width: int = 0
+    logit_probe_batch_size: int = 0
+    logit_objective_kl_weight: float = 0.0
+    logit_objective_logit_weight: float = 0.0
+    logit_objective_token_weight: float = 0.0
+    logit_stability_horizon: int = 0
+    logit_extended_horizon: int = 0
+    logit_extended_candidate_limit: int = 0
+    logit_layer_transfer_limit: int = 0
+    logit_stability_maximum_kl: float = 0.0
+    logit_stability_maximum_logit_difference: float = 0.0
 
     @property
     def effective_method(self) -> str:
@@ -3624,6 +3674,8 @@ class OutputPreservingConfig:
             suffix = "__anchor"
         elif self.query_evidence == "pooled":
             suffix = "__pooled_swaps"
+        elif self.draft_validation and self.draft_ranking_mode == "joint_normalized":
+            suffix = "__draft_joint"
         elif self.draft_validation:
             suffix = "__draft_gate"
         elif self.max_swaps_per_head == 2:
@@ -3632,7 +3684,35 @@ class OutputPreservingConfig:
             suffix = ""
         else:
             suffix = f"__swaps{self.max_swaps_per_head}"
-        return f"mosaickv_exact__output_preserving_v1{suffix}"
+        logit_suffix = ""
+        if self.short_horizon_logit_reranking:
+            logit_suffix = (
+                "__within_route_position_beam"
+                if self.logit_candidate_strategy == "within_route_position_beam"
+                else (
+                    "__layer_capacity_directional_single_beam"
+                    if self.logit_candidate_strategy == "layer_capacity_directional_single_beam"
+                    else (
+                        "__layer_capacity_vectorized_surrogate_beam"
+                        if self.logit_candidate_strategy
+                        == "layer_capacity_vectorized_surrogate_beam"
+                        else (
+                            "__layer_capacity_surrogate_beam"
+                            if self.logit_candidate_strategy == "layer_capacity_surrogate_beam"
+                            else (
+                                "__layer_capacity_logit_beam"
+                                if self.logit_candidate_strategy == "layer_capacity_beam"
+                                else (
+                                    "__route_logit_beam"
+                                    if self.logit_candidate_strategy == "route_exchange_beam"
+                                    else "__short_logit"
+                                )
+                            )
+                        )
+                    )
+                )
+            )
+        return f"mosaickv_exact__output_preserving_v1{suffix}{logit_suffix}"
 
     def __post_init__(self) -> None:
         if self.query_evidence not in {"individual", "pooled"}:
@@ -3643,18 +3723,63 @@ class OutputPreservingConfig:
             raise ConfigurationError(
                 "output_preserving.draft_validation requires individual query evidence"
             )
+        if self.draft_ranking_mode not in {"veto", "joint_normalized"}:
+            raise ConfigurationError(
+                "output_preserving.draft_ranking_mode must be veto or joint_normalized"
+            )
+        if self.draft_ranking_mode == "joint_normalized" and not self.draft_validation:
+            raise ConfigurationError(
+                "output_preserving joint_normalized ranking requires draft_validation"
+            )
+        if self.logit_candidate_strategy not in {
+            "weight_grid",
+            "route_exchange_beam",
+            "layer_capacity_beam",
+            "layer_capacity_surrogate_beam",
+            "layer_capacity_vectorized_surrogate_beam",
+            "layer_capacity_directional_single_beam",
+            "within_route_position_beam",
+        }:
+            raise ConfigurationError(
+                "output_preserving.logit_candidate_strategy must be weight_grid, "
+                "route_exchange_beam, layer_capacity_beam, or "
+                "layer_capacity_surrogate_beam, or "
+                "layer_capacity_vectorized_surrogate_beam, or "
+                "layer_capacity_directional_single_beam, or "
+                "within_route_position_beam"
+            )
         for name, low, high in (
             ("max_routed_heads", 0, 4096),
             ("max_swaps_per_head", 0, 16),
             ("shortlist_size", 1, 64),
             ("pair_chunk_size", 1, 4096),
+            ("logit_route_single_candidates", 0, 16),
+            ("logit_route_candidate_limit", 0, 16),
+            ("logit_route_max_combination_width", 0, 3),
+            ("logit_probe_batch_size", 0, 16),
+            ("logit_extended_candidate_limit", 0, 4),
+            ("logit_layer_transfer_limit", 0, 15),
         ):
             value = getattr(self, name)
             if type(value) is not int or not low <= value <= high:
                 raise ConfigurationError(
                     f"output_preserving.{name} must be an integer in [{low}, {high}]"
                 )
-        for name in ("minimum_error", "minimum_improvement", "minimum_query_mass"):
+        for name in (
+            "minimum_error",
+            "minimum_improvement",
+            "minimum_query_mass",
+            "prompt_objective_weight",
+            "draft_objective_weight",
+            "minimum_joint_improvement",
+            "logit_candidate_prompt_weight_low",
+            "logit_candidate_prompt_weight_high",
+            "logit_objective_kl_weight",
+            "logit_objective_logit_weight",
+            "logit_objective_token_weight",
+            "logit_stability_maximum_kl",
+            "logit_stability_maximum_logit_difference",
+        ):
             value = getattr(self, name)
             if (
                 isinstance(value, bool)
@@ -3665,6 +3790,193 @@ class OutputPreservingConfig:
                 raise ConfigurationError(f"output_preserving.{name} must be finite and nonnegative")
         if not 0 < self.minimum_query_mass < 1:
             raise ConfigurationError("output_preserving.minimum_query_mass must be in (0, 1)")
+        if not math.isclose(
+            self.prompt_objective_weight + self.draft_objective_weight,
+            1.0,
+            rel_tol=0,
+            abs_tol=1e-9,
+        ):
+            raise ConfigurationError(
+                "output_preserving prompt/draft objective weights must sum to one"
+            )
+        if self.draft_ranking_mode == "joint_normalized" and (
+            self.prompt_objective_weight <= 0 or self.draft_objective_weight <= 0
+        ):
+            raise ConfigurationError(
+                "output_preserving joint_normalized ranking requires positive objective weights"
+            )
+        if (
+            type(self.logit_stability_horizon) is not int
+            or not 0 <= self.logit_stability_horizon <= 4
+        ):
+            raise ConfigurationError(
+                "output_preserving.logit_stability_horizon must be an integer in [0, 4]"
+            )
+        if type(self.logit_extended_horizon) is not int or not (
+            0 <= self.logit_extended_horizon <= 16
+        ):
+            raise ConfigurationError(
+                "output_preserving.logit_extended_horizon must be an integer in [0, 16]"
+            )
+        if self.short_horizon_logit_reranking:
+            if not self.draft_validation or self.draft_ranking_mode != "joint_normalized":
+                raise ConfigurationError(
+                    "output-preserving short-horizon logit reranking requires joint draft ranking"
+                )
+            if self.logit_candidate_strategy == "weight_grid":
+                if not (
+                    0
+                    < self.logit_candidate_prompt_weight_low
+                    < self.prompt_objective_weight
+                    < self.logit_candidate_prompt_weight_high
+                    < 1
+                ):
+                    raise ConfigurationError(
+                        "output-preserving logit candidate weights must bracket the configured "
+                        "prompt objective weight inside (0, 1)"
+                    )
+                if any(
+                    value != 0
+                    for value in (
+                        self.logit_route_single_candidates,
+                        self.logit_route_candidate_limit,
+                        self.logit_route_max_combination_width,
+                        self.logit_probe_batch_size,
+                        self.logit_objective_kl_weight,
+                        self.logit_objective_logit_weight,
+                        self.logit_objective_token_weight,
+                    )
+                ):
+                    raise ConfigurationError(
+                        "weight-grid logit reranking cannot configure route-exchange controls"
+                    )
+            else:
+                if self.logit_candidate_prompt_weight_low != 0 or (
+                    self.logit_candidate_prompt_weight_high != 0
+                ):
+                    raise ConfigurationError(
+                        "route-exchange logit reranking does not use reconstruction weight grids"
+                    )
+                if not 1 <= self.logit_route_single_candidates <= 8:
+                    raise ConfigurationError(
+                        "route-exchange logit reranking requires 1-8 single-route candidates"
+                    )
+                if not 8 <= self.logit_route_candidate_limit <= 16:
+                    raise ConfigurationError(
+                        "route-exchange logit reranking requires an 8-16 plan limit"
+                    )
+                if self.logit_route_candidate_limit <= self.logit_route_single_candidates:
+                    raise ConfigurationError(
+                        "route-exchange plan limit must leave capacity for the anchor or beam"
+                    )
+                if self.logit_candidate_strategy in {
+                    "layer_capacity_directional_single_beam",
+                    "within_route_position_beam",
+                }:
+                    if self.logit_route_max_combination_width != 1:
+                        raise ConfigurationError(
+                            "directional single-candidate beams require single transactions"
+                        )
+                elif not 2 <= self.logit_route_max_combination_width <= 3:
+                    raise ConfigurationError(
+                        "route-exchange beam combination width must be two or three"
+                    )
+                if not 1 <= self.logit_probe_batch_size <= self.logit_route_candidate_limit:
+                    raise ConfigurationError(
+                        "route-exchange probe batch size must fit the candidate limit"
+                    )
+                if self.max_routed_heads < self.logit_route_single_candidates:
+                    raise ConfigurationError(
+                        "route-exchange generation needs at least as many routed heads as "
+                        "single-route candidates"
+                    )
+                if (
+                    self.logit_objective_kl_weight
+                    + self.logit_objective_logit_weight
+                    + self.logit_objective_token_weight
+                    <= 0
+                ):
+                    raise ConfigurationError(
+                        "route-exchange logit objective requires a positive weight"
+                    )
+                if self.logit_candidate_strategy == "route_exchange_beam":
+                    if any(
+                        value != 0
+                        for value in (
+                            self.logit_extended_horizon,
+                            self.logit_extended_candidate_limit,
+                            self.logit_layer_transfer_limit,
+                        )
+                    ):
+                        raise ConfigurationError(
+                            "route-exchange beam cannot configure layer-capacity controls"
+                        )
+                else:
+                    if not 1 <= self.logit_layer_transfer_limit <= 8:
+                        raise ConfigurationError(
+                            "layer-capacity beam requires 1-8 transfer candidates"
+                        )
+                    if self.logit_route_candidate_limit < 1 + self.logit_layer_transfer_limit:
+                        raise ConfigurationError(
+                            "layer-capacity plan limit must cover the anchor and transfer plans"
+                        )
+                    if not (self.logit_stability_horizon < self.logit_extended_horizon <= 16):
+                        raise ConfigurationError(
+                            "layer-capacity extended horizon must exceed the short horizon"
+                        )
+                    if self.logit_candidate_strategy == "layer_capacity_beam":
+                        if not 2 <= self.logit_extended_candidate_limit <= 4:
+                            raise ConfigurationError(
+                                "layer-capacity beam requires 2-4 extended candidates"
+                            )
+                    elif (
+                        self.logit_candidate_strategy == "within_route_position_beam"
+                        and self.logit_extended_candidate_limit != 2
+                    ):
+                        raise ConfigurationError(
+                            "within-route position beam extends exactly two candidates"
+                        )
+                    elif (
+                        self.logit_candidate_strategy != "within_route_position_beam"
+                        and self.logit_extended_candidate_limit != 1
+                    ):
+                        raise ConfigurationError(
+                            "surrogate layer-capacity beam extends exactly one candidate"
+                        )
+            if self.logit_stability_horizon < 1:
+                raise ConfigurationError(
+                    "output-preserving short-horizon logit reranking requires a positive horizon"
+                )
+            if (
+                self.logit_stability_maximum_kl <= 0
+                or self.logit_stability_maximum_logit_difference <= 0
+            ):
+                raise ConfigurationError(
+                    "output-preserving short-horizon logit thresholds must be positive"
+                )
+        elif any(
+            value != 0
+            for value in (
+                self.logit_candidate_prompt_weight_low,
+                self.logit_candidate_prompt_weight_high,
+                self.logit_route_single_candidates,
+                self.logit_route_candidate_limit,
+                self.logit_route_max_combination_width,
+                self.logit_probe_batch_size,
+                self.logit_objective_kl_weight,
+                self.logit_objective_logit_weight,
+                self.logit_objective_token_weight,
+                self.logit_stability_horizon,
+                self.logit_extended_horizon,
+                self.logit_extended_candidate_limit,
+                self.logit_layer_transfer_limit,
+                self.logit_stability_maximum_kl,
+                self.logit_stability_maximum_logit_difference,
+            )
+        ):
+            raise ConfigurationError(
+                "output-preserving logit controls require short_horizon_logit_reranking"
+            )
 
     @classmethod
     def from_mapping(cls, value: object) -> OutputPreservingConfig:
@@ -3680,6 +3992,64 @@ class OutputPreservingConfig:
             minimum_improvement=_float(data, "minimum_improvement", 1e-7, "output_preserving"),
             minimum_query_mass=_float(data, "minimum_query_mass", 1e-8, "output_preserving"),
             draft_validation=_bool(data, "draft_validation", False, "output_preserving"),
+            draft_ranking_mode=_optional_str(
+                data, "draft_ranking_mode", "veto", "output_preserving"
+            ),
+            prompt_objective_weight=_float(
+                data, "prompt_objective_weight", 0.5, "output_preserving"
+            ),
+            draft_objective_weight=_float(data, "draft_objective_weight", 0.5, "output_preserving"),
+            minimum_joint_improvement=_float(
+                data, "minimum_joint_improvement", 1e-7, "output_preserving"
+            ),
+            short_horizon_logit_reranking=_bool(
+                data, "short_horizon_logit_reranking", False, "output_preserving"
+            ),
+            logit_candidate_strategy=_optional_str(
+                data, "logit_candidate_strategy", "weight_grid", "output_preserving"
+            ),
+            logit_candidate_prompt_weight_low=_float(
+                data, "logit_candidate_prompt_weight_low", 0.0, "output_preserving"
+            ),
+            logit_candidate_prompt_weight_high=_float(
+                data, "logit_candidate_prompt_weight_high", 0.0, "output_preserving"
+            ),
+            logit_route_single_candidates=_int(
+                data, "logit_route_single_candidates", 0, "output_preserving"
+            ),
+            logit_route_candidate_limit=_int(
+                data, "logit_route_candidate_limit", 0, "output_preserving"
+            ),
+            logit_route_max_combination_width=_int(
+                data, "logit_route_max_combination_width", 0, "output_preserving"
+            ),
+            logit_probe_batch_size=_int(data, "logit_probe_batch_size", 0, "output_preserving"),
+            logit_objective_kl_weight=_float(
+                data, "logit_objective_kl_weight", 0.0, "output_preserving"
+            ),
+            logit_objective_logit_weight=_float(
+                data, "logit_objective_logit_weight", 0.0, "output_preserving"
+            ),
+            logit_objective_token_weight=_float(
+                data, "logit_objective_token_weight", 0.0, "output_preserving"
+            ),
+            logit_stability_horizon=_int(data, "logit_stability_horizon", 0, "output_preserving"),
+            logit_extended_horizon=_int(data, "logit_extended_horizon", 0, "output_preserving"),
+            logit_extended_candidate_limit=_int(
+                data, "logit_extended_candidate_limit", 0, "output_preserving"
+            ),
+            logit_layer_transfer_limit=_int(
+                data, "logit_layer_transfer_limit", 0, "output_preserving"
+            ),
+            logit_stability_maximum_kl=_float(
+                data, "logit_stability_maximum_kl", 0.0, "output_preserving"
+            ),
+            logit_stability_maximum_logit_difference=_float(
+                data,
+                "logit_stability_maximum_logit_difference",
+                0.0,
+                "output_preserving",
+            ),
         )
 
 
@@ -3708,10 +4078,42 @@ class RunConfig:
     published_kv: PublishedKVConfig = field(default_factory=PublishedKVConfig)
     schema_version: int = 1
     output_preserving: OutputPreservingConfig | None = None
+    bounded_decode: BoundedDecodeConfig | None = None
 
     def __post_init__(self) -> None:
         if self.schema_version != 1:
             raise ConfigurationError("schema_version must equal 1")
+        if self.bounded_decode is not None:
+            if not isinstance(self.bounded_decode, BoundedDecodeConfig):
+                raise ConfigurationError("bounded_decode must be a validated configuration")
+            if (
+                self.method
+                not in {MosaicKVMethod.MOSAICKV_EXACT, MosaicKVMethod.PROMPT_ATTENTION_TOPK}
+                or self.execution.backend is not Backend.HUGGINGFACE
+                or self.execution.attention_implementation != "eager"
+                or self.execution.decode_attention_implementation not in {None, "eager"}
+                or self.cache.budget_unit is not BudgetUnit.BYTES
+                or self.cache.block_size != 1
+                or self.cache.physical_budget_block_size not in {None, 1}
+                or (
+                    self.cache.total_storage_budget_bytes is not None
+                    and self.cache.total_storage_budget_bytes < self.cache.budget_value
+                )
+                or self.selection.physical_capacity_fraction != 1.0
+                or self.prototypes.enabled
+                or self.residual.enabled
+                or self.repair.enabled
+                or self.repair.policy is not RepairPolicy.NONE
+                or self.output_preserving is not None
+                or self.diagnostics.enabled
+                or self.generation.do_sample
+                or self.generation.temperature != 0
+            ):
+                raise ConfigurationError(
+                    "bounded_decode requires exact MosaicKV or Prompt Top-K, HF eager, "
+                    "one-token byte budgets, full physical-capacity fraction, greedy decoding, "
+                    "and disabled prototype/residual/repair/output-preserving/oracle diagnostics"
+                )
         if self.output_preserving is not None:
             if not isinstance(self.output_preserving, OutputPreservingConfig):
                 raise ConfigurationError("output_preserving must be a validated configuration")
@@ -3752,6 +4154,14 @@ class RunConfig:
                 or self.ablation.variant is not AblationVariant.NONE
                 or self.generation.do_sample
                 or self.generation.temperature != 0
+                or (
+                    self.output_preserving.short_horizon_logit_reranking
+                    and self.generation.max_new_tokens
+                    <= max(
+                        self.output_preserving.logit_stability_horizon,
+                        self.output_preserving.logit_extended_horizon,
+                    )
+                )
             ):
                 raise ConfigurationError(
                     "output_preserving requires HF eager mosaickv_exact, one-token physical byte "
@@ -4164,6 +4574,7 @@ class RunConfig:
             "vl_cache",
             "published_kv",
             "output_preserving",
+            "bounded_decode",
         }
         _reject_unknown(data, allowed, "config")
         required = {"model", "dataset", "execution", "generation", "cache"}
@@ -4198,6 +4609,11 @@ class RunConfig:
                 None
                 if data.get("output_preserving") is None
                 else OutputPreservingConfig.from_mapping(data["output_preserving"])
+            ),
+            bounded_decode=(
+                None
+                if data.get("bounded_decode") is None
+                else BoundedDecodeConfig.from_mapping(data["bounded_decode"])
             ),
             schema_version=_int(data, "schema_version", 1, "config"),
         )
@@ -4247,6 +4663,8 @@ def canonical_config(config: RunConfig) -> JsonObject:
     # Adding the opt-in candidate must not change historical config identities.
     if config.output_preserving is None:
         payload.pop("output_preserving", None)
+    if config.bounded_decode is None:
+        payload.pop("bounded_decode", None)
     return payload
 
 
@@ -4297,6 +4715,7 @@ def synthetic_evaluation_config(seed: int = 0) -> RunConfig:
 
 __all__ = [
     "AblationConfig",
+    "BoundedDecodeConfig",
     "CacheConfig",
     "ConfigurationError",
     "DatasetConfig",

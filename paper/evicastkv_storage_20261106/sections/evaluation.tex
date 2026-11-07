@@ -1,0 +1,206 @@
+\section{Evaluation}
+\label{sec:evaluation}
+We ask three questions: (1) what storage does the evaluated representation
+actually own initially, finally and during decoding; (2) what captioning
+quality accompanies that operating point; and (3) what completed-request
+time is observed after accounting for construction and reconstruction?
+These questions are deliberately narrower than universal superiority at
+a common byte budget or independent confirmation of the original design.
+
+\subsection{Experimental setup and controls}
+\label{sec:setup}
+\paragraph{Model and hardware.}
+All methods use \smallpath{llava-hf/llava-1.5-7b-hf}, model/processor revision
+\texttt{b234b804}, BF16 model weights and HF eager attention
+\citep{liu2024improved}. Workers use one NVIDIA A100-SXM4-80GB and 12 CPU
+cores. At most six GPU workers execute concurrently; this is campaign
+parallelism, not model parallelism or a batched inference claim. Other
+users may occupy other GPUs on the node. Software is PyTorch 2.8.0 with
+CUDA runtime 12.8, Transformers 4.55.2, lmms-eval 0.7.2 and
+pycocoevalcap 1.2. Telemetry records the driver, GPU UUID, clocks, power
+state and visible process concurrency; no locked-clock experiment is
+claimed. The appendix lists complete revisions and settings.
+
+\paragraph{Dataset and generation.}
+We use 256 paired COCO validation images \citep{lin2014coco}, pinned through
+\smallpath{lmms-lab/COCO-Caption}, revision \texttt{c3213b54}.
+The prompt is ``Provide a one-sentence caption for the provided image.''
+Every method receives the same image, processor/chat template,
+tokenization, unpadded prompt and generation schedule. The actual decoder
+prefix is 603 positions. Greedy generation computes all 128 predictions,
+regardless of EOS; scoring uses the prefix ending at the first terminal
+token. This separates fixed systems work from caption parsing. A final
+prediction is not an additional processed/cache-appended token.
+
+The ledger preserves every supplied reference caption, including images
+with five, six or seven references. No references are truncated to force a
+uniform count. The cohort was reused from the frozen storage study and
+has been inspected. Historical-ID exclusions are recorded, but universal
+underlying-source freshness is not certified. These are development
+operating-point measurements, not untouched confirmation.
+
+\paragraph{Methods and budgets.}
+We evaluate FullKV, \Evi{}, Prompt Top-K and local PrefixKV, VL-Cache and
+LOOK-M precision/storage adaptations. R+A denotes reimplementation plus
+adaptation; A denotes a local adaptation. All compressed methods retain
+their frozen policies. Their encoded bytes differ, despite a historical
+common source-slot convention. We therefore report them as separate
+operating points, not a same-budget test, swept frontier or proof that one
+selection policy is intrinsically better. FullKV is an uncompressed
+quality reference and is excluded from compressed-method latency tests.
+
+\paragraph{Three separate measurement passes.}
+First, 96 memory workers measure all six methods on all 256 images.
+Second, 16 workers perform uninstrumented timing for those same
+method--image pairs, after five warmups per method per worker and with
+randomized method order within each image. Third, six fixed image indices
+receive five warmups and 20 paired timed repetitions per compressed
+method. Each timed request recomputes media processing, prefill,
+construction, graph setup and decode; only loaded model weights and
+ordinary file/compiler caching are reused. Model loading, artifact I/O and
+metric scoring are excluded. Memory-audit timings are never substituted
+for latency.
+
+We use synchronized monotonic request wall time. Device events and
+diagnostic intervals retain their own meanings; nested device or host
+intervals are not summed as exclusive kernel costs
+\citep{pytorch2025cuda}. The timer includes final CPU logits export,
+EOS-aware detokenization and packet retirement. Since outputs are not
+streamed, we do not claim measured time-to-first-token emission.
+
+\subsection{Memory boundaries and correctness}
+\label{sec:memory}
+Initial and final storage count unique backing allocations rather than
+tensor-view sizes. The decode audit additionally observes live
+reconstruction/lease or native-append overlap. Its scope excludes weights,
+ordinary attention activations, vendor-internal workspace and prefill
+transients. Different native/encoded observers are recorded explicitly;
+this is a declared decode-owned tensor boundary, not complete process HBM.
+
+Before expansion, six canaries compare all 128 exported logits bitwise
+with and without memory instrumentation. All pass, as do the measured
+storage endpoints. The canonical CPU suite passes 4,548 tests. The full
+study has 1,536 audited memory rows, 1,536 corresponding uninstrumented
+timing rows and 600 repeated timing rows. Every audited/unaudited pair
+has identical token IDs and storage endpoints. All 124 GPU workers
+complete, with no failed accepted sample, missing pair or FullKV fallback.
+These checks validate measurement consistency, not equivalence of a lossy
+cache to unrestricted FullKV.
+
+\begin{table*}[t]
+\centering\small
+\setlength{\tabcolsep}{6pt}
+\input{generated/operating_points}
+\caption{Completed 256-image COCO operating points: initial/final memory
+and peak mean/max in MiB; full-request latency quantiles in seconds. Memory
+columns are means except the explicitly shown maximum. R+A means local
+reimplementation plus precision/storage adaptation, not official execution.
+\textbf{Realized byte budgets differ.} FullKV latency is descriptive only.
+No row is omitted for unfavorable quality or latency.}
+\label{tab:main}
+\end{table*}
+
+\paragraph{Observed storage.}
+Table~\ref{tab:main} reports the complete cohort. \Evi{} owns
+\EviInitial~MiB initially, \EviFinal~MiB finally and
+\EviPeak~MiB mean audited decode-owned peak, with a maximum of
+\EviMaxPeak~MiB. Relative to FullKV, those mean boundaries decrease by
+\FullInitialReduction\%, \FullFinalReduction\% and \FullPeakReduction\%,
+respectively. These KV-only reductions must not be applied to total GPU
+memory, which also contains the model and other resources.
+
+Relative to Prompt Top-K's observed point, mean initial/final/peak
+reductions are \TopInitialReduction\%, \TopFinalReduction\% and
+\TopPeakReduction\%. PrefixKV's adaptation is the closest measured
+compressed memory point: its final and mean decode-peak differences are
+only 5.85\% and 2.90\%. Generated history therefore narrows the initial
+memory advantage. No comparison here establishes a 30\% reduction against
+the compressed competitors, much less a 30\% equal-quality frontier shift.
+
+\subsection{Corpus CIDEr and paired uncertainty}
+\label{sec:quality}
+CIDEr measures reference-caption consensus \citep{vedantam2015cider}.
+We use the pinned PTB tokenizer and corpus reducer through the COCO
+evaluation ecosystem, report score points on the evaluator's $\times100$
+scale, and retain all images in the denominator. No mean of shard CIDEr
+scores is used. The bootstrap samples paired images with replacement
+10,000 times using seed 20261106. Each replicate recomputes reference
+document frequencies, TF--IDF weights and the complete corpus reduction
+\citep{efron1979bootstrap}. Repeated images count as repeated resampled
+documents; cached per-image scores are not substituted.
+
+\begin{table*}[t]
+\centering\small
+\input{generated/quality_intervals}
+\caption{\Evi{} minus each reference operating point in corpus CIDEr.
+Five contrasts form the quality family. Unadjusted paired intervals and
+Bonferroni familywise 95\% intervals are both shown. These intervals quantify
+paired uncertainty on the inspected cohort; they do not establish dataset
+freshness or equal-byte comparisons.}
+\label{tab:quality}
+\end{table*}
+
+\Evi{} scores \EviCider{} versus \FullCider{} for FullKV and 118.33 for
+Prompt Top-K. Its Top-K difference is $+1.44$ CIDEr, but the adjusted
+interval includes negative values. The VL-Cache and LOOK-M adaptations
+score 122.16 and 120.96, respectively, both above \Evi{}'s point estimate.
+Table~\ref{tab:quality} therefore does not establish zero-margin quality
+non-inferiority to those compressed points. An interval crossing zero is
+not evidence of equality.
+
+Only the PrefixKV-adaptation difference remains positive after this
+familywise correction. That finding requires an additional caveat:
+42/256 of its outputs reach the fixed 128-prediction limit, versus none
+for the other five methods. All remain included and scored; none are
+silently dropped. This behavior, the added codec and the changed task mean
+that the result cannot be interpreted as a reproduction failure or general
+quality claim about official PrefixKV. Appendix tables report caption
+lengths and limit-hit counts explicitly.
+
+\begin{figure}[t]
+\centering\input{figures/quality_memory}
+\caption{Discrete compressed operating points, not curves or a fitted Pareto
+frontier. \Evi{} has the smallest initial cache here, but VL-Cache and LOOK-M
+adaptations have higher point-estimate CIDEr. FullKV is outside the plotted
+compressed-memory range and is listed in Table~\ref{tab:main}.}
+\label{fig:quality}
+\end{figure}
+
+\subsection{Full-request time and observed execution policy}
+\label{sec:latency}
+On the 256 images, \Evi{}'s median/p95 request time is
+\EviMedian/\EviTail~s. This is lower than the measured compressed adaptations,
+but these are not matched-byte or official-code latency conclusions.
+In the separate six-image repeated study, ratios are recomputed inside a
+nested paired bootstrap over images and repetitions. Four contrasts use
+familywise-adjusted intervals. The ratio of mean \Evi{} time to mean
+baseline time is below one for all four observed points, yielding
+\TopFaster\%, \PrefixFaster\%, \VLFaster\% and \LookFaster\% lower time
+versus Top-K, PrefixKV, VL-Cache and LOOK-M adaptations, respectively.
+The six-image ratios are not pooled with the 256-image timing distribution.
+
+\begin{figure}[t]
+\centering\input{figures/paired_latency}
+\caption{Ratio of mean completed-request time on the six-image, 20-repeat
+study. Bars show multiplicity-adjusted paired intervals; the reference line
+is equal time. FullKV is excluded. Different realized cache layouts and
+different eligible execution paths remain part of these operating points.}
+\label{fig:latency}
+\end{figure}
+
+\paragraph{What explains the timing, and what remains unproven?}
+Saved phase boundaries show approximately 0.80~s for \Evi{}'s combined
+prefill/construction/retirement and 5.70~s for its recorded decode region.
+Top-K has a similar 0.80~s first region and a 6.64~s decode region. This is
+consistent with the importance of reconstruction scheduling and replay,
+not proof that fewer bytes alone cause the gain: \Evi{} engages uniform
+replay on every image while the frozen baseline layouts are ineligible.
+VL-Cache's local adaptation spends approximately 5.34~s in its combined
+prefill/construction region; LOOK-M's spends 42.05~s. Those are properties
+of these local paths, not intrinsic costs of the published algorithms.
+The appendix gives complete phase means and engagement counts.
+
+The broad six-component planner is inactive, so its utility, graph and
+forecasting cannot explain these numbers. Nor can shorter-context eager
+results establish speedups under paged/FlashAttention serving engines,
+long contexts or larger batches \citep{dao2022flashattention,kwon2023paged}.

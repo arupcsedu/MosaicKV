@@ -258,7 +258,7 @@ def validate_isoquality_protocol(protocol: Mapping[str, Any]) -> dict[str, Any]:
         raise ValueError("memory/quality claim gate was weakened")
     resources = protocol.get("resources", {})
     if resources != {
-        "max_global_a100s": 4,
+        "max_global_a100s": 6,
         "gpus_per_worker": 1,
         "cpus_per_worker": 12,
         "time_limit_seconds": 7200,

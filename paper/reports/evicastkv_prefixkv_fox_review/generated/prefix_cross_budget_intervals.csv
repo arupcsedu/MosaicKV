@@ -1,0 +1,17 @@
+task,candidate_cap_mib,baseline,reference_cap_mib,metric_name,difference,simultaneous_ci_low,simultaneous_ci_high,family_size,bootstrap_replicates,metric_direction,passes
+llava_description,80,prefixkv_reimpl,160,teacher_forced_ppl,-0.020828961035000315,-0.03663571461677321,-0.003975502868116787,16,10000,lower,True
+llava_description,80,prefixkv_reimpl,160,rouge_l_f1,-0.001408861277111706,-0.07982450715282796,0.07716906831424043,16,10000,higher,False
+llava_description,80,prompt_attention_topk,160,teacher_forced_ppl,0.007629679226891728,-0.001621926834478278,0.017847881360618507,16,10000,lower,False
+llava_description,80,prompt_attention_topk,160,rouge_l_f1,-0.09766421196007968,-0.18755671955814526,-0.00790837491106338,16,10000,higher,False
+llava_description,120,prefixkv_reimpl,160,teacher_forced_ppl,-0.025902879511131793,-0.041859423932423624,-0.00925660715001331,16,10000,lower,True
+llava_description,120,prefixkv_reimpl,160,rouge_l_f1,0.0757964344618326,-0.021139828600800704,0.16313285031789626,16,10000,higher,False
+llava_description,120,prompt_attention_topk,160,teacher_forced_ppl,0.0025557607507602498,-0.0022258026292523428,0.007883503960162299,16,10000,lower,False
+llava_description,120,prompt_attention_topk,160,rouge_l_f1,-0.02045891622113538,-0.06804039815145628,0.02059200921323901,16,10000,higher,False
+mmvet_prefixkv,80,prefixkv_reimpl,160,teacher_forced_ppl,0.19484270330530684,0.041563106832529624,0.33638799579496104,16,10000,lower,False
+mmvet_prefixkv,80,prefixkv_reimpl,160,rouge_l_f1,0.058957156995668725,-0.009514693514038965,0.14094157967950932,16,10000,higher,False
+mmvet_prefixkv,80,prompt_attention_topk,160,teacher_forced_ppl,-0.004417209674691058,-0.030456507431760215,0.019909539996469928,16,10000,lower,False
+mmvet_prefixkv,80,prompt_attention_topk,160,rouge_l_f1,-0.05650267527433961,-0.130116662087687,0.014342443176910104,16,10000,higher,False
+mmvet_prefixkv,120,prefixkv_reimpl,160,teacher_forced_ppl,0.19743811226153163,0.04218994072095852,0.34262815504091343,16,10000,lower,False
+mmvet_prefixkv,120,prefixkv_reimpl,160,rouge_l_f1,0.08642351376507196,0.016512979951934917,0.16608276516827125,16,10000,higher,True
+mmvet_prefixkv,120,prompt_attention_topk,160,teacher_forced_ppl,-0.001821800718466271,-0.0177013740132339,0.016629662644351995,16,10000,lower,False
+mmvet_prefixkv,120,prompt_attention_topk,160,rouge_l_f1,-0.029036318504936376,-0.08965828119164358,0.029930268994966466,16,10000,higher,False

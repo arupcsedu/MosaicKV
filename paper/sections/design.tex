@@ -1,0 +1,128 @@
+\section{MosaicKV Design}
+\label{sec:design}
+\begin{figure*}[t]
+\centering\input{figures/architecture}
+\caption{Evaluated execution. Stable heads use vectorized exact selection;
+routed heads use query-conditioned graph planning. One transaction reconciles
+capacity before packing. Dashed extensions are inactive in all reported runs.}
+\label{fig:architecture}
+\end{figure*}
+
+\subsection{Forecast demand from prompt queries}
+Prefill yields the full source cache and query evidence. The evaluated policy
+uses the last $w=16$ prompt positions to estimate near-future demand. Query
+heads map to their owning KV heads; query--key scoring uses compatible
+positional representations. Raw pre-RoPE queries cannot be directly dotted
+against post-RoPE keys. The forecast interface records per-route means,
+variance, weighted centroids, and provenance.
+
+Draft and hybrid forecasting are available extensions. A deterministic draft
+forks the existing prefill, collects queries, and discards its mutations,
+requiring no second image encoding or prefill. Main results use prompt-window
+forecasting. Draft-based search diagnostics appear in the appendix; benchmark
+references and oracle future queries are inaccessible to the online policy.
+
+\subsection{Represent complementary evidence sparsely}
+Graph nodes are eligible cache blocks. Pooled K/V descriptors and prompt
+attention define semantic and co-activation relationships. Spatial, temporal,
+region, and layout metadata can contribute edges when available. Filters
+require the same layer and KV head, permitted modality pairs, and configured
+position spans. Missing metadata disables its edge source.
+
+Each node stores at most $d=8$ sparse neighbors. Shortlists and chunked top-$k$
+search bound working memory; deterministic ties preserve repeatability.
+Storage is $O(nd)$ for $n$ nodes, but exhaustive chunking alone would still
+have quadratic comparison time. Routed planning restricts which heads and
+candidates enter the search. Coverage favors complementary neighborhoods over
+several redundant blocks from the same evidence region.
+
+\subsection{Combine attention, values, and coverage}
+Let $a_i$ denote forecast attention, $v_i$ value contribution, and $n_i$ novelty
+relative to graph neighbors. The implemented signed utility is
+\begin{equation}
+ u_i=\lambda_q a_i-\lambda_v v_i-\lambda_o n_i.
+ \label{eq:utility}
+\end{equation}
+Negative $\lambda_v,\lambda_o$ reward contribution and novelty. Signals are
+normalized per layer/head. For nonnegative compatible similarities $w_{ij}$,
+\begin{align}
+ C_g(S)&=|\mathcal B|^{-1}\sum_j\max_{i\in S}w_{ij},\\
+ C_m(S)&=|\{m(i):i\in S\}|/|\{m(i):i\in\mathcal B\}|,\\
+ F(S)&=\sum_{i\in S}u_i-\lambda_g C_g(S)-\lambda_m C_m(S).
+ \label{eq:objective}
+\end{align}
+Nonpositive coverage coefficients make coverage a reward. Under nonnegative
+utilities and similarities, the monotone submodular form motivates greedy
+marginal selection \citep{nemhauser1978}. Its cardinality approximation theorem
+does not automatically extend to the routed byte-constrained executor or
+guarantee answer quality.
+
+The general selector caches marginal gains; the evaluated one-token path uses
+vectorized coverage selection with two correction rounds. Mandatory blocks
+are selected first. All retained K/V values remain unchanged, and each block
+records its selection reason and original positions. Attention predicts use;
+value and coverage signals seek to preserve different information, rather
+than treating many similar high-mass blocks as independently useful.
+
+\subsection{Route expensive work and reconcile capacity}
+\begin{table}[t]
+\caption{Algorithmic distinctions. These are design properties, not an
+assertion of equal implementation quality or universal empirical dominance.}
+\label{tab:design-differences}
+\centering\small
+\begin{tabularx}{\columnwidth}{lY}
+\toprule
+Policy & Main decision and representation\\\midrule
+Prompt Top-K & Rank prompt-attention mass; retain exact states\\
+LOOK-M & Text-prior pivots with compensatory merging\\
+PrefixKV & Offline layer importance-prefix profile and native maintenance\\
+VL-Cache & Post-vision attention and sparsity-adaptive layer budgets\\
+MosaicKV exact & Prompt forecast, routed value/coverage selection, one physical capacity transaction\\
+\bottomrule
+\end{tabularx}
+\end{table}
+A full-source graph can make compression dominate request time. The frozen
+policy routes a configured $1/256$ head fraction through graph planning.
+Stable heads use vectorized prompt-attention ranking and stay outside the
+graph. The routed candidate shortlist retains 8\% of eligible nonmandatory
+blocks, with compatible neighbors and bounded similarity search. This is a
+specific measured execution policy, not an optimal routing claim.
+
+Mandatory positions, stable allocations, routed allocations, and per-head
+minima participate in one capacity transaction. It deducts actual selected
+bytes and fills attainable spare slots deterministically with compatible
+blocks. Utility optimization can use a narrow shortlist while feasibility
+filling uses compatible blocks already present in the graph. This avoids
+making a feasible cache fail merely because the optimization shortlist is
+small. A layout certificate records the largest feasible capacity; mandatory
+infeasibility is explicit.
+
+\begin{algorithm}[t]
+\caption{Evaluated exact-selection request}
+\label{alg:exact}
+\begin{algorithmic}[1]
+\REQUIRE Full prefill cache, prompt queries, physical byte cap $C$
+\STATE Build blocks, modality maps, and mandatory set
+\STATE Forecast demand using the final $16$ prompt positions
+\STATE Partition stable and routed heads
+\STATE Select stable blocks with vectorized prompt ranking
+\STATE Build sparse graph and select routed blocks by utility
+\STATE Reconcile both selections in one physical capacity transaction
+\STATE Pack exact K/V and preserve original logical positions
+\STATE Record initial bytes; decode greedily using logical time
+\STATE Record final/peak storage and phase timings
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{Keep logical time independent of physical slots}
+Eviction compacts physical storage but does not renumber original positions.
+The runtime separately tracks active length, original logical length, and next
+decode position. Masks exclude invalid padding. A key from position $p$ keeps
+its positional meaning when moved to physical slot $j\ne p$.
+
+The extensible architecture also defines FP32-accumulated prototypes, pinned-CPU
+residual members, and uncertainty-triggered restoration. Post-RoPE key
+averaging can mix incompatible phases \citep{su2021rope}; a conservative gate
+disables it unless adapter evidence establishes safety. The appendix specifies
+these interfaces. Every measured performance and quality result uses exact
+selection without prototype, residual, or repair transformations.

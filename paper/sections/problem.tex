@@ -1,0 +1,28 @@
+\section{Problem Formulation}
+\label{sec:problem}
+Let $\mathcal B$ be blocks from the immutable prefill cache. Each block belongs
+to one layer and one KV head and carries original positions and modality
+metadata. With mandatory blocks $\mathcal M$, a selected set $S$ must satisfy
+\begin{equation}
+ \mathcal M\subseteq S,\qquad B_{\rm init}(\operatorname{pack}(S))\le C.
+ \label{eq:budget}
+\end{equation}
+Cost is unique live backing storage, including padding and preallocation,
+rather than the selected descriptor count. At the evaluated one-token
+granularity, the runtime chooses the largest feasible layout below $C$ and
+records any shortfall.
+
+An equal-memory comparison measures quality differences at identical realized
+bytes. A lower-memory comparison asks whether quality is preserved at a smaller
+budget. We distinguish initial, final, and peak live-cache storage at
+instrumented transaction boundaries; the latter excludes weights, temporary
+planner buffers, and allocator reservations. The registered 30\% frontier test
+requires
+\begin{equation}
+ \min_{x\in\{\mathrm{init,final,peak}\}}
+ \left(1-\frac{B^m_x}{B^b_x}\right)\ge0.30
+ \label{eq:isoquality}
+\end{equation}
+and paired zero-margin quality non-inferiority. Its negative outcomes accompany
+the fixed-memory results. A confidence interval containing zero does not
+establish equivalence.

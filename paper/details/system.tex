@@ -1,0 +1,144 @@
+\section{Implementation Architecture and Correctness Contracts}
+\label{app:system}
+\subsection{Package boundaries}
+\begin{table*}[t]
+\caption{Source map relative to \texttt{mosaickv/src/mosaickv/}. These are
+implementation locations, not assertions that all backend combinations pass.}
+\small\begin{tabularx}{\textwidth}{P{3.4cm}YY}\toprule
+Area & Main modules & Contract\\\midrule
+Configuration and state & \codepath{config.py}, \codepath{cache_state.py} & Strict validation, immutable descriptors, logical and physical state\\
+Model adapters & \codepath{adapters/huggingface/} & Input preparation, explicit prefill/decode, query hooks, layout and compatibility\\
+Forecast and graph & \codepath{forecasting/}, \codepath{graph/} & Isolated query statistics, sparse compatible evidence relations\\
+Utility and selection & \codepath{selection/} & Budget feasibility, deterministic selection, calibration and bounded variants\\
+Tiers and repair & \codepath{prototypes/}, \codepath{residual/}, \codepath{repair/} & Safe construction, source memberships, optional restoration\\
+HF / vLLM runtime & \codepath{backends/hf_runtime.py}, \codepath{backends/vllm_native_plugin.py} & Cache transaction, decode loop, kernel and version checks\\
+Measurements & \codepath{measurements/} & CUDA/wall timing, live storage, peaks, trial statistics\\
+Evaluation & \codepath{evaluation/}, \codepath{evaluation/metrics/} & Task routing, official scoring, result categories and paired reducers\\
+\bottomrule\end{tabularx}
+\end{table*}
+
+The package has no required AAFLOW runtime dependency. Any later reuse must be
+isolated, pinned, licensed, and imported through an explicit package boundary.
+The experiment harness cannot change baseline code silently to make a table
+look better. Configuration, algorithm, backend, metric, and presentation are
+separate concerns so each can be audited independently.
+
+\subsection{Adapter API}
+An adapter exposes \texttt{prepare\_inputs}, \texttt{prefill},
+\texttt{decode\_one\_token}, cache extraction and injection, query capture,
+modality mapping, logical sequence length, and cache layout. Its capabilities
+record prototype-merge and residual-repair support. These are claims about an
+exact model/revision/backend combination, not a model-family marketing label.
+
+Hooks capture model-specific query projections without modifying weights.
+Hook placement must account for query normalization, rotary transforms, and
+GQA grouping. Models need not expose the same cache class or tensor dimension
+ordering. Legacy tuples, dynamic caches, preallocated caches, and paged pools
+require explicit conversion rules. Injection must update lengths and masks
+as well as K/V tensors.
+
+\subsection{Explicit generation loop}
+\begin{algorithm}[h]
+\caption{One request with an explicit cache boundary}
+\label{alg:runtime}
+\begin{algorithmic}[1]
+\REQUIRE Immutable request, adapter, method, physical cap $C$
+\STATE Prepare identical prompt and media inputs
+\STATE Run prefill once; obtain cache, logits, and metadata
+\STATE Snapshot original positions and mandatory source blocks
+\IF{identity configuration}
+  \STATE Keep cache unchanged; skip lossy transformations
+\ELSE
+  \STATE Forecast queries from prompt and/or isolated draft
+  \STATE Build compatible graph and calculate block utilities
+  \STATE Select and construct a feasible isolated cache plan
+  \STATE Validate physical bytes, positions, masks, and memberships
+  \STATE Atomically publish compressed cache or record failure
+\ENDIF
+\STATE Emit deterministic next token under declared stop policy
+\WHILE{generation has not reached its stopping condition}
+  \STATE Run one provisional token step
+  \IF{supported repair policy triggers}
+    \STATE Restore bounded residual evidence; enforce byte cap
+    \STATE Roll back provisional mutation and re-decode once
+  \ENDIF
+  \STATE Commit token, cache update, and next logical position
+\ENDWHILE
+\STATE Write prediction, metrics, timing, trace, and manifest link
+\end{algorithmic}
+\end{algorithm}
+
+The first generated token comes from the prefill output unless the declared
+method deliberately recomputes it. Compression must not accidentally feed a
+token twice, omit the first token, or increment logical position early.
+Ordinary generation parity compares the same stopping and padding settings.
+EOS behavior and fixed-length systems decoding are separate protocols.
+
+\subsection{Retention-one parity}
+For every supported adapter, compare at least sixteen deterministic generated
+tokens against ordinary model generation, and compare an extraction/reinjection
+path against untouched FullKV. Report token agreement and maximum absolute
+logit difference, together with dtype, backend, tolerance, deterministic settings,
+and stopping rules. Tolerances are preregistered and dtype-specific; a failure
+is not repaired by widening them after seeing the result.
+
+CPU mock tests establish shape, ownership, and transaction invariants but are
+not real-checkpoint GPU parity. A passing eager result does not establish SDPA,
+FlashAttention-2, or vLLM parity. A backend numerical deviation is distinct from
+algorithmic loss due to compression and is measured independently.
+
+\subsection{HF model families and scope}
+LLaVA-1.5, LLaVA-NeXT, Qwen2.5-VL \citep{bai2025qwen}, and OneVision have model-specific input and
+position handling. A family label does not mean every revision, multi-image
+mode, or video path is supported. The primary study uses one LLaVA-1.5
+checkpoint; the VL-Cache-native lane uses its separate LLaVA-v1.6 setting.
+Generalization experiments are conditional extensions, not evidence inherited
+from the primary checkpoint. InternVL remains optional when its public API and
+query/cache access satisfy the same contracts.
+
+\subsection{vLLM transaction and isolation}
+The version-specific native plugin operates at whole engine blocks. Its safe
+surface is narrower than the HF tensor interface. A compressed request must
+keep original logical positions while updating block ownership, table entries,
+and attention metadata consistently. The inspected implementation includes
+restrictions around eager execution, supported attention metadata, cache groups,
+and prefix-cache behavior. These restrictions must be read from the pinned
+source and manifest rather than replaced by a generic claim of vLLM support.
+
+A request-wide aggregation of per-head evidence is a policy change. It must
+avoid unnormalized vote-count effects and report the actual block plan. Any
+external HF forecasting or plan generation must be included in end-to-end time
+and peak resource accounting; excluding it creates an unfair serving claim.
+An A--B--A test in the same engine checks that request A's output and relevant
+state are unchanged by an intervening compressed request B. It complements,
+but does not replace, allocator and logical-position tests.
+
+\subsection{Timing boundaries and memory ownership}
+A CUDA event measures work on its relevant stream; it does not measure CPU
+dictionary assembly or a host-side knapsack. Synchronize at controlled timing
+boundaries and use wall-clock spans for the full request. If transfers use
+another stream, establish dependencies before ending the measured phase.
+Instrumentation hooks can themselves alter execution and must be consistent
+between methods. Warmups should exercise the same path as measured trials.
+
+Reset peak-memory statistics at declared boundaries. Report prefill peak,
+compression peak, and steady active cache separately. Compression after prefill
+cannot eliminate the full prefill peak retrospectively. For storage counting,
+deduplicate aliased storages by device and underlying allocation. A small view
+of a large tensor can retain all of its storage; a contiguous copy may be
+needed to realize the intended savings. Allocator-reserved bytes, model weights,
+temporary workspaces, metadata, active KV, and CPU residuals are distinct fields.
+
+\subsection{Atomic outputs and resume}
+Run IDs and sample IDs identify work. Write raw predictions and failures in
+JSONL with a schema version, then derive metrics and Parquet aggregates. Resume
+requires matching source/configuration/model/dataset hashes; a sample ID alone
+does not authorize reuse under a different method. Duplicate successful rows
+are errors or explicitly resolved attempts, not extra observations. Failed
+samples retain their error type, timing gathered so far, and trace location.
+Partial shards can be reused without changing immutable source artifacts.
+
+Slurm arrays use one immutable resolved config per task and unique output roots.
+Parallel workers may share read-only model/dataset caches but not mutable
+request state. Job completion is not scientific success: a zero exit code
+still requires denominator, trace, metric, parity, and budget validation.

@@ -31,6 +31,7 @@ from mosaickv.backends.hf_runtime import (
     _plan_has_live_residual_repair,
     _refined_budget_candidates,
     _route_head_attention,
+    _select_output_preserving_logit_candidate,
     _selection_decision_evidence,
     _short_horizon_candidate_evaluation,
     _trace_catalog,
@@ -2187,6 +2188,89 @@ def test_short_horizon_logit_gate_is_thresholded_and_fail_closed() -> None:
     assert not token_changed.passed
     assert not token_changed.greedy_token_match
     assert not excessive_kl.passed
+
+
+def test_short_horizon_objective_uses_all_steps_and_token_changes() -> None:
+    evaluation = _short_horizon_candidate_evaluation(
+        "route",
+        kl_values=(0.01, 0.02),
+        maximum_logit_differences=(0.5, 0.75),
+        greedy_token_matches=(True, False),
+        maximum_kl_threshold=0.02,
+        maximum_logit_difference_threshold=1.0,
+        objective_weights=(50.0, 1.0, 2.0),
+        exchange_routes=((3, 1),),
+    )
+    assert evaluation.kl_sum == pytest.approx(0.03)
+    assert evaluation.logit_difference_sum == pytest.approx(1.25)
+    assert evaluation.token_mismatches == 1
+    assert evaluation.objective_value == pytest.approx(4.75)
+    assert evaluation.exchange_routes == ((3, 1),)
+
+
+def test_output_preserving_logit_reranker_uses_normalized_stability_and_fallback() -> None:
+    anchor = hf_runtime.ShortHorizonLogitCandidateEvaluation(
+        "prompt_topk_anchor", False, False, 0.03, 1.2, 2
+    )
+    lower_kl = hf_runtime.ShortHorizonLogitCandidateEvaluation(
+        "joint_prompt_weight_0.25", True, True, 0.005, 0.8, 2
+    )
+    balanced = hf_runtime.ShortHorizonLogitCandidateEvaluation(
+        "joint_prompt_weight_0.50", True, True, 0.01, 0.1, 2
+    )
+    selected, fallback = _select_output_preserving_logit_candidate(
+        (anchor, lower_kl, balanced),
+        maximum_kl=0.02,
+        maximum_logit_difference=1.0,
+    )
+    assert selected.candidate_id == "joint_prompt_weight_0.50"
+    assert not fallback
+    selected, fallback = _select_output_preserving_logit_candidate(
+        (anchor, replace(lower_kl, passed=False), replace(balanced, passed=False)),
+        maximum_kl=0.02,
+        maximum_logit_difference=1.0,
+    )
+    assert selected.candidate_id == "prompt_topk_anchor"
+    assert fallback
+
+
+def test_layer_capacity_reranker_has_no_benchmark_label_input() -> None:
+    import inspect
+
+    signature = inspect.signature(
+        hf_runtime._run_output_preserving_layer_capacity_reranking
+    )
+    forbidden = {"answer", "answers", "reference", "references", "label", "labels"}
+    assert not forbidden & set(signature.parameters)
+    decision = hf_runtime.ShortHorizonLogitStabilityDecision(
+        enabled=True,
+        shortlist_size=8,
+        evaluated_candidates=(),
+        selected_candidate_id="prompt_topk_anchor",
+        selected_candidate_passed=False,
+        used_fail_closed_scalar_anchor=True,
+        horizon=2,
+        maximum_kl_threshold=0.02,
+        maximum_logit_difference_threshold=1.0,
+        candidate_strategy="layer_capacity_beam",
+    )
+    assert decision.benchmark_labels_accessed is False
+
+
+def test_surrogate_layer_capacity_reranker_has_no_benchmark_label_input() -> None:
+    import inspect
+
+    signature = inspect.signature(
+        hf_runtime._run_output_preserving_surrogate_layer_capacity_reranking
+    )
+    forbidden = {"answer", "answers", "reference", "references", "label", "labels"}
+    assert not forbidden & set(signature.parameters)
+    source = inspect.getsource(
+        hf_runtime._run_output_preserving_surrogate_layer_capacity_reranking
+    )
+    assert "benchmark_labels" not in source
+    assert "prompt_draft_route_risk" in source
+    assert "layer_capacity_directional_single_candidates" in source
 
 
 @pytest.mark.parametrize("head_axis,sequence_axis", ((1, 2), (2, 1)))

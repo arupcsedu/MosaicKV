@@ -1,0 +1,21 @@
+\begin{tikzpicture}[node distance=7mm]
+\node[box,text width=2.55cm] (exact) {\textbf{Exact}\\Original selected K/V\\GPU active storage};
+\node[optbox,text width=2.55cm,right=of exact] (proto) {\textbf{Prototype}\\Weighted K/V\\GPU active storage};
+\node[optbox,text width=2.55cm,right=of proto] (resid) {\textbf{Residual}\\Original members\\Pinned CPU storage};
+\node[box,text width=2.55cm,right=of resid] (provisional) {Provisional token\\entropy / prototype risk};
+\node[optbox,text width=2.55cm,below=13mm of provisional] (restore) {Rank and restore members\\wait for transfer};
+\node[optbox,text width=2.55cm,left=of restore] (budget) {Promote exact blocks\\evict if budget requires};
+\node[optbox,text width=2.55cm,left=of budget] (redo) {Rollback provisional state\\recompute once};
+\node[box,text width=2.55cm,left=of redo] (commit) {Commit token and cache\\next logical position};
+\draw[optional] (proto)--(resid);
+\coordinate (decodebus) at ($(exact.north)+(0,0.6)$);
+\draw[flow] (exact.north)--(decodebus)-| (provisional.north);
+\draw[optional] (proto.north)--(proto.north|-decodebus);
+\draw[optional] (provisional)--node[right,font=\scriptsize]{trigger}(restore);
+\draw[optional] (restore)--(budget);
+\draw[optional] (budget)--(redo);
+\draw[optional] (redo)--(commit);
+\draw[optional] (resid.south)--++(0,-0.4)-| (restore.west);
+\draw[flow] (provisional.east)--++(0.4,0)|- ($(commit.south)+(0,-0.6)$)--(commit.south);
+\node[font=\scriptsize,fill=white] at ($(redo.south)+(0,-0.6)$) {no trigger: commit provisional token};
+\end{tikzpicture}

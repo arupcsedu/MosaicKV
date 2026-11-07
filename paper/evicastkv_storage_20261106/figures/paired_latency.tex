@@ -1,0 +1,14 @@
+\begin{tikzpicture}
+\begin{axis}[
+ width=.94\columnwidth,height=4.6cm,
+ xlabel={EviCastKV-S / baseline request time},xmin=0,xmax=1.06,
+ symbolic y coords={LOOKM,PrefixKV,TopK,VLCache},
+ ytick=data,yticklabels={LOOK-M (R+A),PrefixKV (R+A),Prompt Top-K (A),VL-Cache (R+A)},
+ enlarge y limits=.25,grid=major,grid style={gray!15},
+ tick label style={font=\scriptsize},label style={font=\small}]
+\addplot[only marks,color=eviblue,mark=*,mark size=2.5pt,
+ error bars/.cd,x dir=both,x explicit]
+ table[x=ratio,y=baseline,x error minus=minus,x error plus=plus]{generated/latency.dat};
+\draw[dashed,color=riskred] (axis cs:1,LOOKM) -- (axis cs:1,VLCache);
+\end{axis}
+\end{tikzpicture}

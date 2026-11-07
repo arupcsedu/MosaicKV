@@ -1,0 +1,12 @@
+% Derived from immutable measured artifacts by export_report.py.
+\begin{tabular}{lrrr}
+\toprule
+Profiled operation & Eager s & Compact s & Reduction\\\midrule
+EviCastKV tier, 120 MiB & 8.604 & 1.333 & 84.5\%\\
+Top-K views, 120 MiB & 6.806 & 0.512 & 92.5\%\\
+EviCastKV tier, 20 MiB & 1.762 & 0.571 & 67.6\%\\
+EviCastKV tier, 40 MiB & 3.218 & 0.761 & 76.3\%\\
+Guarded tier, 20 MiB & 1.726 & 0.572 & 66.9\%\\
+Guarded tier, 40 MiB & 3.144 & 0.789 & 74.9\%\\
+\bottomrule
+\end{tabular}

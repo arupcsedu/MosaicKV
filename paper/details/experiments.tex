@@ -1,0 +1,276 @@
+\section{Complete Experimental Plan and Blank Result Tables}
+\label{app:experiments}
+\subsection{Reading this section}
+All sample counts, caps, and trial counts below are \emph{planned controls}.
+They are not completed-result counts. Every numerical measurement cell remains
+blank. No plot contains fabricated empirical points. Complete each template
+only through a reproducible derivation from immutable raw artifacts, retain
+unsuccessful regimes, and list the exact effective method.
+
+\subsection{Datasets, model families, and lanes}
+\begin{table*}[t]
+\caption{Experimental coverage and native metrics. Target counts are planning
+limits, not verified completion counts. Every lane needs pinned revisions.}
+\small\begin{tabularx}{\textwidth}{P{2.2cm}P{3cm}P{2.3cm}Y}\toprule
+Lane & Model / tasks & Metric & Purpose and admissibility\\\midrule
+Primary unified & LLaVA-1.5-7B; MMStar (1,500), TextVQA (3,000), DocVQA (4,500) & Accuracy; consensus; ANLS & Preserve existing primary evidence separately; reuse only exact control matches\\
+PrefixKV native & Paper checkpoint; LLaVA-Description; MM-Vet where executable & Corpus PPL; ROUGE-L F1; declared MM-Vet scorer & Reproduce published operating points in the compatible legacy transport before broader claims\\
+PrefixKV byte-capped & Same validated checkpoint and tasks within lane & Same native metrics, separate columns & Deterministically rescale profile shape; label byte-matched \texttt{prefixkv\_reimpl} variant\\
+VL-Cache native & LLaVA-v1.6-Mistral; COCO Caption; DocVQA & CIDEr; ANLS & Native nominal ratios; local implementation explicitly \texttt{vl\_cache\_reimpl}\\
+VL-Cache byte-capped & Same checkpoint and task ledgers as its unified lane & CIDEr; ANLS & Physical-byte caps, not substituted paper ratios\\
+LOOK-M & Compatible LLaVA-1.5; MileBench & Accuracy; ROUGE-L; official subtask summaries & Official only when pinned upstream executes; otherwise audited \texttt{lookm\_reimpl}\\
+Conditional extensions & Qwen family / multi-image / video / MathVista & Task-specific & Separate authorization, support validation, and preregistration\\
+\bottomrule\end{tabularx}
+\end{table*}
+
+Different checkpoints cannot be made comparable by renaming their family.
+The original legacy LLaVA checkpoint and its HF conversion may differ in
+processor, chat conventions, and execution behavior. The model-native lanes
+stay separate until checkpoint and preprocessing equivalence are demonstrated.
+Unsupported high-retention memory points are explicitly marked hardware
+unsupported; do not silently lower their ratio or resolution.
+
+Dataset identity includes repository, configuration, revision, split, and
+sample ID. Media hashes and prompt hashes add a second layer of reproducibility.
+Questions sharing the same image/page need a declared independence policy.
+Calibration, feasibility debugging, and held-out evaluation have distinct
+ledgers. Previously inspected samples can support development but cannot be
+relabeled untouched. MMStar is not silently replaced by another dataset; any
+replacement would require a separately named protocol.
+
+\subsection{Experiment 1: shared-byte quality--memory curves}
+For each eligible task/backend/model stratum, run Prompt Top-K, MosaicKV, and
+the lane's audited compressed baseline at common physical caps. Hold samples,
+generation, preprocessing, attention backend, block granularity, and mandatory
+policy fixed. FullKV is run or reused as the quality reference, not as a latency
+competitor. At each cap, verify maximal feasible fill and achieved-byte
+tolerance before pairing quality or runtime.
+
+Plot each method's measured points as a curve with CIs, without fabricating
+missing/unsupported budgets. Connecting observed points visually is not
+permission to claim an unmeasured operating point. A strict Pareto comparison
+uses observed points with the same task and controls. A confidence-aware plot
+should distinguish point-estimate dominance from statistically supported
+quality non-inferiority.
+
+\begin{figure}[h]
+\centering\input{figures/evaluation_flow}
+\caption{The direct-comparison pipeline. Every branch receives the same
+controls. Shared realized bytes, not matching ratio labels, admit a pair.}
+\end{figure}
+
+\begin{table*}[t]
+\caption{Shared-byte curve template. Instantiate per model/task/backend and
+method; do not average incompatible metrics. Numeric measurement cells blank.}
+\small\begin{tabular}{llrrrrrrr}\toprule
+Method & Cap & Actual MiB & Padding MiB & Residual MiB & Score & Paired $\Delta$ [CI] & E2E p50 & Paired $n$\\\midrule
+Prompt Top-K & 10 MiB & & & & & & & \\
+Lane \texttt{\_reimpl} & 10 MiB & & & & & & & \\
+MosaicKV exact & 10 MiB & & & & & & & \\
+Prompt Top-K & 20 MiB & & & & & & & \\
+Lane \texttt{\_reimpl} & 20 MiB & & & & & & & \\
+MosaicKV exact & 20 MiB & & & & & & & \\
+Prompt Top-K & 40 MiB & & & & & & & \\
+Lane \texttt{\_reimpl} & 40 MiB & & & & & & & \\
+MosaicKV exact & 40 MiB & & & & & & & \\
+Prompt Top-K & 80 MiB & & & & & & & \\
+Lane \texttt{\_reimpl} & 80 MiB & & & & & & & \\
+MosaicKV exact & 80 MiB & & & & & & & \\
+\bottomrule\end{tabular}
+\end{table*}
+
+The 30\% target is tested on the quality-constrained frontier, not by comparing
+arbitrarily chosen nominal ratios. If the most memory-efficient quality-eligible
+competitor requires $B_c$ and MosaicKV requires $B_m$, the relative reduction
+is $1-B_m/B_c$. The competitor-selection rule and threshold are frozen before
+evaluation. Where MosaicKV requires more memory, show that result plainly.
+
+\subsection{Experiment 2: paper-native reproduction}
+\paragraph{PrefixKV.}
+First validate one or more published PPL/ROUGE-L operating points using the
+paper checkpoint, supplied profile or preregistered disjoint calibration,
+teacher-forcing target, and evaluator. A released profile with undisclosed
+calibration identities must be labeled upstream-profile provenance unresolved,
+not a verified clean local calibration. Record paper retention and actual
+active bytes. PPL success does not certify ROUGE-L or common-HF transport.
+The anomalously low historical OCR results are diagnostic failures, not evidence
+against PrefixKV.
+
+\paragraph{VL-Cache.}
+Run the native caption/document metrics with audited H2O, StreamingLLM, and
+PyramidKV variants where executable, plus MosaicKV and FullKV quality reference.
+Label the local implementation \texttt{vl\_cache\_reimpl}. An implementation
+of the paper's scoring formula with a different fused attention kernel can
+support algorithmic comparisons but not a claim to reproduce its published
+systems speedup. Byte-matched results form a separate named lane.
+
+\paragraph{LOOK-M.}
+Use MileBench routing and hierarchy. An official run requires the pinned code
+to execute under its supported model/environment; a broken upstream path is
+not repaired by relabeling local code as official. Include H2O, SnapKV, or RoCo
+only after their provenance and compatibility are audited. Accuracy and ROUGE-L
+remain separate, alongside the official hierarchy.
+
+\begin{table*}[t]
+\caption{Paper-native reproduction gate template. Paper-reported values are
+kept in their own column and never masquerade as local measurements. No values
+are populated before source/metric verification.}
+\small\begin{tabularx}{\textwidth}{lYYrrrr}\toprule
+Method & Provenance & Metric / operating point & Paper reported & Local & Delta & Gate\\\midrule
+PrefixKV & official pinned & PPL / preregistered ratio & & & & \\
+PrefixKV & official pinned & ROUGE-L / preregistered ratio & & & & \\
+PrefixKV variant & \texttt{prefixkv\_reimpl} & Byte-capped native metric & & & & \\
+VL-Cache & \texttt{vl\_cache\_reimpl} & CIDEr / native ratio & & & & \\
+VL-Cache & \texttt{vl\_cache\_reimpl} & ANLS / native ratio & & & & \\
+LOOK-M & official if executable & MileBench declared metric & & & & \\
+LOOK-M & \texttt{lookm\_reimpl} & MileBench declared metric & & & & \\
+\bottomrule\end{tabularx}
+\end{table*}
+
+\subsection{Experiment 3: systems microbenchmarks}
+Select a fixed latency subset without inspecting method outcomes. Sweep input
+visual-token count, supported image count, output length, batch size, and shared
+byte cap one axis at a time or through a declared factorial design. Proposed
+output lengths are 32, 64, 128, and 256; batch sizes are 1, 2, and 4 where
+supported. These are controlled workload values, not observed outputs.
+
+Use isolated GPU runs where possible, record background processes, and record
+fixed clocks only when permission and hardware permit them. Each configuration
+has five warmups and at least twenty measured repetitions. Alternate or
+randomize method order to reduce thermal and temporal drift while preserving
+the paired design. An A100 40 GB and A100 80 GB are distinct hardware strata.
+Report request throughput and token throughput with explicit denominators;
+batch latency divided by batch size is not individual request latency.
+
+\begin{table*}[t]
+\caption{MosaicKV phase and storage template, repeated per task/backend/cap.
+Nested phase times must not be double-counted in the end-to-end total.}
+\small\begin{tabularx}{\textwidth}{YrrrrY}\toprule
+Phase & p50 (s) & p95 (s) & Mean (s) & Peak bytes & State or cost represented\\\midrule
+Image/video encoder & & & & & Vision features\\
+Projector & & & & & Features mapped to LM space\\
+Language prefill & & & & & Original full KV creation\\
+Future forecast & & & & & Query capture and optional draft\\
+Planner preparation & & & & & Pooling, routing, data movement\\
+Sparse graph & & & & & Nodes, edges, top-k construction\\
+Utility and selection & & & & & Scores and feasible allocation\\
+Tier construction & & & & & Exact and compatible prototypes\\
+Cache packing & & & & & Physical layout and validity masks\\
+Residual transfer & & & & & Host-to-device restored members\\
+Repair re-decode & & & & & Recomputed provisional step\\
+Final decode & & & & & Token-by-token generation\\
+End-to-end wall time & & & & & Full critical path, not phase sum\\\midrule
+Active exact KV bytes & & & & & Dedicated storage observation\\
+Active prototype KV bytes & & & & & Only if mechanism active\\
+Physical padding bytes & & & & & Not populated source evidence\\
+CPU residual bytes & & & & & Include scales/indices separately\\
+\bottomrule\end{tabularx}
+\end{table*}
+
+The break-even condition is useful as a model, not a result. If planning costs
+$T_c$, repair costs $T_r$, and each of $D$ decode steps saves $\Delta t$, then
+a speedup requires roughly $D\Delta t>T_c+T_r$, ignoring interactions that must
+be measured. Compare this explanation with phase traces. A short-context eager
+gain cannot be generalized to paged attention; if the compressed methods are
+latency-equivalent under vLLM, report that rather than emphasizing only HF.
+
+\subsection{Experiment 4: component ablations}
+Run the same feasible budget for all variants. Disable one component at a time,
+keep training-free hyperparameters fixed, and record the effective mechanism.
+Use a general visual task, an OCR/document task, ChartQA
+\citep{masry2022chartqa}, and Video-MME \citep{fu2024videomme}
+only when the model supports it. Keep auxiliary task extensions separate from
+the primary three-task study.
+
+\begin{table*}[t]
+\caption{Ablation template. Each row requires actual mechanism activity and
+identical physical budgets; unsupported rows are not scored as zero.}
+\small\begin{tabular}{llrrrrrr}\toprule
+ID & Variant & Score & Active bytes & Forecast recall & Graph coverage & Logit KL & E2E (s)\\\midrule
+A & Full enabled MosaicKV design & & & & & & \\
+B & No future-query forecast & & & & & & \\
+C & Prompt-window forecast only & & & & & & \\
+D & Draft forecast only & & & & & & \\
+E & No evidence graph & & & & & & \\
+F & Semantic-only graph & & & & & & \\
+G & No value contribution & & & & & & \\
+H & Attention-only utility & & & & & & \\
+I & No prototype merging & & & & & & \\
+J & No residual repair & & & & & & \\
+K & Oracle forecast (evaluation only) & & & & & & \\
+L & Oracle repair (evaluation only) & & & & & & \\
+\bottomrule\end{tabular}
+\end{table*}
+
+Use at most three primary ablation figures: forecast recall versus task quality,
+graph/value contribution versus fidelity, and prototype/repair quality versus
+cost. A graph-coverage increase with unchanged score is reported as such.
+Disagreement between attention-output error and logit KL is not hidden behind
+one preferred metric. If prototypes fall back to exact selection, their row
+does not answer whether merging helped.
+
+\subsection{Experiment 5: residual repair, conditional}
+This experiment is admitted only after lossless residual indexing, safe
+prototype construction, provisional rollback, budget enforcement, and one-time
+re-decode pass their correctness tests. Compare none, entropy, prototype risk,
+combined risk, and oracle evaluation-only policies. Sweep thresholds, maximum
+restored blocks, residual dtype, and placement on a disjoint calibration set,
+then freeze the selected policy.
+
+Report repair precision as beneficial triggered repairs divided by triggered
+repairs. Define the unit (event or example) before computing it. Recall requires
+an independently measured set of repairable compressed failures; an untested
+failure is not automatically repairable. Report recovered FullKV answer,
+improved task score, harmful change, and no-effect cases, plus p95 repair time,
+restored bytes, and net quality/latency change. Include representative failures
+from OCR, chart, ordinary images, and video only if available. Do not select
+only visually persuasive successes.
+
+\begin{table}[h]
+\caption{Conditional repair template. All empirical cells blank.}
+\small\begin{tabularx}{\columnwidth}{Yrrrr}\toprule
+Policy & Prec. & Recall & p95 time & $\Delta$ score\\\midrule
+None & & & & \\
+Entropy & & & & \\
+Prototype risk & & & & \\
+Combined & & & & \\
+Oracle (evaluation only) & & & & \\
+\bottomrule\end{tabularx}
+\end{table}
+
+\subsection{Experiment 6: model/backend generalization, conditional}
+Tune on one model and one disjoint calibration dataset, then freeze the
+algorithmic hyperparameters. Evaluate on separately supported LLaVA and Qwen
+configurations without retuning. Treat eager, SDPA, FlashAttention-2, and
+verified vLLM native paths as separate backend implementations. Report
+architecture-specific adaptations such as positional transforms, GQA mapping,
+visual token expansion, and block granularity. Unsupported combinations remain
+explicit. SGLang is excluded from this thesis's executable scope.
+
+Algorithmic generalization is a quality/memory question under a frozen policy.
+Backend numerical parity is a correctness question under a fixed algorithm.
+Passing one does not prove the other. Report both in separate tables, with
+model-by-task quality loss and backend token/logit deviation.
+
+\subsection{Historical artifact reuse and admissibility}
+Reuse requires matching checkpoint revision, processor/chat template, media
+preprocessing, exact prompts and sample IDs, generation controls, precision,
+backend/kernel, block and mandatory policy, and per-sample realized-byte
+boundary. Latency reuse additionally requires compatible hardware, warmups,
+repetitions, concurrency, and measurement definitions. A matching method name,
+nominal ratio, or sample count is insufficient.
+
+Historical nominal-ratio results remain separate quality--memory/Pareto
+diagnostics. They are not relabeled shared-byte evidence. Primary FullKV,
+Prompt Top-K, and MosaicKV artifacts remain immutable, and the new reproduction
+lanes extend rather than overwrite them. No FullKV latency comparison is
+introduced by reuse.
+
+\subsection{Figure plan without fabricated results}
+The final manuscript should contain: (1) quality--memory curves by task and
+backend, (2) compressed-only paired latency ratios at shared realized bytes,
+(3) planning/decode phase breakdowns, and (4) conditional ablation or repair
+figures if admissible. Each plot reads measured aggregates and displays failed
+or unsupported points separately. This draft contains architectural TikZ
+diagrams only; empty result tables establish the reporting structure without
+manufacturing a visual trend.

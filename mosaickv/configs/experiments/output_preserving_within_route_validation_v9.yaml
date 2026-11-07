@@ -1,0 +1,100 @@
+schema_version: 1
+protocol_id: output_preserving_within_route_validation_v9
+classification: preregistered_disjoint_development_validation_not_paper_evidence
+candidate_retuning_authorized: false
+paper_claim_authorized: false
+paper_campaign_submission_authorized: false
+
+candidate:
+  effective_method: mosaickv_exact__output_preserving_v1__draft_joint__within_route_position_beam
+  cap_mib: 25.5
+  cache_values: original_exact_kv_only
+  logical_positions: preserved
+  mandatory_policy: last_token
+  query_evidence: individual
+  draft_steps: 4
+  draft_ranking_mode: joint_normalized
+  prompt_objective_weight: 0.5
+  draft_objective_weight: 0.5
+  transaction: one_block_equal_byte_substitution_within_one_layer_and_kv_head
+  route_lengths: fixed_to_prompt_topk_anchor
+  physical_padding_bytes: 0
+  directional_ranking: normalized_prompt_and_draft_reconstruction_gain_minus_directional_perturbation
+  actual_logit_verification_required: true
+  analytic_candidate_count: 16
+  model_probed_candidate_count: 4
+  short_probe_horizon: 2
+  extended_probe_horizon: 8
+  extended_candidate_count: 2
+  logit_gate:
+    require_greedy_token_match: true
+    maximum_kl: 0.02
+    maximum_absolute_logit_difference: 1.0
+    reuse_original_fullkv_prefill: true
+    second_prefill_forbidden: true
+    discard_probe_states_before_measured_decode: true
+    benchmark_labels_accessed: false
+    no_passing_candidate: deterministic_prompt_topk_anchor
+  maximum_fail_closed_fraction: 0.20
+
+stages:
+  canary:
+    sample_count: 16
+    selection_seed: 20271027
+    statistical_evidence: false
+    automatic_successor_submission: false
+  calibration:
+    sample_count: 128
+    selection_seed: 20271028
+    requires_positive_canary: true
+    automatic_successor_submission: false
+
+controls:
+  model_id: llava-hf/llava-v1.6-mistral-7b-hf
+  model_revision: 2424fdd47412fccc66d91719126b420e9fbd7065
+  dataset_id: lmms-lab/COCO-Caption
+  dataset_revision: c3213b54e173ae86517d481de17f31439d6f8c72
+  split: val
+  precision: fp16
+  backend: huggingface
+  attention_implementation: eager
+  deterministic_generation: true
+  max_new_tokens: 64
+  warmups: 1
+  seed: 20271014
+  block_size: 1
+  require_identical_processor_prompt_media_and_tokenization: true
+  require_exact_realized_initial_byte_caps: true
+  require_identical_sample_ids: true
+
+gates:
+  retention_one_token_agreement: 1.0
+  retention_one_maximum_logit_difference: 1.0e-5
+  minimum_memory_reduction: 0.30
+  memory_boundaries: [initial, final, peak]
+  memory_scope: every_sample_and_boundary
+  quality_metric: cider
+  paired_bootstrap_resamples: 10000
+  paired_bootstrap_confidence: 0.95
+  quality_noninferiority_margin: 0.0
+  required_ci_lower_bound: 0.0
+  maximum_fail_closed_fraction: 0.20
+  require_complete_rows_traces_manifests_and_provenance: true
+  require_label_blind_logit_probe_trace: true
+  require_zero_physical_padding_in_measured_cache: true
+
+resources:
+  partition: bii-gpu
+  reservation: bi_fox_dgx
+  maximum_global_a100s: 4
+  workers: 4
+  gpus_per_worker: 1
+  cpus_per_worker: 12
+  memory_per_worker_gib: 96
+  shard_time_limit: '02:00:00'
+
+decision:
+  canary_pass: prepare_calibration_only_after_artifact_analysis
+  calibration_pass: freeze_candidate_then_require_explicit_commit_authorization
+  any_failure: seal_negative_and_do_not_tune_from_sample_level_outcomes
+  automatic_paper_campaign_submission: false

@@ -79,6 +79,45 @@ def controls(config: dict) -> dict:
     }
 
 
+def development_source_binding(attestation: Path | None, source_root: Path, stage: str) -> dict:
+    """Permit exploratory HF sources only from the same preserved snapshot.
+
+    This is not an exception to the canonical campaign's clean-source gate.
+    Both the file inventory and the git dirty-patch fingerprint are required.
+    """
+    if attestation is None or stage != "preflight":
+        raise ValueError("dirty HF sources require an attested development preflight")
+    from mosaickv.manifest import _worktree_fingerprint
+
+    inventory = json.loads(attestation.read_text())
+    if Path(inventory["source_root"]).resolve() != source_root.resolve():
+        raise ValueError("HF development source belongs to another snapshot")
+    if not inventory.get("files") or inventory.get("patch_sha") != _worktree_fingerprint(
+        source_root
+    ):
+        raise ValueError("HF development source fingerprint differs")
+    for name, expected in inventory["files"].items():
+        path = (source_root / name).resolve()
+        if not path.is_relative_to(source_root.resolve()) or sha(path) != expected:
+            raise ValueError("HF development source inventory differs")
+    return inventory
+
+
+def project_backend_config(config: dict) -> dict:
+    """Drop HF-only decode transport, not the recorded source-selector policy.
+
+    The vLLM transaction replays prefill selections and then appends new tokens;
+    it cannot execute PrefixKV's per-layer decode eviction. The caller records
+    both policies separately. Never relabel this as official PrefixKV.
+    """
+    config = copy.deepcopy(config)
+    if config["method"] == "prefixkv_reimpl":
+        config["prefixkv"].update(
+            decode_policy="realized_ratio", hf_cache_transport="common_guarded"
+        )
+    return config
+
+
 def prepare(
     completion_path: Path,
     output: Path,
@@ -89,9 +128,16 @@ def prepare(
     source_root: Path,
     attestation: Path | None,
     preflight_report: Path | None = None,
+    allow_development_hf: bool = False,
 ) -> dict:
     completion = json.loads(completion_path.read_text())
-    if completion.get("status") != "completed" or completion.get("source_git_dirty"):
+    development = (
+        development_source_binding(attestation, source_root, stage)
+        if allow_development_hf else None
+    )
+    if completion.get("status") != "completed" or (
+        completion.get("source_git_dirty") and development is None
+    ):
         raise ValueError("only clean, completed HF source shards may be mirrored")
     task = completion.get("task")
     if task not in TASKS:
@@ -155,8 +201,14 @@ def prepare(
             raise ValueError("failed HF arm cannot be silently reused")
         manifest_path = Path(source_rows[0]["manifest_path"])
         manifest = json.loads(manifest_path.read_text())
-        if manifest["source"]["git_dirty"]:
+        if manifest["source"]["git_dirty"] and development is None:
             raise ValueError("HF manifest is not clean")
+        if development is not None and (
+            manifest["source"]["git_sha"] != source_sha
+            or manifest["source"]["patch_sha"] != development["patch_sha"]
+            or manifest["source"]["canonical_eligible"]
+        ):
+            raise ValueError("HF manifest differs from exploratory source attestation")
         if manifest["resolved_config"]["cache"]["budget_value"] != cap:
             raise ValueError("HF source arm is not at requested physical cap")
         raw = manifest_path.with_name("results.jsonl")
@@ -211,7 +263,7 @@ def prepare(
         arm_inputs = []
     arm_inputs += [(item[0]["method"], item) for item in manifests]
     for name, (_, manifest_path, manifest, trace_root) in arm_inputs:
-        config = copy.deepcopy(manifest["resolved_config"])
+        config = project_backend_config(manifest["resolved_config"])
         config["execution"]["backend"] = "vllm"
         config["execution"]["attention_implementation"] = "eager"
         config["execution"]["decode_attention_implementation"] = "eager"
@@ -273,6 +325,10 @@ def prepare(
                 "catalog_sha256": sha(catalog_path) if catalog_path else None,
                 "hf_manifest": str(manifest_path),
                 "hf_manifest_sha256": sha(manifest_path),
+                "source_decode_policy": manifest["resolved_config"].get("prefixkv", {}).get(
+                    "decode_policy"
+                ) if name == "prefixkv_reimpl" else "append_only",
+                "serving_decode_policy": "append_only_requestwide_projection",
             }
         )
     spec = {

@@ -15,11 +15,35 @@ from prepare_output_preserving_sweep import source_digest
 from run_coco_shared_bytes import gpu_snapshot
 from run_prefixkv_decode_preflight import digest, write_once
 
-from mosaickv.config import config_sha256, load_config
+from mosaickv.config import OutputPreservingConfig, config_sha256, load_config
 from mosaickv.evaluation.coco_shared_bytes import processor_signature, validate_caption_rows
 from mosaickv.evaluation.paper_native_lanes import load_paper_native_ledger
 from mosaickv.evaluation.tasks import default_task_registry
 from mosaickv.evaluation.worker_support import record_hf_run, settle
+
+SUPPORTED_CLASSIFICATIONS = frozenset(
+    {
+        "retrospective_development_only_not_paper_evidence",
+        "preregistered_fresh_development_validation_not_paper_evidence",
+        "preregistered_disjoint_development_validation_not_paper_evidence",
+    }
+)
+
+
+def validate_plan_classification(classification: object) -> str:
+    """Accept only explicitly registered output-preserving development protocols."""
+
+    if not isinstance(classification, str) or classification not in SUPPORTED_CLASSIFICATIONS:
+        raise ValueError("wrong experiment classification")
+    return classification
+
+
+def registered_surrogate_trace_counts(options: OutputPreservingConfig) -> tuple[int, int]:
+    """Return the preregistered analytic/model-probed counts for one strategy."""
+
+    if options.logit_candidate_strategy == "within_route_position_beam":
+        return options.logit_route_candidate_limit, 4
+    return options.logit_layer_transfer_limit, 2
 
 
 def run(args: argparse.Namespace) -> None:
@@ -39,11 +63,7 @@ def run(args: argparse.Namespace) -> None:
     if digest(root / "plan.json") != args.plan_sha256:
         raise ValueError("plan hash mismatch")
     plan = json.loads((root / "plan.json").read_text())
-    if plan["classification"] not in {
-        "retrospective_development_only_not_paper_evidence",
-        "preregistered_fresh_development_validation_not_paper_evidence",
-    }:
-        raise ValueError("wrong experiment classification")
+    validate_plan_classification(plan.get("classification"))
     source = Path(plan["source_root"])
     if source_digest(source) != plan["source_content_sha256"]:
         raise ValueError("development source snapshot changed")
@@ -188,8 +208,106 @@ def run(args: argparse.Namespace) -> None:
                 raise ValueError(f"effective method mismatch: {effective}")
             if job["label"].startswith("output_preserving"):
                 audit = trace.get("output_reconstruction")
-                if not audit or audit["final_error"] > audit["initial_error"] + 1e-6:
-                    raise ValueError("missing/increasing reconstruction objective")
+                if not audit:
+                    raise ValueError("missing reconstruction objective")
+                if audit.get("draft_ranking_mode") == "joint_normalized":
+                    swaps = [
+                        swap for route in audit.get("routes", ()) for swap in route.get("swaps", ())
+                    ]
+                    if any(
+                        not isinstance(swap.get("joint_normalized_gain"), (float, int))
+                        or swap["joint_normalized_gain"] <= 0
+                        for swap in swaps
+                    ):
+                        raise ValueError("joint reranker accepted a nonpositive joint gain")
+                elif audit["final_error"] > audit["initial_error"] + 1e-6:
+                    raise ValueError("increasing prompt reconstruction objective")
+                if (
+                    config.output_preserving is not None
+                    and config.output_preserving.short_horizon_logit_reranking
+                ):
+                    stability = trace.get("short_horizon_logit_stability", {})
+                    evaluations = stability.get("evaluated_candidates", ())
+                    route_exchange = (
+                        config.output_preserving.logit_candidate_strategy == "route_exchange_beam"
+                    )
+                    layer_capacity = config.output_preserving.logit_candidate_strategy in {
+                        "layer_capacity_beam",
+                        "layer_capacity_surrogate_beam",
+                        "layer_capacity_vectorized_surrogate_beam",
+                        "layer_capacity_directional_single_beam",
+                        "within_route_position_beam",
+                    }
+                    surrogate_capacity = config.output_preserving.logit_candidate_strategy in {
+                        "layer_capacity_surrogate_beam",
+                        "layer_capacity_vectorized_surrogate_beam",
+                        "layer_capacity_directional_single_beam",
+                        "within_route_position_beam",
+                    }
+                    expected_surrogate_count, expected_model_probed_count = (
+                        registered_surrogate_trace_counts(config.output_preserving)
+                    )
+                    candidate_count_valid = (
+                        len(evaluations)
+                        == (
+                            4
+                            if config.output_preserving.logit_candidate_strategy
+                            == "within_route_position_beam"
+                            else 2
+                        )
+                        if surrogate_capacity
+                        else (
+                            8
+                            <= len(evaluations)
+                            <= config.output_preserving.logit_route_candidate_limit
+                            if layer_capacity
+                            else (
+                                1
+                                <= len(evaluations)
+                                <= config.output_preserving.logit_route_candidate_limit
+                                if route_exchange
+                                else 2 <= len(evaluations) <= 4
+                            )
+                        )
+                    )
+                    allowed_steps = {config.output_preserving.logit_stability_horizon}
+                    if layer_capacity:
+                        allowed_steps.add(config.output_preserving.logit_extended_horizon)
+                    if (
+                        stability.get("status") != "completed_label_blind"
+                        or stability.get("benchmark_labels_accessed") is not False
+                        or stability.get("fullkv_prefill_reused") is not True
+                        or stability.get("second_prefill_performed") is not False
+                        or stability.get("probe_states_discarded_before_measured_decode")
+                        is not True
+                        or stability.get("horizon")
+                        != config.output_preserving.logit_stability_horizon
+                        or not candidate_count_valid
+                        or any(
+                            item.get("evaluated_steps") not in allowed_steps for item in evaluations
+                        )
+                        or (
+                            (route_exchange or layer_capacity)
+                            and (
+                                stability.get("candidate_strategy")
+                                != config.output_preserving.logit_candidate_strategy
+                                or stability.get("batched_probe_execution") is not True
+                                or not isinstance(stability.get("probe_batch_count"), int)
+                                or stability["probe_batch_count"] < 1
+                            )
+                        )
+                        or (
+                            surrogate_capacity
+                            and (
+                                stability.get("surrogate_candidate_count")
+                                != expected_surrogate_count
+                                or stability.get("model_probed_candidate_count")
+                                != expected_model_probed_count
+                                or not stability.get("probe_phase_timings")
+                            )
+                        )
+                    ):
+                        raise ValueError("incomplete output-preserving logit reranking trace")
         summary.update(
             status="passed",
             record=record,

@@ -1,0 +1,19 @@
+Multimodal key--value (KV) caches contain abundant visual state but can lose
+answer-critical evidence under aggressive compression. MosaicKV is a
+training-free cache manager that combines prompt-query forecasts, sparse
+evidence relationships, and value-aware selection under a physical byte
+budget. A routed planner applies graph optimization to a small subset of
+attention heads; remaining heads use vectorized prompt-attention selection.
+The evaluated implementation retains original KV states and logical positions
+exactly. At matched memory, MosaicKV improves COCO CIDEr from 107.84 to 111.48
+over a VL-Cache reimplementation at 40 MiB; the paired 95\% interval for the
+gain is $[0.53,7.06]$, and mean request time decreases by 19.65\%.
+On a separate 192-example MileBench cohort, it improves ROUGE-L and Accuracy
+over a LOOK-M reimplementation at 16 MiB and reduces mean request time by
+38.6\%. On PrefixKV's 1,000-description and 218-question routes, it improves
+reference-output ROUGE-L by 7.67 and 14.04 points at the registered native
+operating point. The results also expose limits: lower initial storage need
+not imply lower final storage, and the measured curves do not establish
+universal lower-memory equivalence. We provide physical-storage accounting,
+paired metric-specific analysis, and an extensible architecture whose
+prototype and repair tiers remain outside the evaluated claims.

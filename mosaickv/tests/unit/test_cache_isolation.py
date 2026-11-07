@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -27,6 +27,7 @@ from mosaickv.backends.hf_runtime import (
     MosaicKVCompressionPlan,
     PackedRuntimeCache,
     construct_isolated_packed_decode_state,
+    construct_isolated_packed_decode_state_batch,
     probe_isolated_packed_candidate,
 )
 from mosaickv.baselines.selectors import HeadLocalCapacityRecord
@@ -272,6 +273,93 @@ def test_hf_packed_constructor_builds_owned_validity_metadata() -> None:
     assert torch.equal(validity[0], torch.tensor([[True, False], [False, True]]))
     handle.assert_reference_unchanged()
     handle.close()
+
+
+def test_hf_batched_packed_constructor_stacks_owned_exact_caches() -> None:
+    adapter = MockCacheAdapter()
+    reference = _reference_state()
+    first = PackedRuntimeCache(
+        snapshot=_packed_snapshot(),
+        validity_masks=(),
+        prompt_capacity=2,
+        all_slots_valid=True,
+        prototype_slots=(),
+        prototype_attention_biases=(),
+        slot_records=(),
+    )
+    second_snapshot = clone_cache_snapshot(first.snapshot)
+    second_snapshot.layers[0].key.add_(10)
+    second = replace(first, snapshot=second_snapshot)
+    checkpoint = capture_decode_state(adapter, reference)
+    with construct_isolated_packed_decode_state_batch(
+        adapter,
+        reference,
+        (first, second),
+        candidate_ids=("first", "second"),
+    ) as handle:
+        assert handle.state.attention_mask.shape == (2, 2)
+        assert handle.state.past_key_values[0][0].shape[0] == 2
+        torch.testing.assert_close(
+            handle.state.past_key_values[0][0][0],
+            first.snapshot.layers[0].key[0],
+        )
+        torch.testing.assert_close(
+            handle.state.past_key_values[0][0][1],
+            second.snapshot.layers[0].key[0],
+        )
+        handle.state.past_key_values[0][0].zero_()
+        handle.assert_reference_unchanged()
+    assert_decode_state_unchanged(adapter, reference, checkpoint)
+
+
+def test_hf_batched_packed_constructor_masks_disposable_layer_padding() -> None:
+    adapter = MockCacheAdapter()
+    reference = _reference_state()
+
+    def packed(lengths: tuple[int, int], offset: float) -> PackedRuntimeCache:
+        snapshot = CacheSnapshot(
+            layers=tuple(
+                CacheLayerSnapshot(
+                    torch.full((1, 2, length, 3), offset + layer),
+                    torch.full((1, 2, length, 3), offset + 10 + layer),
+                    2,
+                )
+                for layer, length in enumerate(lengths)
+            ),
+            source_class=tuple,
+            source_kind="tuple",
+            active_sequence_length=max(lengths),
+            cached_key_state=CachedKeyState.POST_ROPE,
+            independent_layer_lengths=True,
+        )
+        return PackedRuntimeCache(
+            snapshot=snapshot,
+            validity_masks=(),
+            prompt_capacity=max(lengths),
+            all_slots_valid=True,
+            prototype_slots=(),
+            prototype_attention_biases=(),
+            slot_records=(),
+            layerwise_exact_logical_positions=tuple(
+                tuple(tuple(range(length)) for _head in range(2)) for length in lengths
+            ),
+        )
+
+    first, second = packed((3, 2), 1.0), packed((2, 3), 20.0)
+    with construct_isolated_packed_decode_state_batch(
+        adapter,
+        reference,
+        (first, second),
+        candidate_ids=("first", "second"),
+    ) as handle:
+        assert handle.state.attention_mask.shape == (2, 3)
+        assert all(layer[0].shape == (2, 2, 3, 3) for layer in handle.state.past_key_values)
+        masks = handle.state.model_state["mosaickv_validity_masks"]
+        assert masks[0].shape == (2, 2, 3)
+        assert masks[0][0].all() and not masks[0][1, :, -1].any()
+        assert not masks[1][0, :, -1].any() and masks[1][1].all()
+        assert handle.state.model_state["mosaickv_packed_all_valid"] is False
+        assert "mosaickv_layerwise_exact" not in handle.state.model_state
 
 
 def test_isolated_packed_probe_discards_mutated_candidate_state() -> None:

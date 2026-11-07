@@ -1,0 +1,12 @@
+% Derived from immutable measured artifacts by export_report.py.
+\begin{tabular}{llrrrrrr}
+\toprule
+Task & Method & PPL $\downarrow$ & R-L $\uparrow$ & Init. & Final & Peak & E2E s\\\midrule
+Description & FullKV & 2.9555 & 100.00 & 298.83 & 810.33 & 810.33 & ---\\
+Description & PrefixKV (R) & 3.0889 & 63.42 & 149.70 & 406.20 & 406.42 & 52.96\\
+Description & \textbf{EviCastKV exact} & 2.9620 & 71.09 & 102.62 & 614.12 & 614.12 & 63.91\\
+MM-Vet route & FullKV & 5.2778 & 100.00 & 301.42 & 812.92 & 812.92 & ---\\
+MM-Vet route & PrefixKV (R) & 5.3339 & 64.97 & 151.01 & 407.47 & 407.74 & 52.96\\
+MM-Vet route & \textbf{EviCastKV exact} & 5.2775 & 79.03 & 103.63 & 615.13 & 615.13 & 64.03\\
+\bottomrule
+\end{tabular}

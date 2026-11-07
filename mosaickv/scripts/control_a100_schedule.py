@@ -33,12 +33,20 @@ def limits(now: datetime, max_worker_minutes: int = 120) -> tuple[int, int]:
 
 
 def duration_minutes(value: str) -> int:
-    days, clock = value.split("-", 1) if "-" in value else ("0", value)
-    parts = [int(part) for part in clock.split(":")]
-    if len(parts) != 3:
-        raise ValueError(f"Expected finite Slurm D-HH:MM:SS time, got {value!r}")
-    hours, minutes, seconds = parts
-    return int(days) * 1440 + hours * 60 + minutes + (seconds > 0)
+    """Parse finite squeue durations, rounding partial minutes upward.
+
+    squeue displays sub-hour limits as MM:SS, even when sbatch received
+    HH:MM:SS. Reject unlimited/malformed values before releasing any worker.
+    """
+    match = re.fullmatch(r"(?:(\d+)-)?(\d+):([0-5]\d)(?::([0-5]\d))?", value)
+    if match is None or (match[1] is not None and match[4] is None):
+        raise ValueError(f"Expected finite Slurm [D-]HH:MM:SS or MM:SS time, got {value!r}")
+    days = int(match[1] or 0)
+    if match[4] is None:
+        hours, minutes, seconds = 0, int(match[2]), int(match[3])
+    else:
+        hours, minutes, seconds = int(match[2]), int(match[3]), int(match[4])
+    return days * 1440 + hours * 60 + minutes + (seconds > 0)
 
 
 def gpu_count(gres: str) -> int:

@@ -1,0 +1,11 @@
+\begin{tikzpicture}
+\begin{axis}[width=\columnwidth,height=4.5cm,xmin=.8,xmax=3.2,
+ xtick={1,2,3},xticklabels={Initial,Final,Peak},ylabel={Live KV (MiB)},
+ tick label style={font=\scriptsize},label style={font=\small},grid=major,
+ grid style={gray!18},legend style={font=\scriptsize,at={(.02,.98)},anchor=north west}]
+\addplot[exactblue,thick,mark=*] table[x=boundary,y=mosaickv_exact]{generated/prefix_boundaries.dat};
+\addlegendentry{MosaicKV exact}
+\addplot[protogold,thick,mark=triangle*] table[x=boundary,y=prefixkv_reimpl]{generated/prefix_boundaries.dat};
+\addlegendentry{PrefixKV native (R)}
+\end{axis}
+\end{tikzpicture}
