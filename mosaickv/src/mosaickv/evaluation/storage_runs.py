@@ -170,7 +170,10 @@ def cache_from_formats(
     cache.shared_tensors = tuple(shared)
     cache.shared_bytes = backing_bytes(cache.shared_tensors)
     cache.initial_bytes = backing_bytes(
-        tuple(t for x in cache.layers for t in cast(ExactLayer, x).owned_tensors())
+        (
+            *cache.shared_tensors,
+            *(t for x in cache.layers for t in cast(ExactLayer, x).owned_tensors()),
+        )
     )
     cache.observe()
     from mosaickv.evaluation.graph_lookahead import attach as attach_lookahead

@@ -37,8 +37,52 @@ def checked(root, expected):
     return plan
 
 
-def component_policies(proposal_study=False, allocation_study=False, replacement_study=False):
+def component_policies(
+    proposal_study=False, allocation_study=False, replacement_study=False, transaction_study=False
+):
     base = OverlayPolicy(record_phase_timings=True)
+    if transaction_study:
+        improved = replace(
+            base,
+            forecast_distribution="individual_queries",
+            prototype_representation="parent_residual_delta",
+            graph_accumulation="segmented_tensor_topk",
+        )
+        replaced = replace(improved, replace_source_codes=True)
+        adaptive = replace(replaced, precision_transaction="joint_guarded")
+        return {
+            "full": asdict(improved),
+            "source_replaced": asdict(replaced),
+            "source_replaced_parent": asdict(replace(replaced, enabled=False)),
+            "parent_reserved": asdict(replace(replaced, component_mode="parent_reserved")),
+            "transaction_exact": asdict(replace(replaced, precision_transaction="exact")),
+            "transaction_prototype": asdict(replace(replaced, precision_transaction="prototype")),
+            "transaction_joint_guarded": asdict(adaptive),
+            **{
+                name: asdict(
+                    replace(
+                        adaptive,
+                        component_mode=name,
+                        precision_transaction=(
+                            "none"
+                            if name == "no_forecast"
+                            else "prototype"
+                            if name == "no_value"
+                            else "joint_guarded"
+                        ),
+                    )
+                )
+                for name in (
+                    "no_forecast",
+                    "no_graph",
+                    "no_value",
+                    "modular_selection",
+                    "exact_members",
+                    "no_repair",
+                    "forced_repair",
+                )
+            },
+        }
     if replacement_study:
         improved = replace(
             base,
@@ -118,7 +162,14 @@ def component_policies(proposal_study=False, allocation_study=False, replacement
     }
 
 
-def prepare(root, proposal_study=False, allocation_study=False, replacement_study=False):
+def prepare(
+    root,
+    proposal_study=False,
+    allocation_study=False,
+    replacement_study=False,
+    transaction_study=False,
+):
+    replacement_study = replacement_study or transaction_study
     proposal_study = proposal_study or allocation_study or replacement_study
     if root.exists():
         raise FileExistsError("new immutable component output root required")
@@ -189,6 +240,8 @@ def prepare(root, proposal_study=False, allocation_study=False, replacement_stud
                 "mosaickv/tests/unit/test_source_replacement.py",
                 "mosaickv/tests/unit/test_precision_gain.py",
                 "mosaickv/tests/unit/test_source_hotpath.py",
+                "mosaickv/tests/unit/test_shared_source_map_accounting.py",
+                "mosaickv/tests/unit/test_precision_transaction_study.py",
                 "mosaickv/tests/unit/test_opportunity_demand.py",
                 "mosaickv/tests/unit/test_bounded_probe_horizon.py",
                 "mosaickv/tests/unit/test_streaming_source_constructor.py",
@@ -205,6 +258,26 @@ def prepare(root, proposal_study=False, allocation_study=False, replacement_stud
     if result.returncode:
         raise RuntimeError("component CPU gate failed; no GPU submission")
     paths += [root / "inputs.json", root / "cpu.json"]
+    if transaction_study:
+        from mosaickv.evaluation.precision_transaction_study import study as transaction_audit
+
+        proof = {}
+        consumed = Path("/scratch/djy8hg/runs/evicastkv/storage-source-replacement-20261106-v6")
+        for worker in (0, 1):
+            row_path = next((consumed / f"workers/{worker}").glob("[0-9][0-9]-full.json"))
+            row = read(row_path)
+            capture = row["evaluation_capture"]
+            if sha(Path(capture["path"])) != capture["sha256"]:
+                raise ValueError("consumed precision capture changed")
+            result = transaction_audit(
+                torch.load(capture["path"], weights_only=True, map_location="cpu")
+            )
+            if not (result["accepted_meaningful_change"] and result["final_joint_guard_passed"]):
+                raise ValueError("guarded transaction has no useful prospective change; stop GPU")
+            proof[str(worker)] = result
+            paths += [row_path, Path(capture["path"])]
+        write_once(root / "cpu_transaction_feasibility.json", proof)
+        paths += [root / "cpu_transaction_feasibility.json"]
     write_once(
         root / "plan.json",
         dict(
@@ -215,13 +288,22 @@ def prepare(root, proposal_study=False, allocation_study=False, replacement_stud
             arms=(
                 "full_kv",
                 "parent",
-                *component_policies(proposal_study, allocation_study, replacement_study),
+                *component_policies(
+                    proposal_study, allocation_study, replacement_study, transaction_study
+                ),
             ),
             component_policies=component_policies(
-                proposal_study, allocation_study, replacement_study
+                proposal_study, allocation_study, replacement_study, transaction_study
             ),
             source_replacement_study=replacement_study,
-            component_reference_arm="all_adaptive" if allocation_study else "full",
+            storage_boundary_version="shared_initial_final_peak_v2",
+            component_reference_arm=(
+                "transaction_joint_guarded"
+                if transaction_study
+                else "all_adaptive"
+                if allocation_study
+                else "full"
+            ),
             overlay_policy=asdict(OverlayPolicy(record_phase_timings=True)),
             output_predictions=128,
             guard_predictions=32,
@@ -302,6 +384,9 @@ def worker(root, expected):
                 precision="bf16",
                 seed=plan["parent"]["protocol"]["seed"],
                 measurement_type="validation_smoke",
+                storage_boundary_version=plan.get(
+                    "storage_boundary_version", "legacy_initial_private"
+                ),
                 **scheduler_identity({}),
                 parent_ledger_sha=sha(PARENT / "ledger.json"),
                 reference_captions_available_during_inference=False,
@@ -698,9 +783,12 @@ def main():
     p.add_argument("--proposal-study", action="store_true")
     p.add_argument("--allocation-study", action="store_true")
     p.add_argument("--replacement-study", action="store_true")
+    p.add_argument("--transaction-study", action="store_true")
     a = p.parse_args()
     if a.action == "prepare":
-        prepare(a.root, a.proposal_study, a.allocation_study, a.replacement_study)
+        prepare(
+            a.root, a.proposal_study, a.allocation_study, a.replacement_study, a.transaction_study
+        )
     elif a.action == "worker":
         return worker(a.root, a.plan_sha)
     elif a.action == "analyze":

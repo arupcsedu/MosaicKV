@@ -27,6 +27,7 @@ class QuantizedBody:
     # retain ORIGINAL positions; only code payload rows are physically omitted.
     row_map: Any = None
     stored_rows: int = 0
+    row_map_shared: bool = False
 
     def tensors(self) -> tuple[Any, ...]:
         return (

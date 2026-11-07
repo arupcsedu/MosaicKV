@@ -76,8 +76,9 @@ class SharedSourceFormat:
     row_positions_cpu: object = None
 
     def private(self):
+        shared_ids = {id(t) for t in self.source_shared()}
         return (
-            *self.source.tensors(),
+            *(t for t in self.source.tensors() if id(t) not in shared_ids),
             self.row_positions,
             *(t for body in self.exact for t in body.buffers),
             *(t for patch in self.transport_patches for t in patch.tensors),
@@ -86,7 +87,17 @@ class SharedSourceFormat:
         )
 
     def shared(self):
-        return self.cos, self.sin, self.union, self.slots
+        return self.cos, self.sin, self.union, self.slots, *self.source_shared()
+
+    def source_shared(self):
+        # Delta specifications hold an EncodedBody; bound readers restore its
+        # QuantizedBody metadata. Ownership classification must agree in BOTH.
+        body = getattr(self.source, "metadata", self.source)
+        if getattr(body, "row_map_shared", False):
+            if body.row_map is None:
+                raise ValueError("shared source map flag requires a real map owner")
+            return (body.row_map,)
+        return ()
 
     def tensors(self):
         return (*self.private(), *self.shared())

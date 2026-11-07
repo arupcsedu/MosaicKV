@@ -24,6 +24,11 @@ bytes alone are not evidence of net storage reduction.
 The common row map has ONE backing owner shared across layers. Duplicating it
 per layer can outweigh small code savings; verify actual alias identity and
 global storage deduplication, not merely equal map contents.
+The map is classified as shared in both encoded specifications and bound
+readers. Cached per-layer counters must equal independent global enumeration.
+The corrected initial boundary includes all shared phase/position/map owners,
+as final/peak already do. Historical initial-private-only records are retained;
+they must not be reinterpreted as this corrected physical-storage boundary.
 
 The old code owner must die before decoding. Weak references audit original
 tensor retirement; the new payload must own separate, smaller backing storage.

@@ -175,6 +175,7 @@ def replace_with_codec(packets, codec):
                 if smaller.row_map.shape != shared_map.shape:
                     raise RuntimeError("common source map changed logical shape")
                 smaller = replace(smaller, row_map=shared_map)
+            smaller = replace(smaller, row_map_shared=True)
             record["row_map_shared_across_layers"] = True
         records.append(record)
         if record["replaced"]:

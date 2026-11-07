@@ -51,6 +51,7 @@ class OverlayPolicy:
     replace_source_codes: bool = False
     repair_policy: str = "entropy"
     prototype_risk_threshold: float = 0.01
+    precision_transaction: str = "none"
 
     def __post_init__(self):
         if not self.layers or tuple(sorted(set(self.layers))) != self.layers:
@@ -99,6 +100,12 @@ class OverlayPolicy:
 
         if not math.isfinite(self.prototype_risk_threshold) or self.prototype_risk_threshold <= 0:
             raise ValueError("positive finite prototype risk threshold required")
+        if self.precision_transaction not in ("none", "exact", "prototype", "joint_guarded"):
+            raise ValueError("registered precision transaction required")
+        if self.precision_transaction != "none" and (
+            self.prototype_representation != "parent_residual_delta" or not self.enabled
+        ):
+            raise ValueError("precision transaction requires active parent-residual prototypes")
 
 
 class _Phases:
@@ -608,6 +615,55 @@ def plan_layer(
         raise RuntimeError("overlay including repair reservation exceeds hard auxiliary cap")
     overlay.component_mode = policy.component_mode
     overlay.prototype_representation = policy.prototype_representation
+    if policy.precision_transaction != "none" and policy.component_mode != "parent_reserved":
+        from mosaickv.evaluation.precision_transaction_study import plan_precision_transaction
+
+        if parent_pair is None:
+            raise ValueError("precision transaction requires original parent observations")
+        payload = dict(
+            original_pair=tuple(t[0, head].detach().cpu().clone() for t in original),
+            parent_pair=tuple(t[0, head].detach().cpu().clone() for t in parent_pair),
+            prompt_queries=query[0, 0].detach().cpu().clone(),
+            phases=tuple(t[0].detach().cpu().clone() for t in phases),
+            evidence={
+                k: evidence[k]
+                for k in (
+                    "selected_extra",
+                    "prototype_members",
+                    "original_protected_positions",
+                    "prototype_anchor_position",
+                    "prototype_representation",
+                )
+            },
+            overlay=dict(
+                member_keys=overlay.member_keys.detach().cpu().clone(),
+                prototype_value=overlay.prototype_pair[1].detach().cpu().clone(),
+            ),
+        )
+        proof = plan_precision_transaction(payload, mode=policy.precision_transaction)
+        replacement = proof.pop("replacement")
+        revised = replacement["exact_ids"]
+        if len(revised) != len(extras) or set(revised) & (set(required) | set(ids)):
+            raise RuntimeError("precision transaction changed capacity or protected memberships")
+        old = overlay.exact_ids.cpu().tolist()
+        overlay.exact_ids.copy_(torch.tensor(revised, dtype=torch.long, device="cpu"))
+        for target, source in zip(overlay.exact_pair, original, strict=True):
+            target.copy_(source[0, head].index_select(0, overlay.exact_ids))
+        if proof["accepted_prototype"]:
+            for target, source in zip(
+                overlay.prototype_pair, replacement["prototype_pair"], strict=True
+            ):
+                target.copy_(source)
+            overlay.member_keys.copy_(replacement["member_keys"])
+            overlay.dispersion = replacement["dispersion"]
+        evidence.update(
+            selected_extra=list(revised),
+            submodular_seed_extra=old,
+            precision_transaction=policy.precision_transaction,
+            precision_transaction_evidence=proof,
+            original_query_holdout_not_independent_examples=True,
+        )
+        timer.mark("precision_transaction_cpu_and_buffer_updates")
     if policy.component_mode == "exact_members":
         # Reuse already charged promotion buffers. A preparation control,
         # explicitly NOT an uncertainty-triggered repair event.
@@ -820,7 +876,7 @@ def integrated_storage(
         result.shared_tensors = (*result.shared_tensors, *extra)
         result.shared_bytes = _bytes(result.shared_tensors)
         result.initial_bytes = _bytes(
-            (*extra, *(t for layer in result.layers for t in layer.owned_tensors()))
+            (*result.shared_tensors, *(t for layer in result.layers for t in layer.owned_tensors()))
         )
         result.observe()
         return result
