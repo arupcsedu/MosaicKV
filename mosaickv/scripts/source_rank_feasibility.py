@@ -60,7 +60,7 @@ def submit(root, worker, after=None):
     return subprocess.check_output(args, text=True).strip()
 
 
-def prepare(root):
+def prepare(root, *, refined_source=False):
     from evicastkv_projection_source_cpu import metadata_features
 
     from mosaickv.adapters.huggingface.registry import _resolve_model_source
@@ -69,7 +69,15 @@ def prepare(root):
     if root.exists():
         raise FileExistsError("new immutable CPU study root required")
     parent = read(PARENT / "plan.json")
-    jobs, paths = [], [PARENT / "plan.json", SOURCE / "mosaickv/docs/source_rank_feasibility.md"]
+    protocol = "refined_source_feasibility.md" if refined_source else "source_rank_feasibility.md"
+    jobs, paths = [], [PARENT / "plan.json", SOURCE / "mosaickv/docs" / protocol]
+    prior = Path("/scratch/djy8hg/runs/evicastkv/source-rank-feasibility-20261107-v1")
+    if refined_source:
+        decision = read(prior / "analysis/decision.json")
+        if not decision["complete"] or decision["source_factor_feasible_on_both"]:
+            raise ValueError("complete negative pure-rank screen required")
+        paths += [prior / "analysis/decision.json"]
+        paths += [prior / f"workers/{i}/result.json" for i in (0, 1)]
     for i in (0, 1):
         folder = PARENT / f"workers/{i}"
         status = read(folder / "result.json")
@@ -135,6 +143,11 @@ def prepare(root):
                 "-o",
                 "addopts=",
                 "mosaickv/tests/unit/test_source_rank_feasibility.py",
+                *(
+                    ["mosaickv/tests/unit/test_refined_source_feasibility.py"]
+                    if refined_source
+                    else []
+                ),
             ],
             cwd=SOURCE,
             stdout=stream,
@@ -151,11 +164,23 @@ def prepare(root):
             bound_files={str(p): sha(p) for p in paths},
             jobs=jobs,
             ranks=[96, 128],
+            source_family="refined_source" if refined_source else "pure_rank",
+            families=["lut2", "spatial4_binary_residual", "spatial8_binary_residual"]
+            if refined_source
+            else [],
+            expected_cases_per_worker=96 if refined_source else 64,
+            prior_negative_root=str(prior) if refined_source else None,
             layers=list(range(32)),
             checkpoint=str(checkpoint),
             minimum_net_cpu_payload_reduction=0.10,
             source_mse_slack=1e-12,
-            numerical_rule="actual_factor_source_mse_not_greater_than_existing_three_bit",
+            numerical_rule="every_nonexact_image_row_source_mse_not_greater_than_existing_three_bit"
+            if refined_source
+            else "actual_factor_source_mse_not_greater_than_existing_three_bit",
+            literal_refinement="minimal_largest_scalar_errors_or_full_row_charged"
+            if refined_source
+            else None,
+            lloyd_iterations=4 if refined_source else None,
             model_weights_loaded=False,
             benchmark_labels_accessed=False,
             original_six_compaction_backend_implemented=False,
@@ -245,15 +270,43 @@ def worker(root, expected):
             exact = protected_positions(
                 capture["source_memberships"][layer], text, length=x.shape[1]
             ).all(0)
-            part = screen(x, exact, text, tuple(plan["ranks"]))
+            refined_source = plan.get("source_family") == "refined_source"
+            if refined_source:
+                from mosaickv.evaluation.refined_source_feasibility import screen_refined
+
+                config = read(Path(plan["checkpoint"]) / "config.json")["vision_config"]
+                if (config["image_size"], config["patch_size"]) != (336, 14):
+                    raise ValueError("audited pinned raster vision geometry required")
+                part = screen_refined(x, exact, text)
+                if [r["family"] for r in part["rows"]] != plan["families"]:
+                    raise ValueError("registered source families changed")
+            else:
+                part = screen(x, exact, text, tuple(plan["ranks"]))
             for row in part["rows"]:
                 cases.append(dict(row, layer=layer))
             baseline.append(part["baseline"])
-            rank = min(part["candidates"]) if part["candidates"] else None
+            rank = (
+                min(
+                    part["candidates"],
+                    key=lambda k: (
+                        part["candidates"][k]["codes"].numel()
+                        + part["candidates"][k]["other_bytes"],
+                        k,
+                    ),
+                )
+                if part["candidates"] and refined_source
+                else min(part["candidates"])
+                if part["candidates"]
+                else None
+            )
             adaptive.append(part["baseline"] if rank is None else part["candidates"][rank])
             chosen.append(rank)
             write_once(folder / f"layer-{layer:02}.json", dict(rows=part["rows"], chosen_rank=rank))
         old, new = cpu_serialized_storage(baseline), cpu_serialized_storage(adaptive)
+        if plan.get("source_family") == "refined_source":
+            prior = read(Path(plan["prior_negative_root"]) / f"workers/{i}/result.json")
+            if old != prior["result"]["baseline"]:
+                raise ValueError("unchanged baseline source/codec accounting differs")
         reduction = 1 - new["net_cpu_payload_bytes"] / old["net_cpu_payload_bytes"]
         result = dict(
             baseline=old,
@@ -290,7 +343,8 @@ def analyze(root, expected):
         records.append(
             read(p) if p.exists() else dict(status="missing", errors=["missing worker"], cases=[])
         )
-    complete = all(r["status"] == "completed" and len(r["cases"]) == 64 for r in records)
+    count = plan.get("expected_cases_per_worker", 64)
+    complete = all(r["status"] == "completed" and len(r["cases"]) == count for r in records)
     feasible = complete and all(r["result"]["local_screen_passed"] for r in records)
     out = root / "analysis"
     out.mkdir(exist_ok=False)
@@ -302,7 +356,8 @@ def analyze(root, expected):
             source_factor_feasible_on_both=feasible,
             records=records,
             actual_cases=sum(len(r["cases"]) for r in records),
-            expected_cases=128,
+            expected_cases=count * 2,
+            source_family=plan.get("source_family", "pure_rank"),
             model_or_gpu_quality_established=False,
             gpu_followup_authorized=False,
             preserve_existing_runtime=True,
@@ -338,9 +393,10 @@ def main():
     p.add_argument("action", choices=("prepare", "worker", "analyze"))
     p.add_argument("--root", required=True, type=Path)
     p.add_argument("--plan-sha")
+    p.add_argument("--refined-source", action="store_true", help="CPU-only source-codec study")
     a = p.parse_args()
     return (
-        prepare(a.root)
+        prepare(a.root, refined_source=a.refined_source)
         if a.action == "prepare"
         else worker(a.root, a.plan_sha)
         if a.action == "worker"
