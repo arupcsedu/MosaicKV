@@ -37,8 +37,48 @@ def checked(root, expected):
     return plan
 
 
-def component_policies(proposal_study=False):
+def component_policies(proposal_study=False, allocation_study=False):
     base = OverlayPolicy(record_phase_timings=True)
+    if allocation_study:
+        improved = replace(
+            base,
+            forecast_distribution="individual_queries",
+            prototype_representation="parent_residual_delta",
+        )
+        all_adaptive = replace(
+            improved,
+            utility_signal="parent_reconstruction_error",
+            demand_weighted_coverage=True,
+            routing_signal="parent_error_opportunity",
+        )
+        return {
+            "full": asdict(base),
+            "individual_delta": asdict(improved),
+            "individual_delta_fast_graph": asdict(
+                replace(improved, graph_accumulation="segmented_tensor_topk")
+            ),
+            "error_utility": asdict(
+                replace(improved, utility_signal="parent_reconstruction_error")
+            ),
+            "demand_graph": asdict(replace(improved, demand_weighted_coverage=True)),
+            "opportunity_route": asdict(
+                replace(improved, routing_signal="parent_error_opportunity")
+            ),
+            "all_adaptive": asdict(all_adaptive),
+            **{
+                name: asdict(replace(all_adaptive, component_mode=name))
+                for name in (
+                    "no_forecast",
+                    "no_graph",
+                    "no_value",
+                    "modular_selection",
+                    "exact_members",
+                    "no_repair",
+                    "forced_repair",
+                )
+            },
+            "parent_reserved": asdict(replace(base, component_mode="parent_reserved")),
+        }
     if not proposal_study:
         return {mode: asdict(replace(base, component_mode=mode)) for mode in COMPONENT_MODES}
     return {
@@ -58,7 +98,8 @@ def component_policies(proposal_study=False):
     }
 
 
-def prepare(root, proposal_study=False):
+def prepare(root, proposal_study=False, allocation_study=False):
+    proposal_study = proposal_study or allocation_study
     if root.exists():
         raise FileExistsError("new immutable component output root required")
     source_sha = clean_source(SOURCE)
@@ -124,6 +165,8 @@ def prepare(root, proposal_study=False):
                 "mosaickv/tests/unit/test_storage_six_overlay.py",
                 "mosaickv/tests/unit/test_storage_component_gate.py",
                 "mosaickv/tests/unit/test_residual_delta_prototype.py",
+                "mosaickv/tests/unit/test_storage_error_aware.py",
+                "mosaickv/tests/unit/test_opportunity_demand.py",
                 "mosaickv/tests/unit/test_bounded_probe_horizon.py",
                 "mosaickv/tests/unit/test_streaming_source_constructor.py",
                 "mosaickv/tests/unit/test_prototype_rope.py",
@@ -146,8 +189,9 @@ def prepare(root, proposal_study=False):
             parent=parent,
             options=options,
             bound_files={str(p): sha(p) for p in paths},
-            arms=("full_kv", "parent", *component_policies(proposal_study)),
-            component_policies=component_policies(proposal_study),
+            arms=("full_kv", "parent", *component_policies(proposal_study, allocation_study)),
+            component_policies=component_policies(proposal_study, allocation_study),
+            component_reference_arm="all_adaptive" if allocation_study else "full",
             overlay_policy=asdict(OverlayPolicy(record_phase_timings=True)),
             output_predictions=128,
             guard_predictions=32,
@@ -259,7 +303,9 @@ def worker(root, expected):
                     )
 
                     def capture(payload, record=row):
-                        path = folder / f"layer-{payload['layer']}-evaluation-only.pt"
+                        path = (
+                            folder / f"{record['arm']}-layer-{payload['layer']}-evaluation-only.pt"
+                        )
                         if path.exists():
                             raise FileExistsError("immutable routed capture already exists")
                         torch.save(payload, path)
@@ -269,7 +315,7 @@ def worker(root, expected):
                         adapter,
                         policy,
                         reader_options=options,
-                        diagnostic_capture=capture if arm == "full" else None,
+                        diagnostic_capture=capture if arm in ("full", "all_adaptive") else None,
                     ) as proof:
                         values, detail = campaign.execute(
                             adapter, inputs, transport, "mosaickv_exact", audit=False
@@ -336,6 +382,10 @@ def worker(root, expected):
                 errors.append(
                     "preloaded exact-members control differs from forced original restoration"
                 )
+            if "individual_delta_fast_graph" in values_by_arm and not torch.equal(
+                values_by_arm["individual_delta_fast_graph"], values_by_arm["individual_delta"]
+            ):
+                errors.append("segmented graph execution changed a final model logit bit")
     except Exception:
         errors.append(traceback.format_exc())
     write_once(
@@ -388,8 +438,9 @@ def analyze(root, expected):
             for r in rows
             if r["sample_id"] == sample["sample_id"] and r["status"] == "completed"
         }
-        if "full" in by_arm:
-            capture = by_arm["full"].get("evaluation_capture")
+        reference_arm = plan.get("component_reference_arm", "full")
+        if reference_arm in by_arm:
+            capture = by_arm[reference_arm].get("evaluation_capture")
             if capture is not None:
                 if sha(Path(capture["path"])) != capture["sha256"]:
                     raise ValueError("immutable routed capture changed")
@@ -397,9 +448,9 @@ def analyze(root, expected):
                     torch.load(capture["path"], map_location="cpu", weights_only=True)
                 )
             effects[sample["sample_id"]] = {
-                arm: stage_effect(by_arm["full"]["fullkv_readout"], row["fullkv_readout"])
+                arm: stage_effect(by_arm[reference_arm]["fullkv_readout"], row["fullkv_readout"])
                 for arm, row in by_arm.items()
-                if arm in component_names and arm != "full"
+                if arm in component_names and arm != reference_arm
             }
             from mosaickv.evaluation.storage_component_gate import logit_diagnostics
 
@@ -423,7 +474,7 @@ def analyze(root, expected):
             aligned[sample["sample_id"]] = dict(
                 common_fullkv_prefix_predictions=support,
                 readouts=common,
-                effects={a: stage_effect(common["full"], v) for a, v in common.items()},
+                effects={a: stage_effect(common[reference_arm], v) for a, v in common.items()},
                 evaluation_only_not_proposal_input=True,
             )
     scores = {}
@@ -535,9 +586,10 @@ def main():
     p.add_argument("--plan-sha")
     p.add_argument("--phase", default="components")
     p.add_argument("--proposal-study", action="store_true")
+    p.add_argument("--allocation-study", action="store_true")
     a = p.parse_args()
     if a.action == "prepare":
-        prepare(a.root, a.proposal_study)
+        prepare(a.root, a.proposal_study, a.allocation_study)
     elif a.action == "worker":
         return worker(a.root, a.plan_sha)
     elif a.action == "analyze":

@@ -11,7 +11,7 @@ exact protection, lossless history and execution optimizations are unchanged.
 from __future__ import annotations
 
 from contextlib import ExitStack, contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from unittest.mock import patch
 
 import torch
@@ -44,6 +44,10 @@ class OverlayPolicy:
     record_phase_timings: bool = False
     forecast_distribution: str = "mean_query"
     prototype_representation: str = "absolute_kv"
+    utility_signal: str = "original_value"
+    demand_weighted_coverage: bool = False
+    routing_signal: str = "value_energy"
+    graph_accumulation: str = "preselected"
 
     def __post_init__(self):
         if not self.layers or tuple(sorted(set(self.layers))) != self.layers:
@@ -72,6 +76,14 @@ class OverlayPolicy:
             raise ValueError("registered mean-query or individual-query forecast required")
         if self.prototype_representation not in ("absolute_kv", "parent_residual_delta"):
             raise ValueError("registered absolute or parent-residual prototype required")
+        if self.utility_signal not in ("original_value", "parent_reconstruction_error"):
+            raise ValueError("registered original-value or parent-error utility required")
+        if self.routing_signal not in ("value_energy", "parent_error_opportunity"):
+            raise ValueError("registered routing signal required")
+        if type(self.demand_weighted_coverage) is not bool:
+            raise ValueError("explicit demand-weighted coverage flag required")
+        if self.graph_accumulation not in ("preselected", "segmented_tensor_topk"):
+            raise ValueError("registered sparse edge implementation required")
 
 
 class _Phases:
@@ -284,7 +296,17 @@ def plan_layer(
     # source-index tie break. No benchmark answers or reference logits exist.
     demand = probabilities[0, :, -16:].float().mean(1)
     energy = original[1][0].float().square().sum(-1)
-    head = int((demand * energy).sum(-1).argmax())
+    if policy.routing_signal == "parent_error_opportunity":
+        if parent_pair is None:
+            raise ValueError("actual parent required for opportunity routing")
+        error = (original[1][0].float() - parent_pair[1][0].float()).square().sum(-1)
+        available = (demand * error).masked_fill(protected.to(error.device), 0.0)
+        # Optimistic, feasible-cardinality V-error surrogate, not a logit
+        # certificate. Deterministic lower-head tie break via argmax.
+        opportunities = available.topk(min(policy.extra_exact_positions, n), dim=-1).values.sum(-1)
+        head = int(opportunities.argmax())
+    else:
+        head = int((demand * energy).sum(-1).argmax())
     required = tuple(protected[head].nonzero().flatten().tolist())
     pair = tuple(t[:, head : head + 1] for t in original)
     full = FullKVState.from_tensors(
@@ -301,8 +323,14 @@ def plan_layer(
     c, s = phases[0][:, None, -window:], phases[1][:, None, -window:]
     rotated = torch.cat((-query[..., d // 2 :], query[..., : d // 2]), -1)
     query = query * c + rotated * s
+    individual_probabilities = None
+    if policy.forecast_distribution == "individual_queries" or policy.demand_weighted_coverage:
+        individual_probabilities = torch.softmax(
+            (query[0, 0].float() @ pair[0][0, 0].float().T) / d**0.5, -1
+        )
     if policy.component_mode == "no_forecast":
         prediction = demand[head]
+        individual_probabilities = probabilities[0, head, -window:].float()
         forecast_mode = "observed_prompt_attention_no_forecast"
     else:
         forecast = build_query_forecast(
@@ -321,9 +349,7 @@ def plan_layer(
         if policy.forecast_distribution == "individual_queries":
             # Forecast attention from the distribution, not attention of its
             # mean query. Individual observations survive the nonlinearity.
-            prediction = torch.softmax(
-                (query[0, 0].float() @ pair[0][0, 0].float().T) / d**0.5, -1
-            ).mean(0)
+            prediction = individual_probabilities.mean(0)
         else:
             prediction = torch.softmax(
                 (forecast.layers[0][0].prompt_mean.float().reshape(1, d) @ pair[0][0, 0].float().T)
@@ -338,13 +364,23 @@ def plan_layer(
             enabled=policy.component_mode != "no_graph",
             max_neighbors=4,
             similarity_chunk_size=128,
+            edge_accumulation_mode=policy.graph_accumulation,
         ),
         prompt_attentions=(probabilities[:, head : head + 1],),
         prompt_attention_query_window=window,
     )
     timer.mark("sparse_graph")
+    utility_graph = graph
+    if policy.utility_signal == "parent_reconstruction_error":
+        if parent_pair is None:
+            raise ValueError("actual parent required for error-aware utility")
+        errors = (original[1][0, head].float() - parent_pair[1][0, head].float()).cpu().numpy()
+        utility_graph = replace(
+            graph,
+            nodes=tuple(replace(node, pooled_value=errors[node.node_id]) for node in graph.nodes),
+        )
     utilities = compute_block_utilities(
-        graph,
+        utility_graph,
         UtilityConfig(
             lambda_v=0.0 if policy.component_mode == "no_value" else -0.25,
             lambda_o=0.0 if policy.component_mode == "no_value" else -0.25,
@@ -354,20 +390,38 @@ def plan_layer(
         rope_aware=True,
     )
     timer.mark("value_utility")
-    objective = BudgetedObjective(
-        graph,
-        utilities,
-        SelectionConfig(
-            lambda_g=0.0 if policy.component_mode == "modular_selection" else -0.1,
-            lambda_m=0.0 if policy.component_mode == "modular_selection" else -0.1,
-            stop_on_nonpositive_gain=False,
-            minimum_stratum_fraction=0.0,
-        ),
+    selection_config = SelectionConfig(
+        lambda_g=0.0 if policy.component_mode == "modular_selection" else -0.1,
+        lambda_m=0.0 if policy.component_mode == "modular_selection" else -0.1,
+        stop_on_nonpositive_gain=False,
+        minimum_stratum_fraction=0.0,
     )
     count = min(n - policy.prototype_members, len(required) + policy.extra_exact_positions)
     if count <= len(required):
         raise RuntimeError("no feasible optional protection/prototype capacity")
+    objective = BudgetedObjective(
+        graph,
+        utilities,
+        selection_config,
+    )
+    if policy.demand_weighted_coverage:
+        from mosaickv.selection.opportunity_demand import (
+            DemandWeightedObjective,
+            make_route_evidence,
+        )
+
+        evidence = make_route_evidence(
+            full,
+            {(0, 0): individual_probabilities.detach().cpu().numpy()},
+            prediction.detach().cpu().numpy(),
+            {(0, 0): count},
+        )
+        objective = DemandWeightedObjective(
+            graph, utilities, selection_config, evidence, floor=0.95
+        )
     selected = lazy_greedy_select(objective, SelectionBudget(count * d * 4, BudgetUnit.BYTES))
+    if policy.demand_weighted_coverage:
+        selected = objective.protect_selection(selected)
     timer.mark("budgeted_selection")
     anchors = tuple(
         node for node in selected.selected_node_ids if str(full.blocks[node].modality) == "image"
@@ -387,7 +441,7 @@ def plan_layer(
         anchors = tuple(a for a in anchors if a in feasible)
     if not anchors:
         raise RuntimeError("real image prototype requires a compatible selected image anchor")
-    anchor = max(anchors, key=lambda node: (float(prediction[node]), -node))
+    anchor = max(anchors, key=lambda node: (float(prediction[node].detach()), -node))
     transform = RotaryPrototypeKeyTransform(
         phases[0][:, None], phases[1][:, None], "actual_pinned_LLaVA_Llama_phase_v1"
     )
@@ -473,6 +527,11 @@ def plan_layer(
         prototype_anchor_position=record.anchor_logical_position,
         delta_prototype_uniform_weights=policy.prototype_representation == "parent_residual_delta",
         parent_source_storage_retired=False,
+        utility_signal=policy.utility_signal,
+        routing_signal=policy.routing_signal,
+        demand_weighted_coverage=policy.demand_weighted_coverage,
+        graph_accumulation=policy.graph_accumulation,
+        per_query_mass_guard=getattr(objective, "guard_report", None),
         disabled_components={
             "parent_reserved": ["all_overlay_reads"],
             "no_forecast": ["future_query_forecast"],
@@ -612,7 +671,11 @@ def integrated_storage(
             packet = super().__call__(index, attention, original, args, kwargs, output)
             if policy.enabled and index in policy.layers:
                 approximation = None
-                if policy.prototype_representation == "parent_residual_delta":
+                if (
+                    policy.prototype_representation == "parent_residual_delta"
+                    or policy.utility_signal == "parent_reconstruction_error"
+                    or policy.routing_signal == "parent_error_opportunity"
+                ):
                     from time import perf_counter
 
                     torch.cuda.synchronize()

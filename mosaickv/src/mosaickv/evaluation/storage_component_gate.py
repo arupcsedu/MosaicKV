@@ -140,8 +140,13 @@ def precision_evidence(payload):
             for t, source in zip(pair, original, strict=True):
                 t[ids] = source[ids]
         if proto:
-            pair[0][members] = payload["overlay"]["member_keys"].double()
-            pair[1][members] = payload["overlay"]["prototype_value"].double()
+            keys = payload["overlay"]["member_keys"].double()
+            values = payload["overlay"]["prototype_value"].double()
+            if payload["evidence"].get("prototype_representation") == "parent_residual_delta":
+                keys = (parent[0][members] + keys).to(torch.bfloat16).double()
+                values = (parent[1][members] + values).to(torch.bfloat16).double()
+            pair[0][members] = keys
+            pair[1][members] = values
         if restore:
             for t, source in zip(pair, original, strict=True):
                 t[members] = source[members]

@@ -100,6 +100,7 @@ def study(payload):
     )
     candidate = dict(
         payload,
+        evidence=dict(payload["evidence"], prototype_representation="absolute_kv"),
         overlay=dict(payload["overlay"], member_keys=effective[0], prototype_value=effective[1]),
     )
     result = precision_evidence(candidate)
