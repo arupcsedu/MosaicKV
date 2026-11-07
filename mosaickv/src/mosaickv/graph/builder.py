@@ -25,6 +25,48 @@ from mosaickv.graph.types import (
 )
 
 _positional_search = ContextVar("evicastkv_positional_graph_search", default="reference")
+_cosine_search = ContextVar("evicastkv_cosine_topk_search", default="stable_sort")
+
+
+@contextmanager
+def cosine_search(mode):
+    if mode not in ("stable_sort", "partition"):
+        raise ValueError("registered stable-sort/partition cosine search required")
+    token = _cosine_search.set(mode)
+    try:
+        yield
+    finally:
+        _cosine_search.reset(token)
+
+
+def _positive_partition_topk(scores, self_columns, count):
+    """Exactly the positive descending-score/lower-column-ID top-k set.
+
+    Partition determines the cutoff, then a prefix rank resolves ALL ties in
+    original sorted-node-ID order. Never trust argpartition's arbitrary ties.
+    Return COO row/column order; final graph sorting is unchanged.
+    """
+    values = np.asarray(scores)
+    diagonal = np.asarray(self_columns, dtype=np.int64)
+    if (
+        values.ndim != 2
+        or values.shape[1] < 1
+        or diagonal.shape != (values.shape[0],)
+        or type(count) is not int
+        or count < 1
+        or not bool(np.isfinite(values).all())
+        or bool(((diagonal < 0) | (diagonal >= values.shape[1])).any())
+    ):
+        raise ValueError("finite score tiles, valid self columns and positive top-k required")
+    work = values.copy()
+    work[np.arange(len(work)), diagonal] = -np.inf
+    k = min(count, work.shape[1])
+    cutoff = np.partition(work, work.shape[1] - k, axis=1)[:, work.shape[1] - k]
+    above = work > cutoff[:, None]
+    ties = work == cutoff[:, None]
+    needed = k - np.count_nonzero(above, axis=1)
+    retained = (above | (ties & (np.cumsum(ties, axis=1) <= needed[:, None]))) & (work > 0)
+    return np.nonzero(retained)
 
 
 @contextmanager
@@ -364,6 +406,18 @@ def _add_cosine_edges(
             source_ids = node_ids[start : start + config.similarity_chunk_size]
             score_tile = matrix[start : start + len(source_ids)] @ matrix.T
             if unrestricted_group:
+                if _cosine_search.get() == "partition" and accumulator._uses_segmented_topk:
+                    row_indices, columns = _positive_partition_topk(
+                        score_tile, np.arange(start, start + len(source_ids)), config.max_neighbors
+                    )
+                    accumulator._add_preselected_array(
+                        np.asarray(source_ids, dtype=np.int64)[row_indices],
+                        np.asarray(node_ids, dtype=np.int64)[columns],
+                        edge_type,
+                        score_tile[row_indices, columns],
+                        source_weight,
+                    )
+                    continue
                 # Columns follow sorted node IDs. A stable descending sort is
                 # therefore exactly the documented lower-node-ID tie break,
                 # but performs one vectorized ordering operation per tile

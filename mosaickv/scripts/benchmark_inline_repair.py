@@ -40,7 +40,7 @@ def checked(root, expected):
     return plan
 
 
-def prepare(root, indexed_graph=False):
+def prepare(root, indexed_graph=False, graph_gate_root=None):
     source = clean_source(SOURCE)
     if root.exists():
         raise FileExistsError("new immutable paired root required")
@@ -48,9 +48,10 @@ def prepare(root, indexed_graph=False):
     if not decision["execution_passed"]:
         raise ValueError("bitwise inline/forced parity gate must pass before timing")
     if indexed_graph:
-        gate = Path(
-            "/scratch/djy8hg/runs/evicastkv/indexed-positional-graph-20261107-v1/analysis/decision.json"
+        graph_gate_root = graph_gate_root or Path(
+            "/scratch/djy8hg/runs/evicastkv/indexed-positional-graph-20261107-v1"
         )
+        gate = graph_gate_root / "analysis/decision.json"
         if read(gate).get("execution_passed") is not True:
             raise ValueError("actual graph/logit parity gate must pass first")
     parent = read(GATE / "plan.json")
@@ -77,8 +78,21 @@ def prepare(root, indexed_graph=False):
         for name, inline in (("original_probe", False), ("inline", True))
     }
     if indexed_graph:
-        policies["inline"]["graph_positional_search"] = "indexed"
-        paths.append(gate)
+        graph_plan = read(graph_gate_root / "plan.json")
+        if digest(graph_plan["parent"]["config"]) != digest(parent["parent"]["config"]) or digest(
+            read(graph_gate_root / "inputs.json")
+        ) != digest(read(GATE / "inputs.json")):
+            raise ValueError("graph gate uses different model or input controls")
+        policies = dict(
+            original_probe=graph_plan["component_policies"]["full"],
+            inline=graph_plan["component_policies"]["inline_indexed"],
+        )
+        runtime_fields = {"inline_repair", "graph_positional_search", "graph_cosine_topk"}
+        if {k: v for k, v in policies["original_probe"].items() if k not in runtime_fields} != {
+            k: v for k, v in policies["inline"].items() if k not in runtime_fields
+        }:
+            raise ValueError("paired methods differ in algorithm, budget or quality policy")
+        paths += [gate, graph_gate_root / "plan.json", graph_gate_root / "inputs.json"]
     root.mkdir(parents=True)
     write_once(root / "inputs.json", read(GATE / "inputs.json"))
     with (root / "cpu.txt").open("x") as output:
@@ -384,9 +398,10 @@ def main():
     parser.add_argument("--plan-sha")
     parser.add_argument("--phase", default="inline_pair")
     parser.add_argument("--indexed-graph", action="store_true")
+    parser.add_argument("--graph-gate-root", type=Path)
     args = parser.parse_args()
     if args.action == "prepare":
-        return prepare(args.root, args.indexed_graph)
+        return prepare(args.root, args.indexed_graph, args.graph_gate_root)
     if args.action == "worker":
         return worker(args.root, args.plan_sha)
     if args.action == "analyze":

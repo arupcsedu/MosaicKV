@@ -57,6 +57,7 @@ class OverlayPolicy:
     readout_target: str = "conditional_head"
     inline_repair: bool = False
     graph_positional_search: str = "reference"
+    graph_cosine_topk: str = "stable_sort"
 
     def __post_init__(self):
         if not self.layers or tuple(sorted(set(self.layers))) != self.layers:
@@ -123,6 +124,13 @@ class OverlayPolicy:
             raise ValueError("explicit inline repair activation required")
         if self.graph_positional_search not in ("reference", "indexed"):
             raise ValueError("registered positional-graph execution policy required")
+        if self.graph_cosine_topk not in ("stable_sort", "partition"):
+            raise ValueError("registered cosine top-k execution policy required")
+        if (
+            self.graph_cosine_topk == "partition"
+            and self.graph_accumulation != "segmented_tensor_topk"
+        ):
+            raise ValueError("partition top-k requires the segmented graph implementation")
         if self.inline_repair and (
             self.layers != (31,)
             or not self.enabled
@@ -422,9 +430,9 @@ def plan_layer(
             ).reshape(-1)
         forecast_mode = forecast.provenance.mode.value
     timer.mark("prompt_queries_and_forecast")
-    from mosaickv.graph.builder import positional_search
+    from mosaickv.graph.builder import cosine_search, positional_search
 
-    with positional_search(policy.graph_positional_search):
+    with positional_search(policy.graph_positional_search), cosine_search(policy.graph_cosine_topk):
         graph = build_evidence_graph(
             full,
             GraphConfig(
@@ -606,6 +614,7 @@ def plan_layer(
         graph_nodes=len(graph.nodes),
         graph_edges=len(graph.weights),
         graph_positional_search=policy.graph_positional_search,
+        graph_cosine_topk=policy.graph_cosine_topk,
         cross_modal_edges=sum(
             graph.nodes[a].block.modality != graph.nodes[b].block.modality
             for a, b in zip(graph.row_indices, graph.column_indices, strict=True)

@@ -55,9 +55,14 @@ def component_policies(
         policies = component_policies(inline_study=True)
         return {
             **policies,
-            "full_indexed": dict(policies["full"], graph_positional_search="indexed"),
+            "full_indexed": dict(
+                policies["full"], graph_positional_search="indexed", graph_cosine_topk="partition"
+            ),
             "inline_indexed": dict(
-                policies["full"], graph_positional_search="indexed", inline_repair=True
+                policies["full"],
+                graph_positional_search="indexed",
+                graph_cosine_topk="partition",
+                inline_repair=True,
             ),
         }
     if inline_study:
@@ -446,6 +451,7 @@ def prepare(
                 "mosaickv/tests/unit/test_indexed_positional_graph.py",
                 "mosaickv/tests/unit/test_graph.py",
                 "mosaickv/tests/unit/test_direct_attention_pooling.py",
+                "mosaickv/tests/unit/test_partition_graph_topk.py",
                 "mosaickv/tests/unit/test_opportunity_demand.py",
                 "mosaickv/tests/unit/test_bounded_probe_horizon.py",
                 "mosaickv/tests/unit/test_streaming_source_constructor.py",
