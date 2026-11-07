@@ -654,7 +654,7 @@ def worker(root, expected):
         # Reverse component order on worker 1; fixed controls always first.
         policies = plan.get("component_policies", component_policies())
         component_names = tuple(policies)
-        components = component_names if index == 0 else tuple(reversed(component_names))
+        components = component_names if index % 2 == 0 else tuple(reversed(component_names))
         for arm in ("full_kv", "parent", *components):
             gc.collect()
             row = dict(
@@ -904,7 +904,8 @@ def analyze(root, expected):
     arms = plan.get("arms", ARMS)
     component_names = tuple(plan.get("component_policies", component_policies()))
     rows, errors, matches = [], [], {}
-    for index in (0, 1):
+    input_count = len(read(root / "inputs.json"))
+    for index in range(input_count):
         folder = root / f"workers/{index}"
         result = read(folder / "result.json") if (folder / "result.json").exists() else {}
         if result.get("status") != "completed":
@@ -912,7 +913,7 @@ def analyze(root, expected):
         rows += [read(p) for p in sorted(folder.glob("[0-9][0-9]-*.json"))]
         if (folder / "storage_matching.json").exists():
             matches[str(index)] = read(folder / "storage_matching.json")
-    expected_rows = 2 * len(arms)
+    expected_rows = input_count * len(arms)
     if len(rows) != expected_rows:
         errors.append(f"incomplete rows {len(rows)}/{expected_rows}")
     for row in rows:
@@ -1084,7 +1085,7 @@ def analyze(root, expected):
         "",
         f"Completed records: {len(rows)}/{expected_rows}. Errors: {len(errors)}.",
         "",
-        "Two consumed images, all 128 predictions. No independent superiority test.",
+        f"{input_count} consumed images, all 128 predictions. No independent superiority test.",
         "Parent-reserved is a real-allocation inactive control, not an efficient parent benchmark.",
         "Peak is a decode-owned counter. All actual storage boundaries are checked, not assumed.",
         "",
