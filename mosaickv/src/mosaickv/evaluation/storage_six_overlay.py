@@ -58,6 +58,7 @@ class OverlayPolicy:
     inline_repair: bool = False
     graph_positional_search: str = "reference"
     graph_cosine_topk: str = "stable_sort"
+    skip_discarded_exact: bool = False
 
     def __post_init__(self):
         if not self.layers or tuple(sorted(set(self.layers))) != self.layers:
@@ -122,6 +123,10 @@ class OverlayPolicy:
             raise ValueError("FullKV draft target requires active readout selection")
         if type(self.inline_repair) is not bool:
             raise ValueError("explicit inline repair activation required")
+        if type(self.skip_discarded_exact) is not bool or (
+            self.skip_discarded_exact and self.precision_transaction != "prototype"
+        ):
+            raise ValueError("discarded-search optimization requires prototype-only fitting")
         if self.graph_positional_search not in ("reference", "indexed"):
             raise ValueError("registered positional-graph execution policy required")
         if self.graph_cosine_topk not in ("stable_sort", "partition"):
@@ -719,7 +724,11 @@ def plan_layer(
                 prototype_value=overlay.prototype_pair[1].detach().cpu().clone(),
             ),
         )
-        proof = plan_precision_transaction(payload, mode=policy.precision_transaction)
+        proof = plan_precision_transaction(
+            payload,
+            mode=policy.precision_transaction,
+            skip_discarded_exact=policy.skip_discarded_exact,
+        )
         replacement = proof.pop("replacement")
         revised = replacement["exact_ids"]
         if len(revised) != len(extras) or set(revised) & (set(required) | set(ids)):

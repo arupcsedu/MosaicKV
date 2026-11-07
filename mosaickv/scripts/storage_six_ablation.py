@@ -56,12 +56,16 @@ def component_policies(
         return {
             **policies,
             "full_indexed": dict(
-                policies["full"], graph_positional_search="indexed", graph_cosine_topk="partition"
+                policies["full"],
+                graph_positional_search="indexed",
+                graph_cosine_topk="partition",
+                skip_discarded_exact=True,
             ),
             "inline_indexed": dict(
                 policies["full"],
                 graph_positional_search="indexed",
                 graph_cosine_topk="partition",
+                skip_discarded_exact=True,
                 inline_repair=True,
             ),
         }
@@ -301,7 +305,12 @@ def prepare(
     graph_runtime_study=False,
     external_graph_parity_root=None,
     after_gpu_job=None,
+    paired_after_graph_root=None,
 ):
+    if paired_after_graph_root is not None and (
+        not graph_runtime_study or Path(paired_after_graph_root).exists()
+    ):
+        raise ValueError("new paired-runtime root requires the registered graph parity study")
     inline_study = inline_study or graph_runtime_study
     replacement_study = replacement_study or inline_study or graph_runtime_study
     global_draft_study = global_draft_study or horizon_study
@@ -452,6 +461,7 @@ def prepare(
                 "mosaickv/tests/unit/test_graph.py",
                 "mosaickv/tests/unit/test_direct_attention_pooling.py",
                 "mosaickv/tests/unit/test_partition_graph_topk.py",
+                "mosaickv/tests/unit/test_skip_discarded_exact.py",
                 "mosaickv/tests/unit/test_opportunity_demand.py",
                 "mosaickv/tests/unit/test_bounded_probe_horizon.py",
                 "mosaickv/tests/unit/test_streaming_source_constructor.py",
@@ -534,6 +544,9 @@ def prepare(
             indexed_positional_graph_runtime_study=graph_runtime_study,
             external_graph_parity=cross_source,
             gpu_start_after_any_job=after_gpu_job,
+            paired_after_graph_root=str(paired_after_graph_root)
+            if paired_after_graph_root
+            else None,
             storage_boundary_version="shared_initial_final_peak_v2",
             component_reference_arm=(
                 "transaction_joint_guarded"
@@ -721,6 +734,13 @@ def worker(root, expected):
                             adapter, inputs, transport, "mosaickv_exact", audit=False
                         )
                     row["mechanism_evidence"] = proof
+                    if policy.skip_discarded_exact and any(
+                        p["precision_transaction_evidence"]["discarded_exact_search_evaluated"]
+                        for p in proof["layers"].values()
+                    ):
+                        raise RuntimeError(
+                            "configured discarded-search optimization did not engage"
+                        )
                     if (
                         plan.get("evaluation_only_fixed_plan_horizon_audit")
                         and policy.readout_selection != "none"
@@ -1168,6 +1188,7 @@ def main():
     p.add_argument("--graph-runtime-study", action="store_true")
     p.add_argument("--graph-parity-root", type=Path)
     p.add_argument("--after-gpu-job")
+    p.add_argument("--paired-after-graph-root", type=Path)
     a = p.parse_args()
     if a.action == "prepare":
         prepare(
@@ -1184,11 +1205,31 @@ def main():
             a.graph_runtime_study,
             a.graph_parity_root,
             a.after_gpu_job,
+            a.paired_after_graph_root,
         )
     elif a.action == "worker":
         return worker(a.root, a.plan_sha)
     elif a.action == "analyze":
         analyze(a.root, a.plan_sha)
+        # Finite, write-once same-input runtime follow-up only. Never launch
+        # new cohorts or a paper campaign from a successful diagnostic exit.
+        plan = checked(a.root, a.plan_sha)
+        followup = plan.get("paired_after_graph_root")
+        if followup:
+            decision = read(a.root / "analysis/decision.json")
+            if decision["execution_passed"]:
+                from benchmark_inline_repair import prepare as paired_prepare
+
+                paired_prepare(Path(followup), indexed_graph=True, graph_gate_root=a.root)
+            else:
+                write_once(
+                    a.root / "analysis/paired_followup_blocked.json",
+                    dict(
+                        reason="graph/logit parity failed",
+                        paired_root=followup,
+                        new_cohort_authorized=False,
+                    ),
+                )
     else:
         checked(a.root, a.plan_sha)
         return subprocess.call(

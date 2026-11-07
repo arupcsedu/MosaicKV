@@ -43,6 +43,7 @@ def frozen_policies(seed):
                 base,
                 component_mode=mode,
                 precision_transaction="none" if mode == "no_forecast" else "prototype",
+                skip_discarded_exact=False if mode == "no_forecast" else base.skip_discarded_exact,
             )
         )
         for mode in COMPONENT_MODES

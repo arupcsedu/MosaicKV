@@ -141,7 +141,7 @@ def restoration_errors(queries, original, current, candidates):
 
 
 @torch.inference_mode()
-def plan_precision_transaction(payload, *, mode="joint_guarded"):
+def plan_precision_transaction(payload, *, mode="joint_guarded", skip_discarded_exact=False):
     """Pure training-free online planner; original PREFILL data, not future oracles.
 
     Strict schema excludes benchmark answers, references and generated logits.
@@ -158,6 +158,8 @@ def plan_precision_transaction(payload, *, mode="joint_guarded"):
         raise ValueError("strict label-free precision input schema required")
     if mode not in ("exact", "prototype", "joint_guarded"):
         raise ValueError("registered precision transaction required")
+    if type(skip_discarded_exact) is not bool or (skip_discarded_exact and mode != "prototype"):
+        raise ValueError("only a discarded prototype-only exact branch may be skipped")
     if set(payload["evidence"]) != {
         "selected_extra",
         "prototype_members",
@@ -193,26 +195,35 @@ def plan_precision_transaction(payload, *, mode="joint_guarded"):
         value[list(ids)] = source[list(ids)]
     # Keep original query positions for the causal mask by evaluating all
     # queries, but only EARLY scores may choose the next exact row.
-    candidate = tuple(t.clone() for t in fixed)
-    selected, decisions = [], []
-    available = sorted(set(range(len(parent[0]))) - forbidden)
-    split = len(queries) // 2
-    for _ in ids:
-        remaining = tuple(i for i in available if i not in selected)
-        errors = restoration_errors(queries, original, candidate, remaining)
-        slot = int(errors[:split].mean(0).argmin())
-        position = remaining[slot]
-        selected.append(position)
-        decisions.append(
-            dict(position=position, early_candidate_error=float(errors[:split, slot].mean()))
+    before = metrics(queries, baseline, original)
+    if skip_discarded_exact:
+        # In prototype-only mode exact_ok is always false. None of these
+        # discarded candidate scores feeds the weighted prototype or final
+        # joint veto. Keep its absence explicit, not fabricated diagnostics.
+        selected, decisions, after, verified, strict = list(ids), [], before, False, False
+    else:
+        candidate = tuple(t.clone() for t in fixed)
+        selected, decisions = [], []
+        available = sorted(set(range(len(parent[0]))) - forbidden)
+        split = len(queries) // 2
+        for _ in ids:
+            remaining = tuple(i for i in available if i not in selected)
+            errors = restoration_errors(queries, original, candidate, remaining)
+            slot = int(errors[:split].mean(0).argmin())
+            position = remaining[slot]
+            selected.append(position)
+            decisions.append(
+                dict(position=position, early_candidate_error=float(errors[:split, slot].mean()))
+            )
+            for value, source in zip(candidate, original, strict=True):
+                value[position] = source[position]
+        after = metrics(queries, candidate, original)
+        verified = all(
+            after[k][h] <= before[k][h] + 1e-12
+            for k in before
+            for h in ("early", "late", "maximum")
         )
-        for value, source in zip(candidate, original, strict=True):
-            value[position] = source[position]
-    before, after = metrics(queries, baseline, original), metrics(queries, candidate, original)
-    verified = all(
-        after[k][h] <= before[k][h] + 1e-12 for k in before for h in ("early", "late", "maximum")
-    )
-    strict = all(after[k]["mean"] < before[k]["mean"] for k in before)
+        strict = all(after[k]["mean"] < before[k]["mean"] for k in before)
     report = dict(
         baseline_exact=list(ids),
         proposed_exact=selected,
@@ -228,6 +239,7 @@ def plan_precision_transaction(payload, *, mode="joint_guarded"):
         benchmark_answers_used=False,
         benchmark_quality_established=False,
         fresh_evaluation_authorized=False,
+        discarded_exact_search_evaluated=not skip_discarded_exact,
     )
     weighted = weighted_prototype_trial(payload, return_payload=True)
     proposed_prototype = weighted.pop("replacement")

@@ -87,7 +87,12 @@ def prepare(root, indexed_graph=False, graph_gate_root=None):
             original_probe=graph_plan["component_policies"]["full"],
             inline=graph_plan["component_policies"]["inline_indexed"],
         )
-        runtime_fields = {"inline_repair", "graph_positional_search", "graph_cosine_topk"}
+        runtime_fields = {
+            "inline_repair",
+            "graph_positional_search",
+            "graph_cosine_topk",
+            "skip_discarded_exact",
+        }
         if {k: v for k, v in policies["original_probe"].items() if k not in runtime_fields} != {
             k: v for k, v in policies["inline"].items() if k not in runtime_fields
         }:
