@@ -124,3 +124,50 @@ def cpu_serialized_storage(bodies):
         gpu_kv_storage_measured=False,
         whole_request_peak_certified=False,
     )
+
+
+def choose_codec_coupled(alternatives):
+    """Exact finite CPU format DP, charging inter-layer codec and replay scratch.
+
+    Each layer is a stable list of (name, payload), parent first. Payloads have
+    already passed their numerical screen. Delta cost depends on the preceding
+    code bytes, so independently minimizing each layer's raw bytes is unsafe.
+    Include whole-stream raw fallback. Ties prefer earlier (parent) choices.
+    """
+    if not alternatives or any(not layer for layer in alternatives):
+        raise ValueError("at least one feasible parent choice per layer required")
+    states = {(None, 0): (0, ())}
+    previous_layer = None
+    raw_path, raw_total = [], 0
+    for layer in alternatives:
+        raw = min(
+            range(len(layer)),
+            key=lambda i: (layer[i][1]["codes"].numel() + layer[i][1]["other_bytes"], i),
+        )
+        raw_path.append(raw)
+        raw_total += layer[raw][1]["codes"].numel() + layer[raw][1]["other_bytes"]
+        next_states, packet_cache = {}, {}
+        for (old_index, scratch), (cost, path) in states.items():
+            for index, (_name, body) in enumerate(layer):
+                key = old_index, index
+                if key not in packet_cache:
+                    old = (
+                        None
+                        if previous_layer is None
+                        else previous_layer[old_index][1]["codes"].contiguous().numpy()
+                    )
+                    packet_cache[key] = encode(old, body["codes"].contiguous().numpy())
+                packet = packet_cache[key]
+                capacity = max(scratch, 0 if packet.raw else packet.length)
+                proposal = cost + packet.serialized_bytes + body["other_bytes"], (*path, index)
+                state_key = index, capacity
+                if state_key not in next_states or proposal < next_states[state_key]:
+                    next_states[state_key] = proposal
+        previous_layer, states = layer, next_states
+    best = min((cost + scratch, path) for (_last, scratch), (cost, path) in states.items())
+    total, path = min(best, (raw_total, tuple(raw_path)))
+    chosen = [layer[index][1] for layer, index in zip(alternatives, path, strict=True)]
+    measured = cpu_serialized_storage(chosen)
+    if measured["net_cpu_payload_bytes"] != total:
+        raise RuntimeError("codec-coupled dynamic program disagrees with serialized payload")
+    return chosen, [layer[index][0] for layer, index in zip(alternatives, path, strict=True)]

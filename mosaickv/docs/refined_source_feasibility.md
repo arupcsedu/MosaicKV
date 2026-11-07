@@ -32,9 +32,14 @@ pointers. Use a complete BF16 row plus an int16 map when cheaper. Charge all
 actual patch arrays, maps, prototype headers and packed codes. Original exact
 K/V, protected text, logical positions and model weights are unchanged.
 
-Choose the smallest raw passing format per layer, otherwise retain the old
-source. Then apply the **same** adjacent-layer lossless codec, offsets and replay
-workspace accounting to the original and adaptive streams. The old baseline
+The first CPU execution showed that choosing the smallest raw format separately
+could increase net storage by disrupting the next layer's delta codec. Preserve
+that negative attempt. The corrective chooser uses an exact finite dynamic
+program over numerically feasible formats, predecessor-dependent codec costs,
+and the maximum charged replay workspace. Include whole-stream raw fallback and
+prefer the parent on equal cost. The parent at every layer is always available,
+so the net CPU payload cannot exceed the baseline. Apply the **same** codec and
+workspace rule to the original and adaptive streams. The old baseline
 totals must match the prior screen exactly. Require at least 10% net CPU source
 payload reduction on both consumed inputs before considering native reader
 implementation. Preserve all rejected formats, layers and errors.

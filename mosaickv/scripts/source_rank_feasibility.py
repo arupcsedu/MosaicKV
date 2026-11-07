@@ -181,6 +181,9 @@ def prepare(root, *, refined_source=False):
             if refined_source
             else None,
             lloyd_iterations=4 if refined_source else None,
+            source_choice_rule="globally_minimum_cpu_codec_payload_with_parent_fallback"
+            if refined_source
+            else "minimum_rank_raw_payload",
             model_weights_loaded=False,
             benchmark_labels_accessed=False,
             original_six_compaction_backend_implemented=False,
@@ -214,7 +217,11 @@ def worker(root, expected):
         original_text_positions,
         protected_positions,
     )
-    from mosaickv.evaluation.source_rank_feasibility import cpu_serialized_storage, screen
+    from mosaickv.evaluation.source_rank_feasibility import (
+        choose_codec_coupled,
+        cpu_serialized_storage,
+        screen,
+    )
 
     plan = checked(root, expected)
     torch.set_num_threads(12)
@@ -264,7 +271,7 @@ def worker(root, expected):
             previous.load_messages(features),
             expected_length=capture["phases"][0].shape[1],
         )
-        baseline, adaptive, chosen = [], [], []
+        baseline, adaptive, chosen, alternatives = [], [], [], []
         for layer in plan["layers"]:
             x = capture["normalized"][layer]
             exact = protected_positions(
@@ -285,6 +292,7 @@ def worker(root, expected):
             for row in part["rows"]:
                 cases.append(dict(row, layer=layer))
             baseline.append(part["baseline"])
+            alternatives.append([("parent", part["baseline"]), *sorted(part["candidates"].items())])
             rank = (
                 min(
                     part["candidates"],
@@ -302,6 +310,10 @@ def worker(root, expected):
             adaptive.append(part["baseline"] if rank is None else part["candidates"][rank])
             chosen.append(rank)
             write_once(folder / f"layer-{layer:02}.json", dict(rows=part["rows"], chosen_rank=rank))
+        raw_minimum = cpu_serialized_storage(adaptive)
+        if plan.get("source_family") == "refined_source":
+            adaptive, selected = choose_codec_coupled(alternatives)
+            chosen = [None if name == "parent" else name for name in selected]
         old, new = cpu_serialized_storage(baseline), cpu_serialized_storage(adaptive)
         if plan.get("source_family") == "refined_source":
             prior = read(Path(plan["prior_negative_root"]) / f"workers/{i}/result.json")
@@ -311,6 +323,7 @@ def worker(root, expected):
         result = dict(
             baseline=old,
             adaptive=new,
+            independent_raw_choice=raw_minimum,
             net_cpu_payload_reduction=reduction,
             selected_ranks=chosen,
             numerical_eligible_layers=sum(x is not None for x in chosen),
