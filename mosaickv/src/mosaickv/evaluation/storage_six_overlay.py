@@ -671,7 +671,18 @@ def plan_layer(
         anchors = tuple(a for a in anchors if a in feasible)
     if not anchors:
         raise RuntimeError("real image prototype requires a compatible selected image anchor")
-    anchor = max(anchors, key=lambda node: (float(prediction[node].detach()), -node))
+    from mosaickv.evaluation.feasible_overlay_anchor import choose as choose_anchor
+
+    prototype_config = PrototypeConfig(
+        group_size=policy.prototype_members,
+        max_position_span=1024,
+        maximum_prototypes_per_head=1,
+        budget_planning_mode="one_pass_bounded_anchor_cover",
+        source_modalities=("image",),
+    )
+    anchor, assignment_plan, anchor_feasibility = choose_anchor(
+        graph, selected, prototype_config, anchors, prediction.detach().cpu().tolist()
+    )
     transform = RotaryPrototypeKeyTransform(
         phases[0][:, None], phases[1][:, None], "actual_pinned_LLaVA_Llama_phase_v1"
     )
@@ -680,18 +691,13 @@ def plan_layer(
         graph,
         selected,
         adapter.capabilities,
-        prototype_config=PrototypeConfig(
-            group_size=policy.prototype_members,
-            max_position_span=1024,
-            maximum_prototypes_per_head=1,
-            budget_planning_mode="one_pass_bounded_anchor_cover",
-            source_modalities=("image",),
-        ),
+        prototype_config=prototype_config,
         residual_config=ResidualConfig(require_pinned_memory=pin_residuals),
         active_byte_budget=(count + 1) * d * 4,
         retention_ratio=0.5,
         active_budget=SelectionBudget((count + 1) * d * 4, BudgetUnit.BYTES),
         prototype_anchor_node_ids=(anchor,),
+        assignment_plan=assignment_plan,
         key_transform=transform,
         exact_gather_mode="batched_layer",
     )
@@ -732,6 +738,7 @@ def plan_layer(
     phase_ids = torch.tensor((*ids, record.anchor_logical_position), device=pair[0].device)
     phase_subset = tuple(t[0].index_select(0, phase_ids).contiguous() for t in phases)
     evidence = dict(
+        anchor_feasibility=anchor_feasibility,
         forecast_mode=forecast_mode,
         graph_nodes=len(graph.nodes),
         graph_edges=len(graph.weights),

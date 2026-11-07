@@ -47,7 +47,7 @@ def checked(root, expected):
     return p
 
 
-def prepare(root, full_head_parent=False):
+def prepare(root, full_head_parent=False, reuse_worker_one=False):
     source = clean_source(SOURCE)
     if root.exists():
         raise FileExistsError("new immutable correctness-only output root required")
@@ -83,6 +83,9 @@ def prepare(root, full_head_parent=False):
         "mosaickv/src/mosaickv/evaluation/six_stage_impact.py",
         "mosaickv/tests/unit/test_six_stage_impact.py",
         "mosaickv/slurm/prepare_corrected_key_timing.sbatch",
+        "mosaickv/src/mosaickv/evaluation/feasible_overlay_anchor.py",
+        "mosaickv/tests/unit/test_feasible_overlay_anchor.py",
+        "mosaickv/docs/feasible_overlay_anchor.md",
     }
     if not set(diff) <= allowed:
         raise ValueError("source changed outside the registered guard/codec correction scope")
@@ -99,6 +102,53 @@ def prepare(root, full_head_parent=False):
         bound += [debug / "plan.json", debug / "analysis/decision.json"]
         for arm in ("hybrid_reference", "hybrid_fast"):
             policies[arm]["anchor_counterfactual"] = "full_heads"
+    worker_roots = {str(i): str(root / f"workers/{i}") for i in (0, 1)}
+    producer_shas = {str(i): source for i in (0, 1)}
+    if reuse_worker_one:
+        if not full_head_parent:
+            raise ValueError("reuse requires identical full-head controls")
+        previous = Path(
+            "/scratch/djy8hg/runs/evicastkv/device-guard-consumed-full-head-check-20261107-v2"
+        )
+        prior_plan = read(previous / "plan.json")
+        prior = previous / "workers/1"
+        if (
+            prior_plan["source_sha"] != "08142bea6816962947a5ead3a4ea20d95e8fedbc"
+            or prior_plan["policies"] != policies
+            or prior_plan["parent"] != parent["parent"]
+            or prior_plan["options"] != parent["options"]
+            or read(prior_plan["inputs"]) != inputs
+        ):
+            raise ValueError("only the registered unchanged-valid-path worker can be reused")
+        result = read(prior / "result.json")
+        extra = read(prior / "additional_controls.json")
+        rows = [json.loads(line) for line in (prior / "raw.jsonl").read_text().splitlines()]
+        if (
+            result["status"] != "completed"
+            or result["completed_samples"] != 8
+            or len(rows) != 8
+            or any(r["status"] != "completed" for r in rows)
+            or {r["sample_id"] for r in rows} != {r["sample_id"] for r in inputs[8:]}
+            or extra["ABA_all_128_logits_bitwise"] is not True
+            or extra["finite_fault"]["actual_vetoes"] < 1
+            or any(
+                r["controls"].get(k) is not True
+                for r in rows
+                for k in (
+                    "all_128_host_device_logits_bitwise",
+                    "all_127_counterfactual_logits_bitwise_parent",
+                    "all_127_guard_records_bitwise",
+                    "all_128_common_codec_logits_bitwise_legacy_parent",
+                )
+            )
+        ):
+            raise ValueError("complete unchanged-input numerical/veto/isolation evidence required")
+        worker_roots["1"], producer_shas["1"] = str(prior), prior_plan["source_sha"]
+        bound += [previous / "plan.json"]
+        bound += [
+            prior / name
+            for name in ("raw.jsonl", "manifest.json", "result.json", "additional_controls.json")
+        ]
     root.mkdir(parents=True)
     (root / "logs").mkdir()
     with (root / "cpu.txt").open("x") as log:
@@ -118,6 +168,7 @@ def prepare(root, full_head_parent=False):
                 "mosaickv/tests/unit/test_layer_code_delta.py",
                 "mosaickv/tests/unit/test_captured_code_replay.py",
                 "mosaickv/tests/unit/test_replay_descriptors.py",
+                "mosaickv/tests/unit/test_feasible_overlay_anchor.py",
             ],
             cwd=SOURCE,
             stdout=log,
@@ -155,12 +206,44 @@ def prepare(root, full_head_parent=False):
             graph_template_CPU_limit=4 * 2**20,
             full_head_parent=full_head_parent,
             single_head_numerical_optimization_promoted=False,
+            worker_roots=worker_roots,
+            producer_shas=producer_shas,
+            reused_completed_workers=[1] if reuse_worker_one else [],
+            reuse_is_consumed_correctness_only_not_frozen_paper_cohort=True,
         ),
     )
     import all_head_native_source as infra
 
     infra.SOURCE, infra.SHELL = SOURCE, SOURCE / "mosaickv/slurm/check_consumed_guard.sbatch"
-    array = infra.submit(root, "worker")
+    if reuse_worker_one:
+        array = subprocess.check_output(
+            [
+                "sbatch",
+                "--parsable",
+                "--account=bii_dsc_community",
+                "--nodes=1",
+                "--ntasks=1",
+                "--job-name=mk-guard-feasible-retry",
+                "--partition=bii-gpu",
+                "--reservation=bi_fox_dgx",
+                "--gres=gpu:a100:1",
+                "--cpus-per-task=12",
+                "--mem=48G",
+                "--time=00:30:00",
+                "--array=0%1",
+                "--hold",
+                f"--output={root}/logs/worker-%A_%a.out",
+                f"--error={root}/logs/worker-%A_%a.err",
+                str(infra.SHELL),
+                str(SOURCE),
+                str(root),
+                sha(root / "plan.json"),
+                "worker",
+            ],
+            text=True,
+        ).strip()
+    else:
+        array = infra.submit(root, "worker")
     write_once(
         root / "admission.json",
         dict(
@@ -177,7 +260,7 @@ def prepare(root, full_head_parent=False):
         array=array,
         controller=infra.submit(root, "controller"),
         analyzer=infra.submit(root, "analyze", after=array),
-        maximum_gpu_workers=2,
+        maximum_gpu_workers=1 if reuse_worker_one else 2,
         cpus_per_worker=12,
         minutes_per_worker=30,
     )
@@ -368,13 +451,16 @@ def analyze(root, expected):
     p = checked(root, expected)
     results, errors, rows = {}, {}, []
     for i in (0, 1):
-        folder = root / f"workers/{i}"
+        folder = Path(p.get("worker_roots", {}).get(str(i), str(root / f"workers/{i}")))
         try:
             rows += [json.loads(line) for line in (folder / "raw.jsonl").read_text().splitlines()]
             result = read(folder / "result.json")
             if result["status"] != "completed" or result["completed_samples"] != 8:
                 raise ValueError(result)
             results[str(i)] = read(folder / "additional_controls.json")
+            actual_sha = read(folder / "manifest.json")["git_sha"]
+            if actual_sha != p.get("producer_shas", {}).get(str(i), p["source_sha"]):
+                raise ValueError("worker provenance does not match the registered producer")
         except Exception:
             errors[str(i)] = traceback.format_exc()
     expected_ids = {s["sample_id"] for s in read(p["inputs"])}
@@ -398,6 +484,8 @@ def analyze(root, expected):
             latency_superiority_measured=False,
             fresh_or_paper_campaign_authorized=False,
             no_new_evaluation_identities=True,
+            worker_producer_shas=p.get("producer_shas"),
+            reused_completed_workers=p.get("reused_completed_workers", []),
         ),
     )
     print(json.dumps(dict(complete=complete, denominator=len(rows), errors=errors)), flush=True)
@@ -409,9 +497,10 @@ def main():
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--plan-sha")
     parser.add_argument("--full-head-parent", action="store_true")
+    parser.add_argument("--reuse-worker-one", action="store_true")
     a = parser.parse_args()
     if a.action == "prepare":
-        return prepare(a.root, a.full_head_parent)
+        return prepare(a.root, a.full_head_parent, a.reuse_worker_one)
     if a.action == "worker":
         return worker(a.root, a.plan_sha)
     if a.action == "analyze":

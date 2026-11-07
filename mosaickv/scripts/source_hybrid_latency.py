@@ -116,7 +116,7 @@ def prepare(
         paths.append(cpu)
     if full_head_parent:
         gate = Path(
-            "/scratch/djy8hg/runs/evicastkv/device-guard-consumed-full-head-check-20261107-v2"
+            "/scratch/djy8hg/runs/evicastkv/device-guard-consumed-full-head-check-20261107-v3-feasible-groups"
         )
         decision = read(gate / "analysis/decision.json")
         if (
