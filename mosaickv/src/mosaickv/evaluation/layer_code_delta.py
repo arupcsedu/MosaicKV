@@ -15,6 +15,24 @@ from mosaickv.evaluation.lossless_prompt_cache import backing_bytes
 from mosaickv.evaluation.precision_tier import QuantizedBody
 
 
+def predecessor(previous, role, stream):
+    """Compressed does not imply delta-dependent (standalone symbols are valid).
+
+    Legacy compressed byte streams require an adjacent predecessor. New symbol
+    packets explicitly declare their dependency. Missing required predecessors
+    still fail closed, including captured replay; no dummy source is invented.
+    """
+    required = getattr(stream, "has_previous", not stream.raw)
+    if type(required) is not bool or (stream.raw and required):
+        raise ValueError("explicit valid source-stream dependency required")
+    if not required:
+        return None
+    parent = previous.get(role)
+    if parent is None:
+        raise ValueError("complete same-shape predecessor required for compressed replay")
+    return parent
+
+
 def map_bodies(packet, function):
     from mosaickv.evaluation.exact_storage import ExactFormat
     from mosaickv.evaluation.full_prompt_source import FullPromptSourceFormat
@@ -98,7 +116,9 @@ def convert(packets):
             stream = encode(previous.get(role), original.codes)
             if not stream.raw:
                 requirements[role] = max(requirements.get(role, 0), stream.length)
-                if not torch.equal(decode(previous[role], stream), original.codes):
+                if not torch.equal(
+                    decode(predecessor(previous, role, stream), stream), original.codes
+                ):
                     raise RuntimeError("GPU code serialization changed an original bit")
             records.append(
                 dict(
@@ -184,12 +204,12 @@ class Replay:
             for role, encoded, destination in items:
                 stream = encoded.stream
                 if not stream.raw:
-                    predecessor = previous.get(role)
-                    if predecessor is None or predecessor.shape != destination.shape:
+                    parent = predecessor(previous, role, stream)
+                    if parent is not None and parent.shape != destination.shape:
                         raise ValueError(
                             "complete same-shape predecessor required for captured replay"
                         )
-                    operations.append((predecessor, stream, destination))
+                    operations.append((parent, stream, destination))
                 current[role] = destination
             bindings.append(tuple(operations))
             previous = current
@@ -231,7 +251,9 @@ class Replay:
                     stream.payload
                     if stream.raw
                     else decode(
-                        self.previous.get(role), stream, self.scratch[role][: stream.length]
+                        predecessor(self.previous, role, stream),
+                        stream,
+                        self.scratch[role][: stream.length],
                     )
                 )
                 current[role] = codes
@@ -247,7 +269,7 @@ class Replay:
                     else (
                         stream.payload
                         if stream.raw
-                        else decode(self.previous.get(role), stream, destination)
+                        else decode(predecessor(self.previous, role, stream), stream, destination)
                     )
                 )
                 if codes.data_ptr() != destination.data_ptr() or codes.shape != destination.shape:

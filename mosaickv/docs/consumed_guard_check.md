@@ -40,3 +40,12 @@ the shortcut with the validated full-head counterfactual for both transports,
 requiring that bound two-input diagnostic first. Previous single-head timings
 must not be silently reused for this corrected configuration. Production code,
 thresholds, cache values and source memberships remain unchanged.
+
+The broad full-head retry then passed nine samples but stopped on two
+self-contained common-codec packet conversion errors, before those requests'
+hybrid execution. The corrected retry binds its new candidate SHA and declares
+the standalone-stream repair explicitly. It additionally requires every
+common-codec parent logit vector to match the original legacy storage parent;
+this representation check is not an equal-byte selection or latency comparison.
+Derived failure denominators now include partially completed workers and
+explicitly identify unattempted inputs instead of dropping valid partial rows.

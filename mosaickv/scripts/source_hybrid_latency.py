@@ -116,7 +116,7 @@ def prepare(
         paths.append(cpu)
     if full_head_parent:
         gate = Path(
-            "/scratch/djy8hg/runs/evicastkv/device-guard-consumed-full-head-check-20261107-v1"
+            "/scratch/djy8hg/runs/evicastkv/device-guard-consumed-full-head-check-20261107-v2"
         )
         decision = read(gate / "analysis/decision.json")
         if (
@@ -215,6 +215,9 @@ def prepare(
                 "mosaickv/tests/unit/test_precision_target_reuse.py",
                 "mosaickv/tests/unit/test_source_hybrid_validation.py",
                 "mosaickv/tests/unit/test_storage_six_overlay.py",
+                "mosaickv/tests/unit/test_layer_code_delta.py",
+                "mosaickv/tests/unit/test_captured_code_replay.py",
+                "mosaickv/tests/unit/test_replay_descriptors.py",
             ],
             cwd=SOURCE,
             stdout=log,

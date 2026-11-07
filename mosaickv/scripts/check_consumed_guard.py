@@ -55,8 +55,9 @@ def prepare(root, full_head_parent=False):
         raise ValueError("prior complete numerical/storage timing study required")
     if read(PANEL / "analysis/panel_stopping_decision.json")["execution_passed"] is not True:
         raise ValueError("previously consumed panel must be complete")
-    # The new commit adds only this harness, helpers, tests and documentation.
-    # All candidate implementation files must still be byte-identical.
+    # Permit only the registered execution corrections, their tests and this
+    # bounded harness. Record a new candidate SHA; never call the corrected
+    # codec byte-identical source code to its historical implementation.
     diff = subprocess.check_output(
         ["git", "diff", "--name-only", CANDIDATE, source], cwd=SOURCE, text=True
     ).splitlines()
@@ -69,9 +70,22 @@ def prepare(root, full_head_parent=False):
         "mosaickv/scripts/debug_guard_counterfactual.py",
         "mosaickv/slurm/debug_guard_counterfactual.sbatch",
         "mosaickv/tests/unit/test_guard_counterfactual_debug.py",
+        "mosaickv/src/mosaickv/evaluation/layer_code_delta.py",
+        "mosaickv/tests/unit/test_layer_code_delta.py",
+        "mosaickv/docs/standalone_symbol_replay.md",
+        "mosaickv/scripts/source_hybrid_latency.py",
+        "mosaickv/scripts/probe_structural_key.py",
+        "mosaickv/src/mosaickv/graph/structural_templates.py",
+        "mosaickv/src/mosaickv/evaluation/storage_six_overlay.py",
+        "mosaickv/tests/unit/test_structural_templates.py",
+        "mosaickv/docs/direct_structural_key.md",
+        "mosaickv/docs/six_stage_design_limits_20261107.md",
+        "mosaickv/src/mosaickv/evaluation/six_stage_impact.py",
+        "mosaickv/tests/unit/test_six_stage_impact.py",
+        "mosaickv/slurm/prepare_corrected_key_timing.sbatch",
     }
     if not set(diff) <= allowed:
-        raise ValueError("candidate source changed outside correctness harness")
+        raise ValueError("source changed outside the registered guard/codec correction scope")
     inputs = consumed_inputs(read(PANEL / "inputs.json"))
     parent = read(BENCH / "plan.json")
     bound = [BENCH / "plan.json", BENCH / "analysis/decision.json"]
@@ -101,6 +115,9 @@ def prepare(root, full_head_parent=False):
                 "mosaickv/tests/unit/test_guard_tail_graph.py",
                 "mosaickv/tests/unit/test_guard_readout_reuse.py",
                 "mosaickv/tests/unit/test_live_anchor_guard.py",
+                "mosaickv/tests/unit/test_layer_code_delta.py",
+                "mosaickv/tests/unit/test_captured_code_replay.py",
+                "mosaickv/tests/unit/test_replay_descriptors.py",
             ],
             cwd=SOURCE,
             stdout=log,
@@ -115,7 +132,10 @@ def prepare(root, full_head_parent=False):
         root / "plan.json",
         dict(
             source_sha=source,
-            frozen_candidate_sha=CANDIDATE,
+            frozen_candidate_sha=source,
+            historical_candidate_parent_sha=CANDIDATE,
+            common_codec_standalone_dependency_repair=True,
+            legacy_parent_logit_parity_required_each_sample=True,
             bound_files={str(p): sha(p) for p in bound},
             parent=parent["parent"],
             options=parent["options"],
@@ -245,7 +265,11 @@ def worker(root, expected):
                 gc.collect()
                 with ExitStack() as stack:
                     codec = stack.enter_context(
-                        source_codec(True, construction="pack_selected", decoder="bitmap_prefix")
+                        source_codec(
+                            arm != "storage_only",
+                            construction="pack_selected",
+                            decoder="bitmap_prefix",
+                        )
                     )
                     exported = (
                         stack.enter_context(parent_export()) if arm == "hybrid_reference" else {}
@@ -258,7 +282,7 @@ def worker(root, expected):
                         adapter, features, transport, "mosaickv_exact", audit=False
                     )
                 proof = codec.report()
-                if (
+                if arm != "storage_only" and (
                     not proof["all_shared_source_consumers_covered"]
                     or proof["compressed_replacements"] != proof["original_owners_retired"]
                 ):
@@ -275,10 +299,16 @@ def worker(root, expected):
                         manifest_path=str(folder / "manifest.json"),
                     )
                     try:
+                        legacy, _, _, _ = run(features, "storage_only")
                         parent, _, _, _ = run(features, "codec_fast")
+                        if not torch.equal(legacy, parent):
+                            raise ValueError(
+                                "common codec changed an ordinary-parent vocabulary vector"
+                            )
                         host, hd, he, counter = run(features, "hybrid_reference")
                         device, dd, de, _ = run(features, "hybrid_fast")
                         controls = compare(parent, host, device, counter, he, de)
+                        controls["all_128_common_codec_logits_bitwise_legacy_parent"] = True
                         storage = same_storage(hd, dd)
                         row.update(
                             status="completed",
@@ -340,11 +370,11 @@ def analyze(root, expected):
     for i in (0, 1):
         folder = root / f"workers/{i}"
         try:
+            rows += [json.loads(line) for line in (folder / "raw.jsonl").read_text().splitlines()]
             result = read(folder / "result.json")
             if result["status"] != "completed" or result["completed_samples"] != 8:
                 raise ValueError(result)
             results[str(i)] = read(folder / "additional_controls.json")
-            rows += [json.loads(line) for line in (folder / "raw.jsonl").read_text().splitlines()]
         except Exception:
             errors[str(i)] = traceback.format_exc()
     expected_ids = {s["sample_id"] for s in read(p["inputs"])}
@@ -355,7 +385,10 @@ def analyze(root, expected):
         out / "decision.json",
         dict(
             complete=complete,
-            completed_denominator=len(rows),
+            completed_denominator=sum(r["status"] == "completed" for r in rows),
+            failed_denominator=sum(r["status"] != "completed" for r in rows),
+            attempted_denominator=len(rows),
+            unattempted_sample_ids=sorted(expected_ids - {r["sample_id"] for r in rows}),
             planned_denominator=16,
             results=results,
             errors=errors,

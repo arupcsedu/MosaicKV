@@ -1,6 +1,6 @@
 """CPU reference substitutes only the codec kernels, never replay semantics."""
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from types import SimpleNamespace
 
 import numpy as np
@@ -166,3 +166,79 @@ def test_shared_replay_accounting_matches_live_cache_before_and_after_updates(pa
         assert observed["final_active_kv_storage_bytes"] == backing_bytes(
             tuple(t for layer in cache.layers for t in layer.owned_tensors())
         )
+
+
+@dataclass(frozen=True)
+class IndependentFixture:
+    """CPU sparse fixture, not the production GPU format or measured result."""
+
+    length: int
+    payload: torch.Tensor
+    has_previous: bool = False
+    raw: bool = False
+
+    def tensors(self):
+        return (self.payload,)
+
+    @property
+    def serialized_bytes(self):
+        return self.payload.numel() * self.payload.element_size()
+
+
+@pytest.mark.parametrize("prepared,captured", [(False, False), (True, False), (True, True)])
+def test_self_contained_compressed_first_layer_and_captured_replay(
+    packets, monkeypatch, prepared, captured
+):
+    from mosaickv.evaluation.replay_descriptor_policy import use
+
+    def independent_encode(previous, current):
+        indices = current.nonzero().flatten()
+        assert indices.numel() == 1
+        return IndependentFixture(
+            current.numel(),
+            torch.tensor([int(indices[0]), int(current[indices[0]])], dtype=torch.int32),
+        )
+
+    def independent_decode(previous, stream, destination=None):
+        assert previous is None  # Explicit absence, not a fabricated dummy source.
+        out = torch.empty(stream.length, dtype=torch.uint8) if destination is None else destination
+        out.zero_()
+        out[int(stream.payload[0])] = int(stream.payload[1])
+        return out
+
+    monkeypatch.setattr(runtime, "encode", independent_encode)
+    monkeypatch.setattr(runtime, "decode", independent_decode)
+    encoded, report = runtime.convert(packets)
+    assert report["enabled"]
+    assert all(not r["raw_fallback"] for r in report["records"])
+    with use(prepared):
+        bound = runtime.bind(encoded)
+        other = runtime.bind(encoded)
+    a = bound[0].replay
+    if captured:
+        a.prepare_graph()
+        assert all(parent is None for ops in a.graph_bindings for parent, _, _ in ops)
+    assert all(
+        a.scratch[role].data_ptr() != other[0].replay.scratch[role].data_ptr() for role in a.scratch
+    )
+    assert backing_bytes(tuple(t for p in bound for t in p.tensors())) == report["net_active_bytes"]
+    for _ in range(3):
+        for i, original in enumerate(packets):
+            if captured:
+                actual = a.advance_for_graph(i)
+                a.decode_for_graph(i)
+            else:
+                actual = a.view(i)
+            assert all(
+                torch.equal(x.codes, y.codes)
+                for x, y in zip(original.pair, actual.pair, strict=True)
+            )
+
+
+def test_missing_required_predecessor_is_still_rejected():
+    stream = IndependentFixture(1024, torch.tensor([0, 1], dtype=torch.int32))
+    assert runtime.predecessor({}, "source", stream) is None
+    with pytest.raises(ValueError, match="predecessor"):
+        runtime.predecessor({}, "source", replace(stream, has_previous=True))
+    with pytest.raises(ValueError, match="dependency"):
+        runtime.predecessor({}, "source", replace(stream, has_previous=1))
