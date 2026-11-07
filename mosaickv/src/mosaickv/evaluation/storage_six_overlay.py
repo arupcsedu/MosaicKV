@@ -73,8 +73,8 @@ class OverlayPolicy:
     anchor_tail: str = "reference"
 
     def __post_init__(self):
-        if self.anchor_tail not in ("reference", "cuda_graph") or (
-            self.anchor_tail == "cuda_graph"
+        if self.anchor_tail not in ("reference", "cuda_graph", "manual_shared_stream") or (
+            self.anchor_tail != "reference"
             and (not self.live_anchor_guard or self.anchor_risk_repair or self.reuse_anchor_readout)
         ):
             raise ValueError(

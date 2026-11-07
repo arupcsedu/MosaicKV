@@ -25,7 +25,10 @@ def native_tail(norm, head, parent, active):
 
 
 class GuardTail:
-    def __init__(self, norm, head):
+    def __init__(self, norm, head, *, capture_mode="context_manager"):
+        if capture_mode not in ("context_manager", "manual_shared_stream"):
+            raise ValueError("explicit registered graph-capture implementation required")
+        self.capture_mode = capture_mode
         self.norm, self.head = norm, head
         self.inputs = self.outputs = self.graph = None
         self.calls = self.replays = 0
@@ -49,7 +52,12 @@ class GuardTail:
         before = torch.cuda.memory_allocated(parent.device)
         self.inputs = (parent.clone(), active.clone())
         current = torch.cuda.current_stream(parent.device)
-        stream = torch.cuda.Stream(device=parent.device)
+        if self.capture_mode == "manual_shared_stream":
+            from mosaickv.evaluation.post_attention_segment import capture_stream
+
+            stream = capture_stream(parent.device)
+        else:
+            stream = torch.cuda.Stream(device=parent.device)
         stream.wait_stream(current)
         with torch.cuda.stream(stream):
             for _ in range(2):
@@ -57,8 +65,25 @@ class GuardTail:
             del warm
         current.wait_stream(stream)
         self.graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(self.graph, stream=stream):
-            self.outputs = native_tail(self.norm, self.head, *self.inputs)
+        if self.capture_mode == "manual_shared_stream":
+            # torch.cuda.graph.__enter__ additionally collects all Python
+            # garbage and empties the allocator cache. The enclosing request
+            # already manages those boundaries. Use the same explicit-capture
+            # protocol as the validated common epilogue, without changing any
+            # captured operator or allowing overlapping captures.
+            try:
+                with torch.cuda.stream(stream):
+                    self.graph.capture_begin(capture_error_mode="global")
+                    try:
+                        self.outputs = native_tail(self.norm, self.head, *self.inputs)
+                    finally:
+                        self.graph.capture_end()
+            except BaseException:
+                self.graph.reset()
+                raise
+        else:
+            with torch.cuda.graph(self.graph, stream=stream):
+                self.outputs = native_tail(self.norm, self.head, *self.inputs)
         current.wait_stream(stream)
         torch.cuda.synchronize(parent.device)
         self.explicit_bytes = backing_bytes((*self.inputs, *self.outputs))
@@ -85,6 +110,7 @@ class GuardTail:
     def report(self):
         return dict(
             calls=self.calls,
+            capture_mode=self.capture_mode,
             replays=self.replays,
             captures=int(self.graph is not None),
             explicit_activation_backing_bytes=self.explicit_bytes,

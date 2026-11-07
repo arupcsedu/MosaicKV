@@ -9,7 +9,7 @@ from mosaickv.evaluation.guard_tail_graph import GuardTail, native_tail
 
 
 @torch.inference_mode()
-def run():
+def run(*, capture_mode="context_manager"):
     from transformers.models.llama.modeling_llama import LlamaRMSNorm
 
     norm = LlamaRMSNorm(4096).to(device="cuda", dtype=torch.bfloat16)
@@ -23,7 +23,7 @@ def run():
     native = []
     for parent, active in pairs:
         native.append(tuple(x.clone() for x in native_tail(norm, head, parent, active)))
-    g = GuardTail(norm, head)
+    g = GuardTail(norm, head, capture_mode=capture_mode)
     for index in (0, 1, 2, 1, 0):
         output, logits, record = g.run(*pairs[index])
         wanted = native[index]
@@ -53,7 +53,7 @@ def run():
         for arm in order:
             torch.cuda.synchronize()
             begin = perf_counter()
-            graph = GuardTail(norm, head) if arm == "graph" else None
+            graph = GuardTail(norm, head, capture_mode=capture_mode) if arm == "graph" else None
             for step in range(127):
                 parent, active = pairs[step % len(pairs)]
                 if graph is None:
@@ -74,6 +74,7 @@ def run():
     ratio = sum(results["graph"]) / sum(results["reference"])
     return dict(
         classification="synthetic_native_operator_only_not_measured_model_quality",
+        capture_mode=capture_mode,
         synthetic_weights=True,
         bitwise_native_controls=True,
         A_B_A_isolation=True,

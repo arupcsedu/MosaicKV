@@ -48,12 +48,15 @@ def prepare(
     planner_exact_fast=False,
     cpu_torch_threads=12,
     guard_tail=False,
+    manual_guard_capture=False,
 ):
     import all_head_native_source as infra
 
     source = clean_source(SOURCE)
     if guard_tail and (not shared_suffix or not planner_exact_fast or reuse_anchor_readout):
         raise ValueError("native tail diagnostic requires the exact planner/shared suffix controls")
+    if manual_guard_capture and not guard_tail:
+        raise ValueError("manual capture requires the explicit guard-tail diagnostic")
     parent = read(PARENT / "plan.json")
     if not read(PARENT / "analysis/decision.json")["model_parity_gate_passed"]:
         raise ValueError("pretrained all-head retirement and logit parity must pass first")
@@ -96,7 +99,11 @@ def prepare(
             graph_spatial_search="zero_overlap" if planner_exact_fast else "reference",
             reuse_precision_targets=planner_exact_fast,
             prototype_anchor_scope="selected" if planner_exact_fast else "legacy",
-            anchor_tail="cuda_graph" if guard_tail else "reference",
+            anchor_tail="manual_shared_stream"
+            if manual_guard_capture
+            else "cuda_graph"
+            if guard_tail
+            else "reference",
         ),
     }
     compact = reuse_anchor_readout or shared_suffix or planner_exact_fast
@@ -163,6 +170,7 @@ def prepare(
             planner_exact_fast=planner_exact_fast,
             cpu_torch_threads=cpu_torch_threads,
             guard_tail=guard_tail,
+            manual_guard_capture=manual_guard_capture,
             tail_operator_gate="bitwise_native_then_capture_inclusive_128_call_ratio_below_0.95"
             if guard_tail
             else "not_used",
@@ -306,7 +314,11 @@ def worker(root, expected):
         if plan.get("guard_tail"):
             from mosaickv.evaluation.guard_tail_diagnostic import run as tail_diagnostic
 
-            operator = tail_diagnostic()
+            operator = tail_diagnostic(
+                capture_mode="manual_shared_stream"
+                if plan.get("manual_guard_capture")
+                else "context_manager"
+            )
             write_once(folder / "tail_operator.json", operator)
             if not operator["passed"]:
                 raise RuntimeError("native guard-tail operator did not pass; no model benchmark")
@@ -585,6 +597,7 @@ def main():
     p.add_argument("--planner-exact-fast", action="store_true")
     p.add_argument("--cpu-torch-threads", type=int, choices=(1, 2, 12), default=12)
     p.add_argument("--guard-tail", action="store_true")
+    p.add_argument("--manual-guard-capture", action="store_true")
     a = p.parse_args()
     if a.action == "prepare":
         return prepare(
@@ -595,6 +608,7 @@ def main():
             planner_exact_fast=a.planner_exact_fast,
             cpu_torch_threads=a.cpu_torch_threads,
             guard_tail=a.guard_tail,
+            manual_guard_capture=a.manual_guard_capture,
         )
     if a.action == "worker":
         return worker(a.root, a.plan_sha)

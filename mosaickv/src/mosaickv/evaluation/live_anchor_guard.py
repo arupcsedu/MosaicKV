@@ -106,12 +106,15 @@ class LiveAnchorGuard:
         self.token = _current.set(self)
         score, values, epilogue = Binding.scores, Binding.values, Transport.run
         owner = self
-        if self.policy and self.policy.anchor_tail == "cuda_graph":
+        if self.policy and self.policy.anchor_tail != "reference":
             from mosaickv.evaluation.guard_tail_graph import GuardTail
 
             self.tail = GuardTail(
                 self.adapter.model.model.language_model.norm,
                 self.adapter.model.get_output_embeddings(),
+                capture_mode="manual_shared_stream"
+                if self.policy.anchor_tail == "manual_shared_stream"
+                else "context_manager",
             )
         if self.policy and self.policy.reuse_anchor_readout:
             from mosaickv.evaluation.guard_readout_reuse import ReadoutReuse
