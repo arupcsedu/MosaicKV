@@ -97,9 +97,30 @@ def gpu_controls():
                     raise RuntimeError("fused projection/prepared replay changed output bits")
         results.append(dict(rows=n, bitwise=True, **evidence))
     torch.cuda.synchronize()
+    # The frozen parent uses the separate 192-row launch wrapper, including
+    # its non-192 tail and joint incoming row. Test the actual wrapper too.
+    from mosaickv.evaluation.paper_geometry import registered_geometry
+    from mosaickv.evaluation.source_192_feasibility import decode as decode192
+
+    x = torch.randn(1, 1, 603, 4096, device="cuda", dtype=torch.bfloat16)
+    omitted = torch.arange(603) % 3 == 0
+    body = pack_unprotected(x, omitted.to("cuda")[None], bits=3, axis=2)
+    compacted, _ = compact(body, omitted)
+    incoming = torch.randn(4096, device="cuda", dtype=torch.bfloat16)
+    for first, take, extra in ((0, 192, None), (576, 27, incoming)):
+        outputs = []
+        for source in (body, compacted):
+            out = torch.full((192, 4096), -99, device="cuda", dtype=torch.bfloat16)
+            with registered_geometry(603):
+                decode192(SimpleNamespace(source=source), out, first, take, 192, extra)
+            outputs.append(out)
+        if not torch.equal(outputs[0].view(torch.int16), outputs[1].view(torch.int16)):
+            raise RuntimeError("frozen parent source-192 wrapper changed words or sentinels")
+    torch.cuda.synchronize()
     return dict(
         passed=True,
         cases=results,
+        parent_source_192_wrapper_bitwise=True,
         synthetic_operator_controls=True,
         no_benchmark_quality_claim=True,
     )

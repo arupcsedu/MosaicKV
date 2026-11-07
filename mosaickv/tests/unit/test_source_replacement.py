@@ -97,3 +97,56 @@ def test_replacement_variants_are_isolated_and_common_parent_is_measured():
     assert policies["signed_gain"]["routing_signal"] == "value_energy"
     assert not policies["signed_gain"]["demand_weighted_coverage"]
     assert policies["actual_attention_risk"]["prototype_risk_threshold"] == 0.01
+
+
+@pytest.mark.parametrize("mapped", (False, True))
+@pytest.mark.parametrize("tail", (False, True))
+def test_actual_parent_192_wrapper_binds_complete_kernel_abi(monkeypatch, mapped, tail):
+    import inspect
+    from types import SimpleNamespace
+
+    from mosaickv.evaluation import source_192_feasibility as reader
+    from mosaickv.evaluation.paper_geometry import registered_geometry
+
+    calls = []
+    name = "_decode_joint" if tail else "_decode"
+    original = getattr(reader, name)
+
+    class Kernel:
+        def __getitem__(self, grid):
+            def call(*args, **kwargs):
+                options = {
+                    k: v for k, v in kwargs.items() if k not in ("num_warps", "enable_fp_fusion")
+                }
+                bound = inspect.signature(original.fn).bind(*args, **options)
+                calls.append(bound.arguments)
+                return SimpleNamespace(metadata=SimpleNamespace(global_scratch_size=0), n_spills=0)
+
+            return call
+
+    monkeypatch.setattr(reader, name, Kernel())
+    codes = torch.empty(1, dtype=torch.uint8)
+    mapping = torch.empty(603, dtype=torch.int32) if mapped else None
+    body = SimpleNamespace(
+        shape=(1, 1, 603, 4096),
+        codes=codes,
+        minimum=codes,
+        scale=codes,
+        row_map=mapping,
+        stored_rows=402 if mapped else 0,
+    )
+    packet = SimpleNamespace(source=body)
+    out = torch.empty(192, 4096, dtype=torch.bfloat16)
+    with registered_geometry(603):
+        reader.decode(
+            packet,
+            out,
+            576 if tail else 0,
+            27 if tail else 192,
+            192,
+            torch.empty(4096, dtype=torch.bfloat16) if tail else None,
+        )
+    assert len(calls) == 1
+    assert calls[0]["HAS_ROW_MAP"] is mapped
+    assert calls[0]["ROW_MAP"] is (mapping if mapped else codes)
+    assert calls[0]["SOURCE_ROWS"] == (402 if mapped else 0)

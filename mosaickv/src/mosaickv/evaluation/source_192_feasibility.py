@@ -124,6 +124,9 @@ def decode(packet, source, first, take, capacity, incoming=None):
     ):
         raise ValueError("explicit bounded original source chunk and tail incoming required")
     mapping, values, columns = kernel_arguments(packet)
+    from mosaickv.evaluation.source_replacement import arguments as source_arguments
+
+    row_map, source_rows, has_row_map = source_arguments(packet.source)
     if incoming is None:
         compiled = _decode[(triton.cdiv(take, 16), 64)](
             packet.source.codes,
@@ -135,8 +138,11 @@ def decode(packet, source, first, take, capacity, incoming=None):
             n,
             first,
             take,
+            row_map,
             WIDTH=WIDTH,
             HAS_COLUMNS=columns,
+            SOURCE_ROWS=source_rows,
+            HAS_ROW_MAP=has_row_map,
             num_warps=4,
             enable_fp_fusion=False,
         )
@@ -150,10 +156,13 @@ def decode(packet, source, first, take, capacity, incoming=None):
             incoming,
             source,
             n,
+            row_map,
             FIRST=first,
             TAKE=take,
             WIDTH=WIDTH,
             HAS_COLUMNS=columns,
+            SOURCE_ROWS=source_rows,
+            HAS_ROW_MAP=has_row_map,
             num_warps=4,
             enable_fp_fusion=False,
         )
