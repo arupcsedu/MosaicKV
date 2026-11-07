@@ -23,6 +23,10 @@ class QuantizedBody:
     minimum: Any
     scale: Any
     codebook: Any = None
+    # Optional lossless source-code replacement. Headers and logical shape
+    # retain ORIGINAL positions; only code payload rows are physically omitted.
+    row_map: Any = None
+    stored_rows: int = 0
 
     def tensors(self) -> tuple[Any, ...]:
         return (
@@ -30,6 +34,7 @@ class QuantizedBody:
             self.minimum,
             self.scale,
             *(() if self.codebook is None else (self.codebook,)),
+            *(() if self.row_map is None else (self.row_map,)),
         )
 
 
@@ -127,6 +132,10 @@ def pack(
 def unpack_cpu(body: QuantizedBody) -> Any:
     if body.codes.device.type != "cpu":
         raise ValueError("CPU oracle only")
+    if body.row_map is not None:
+        from mosaickv.evaluation.source_replacement import unpack_cpu as unpack_replaced
+
+        return unpack_replaced(body)
     bytes_ = body.codes.reshape(-1, body.bits).long()
     words = sum(bytes_[:, i] << (8 * i) for i in range(body.bits))
     shifts = torch.arange(8, dtype=torch.long) * body.bits

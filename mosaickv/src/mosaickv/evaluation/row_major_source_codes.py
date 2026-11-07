@@ -39,6 +39,8 @@ def reference(codes, rows, width):
 
 
 def pack_into(body, scratch):
+    if body.row_map is not None:
+        raise NotImplementedError("row-major scratch has no compact source encoding")
     if (
         body.bits != 3
         or body.axis != 2

@@ -48,6 +48,9 @@ class OverlayPolicy:
     demand_weighted_coverage: bool = False
     routing_signal: str = "value_energy"
     graph_accumulation: str = "preselected"
+    replace_source_codes: bool = False
+    repair_policy: str = "entropy"
+    prototype_risk_threshold: float = 0.01
 
     def __post_init__(self):
         if not self.layers or tuple(sorted(set(self.layers))) != self.layers:
@@ -76,7 +79,11 @@ class OverlayPolicy:
             raise ValueError("registered mean-query or individual-query forecast required")
         if self.prototype_representation not in ("absolute_kv", "parent_residual_delta"):
             raise ValueError("registered absolute or parent-residual prototype required")
-        if self.utility_signal not in ("original_value", "parent_reconstruction_error"):
+        if self.utility_signal not in (
+            "original_value",
+            "parent_reconstruction_error",
+            "exact_restoration_gain",
+        ):
             raise ValueError("registered original-value or parent-error utility required")
         if self.routing_signal not in ("value_energy", "parent_error_opportunity"):
             raise ValueError("registered routing signal required")
@@ -84,6 +91,14 @@ class OverlayPolicy:
             raise ValueError("explicit demand-weighted coverage flag required")
         if self.graph_accumulation not in ("preselected", "segmented_tensor_topk"):
             raise ValueError("registered sparse edge implementation required")
+        if type(self.replace_source_codes) is not bool:
+            raise ValueError("explicit source replacement flag required")
+        if self.repair_policy not in ("entropy", "entropy_or_prototype_risk"):
+            raise ValueError("registered repair policy required")
+        import math
+
+        if not math.isfinite(self.prototype_risk_threshold) or self.prototype_risk_threshold <= 0:
+            raise ValueError("positive finite prototype risk threshold required")
 
 
 class _Phases:
@@ -389,6 +404,31 @@ def plan_layer(
         attention_provenance="actual_post_RoPE_prompt_mean_forecast_not_labels",
         rope_aware=True,
     )
+    restoration_report = None
+    if policy.utility_signal == "exact_restoration_gain":
+        from mosaickv.evaluation.precision_gain import exact_restoration_gain
+
+        if parent_pair is None:
+            raise ValueError("actual parent needed for signed restoration gain")
+        gain, anchor_error = exact_restoration_gain(
+            query[0, 0], tuple(t[0, head] for t in original), tuple(t[0, head] for t in parent_pair)
+        )
+        normalized = (gain / max(anchor_error, 1e-20)).clamp(-1, 1).cpu().tolist()
+        utilities = replace(
+            utilities,
+            blocks=tuple(
+                replace(u, local_utility=u.local_utility + 0.25 * normalized[u.node_id])
+                for u in utilities.blocks
+            ),
+        )
+        restoration_report = dict(
+            anchor_attention_output_mse=anchor_error,
+            maximum_relative_gain=max(normalized),
+            minimum_relative_gain=min(normalized),
+            weight=0.25,
+            actual_key_change_and_softmax_normalization=True,
+            benchmark_quality_certificate=False,
+        )
     timer.mark("value_utility")
     selection_config = SelectionConfig(
         lambda_g=0.0 if policy.component_mode == "modular_selection" else -0.1,
@@ -528,6 +568,7 @@ def plan_layer(
         delta_prototype_uniform_weights=policy.prototype_representation == "parent_residual_delta",
         parent_source_storage_retired=False,
         utility_signal=policy.utility_signal,
+        signed_restoration_gain=restoration_report,
         routing_signal=policy.routing_signal,
         demand_weighted_coverage=policy.demand_weighted_coverage,
         graph_accumulation=policy.graph_accumulation,
@@ -571,7 +612,7 @@ def plan_layer(
     return overlay
 
 
-def _private_probe(original_run, args, kwargs, options):
+def _private_probe(original_run, args, kwargs, options, attention_observer=None):
     """New thread => new request-local ContextVars, NOT nested cache bindings.
 
     A registered one-update scope retains exact per-layer engagement checks.
@@ -610,7 +651,18 @@ def _private_probe(original_run, args, kwargs, options):
                 native(False),
                 prefetch(False),
             ):
-                values, detail = original_run(*args, **kwargs)
+                with ExitStack() as hooks:
+                    if attention_observer is not None:
+                        adapter = args[0]
+                        original_decode = adapter.decode_one_token
+
+                        def captured(*a, **kw):
+                            result = original_decode(*a, **dict(kw, capture_attentions=True))
+                            attention_observer(result.attention_weights)
+                            return result
+
+                        hooks.enter_context(patch.object(adapter, "decode_one_token", captured))
+                    values, detail = original_run(*args, **kwargs)
                 return values, (), detail
 
         wrapped = body
@@ -673,7 +725,8 @@ def integrated_storage(
                 approximation = None
                 if (
                     policy.prototype_representation == "parent_residual_delta"
-                    or policy.utility_signal == "parent_reconstruction_error"
+                    or policy.utility_signal
+                    in ("parent_reconstruction_error", "exact_restoration_gain")
                     or policy.routing_signal == "parent_error_opportunity"
                 ):
                     from time import perf_counter
@@ -765,6 +818,9 @@ def integrated_storage(
         return result
 
     def run(*args, **kwargs):
+        from mosaickv.evaluation.source_replacement import audit_retirement
+
+        audit_retirement(report["source_replacement"])
         if policy.enabled and set(overlays) != set(policy.layers):
             raise RuntimeError("every configured mechanism layer must have a real overlay")
         report["prompt_length"] = args[1].state.logical_sequence_length
@@ -774,15 +830,51 @@ def integrated_storage(
             if reader_options is None:
                 raise ValueError("frozen parent reader options required for the private probe")
             probe_kwargs = dict(kwargs, tokens=policy.provisional_tokens)
-            before, probe_details = _private_probe(original_run, args, probe_kwargs, reader_options)
+
+            def observe(weights):
+                for layer, overlay in overlays.items():
+                    if len(weights) <= layer or weights[layer] is None:
+                        raise RuntimeError("actual decode attention unavailable for prototype risk")
+                    overlay.attention_mass = float(
+                        weights[layer][0, overlay.head, -1].index_select(0, overlay.positions).sum()
+                    )
+
+            risk_policy = policy.repair_policy == "entropy_or_prototype_risk"
+            before, probe_details = _private_probe(
+                original_run,
+                args,
+                probe_kwargs,
+                reader_options,
+                attention_observer=observe if risk_policy else None,
+            )
             entropy = normalized_next_token_entropy(before[1])
             report["provisional_entropy"] = entropy
             report["probe_storage"] = probe_details["storage"]
             report["probe_decode_wall_seconds"] = probe_details["decode_wall_seconds"]
             report["provisional_tokens"] = policy.provisional_tokens
             forced = policy.force_repair or policy.component_mode == "forced_repair"
+            from mosaickv.evaluation.precision_gain import repair_risk
+
+            risks = (
+                {
+                    str(i): repair_risk(
+                        o.attention_mass,
+                        o.dispersion,
+                        max(float(o.residual_pair[1].float().norm(dim=-1).mean()), 1e-12),
+                    )
+                    for i, o in overlays.items()
+                }
+                if risk_policy
+                else {}
+            )
+            report["actual_decode_prototype_risk"] = risks
+            report["actual_decode_prototype_mass"] = (
+                {str(i): o.attention_mass for i, o in overlays.items()} if risk_policy else {}
+            )
+            report["prototype_risk_threshold"] = policy.prototype_risk_threshold
+            risk_trigger = bool(risks) and max(risks.values()) >= policy.prototype_risk_threshold
             if policy.component_mode not in ("no_repair", "exact_members", "parent_reserved") and (
-                forced or entropy >= policy.entropy_threshold
+                forced or entropy >= policy.entropy_threshold or risk_trigger
             ):
                 index = min(overlays)
                 event = overlays[index].promote()
@@ -790,7 +882,13 @@ def integrated_storage(
                     dict(
                         event,
                         layer=index,
-                        trigger_reason="controlled_entropy_zero" if forced else "entropy",
+                        trigger_reason=(
+                            "controlled_entropy_zero"
+                            if forced
+                            else "prototype_risk"
+                            if risk_trigger
+                            else "entropy"
+                        ),
                         current_token_recomputed_once=True,
                         stress_control=forced,
                     )
@@ -818,6 +916,11 @@ def integrated_storage(
         return after, details
 
     with ExitStack() as stack:
+        from mosaickv.evaluation.source_replacement import use as source_replacement
+
+        report["source_replacement"] = stack.enter_context(
+            source_replacement(policy.replace_source_codes)
+        )
         stack.enter_context(patch.object(constructor, "StreamingDirectSource", Encoder))
         stack.enter_context(
             patch.object(SequentialSourceHistoryLayer, "materialize_component", fill)

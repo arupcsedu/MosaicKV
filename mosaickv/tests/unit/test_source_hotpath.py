@@ -30,7 +30,7 @@ class Compiled:
 
 
 class Kernel:
-    arg_names = tuple([f"a{i}" for i in range(13)] + ["COMPONENT", "WIDTH"])
+    arg_names = tuple([f"a{i}" for i in range(14)] + ["COMPONENT", "WIDTH"])
 
     def __init__(self, scratch=0):
         self.calls = []
@@ -62,6 +62,7 @@ def args_fixture():
         target,
         17,
         24 * 128,
+        codes,
     )
 
 
@@ -71,7 +72,7 @@ def test_prepared_runtime_destinations_and_strides_are_not_cached():
     with policy.use("prepared") as state:
         policy.source_launch(kernel, (2, 4), args, options, attention)
         other = Tensor(2048)
-        current = (*args[:9], other, other, 17, 26 * 128)
+        current = (*args[:9], other, other, 17, 26 * 128, args[13])
         policy.source_launch(kernel, (2, 4), current, options, attention)
         assert state["source_hits"] == state["source_misses"] == 1
         assert kernel.direct[0][1][9] is other and kernel.direct[0][1][12] == 26 * 128
@@ -102,7 +103,7 @@ def test_mutated_route_or_lease_fails_closed(fault):
         elif fault == "alignment":
             args[9].pointer = 1025
         elif fault == "wide_stride":
-            changed[-1] = 2**33
+            changed[12] = 2**33
         else:
             options["WIDTH"] = 1024
         with pytest.raises((ValueError, RuntimeError)):

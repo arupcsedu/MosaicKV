@@ -164,10 +164,13 @@ def _decode_joint(
     INPUT,
     OUT,
     ROWS,
+    ROW_MAP,
     FIRST: tl.constexpr,
     TAKE: tl.constexpr,
     WIDTH: tl.constexpr,
     HAS_COLUMNS: tl.constexpr,
+    SOURCE_ROWS: tl.constexpr = 0,
+    HAS_ROW_MAP: tl.constexpr = False,
 ):
     local = tl.program_id(0) * 16 + tl.arange(0, 16)
     col = tl.program_id(1) * 64 + tl.arange(0, 64)
@@ -183,6 +186,11 @@ def _decode_joint(
         WIDTH,
         3,
         HAS_COLUMNS,
+        False,
+        False,
+        ROW_MAP,
+        SOURCE_ROWS,
+        HAS_ROW_MAP,
     )
     incoming = tl.load(
         INPUT + tl.broadcast_to(col[None, :], (16, 64)), local[:, None] == TAKE, other=0
@@ -258,6 +266,9 @@ class Engine(OriginalEngine):
             take = min(128, n - first)
             if take == self.tail:
                 mapping, values, columns = kernel_arguments(packet)
+                from mosaickv.evaluation.source_replacement import arguments as source_arguments
+
+                row_map, source_rows, has_row_map = source_arguments(packet.source)
                 compiled = _decode_joint[(triton.cdiv(take + 1, 16), 64)](
                     packet.source.codes,
                     packet.source.minimum,
@@ -267,10 +278,13 @@ class Engine(OriginalEngine):
                     self.incoming,
                     self.source,
                     n,
+                    row_map,
                     FIRST=first,
                     TAKE=take,
                     WIDTH=4096,
                     HAS_COLUMNS=columns,
+                    SOURCE_ROWS=source_rows,
+                    HAS_ROW_MAP=has_row_map,
                     num_warps=4,
                     enable_fp_fusion=False,
                 )

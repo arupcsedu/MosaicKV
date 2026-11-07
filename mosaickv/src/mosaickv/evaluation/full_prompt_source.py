@@ -67,6 +67,9 @@ def decode_into(packet, workspace):
 
         columns, values, has_columns = kernel_arguments(packet)
         n, width = packet.source.shape[2:]
+        from mosaickv.evaluation.source_replacement import arguments as source_arguments
+
+        row_map, source_rows, has_row_map = source_arguments(packet.source)
         _decoded_source[((n + 15) // 16, width // 64)](
             packet.source.codes,
             packet.source.minimum,
@@ -78,6 +81,9 @@ def decode_into(packet, workspace):
             WIDTH=width,
             HAS_COLUMNS=has_columns,
             REUSE_HEADERS=reuse_headers(),
+            ROW_MAP=row_map,
+            SOURCE_ROWS=source_rows,
+            HAS_ROW_MAP=has_row_map,
             enable_fp_fusion=False,
         )
     elif workspace.device.type == "cpu":

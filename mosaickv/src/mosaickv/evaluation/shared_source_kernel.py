@@ -22,10 +22,19 @@ def _read(
     BITS: tl.constexpr,
     REUSE_HEADERS: tl.constexpr = False,
     ROW4: tl.constexpr = False,
+    ROW_MAP=None,
+    SOURCE_ROWS: tl.constexpr = 0,
+    HAS_ROW_MAP: tl.constexpr = False,
 ):
     col = start + tl.arange(0, 64)
-    index = col[None, :] * ROWS + row[:, None]
     valid = row[:, None] < ROWS
+    if HAS_ROW_MAP:
+        physical = tl.load(ROW_MAP + row, row < ROWS, other=-1)
+        code_valid = valid & (physical[:, None] >= 0)
+        index = col[None, :] * SOURCE_ROWS + tl.maximum(physical[:, None], 0)
+    else:
+        code_valid = valid
+        index = col[None, :] * ROWS + row[:, None]
     if ROW4:
         flat = row[:, None] * WIDTH + col[None, :]
         byte = tl.load(CODES + flat // 2, valid, other=0).to(tl.int32)
@@ -33,8 +42,8 @@ def _read(
     else:
         bit = index * BITS
         byte, shift = bit // 8, bit % 8
-        a = tl.load(CODES + byte, valid, other=0).to(tl.int32)
-        b = tl.load(CODES + byte + 1, valid & (shift + BITS > 8), other=0).to(tl.int32)
+        a = tl.load(CODES + byte, code_valid, other=0).to(tl.int32)
+        b = tl.load(CODES + byte + 1, code_valid & (shift + BITS > 8), other=0).to(tl.int32)
         code = ((a >> shift) | (b << (8 - shift))) & ((1 << BITS) - 1)
     if REUSE_HEADERS:
         # The fixed 16/32/64-row tiles divide the 128-row quantizer group.
@@ -66,8 +75,25 @@ def _read_coherent(
     HAS_COLUMNS: tl.constexpr,
     REUSE_HEADERS: tl.constexpr = False,
     ROW4: tl.constexpr = False,
+    ROW_MAP=None,
+    SOURCE_ROWS: tl.constexpr = 0,
+    HAS_ROW_MAP: tl.constexpr = False,
 ):
-    x = _read(CODES, MINIMUM, SCALE, row, start, ROWS, WIDTH, BITS, REUSE_HEADERS, ROW4)
+    x = _read(
+        CODES,
+        MINIMUM,
+        SCALE,
+        row,
+        start,
+        ROWS,
+        WIDTH,
+        BITS,
+        REUSE_HEADERS,
+        ROW4,
+        ROW_MAP,
+        SOURCE_ROWS,
+        HAS_ROW_MAP,
+    )
     if HAS_COLUMNS:
         col = start + tl.arange(0, 64)
         slot = tl.load(MAP + col).to(tl.int32)
@@ -92,6 +118,7 @@ def _project(
     OV,
     ROWS,
     HEAD_OUT,
+    ROW_MAP,
     WIDTH: tl.constexpr,
     DIM: tl.constexpr,
     BITS: tl.constexpr,
@@ -104,6 +131,8 @@ def _project(
     FIRST: tl.constexpr = 0,
     TAKE: tl.constexpr = 0,
     V_PREFIX: tl.constexpr = False,
+    SOURCE_ROWS: tl.constexpr = 0,
+    HAS_ROW_MAP: tl.constexpr = False,
 ):
     row = FIRST + tl.program_id(0) * ROW_TILE + tl.arange(0, ROW_TILE)
     head = tl.program_id(1) * HEAD_GROUP
@@ -126,6 +155,9 @@ def _project(
             HAS_COLUMNS,
             REUSE_HEADERS,
             ROW4,
+            ROW_MAP,
+            SOURCE_ROWS,
+            HAS_ROW_MAP,
         )
         k = start * 64 + reduction
         if COMPONENT != 1:
@@ -194,6 +226,7 @@ def project(packet, attention, targets, *, component=-1, inspect_kernel=False, w
             raise ValueError("explicit supported warp count required")
         body = packet.source
         from mosaickv.evaluation.source_channel_exceptions import kernel_arguments
+        from mosaickv.evaluation.source_replacement import arguments as source_arguments
 
         column_map, column_values, has_columns = kernel_arguments(packet)
         width = body.shape[-1]
@@ -230,6 +263,9 @@ def project(packet, attention, targets, *, component=-1, inspect_kernel=False, w
         if first and reuse_headers():
             raise NotImplementedError("offset windows do not support the header-reuse ablation")
         row4 = lookup(body)
+        row_map, source_rows, has_row_map = source_arguments(body)
+        if has_row_map and row4 is not None:
+            raise NotImplementedError("compacted sources cannot use the row-major scratch policy")
         grid = (triton.cdiv(take or n, row_tile), h // head_group)
         arguments = (
             body.codes if row4 is None else row4,
@@ -244,6 +280,7 @@ def project(packet, attention, targets, *, component=-1, inspect_kernel=False, w
             *targets,
             n,
             targets[0].stride(1),
+            row_map,
         )
         options = dict(
             WIDTH=width,
@@ -258,6 +295,8 @@ def project(packet, attention, targets, *, component=-1, inspect_kernel=False, w
             FIRST=first,
             TAKE=take,
             V_PREFIX=v_prefix,
+            SOURCE_ROWS=source_rows,
+            HAS_ROW_MAP=has_row_map,
             num_warps=warps,
             num_stages={1: 3, 2: 2, 4: 1}[head_group],
             enable_fp_fusion=False,
@@ -288,11 +327,29 @@ def _decoded_source(
     WIDTH: tl.constexpr,
     HAS_COLUMNS: tl.constexpr,
     REUSE_HEADERS: tl.constexpr = False,
+    ROW_MAP=None,
+    SOURCE_ROWS: tl.constexpr = 0,
+    HAS_ROW_MAP: tl.constexpr = False,
 ):
     row = tl.program_id(0) * 16 + tl.arange(0, 16)
     start = tl.program_id(1) * 64
     values = _read_coherent(
-        CODES, MINIMUM, SCALE, MAP, VALUES, row, start, ROWS, WIDTH, 3, HAS_COLUMNS, REUSE_HEADERS
+        CODES,
+        MINIMUM,
+        SCALE,
+        MAP,
+        VALUES,
+        row,
+        start,
+        ROWS,
+        WIDTH,
+        3,
+        HAS_COLUMNS,
+        REUSE_HEADERS,
+        False,
+        ROW_MAP,
+        SOURCE_ROWS,
+        HAS_ROW_MAP,
     )
     offsets = row[:, None] * WIDTH + start + tl.arange(0, 64)[None, :]
     tl.store(OUT + offsets, values, row[:, None] < ROWS)
@@ -308,6 +365,9 @@ def decode_source_for_construction(packet):
     column_map, column_values, has_columns = kernel_arguments(packet)
     out = torch.empty((1, n, width), device=packet.source.codes.device, dtype=torch.bfloat16)
     from mosaickv.evaluation.reconstruction_policy import reuse_headers
+    from mosaickv.evaluation.source_replacement import arguments as source_arguments
+
+    row_map, source_rows, has_row_map = source_arguments(packet.source)
 
     _decoded_source[(triton.cdiv(n, 16), width // 64)](
         packet.source.codes,
@@ -320,21 +380,53 @@ def decode_source_for_construction(packet):
         WIDTH=width,
         HAS_COLUMNS=has_columns,
         REUSE_HEADERS=reuse_headers(),
+        ROW_MAP=row_map,
+        SOURCE_ROWS=source_rows,
+        HAS_ROW_MAP=has_row_map,
         enable_fp_fusion=False,
     )
     return out
 
 
 @triton.jit(do_not_specialize=["ROWS", "FIRST", "TAKE"])
-def _decode_chunk(CODES, MINIMUM, SCALE, OUT, ROWS, FIRST, TAKE, WIDTH: tl.constexpr):
+def _decode_chunk(
+    CODES,
+    MINIMUM,
+    SCALE,
+    OUT,
+    ROWS,
+    FIRST,
+    TAKE,
+    ROW_MAP,
+    WIDTH: tl.constexpr,
+    SOURCE_ROWS: tl.constexpr = 0,
+    HAS_ROW_MAP: tl.constexpr = False,
+):
     local = tl.program_id(0) * 16 + tl.arange(0, 16)
     start = tl.program_id(1) * 64
-    values = _read(CODES, MINIMUM, SCALE, FIRST + local, start, ROWS, WIDTH, 3)
+    values = _read(
+        CODES,
+        MINIMUM,
+        SCALE,
+        FIRST + local,
+        start,
+        ROWS,
+        WIDTH,
+        3,
+        False,
+        False,
+        ROW_MAP,
+        SOURCE_ROWS,
+        HAS_ROW_MAP,
+    )
     offset = local[:, None] * WIDTH + start + tl.arange(0, 64)[None, :]
     tl.store(OUT + offset, values, local[:, None] < TAKE)
 
 
 def decode_chunk(packet, target, first):
+    from mosaickv.evaluation.source_replacement import arguments as source_arguments
+
+    row_map, source_rows, has_row_map = source_arguments(packet.source)
     n, width = packet.source.shape[2:]
     take = target.shape[1]
     if not 0 <= first < first + take <= n or not target.is_contiguous():
@@ -347,7 +439,10 @@ def decode_chunk(packet, target, first):
         n,
         first,
         take,
+        row_map,
         WIDTH=width,
+        SOURCE_ROWS=source_rows,
+        HAS_ROW_MAP=has_row_map,
         enable_fp_fusion=False,
     )
 

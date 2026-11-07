@@ -20,13 +20,31 @@ def _decode(
     ROWS,
     FIRST,
     TAKE,
+    ROW_MAP,
     WIDTH: tl.constexpr,
     HAS_COLUMNS: tl.constexpr,
+    SOURCE_ROWS: tl.constexpr = 0,
+    HAS_ROW_MAP: tl.constexpr = False,
 ):
     local = tl.program_id(0) * 16 + tl.arange(0, 16)
     start = tl.program_id(1) * 64
     x = _read_coherent(
-        CODES, MINIMUM, SCALE, MAP, VALUES, FIRST + local, start, ROWS, WIDTH, 3, HAS_COLUMNS
+        CODES,
+        MINIMUM,
+        SCALE,
+        MAP,
+        VALUES,
+        FIRST + local,
+        start,
+        ROWS,
+        WIDTH,
+        3,
+        HAS_COLUMNS,
+        False,
+        False,
+        ROW_MAP,
+        SOURCE_ROWS,
+        HAS_ROW_MAP,
     )
     offset = local[:, None] * WIDTH + start + tl.arange(0, 64)[None, :]
     tl.store(OUT + offset, x, local[:, None] < TAKE)
@@ -48,6 +66,9 @@ def decode_slice(packet, target, first, take):
     ):
         raise ValueError("bounded private 128-row original source chunk required")
     mapping, values, columns = kernel_arguments(packet)
+    from mosaickv.evaluation.source_replacement import arguments as source_arguments
+
+    row_map, source_rows, has_row_map = source_arguments(packet.source)
     compiled = _decode[(triton.cdiv(take, 16), width // 64)](
         packet.source.codes,
         packet.source.minimum,
@@ -58,8 +79,11 @@ def decode_slice(packet, target, first, take):
         n,
         first,
         take,
+        row_map,
         WIDTH=width,
         HAS_COLUMNS=columns,
+        SOURCE_ROWS=source_rows,
+        HAS_ROW_MAP=has_row_map,
         num_warps=4,
         enable_fp_fusion=False,
     )

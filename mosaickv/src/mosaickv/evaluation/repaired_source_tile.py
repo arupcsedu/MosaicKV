@@ -123,6 +123,8 @@ def validate(packet, attention, component, target):
 
 def project_raw(packet, attention, component, target, *, inspect_kernel=False):
     """Writes native tile + original RoPE; caller MUST fit/apply frozen repair."""
+    if packet.source.row_map is not None:
+        raise NotImplementedError("legacy 32-column tile has no compact source reader")
     from mosaickv.evaluation.shared_source_kernel import rotate_native
     from mosaickv.evaluation.source_channel_exceptions import kernel_arguments
 
@@ -159,6 +161,8 @@ def project_raw(packet, attention, component, target, *, inspect_kernel=False):
 
 def decode_control(packet, target):
     """Control-only full dequantized output; never a serving workspace."""
+    if packet.source.row_map is not None:
+        raise NotImplementedError("legacy 32-column tile has no compact source reader")
     from mosaickv.evaluation.source_channel_exceptions import kernel_arguments
 
     n, width = packet.source.shape[2:]

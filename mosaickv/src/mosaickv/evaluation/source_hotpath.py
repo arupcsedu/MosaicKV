@@ -74,9 +74,10 @@ def source_launch(kernel, grid, arguments, options, attention):
         # Primitive paired projection is outside the private one-buffer path.
         return kernel[grid](*arguments, **options)
     if (
-        len(arguments) != 13
+        len(arguments) != 14
+        or not hasattr(arguments[13], "data_ptr")
         or arguments[9] is not arguments[10]
-        or any(type(x) is not int or not 0 < x < 2**31 for x in arguments[11:])
+        or any(type(x) is not int or not 0 < x < 2**31 for x in arguments[11:13])
         or arguments[9].data_ptr() % 16
         or arguments[9].device.type != "cuda"
         or str(arguments[9].dtype) != "torch.bfloat16"
@@ -91,6 +92,7 @@ def source_launch(kernel, grid, arguments, options, attention):
         arguments[0].device,
         tuple("codes" if x is arguments[0] else id(x) for x in arguments[1:9]),
         arguments[11],
+        arguments[13].data_ptr(),
         tuple(grid),
         tuple(sorted(options.items())),
     )

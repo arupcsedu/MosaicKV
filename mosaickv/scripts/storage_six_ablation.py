@@ -37,8 +37,28 @@ def checked(root, expected):
     return plan
 
 
-def component_policies(proposal_study=False, allocation_study=False):
+def component_policies(proposal_study=False, allocation_study=False, replacement_study=False):
     base = OverlayPolicy(record_phase_timings=True)
+    if replacement_study:
+        improved = replace(
+            base,
+            forecast_distribution="individual_queries",
+            prototype_representation="parent_residual_delta",
+            graph_accumulation="segmented_tensor_topk",
+        )
+        replaced = replace(improved, replace_source_codes=True)
+        return {
+            "full": asdict(improved),
+            "parent_reserved": asdict(replace(improved, component_mode="parent_reserved")),
+            "exact_members": asdict(replace(improved, component_mode="exact_members")),
+            "forced_repair": asdict(replace(improved, component_mode="forced_repair")),
+            "source_replaced": asdict(replaced),
+            "source_replaced_parent": asdict(replace(replaced, enabled=False)),
+            "signed_gain": asdict(replace(replaced, utility_signal="exact_restoration_gain")),
+            "actual_attention_risk": asdict(
+                replace(replaced, repair_policy="entropy_or_prototype_risk")
+            ),
+        }
     if allocation_study:
         improved = replace(
             base,
@@ -98,8 +118,8 @@ def component_policies(proposal_study=False, allocation_study=False):
     }
 
 
-def prepare(root, proposal_study=False, allocation_study=False):
-    proposal_study = proposal_study or allocation_study
+def prepare(root, proposal_study=False, allocation_study=False, replacement_study=False):
+    proposal_study = proposal_study or allocation_study or replacement_study
     if root.exists():
         raise FileExistsError("new immutable component output root required")
     source_sha = clean_source(SOURCE)
@@ -166,6 +186,9 @@ def prepare(root, proposal_study=False, allocation_study=False):
                 "mosaickv/tests/unit/test_storage_component_gate.py",
                 "mosaickv/tests/unit/test_residual_delta_prototype.py",
                 "mosaickv/tests/unit/test_storage_error_aware.py",
+                "mosaickv/tests/unit/test_source_replacement.py",
+                "mosaickv/tests/unit/test_precision_gain.py",
+                "mosaickv/tests/unit/test_source_hotpath.py",
                 "mosaickv/tests/unit/test_opportunity_demand.py",
                 "mosaickv/tests/unit/test_bounded_probe_horizon.py",
                 "mosaickv/tests/unit/test_streaming_source_constructor.py",
@@ -189,8 +212,15 @@ def prepare(root, proposal_study=False, allocation_study=False):
             parent=parent,
             options=options,
             bound_files={str(p): sha(p) for p in paths},
-            arms=("full_kv", "parent", *component_policies(proposal_study, allocation_study)),
-            component_policies=component_policies(proposal_study, allocation_study),
+            arms=(
+                "full_kv",
+                "parent",
+                *component_policies(proposal_study, allocation_study, replacement_study),
+            ),
+            component_policies=component_policies(
+                proposal_study, allocation_study, replacement_study
+            ),
+            source_replacement_study=replacement_study,
             component_reference_arm="all_adaptive" if allocation_study else "full",
             overlay_policy=asdict(OverlayPolicy(record_phase_timings=True)),
             output_predictions=128,
@@ -245,6 +275,10 @@ def worker(root, expected):
     cfg = RunConfig.from_mapping(plan["parent"]["config"])
     rows, errors, values_by_arm = [], [], {}
     try:
+        if plan.get("source_replacement_study"):
+            from mosaickv.evaluation.source_replacement_controls import gpu_controls
+
+            write_once(folder / "source_operator_controls.json", gpu_controls())
         adapter = load_hf_adapter(
             cfg.model.id,
             revision=cfg.model.revision,
@@ -323,7 +357,9 @@ def worker(root, expected):
                     row["mechanism_evidence"] = proof
                     if detail["prefill_storage"]["original_KV_tensor_objects_alive"] != 0:
                         raise RuntimeError("original dense KV owner survived")
-                    if not proof["all_residuals_pinned"] or proof["extra_gpu_bytes"] != 6713:
+                    if not proof["all_residuals_pinned"] or proof["extra_gpu_bytes"] != (
+                        6713 if policy.enabled else 0
+                    ):
                         raise RuntimeError("registered real matched auxiliary allocations changed")
                     if arm == "no_graph" and any(
                         e["graph_edges"] for e in proof["layers"].values()
@@ -386,6 +422,23 @@ def worker(root, expected):
                 values_by_arm["individual_delta_fast_graph"], values_by_arm["individual_delta"]
             ):
                 errors.append("segmented graph execution changed a final model logit bit")
+            if plan.get("source_replacement_study"):
+                for arm, reference in (
+                    ("source_replaced", "full"),
+                    ("source_replaced_parent", "parent"),
+                ):
+                    if not torch.equal(values_by_arm[arm], values_by_arm[reference]):
+                        errors.append(f"lossless source replacement changed logits: {arm}")
+                for row in rows:
+                    policy = policies.get(row["arm"], {})
+                    if policy.get("replace_source_codes") and row["status"] == "completed":
+                        proof = row["mechanism_evidence"]["source_replacement"]
+                        if (
+                            proof["replaced_code_owners"] != 32
+                            or proof["old_code_tensor_objects_alive"] != 0
+                            or proof["saved_gpu_bytes"] <= 0
+                        ):
+                            errors.append("incomplete source replacement/retirement")
     except Exception:
         errors.append(traceback.format_exc())
     write_once(
@@ -428,6 +481,52 @@ def analyze(root, expected):
     for row in rows:
         if row["status"] == "completed" and sha(Path(row["logits_path"])) != row["logits_sha256"]:
             raise ValueError("saved readout artifact changed")
+    replacement_pairs = []
+    if plan.get("source_replacement_study"):
+        for sample in read(root / "inputs.json"):
+            group = {
+                r["arm"]: r
+                for r in rows
+                if r["sample_id"] == sample["sample_id"] and r["status"] == "completed"
+            }
+            for arm, reference in (
+                ("source_replaced", "full"),
+                ("source_replaced_parent", "parent"),
+            ):
+                if arm not in group or reference not in group:
+                    errors.append(f"missing lossless replacement pair: {sample['sample_id']} {arm}")
+                    continue
+                r, old = group[arm], group[reference]
+                proof = r["mechanism_evidence"]["source_replacement"]
+                bitwise = torch.equal(
+                    torch.load(r["logits_path"], weights_only=True, map_location="cpu"),
+                    torch.load(old["logits_path"], weights_only=True, map_location="cpu"),
+                )
+                ds, before = r["detail"], old["detail"]
+                initial = before["initial_encoded_bytes"] - ds["initial_encoded_bytes"]
+                final = before["final_encoded_bytes"] - ds["final_encoded_bytes"]
+                passed = (
+                    bitwise
+                    and initial == final == proof["saved_gpu_bytes"] > 0
+                    and proof["old_code_tensor_objects_alive"] == 0
+                    and proof["replaced_code_owners"] == 32
+                )
+                replacement_pairs.append(
+                    dict(
+                        sample_id=sample["sample_id"],
+                        arm=arm,
+                        reference=reference,
+                        bitwise_128_prediction_logits=bitwise,
+                        initial_saved_bytes=initial,
+                        final_saved_bytes=final,
+                        code_retirement=proof,
+                        passed=passed,
+                    )
+                )
+                if not passed:
+                    errors.append(
+                        f"source replacement/accounting gate failed: {sample['sample_id']} {arm}"
+                    )
     out = root / "analysis"
     out.mkdir(exist_ok=False)
     write_once(out / "rows.json", rows)
@@ -501,6 +600,7 @@ def analyze(root, expected):
             expected_rows=expected_rows,
             actual_rows=len(rows),
             storage_matching=matches,
+            source_replacement_pairs=replacement_pairs,
             component_effects=effects,
             common_prefix_effects=aligned,
             precision_decomposition=precision,
@@ -513,8 +613,9 @@ def analyze(root, expected):
             fresh_evaluation_authorized=False,
             superiority_established=False,
             reason=(
-                "Consumed two-image audit; execution/readout shifts cannot establish "
-                "useful answer quality or justify source retirement."
+                "Consumed two-image audit; source replacement requires verified owner retirement, "
+                "positive net backing savings and bitwise parent logits. Local readout changes "
+                "do not establish benchmark superiority or authorize larger campaigns."
             ),
         ),
     )
@@ -573,6 +674,15 @@ def analyze(root, expected):
         json.dumps(dict(storage_matching=matches, component_effects=effects), indent=2),
         "```",
         "",
+        "## Lossless source replacement",
+        "",
+        "This common codec is not prototype compaction. Mixed-budget rows above are not "
+        "byte-matched quality comparisons. Only policy ablations using the same replacement "
+        "and auxiliary buffers are storage-matched. Whole-request peak remains uncertified.",
+        "```json",
+        json.dumps(replacement_pairs, indent=2),
+        "```",
+        "",
         "## Failures",
         *[f"\n```\n{e}\n```" for e in errors],
     ]
@@ -587,9 +697,10 @@ def main():
     p.add_argument("--phase", default="components")
     p.add_argument("--proposal-study", action="store_true")
     p.add_argument("--allocation-study", action="store_true")
+    p.add_argument("--replacement-study", action="store_true")
     a = p.parse_args()
     if a.action == "prepare":
-        prepare(a.root, a.proposal_study, a.allocation_study)
+        prepare(a.root, a.proposal_study, a.allocation_study, a.replacement_study)
     elif a.action == "worker":
         return worker(a.root, a.plan_sha)
     elif a.action == "analyze":

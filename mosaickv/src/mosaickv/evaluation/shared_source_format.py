@@ -243,6 +243,10 @@ def construct(
         source = pack_unprotected(normalized[:, None], mask.all(0)[None], bits=3, axis=2)
     else:
         source = pack(normalized[:, None], bits=3, axis=2)
+    if exclude_global_exact:
+        from mosaickv.evaluation.source_replacement import maybe_compact
+
+        source = maybe_compact(source, host_mask.all(0))
     head, position = rows.long() // n, rows.long() % n
     exact = tuple(
         encode(t[0, head, position].reshape(1, 1, len(rows), d).contiguous()) for t in original_pair
