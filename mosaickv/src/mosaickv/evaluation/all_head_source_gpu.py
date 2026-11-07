@@ -130,6 +130,7 @@ def decode(previous, packet, destination=None):
 class CodecState:
     def __init__(self):
         self.records, self.references = [], []
+        self.coverage = []
 
     def report(self):
         return dict(
@@ -139,7 +140,9 @@ class CodecState:
             compressed_replacements=sum(r["symbol_codec_selected"] for r in self.records),
             original_owners_retired=sum(ref() is None for ref in self.references),
             benchmark_labels_accessed=False,
-            all_shared_source_consumers_covered=True,
+            all_shared_source_consumers_covered=bool(self.coverage)
+            and all(x["all_shared_consumers_covered"] for x in self.coverage),
+            coverage=self.coverage,
             quality_improvement_established=False,
             whole_request_peak_certified=False,
         )
@@ -207,9 +210,10 @@ def use(enabled=True):
                     or body.shape != (1, 1, n, h * dim)
                 ):
                     raise ValueError("source-only original full-MHA layout required")
-                SourceCoverage(
+                proof = SourceCoverage(
                     layer, tuple(range(h)), ("key", "value"), tuple(range(n)), ((0, h * dim),)
                 ).verify(kv_heads=h, head_dim=dim, length=n)
+                state.coverage.append(dict(layer=layer, **proof))
                 return body
 
             runtime.map_bodies(packet, validate)

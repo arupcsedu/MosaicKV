@@ -14,6 +14,7 @@ from mosaickv.evaluation.fox_campaign import clean_source, digest, sha, write_on
 SOURCE = Path(__file__).resolve().parents[2]
 CPU = Path("/scratch/djy8hg/runs/evicastkv/all-head-source-feasibility-20261107-v1")
 PYTHON = "/scratch/djy8hg/env/mosaickv/bin/python"
+SHELL = SOURCE / "mosaickv/slurm/all_head_native_source.sbatch"
 
 
 def read(p):
@@ -63,7 +64,7 @@ def submit(root, action, after=None):
     args += [
         f"--output={root}/logs/{action}-%A_%a.out",
         f"--error={root}/logs/{action}-%A_%a.err",
-        str(SOURCE / "mosaickv/slurm/all_head_native_source.sbatch"),
+        str(SHELL),
         str(SOURCE),
         str(root),
         sha(root / "plan.json"),
