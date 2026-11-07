@@ -13,6 +13,16 @@ Its two inputs are consumed development diagnostics. The codec saves approximate
 logit vectors bitwise. Counter peak is decode-owned, not whole-request GPU peak.
 The single-call times are not a latency acceptance result.
 
+The `bitmap_prefix` source decoder is a separate default-off implementation.
+It replaces two 512-element symbol prefix scans with prefix popcounts of the
+64-byte bitmaps. It does not change the packet format, quantizer, reconstructed
+codes or charged workspace. Its native 64-layer, two-input parity experiment is
+`/scratch/djy8hg/runs/evicastkv/source-bitmap-prefix-20261107-v1`.
+Only a passed native decision allows `source_hybrid_latency.py prepare
+--bitmap-prefix --root NEW_PATH` to use it in the optimized model arms.
+The common storage control receives the same optimized decoder as the hybrid.
+Operator timing alone is not an end-to-end latency claim.
+
 Two default-off optimizations retain the existing reference paths:
 
 - `all_head_source_gpu.use(construction="pack_selected")` counts both lossless

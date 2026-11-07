@@ -40,7 +40,7 @@ def checked(root, expected):
     return plan
 
 
-def prepare(root):
+def prepare(root, bitmap_prefix=False):
     import all_head_native_source as infra
 
     source = clean_source(SOURCE)
@@ -51,6 +51,11 @@ def prepare(root):
         raise FileExistsError("new immutable paired-validation output root required")
     paths = [PARENT / "plan.json", PARENT / "analysis/decision.json", PARENT / "inputs.json"]
     paths += [Path(p) for p in parent["bound_files"]]
+    if bitmap_prefix:
+        native_gate = Path("/scratch/djy8hg/runs/evicastkv/source-bitmap-prefix-20261107-v1")
+        if read(native_gate / "analysis/decision.json")["passed"] is not True:
+            raise ValueError("all native bitmap-prefix controls must pass before model timing")
+        paths += [native_gate / "plan.json", native_gate / "analysis/decision.json"]
     refs, codes = {}, {}
     for i in (0, 1):
         refs[str(i)] = {}
@@ -125,6 +130,7 @@ def prepare(root):
             multiplicity_comparisons=10,
             source_codec_optimization="count_both_pack_only_identical_winner",
             hybrid_optimization="one_changed_head_parent_counterfactual",
+            fast_decoder="bitmap_prefix" if bitmap_prefix else "reference",
             independent_quality_or_superiority_established=False,
             fresh_or_paper_campaign_authorized=False,
         ),
@@ -307,6 +313,9 @@ def worker(root, expected):
                                     construction="pack_selected"
                                     if arm.endswith("fast")
                                     else "both",
+                                    decoder=plan["fast_decoder"]
+                                    if arm.endswith("fast")
+                                    else "reference",
                                 ) as codec,
                                 integrated_storage(
                                     adapter, policy, reader_options=options
@@ -449,9 +458,10 @@ def main():
     p.add_argument("action", choices=("prepare", "worker", "analyze", "controller"))
     p.add_argument("--root", type=Path, required=True)
     p.add_argument("--plan-sha")
+    p.add_argument("--bitmap-prefix", action="store_true")
     a = p.parse_args()
     if a.action == "prepare":
-        return prepare(a.root)
+        return prepare(a.root, bitmap_prefix=a.bitmap_prefix)
     if a.action == "worker":
         return worker(a.root, a.plan_sha)
     if a.action == "analyze":
