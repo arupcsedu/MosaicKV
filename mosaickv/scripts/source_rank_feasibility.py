@@ -2,6 +2,7 @@
 """Two consumed source captures; CPU-only lower-bound and actual-format study."""
 
 import argparse
+import importlib.metadata
 import json
 import os
 import subprocess
@@ -60,7 +61,7 @@ def submit(root, worker, after=None):
     return subprocess.check_output(args, text=True).strip()
 
 
-def prepare(root, *, refined_source=False):
+def prepare(root, *, refined_source=False, mixed_source=False):
     from evicastkv_projection_source_cpu import metadata_features
 
     from mosaickv.adapters.huggingface.registry import _resolve_model_source
@@ -69,15 +70,30 @@ def prepare(root, *, refined_source=False):
     if root.exists():
         raise FileExistsError("new immutable CPU study root required")
     parent = read(PARENT / "plan.json")
-    protocol = "refined_source_feasibility.md" if refined_source else "source_rank_feasibility.md"
+    codec_study = refined_source or mixed_source
+    protocol = (
+        "mixed_source_feasibility.md"
+        if mixed_source
+        else "refined_source_feasibility.md"
+        if refined_source
+        else "source_rank_feasibility.md"
+    )
     jobs, paths = [], [PARENT / "plan.json", SOURCE / "mosaickv/docs" / protocol]
     prior = Path("/scratch/djy8hg/runs/evicastkv/source-rank-feasibility-20261107-v1")
-    if refined_source:
+    if codec_study:
         decision = read(prior / "analysis/decision.json")
         if not decision["complete"] or decision["source_factor_feasible_on_both"]:
             raise ValueError("complete negative pure-rank screen required")
         paths += [prior / "analysis/decision.json"]
         paths += [prior / f"workers/{i}/result.json" for i in (0, 1)]
+    if mixed_source:
+        previous_codec = Path(
+            "/scratch/djy8hg/runs/evicastkv/refined-source-codec-coupled-20261107-v1"
+        )
+        decision = read(previous_codec / "analysis/decision.json")
+        if not decision["complete"] or decision["source_factor_feasible_on_both"]:
+            raise ValueError("complete negative prototype/residual source screen required")
+        paths.append(previous_codec / "analysis/decision.json")
     for i in (0, 1):
         folder = PARENT / f"workers/{i}"
         status = read(folder / "result.json")
@@ -145,9 +161,10 @@ def prepare(root, *, refined_source=False):
                 "mosaickv/tests/unit/test_source_rank_feasibility.py",
                 *(
                     ["mosaickv/tests/unit/test_refined_source_feasibility.py"]
-                    if refined_source
+                    if codec_study
                     else []
                 ),
+                *(["mosaickv/tests/unit/test_mixed_source_feasibility.py"] if mixed_source else []),
             ],
             cwd=SOURCE,
             stdout=stream,
@@ -164,25 +181,34 @@ def prepare(root, *, refined_source=False):
             bound_files={str(p): sha(p) for p in paths},
             jobs=jobs,
             ranks=[96, 128],
-            source_family="refined_source" if refined_source else "pure_rank",
-            families=["lut2", "spatial4_binary_residual", "spatial8_binary_residual"]
+            source_family="mixed_source"
+            if mixed_source
+            else "refined_source"
+            if refined_source
+            else "pure_rank",
+            families=["mixed_group8_bits1234"]
+            if mixed_source
+            else ["lut2", "spatial4_binary_residual", "spatial8_binary_residual"]
             if refined_source
             else [],
-            expected_cases_per_worker=96 if refined_source else 64,
-            prior_negative_root=str(prior) if refined_source else None,
+            expected_cases_per_worker=32 if mixed_source else 96 if refined_source else 64,
+            prior_negative_root=str(prior) if codec_study else None,
             layers=list(range(32)),
             checkpoint=str(checkpoint),
             minimum_net_cpu_payload_reduction=0.10,
             source_mse_slack=1e-12,
             numerical_rule="every_nonexact_image_row_source_mse_not_greater_than_existing_three_bit"
-            if refined_source
+            if codec_study
             else "actual_factor_source_mse_not_greater_than_existing_three_bit",
             literal_refinement="minimal_largest_scalar_errors_or_full_row_charged"
             if refined_source
             else None,
-            lloyd_iterations=4 if refined_source else None,
+            lloyd_iterations=4 if codec_study else None,
+            mixed_group_width=8 if mixed_source else None,
+            lp_seconds_per_layer=20 if mixed_source else None,
+            maximum_monotone_group_upgrades=128 if mixed_source else None,
             source_choice_rule="globally_minimum_cpu_codec_payload_with_parent_fallback"
-            if refined_source
+            if codec_study
             else "minimum_rank_raw_payload",
             model_weights_loaded=False,
             benchmark_labels_accessed=False,
@@ -250,6 +276,7 @@ def worker(root, expected):
                 gpu_type="not_used",
                 gpu_count=0,
                 torch=torch.__version__,
+                scipy=importlib.metadata.version("scipy"),
                 environment=environment(),
                 producer_environment=producer["environment"],
                 environment_lock_sha256=sha(SOURCE / "mosaickv/env/common/requirements.lock"),
@@ -277,8 +304,12 @@ def worker(root, expected):
             exact = protected_positions(
                 capture["source_memberships"][layer], text, length=x.shape[1]
             ).all(0)
-            refined_source = plan.get("source_family") == "refined_source"
-            if refined_source:
+            codec_study = plan.get("source_family") in ("refined_source", "mixed_source")
+            if plan.get("source_family") == "mixed_source":
+                from mosaickv.evaluation.mixed_source_feasibility import screen_mixed
+
+                part = screen_mixed(x, exact, text)
+            elif plan.get("source_family") == "refined_source":
                 from mosaickv.evaluation.refined_source_feasibility import screen_refined
 
                 config = read(Path(plan["checkpoint"]) / "config.json")["vision_config"]
@@ -302,7 +333,7 @@ def worker(root, expected):
                         k,
                     ),
                 )
-                if part["candidates"] and refined_source
+                if part["candidates"] and codec_study
                 else min(part["candidates"])
                 if part["candidates"]
                 else None
@@ -311,11 +342,11 @@ def worker(root, expected):
             chosen.append(rank)
             write_once(folder / f"layer-{layer:02}.json", dict(rows=part["rows"], chosen_rank=rank))
         raw_minimum = cpu_serialized_storage(adaptive)
-        if plan.get("source_family") == "refined_source":
+        if plan.get("source_family") in ("refined_source", "mixed_source"):
             adaptive, selected = choose_codec_coupled(alternatives)
             chosen = [None if name == "parent" else name for name in selected]
         old, new = cpu_serialized_storage(baseline), cpu_serialized_storage(adaptive)
-        if plan.get("source_family") == "refined_source":
+        if plan.get("source_family") in ("refined_source", "mixed_source"):
             prior = read(Path(plan["prior_negative_root"]) / f"workers/{i}/result.json")
             if old != prior["result"]["baseline"]:
                 raise ValueError("unchanged baseline source/codec accounting differs")
@@ -406,10 +437,12 @@ def main():
     p.add_argument("action", choices=("prepare", "worker", "analyze"))
     p.add_argument("--root", required=True, type=Path)
     p.add_argument("--plan-sha")
-    p.add_argument("--refined-source", action="store_true", help="CPU-only source-codec study")
+    group = p.add_mutually_exclusive_group()
+    group.add_argument("--refined-source", action="store_true", help="CPU-only source-codec study")
+    group.add_argument("--mixed-source", action="store_true", help="CPU-only group-precision study")
     a = p.parse_args()
     return (
-        prepare(a.root, refined_source=a.refined_source)
+        prepare(a.root, refined_source=a.refined_source, mixed_source=a.mixed_source)
         if a.action == "prepare"
         else worker(a.root, a.plan_sha)
         if a.action == "worker"
