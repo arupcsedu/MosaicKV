@@ -48,7 +48,25 @@ def component_policies(
     readout_selection_study=False,
     global_draft_study=False,
     horizon_study=False,
+    inline_study=False,
 ):
+    if inline_study:
+        policies = component_policies(readout_study=True)
+        keep = (
+            "full",
+            "source_replaced",
+            "source_replaced_parent",
+            "parent_reserved",
+            "exact_members",
+            "forced_repair",
+        )
+        template = policies["source_replaced"]
+        return {
+            **{k: policies[k] for k in keep},
+            "inline_entropy": dict(template, inline_repair=True),
+            "inline_forced": dict(template, inline_repair=True, force_repair=True),
+            "inline_no_repair": dict(template, inline_repair=True, component_mode="no_repair"),
+        }
     if horizon_study:
         policies = component_policies(global_draft_study=True)
         keys = (
@@ -264,7 +282,9 @@ def prepare(
     readout_selection_study=False,
     global_draft_study=False,
     horizon_study=False,
+    inline_study=False,
 ):
+    replacement_study = replacement_study or inline_study
     global_draft_study = global_draft_study or horizon_study
     readout_selection_study = readout_selection_study or global_draft_study
     replacement_study = (
@@ -382,6 +402,7 @@ def prepare(
                 "mosaickv/tests/unit/test_conditional_readout_selection.py",
                 "mosaickv/tests/unit/test_offloaded_fullkv_draft.py",
                 "mosaickv/tests/unit/test_readout_horizon_audit.py",
+                "mosaickv/tests/unit/test_inline_first_step_repair.py",
                 "mosaickv/tests/unit/test_opportunity_demand.py",
                 "mosaickv/tests/unit/test_bounded_probe_horizon.py",
                 "mosaickv/tests/unit/test_streaming_source_constructor.py",
@@ -437,6 +458,7 @@ def prepare(
                     readout_selection_study,
                     global_draft_study,
                     horizon_study,
+                    inline_study,
                 ),
             ),
             component_policies=component_policies(
@@ -448,6 +470,7 @@ def prepare(
                 readout_selection_study,
                 global_draft_study,
                 horizon_study,
+                inline_study,
             ),
             source_replacement_study=replacement_study,
             exact_last_layer_readout_study=readout_study,
@@ -456,6 +479,7 @@ def prepare(
             evaluation_only_fixed_plan_horizon_audit=horizon_study,
             oracle_horizon_audit_not_online_selection=horizon_study,
             fixed_consumed_counterfactual_plans=fixed_plans,
+            inline_first_step_repair_study=inline_study,
             storage_boundary_version="shared_initial_final_peak_v2",
             component_reference_arm=(
                 "transaction_joint_guarded"
@@ -731,6 +755,16 @@ def worker(root, expected):
                 values_by_arm["controlled_plan_0"], values_by_arm["source_replaced"]
             ):
                 errors.append("controlled identity changed a final decode logit bit")
+            if plan.get("inline_first_step_repair_study"):
+                for arm, reference in (
+                    ("inline_entropy", "source_replaced"),
+                    ("inline_forced", "forced_repair"),
+                ):
+                    if not torch.equal(values_by_arm[arm], values_by_arm[reference]):
+                        errors.append(f"inline repair differs bitwise from original policy: {arm}")
+                    evidence = completed[arm]["mechanism_evidence"]["inline_first_step_repair"]
+                    if not evidence["completed"] or evidence["retained_private_tensor_owners"]:
+                        errors.append("inline observation did not engage or retire")
             if "individual_delta_fast_graph" in values_by_arm and not torch.equal(
                 values_by_arm["individual_delta_fast_graph"], values_by_arm["individual_delta"]
             ):
@@ -1043,6 +1077,7 @@ def main():
     p.add_argument("--readout-selection-study", action="store_true")
     p.add_argument("--global-draft-study", action="store_true")
     p.add_argument("--horizon-study", action="store_true")
+    p.add_argument("--inline-study", action="store_true")
     a = p.parse_args()
     if a.action == "prepare":
         prepare(
@@ -1055,6 +1090,7 @@ def main():
             a.readout_selection_study,
             a.global_draft_study,
             a.horizon_study,
+            a.inline_study,
         )
     elif a.action == "worker":
         return worker(a.root, a.plan_sha)

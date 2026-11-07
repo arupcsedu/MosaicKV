@@ -55,6 +55,7 @@ class OverlayPolicy:
     readout_control: bool = False
     readout_selection: str = "none"
     readout_target: str = "conditional_head"
+    inline_repair: bool = False
 
     def __post_init__(self):
         if not self.layers or tuple(sorted(set(self.layers))) != self.layers:
@@ -117,6 +118,17 @@ class OverlayPolicy:
             raise ValueError("registered conditional-head or actual FullKV draft target required")
         if self.readout_target == "fullkv_draft" and self.readout_selection == "none":
             raise ValueError("FullKV draft target requires active readout selection")
+        if type(self.inline_repair) is not bool:
+            raise ValueError("explicit inline repair activation required")
+        if self.inline_repair and (
+            self.layers != (31,)
+            or not self.enabled
+            or self.provisional_tokens != 2
+            or self.readout_selection != "none"
+            or self.readout_control
+            or self.repair_policy != "entropy"
+        ):
+            raise ValueError("inline repair supports only the registered last-layer entropy policy")
         if (self.readout_control or self.readout_selection != "none") and (
             self.layers != (31,) or self.provisional_tokens != 2 or not self.enabled
         ):
@@ -960,7 +972,22 @@ def integrated_storage(
         if policy.enabled and set(overlays) != set(policy.layers):
             raise RuntimeError("every configured mechanism layer must have a real overlay")
         report["prompt_length"] = args[1].state.logical_sequence_length
-        if overlays:
+        inline_result = None
+        if overlays and policy.inline_repair:
+            from mosaickv.evaluation.inline_first_step_repair import InlineRepair
+
+            with InlineRepair(adapter, overlays[31], policy, report) as inline:
+                inline_result = original_run(*args, **kwargs)
+            if not inline.done:
+                raise RuntimeError("inline first-step repair transport did not engage")
+            report.update(
+                provisional_tokens=2,
+                provisional_model_updates=0,
+                probe_decode_wall_seconds=0.0,
+                probe_storage=None,
+                separate_compressed_cache_probe_performed=False,
+            )
+        if overlays and not policy.inline_repair:
             # A separate, disposable two-prediction cache uses the SAME prefill
             # and source packets. No nested live cache or second prefill.
             if reader_options is None:
@@ -1128,15 +1155,15 @@ def integrated_storage(
                     )
                 )
             report["provisional_first_decode_logit_sha"] = None
-        after, details = original_run(*args, **kwargs)
-        if overlays and predicted_selected is not None:
+        after, details = original_run(*args, **kwargs) if inline_result is None else inline_result
+        if overlays and not policy.inline_repair and predicted_selected is not None:
             from mosaickv.evaluation.exact_last_layer_readout import compare_logits
 
             check = compare_logits(predicted_selected, after[1])
             report["conditional_readout_selection"]["actual_selected_logit_control"] = check
             if not check["logits_bitwise"]:
                 raise RuntimeError("selected conditional suffix differs from actual final decode")
-        if overlays:
+        if overlays and not policy.inline_repair:
             report["repair_logit_max_change"] = float((before[1] - after[1]).abs().max())
             report["repair_token_changed"] = int(before[1].argmax()) != int(after[1].argmax())
             if policy.readout_selection != "none":
@@ -1153,7 +1180,13 @@ def integrated_storage(
         report["parent_reader_and_lossless_history_used"] = True
         report["actual_overlay_fills"] = {str(i): int(o.actual_fills) for i, o in overlays.items()}
         if overlays and any(
-            int(o.actual_fills) < 2 * (kwargs["tokens"] + policy.provisional_tokens - 2)
+            int(o.actual_fills)
+            < 2
+            * (
+                kwargs["tokens"]
+                - 1
+                + (0 if policy.inline_repair else policy.provisional_tokens - 1)
+            )
             for o in overlays.values()
         ):
             raise RuntimeError("prototype reader did not engage for every provisional/final step")
