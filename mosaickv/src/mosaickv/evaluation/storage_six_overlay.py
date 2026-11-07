@@ -67,8 +67,19 @@ class OverlayPolicy:
     reuse_anchor_readout: bool = False
     anchor_suffix: str = "reference"
     verify_anchor_suffix: bool = False
+    graph_spatial_search: str = "reference"
+    reuse_precision_targets: bool = False
+    prototype_anchor_scope: str = "legacy"
 
     def __post_init__(self):
+        if self.prototype_anchor_scope not in ("legacy", "selected", "matched_groups"):
+            raise ValueError("explicit prototype anchor scope required")
+        if self.graph_spatial_search not in ("reference", "zero_overlap"):
+            raise ValueError("registered exact spatial search required")
+        if type(self.reuse_precision_targets) is not bool or (
+            self.reuse_precision_targets and self.precision_transaction == "none"
+        ):
+            raise ValueError("attention-target reuse requires an active precision transaction")
         if self.anchor_suffix not in ("reference", "shared_graph") or (
             self.anchor_suffix == "shared_graph" and not self.live_anchor_guard
         ):
@@ -493,9 +504,13 @@ def plan_layer(
             ).reshape(-1)
         forecast_mode = forecast.provenance.mode.value
     timer.mark("prompt_queries_and_forecast")
-    from mosaickv.graph.builder import cosine_search, positional_search
+    from mosaickv.graph.builder import cosine_search, positional_search, spatial_search
 
-    with positional_search(policy.graph_positional_search), cosine_search(policy.graph_cosine_topk):
+    with (
+        positional_search(policy.graph_positional_search),
+        cosine_search(policy.graph_cosine_topk),
+        spatial_search(policy.graph_spatial_search),
+    ):
         graph = build_evidence_graph(
             full,
             GraphConfig(
@@ -597,7 +612,10 @@ def plan_layer(
     anchors = tuple(
         node for node in selected.selected_node_ids if str(full.blocks[node].modality) == "image"
     )
-    if policy.record_phase_timings or policy.component_mode != "full":
+    matched_anchors = policy.prototype_anchor_scope == "matched_groups" or (
+        policy.prototype_anchor_scope == "legacy" and policy.record_phase_timings
+    )
+    if matched_anchors or policy.component_mode != "full":
         # Common matched-allocation rule: the bounded constructor partitions
         # image nodes into member_count+1 segments. Require a full real group,
         # rather than padding a short prototype or silently changing bytes.
@@ -786,6 +804,7 @@ def plan_layer(
             payload,
             mode=policy.precision_transaction,
             skip_discarded_exact=policy.skip_discarded_exact,
+            reuse_targets=policy.reuse_precision_targets,
         )
         replacement = proof.pop("replacement")
         revised = replacement["exact_ids"]

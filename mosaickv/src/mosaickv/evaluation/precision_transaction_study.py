@@ -19,10 +19,11 @@ def attend(queries, pair, *, causal):
     return score.softmax(-1) @ pair[1].double()
 
 
-def metrics(queries, pair, original):
+def metrics(queries, pair, original, *, targets=None):
     result = {}
     for causal in (False, True):
-        error = attend(queries, pair, causal=causal) - attend(queries, original, causal=causal)
+        target = attend(queries, original, causal=causal) if targets is None else targets[causal]
+        error = attend(queries, pair, causal=causal) - target
         error = error.square().sum(-1)
         split = len(error) // 2
         result["causal" if causal else "future_proxy"] = dict(
@@ -34,7 +35,7 @@ def metrics(queries, pair, original):
     return result
 
 
-def weighted_prototype_trial(payload, *, return_payload=False):
+def weighted_prototype_trial(payload, *, return_payload=False, targets=None, baseline_metrics=None):
     """One closed-form demand-weighted prototype; no alpha sweep or answer fitting."""
     from mosaickv.evaluation.residual_delta_prototype import construct
     from mosaickv.evaluation.storage_six_overlay import LayerOverlay
@@ -77,7 +78,12 @@ def weighted_prototype_trial(payload, *, return_payload=False):
         new = overlay.member_keys if component == 0 else overlay.prototype_pair[1]
         a[list(members)] += old
         b[list(members)] += new
-    baseline, proposal = metrics(queries, before, original), metrics(queries, after, original)
+    baseline = (
+        metrics(queries, before, original, targets=targets)
+        if baseline_metrics is None
+        else baseline_metrics
+    )
+    proposal = metrics(queries, after, original, targets=targets)
     passed = all(
         proposal[k][h] <= baseline[k][h] + 1e-12
         for k in baseline
@@ -141,7 +147,9 @@ def restoration_errors(queries, original, current, candidates):
 
 
 @torch.inference_mode()
-def plan_precision_transaction(payload, *, mode="joint_guarded", skip_discarded_exact=False):
+def plan_precision_transaction(
+    payload, *, mode="joint_guarded", skip_discarded_exact=False, reuse_targets=False
+):
     """Pure training-free online planner; original PREFILL data, not future oracles.
 
     Strict schema excludes benchmark answers, references and generated logits.
@@ -160,6 +168,8 @@ def plan_precision_transaction(payload, *, mode="joint_guarded", skip_discarded_
         raise ValueError("registered precision transaction required")
     if type(skip_discarded_exact) is not bool or (skip_discarded_exact and mode != "prototype"):
         raise ValueError("only a discarded prototype-only exact branch may be skipped")
+    if type(reuse_targets) is not bool:
+        raise ValueError("explicit request-local attention-target reuse required")
     if set(payload["evidence"]) != {
         "selected_extra",
         "prototype_members",
@@ -195,7 +205,12 @@ def plan_precision_transaction(payload, *, mode="joint_guarded", skip_discarded_
         value[list(ids)] = source[list(ids)]
     # Keep original query positions for the causal mask by evaluating all
     # queries, but only EARLY scores may choose the next exact row.
-    before = metrics(queries, baseline, original)
+    targets = (
+        {causal: attend(queries, original, causal=causal) for causal in (False, True)}
+        if reuse_targets
+        else None
+    )
+    before = metrics(queries, baseline, original, targets=targets)
     if skip_discarded_exact:
         # In prototype-only mode exact_ok is always false. None of these
         # discarded candidate scores feeds the weighted prototype or final
@@ -217,7 +232,7 @@ def plan_precision_transaction(payload, *, mode="joint_guarded", skip_discarded_
             )
             for value, source in zip(candidate, original, strict=True):
                 value[position] = source[position]
-        after = metrics(queries, candidate, original)
+        after = metrics(queries, candidate, original, targets=targets)
         verified = all(
             after[k][h] <= before[k][h] + 1e-12
             for k in before
@@ -241,7 +256,12 @@ def plan_precision_transaction(payload, *, mode="joint_guarded", skip_discarded_
         fresh_evaluation_authorized=False,
         discarded_exact_search_evaluated=not skip_discarded_exact,
     )
-    weighted = weighted_prototype_trial(payload, return_payload=True)
+    weighted = weighted_prototype_trial(
+        payload,
+        return_payload=True,
+        targets=targets,
+        baseline_metrics=before if reuse_targets else None,
+    )
     proposed_prototype = weighted.pop("replacement")
     report["query_weighted_prototype"] = weighted
     exact_ok = report["proxy_gate_passed"] and mode in ("exact", "joint_guarded")
@@ -258,7 +278,7 @@ def plan_precision_transaction(payload, *, mode="joint_guarded", skip_discarded_
             value[list(members)] += correction
     for value, source in zip(pair, original, strict=True):
         value[chosen_ids] = source[chosen_ids]
-    joint = metrics(queries, pair, original)
+    joint = metrics(queries, pair, original, targets=targets)
     joint_ok = all(
         joint[k][h] <= before[k][h] + 1e-12 for k in before for h in ("early", "late", "maximum")
     )

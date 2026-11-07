@@ -40,7 +40,14 @@ def checked(root, expected):
     return plan
 
 
-def prepare(root, bitmap_prefix=False, reuse_anchor_readout=False, shared_suffix=False):
+def prepare(
+    root,
+    bitmap_prefix=False,
+    reuse_anchor_readout=False,
+    shared_suffix=False,
+    planner_exact_fast=False,
+    cpu_torch_threads=12,
+):
     import all_head_native_source as infra
 
     source = clean_source(SOURCE)
@@ -83,9 +90,12 @@ def prepare(root, bitmap_prefix=False, reuse_anchor_readout=False, shared_suffix
             anchor_counterfactual="single_head",
             reuse_anchor_readout=reuse_anchor_readout,
             anchor_suffix="shared_graph" if shared_suffix else "reference",
+            graph_spatial_search="zero_overlap" if planner_exact_fast else "reference",
+            reuse_precision_targets=planner_exact_fast,
+            prototype_anchor_scope="selected" if planner_exact_fast else "legacy",
         ),
     }
-    compact = reuse_anchor_readout or shared_suffix
+    compact = reuse_anchor_readout or shared_suffix or planner_exact_fast
     arms = ("storage_only", "codec_fast", "hybrid_fast") if compact else ARMS
     policies = {arm: policies[arm] for arm in arms}
     for p in policies.values():
@@ -106,6 +116,8 @@ def prepare(root, bitmap_prefix=False, reuse_anchor_readout=False, shared_suffix
                 "mosaickv/tests/unit/test_live_anchor_guard.py",
                 "mosaickv/tests/unit/test_guard_readout_reuse.py",
                 "mosaickv/tests/unit/test_guard_suffix_replay.py",
+                "mosaickv/tests/unit/test_zero_overlap_spatial.py",
+                "mosaickv/tests/unit/test_precision_target_reuse.py",
                 "mosaickv/tests/unit/test_source_hybrid_validation.py",
                 "mosaickv/tests/unit/test_storage_six_overlay.py",
             ],
@@ -143,6 +155,8 @@ def prepare(root, bitmap_prefix=False, reuse_anchor_readout=False, shared_suffix
             fast_decoder="bitmap_prefix" if bitmap_prefix else "reference",
             reuse_anchor_readout=reuse_anchor_readout,
             shared_suffix=shared_suffix,
+            planner_exact_fast=planner_exact_fast,
+            cpu_torch_threads=cpu_torch_threads,
             profile_and_verify_suffix_before_timed_trials=shared_suffix,
             independent_quality_or_superiority_established=False,
             fresh_or_paper_campaign_authorized=False,
@@ -248,7 +262,7 @@ def worker(root, expected):
         raise RuntimeError("one isolated A100 required")
     if os.environ.get("CUBLAS_WORKSPACE_CONFIG") != ":4096:8":
         raise RuntimeError("identical deterministic CUDA launch required")
-    torch.set_num_threads(12)
+    torch.set_num_threads(plan["cpu_torch_threads"])
     torch.manual_seed(plan["seed"])
     torch.use_deterministic_algorithms(True)
     i = int(os.environ["SLURM_ARRAY_TASK_ID"])
@@ -281,6 +295,7 @@ def worker(root, expected):
                 attention="eager",
                 precision="bf16",
                 measurement_type="paired_consumed_input_latency_not_independent_quality",
+                cpu_torch_threads=torch.get_num_threads(),
                 fixed_clocks_applied=False,
                 **scheduler_identity({}),
             ),
@@ -294,7 +309,8 @@ def worker(root, expected):
         options = campaign.request_options(
             plan["options"]["mosaickv_exact"], transport, "mosaickv_exact", False
         )
-        if plan["profile_and_verify_suffix_before_timed_trials"]:
+
+        def profile_once(label):
             import cProfile
             import pstats
 
@@ -322,11 +338,11 @@ def worker(root, expected):
                 or guard["early_middle_late_native_suffix_verifications"] != 3
             ):
                 raise RuntimeError("actual early/middle/late native suffix controls missing")
-            profiler.dump_stats(str(folder / "profile.pstats"))
-            with (folder / "profile.txt").open("x") as stream:
+            profiler.dump_stats(str(folder / f"{label}.pstats"))
+            with (folder / f"{label}.txt").open("x") as stream:
                 pstats.Stats(profiler, stream=stream).sort_stats("cumulative").print_stats(100)
             write_once(
-                folder / "profile.json",
+                folder / f"{label}.json",
                 dict(
                     classification="consumed_input_instrumented_profile_excluded_from_latency_trials",
                     all_128_logits_bitwise=True,
@@ -337,9 +353,14 @@ def worker(root, expected):
                 ),
             )
             del values
+
+        if plan["profile_and_verify_suffix_before_timed_trials"]:
+            profile_once("cold_profile")
         rng = random.Random(plan["seed"] + i)
         with (folder / "raw.jsonl").open("x") as log:
             for phase, n in (("warmup", plan["warmups"]), ("timed", plan["repetitions"])):
+                if phase == "timed" and plan["profile_and_verify_suffix_before_timed_trials"]:
+                    profile_once("profile")
                 arms = tuple(plan["arms"])
                 orders = [list(arms[t % len(arms) :] + arms[: t % len(arms)]) for t in range(n)]
                 rng.shuffle(orders)
@@ -541,6 +562,8 @@ def main():
     p.add_argument("--bitmap-prefix", action="store_true")
     p.add_argument("--reuse-anchor-readout", action="store_true")
     p.add_argument("--shared-suffix", action="store_true")
+    p.add_argument("--planner-exact-fast", action="store_true")
+    p.add_argument("--cpu-torch-threads", type=int, choices=(1, 2, 12), default=12)
     a = p.parse_args()
     if a.action == "prepare":
         return prepare(
@@ -548,6 +571,8 @@ def main():
             bitmap_prefix=a.bitmap_prefix,
             reuse_anchor_readout=a.reuse_anchor_readout,
             shared_suffix=a.shared_suffix,
+            planner_exact_fast=a.planner_exact_fast,
+            cpu_torch_threads=a.cpu_torch_threads,
         )
     if a.action == "worker":
         return worker(a.root, a.plan_sha)

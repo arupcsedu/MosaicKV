@@ -26,6 +26,19 @@ from mosaickv.graph.types import (
 
 _positional_search = ContextVar("evicastkv_positional_graph_search", default="reference")
 _cosine_search = ContextVar("evicastkv_cosine_topk_search", default="stable_sort")
+_spatial_search = ContextVar("evicastkv_spatial_search", default="reference")
+
+
+@contextmanager
+def spatial_search(mode):
+    """Execution-only exact zero-distance bound; never approximate distances."""
+    if mode not in ("reference", "zero_overlap"):
+        raise ValueError("registered reference/zero-overlap spatial search required")
+    token = _spatial_search.set(mode)
+    try:
+        yield
+    finally:
+        _spatial_search.reset(token)
 
 
 @contextmanager
@@ -528,6 +541,17 @@ def _add_spatial_edges(
 ) -> None:
     if config.spatial_weight == 0:
         return
+    zero_bound = _spatial_search.get() == "zero_overlap"
+    if zero_bound:
+        boxes = np.asarray(
+            [n.evidence.normalized_box or (0, 0, 0, 0) for n in nodes], dtype=np.float64
+        )
+        modalities = sorted({n.block.modality.value for n in nodes})
+        codes = {m: i for i, m in enumerate(modalities)}
+        modality_ids = np.asarray([codes[n.block.modality.value] for n in nodes])
+        allowed = np.asarray(
+            [[f"{a}:{b}" in config.allowed_modality_pairs for b in modalities] for a in modalities]
+        )
     groups: dict[tuple[Any, ...], list[int]] = defaultdict(list)
     for node in nodes:
         if eligible_node_ids is not None and node.node_id not in eligible_node_ids:
@@ -561,6 +585,27 @@ def _add_spatial_edges(
             for x_index in range(min_x, max_x + 1):
                 for y_index in range(min_y, max_y + 1):
                     candidate_ids.update(grid.get((x_index, y_index), ()))
+            if zero_bound and candidate_ids:
+                # Grouping already enforces layer/head/container compatibility.
+                # A zero rectangle distance has the exact maximum score 1.0.
+                # Once k compatible zero-distance targets exist, no other
+                # candidate can beat them. Resolve every tie by lower node ID.
+                ids = np.asarray(sorted(candidate_ids), dtype=np.int64)
+                ids = ids[(ids != source_id) & allowed[modality_ids[source_id], modality_ids[ids]]]
+                b = boxes[ids]
+                zero = ids[
+                    (b[:, 0] <= right) & (b[:, 2] >= left) & (b[:, 1] <= bottom) & (b[:, 3] >= top)
+                ]
+                if len(zero) >= config.max_neighbors:
+                    for target_id in zero[: config.max_neighbors]:
+                        accumulator.add(
+                            source_id,
+                            int(target_id),
+                            EdgeType.SPATIAL_ADJACENCY,
+                            1.0,
+                            config.spatial_weight,
+                        )
+                    continue
             scored: dict[int, float] = {}
             for target_id in candidate_ids:
                 target = nodes[target_id]
