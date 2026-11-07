@@ -59,6 +59,7 @@ class OverlayPolicy:
     graph_positional_search: str = "reference"
     graph_cosine_topk: str = "stable_sort"
     skip_discarded_exact: bool = False
+    live_anchor_guard: bool = False
 
     def __post_init__(self):
         if not self.layers or tuple(sorted(set(self.layers))) != self.layers:
@@ -123,6 +124,10 @@ class OverlayPolicy:
             raise ValueError("FullKV draft target requires active readout selection")
         if type(self.inline_repair) is not bool:
             raise ValueError("explicit inline repair activation required")
+        if type(self.live_anchor_guard) is not bool or (
+            self.live_anchor_guard and (not self.inline_repair or self.layers != (31,))
+        ):
+            raise ValueError("live parent guard requires registered final-layer inline transport")
         if type(self.skip_discarded_exact) is not bool or (
             self.skip_discarded_exact and self.precision_transaction != "prototype"
         ):
@@ -980,6 +985,10 @@ def integrated_storage(
 
     def fill(layer, component):
         original_fill(layer, component)
+        if policy.live_anchor_guard:
+            from mosaickv.evaluation.live_anchor_guard import record_parent_component
+
+            record_parent_component(layer, component)
         if policy.readout_control or policy.readout_selection != "none":
             from mosaickv.evaluation.exact_last_layer_readout import record_component
 
@@ -1013,7 +1022,27 @@ def integrated_storage(
             from mosaickv.evaluation.inline_first_step_repair import InlineRepair
 
             with InlineRepair(adapter, overlays[31], policy, report) as inline:
-                inline_result = original_run(*args, **kwargs)
+                if policy.live_anchor_guard:
+                    from mosaickv.evaluation.live_anchor_guard import LiveAnchorGuard
+
+                    with LiveAnchorGuard(adapter, overlays[31], report) as guarded:
+                        inline_result = original_run(*args, **kwargs)
+                    if len(guarded.parent_logits) != kwargs["tokens"] - 1:
+                        raise RuntimeError("live parent guard did not observe every decode update")
+                    if diagnostic_capture is not None:
+                        diagnostic_capture(
+                            dict(
+                                capture_kind="anchor_guard",
+                                layer=31,
+                                parent_logits=torch.stack(guarded.parent_logits),
+                                evidence=report["live_anchor_guard"],
+                                evaluation_only=True,
+                                labels_accessed=False,
+                            )
+                        )
+                    guarded.parent_logits.clear()
+                else:
+                    inline_result = original_run(*args, **kwargs)
             if not inline.done:
                 raise RuntimeError("inline first-step repair transport did not engage")
             report.update(

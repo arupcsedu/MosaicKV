@@ -50,7 +50,17 @@ def component_policies(
     horizon_study=False,
     inline_study=False,
     graph_runtime_study=False,
+    live_anchor_study=False,
 ):
+    if live_anchor_study:
+        policies = component_policies(graph_runtime_study=True)
+        return {
+            **policies,
+            "guarded_full": dict(policies["inline_indexed"], live_anchor_guard=True),
+            "guarded_parent_reserved": dict(
+                policies["inline_indexed"], live_anchor_guard=True, component_mode="parent_reserved"
+            ),
+        }
     if graph_runtime_study:
         policies = component_policies(inline_study=True)
         return {
@@ -306,7 +316,9 @@ def prepare(
     external_graph_parity_root=None,
     after_gpu_job=None,
     paired_after_graph_root=None,
+    live_anchor_study=False,
 ):
+    graph_runtime_study = graph_runtime_study or live_anchor_study
     if paired_after_graph_root is not None and (
         not graph_runtime_study or Path(paired_after_graph_root).exists()
     ):
@@ -462,6 +474,7 @@ def prepare(
                 "mosaickv/tests/unit/test_direct_attention_pooling.py",
                 "mosaickv/tests/unit/test_partition_graph_topk.py",
                 "mosaickv/tests/unit/test_skip_discarded_exact.py",
+                "mosaickv/tests/unit/test_live_anchor_guard.py",
                 "mosaickv/tests/unit/test_opportunity_demand.py",
                 "mosaickv/tests/unit/test_bounded_probe_horizon.py",
                 "mosaickv/tests/unit/test_streaming_source_constructor.py",
@@ -519,6 +532,7 @@ def prepare(
                     horizon_study,
                     inline_study,
                     graph_runtime_study,
+                    live_anchor_study,
                 ),
             ),
             component_policies=component_policies(
@@ -532,6 +546,7 @@ def prepare(
                 horizon_study,
                 inline_study,
                 graph_runtime_study,
+                live_anchor_study,
             ),
             source_replacement_study=replacement_study,
             exact_last_layer_readout_study=readout_study,
@@ -542,6 +557,7 @@ def prepare(
             fixed_consumed_counterfactual_plans=fixed_plans,
             inline_first_step_repair_study=inline_study,
             indexed_positional_graph_runtime_study=graph_runtime_study,
+            live_last_layer_parent_guard_study=live_anchor_study,
             external_graph_parity=cross_source,
             gpu_start_after_any_job=after_gpu_job,
             paired_after_graph_root=str(paired_after_graph_root)
@@ -696,7 +712,9 @@ def worker(root, expected):
                             raise FileExistsError("immutable routed capture already exists")
                         torch.save(payload, path)
                         record[
-                            "fullkv_draft_capture"
+                            "anchor_guard_capture"
+                            if kind == "anchor_guard"
+                            else "fullkv_draft_capture"
                             if kind == "fullkv_draft"
                             else "readout_capture"
                             if kind
@@ -727,6 +745,7 @@ def worker(root, expected):
                                 if arm in ("full", "all_adaptive", "readout_joint")
                                 or policy.readout_control
                                 or policy.readout_selection != "none"
+                                or policy.live_anchor_guard
                                 else None,
                             )
                         )
@@ -782,6 +801,18 @@ def worker(root, expected):
                         audit=False,
                     )
                 actual = values.cpu()
+                if arm in policies and policy.live_anchor_guard:
+                    payload = torch.load(
+                        row["anchor_guard_capture"]["path"], weights_only=True, map_location="cpu"
+                    )
+                    if not torch.equal(payload["parent_logits"], values_by_arm["parent"][1:]):
+                        raise RuntimeError(
+                            "live parent counterfactual differs from untouched parent"
+                        )
+                    if not torch.equal(actual.argmax(-1), values_by_arm["parent"].argmax(-1)):
+                        raise RuntimeError("live parent guard changed a generated parent token")
+                    row["all_parent_counterfactual_logits_bitwise"] = True
+                    row["all_128_emitted_parent_tokens_identical"] = True
                 values_by_arm[arm] = actual
                 if arm != "full_kv":
                     row["fullkv_readout"] = logit_diagnostics(values_by_arm["full_kv"], actual)
@@ -1189,6 +1220,7 @@ def main():
     p.add_argument("--graph-parity-root", type=Path)
     p.add_argument("--after-gpu-job")
     p.add_argument("--paired-after-graph-root", type=Path)
+    p.add_argument("--live-anchor-study", action="store_true")
     a = p.parse_args()
     if a.action == "prepare":
         prepare(
@@ -1206,6 +1238,7 @@ def main():
             a.graph_parity_root,
             a.after_gpu_job,
             a.paired_after_graph_root,
+            a.live_anchor_study,
         )
     elif a.action == "worker":
         return worker(a.root, a.plan_sha)
