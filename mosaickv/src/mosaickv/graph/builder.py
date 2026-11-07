@@ -1305,6 +1305,49 @@ def build_evidence_graph(
     structural_candidates = (
         graph_candidates if config.candidate_graph_mode == "shortlist_rerank" else None
     )
+    from mosaickv.graph.structural_templates import cache_key
+    from mosaickv.graph.structural_templates import current as template_bank
+
+    bank = template_bank()
+    key = None
+    cached = None
+    if bank is not None:
+        key = cache_key(
+            nodes, config, structural_candidates, (_positional_search.get(), _spatial_search.get())
+        )
+        cached = bank.get(key)
+    if cached is None:
+        structural = accumulator if bank is None else _EdgeAccumulator(config)
+        _add_structural_edges(nodes, config, structural, structural_candidates)
+        if bank is not None:
+            cached = bank.put(key, structural.finalize(), len(nodes), config.max_neighbors)
+    if cached is not None:
+        # Structural edge types are disjoint from dynamic semantic/attention
+        # types. Segments already contain weighted scores, not scores to clip
+        # or weight a second time. They were independently validated on insert.
+        accumulator._segmented_preselected.extend(cached)
+    fallback_used = bool(config.candidate_graph_mode == "full" and config.fallback_weight > 0)
+    rows, columns, weights, edge_types = accumulator.finalize()
+    diagnostics = _diagnostics(
+        nodes,
+        rows,
+        columns,
+        edge_types,
+        fallback_used=fallback_used,
+        candidate_node_ids=graph_candidates,
+        candidate_graph_mode=config.candidate_graph_mode,
+    )
+    return SparseEvidenceGraph._from_validated(
+        nodes=nodes,
+        row_indices=rows,
+        column_indices=columns,
+        weights=weights,
+        edge_types=edge_types,
+        diagnostics=diagnostics,
+    )
+
+
+def _add_structural_edges(nodes, config, accumulator, structural_candidates):
     _add_spatial_edges(
         nodes,
         config,
@@ -1335,27 +1378,8 @@ def build_evidence_graph(
     # path even when learned descriptors select mutually dissimilar neighbors.
     # Each source still contributes at most ``max_neighbors`` outgoing edges,
     # so the graph remains O(n*d).
-    fallback_used = bool(config.candidate_graph_mode == "full" and config.fallback_weight > 0)
     if config.candidate_graph_mode == "full":
         _add_fallback_edges(nodes, config, accumulator)
-    rows, columns, weights, edge_types = accumulator.finalize()
-    diagnostics = _diagnostics(
-        nodes,
-        rows,
-        columns,
-        edge_types,
-        fallback_used=fallback_used,
-        candidate_node_ids=graph_candidates,
-        candidate_graph_mode=config.candidate_graph_mode,
-    )
-    return SparseEvidenceGraph._from_validated(
-        nodes=nodes,
-        row_indices=rows,
-        column_indices=columns,
-        weights=weights,
-        edge_types=edge_types,
-        diagnostics=diagnostics,
-    )
 
 
 __all__ = ["build_evidence_graph"]

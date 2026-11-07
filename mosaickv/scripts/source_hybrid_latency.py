@@ -8,6 +8,7 @@ import os
 import random
 import subprocess
 import traceback
+from contextlib import ExitStack
 from dataclasses import asdict
 from pathlib import Path
 from time import perf_counter
@@ -50,6 +51,7 @@ def prepare(
     guard_tail=False,
     manual_guard_capture=False,
     native_readout_handoff=False,
+    structural_templates=False,
 ):
     import all_head_native_source as infra
 
@@ -60,6 +62,8 @@ def prepare(
         raise ValueError("manual capture requires the explicit guard-tail diagnostic")
     if native_readout_handoff and not manual_guard_capture:
         raise ValueError("native readout handoff requires validated manual capture")
+    if structural_templates and not native_readout_handoff:
+        raise ValueError("structural template study requires the validated native-handoff controls")
     parent = read(PARENT / "plan.json")
     if not read(PARENT / "analysis/decision.json")["model_parity_gate_passed"]:
         raise ValueError("pretrained all-head retirement and logit parity must pass first")
@@ -71,6 +75,11 @@ def prepare(
         gate = Path("/scratch/djy8hg/runs/evicastkv/hybrid-manual-shared-capture-20261107-v2")
         if read(gate / "analysis/decision.json")["complete"] is not True:
             raise ValueError("complete native-tail model parity/storage evidence required first")
+        paths += [gate / "plan.json", gate / "analysis/decision.json"]
+    if structural_templates:
+        gate = Path("/scratch/djy8hg/runs/evicastkv/native-readout-handoff-20261107-v1")
+        if read(gate / "analysis/decision.json")["complete"] is not True:
+            raise ValueError("complete handoff model parity/storage evidence required first")
         paths += [gate / "plan.json", gate / "analysis/decision.json"]
     if bitmap_prefix:
         native_gate = Path("/scratch/djy8hg/runs/evicastkv/source-bitmap-prefix-20261107-v1")
@@ -123,6 +132,9 @@ def prepare(
         arms = ("storage_only", "codec_fast", "hybrid_reference", "hybrid_fast")
     else:
         arms = ("storage_only", "codec_fast", "hybrid_fast") if compact else ARMS
+    if structural_templates:
+        policies["hybrid_reference"] = dict(policies["hybrid_fast"])
+        policies["hybrid_fast"] = dict(policies["hybrid_fast"], graph_structural_templates=True)
     policies = {arm: policies[arm] for arm in arms}
     for p in policies.values():
         OverlayPolicy(**dict(p, layers=tuple(p["layers"])))
@@ -143,6 +155,7 @@ def prepare(
                 "mosaickv/tests/unit/test_guard_readout_reuse.py",
                 "mosaickv/tests/unit/test_guard_suffix_replay.py",
                 "mosaickv/tests/unit/test_guard_tail_graph.py",
+                "mosaickv/tests/unit/test_structural_templates.py",
                 "mosaickv/tests/unit/test_zero_overlap_spatial.py",
                 "mosaickv/tests/unit/test_precision_target_reuse.py",
                 "mosaickv/tests/unit/test_source_hybrid_validation.py",
@@ -187,6 +200,8 @@ def prepare(
             guard_tail=guard_tail,
             manual_guard_capture=manual_guard_capture,
             native_readout_handoff=native_readout_handoff,
+            structural_templates=structural_templates,
+            structural_template_maximum_CPU_bytes=4 * 2**20,
             tail_operator_gate="bitwise_native_then_capture_inclusive_128_call_ratio_below_0.95"
             if guard_tail
             else "not_used",
@@ -302,7 +317,14 @@ def worker(root, expected):
     folder = root / f"workers/{i}"
     folder.mkdir(parents=True, exist_ok=False)
     errors, count = [], 0
+    resources, templates = ExitStack(), None
     try:
+        if plan.get("structural_templates"):
+            from mosaickv.graph.structural_templates import engine_scope
+
+            templates = resources.enter_context(
+                engine_scope(plan["structural_template_maximum_CPU_bytes"])
+            )
         cfg = RunConfig.from_mapping(plan["parent"]["config"])
         write_once(
             folder / "manifest.json",
@@ -496,6 +518,7 @@ def worker(root, expected):
                                 detail=detail,
                                 mechanism_evidence=evidence,
                                 source_codec_evidence=proof,
+                                structural_templates=templates.report() if templates else None,
                                 request_wall_seconds=elapsed,
                                 all_128_expected_logits_bitwise=True,
                                 storage_parent_greedy_token_agreement=float(
@@ -515,8 +538,14 @@ def worker(root, expected):
                             raise RuntimeError("fail-fast numerical/retirement gate")
                     print(json.dumps(dict(phase=phase, completed_trial=trial)), flush=True)
         write_once(folder / "gpu_after.json", asdict(capture_gpu_environment(torch)))
+        if templates is not None and not (templates.hits > 0 and templates.misses > 0):
+            raise RuntimeError("both real template compilation and replay must engage")
     except Exception:
         errors.append(traceback.format_exc())
+    finally:
+        if templates is not None:
+            write_once(folder / "structural_templates.json", templates.report())
+        resources.close()
     write_once(
         folder / "result.json",
         dict(
@@ -629,6 +658,7 @@ def main():
     p.add_argument("--guard-tail", action="store_true")
     p.add_argument("--manual-guard-capture", action="store_true")
     p.add_argument("--native-readout-handoff", action="store_true")
+    p.add_argument("--structural-templates", action="store_true")
     a = p.parse_args()
     if a.action == "prepare":
         return prepare(
@@ -641,6 +671,7 @@ def main():
             guard_tail=a.guard_tail,
             manual_guard_capture=a.manual_guard_capture,
             native_readout_handoff=a.native_readout_handoff,
+            structural_templates=a.structural_templates,
         )
     if a.action == "worker":
         return worker(a.root, a.plan_sha)

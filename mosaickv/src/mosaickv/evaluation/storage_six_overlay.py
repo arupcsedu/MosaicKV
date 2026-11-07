@@ -72,8 +72,11 @@ class OverlayPolicy:
     prototype_anchor_scope: str = "legacy"
     anchor_tail: str = "reference"
     export_parent_logits: bool = True
+    graph_structural_templates: bool = False
 
     def __post_init__(self):
+        if type(self.graph_structural_templates) is not bool:
+            raise ValueError("explicit structural graph-template activation required")
         if type(self.export_parent_logits) is not bool:
             raise ValueError("explicit parent-logit diagnostic export boolean required")
         if self.anchor_tail not in ("reference", "cuda_graph", "manual_shared_stream") or (
@@ -520,11 +523,13 @@ def plan_layer(
         forecast_mode = forecast.provenance.mode.value
     timer.mark("prompt_queries_and_forecast")
     from mosaickv.graph.builder import cosine_search, positional_search, spatial_search
+    from mosaickv.graph.structural_templates import activate as activate_templates
 
     with (
         positional_search(policy.graph_positional_search),
         cosine_search(policy.graph_cosine_topk),
         spatial_search(policy.graph_spatial_search),
+        activate_templates(policy.graph_structural_templates),
     ):
         graph = build_evidence_graph(
             full,
