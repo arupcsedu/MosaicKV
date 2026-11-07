@@ -101,6 +101,24 @@ def test_cpu_analysis_uses_afterany_not_success_dependency(tmp_path, monkeypatch
     assert not any("--gres" in value for value in captured[0])
 
 
+def test_media_boundary_produces_decoded_rgb_not_filenames(tmp_path):
+    from PIL import Image
+
+    script = orchestration()
+    path = tmp_path / "fixture.png"
+    Image.new("RGBA", (3, 4), (9, 8, 7, 255)).save(path)
+    sample = dict(
+        prompt="fixture", media=[dict(kind="image", path=str(path), sha256=script.sha(path))]
+    )
+    messages = script.sample_messages(sample)
+    pixels = messages[0].content[0].value
+    assert isinstance(pixels, Image.Image) and pixels.mode == "RGB"
+    assert pixels.size == (3, 4) and pixels.getpixel((0, 0)) == (9, 8, 7)
+    sample["media"][0]["sha256"] = "f" * 64
+    with pytest.raises(ValueError, match="modified"):
+        script.sample_messages(sample)
+
+
 def fixture_evidence():
     # Synthetic validation fixture only; never an experimental measurement.
     trace = dict(

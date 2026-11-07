@@ -69,7 +69,7 @@ def build_config(protocol: Mapping[str, Any], arm: str) -> RunConfig:
             block_size=1,
             physical_budget_block_size=1,
             physical_budget_mandatory_policy="first_and_last",
-            packing_mode="preallocated_layer",
+            packing_mode="batched_layer",
             exact_gather_mode="source_views",
             accounting_spec_sha=hashlib.sha256(
                 json.dumps(protocol["accounting"], sort_keys=True, separators=(",", ":")).encode()

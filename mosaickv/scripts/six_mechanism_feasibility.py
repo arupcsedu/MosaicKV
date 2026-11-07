@@ -27,6 +27,75 @@ def read(path):
     return json.loads(Path(path).read_text())
 
 
+def sample_messages(sample):
+    """Decode checksum-verified pixels at the media boundary, never references."""
+    from PIL import Image
+
+    from mosaickv.evaluation.messages import MediaItem, MediaKind, build_multimodal_messages
+
+    media_items = []
+    for media in sample["media"]:
+        if media["kind"] != "image" or sha(Path(media["path"])) != media["sha256"]:
+            raise ValueError("unsupported or modified consumed image")
+        with Image.open(media["path"]) as image:
+            pixels = image.convert("RGB").copy()
+        media_items.append(MediaItem(MediaKind.IMAGE, pixels))
+    return build_multimodal_messages(sample["prompt"], tuple(media_items))
+
+
+def cached_processor_preflight(inputs, protocol):
+    """CPU-only real pinned processor test; no model weights or downloads."""
+    from transformers import AutoProcessor
+
+    from mosaickv.adapters.huggingface.registry import _resolve_model_source
+    from mosaickv.evaluation.six_mechanism_probe import tensor_sha
+
+    processor = AutoProcessor.from_pretrained(
+        _resolve_model_source(
+            protocol["model_id"], protocol["model_revision"], local_files_only=True
+        ),
+        revision=protocol["model_revision"],
+        local_files_only=True,
+        use_fast=False,
+    )
+    result = []
+    for index, sample in inputs.items():
+        messages = sample_messages(sample)
+        pixels = [
+            part.value for message in messages for part in message.content if part.type == "image"
+        ]
+        prompt = (
+            processor.apply_chat_template(
+                [
+                    dict(
+                        role="user",
+                        content=[
+                            *[dict(type="image") for _ in pixels],
+                            dict(type="text", text=sample["prompt"]),
+                        ],
+                    )
+                ],
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+            if getattr(processor, "chat_template", None)
+            else ("USER: " + "<image>\n" * len(pixels) + sample["prompt"] + " ASSISTANT:")
+        )
+        prepared = processor(text=prompt, images=pixels, return_tensors="pt")
+        if prepared["input_ids"].shape[0] != 1 or prepared["pixel_values"].shape[0] != 1:
+            raise ValueError("pinned processor must produce one real image request")
+        result.append(
+            dict(
+                index=int(index),
+                sample_id=sample["sample_id"],
+                input_ids_sha256=tensor_sha(prepared["input_ids"]),
+                input_shape=list(prepared["input_ids"].shape),
+                pixel_shape=list(prepared["pixel_values"].shape),
+            )
+        )
+    return result
+
+
 def clean_source(expected=None):
     status = subprocess.check_output(["git", "status", "--porcelain"], cwd=SOURCE, text=True)
     if status:
@@ -55,6 +124,8 @@ def checked(root, expected):
         raise ValueError("frozen protocol/input content changed")
     if not read(root / "cpu.json")["passed"]:
         raise ValueError("CPU feasibility must pass before GPU submission")
+    if sha(root / "processor_preflight.json") != plan["processor_preflight_sha256"]:
+        raise ValueError("cached processor CPU proof changed")
     return plan
 
 
@@ -175,6 +246,8 @@ def prepare(root):
         arm: canonical_config(build_config(protocol, arm))
         for arm in set(protocol["control_arms"] + protocol["component_arms"])
     }
+    preflight = cached_processor_preflight(inputs, protocol)
+    write_once(root / "processor_preflight.json", preflight)
     write_once(
         root / "plan.json",
         dict(
@@ -182,6 +255,7 @@ def prepare(root):
             protocol=protocol,
             protocol_sha256=sha(PROTOCOL),
             inputs_sha256=sha(root / "inputs.json"),
+            processor_preflight_sha256=sha(root / "processor_preflight.json"),
             configs=configs,
             classification=protocol["classification"],
             immutable_storage_parent="a6f689f",
@@ -196,17 +270,13 @@ def prepare(root):
 
 def execute_arm(adapter, config, sample, folder, arm, sequence):
     from mosaickv.backends.hf_runtime import HuggingFaceMosaicKVModel
-    from mosaickv.evaluation.messages import MediaItem, MediaKind, build_multimodal_messages
     from mosaickv.evaluation.model import EvaluationRequest
     from mosaickv.evaluation.six_mechanism_probe import observe_runtime, tensor_sha
     from mosaickv.manifest import ArtifactProvenance, InputProvenance, RunManifestWriter
     from mosaickv.types import MeasurementType
 
     run_id = f"six-{folder.parent.name}-{folder.name}-{sequence}-{arm}"
-    messages = build_multimodal_messages(
-        sample["prompt"],
-        tuple(MediaItem(MediaKind.IMAGE, media["path"]) for media in sample["media"]),
-    )
+    messages = sample_messages(sample)
     request = EvaluationRequest(
         run_id,
         sample["sample_id"],
@@ -309,7 +379,6 @@ def worker(root, expected, phase, index):
     from mosaickv.adapters.huggingface.parity import compare_with_generate
     from mosaickv.backends.hf_runtime import compare_runtime_retention_one
     from mosaickv.config import RunConfig
-    from mosaickv.evaluation.messages import MediaItem, MediaKind, build_multimodal_messages
     from mosaickv.hf_cli import _model_kwargs
     from mosaickv.measurements.telemetry import capture_gpu_environment
 
@@ -338,23 +407,24 @@ def worker(root, expected, phase, index):
     inputs = read(root / "inputs.json")
     records = []
     parity = {}
+    planned_indices = (
+        protocol["consumed_sample_indices"]
+        if phase == "canary"
+        else protocol["component_sample_indices"][index::2]
+    )
+    failure_sample_id = inputs[str(planned_indices[index if phase == "canary" else 0])]["sample_id"]
     try:
         adapter = load_hf_adapter(
             cfg.model.id,
             revision=cfg.model.revision,
             model_kwargs=_model_kwargs(cfg, local_files_only=True),
-            processor_kwargs={"local_files_only": True},
+            processor_kwargs={"local_files_only": True, "use_fast": False},
         )
         with torch.inference_mode():
             if phase == "canary":
                 current = inputs[str(protocol["consumed_sample_indices"][index])]
                 other = inputs[str(protocol["consumed_sample_indices"][1 - index])]
-                prepared = adapter.prepare_inputs(
-                    build_multimodal_messages(
-                        current["prompt"],
-                        tuple(MediaItem(MediaKind.IMAGE, x["path"]) for x in current["media"]),
-                    )
-                )
+                prepared = adapter.prepare_inputs(sample_messages(current))
                 ordinary = compare_with_generate(adapter, prepared, max_new_tokens=16)
                 identity = replace(
                     cfg, cache=replace(cfg.cache, retention_ratio=1.0, budget_value=2**31 - 1)
@@ -388,6 +458,7 @@ def worker(root, expected, phase, index):
                     for arm in protocol["component_arms"]
                 ]
             for sequence, (arm, sample) in enumerate(order):
+                failure_sample_id = sample["sample_id"]
                 arm_cfg = RunConfig.from_mapping(plan["configs"][arm])
                 record = execute_arm(adapter, arm_cfg, sample, folder, arm, sequence)
                 records.append(record)
@@ -433,6 +504,7 @@ def worker(root, expected, phase, index):
         result = dict(
             status="failed",
             phase=phase,
+            failed_sample_id=failure_sample_id,
             error=f"{type(error).__name__}: {error}",
             traceback=traceback.format_exc(),
             record_count=len(records),

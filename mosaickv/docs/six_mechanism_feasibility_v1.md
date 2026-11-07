@@ -30,6 +30,16 @@ array limited to two workers. A CPU `afterany` analyzer runs even on failure.
 It submits the four-input small component study **only if all canary gates
 pass**. No fresh cohort or large campaign is automatically authorized.
 
+The first GPU attempt stopped at the processor boundary before producing any
+predictions because raw image paths were passed to the pinned processor.
+The correction verifies checksums and decodes RGB PIL images, then tests the
+actual pinned cached processor on CPU before any GPU retry. `use_fast=false`
+matches the checkpoint's saved slow processor. The failed attempt and its
+immutable source remain preserved.
+The corrected diagnostic uses the generic tier-payload packer so promotion
+reads the actual restored payloads, rather than the fused original-source
+gather. Both controls and ablations use that same registered packing policy.
+
 ## Required evidence (no flags-only passes)
 
 - Explicit FullKV versus ordinary `generate` and retention-one packed parity
