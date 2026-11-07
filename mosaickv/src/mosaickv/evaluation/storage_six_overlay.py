@@ -53,6 +53,7 @@ class OverlayPolicy:
     prototype_risk_threshold: float = 0.01
     precision_transaction: str = "none"
     readout_control: bool = False
+    readout_selection: str = "none"
 
     def __post_init__(self):
         if not self.layers or tuple(sorted(set(self.layers))) != self.layers:
@@ -109,13 +110,24 @@ class OverlayPolicy:
             raise ValueError("precision transaction requires active parent-residual prototypes")
         if type(self.readout_control) is not bool:
             raise ValueError("explicit readout control flag required")
-        if self.readout_control and (
-            self.layers != (31,)
-            or self.provisional_tokens != 2
-            or not self.enabled
-            or self.component_mode != "full"
+        if self.readout_selection not in ("none", "exact", "repair", "joint"):
+            raise ValueError("registered conditional-readout selection variant required")
+        if (self.readout_control or self.readout_selection != "none") and (
+            self.layers != (31,) or self.provisional_tokens != 2 or not self.enabled
         ):
             raise ValueError("readout controls require one final layer and one provisional update")
+        if self.readout_control and self.component_mode != "full":
+            raise ValueError("engineering readout control requires the complete overlay")
+        if self.readout_selection != "none" and self.component_mode not in (
+            "full",
+            "no_graph",
+            "no_value",
+            "modular_selection",
+            "no_repair",
+        ):
+            raise ValueError("registered conditional-readout policy ablation required")
+        if self.readout_control and self.readout_selection != "none":
+            raise ValueError("separate control and active readout selection arms required")
 
 
 class _Phases:
@@ -609,6 +621,19 @@ def plan_layer(
             "no_repair": ["uncertainty_promotion"],
         }.get(policy.component_mode, []),
     )
+    if policy.readout_selection != "none":
+        # The original graph/forecast/value/submodular seed remains operative.
+        # Only its bounded neighboring receiver pool enters draft reranking.
+        neighbors = {
+            int(b)
+            for a, b in zip(graph.row_indices, graph.column_indices, strict=True)
+            if int(a) in extras
+        }
+        available = set(range(n)) - set(required) - set(ids) - set(extras)
+        scores = {u.node_id: u.local_utility for u in utilities.blocks}
+        ordered = sorted(available, key=lambda i: (i not in neighbors, -scores[i], i))
+        evidence["readout_receiver_shortlist"] = ordered[:16]
+        evidence["readout_receiver_pool_uses_graph_then_utility"] = True
     overlay = LayerOverlay(
         head=head,
         positions=ids,
@@ -828,7 +853,7 @@ def integrated_storage(
                 )
                 del approximation
                 report["layers"][str(index)] = overlays[index].evidence
-                if policy.readout_control:
+                if policy.readout_control or policy.readout_selection != "none":
                     head = overlays[index].head
                     overlays[index].readout_original = tuple(
                         t[0, head].detach().to(device="cpu", copy=True).contiguous()
@@ -886,14 +911,14 @@ def integrated_storage(
 
     def fill(layer, component):
         original_fill(layer, component)
-        if policy.readout_control:
+        if policy.readout_control or policy.readout_selection != "none":
             from mosaickv.evaluation.exact_last_layer_readout import record_component
 
             record_component(layer, component, parent=True)
         overlay = overlays.get(layer.attention.layer_idx)
         if overlay is not None:
             overlay.fill(component, layer.leased[0])
-        if policy.readout_control:
+        if policy.readout_control or policy.readout_selection != "none":
             record_component(layer, component, parent=False)
 
     def cache(*args, **kwargs):
@@ -931,7 +956,7 @@ def integrated_storage(
 
             risk_policy = policy.repair_policy == "entropy_or_prototype_risk"
             capture = None
-            if policy.readout_control:
+            if policy.readout_control or policy.readout_selection != "none":
                 from mosaickv.evaluation.exact_last_layer_readout import ReadoutCapture
 
                 capture = ReadoutCapture(overlays[31].head)
@@ -943,15 +968,37 @@ def integrated_storage(
                 attention_observer=observe if risk_policy else None,
                 readout_capture=capture,
             )
+            predicted_selected = None
+            readout_trigger = False
             if capture is not None:
                 from mosaickv.evaluation.exact_last_layer_readout import verify_controls
 
                 def probe():
                     return _private_probe(original_run, args, probe_kwargs, reader_options)[0]
 
-                report["exact_last_layer_readout"] = verify_controls(
-                    adapter, capture, overlays[31], overlays[31].readout_original, before[1], probe
-                )
+                if policy.readout_control:
+                    report["exact_last_layer_readout"] = verify_controls(
+                        adapter,
+                        capture,
+                        overlays[31],
+                        overlays[31].readout_original,
+                        before[1],
+                        probe,
+                    )
+                    proof = report["exact_last_layer_readout"]
+                else:
+                    from mosaickv.evaluation.conditional_readout_selection import select
+
+                    proof, predicted_selected = select(
+                        adapter,
+                        capture,
+                        overlays[31],
+                        overlays[31].readout_original,
+                        before[1],
+                        mode=policy.readout_selection,
+                    )
+                    report["conditional_readout_selection"] = proof
+                    readout_trigger = proof["requested_residual_restoration"]
                 if diagnostic_capture is not None:
                     diagnostic_capture(
                         dict(
@@ -960,7 +1007,7 @@ def integrated_storage(
                             data=capture.data,
                             original_prompt=overlays[31].readout_original,
                             reference_logits=before[1].detach().cpu(),
-                            evidence=report["exact_last_layer_readout"],
+                            evidence=proof,
                             evaluation_only=True,
                             labels_accessed=False,
                         )
@@ -994,7 +1041,7 @@ def integrated_storage(
             report["prototype_risk_threshold"] = policy.prototype_risk_threshold
             risk_trigger = bool(risks) and max(risks.values()) >= policy.prototype_risk_threshold
             if policy.component_mode not in ("no_repair", "exact_members", "parent_reserved") and (
-                forced or entropy >= policy.entropy_threshold or risk_trigger
+                forced or entropy >= policy.entropy_threshold or risk_trigger or readout_trigger
             ):
                 index = min(overlays)
                 event = overlays[index].promote()
@@ -1005,6 +1052,8 @@ def integrated_storage(
                         trigger_reason=(
                             "controlled_entropy_zero"
                             if forced
+                            else "conditional_readout_uncertainty_reduction"
+                            if readout_trigger
                             else "prototype_risk"
                             if risk_trigger
                             else "entropy"
@@ -1015,9 +1064,19 @@ def integrated_storage(
                 )
             report["provisional_first_decode_logit_sha"] = None
         after, details = original_run(*args, **kwargs)
+        if overlays and predicted_selected is not None:
+            from mosaickv.evaluation.exact_last_layer_readout import compare_logits
+
+            check = compare_logits(predicted_selected, after[1])
+            report["conditional_readout_selection"]["actual_selected_logit_control"] = check
+            if not check["logits_bitwise"]:
+                raise RuntimeError("selected conditional suffix differs from actual final decode")
         if overlays:
             report["repair_logit_max_change"] = float((before[1] - after[1]).abs().max())
             report["repair_token_changed"] = int(before[1].argmax()) != int(after[1].argmax())
+            if policy.readout_selection != "none":
+                report["allocation_and_optional_repair_joint_effect"] = True
+                report["repair_quality_benefit_isolated"] = False
         report["extra_gpu_bytes"] = _bytes(
             tuple(t for o in overlays.values() for t in o.gpu_tensors())
         )

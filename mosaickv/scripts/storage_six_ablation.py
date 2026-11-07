@@ -43,8 +43,53 @@ def component_policies(
     replacement_study=False,
     transaction_study=False,
     readout_study=False,
+    readout_selection_study=False,
 ):
     base = OverlayPolicy(record_phase_timings=True)
+    if readout_selection_study:
+        seed = replace(
+            base,
+            forecast_distribution="individual_queries",
+            prototype_representation="parent_residual_delta",
+            graph_accumulation="segmented_tensor_topk",
+            precision_transaction="prototype",
+        )
+        replaced = replace(seed, replace_source_codes=True)
+        joint = replace(replaced, readout_selection="joint")
+        return {
+            "full": asdict(seed),
+            "source_replaced": asdict(replaced),
+            "source_replaced_parent": asdict(
+                replace(replaced, enabled=False, precision_transaction="none")
+            ),
+            "parent_reserved": asdict(replace(replaced, component_mode="parent_reserved")),
+            "exact_members": asdict(replace(replaced, component_mode="exact_members")),
+            "forced_repair": asdict(replace(replaced, component_mode="forced_repair")),
+            "readout_exact": asdict(replace(replaced, readout_selection="exact")),
+            "readout_repair": asdict(replace(replaced, readout_selection="repair")),
+            "readout_joint": asdict(joint),
+            **{
+                name: asdict(
+                    replace(
+                        joint,
+                        component_mode=name,
+                        precision_transaction="none" if name == "no_forecast" else "prototype",
+                        readout_selection="none"
+                        if name == "no_forecast"
+                        else "exact"
+                        if name == "no_repair"
+                        else "joint",
+                    )
+                )
+                for name in (
+                    "no_forecast",
+                    "no_graph",
+                    "no_value",
+                    "modular_selection",
+                    "no_repair",
+                )
+            },
+        }
     if readout_study:
         improved = replace(
             base,
@@ -193,8 +238,11 @@ def prepare(
     replacement_study=False,
     transaction_study=False,
     readout_study=False,
+    readout_selection_study=False,
 ):
-    replacement_study = replacement_study or transaction_study or readout_study
+    replacement_study = (
+        replacement_study or transaction_study or readout_study or readout_selection_study
+    )
     proposal_study = proposal_study or allocation_study or replacement_study
     if root.exists():
         raise FileExistsError("new immutable component output root required")
@@ -210,6 +258,23 @@ def prepare(
     paths = [PARENT / n for n in ("plan.json", "options.json", "ledger.json")]
     paths += [PREVIOUS / "inputs.json", Path(parent["profile_path"])]
     paths += [Path(m["path"]) for s in inputs for m in s["media"]]
+    if readout_selection_study:
+        gate = Path("/scratch/djy8hg/runs/evicastkv/exact-last-layer-readout-20261107-v2")
+        decision = gate / "analysis/decision.json"
+        if read(decision).get("execution_passed") is not True:
+            raise ValueError("actual exact-readout engineering gate has not passed")
+        paths.append(decision)
+        for i in (0, 1):
+            row_path = next((gate / f"workers/{i}").glob("[0-9][0-9]-readout_control.json"))
+            row = read(row_path)
+            if row.get("readout_control_passed") is not True:
+                raise ValueError("both actual readout controls required before selection")
+            evidence = row["mechanism_evidence"]["exact_last_layer_readout"]
+            if not evidence["original_overlay_restored"] or not evidence["model_weights_unchanged"]:
+                raise ValueError("readout isolation control failed")
+            paths += [row_path, Path(row["readout_capture"]["path"])]
+            if sha(paths[-1]) != row["readout_capture"]["sha256"]:
+                raise ValueError("immutable readout evidence changed")
     root.mkdir(parents=True)
     write_once(root / "inputs.json", inputs)
     if proposal_study:
@@ -268,6 +333,7 @@ def prepare(
                 "mosaickv/tests/unit/test_shared_source_map_accounting.py",
                 "mosaickv/tests/unit/test_precision_transaction_study.py",
                 "mosaickv/tests/unit/test_exact_last_layer_readout.py",
+                "mosaickv/tests/unit/test_conditional_readout_selection.py",
                 "mosaickv/tests/unit/test_opportunity_demand.py",
                 "mosaickv/tests/unit/test_bounded_probe_horizon.py",
                 "mosaickv/tests/unit/test_streaming_source_constructor.py",
@@ -320,6 +386,7 @@ def prepare(
                     replacement_study,
                     transaction_study,
                     readout_study,
+                    readout_selection_study,
                 ),
             ),
             component_policies=component_policies(
@@ -328,13 +395,17 @@ def prepare(
                 replacement_study,
                 transaction_study,
                 readout_study,
+                readout_selection_study,
             ),
             source_replacement_study=replacement_study,
             exact_last_layer_readout_study=readout_study,
+            conditional_readout_selection_study=readout_selection_study,
             storage_boundary_version="shared_initial_final_peak_v2",
             component_reference_arm=(
                 "transaction_joint_guarded"
                 if transaction_study
+                else "readout_joint"
+                if readout_selection_study
                 else "all_adaptive"
                 if allocation_study
                 else "full"
@@ -475,7 +546,9 @@ def worker(root, expected):
                         policy,
                         reader_options=options,
                         diagnostic_capture=capture
-                        if arm in ("full", "all_adaptive") or policy.readout_control
+                        if arm in ("full", "all_adaptive", "readout_joint")
+                        or policy.readout_control
+                        or policy.readout_selection != "none"
                         else None,
                     ) as proof:
                         values, detail = campaign.execute(
@@ -835,6 +908,7 @@ def main():
     p.add_argument("--replacement-study", action="store_true")
     p.add_argument("--transaction-study", action="store_true")
     p.add_argument("--readout-study", action="store_true")
+    p.add_argument("--readout-selection-study", action="store_true")
     a = p.parse_args()
     if a.action == "prepare":
         prepare(
@@ -844,6 +918,7 @@ def main():
             a.replacement_study,
             a.transaction_study,
             a.readout_study,
+            a.readout_selection_study,
         )
     elif a.action == "worker":
         return worker(a.root, a.plan_sha)
