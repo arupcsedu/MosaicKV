@@ -8,7 +8,7 @@ import torch
 from mosaickv.evaluation.guard_tail_graph import GuardTail, native_tail
 
 
-def lifetime_control(norm, head, pair, capture_mode):
+def lifetime_control(norm, head, pair, capture_mode, reuse_readout=False):
     """The guard must retire before the enclosing graph's RNG-owner audit."""
     from mosaickv.evaluation.post_attention_segment import capture_stream
     from mosaickv.evaluation.prompt_graph_reader import allocator_blocks, generator_metadata
@@ -32,9 +32,13 @@ def lifetime_control(norm, head, pair, capture_mode):
     addresses = generator_metadata(
         before, allocator_blocks(), torch.cuda.memory_allocated() - allocated
     )
-    tail = GuardTail(norm, head, capture_mode=capture_mode)
+    tail = GuardTail(norm, head, capture_mode=capture_mode, reuse_readout=reuse_readout)
     output, logits, record = tail.run(*pair)
+    held = tuple(t.clone() for t in tail.selected_readout()) if reuse_readout else ()
+    borrowed = tail.selected_readout() if reuse_readout else ()
     tail.close()
+    if any(not torch.equal(a, b) for a, b in zip(held, borrowed, strict=True)):
+        raise RuntimeError("native readout changed during graph retirement")
     del output, logits, record, tail
     torch.cuda.synchronize()
     if not all(address in allocator_blocks() for address in addresses):
@@ -50,7 +54,7 @@ def lifetime_control(norm, head, pair, capture_mode):
 
 
 @torch.inference_mode()
-def run(*, capture_mode="context_manager"):
+def run(*, capture_mode="context_manager", reuse_readout=False):
     from transformers.models.llama.modeling_llama import LlamaRMSNorm
 
     norm = LlamaRMSNorm(4096).to(device="cuda", dtype=torch.bfloat16)
@@ -63,8 +67,13 @@ def run(*, capture_mode="context_manager"):
         pairs.append((parent, parent + delta))
     native = []
     for parent, active in pairs:
-        native.append(tuple(x.clone() for x in native_tail(norm, head, parent, active)))
-    g = GuardTail(norm, head, capture_mode=capture_mode)
+        native.append(
+            tuple(
+                x.clone()
+                for x in native_tail(norm, head, parent, active, include_readout=reuse_readout)
+            )
+        )
+    g = GuardTail(norm, head, capture_mode=capture_mode, reuse_readout=reuse_readout)
     for index in (0, 1, 2, 1, 0):
         output, logits, record = g.run(*pairs[index])
         wanted = native[index]
@@ -74,6 +83,10 @@ def run(*, capture_mode="context_manager"):
             and torch.equal(record, wanted[2][:4].cpu())
         ):
             raise RuntimeError("native guard-tail tensors/FP64 reductions differ bitwise")
+        if reuse_readout and any(
+            not torch.equal(a, b) for a, b in zip(g.selected_readout(), wanted[3:], strict=True)
+        ):
+            raise RuntimeError("selected native readout differs from ordinary readout")
     nan = pairs[0][0].clone().fill_(float("nan"))
     try:
         g.run(nan, nan)
@@ -85,7 +98,7 @@ def run(*, capture_mode="context_manager"):
     resources = g.report()
     g.close()
     del g, native, output, logits, record, nan
-    lifetime = lifetime_control(norm, head, pairs[0], capture_mode)
+    lifetime = lifetime_control(norm, head, pairs[0], capture_mode, reuse_readout)
     results = {"reference": [], "graph": []}
     rng = random.Random(20261107)
     # Each block is a new request, including capture, warmup and graph retirement.
@@ -95,11 +108,17 @@ def run(*, capture_mode="context_manager"):
         for arm in order:
             torch.cuda.synchronize()
             begin = perf_counter()
-            graph = GuardTail(norm, head, capture_mode=capture_mode) if arm == "graph" else None
+            graph = (
+                GuardTail(norm, head, capture_mode=capture_mode, reuse_readout=reuse_readout)
+                if arm == "graph"
+                else None
+            )
             for step in range(127):
                 parent, active = pairs[step % len(pairs)]
                 if graph is None:
-                    out, logits, stats = native_tail(norm, head, parent, active)
+                    out, logits, stats = native_tail(
+                        norm, head, parent, active, include_readout=reuse_readout
+                    )[:3]
                     record = stats.detach().cpu()
                     if not bool(record[4]):
                         raise RuntimeError("nonfinite synthetic reference")
@@ -117,6 +136,7 @@ def run(*, capture_mode="context_manager"):
     return dict(
         classification="synthetic_native_operator_only_not_measured_model_quality",
         capture_mode=capture_mode,
+        selected_readout_reuse=reuse_readout,
         synthetic_weights=True,
         bitwise_native_controls=True,
         A_B_A_isolation=True,

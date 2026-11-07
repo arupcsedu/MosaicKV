@@ -21,6 +21,9 @@ def main():
     paths += [a.latency_root / "analysis/decision.json"]
     profiles = [json.loads(path.read_text()) for path in paths[:2]]
     audit = build(profiles, json.loads(paths[2].read_text()), json.loads(paths[3].read_text()))
+    manifests = [a.latency_root / f"workers/{i}/manifest.json" for i in (0, 1)]
+    paths += [a.latency_root / "plan.json", a.panel_root / "plan.json", *manifests]
+    audit["paired_profile_provenance"] = [json.loads(p.read_text()) for p in manifests]
     audit.update(analyzer_git_sha=source, input_sha256={str(path): sha(path) for path in paths})
     a.output.mkdir(parents=True, exist_ok=False)
     write_once(a.output / "audit.json", audit)

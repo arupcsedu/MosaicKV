@@ -10,25 +10,36 @@ from mosaickv.evaluation.live_anchor_guard import decision_tensors
 from mosaickv.evaluation.lossless_prompt_cache import backing_bytes
 
 
-def native_tail(norm, head, parent, active):
+def native_tail(norm, head, parent, active, *, include_readout=False):
     """No fused arithmetic, approximate reduction, changed threshold or labels."""
-    parent_logits = head(norm(parent)).float().reshape(-1)
-    active_logits = head(norm(active)).float().reshape(-1)
+    parent_norm, active_norm = norm(parent), norm(active)
+    parent_native, active_native = head(parent_norm), head(active_norm)
+    parent_logits = parent_native.float().reshape(-1)
+    active_logits = active_native.float().reshape(-1)
     p, c = parent_logits.double(), active_logits.double()
     finite = p.isfinite().all() & c.isfinite().all()
     passed, record = decision_tensors(p, c, finite)
-    return (
+    result = (
         torch.where(passed, active, parent),
         parent_logits,
         torch.cat((record, finite.double().reshape(1))),
     )
+    if include_readout:
+        result += (
+            torch.where(passed, active_norm, parent_norm),
+            torch.where(passed, active_native, parent_native),
+        )
+    return result
 
 
 class GuardTail:
-    def __init__(self, norm, head, *, capture_mode="context_manager"):
+    def __init__(self, norm, head, *, capture_mode="context_manager", reuse_readout=False):
         if capture_mode not in ("context_manager", "manual_shared_stream"):
             raise ValueError("explicit registered graph-capture implementation required")
         self.capture_mode = capture_mode
+        if type(reuse_readout) is not bool:
+            raise ValueError("explicit native-readout reuse boolean required")
+        self.reuse_readout = reuse_readout
         self.norm, self.head = norm, head
         self.inputs = self.outputs = self.graph = None
         self.calls = self.replays = self.captures = 0
@@ -61,7 +72,9 @@ class GuardTail:
         stream.wait_stream(current)
         with torch.cuda.stream(stream):
             for _ in range(2):
-                warm = native_tail(self.norm, self.head, *self.inputs)
+                warm = native_tail(
+                    self.norm, self.head, *self.inputs, include_readout=self.reuse_readout
+                )
             del warm
         current.wait_stream(stream)
         self.graph = torch.cuda.CUDAGraph()
@@ -75,7 +88,9 @@ class GuardTail:
                 with torch.cuda.stream(stream):
                     self.graph.capture_begin(capture_error_mode="global")
                     try:
-                        self.outputs = native_tail(self.norm, self.head, *self.inputs)
+                        self.outputs = native_tail(
+                            self.norm, self.head, *self.inputs, include_readout=self.reuse_readout
+                        )
                     finally:
                         self.graph.capture_end()
             except BaseException:
@@ -83,7 +98,9 @@ class GuardTail:
                 raise
         else:
             with torch.cuda.graph(self.graph, stream=stream):
-                self.outputs = native_tail(self.norm, self.head, *self.inputs)
+                self.outputs = native_tail(
+                    self.norm, self.head, *self.inputs, include_readout=self.reuse_readout
+                )
         current.wait_stream(stream)
         torch.cuda.synchronize(parent.device)
         self.explicit_bytes = backing_bytes((*self.inputs, *self.outputs))
@@ -101,17 +118,23 @@ class GuardTail:
         self.graph.replay()
         self.calls += 1
         self.replays += 1
-        output, logits, stats = self.outputs
+        output, logits, stats = self.outputs[:3]
         cpu = stats.detach().cpu()
         if not bool(cpu[4]):
             raise ValueError("nonfinite logits are an execution failure, not a successful veto")
         # Borrowed output/logits last until the next call. The record is CPU-owned.
         return output, logits, cpu[:4].clone()
 
+    def selected_readout(self):
+        if not self.reuse_readout or self.closed or self.outputs is None:
+            raise RuntimeError("live selected graph readout required")
+        return self.outputs[3:]
+
     def report(self):
         return dict(
             calls=self.calls,
             capture_mode=self.capture_mode,
+            selected_native_readout_in_graph=self.reuse_readout,
             replays=self.replays,
             captures=self.captures,
             explicit_activation_backing_bytes=self.explicit_bytes,

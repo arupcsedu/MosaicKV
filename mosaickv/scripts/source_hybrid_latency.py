@@ -49,6 +49,7 @@ def prepare(
     cpu_torch_threads=12,
     guard_tail=False,
     manual_guard_capture=False,
+    native_readout_handoff=False,
 ):
     import all_head_native_source as infra
 
@@ -57,6 +58,8 @@ def prepare(
         raise ValueError("native tail diagnostic requires the exact planner/shared suffix controls")
     if manual_guard_capture and not guard_tail:
         raise ValueError("manual capture requires the explicit guard-tail diagnostic")
+    if native_readout_handoff and not manual_guard_capture:
+        raise ValueError("native readout handoff requires validated manual capture")
     parent = read(PARENT / "plan.json")
     if not read(PARENT / "analysis/decision.json")["model_parity_gate_passed"]:
         raise ValueError("pretrained all-head retirement and logit parity must pass first")
@@ -64,6 +67,11 @@ def prepare(
         raise FileExistsError("new immutable paired-validation output root required")
     paths = [PARENT / "plan.json", PARENT / "analysis/decision.json", PARENT / "inputs.json"]
     paths += [Path(p) for p in parent["bound_files"]]
+    if native_readout_handoff:
+        gate = Path("/scratch/djy8hg/runs/evicastkv/hybrid-manual-shared-capture-20261107-v2")
+        if read(gate / "analysis/decision.json")["complete"] is not True:
+            raise ValueError("complete native-tail model parity/storage evidence required first")
+        paths += [gate / "plan.json", gate / "analysis/decision.json"]
     if bitmap_prefix:
         native_gate = Path("/scratch/djy8hg/runs/evicastkv/source-bitmap-prefix-20261107-v1")
         if read(native_gate / "analysis/decision.json")["passed"] is not True:
@@ -107,7 +115,14 @@ def prepare(
         ),
     }
     compact = reuse_anchor_readout or shared_suffix or planner_exact_fast
-    arms = ("storage_only", "codec_fast", "hybrid_fast") if compact else ARMS
+    if native_readout_handoff:
+        policies["hybrid_reference"] = dict(policies["hybrid_fast"])
+        policies["hybrid_fast"] = dict(
+            policies["hybrid_fast"], reuse_anchor_readout=True, export_parent_logits=False
+        )
+        arms = ("storage_only", "codec_fast", "hybrid_reference", "hybrid_fast")
+    else:
+        arms = ("storage_only", "codec_fast", "hybrid_fast") if compact else ARMS
     policies = {arm: policies[arm] for arm in arms}
     for p in policies.values():
         OverlayPolicy(**dict(p, layers=tuple(p["layers"])))
@@ -151,8 +166,8 @@ def prepare(
             inputs=str(PARENT / "inputs.json"),
             references=refs,
             source_codes=codes,
-            warmups=6 if compact else 5,
-            repetitions=21 if compact else 20,
+            warmups=8 if native_readout_handoff else 6 if compact else 5,
+            repetitions=24 if native_readout_handoff else 21 if compact else 20,
             arms=list(arms),
             seed=20261107,
             baseline="evicastkv_storage_only",
@@ -161,7 +176,7 @@ def prepare(
             comparison="same_source_KV_values_lossless_representation_not_byte_matched_selection",
             prototype_hybrid="guarded_precision_overlay_not_original_all_layer_slot_merging",
             bootstrap_replicates=10000,
-            multiplicity_comparisons=6 if compact else 10,
+            multiplicity_comparisons=8 if native_readout_handoff else 6 if compact else 10,
             source_codec_optimization="count_both_pack_only_identical_winner",
             hybrid_optimization="one_changed_head_parent_counterfactual",
             fast_decoder="bitmap_prefix" if bitmap_prefix else "reference",
@@ -171,6 +186,7 @@ def prepare(
             cpu_torch_threads=cpu_torch_threads,
             guard_tail=guard_tail,
             manual_guard_capture=manual_guard_capture,
+            native_readout_handoff=native_readout_handoff,
             tail_operator_gate="bitwise_native_then_capture_inclusive_128_call_ratio_below_0.95"
             if guard_tail
             else "not_used",
@@ -317,7 +333,8 @@ def worker(root, expected):
             operator = tail_diagnostic(
                 capture_mode="manual_shared_stream"
                 if plan.get("manual_guard_capture")
-                else "context_manager"
+                else "context_manager",
+                reuse_readout=plan.get("native_readout_handoff", False),
             )
             write_once(folder / "tail_operator.json", operator)
             if not operator["passed"]:
@@ -405,6 +422,9 @@ def worker(root, expected):
                         )
                         try:
                             gc.collect()
+                            fast_codec = arm.endswith("fast") or (
+                                plan.get("native_readout_handoff") and arm.startswith("hybrid")
+                            )
                             policy = OverlayPolicy(
                                 **dict(
                                     plan["policies"][arm],
@@ -416,12 +436,8 @@ def worker(root, expected):
                             with (
                                 source_codec(
                                     arm != "storage_only",
-                                    construction="pack_selected"
-                                    if arm.endswith("fast")
-                                    else "both",
-                                    decoder=plan["fast_decoder"]
-                                    if arm.endswith("fast")
-                                    else "reference",
+                                    construction="pack_selected" if fast_codec else "both",
+                                    decoder=plan["fast_decoder"] if fast_codec else "reference",
                                 ) as codec,
                                 integrated_storage(
                                     adapter, policy, reader_options=options
@@ -446,7 +462,9 @@ def worker(root, expected):
                                 tail = evidence["live_anchor_guard"]["tail_graph"]
                                 if tail["replays"] != 127 or tail["captures"] != 1:
                                     raise RuntimeError("native guard-tail replay did not engage")
-                            if arm == "hybrid_fast" and plan["reuse_anchor_readout"]:
+                            if arm == "hybrid_fast" and (
+                                plan["reuse_anchor_readout"] or plan.get("native_readout_handoff")
+                            ):
                                 reuse = evidence["live_anchor_guard"]["readout_reuse"]
                                 if any(
                                     reuse[k] != 127
@@ -454,6 +472,18 @@ def worker(root, expected):
                                 ):
                                     raise RuntimeError(
                                         "guarded readout did not reuse every actual step"
+                                    )
+                                if plan.get("native_readout_handoff") and (
+                                    reuse["borrowed_native_graph_stages"] != 127
+                                    or evidence["live_anchor_guard"]["observed_parent_logit_steps"]
+                                    != 127
+                                    or evidence["live_anchor_guard"][
+                                        "exported_parent_logit_vectors"
+                                    ]
+                                    != 0
+                                ):
+                                    raise RuntimeError(
+                                        "native handoff or nonexport policy did not engage"
                                     )
                             if arm != "storage_only" and (
                                 not proof["all_shared_source_consumers_covered"]
@@ -598,6 +628,7 @@ def main():
     p.add_argument("--cpu-torch-threads", type=int, choices=(1, 2, 12), default=12)
     p.add_argument("--guard-tail", action="store_true")
     p.add_argument("--manual-guard-capture", action="store_true")
+    p.add_argument("--native-readout-handoff", action="store_true")
     a = p.parse_args()
     if a.action == "prepare":
         return prepare(
@@ -609,6 +640,7 @@ def main():
             cpu_torch_threads=a.cpu_torch_threads,
             guard_tail=a.guard_tail,
             manual_guard_capture=a.manual_guard_capture,
+            native_readout_handoff=a.native_readout_handoff,
         )
     if a.action == "worker":
         return worker(a.root, a.plan_sha)

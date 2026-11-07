@@ -106,7 +106,7 @@ def test_manual_capture_finishes_and_retires_graph_on_operator_failure(monkeypat
     monkeypatch.setattr(post_attention_segment, "capture_stream", lambda *args: stream)
     n = 0
 
-    def native(*args):
+    def native(*args, **kwargs):
         nonlocal n
         n += 1
         if n == 3:
@@ -149,3 +149,30 @@ def test_tail_retirement_preserves_evidence_of_real_graph_capture():
     assert tail.report()["closed"]
     assert tail.report()["captures"] == 1
     assert tail.report()["replays"] == 127
+
+
+@pytest.mark.parametrize("delta", (0.0, 0.1, 8.0))
+def test_optional_selected_readout_matches_ordinary_norm_and_head(delta):
+    p = torch.randn(1, 1, 16).bfloat16()
+    a = p + delta
+    norm = torch.nn.LayerNorm(16).bfloat16()
+    head = torch.nn.Linear(16, 23, bias=False).bfloat16()
+    with torch.inference_mode():
+        output, logits, stats, normalized, selected = native_tail(
+            norm, head, p, a, include_readout=True
+        )
+        reference = native_tail(norm, head, p, a)
+        assert torch.equal(output, reference[0])
+        assert torch.equal(logits, reference[1])
+        assert torch.equal(stats, reference[2])
+        assert torch.equal(normalized, norm(output))
+        assert torch.equal(selected, head(norm(output)))
+
+
+def test_selected_readout_requires_a_live_explicit_graph():
+    with pytest.raises(ValueError, match="boolean"):
+        GuardTail(None, None, reuse_readout=1)
+    tail = GuardTail(None, None, reuse_readout=True)
+    with pytest.raises(RuntimeError, match="live selected"):
+        tail.selected_readout()
+    tail.close()

@@ -14,7 +14,11 @@ COMPARISONS = (
 
 
 def ordered_trials(rows, *, warmups=5, repetitions=20, arms=ARMS):
-    if tuple(arms) not in (ARMS, ("storage_only", "codec_fast", "hybrid_fast")):
+    if tuple(arms) not in (
+        ARMS,
+        ("storage_only", "codec_fast", "hybrid_fast"),
+        ("storage_only", "codec_fast", "hybrid_reference", "hybrid_fast"),
+    ):
         raise ValueError("registered complete factorial or storage-controlled follow-up required")
     expected = {
         (phase, trial, arm)
@@ -41,7 +45,10 @@ def ordered_trials(rows, *, warmups=5, repetitions=20, arms=ARMS):
                 raise ValueError("finite positive synchronized request times required")
             if any(type(r["detail"][k]) is not int or r["detail"][k] <= 0 for k in BOUNDARIES):
                 raise ValueError("all measured live-storage boundaries required")
-        for old, new in (("codec_reference", "codec_fast"),):
+        same_storage = [("codec_reference", "codec_fast")]
+        if tuple(arms) == ("storage_only", "codec_fast", "hybrid_reference", "hybrid_fast"):
+            same_storage.append(("hybrid_reference", "hybrid_fast"))
+        for old, new in same_storage:
             if old not in arms:
                 continue
             if any(

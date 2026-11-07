@@ -51,6 +51,7 @@ class LiveAnchorGuard:
         self.single_head = bool(policy and policy.anchor_counterfactual == "single_head")
         self.readout = None
         self.tail = None
+        self.observed_parent_logit_steps = 0
         self.suffix_replays = self.suffix_verifications = self.suffix_activation_bytes = 0
         self.stack, self.records, self.parent_logits = ExitStack(), [], []
         self.parent_key = self.parent_value = self.probabilities = self.heads = None
@@ -59,6 +60,12 @@ class LiveAnchorGuard:
         self.active_key = self.active_value = self.active_heads = None
         self.repair_events = []
         self.coexisting_temporary_kv_peak_bytes = 0
+
+    def record_readout(self, parent_logits, record):
+        self.records.append(record.detach().cpu())
+        self.observed_parent_logit_steps += 1
+        if self.policy is None or self.policy.export_parent_logits:
+            self.parent_logits.append(parent_logits.detach().cpu())
 
     def charge(self, *extra):
         tensors = tuple(
@@ -115,6 +122,7 @@ class LiveAnchorGuard:
                 capture_mode="manual_shared_stream"
                 if self.policy.anchor_tail == "manual_shared_stream"
                 else "context_manager",
+                reuse_readout=self.policy.reuse_anchor_readout,
             )
         if self.policy and self.policy.reuse_anchor_readout:
             from mosaickv.evaluation.guard_readout_reuse import ReadoutReuse
@@ -222,8 +230,9 @@ class LiveAnchorGuard:
                 # The opt-in graph path forbids repair/readout-reuse branches.
                 # It retains their original reference path when disabled.
                 output, parent_logits, record = owner.tail.run(parent_hidden, active_hidden)
-                owner.records.append(record)
-                owner.parent_logits.append(parent_logits.detach().cpu())
+                owner.record_readout(parent_logits, record)
+                if owner.readout is not None:
+                    owner.readout.stage_borrowed(*owner.tail.selected_readout())
                 owner.heads = None
                 owner.active_key = owner.active_value = owner.active_heads = None
                 owner.query = owner.mask = owner.prototype_mass = None
@@ -305,8 +314,7 @@ class LiveAnchorGuard:
             output = torch.where(passed, active_hidden, parent_hidden)
             if owner.readout is not None:
                 owner.readout.stage(passed, parent_norm, active_norm, parent_native, active_native)
-            owner.records.append(record.detach().cpu())
-            owner.parent_logits.append(parent_logits.detach().cpu())
+            owner.record_readout(parent_logits, record)
             owner.heads = None
             owner.active_key = owner.active_value = owner.active_heads = None
             owner.query = owner.mask = owner.prototype_mass = None
@@ -346,6 +354,8 @@ class LiveAnchorGuard:
                 observed=stats.tolist(),
                 peak_temporary_kv_backing_bytes=self.peak_temporary_kv_bytes,
                 cpu_logit_diagnostic_bytes=backing_bytes(tuple(self.parent_logits)),
+                observed_parent_logit_steps=self.observed_parent_logit_steps,
+                exported_parent_logit_vectors=len(self.parent_logits),
                 fullkv_fallback=False,
                 benchmark_labels_accessed=False,
                 parent_counterfactual_parity_not_assumed=True,

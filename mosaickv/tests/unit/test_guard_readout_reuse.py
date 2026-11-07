@@ -40,3 +40,26 @@ def test_ordering_nonconsumption_and_failure_cannot_leak_cached_outputs():
     assert norm(x) is x
     with pytest.raises(ValueError, match="readout reuse"):
         OverlayPolicy(reuse_anchor_readout=True)
+
+
+def test_native_handoff_borrows_real_buffers_and_consumes_before_overwrite():
+    norm, head = torch.nn.Identity(), torch.nn.Linear(4096, 19, bias=False)
+    selected = torch.ones(1, 1, 4096)
+    logits = torch.randn(1, 1, 19)
+    with ReadoutReuse(norm, head) as g:
+        g.stage_borrowed(selected, logits)
+        assert g.pending_norm is selected and g.pending_logits is logits
+        assert head(norm(torch.zeros_like(selected))) is logits
+        assert g.pending_norm is g.pending_logits is None
+        selected.zero_()
+        assert g.report()["borrowed_native_graph_stages"] == 1
+    assert torch.equal(norm(torch.zeros_like(selected)), selected)
+
+
+def test_bad_or_unconsumed_borrowed_readout_still_fails_closed():
+    norm, head = torch.nn.Identity(), torch.nn.Identity()
+    x, z = torch.ones(1, 1, 4096), torch.ones(1, 1, 19)
+    with ReadoutReuse(norm, head) as g, pytest.raises(ValueError, match="aligned native"):
+        g.stage_borrowed(x, z.double())
+    with pytest.raises(RuntimeError, match="exactly once"), ReadoutReuse(norm, head) as g:
+        g.stage_borrowed(x, z)

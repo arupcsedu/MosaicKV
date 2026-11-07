@@ -66,3 +66,15 @@ def test_compact_followup_cannot_omit_either_storage_control_or_hybrid():
     assert set(ordered_trials(rows, arms=arms)) == set(arms)
     with pytest.raises(ValueError, match="storage-controlled"):
         ordered_trials(rows, arms=("hybrid_fast",))
+
+
+def test_native_handoff_requires_reference_hybrid_and_unchanged_kv_boundaries():
+    arms = ("storage_only", "codec_fast", "hybrid_reference", "hybrid_fast")
+    rows = [r for r in fixture() if r["arm"] in arms]
+    for r in rows:
+        r["method_order"] = list(arms)
+    assert set(ordered_trials(rows, arms=arms)) == set(arms)
+    invalid = deepcopy(rows)
+    next(r for r in invalid if r["arm"] == "hybrid_fast")["detail"][BOUNDARIES[-1]] += 1
+    with pytest.raises(ValueError, match="changed storage"):
+        ordered_trials(invalid, arms=arms)

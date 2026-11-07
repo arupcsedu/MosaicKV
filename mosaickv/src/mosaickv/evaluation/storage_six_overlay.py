@@ -71,11 +71,18 @@ class OverlayPolicy:
     reuse_precision_targets: bool = False
     prototype_anchor_scope: str = "legacy"
     anchor_tail: str = "reference"
+    export_parent_logits: bool = True
 
     def __post_init__(self):
+        if type(self.export_parent_logits) is not bool:
+            raise ValueError("explicit parent-logit diagnostic export boolean required")
         if self.anchor_tail not in ("reference", "cuda_graph", "manual_shared_stream") or (
             self.anchor_tail != "reference"
-            and (not self.live_anchor_guard or self.anchor_risk_repair or self.reuse_anchor_readout)
+            and (
+                not self.live_anchor_guard
+                or self.anchor_risk_repair
+                or (self.reuse_anchor_readout and self.anchor_tail != "manual_shared_stream")
+            )
         ):
             raise ValueError(
                 "guard-tail graph requires live guard without readout reuse/risk repair"
@@ -933,6 +940,8 @@ def integrated_storage(
     adapter, policy: OverlayPolicy, *, reader_options=None, diagnostic_capture=None
 ):
     """Private patches only. Disabled scope must be bitwise parent-equivalent."""
+    if diagnostic_capture is not None and not policy.export_parent_logits:
+        raise ValueError("diagnostic capture requires complete parent-logit export")
     from mosaickv.evaluation import storage_runs
     from mosaickv.evaluation import streaming_source_constructor as constructor
     from mosaickv.evaluation.sequential_source_history import SequentialSourceHistoryLayer
@@ -1111,7 +1120,7 @@ def integrated_storage(
                         adapter, overlays[31], report, policy=policy, inline_owner=inline
                     ) as guarded:
                         inline_result = original_run(*args, **kwargs)
-                    if len(guarded.parent_logits) != kwargs["tokens"] - 1:
+                    if guarded.observed_parent_logit_steps != kwargs["tokens"] - 1:
                         raise RuntimeError("live parent guard did not observe every decode update")
                     if diagnostic_capture is not None:
                         diagnostic_capture(

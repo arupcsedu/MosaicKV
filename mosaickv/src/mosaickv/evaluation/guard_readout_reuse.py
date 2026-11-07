@@ -13,6 +13,7 @@ class ReadoutReuse:
         self.norm, self.head = norm, head
         self.pending_norm = self.pending_logits = None
         self.staged = self.norm_reuses = self.head_reuses = self.peak_activation_bytes = 0
+        self.borrowed_stages = 0
         self.stack = ExitStack()
 
     def stage(self, passed, parent_norm, active_norm, parent_logits, active_logits):
@@ -39,6 +40,30 @@ class ReadoutReuse:
             self.peak_activation_bytes, backing_bytes((self.pending_norm, self.pending_logits))
         )
         self.staged += 1
+
+    def stage_borrowed(self, normalized, logits):
+        """Borrow already selected native graph outputs until the next outer readout.
+
+        The producer may retire its graph, but must not overwrite these tensors
+        before consumption. Strong tensor references retain their true backing.
+        No clone or hidden new ownership is introduced here.
+        """
+        if self.pending_norm is not None or self.pending_logits is not None:
+            raise RuntimeError("previous guarded readout was not consumed")
+        if (
+            normalized.shape != (1, 1, 4096)
+            or logits.ndim != 3
+            or logits.shape[:2] != (1, 1)
+            or normalized.device != logits.device
+            or normalized.dtype != logits.dtype
+        ):
+            raise ValueError("complete aligned native selected readout required")
+        self.pending_norm, self.pending_logits = normalized, logits
+        self.peak_activation_bytes = max(
+            self.peak_activation_bytes, backing_bytes((normalized, logits))
+        )
+        self.staged += 1
+        self.borrowed_stages += 1
 
     def __enter__(self):
         original_norm, original_head = self.norm.forward, self.head.forward
@@ -87,6 +112,7 @@ class ReadoutReuse:
     def report(self):
         return dict(
             staged=self.staged,
+            borrowed_native_graph_stages=self.borrowed_stages,
             normalization_reuses=self.norm_reuses,
             vocabulary_reuses=self.head_reuses,
             parameters_changed=False,

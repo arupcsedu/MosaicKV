@@ -97,3 +97,29 @@ def test_single_head_scope_is_explicit_and_defaults_to_reference():
     assert LiveAnchorGuard(
         SimpleNamespace(), SimpleNamespace(head=0), {}, policy=policy
     ).single_head
+
+
+def test_unused_parent_export_can_be_omitted_without_skipping_any_guard_decision():
+    policy = OverlayPolicy(export_parent_logits=False)
+    g = LiveAnchorGuard(None, None, {}, policy=policy)
+    parent = torch.tensor([3.0, 1.0, -1.0])
+    _, record = decision(parent, parent)
+    g.record_readout(parent, record)
+    assert g.observed_parent_logit_steps == 1 and len(g.records) == 1
+    assert not g.parent_logits
+    assert torch.equal(g.records[0], record)
+    original = LiveAnchorGuard(None, None, {})
+    original.record_readout(parent, record)
+    assert len(original.parent_logits) == 1
+
+
+def test_explicit_diagnostic_capture_requires_full_parent_logit_vectors():
+    from mosaickv.evaluation.storage_six_overlay import integrated_storage
+
+    with (
+        pytest.raises(ValueError, match="complete parent-logit"),
+        integrated_storage(
+            None, OverlayPolicy(export_parent_logits=False), diagnostic_capture=lambda _: None
+        ),
+    ):
+        pass
