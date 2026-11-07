@@ -16,6 +16,19 @@ from unittest.mock import patch
 
 import torch
 
+COMPONENT_MODES = (
+    "full",
+    "parent_reserved",
+    "no_forecast",
+    "no_graph",
+    "no_value",
+    "modular_selection",
+    "no_extra_exact",
+    "exact_members",
+    "no_repair",
+    "forced_repair",
+)
+
 
 @dataclass(frozen=True)
 class OverlayPolicy:
@@ -27,6 +40,8 @@ class OverlayPolicy:
     force_repair: bool = False
     enabled: bool = True
     provisional_tokens: int = 2
+    component_mode: str = "full"
+    record_phase_timings: bool = False
 
     def __post_init__(self):
         if not self.layers or tuple(sorted(set(self.layers))) != self.layers:
@@ -45,6 +60,33 @@ class OverlayPolicy:
             raise ValueError("explicit activation booleans required")
         if type(self.provisional_tokens) is not int or self.provisional_tokens not in (2, 128):
             raise ValueError("registered two-token probe or 128-token parity control required")
+        if self.component_mode not in COMPONENT_MODES:
+            raise ValueError("explicit registered component mode required")
+        if type(self.record_phase_timings) is not bool:
+            raise ValueError("explicit phase timing flag required")
+        if self.component_mode != "full" and not self.enabled:
+            raise ValueError("component ablations require allocated, enabled overlay state")
+
+
+class _Phases:
+    """Exclusive synchronized construction phases; opt-in diagnostic only."""
+
+    def __init__(self, active, device):
+        self.active, self.device, self.values = active, device, {}
+        self.last = self._now()
+
+    def _now(self):
+        from time import perf_counter
+
+        if self.active and self.device.type == "cuda":
+            torch.cuda.synchronize(self.device)
+        return perf_counter()
+
+    def mark(self, name):
+        if self.active:
+            now = self._now()
+            self.values[name] = now - self.last
+            self.last = now
 
 
 def _bytes(values):
@@ -106,6 +148,7 @@ class LayerOverlay:
         self.dispersion, self.evidence = dispersion, evidence
         self.repair_count = 0
         self.attention_mass = 0.0
+        self.component_mode = "full"
 
     def gpu_tensors(self):
         return (
@@ -129,8 +172,14 @@ class LayerOverlay:
     def fill(self, component, destination):
         if destination.ndim != 4 or destination.shape[0] != 1:
             raise ValueError("batch-one dense reader lease required")
+        if self.component_mode == "parent_reserved":
+            # Same REAL allocated storage, intentionally inactive data path.
+            # This is a reservation control, not an efficient parent benchmark.
+            self.actual_fills.add_(1)
+            return
         # Original exact rows and their original logical positions, no donors.
-        destination[0, self.head].index_copy_(0, self.exact_ids, self.exact_pair[component])
+        if self.component_mode != "no_extra_exact":
+            destination[0, self.head].index_copy_(0, self.exact_ids, self.exact_pair[component])
         proto = (
             self.member_keys
             if component == 0
@@ -212,6 +261,7 @@ def plan_layer(
     from mosaickv.types import BudgetUnit, ForecastMode
 
     n, h, d = original[0].shape[-2], original[0].shape[1], original[0].shape[-1]
+    timer = _Phases(policy.record_phase_timings, original[0].device)
     text = tuple(
         p for s in prepared.modality_map if s.modality == "text" for p in range(s.start, s.end)
     )
@@ -230,46 +280,65 @@ def plan_layer(
         mandatory_logical_positions=required,
         cached_key_state=CachedKeyState.POST_ROPE,
     )
+    timer.mark("route_and_descriptors")
     window = min(16, n)
     query = attention.q_proj(hidden[:, -window:]).view(1, window, h, d).transpose(1, 2)
     query = query[:, head : head + 1]
     c, s = phases[0][:, None, -window:], phases[1][:, None, -window:]
     rotated = torch.cat((-query[..., d // 2 :], query[..., : d // 2]), -1)
     query = query * c + rotated * s
-    forecast = build_query_forecast(
-        (query,),
-        (),
-        (1,),
-        ForecastingConfig(
-            mode=ForecastMode.PROMPT_WINDOW, prompt_window=window, draft_steps=0, centroid_count=2
-        ),
-        original_logical_sequence_length=n,
-        draft_cache_isolated=True,
-    )
-    prediction = torch.softmax(
-        (forecast.layers[0][0].prompt_mean.float().reshape(1, d) @ pair[0][0, 0].float().T)
-        / d**0.5,
-        -1,
-    ).reshape(-1)
+    if policy.component_mode == "no_forecast":
+        prediction = demand[head]
+        forecast_mode = "observed_prompt_attention_no_forecast"
+    else:
+        forecast = build_query_forecast(
+            (query,),
+            (),
+            (1,),
+            ForecastingConfig(
+                mode=ForecastMode.PROMPT_WINDOW,
+                prompt_window=window,
+                draft_steps=0,
+                centroid_count=2,
+            ),
+            original_logical_sequence_length=n,
+            draft_cache_isolated=True,
+        )
+        prediction = torch.softmax(
+            (forecast.layers[0][0].prompt_mean.float().reshape(1, d) @ pair[0][0, 0].float().T)
+            / d**0.5,
+            -1,
+        ).reshape(-1)
+        forecast_mode = forecast.provenance.mode.value
+    timer.mark("prompt_queries_and_forecast")
     graph = build_evidence_graph(
         full,
-        GraphConfig(max_neighbors=4, similarity_chunk_size=128),
+        GraphConfig(
+            enabled=policy.component_mode != "no_graph",
+            max_neighbors=4,
+            similarity_chunk_size=128,
+        ),
         prompt_attentions=(probabilities[:, head : head + 1],),
         prompt_attention_query_window=window,
     )
+    timer.mark("sparse_graph")
     utilities = compute_block_utilities(
         graph,
-        UtilityConfig(lambda_v=-0.25, lambda_o=-0.25),
+        UtilityConfig(
+            lambda_v=0.0 if policy.component_mode == "no_value" else -0.25,
+            lambda_o=0.0 if policy.component_mode == "no_value" else -0.25,
+        ),
         forecast_attention_by_node=prediction.detach().cpu().numpy(),
         attention_provenance="actual_post_RoPE_prompt_mean_forecast_not_labels",
         rope_aware=True,
     )
+    timer.mark("value_utility")
     objective = BudgetedObjective(
         graph,
         utilities,
         SelectionConfig(
-            lambda_g=-0.1,
-            lambda_m=-0.1,
+            lambda_g=0.0 if policy.component_mode == "modular_selection" else -0.1,
+            lambda_m=0.0 if policy.component_mode == "modular_selection" else -0.1,
             stop_on_nonpositive_gain=False,
             minimum_stratum_fraction=0.0,
         ),
@@ -278,9 +347,23 @@ def plan_layer(
     if count <= len(required):
         raise RuntimeError("no feasible optional protection/prototype capacity")
     selected = lazy_greedy_select(objective, SelectionBudget(count * d * 4, BudgetUnit.BYTES))
+    timer.mark("budgeted_selection")
     anchors = tuple(
         node for node in selected.selected_node_ids if str(full.blocks[node].modality) == "image"
     )
+    if policy.record_phase_timings or policy.component_mode != "full":
+        # Common matched-allocation rule: the bounded constructor partitions
+        # image nodes into member_count+1 segments. Require a full real group,
+        # rather than padding a short prototype or silently changing bytes.
+        ordered = [i for i, b in enumerate(full.blocks) if str(b.modality) == "image"]
+        size = policy.prototype_members + 1
+        selected_set = set(selected.selected_node_ids)
+        feasible = set()
+        for start in range(0, len(ordered), size):
+            segment = ordered[start : start + size]
+            if len(set(segment) - selected_set) == policy.prototype_members:
+                feasible.update(set(segment) & selected_set)
+        anchors = tuple(a for a in anchors if a in feasible)
     if not anchors:
         raise RuntimeError("real image prototype requires a compatible selected image anchor")
     anchor = max(anchors, key=lambda node: (float(prediction[node]), -node))
@@ -307,6 +390,7 @@ def plan_layer(
         key_transform=transform,
         exact_gather_mode="batched_layer",
     )
+    timer.mark("prototype_and_residual_construction")
     if len(constructed.prototypes) != 1:
         raise RuntimeError(f"real prototype required, not {constructed.mode}: {constructed.reason}")
     record = constructed.prototypes[0]
@@ -329,7 +413,7 @@ def plan_layer(
     phase_ids = torch.tensor((*ids, record.anchor_logical_position), device=pair[0].device)
     phase_subset = tuple(t[0].index_select(0, phase_ids).contiguous() for t in phases)
     evidence = dict(
-        forecast_mode=forecast.provenance.mode.value,
+        forecast_mode=forecast_mode,
         graph_nodes=len(graph.nodes),
         graph_edges=len(graph.weights),
         cross_modal_edges=sum(
@@ -348,6 +432,17 @@ def plan_layer(
         benchmark_labels_accessed=False,
         forecast_is_prompt_only=True,
         prototype_policy="shared_KV_overlay_at_original_member_phases_not_token_compaction",
+        component_mode=policy.component_mode,
+        disabled_components={
+            "parent_reserved": ["all_overlay_reads"],
+            "no_forecast": ["future_query_forecast"],
+            "no_graph": ["graph_edges"],
+            "no_value": ["value_and_novelty_weights"],
+            "modular_selection": ["facility_and_modality_coverage_rewards"],
+            "no_extra_exact": ["additional_exact_protection_reads"],
+            "exact_members": ["prototype_reads_replaced_with_original_members"],
+            "no_repair": ["uncertainty_promotion"],
+        }.get(policy.component_mode, []),
     )
     overlay = LayerOverlay(
         head=head,
@@ -363,6 +458,16 @@ def plan_layer(
     )
     if _bytes(overlay.gpu_tensors()) > policy.maximum_extra_gpu_bytes:
         raise RuntimeError("overlay including repair reservation exceeds hard auxiliary cap")
+    overlay.component_mode = policy.component_mode
+    if policy.component_mode == "exact_members":
+        # Reuse already charged promotion buffers. A preparation control,
+        # explicitly NOT an uncertainty-triggered repair event.
+        for target, source in zip(overlay.promotion, overlay.residual_pair, strict=True):
+            target.copy_(source.reshape_as(target), non_blocking=False)
+        overlay.promoted.fill_(True)
+        evidence["exact_member_control_preloaded"] = True
+    timer.mark("overlay_buffers_and_control_preload")
+    evidence["construction_phase_seconds"] = timer.values
     return overlay
 
 
@@ -431,7 +536,9 @@ def _private_probe(original_run, args, kwargs, options):
 
 
 @contextmanager
-def integrated_storage(adapter, policy: OverlayPolicy, *, reader_options=None):
+def integrated_storage(
+    adapter, policy: OverlayPolicy, *, reader_options=None, diagnostic_capture=None
+):
     """Private patches only. Disabled scope must be bitwise parent-equivalent."""
     from mosaickv.evaluation import storage_runs
     from mosaickv.evaluation import streaming_source_constructor as constructor
@@ -448,6 +555,7 @@ def integrated_storage(adapter, policy: OverlayPolicy, *, reader_options=None):
             repair_events=[],
             original_compaction_design_reproduction=False,
             benchmark_labels_accessed=False,
+            component_mode=policy.component_mode,
         ),
     )
     original_constructor = constructor.StreamingDirectSource
@@ -474,6 +582,54 @@ def integrated_storage(adapter, policy: OverlayPolicy, *, reader_options=None):
                     policy,
                 )
                 report["layers"][str(index)] = overlays[index].evidence
+                if diagnostic_capture is not None:
+                    # Evaluation-only export, never queried by the planner.
+                    # Scratch reconstruction is released BEFORE decode. Store
+                    # only this routed head, not original full-cache owners.
+                    head = overlays[index].head
+                    hidden = kwargs.get("hidden_states", args[0] if args else None)
+                    n, h, d = original[0].shape[-2], original[0].shape[1], original[0].shape[-1]
+                    w = min(16, n)
+                    query = attention.q_proj(hidden[:, -w:]).view(1, w, h, d).transpose(1, 2)
+                    query = query[:, head : head + 1]
+                    cos, sin = kwargs["position_embeddings"]
+                    rotated = torch.cat((-query[..., d // 2 :], query[..., : d // 2]), -1)
+                    query = query * cos[:, None, -w:] + rotated * sin[:, None, -w:]
+                    approximate = packet.materialize(attention)
+                    diagnostic_capture(
+                        dict(
+                            layer=index,
+                            head=head,
+                            original_pair=tuple(
+                                t[0, head].detach().cpu().clone() for t in original
+                            ),
+                            parent_pair=tuple(
+                                t[0, head].detach().cpu().clone() for t in approximate
+                            ),
+                            prompt_queries=query[0, 0].detach().cpu().clone(),
+                            original_prompt_probabilities=output[1][0, head, -w:]
+                            .detach()
+                            .cpu()
+                            .clone(),
+                            phases=tuple(t[0].detach().cpu().clone() for t in (cos, sin)),
+                            evidence=overlays[index].evidence,
+                            overlay=dict(
+                                exact_pair=tuple(
+                                    t.detach().cpu().clone() for t in overlays[index].exact_pair
+                                ),
+                                member_keys=overlays[index].member_keys.detach().cpu().clone(),
+                                prototype_value=overlays[index]
+                                .prototype_pair[1]
+                                .detach()
+                                .cpu()
+                                .clone(),
+                            ),
+                            evaluation_only=True,
+                            labels_accessed=False,
+                            materialization="constructor_packet_not_a_decode_reader_timing",
+                        )
+                    )
+                    del approximate, query, rotated
             return packet
 
     def fill(layer, component):
@@ -509,18 +665,19 @@ def integrated_storage(adapter, policy: OverlayPolicy, *, reader_options=None):
             report["probe_storage"] = probe_details["storage"]
             report["probe_decode_wall_seconds"] = probe_details["decode_wall_seconds"]
             report["provisional_tokens"] = policy.provisional_tokens
-            if policy.force_repair or entropy >= policy.entropy_threshold:
+            forced = policy.force_repair or policy.component_mode == "forced_repair"
+            if policy.component_mode not in ("no_repair", "exact_members", "parent_reserved") and (
+                forced or entropy >= policy.entropy_threshold
+            ):
                 index = min(overlays)
                 event = overlays[index].promote()
                 report["repair_events"].append(
                     dict(
                         event,
                         layer=index,
-                        trigger_reason="controlled_entropy_zero"
-                        if policy.force_repair
-                        else "entropy",
+                        trigger_reason="controlled_entropy_zero" if forced else "entropy",
                         current_token_recomputed_once=True,
-                        stress_control=policy.force_repair,
+                        stress_control=forced,
                     )
                 )
             report["provisional_first_decode_logit_sha"] = None
