@@ -36,3 +36,14 @@ def test_codec_construction_policy_is_explicit_and_default_off_on_cpu():
         assert report["construction"] == "pack_selected"
         assert report["compressed_replacements"] == 0
         assert not report["all_shared_source_consumers_covered"]
+
+
+def test_decoder_scope_is_explicit_and_does_not_weaken_descriptor_checks():
+    from mosaickv.evaluation.all_head_source_gpu import use
+
+    with pytest.raises(ValueError, match="decoder implementation"):
+        decode(None, object(), implementation="guess")
+    with use(False, decoder="bitmap_prefix") as state:
+        assert state.report()["decoder"] == "bitmap_prefix"
+    with pytest.raises(ValueError, match="construction"), use(False, decoder="guess"):
+        pass

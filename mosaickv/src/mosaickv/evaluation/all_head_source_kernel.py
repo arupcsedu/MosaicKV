@@ -2,6 +2,7 @@
 
 import triton
 import triton.language as tl
+from triton.language.extra.cuda import libdevice
 
 
 @triton.jit
@@ -98,28 +99,59 @@ def pack(
 
 
 @triton.jit
-def unpack(previous, payload, offsets, output, HAS_PREVIOUS: tl.constexpr):
+def _bitmap_counts(payload, start, count, enabled):
+    lane = tl.arange(0, 64)
+    byte = tl.load(payload + start + lane, enabled & (lane < tl.cdiv(count, 8)), other=0)
+    byte = byte.to(tl.int32)
+    counts = libdevice.popc(byte)
+    return byte, tl.cumsum(counts, 0), tl.sum(counts, 0)
+
+
+@triton.jit
+def _bitmap_rank(byte, cumulative, slot):
+    selected = tl.gather(byte, slot // 8, 0)
+    prefix = tl.gather(cumulative, slot // 8, 0) - libdevice.popc(selected)
+    before = selected & ((1 << (slot % 8)) - 1)
+    return ((selected >> (slot % 8)) & 1) != 0, prefix + libdevice.popc(before)
+
+
+@triton.jit
+def unpack(
+    previous,
+    payload,
+    offsets,
+    output,
+    HAS_PREVIOUS: tl.constexpr,
+    BITMAP_PREFIX: tl.constexpr = False,
+):
     group, lane = tl.program_id(0), tl.arange(0, 512)
     offset = tl.load(offsets + group).to(tl.uint32)
     raw = (offset & 0x80000000) != 0
     start = (offset & 0x7FFFFFFF).to(tl.int32)
     mode = tl.load(payload + start, ~raw, other=0).to(tl.int32)
-    flag0 = (
-        (tl.load(payload + start + 1 + lane // 8, ~raw, other=0).to(tl.int32) >> (lane % 8)) & 1
-    ) != 0
-    rank0 = tl.maximum(tl.cumsum(flag0.to(tl.int32), 0) - 1, 0)
-    count = tl.sum(flag0.to(tl.int32), 0)
-    flag1 = flag0 & (
-        (
+    if BITMAP_PREFIX:
+        byte0, prefix0, count = _bitmap_counts(payload, start + 1, 512, ~raw)
+        flag0, rank0 = _bitmap_rank(byte0, prefix0, lane)
+        byte1, prefix1, _ = _bitmap_counts(payload, start + 65, count, ~raw)
+        second, rank1 = _bitmap_rank(byte1, prefix1, rank0)
+        flag1 = flag0 & second
+    else:
+        flag0 = (
+            (tl.load(payload + start + 1 + lane // 8, ~raw, other=0).to(tl.int32) >> (lane % 8)) & 1
+        ) != 0
+        rank0 = tl.maximum(tl.cumsum(flag0.to(tl.int32), 0) - 1, 0)
+        count = tl.sum(flag0.to(tl.int32), 0)
+        flag1 = flag0 & (
             (
-                tl.load(payload + start + 65 + rank0 // 8, (~raw) & flag0, other=0).to(tl.int32)
-                >> (rank0 % 8)
+                (
+                    tl.load(payload + start + 65 + rank0 // 8, (~raw) & flag0, other=0).to(tl.int32)
+                    >> (rank0 % 8)
+                )
+                & 1
             )
-            & 1
+            != 0
         )
-        != 0
-    )
-    rank1 = tl.maximum(tl.cumsum(flag1.to(tl.int32), 0) - 1, 0)
+        rank1 = tl.maximum(tl.cumsum(flag1.to(tl.int32), 0) - 1, 0)
     bit, shift = rank1 * 3, (rank1 * 3) % 8
     literal = start + 65 + tl.cdiv(count, 8) + bit // 8
     a = tl.load(payload + literal, (~raw) & flag1, other=0).to(tl.int32)

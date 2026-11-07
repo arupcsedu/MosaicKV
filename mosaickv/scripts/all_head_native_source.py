@@ -127,6 +127,8 @@ def prepare(root):
             model_weights_loaded=False,
             model_quality_established=False,
             six_mechanism_superiority_established=False,
+            decoder_comparison="512_symbol_scan_reference_vs_64_byte_popcount_prefix",
+            decoder_packet_format_unchanged=True,
             fresh_or_paper_campaign_authorized=False,
         ),
     )
@@ -232,13 +234,36 @@ def worker(root, expected):
                 actual = native.decode(previous, packet)
                 if not torch.equal(actual, current):
                     raise RuntimeError("native decoded source differs from original codes")
+                revised = native.decode(previous, packet, implementation="bitmap_prefix")
+                if not torch.equal(revised, actual):
+                    raise RuntimeError("bitmap-prefix decoder differs from reference bits")
                 if previous is not None:
                     scratch = previous.clone()
-                    native.decode(scratch, packet, scratch)
+                    native.decode(scratch, packet, scratch, implementation="bitmap_prefix")
                     if not torch.equal(scratch, current):
                         raise RuntimeError("in-place source replay differs")
                 if not np.array_equal(packet.payload.cpu().numpy(), cpu_packet.payload):
                     raise RuntimeError("replay mutated its immutable source archive")
+                timings = {}
+                for implementation in ("reference", "bitmap_prefix"):
+                    target = torch.empty_like(current)
+                    for _ in range(3):
+                        native.decode(previous, packet, target, implementation=implementation)
+                    torch.cuda.synchronize()
+                    graph = torch.cuda.CUDAGraph()
+                    with torch.cuda.graph(graph):
+                        for _ in range(50):
+                            native.decode(previous, packet, target, implementation=implementation)
+                    begin, end = (torch.cuda.Event(enable_timing=True) for _ in range(2))
+                    begin.record()
+                    for _ in range(20):
+                        graph.replay()
+                    end.record()
+                    end.synchronize()
+                    if not torch.equal(target, current):
+                        raise RuntimeError("captured decoder changed source code bits")
+                    timings[implementation] = begin.elapsed_time(end) / 1000
+                    del graph, target
                 records.append(
                     dict(
                         layer=layer,
@@ -249,9 +274,12 @@ def worker(root, expected):
                         native_serialized_bytes=packet.serialized_bytes,
                         in_place_replay_bitwise=previous is not None,
                         archive_immutable=True,
+                        bitmap_prefix_bitwise=True,
+                        decoder_cuda_interval_ms=timings,
+                        timing_scope="1000_graph_captured_native_replays_not_request_latency",
                     )
                 )
-                del actual, packet
+                del actual, revised, packet
             previous_cpu, previous = codes[layer].numpy(), current
         # Operator isolation: A-B-A reconstructs different private streams;
         # no mutable source binding escapes this test or serving request.

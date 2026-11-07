@@ -142,10 +142,12 @@ def encode_best(previous, current):
     return packet, selected, legacy_bytes
 
 
-def decode(previous, packet, destination=None):
+def decode(previous, packet, destination=None, *, implementation="reference"):
     from mosaickv.evaluation.all_head_source_kernel import unpack
     from mosaickv.evaluation.lossless_code_delta_gpu import validate_bytes
 
+    if implementation not in ("reference", "bitmap_prefix"):
+        raise ValueError("explicit audited native decoder implementation required")
     if not isinstance(packet, DeviceSymbols):
         raise ValueError("native source symbol packet required")
     if (
@@ -187,21 +189,24 @@ def decode(previous, packet, destination=None):
         packet.offsets,
         output,
         HAS_PREVIOUS=packet.has_previous,
+        BITMAP_PREFIX=implementation == "bitmap_prefix",
     )
     return output
 
 
 class CodecState:
-    def __init__(self, construction="both"):
+    def __init__(self, construction="both", decoder="reference"):
         self.records, self.references = [], []
         self.coverage = []
         self.construction = construction
+        self.decoder = decoder
 
     def report(self):
         return dict(
             variant="all_head_lossless_source_codec_v1",
             default_off=True,
             construction=self.construction,
+            decoder=self.decoder,
             records=self.records,
             compressed_replacements=sum(r["symbol_codec_selected"] for r in self.records),
             original_owners_retired=sum(ref() is None for ref in self.references),
@@ -215,16 +220,20 @@ class CodecState:
 
 
 @contextmanager
-def use(enabled=True, *, construction="both"):
+def use(enabled=True, *, construction="both", decoder="reference"):
     """Scope new packet types/decoder to one private runtime, never globally on."""
     import weakref
 
     from mosaickv.evaluation import layer_code_delta as runtime
     from mosaickv.evaluation.all_head_source_codec import SourceCoverage
 
-    if type(enabled) is not bool or construction not in ("both", "pack_selected"):
+    if (
+        type(enabled) is not bool
+        or construction not in ("both", "pack_selected")
+        or decoder not in ("reference", "bitmap_prefix")
+    ):
         raise ValueError("explicit activation and audited source construction required")
-    state = CodecState(construction)
+    state = CodecState(construction, decoder)
     if not enabled:
         yield state
         return
@@ -266,7 +275,7 @@ def use(enabled=True, *, construction="both"):
         if isinstance(packet, CodecChoice):
             packet = packet.packet
         return (
-            decode(previous, packet, destination)
+            decode(previous, packet, destination, implementation=state.decoder)
             if isinstance(packet, DeviceSymbols)
             else (original_decode(previous, packet, destination))
         )
