@@ -227,6 +227,10 @@ class LiveAnchorGuard:
                 owner.heads = None
                 owner.active_key = owner.active_value = owner.active_heads = None
                 owner.query = owner.mask = owner.prototype_mass = None
+                from mosaickv.evaluation.bounded_probe_horizon import expected_updates
+                from mosaickv.evaluation.guard_tail_graph import retire_after_final_update
+
+                retire_after_final_update(owner.tail, len(owner.records), expected_updates())
                 return output
             parent_norm, active_norm = norm(parent_hidden), norm(active_hidden)
             parent_native, active_native = head(parent_norm), head(active_norm)

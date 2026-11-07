@@ -8,6 +8,47 @@ import torch
 from mosaickv.evaluation.guard_tail_graph import GuardTail, native_tail
 
 
+def lifetime_control(norm, head, pair, capture_mode):
+    """The guard must retire before the enclosing graph's RNG-owner audit."""
+    from mosaickv.evaluation.post_attention_segment import capture_stream
+    from mosaickv.evaluation.prompt_graph_reader import allocator_blocks, generator_metadata
+
+    source = torch.ones(1, device="cuda")
+    destination = torch.empty_like(source)
+    current, stream = torch.cuda.current_stream(), capture_stream(source.device)
+    torch.cuda.synchronize()
+    before = allocator_blocks()
+    allocated = torch.cuda.memory_allocated()
+    graph = torch.cuda.CUDAGraph()
+    stream.wait_stream(current)
+    with torch.cuda.stream(stream):
+        graph.capture_begin()
+        try:
+            destination.copy_(source)
+        finally:
+            graph.capture_end()
+    current.wait_stream(stream)
+    torch.cuda.synchronize()
+    addresses = generator_metadata(
+        before, allocator_blocks(), torch.cuda.memory_allocated() - allocated
+    )
+    tail = GuardTail(norm, head, capture_mode=capture_mode)
+    output, logits, record = tail.run(*pair)
+    tail.close()
+    del output, logits, record, tail
+    torch.cuda.synchronize()
+    if not all(address in allocator_blocks() for address in addresses):
+        raise RuntimeError("guard prematurely retired the enclosing graph's RNG owners")
+    allocated = torch.cuda.memory_allocated()
+    graph.reset()
+    del graph
+    torch.cuda.synchronize()
+    released = allocated - torch.cuda.memory_allocated()
+    if released != 1024 or any(address in allocator_blocks() for address in addresses):
+        raise RuntimeError("guard lifecycle violates the unchanged two-scalar retirement check")
+    return dict(registered_scalar_bytes=1024, retired_scalar_bytes=released, passed=True)
+
+
 @torch.inference_mode()
 def run(*, capture_mode="context_manager"):
     from transformers.models.llama.modeling_llama import LlamaRMSNorm
@@ -44,6 +85,7 @@ def run(*, capture_mode="context_manager"):
     resources = g.report()
     g.close()
     del g, native, output, logits, record, nan
+    lifetime = lifetime_control(norm, head, pairs[0], capture_mode)
     results = {"reference": [], "graph": []}
     rng = random.Random(20261107)
     # Each block is a new request, including capture, warmup and graph retirement.
@@ -87,5 +129,6 @@ def run(*, capture_mode="context_manager"):
         capture_inclusive_ratio=ratio,
         required_ratio=0.95,
         activation_resources=resources,
+        enclosing_graph_rng_lifetime_control=lifetime,
         passed=ratio < 0.95,
     )

@@ -31,7 +31,7 @@ class GuardTail:
         self.capture_mode = capture_mode
         self.norm, self.head = norm, head
         self.inputs = self.outputs = self.graph = None
-        self.calls = self.replays = 0
+        self.calls = self.replays = self.captures = 0
         self.explicit_bytes = self.observed_allocator_increment = 0
         self.closed = False
 
@@ -90,6 +90,7 @@ class GuardTail:
         self.observed_allocator_increment = max(
             0, torch.cuda.memory_allocated(parent.device) - before
         )
+        self.captures += 1
 
     def run(self, parent, active):
         self._validate(parent, active)
@@ -112,7 +113,7 @@ class GuardTail:
             calls=self.calls,
             capture_mode=self.capture_mode,
             replays=self.replays,
-            captures=int(self.graph is not None),
+            captures=self.captures,
             explicit_activation_backing_bytes=self.explicit_bytes,
             observed_graph_allocator_increment_bytes=self.observed_allocator_increment,
             additional_persistent_KV_bytes=0,
@@ -128,3 +129,16 @@ class GuardTail:
         self.inputs = self.outputs = self.graph = None
         self.norm = self.head = None
         self.closed = True
+
+
+def retire_after_final_update(tail, completed, expected):
+    """Retire before the outer prompt pool audits shared RNG metadata owners.
+
+    The returned hidden tensor remains caller-owned until the ordinary final
+    readout completes. Graph lifetime must not extend across the enclosing
+    pool's strict two-scalar retirement check.
+    """
+    if type(completed) is not int or type(expected) is not int or not 1 <= completed <= expected:
+        raise ValueError("bounded actual guard-update count required")
+    if completed == expected:
+        tail.close()

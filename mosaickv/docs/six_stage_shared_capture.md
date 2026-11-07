@@ -30,3 +30,12 @@ common-codec storage-only, all 128 frozen logit vectors, exact storage and
 complete traces. No new cohort or paper-scale campaign is authorized by this
 engineering result. Graph activations/backend increments remain disclosed;
 they are not KV savings or whole-request peak certification.
+
+The first pretrained attempt exposed a real lifecycle incompatibility: the
+auxiliary graph outlived the prompt pool's strict RNG-metadata retirement audit.
+Retire the auxiliary graph after its final registered update, before the
+ordinary pool tears down. The final selected hidden tensor remains caller-owned
+through the ordinary readout. Keep the original two-scalar ownership assertion
+unchanged; do not exempt the new graph or silently increase its allowance.
+The actual capture count survives retirement in the report. CPU regressions
+cover one, 31 and 127 updates. Preserve the failed attempt under its original SHA.

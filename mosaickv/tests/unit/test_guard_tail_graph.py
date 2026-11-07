@@ -127,3 +127,25 @@ def test_capture_modes_remain_explicit():
     assert OverlayPolicy(
         inline_repair=True, live_anchor_guard=True, anchor_tail="manual_shared_stream"
     )
+
+
+@pytest.mark.parametrize("horizon", (1, 31, 127))
+def test_tail_retires_before_outer_pool_only_after_its_complete_horizon(horizon):
+    from mosaickv.evaluation.guard_tail_graph import retire_after_final_update
+
+    calls = []
+    tail = SimpleNamespace(close=lambda: calls.append("retired"))
+    for completed in range(1, horizon + 1):
+        retire_after_final_update(tail, completed, horizon)
+        assert len(calls) == int(completed == horizon)
+    with pytest.raises(ValueError, match="bounded actual"):
+        retire_after_final_update(tail, horizon + 1, horizon)
+
+
+def test_tail_retirement_preserves_evidence_of_real_graph_capture():
+    tail = GuardTail(None, None)
+    tail.captures, tail.calls, tail.replays = 1, 127, 127
+    tail.close()
+    assert tail.report()["closed"]
+    assert tail.report()["captures"] == 1
+    assert tail.report()["replays"] == 127
