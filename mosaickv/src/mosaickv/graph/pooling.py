@@ -566,8 +566,7 @@ def pool_block_descriptors(
         block = full_state.blocks[source_node_id]
         blocks_by_layer[block.layer].append((source_node_id, block))
     local_by_source = {
-        source_node_id: local_node_id
-        for local_node_id, source_node_id in enumerate(table_ids)
+        source_node_id: local_node_id for local_node_id, source_node_id in enumerate(table_ids)
     }
 
     # Stage each layer on CPU once.  The previous block-at-a-time path issued
@@ -772,6 +771,34 @@ def pool_block_descriptors(
     return tuple(item[1] for item in indexed_result)
 
 
+def _pool_attention_block_batch(grouped, *, positions, heads):
+    """Gather only requested (head,query,key) coordinates, not B*Q*all_keys.
+
+    A block-size-one graph must not replicate its entire key axis for every
+    block before gathering a single position. Preserve the original contiguous
+    selected tensor and mean reduction, including repeated-head batches.
+    """
+    import torch
+
+    if (
+        grouped.ndim != 3
+        or not positions
+        or not positions[0]
+        or len(positions) != len(heads)
+        or len({len(p) for p in positions}) != 1
+        or min(min(p) for p in positions) < 0
+        or max(max(p) for p in positions) >= grouped.shape[-1]
+        or min(heads) < 0
+        or max(heads) >= grouped.shape[0]
+    ):
+        raise ValueError("valid equal-width prompt-attention block coordinates required")
+    p = torch.as_tensor(positions, dtype=torch.long, device=grouped.device)
+    h = torch.as_tensor(heads, dtype=torch.long, device=grouped.device)
+    q = torch.arange(grouped.shape[1], device=grouped.device)
+    selected = grouped[h[:, None, None], q[None, :, None], p[:, None, :]]
+    return selected.mean(dim=2)
+
+
 def pool_prompt_attention_coactivation(
     full_state: FullKVState,
     prompt_attentions: Sequence[Any],
@@ -853,23 +880,13 @@ def pool_prompt_attention_coactivation(
             deferred_batches: list[Any] = []
             deferred_node_ids: list[int] = []
             for _width, indexed_blocks in by_width.items():
-                positions = torch.as_tensor(
-                    tuple(block.physical_cache_indices for _node_id, block in indexed_blocks),
-                    dtype=torch.long,
-                    device=tensor.device,
+                pooled = _pool_attention_block_batch(
+                    grouped,
+                    positions=tuple(
+                        block.physical_cache_indices for _node_id, block in indexed_blocks
+                    ),
+                    heads=tuple(block.kv_head for _node_id, block in indexed_blocks),
                 )
-                heads = torch.as_tensor(
-                    tuple(block.kv_head for _node_id, block in indexed_blocks),
-                    dtype=torch.long,
-                    device=tensor.device,
-                )
-                source = grouped[heads]
-                selected = torch.gather(
-                    source,
-                    2,
-                    positions[:, None, :].expand(-1, int(source.shape[1]), -1),
-                )
-                pooled = selected.mean(dim=2)
                 if host_transfer_mode.startswith("deferred_layer"):
                     # Preserve the original independent per-head reduction,
                     # but defer its synchronizing device-to-host copy. Long

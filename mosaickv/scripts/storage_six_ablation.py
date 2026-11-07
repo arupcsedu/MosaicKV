@@ -294,6 +294,8 @@ def prepare(
     horizon_study=False,
     inline_study=False,
     graph_runtime_study=False,
+    external_graph_parity_root=None,
+    after_gpu_job=None,
 ):
     inline_study = inline_study or graph_runtime_study
     replacement_study = replacement_study or inline_study or graph_runtime_study
@@ -317,6 +319,32 @@ def prepare(
     paths = [PARENT / n for n in ("plan.json", "options.json", "ledger.json")]
     paths += [PREVIOUS / "inputs.json", Path(parent["profile_path"])]
     paths += [Path(m["path"]) for s in inputs for m in s["media"]]
+    cross_source = {}
+    if external_graph_parity_root is not None:
+        gate = Path(external_graph_parity_root)
+        external = read(gate / "plan.json")
+        if read(gate / "analysis/decision.json").get("execution_passed") is not True:
+            raise ValueError("completed external graph/logit evidence required")
+        if digest(external["parent"]["config"]) != digest(parent["config"]) or digest(
+            read(gate / "inputs.json")
+        ) != digest(inputs):
+            raise ValueError("external graph parity uses different model/inputs/controls")
+        paths += [gate / "plan.json", gate / "analysis/decision.json", gate / "inputs.json"]
+        for i in (0, 1):
+            p = next((gate / f"workers/{i}").glob("[0-9][0-9]-full.json"))
+            row = read(p)
+            path = Path(row["logits_path"])
+            if row["status"] != "completed" or sha(path) != row["logits_sha256"]:
+                raise ValueError("external graph reference missing or changed")
+            cross_source[str(i)] = dict(
+                logits_path=str(path),
+                graph_coo_sha256=row["mechanism_evidence"]["layers"]["31"]["graph_coo_sha256"],
+            )
+            paths += [p, path]
+    if after_gpu_job is not None and (
+        not isinstance(after_gpu_job, str) or not after_gpu_job.isdigit()
+    ):
+        raise ValueError("one explicit predecessor GPU array/job ID required")
     fixed_plans = {}
     if horizon_study:
         completed = Path("/scratch/djy8hg/runs/evicastkv/offloaded-fullkv-draft-20261107-v1")
@@ -417,6 +445,7 @@ def prepare(
                 "mosaickv/tests/unit/test_inline_first_step_repair.py",
                 "mosaickv/tests/unit/test_indexed_positional_graph.py",
                 "mosaickv/tests/unit/test_graph.py",
+                "mosaickv/tests/unit/test_direct_attention_pooling.py",
                 "mosaickv/tests/unit/test_opportunity_demand.py",
                 "mosaickv/tests/unit/test_bounded_probe_horizon.py",
                 "mosaickv/tests/unit/test_streaming_source_constructor.py",
@@ -497,6 +526,8 @@ def prepare(
             fixed_consumed_counterfactual_plans=fixed_plans,
             inline_first_step_repair_study=inline_study,
             indexed_positional_graph_runtime_study=graph_runtime_study,
+            external_graph_parity=cross_source,
+            gpu_start_after_any_job=after_gpu_job,
             storage_boundary_version="shared_initial_final_peak_v2",
             component_reference_arm=(
                 "transaction_joint_guarded"
@@ -530,7 +561,18 @@ def prepare(
 
     infra.SOURCE = SOURCE
     infra.SHELL = SOURCE / "mosaickv/slurm/storage_six_ablation.sbatch"
-    infra.launch(root, "components")
+    original_submit = infra.submit
+
+    def ordered_submit(*args, **kwargs):
+        if after_gpu_job is not None and kwargs.get("array") is not None:
+            kwargs["after"] = after_gpu_job
+        return original_submit(*args, **kwargs)
+
+    infra.submit = ordered_submit
+    try:
+        infra.launch(root, "components")
+    finally:
+        infra.submit = original_submit
 
 
 def worker(root, expected):
@@ -794,6 +836,15 @@ def worker(root, expected):
                         != expected_graph
                     ):
                         errors.append(f"indexed graph changed an actual edge/weight: {arm}")
+            if plan.get("external_graph_parity"):
+                external = plan["external_graph_parity"][str(index)]
+                if completed["full"]["mechanism_evidence"]["layers"]["31"][
+                    "graph_coo_sha256"
+                ] != external["graph_coo_sha256"] or not torch.equal(
+                    values_by_arm["full"],
+                    torch.load(external["logits_path"], weights_only=True, map_location="cpu"),
+                ):
+                    errors.append("direct attention pooling changed a frozen graph or logit bit")
             if "individual_delta_fast_graph" in values_by_arm and not torch.equal(
                 values_by_arm["individual_delta_fast_graph"], values_by_arm["individual_delta"]
             ):
@@ -1108,6 +1159,8 @@ def main():
     p.add_argument("--horizon-study", action="store_true")
     p.add_argument("--inline-study", action="store_true")
     p.add_argument("--graph-runtime-study", action="store_true")
+    p.add_argument("--graph-parity-root", type=Path)
+    p.add_argument("--after-gpu-job")
     a = p.parse_args()
     if a.action == "prepare":
         prepare(
@@ -1122,6 +1175,8 @@ def main():
             a.horizon_study,
             a.inline_study,
             a.graph_runtime_study,
+            a.graph_parity_root,
+            a.after_gpu_job,
         )
     elif a.action == "worker":
         return worker(a.root, a.plan_sha)
