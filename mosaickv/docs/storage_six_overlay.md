@@ -29,13 +29,19 @@ and reported separately. Repair writes original residuals into charged stable
 addresses so previously captured graphs observe the new data. Mandatory values
 and original logical sequence length remain unchanged.
 
-The parent's replay scopes currently enforce a complete 128-prediction
-engagement contract. The provisional diagnostic therefore uses a separately
-owned full decode from the same prefill/packets, in a fresh thread-local scope,
-then discards its history. Entropy uses its first compressed prediction. Any
-promotion recomputes that prediction once in the final request. This overhead
-is included and must not be presented as a latency improvement. General
-arbitrary-step repair is not implemented by this extension.
+The initial prototype used a full provisional trajectory because the parent's
+engagement checks were hard-coded to 127 updates. The separately registered
+two-prediction probe now requires exactly one update through every layer,
+with all cold/capture/replay/copy counts checked. The default main-request
+contract still requires all 127 updates; numerical operators and tolerances
+are unchanged. A 128-prediction provisional control must reproduce all final
+logits bitwise. The private probe reuses the same prefill/packets and discards
+its history. Any promotion recomputes its first prediction once in the final
+request. General arbitrary-step repair is not implemented by this extension.
+
+Valid comparator rows from the first attempt are reused with their original
+producer/manifest and hashes. Only missing or failed comparators are retried.
+Per-worker scratch Triton caches avoid shared compiler-publication races.
 
 ## Finite verification
 

@@ -544,7 +544,9 @@ class Transport:
         self.closed = True
         try:
             if kind is None:
-                self.state["transports"].append(self.ledger.finish(127))
+                from mosaickv.evaluation.bounded_probe_horizon import expected_updates
+
+                self.state["transports"].append(self.ledger.finish(expected_updates()))
                 if self.input_copy is not None:
                     self.state["input_copy_reports"].append(self.input_copy.record())
         finally:

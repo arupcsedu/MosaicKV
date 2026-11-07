@@ -245,8 +245,11 @@ class Transport:
 
     def __exit__(self, kind, value, traceback):
         self.close()
-        if kind is None and (self.calls != 4064 or self.captures != 32 or self.replays != 4064):
-            raise RuntimeError("complete 127-update common epilogue trajectory required")
+        from mosaickv.evaluation.bounded_probe_horizon import expected_updates
+
+        calls = 32 * expected_updates()
+        if kind is None and (self.calls != calls or self.captures != 32 or self.replays != calls):
+            raise RuntimeError("complete registered common epilogue trajectory required")
         self.state["report"] = dict(
             enabled=True,
             calls=self.calls,

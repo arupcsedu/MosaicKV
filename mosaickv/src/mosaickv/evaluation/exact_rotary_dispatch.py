@@ -77,8 +77,10 @@ def managed(function):
         token = _scope.set(state)
         try:
             values, packets, details = function(*args, **kwargs)
-            if enabled and state["calls"] != 4064:
-                raise RuntimeError("complete 127-update rotary engagement required")
+            from mosaickv.evaluation.bounded_probe_horizon import expected_updates
+
+            if enabled and state["calls"] != 32 * expected_updates():
+                raise RuntimeError("complete registered rotary engagement required")
             details["exact_rotary_dispatch"] = dict(
                 state,
                 BF16_intermediate_rounding_preserved=True,

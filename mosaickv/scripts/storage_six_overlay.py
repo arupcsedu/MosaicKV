@@ -20,6 +20,7 @@ PYTHON = "/scratch/djy8hg/env/mosaickv/bin/python"
 ARMS = (
     "parent",
     "disabled_hook",
+    "six_overlay_full_probe",
     "six_overlay",
     "controlled_repair",
     "prompt_attention_topk",
@@ -27,6 +28,7 @@ ARMS = (
     "vl_cache_reimpl",
     "lookm_reimpl",
 )
+REUSE = Path("/scratch/djy8hg/runs/evicastkv/storage-six-overlay-20261106-v1")
 
 
 def read(path):
@@ -54,6 +56,7 @@ def prepare(root):
     root.mkdir(parents=True)
     paths = [PARENT / name for name in ("plan.json", "options.json", "ledger.json")]
     paths.append(PARENT / "timing/workers/0/raw.jsonl")
+    paths += sorted(REUSE.glob("workers/*/[0-9][0-9]-*.json"))
     parent = read(PARENT / "plan.json")
     options = read(PARENT / "options.json")["options"]
     inputs = [
@@ -69,6 +72,11 @@ def prepare(root):
                 "pytest",
                 "-q",
                 "mosaickv/tests/unit/test_storage_six_overlay.py",
+                "mosaickv/tests/unit/test_bounded_probe_horizon.py",
+                "mosaickv/tests/unit/test_exact_rotary_dispatch.py",
+                "mosaickv/tests/unit/test_input_norm_segment.py",
+                "mosaickv/tests/unit/test_post_attention_segment.py",
+                "mosaickv/tests/unit/test_joint_incoming_projection.py",
                 "mosaickv/tests/unit/test_streaming_source_constructor.py",
                 "mosaickv/tests/unit/test_six_mechanism_gate.py",
                 "mosaickv/tests/integration/test_six_mechanism_runtime.py",
@@ -97,6 +105,7 @@ def prepare(root):
                 prototype_members=2,
                 maximum_extra_gpu_bytes=16384,
                 entropy_threshold=0.5,
+                provisional_tokens=2,
             ),
             classification="consumed_storage_extension_diagnostic_not_confirmation",
             prototype_policy="shared_phase_safe_member_overlay_not_original_slot_compaction",
@@ -186,13 +195,46 @@ def worker(root, expected):
                 manifest_path=str(folder / "manifest.json"),
             )
             try:
-                if arm in ("disabled_hook", "six_overlay", "controlled_repair"):
+                previous = next(
+                    (
+                        p
+                        for p in sorted((REUSE / f"workers/{index}").glob("[0-9][0-9]-*.json"))
+                        if read(p).get("arm") == arm and read(p).get("status") == "completed"
+                    ),
+                    None,
+                )
+                if (
+                    arm
+                    in (
+                        "prompt_attention_topk",
+                        "prefixkv_reimpl",
+                        "vl_cache_reimpl",
+                        "lookm_reimpl",
+                    )
+                    and previous is not None
+                ):
+                    reused = dict(
+                        read(previous),
+                        reused_from=str(previous),
+                        reused_sha256=sha(previous),
+                        inference_rerun=False,
+                    )
+                    write_once(folder / f"{len(rows):02}-{arm}.json", reused)
+                    rows.append(reused)
+                    continue
+                if arm in (
+                    "disabled_hook",
+                    "six_overlay",
+                    "six_overlay_full_probe",
+                    "controlled_repair",
+                ):
                     policy = OverlayPolicy(
                         **dict(
                             plan["overlay_policy"],
                             layers=tuple(plan["overlay_policy"]["layers"]),
                             enabled=arm != "disabled_hook",
                             force_repair=arm == "controlled_repair",
+                            provisional_tokens=128 if arm == "six_overlay_full_probe" else 2,
                         )
                     )
                     with integrated_storage(adapter, policy, reader_options=options) as proof:
@@ -223,6 +265,20 @@ def worker(root, expected):
                 if arm in ("six_overlay", "controlled_repair"):
                     if not proof["layers"] or not proof["all_residuals_pinned"]:
                         raise RuntimeError("all mechanisms and pinned residuals must be real")
+                    if any(
+                        not (
+                            e["cross_modal_edges"] > 0
+                            and e["value_contribution_max"] > 0
+                            and e["forecast_mode"] == "prompt_window"
+                            and e["selected_extra"]
+                            and len(e["prototype_members"]) >= 2
+                            and e["prototype_phase_safe"]
+                        )
+                        for e in proof["layers"].values()
+                    ):
+                        raise RuntimeError("all six mechanisms must have observable execution")
+                    if detail["prefill_storage"]["original_KV_tensor_objects_alive"] != 0:
+                        raise RuntimeError("hybrid retained original native KV owners")
                     if arm == "controlled_repair" and not proof["repair_events"]:
                         raise RuntimeError("actual repair required for stress control")
                     original = values_by_arm["parent"][:32].double()
@@ -239,6 +295,10 @@ def worker(root, expected):
                         exact_shared_prefix_comparison=False,
                         same_parent_prefill_controls=True,
                     )
+                    if arm == "six_overlay":
+                        if not torch.equal(values, values_by_arm["six_overlay_full_probe"]):
+                            raise RuntimeError("bounded probe changed a final logit bit")
+                        row["short_probe_bitwise_full_probe"] = True
                 values_by_arm[arm] = values
                 row.update(status="completed", detail=detail)
             except Exception:

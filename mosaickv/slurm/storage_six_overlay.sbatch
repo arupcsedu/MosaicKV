@@ -7,6 +7,9 @@ export CUBLAS_WORKSPACE_CONFIG=:4096:8 HF_HUB_OFFLINE=1 HF_DATASETS_OFFLINE=1
 export TOKENIZERS_PARALLELISM=false
 export PYTHONPATH="$PWD/mosaickv/src:$PWD/mosaickv/scripts"
 export OMP_NUM_THREADS=12 MKL_NUM_THREADS=12 OPENBLAS_NUM_THREADS=2
+# Separate compiler publication namespaces prevent cross-worker artifact races.
+export TRITON_CACHE_DIR="/scratch/djy8hg/cache/mosaickv/triton-private/${SLURM_JOB_ID}-${SLURM_ARRAY_TASK_ID:-cpu}"
+mkdir -p "$TRITON_CACHE_DIR"
 bash mosaickv/scripts/assert_clean_worktree.sh
 exec /scratch/djy8hg/env/mosaickv/bin/python mosaickv/scripts/storage_six_overlay.py \
   "$4" --root "$2" --plan-sha "$3" --phase "$5"

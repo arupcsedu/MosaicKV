@@ -26,6 +26,7 @@ class OverlayPolicy:
     entropy_threshold: float = 0.5
     force_repair: bool = False
     enabled: bool = True
+    provisional_tokens: int = 2
 
     def __post_init__(self):
         if not self.layers or tuple(sorted(set(self.layers))) != self.layers:
@@ -42,6 +43,8 @@ class OverlayPolicy:
             raise ValueError("entropy threshold must be in [0,1]")
         if type(self.force_repair) is not bool or type(self.enabled) is not bool:
             raise ValueError("explicit activation booleans required")
+        if type(self.provisional_tokens) is not int or self.provisional_tokens not in (2, 128):
+            raise ValueError("registered two-token probe or 128-token parity control required")
 
 
 def _bytes(values):
@@ -366,9 +369,8 @@ def plan_layer(
 def _private_probe(original_run, args, kwargs, options):
     """New thread => new request-local ContextVars, NOT nested cache bindings.
 
-    The validated fast path currently requires the complete 128-prediction
-    engagement contract. Preserve it, rather than silently disabling checks
-    for a two-token probe. This cost is reported and is not a latency win.
+    A registered one-update scope retains exact per-layer engagement checks.
+    The separate 128-prediction path remains the bitwise GPU parity control.
     """
     from concurrent.futures import ThreadPoolExecutor
 
@@ -376,7 +378,10 @@ def _private_probe(original_run, args, kwargs, options):
 
     @torch.inference_mode()
     def task():
+        from contextlib import nullcontext
+
         from mosaickv.evaluation import prepared_patch_dispatch as patch_dispatch
+        from mosaickv.evaluation.bounded_probe_horizon import two_prediction_probe
         from mosaickv.evaluation.graph_accounting import use as accounting
         from mosaickv.evaluation.graph_lookahead import use as lookahead
         from mosaickv.evaluation.native_execution_plan import use as native
@@ -415,7 +420,9 @@ def _private_probe(original_run, args, kwargs, options):
             )
         ):
             wrapped = decorator(wrapped)
-        values, _, detail = wrapped(**options)
+        scope = two_prediction_probe() if kwargs["tokens"] == 2 else nullcontext()
+        with scope:
+            values, _, detail = wrapped(**options)
         torch.cuda.synchronize()
         return values, detail
 
@@ -495,10 +502,13 @@ def integrated_storage(adapter, policy: OverlayPolicy, *, reader_options=None):
             # and source packets. No nested live cache or second prefill.
             if reader_options is None:
                 raise ValueError("frozen parent reader options required for the private probe")
-            before, probe_details = _private_probe(original_run, args, kwargs, reader_options)
+            probe_kwargs = dict(kwargs, tokens=policy.provisional_tokens)
+            before, probe_details = _private_probe(original_run, args, probe_kwargs, reader_options)
             entropy = normalized_next_token_entropy(before[1])
             report["provisional_entropy"] = entropy
             report["probe_storage"] = probe_details["storage"]
+            report["probe_decode_wall_seconds"] = probe_details["decode_wall_seconds"]
+            report["provisional_tokens"] = policy.provisional_tokens
             if policy.force_repair or entropy >= policy.entropy_threshold:
                 index = min(overlays)
                 event = overlays[index].promote()
@@ -529,7 +539,8 @@ def integrated_storage(adapter, policy: OverlayPolicy, *, reader_options=None):
         report["parent_reader_and_lossless_history_used"] = True
         report["actual_overlay_fills"] = {str(i): int(o.actual_fills) for i, o in overlays.items()}
         if overlays and any(
-            int(o.actual_fills) < 4 * (kwargs["tokens"] - 1) for o in overlays.values()
+            int(o.actual_fills) < 2 * (kwargs["tokens"] + policy.provisional_tokens - 2)
+            for o in overlays.values()
         ):
             raise RuntimeError("prototype reader did not engage for every provisional/final step")
         return after, details

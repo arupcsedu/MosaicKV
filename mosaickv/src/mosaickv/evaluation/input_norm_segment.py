@@ -233,19 +233,22 @@ class Transport:
 
     def __exit__(self, kind, value, traceback):
         self.close()
+        from mosaickv.evaluation.bounded_probe_horizon import expected_updates
+
+        updates = expected_updates()
         if kind is None and (self.calls, self.cold, self.captures, self.replays) != (
-            4064,
+            32 * updates,
             32,
-            32,
-            4032,
+            0 if updates == 1 else 32,
+            32 * (updates - 1),
         ):
-            raise RuntimeError("complete 127-update common input norm trajectory required")
+            raise RuntimeError("complete registered common input norm trajectory required")
         if (
             kind is None
             and self.state.get("reuse", False)
-            and (self.skipped_copies, self.first_layer_copies) != (3906, 126)
+            and (self.skipped_copies, self.first_layer_copies) != (31 * (updates - 1), updates - 1)
         ):
-            raise RuntimeError("all later-layer norm copies must bypass with 126 embedding copies")
+            raise RuntimeError("all registered later-layer norm and embedding copies required")
         self.state["report"] = dict(
             enabled=True,
             calls=self.calls,
