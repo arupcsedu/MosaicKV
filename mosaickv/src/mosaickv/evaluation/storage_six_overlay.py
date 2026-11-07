@@ -414,18 +414,26 @@ def plan_layer(
             query[0, 0], tuple(t[0, head] for t in original), tuple(t[0, head] for t in parent_pair)
         )
         normalized = (gain / max(anchor_error, 1e-20)).clamp(-1, 1).cpu().tolist()
-        utilities = replace(
-            utilities,
-            blocks=tuple(
-                replace(u, local_utility=u.local_utility + 0.25 * normalized[u.node_id])
-                for u in utilities.blocks
-            ),
-        )
+
+        def gain_utility(u):
+            contribution = u.value_contribution + 1.0 + normalized[u.node_id]
+            local = (
+                utilities.weights.lambda_q * u.forecast_attention_probability
+                - utilities.weights.lambda_v * contribution
+                - utilities.weights.lambda_o * u.uniqueness
+            )
+            return replace(
+                u, expected_attention_output_contribution=contribution, local_utility=local
+            )
+
+        utilities = replace(utilities, blocks=tuple(gain_utility(u) for u in utilities.blocks))
         restoration_report = dict(
             anchor_attention_output_mse=anchor_error,
             maximum_relative_gain=max(normalized),
             minimum_relative_gain=min(normalized),
             weight=0.25,
+            common_gain_offset=1.0,
+            offset_is_constant_at_fixed_cardinality=True,
             actual_key_change_and_softmax_normalization=True,
             benchmark_quality_certificate=False,
         )

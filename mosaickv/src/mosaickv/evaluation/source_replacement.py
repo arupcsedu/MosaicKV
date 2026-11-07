@@ -127,16 +127,67 @@ def compact(body, omitted):
 
 
 def maybe_compact(body, omitted):
-    import weakref
-
     state = _scope.get()
     if state is None:
         return body
-    result, record = compact(body, omitted)
-    if record["replaced"]:
-        state.setdefault("_old_owner_weakrefs", []).append(weakref.ref(body.codes))
-    state["layers"].append(record)
-    return result
+    # Defer the transaction until all layers are known. Layer-dependent
+    # payload lengths destroy the parent's adjacent-layer delta alignment.
+    state.setdefault("_pending_masks", []).append(tuple(omitted.cpu().tolist()))
+    return body
+
+
+def replace_with_codec(packets, codec):
+    """Joint row-removal + existing codec transaction, including replay scratch.
+
+    Compare COMPLETE net storage against the parent's existing codec. Never
+    claim the raw row savings while silently losing larger delta-code savings.
+    """
+    import weakref
+
+    from mosaickv.evaluation.layer_code_delta import map_bodies
+
+    state = _scope.get()
+    if state is None:
+        return codec(packets)
+    masks = state.pop("_pending_masks", [])
+    if len(masks) != len(packets):
+        raise RuntimeError("one complete source-protection mask per layer required")
+    omitted = torch.tensor(masks, dtype=torch.bool).all(0)
+    state["common_omitted_positions"] = omitted.nonzero().flatten().tolist()
+    baseline, before = codec(packets)
+    records, refs = [], []
+
+    def replace_body(role, body):
+        if role != "source":
+            raise NotImplementedError("source-only joint replacement transaction")
+        smaller, record = compact(body, omitted)
+        records.append(record)
+        if record["replaced"]:
+            refs.append(weakref.ref(body.codes))
+        return smaller
+
+    smaller = tuple(map_bodies(packet, replace_body) for packet in packets)
+    candidate, after = codec(smaller)
+    state["parent_codec_net_bytes"] = before["net_active_bytes"]
+    state["candidate_codec_net_bytes"] = after["net_active_bytes"]
+    state["raw_code_saved_bytes"] = sum(r["saved_bytes"] for r in records)
+    if not all(r["replaced"] for r in records) or (
+        after["net_active_bytes"] >= before["net_active_bytes"]
+    ):
+        state.update(
+            replacement_accepted=False,
+            saved_gpu_bytes=0,
+            layers=records,
+            decline_reason="joint_codec_and_maps_have_no_net_storage_benefit",
+        )
+        return baseline, before
+    state.update(
+        replacement_accepted=True,
+        layers=records,
+        saved_gpu_bytes=before["net_active_bytes"] - after["net_active_bytes"],
+        _old_owner_weakrefs=refs,
+    )
+    return candidate, dict(after, source_replacement_verified=True)
 
 
 def audit_retirement(report):
@@ -146,7 +197,7 @@ def audit_retirement(report):
     report["replaced_code_owners"] = len(refs)
     if report["old_code_tensor_objects_alive"]:
         raise RuntimeError("old dense source-code owner survived prefill retirement")
-    report["saved_gpu_bytes"] = sum(row["saved_bytes"] for row in report["layers"])
+    report.setdefault("saved_gpu_bytes", sum(row["saved_bytes"] for row in report["layers"]))
     report["whole_request_peak_certified"] = False
 
 

@@ -59,8 +59,8 @@ def test_default_and_retention_identity_scopes_do_not_transform_sources():
         assert maybe_compact(body, omitted) is body
         assert not proof["layers"]
     with use(True) as proof:
-        assert maybe_compact(body, omitted) is not body
-        assert len(proof["layers"]) == 1
+        assert maybe_compact(body, omitted) is body
+        assert len(proof["_pending_masks"]) == 1
     assert maybe_compact(body, omitted) is body
 
 
@@ -71,12 +71,28 @@ def test_corrupt_map_is_rejected():
         unpack_cpu(replace(result, row_map=torch.full((32,), 9, dtype=torch.int32)))
 
 
-def test_real_retirement_audit_checks_objects_and_counts_map_bytes():
-    from mosaickv.evaluation.source_replacement import audit_retirement
+def test_real_retirement_audit_checks_objects_and_counts_map_bytes(monkeypatch):
+    from dataclasses import dataclass
+
+    from mosaickv.evaluation import layer_code_delta
+    from mosaickv.evaluation.source_replacement import audit_retirement, replace_with_codec
+
+    @dataclass
+    class Packet:
+        source: object
+
+    monkeypatch.setattr(layer_code_delta, "map_bodies", lambda p, f: Packet(f("source", p.source)))
+
+    def codec(packets):
+        return packets, dict(
+            enabled=False,
+            net_active_bytes=backing_bytes(tuple(t for p in packets for t in p.source.tensors())),
+        )
 
     body = pack(torch.zeros(1, 1, 32, 128).bfloat16(), bits=3, axis=2)
     with use(True) as proof:
-        result = maybe_compact(body, torch.ones(32, dtype=torch.bool))
+        assert maybe_compact(body, torch.ones(32, dtype=torch.bool)) is body
+        (packet,), record = replace_with_codec((Packet(body),), codec)
         del body
         gc.collect()
         audit_retirement(proof)
@@ -84,7 +100,37 @@ def test_real_retirement_audit_checks_objects_and_counts_map_bytes():
         assert proof["old_code_tensor_objects_alive"] == 0
         assert proof["saved_gpu_bytes"] > 0
         assert not proof["whole_request_peak_certified"]
-        assert result.row_map is not None
+        assert packet.source.row_map is not None
+        assert record["source_replacement_verified"]
+
+
+def test_joint_codec_rolls_back_if_old_delta_codec_is_smaller(monkeypatch):
+    from dataclasses import dataclass
+
+    from mosaickv.evaluation import layer_code_delta
+    from mosaickv.evaluation.source_replacement import audit_retirement, replace_with_codec
+
+    @dataclass
+    class Packet:
+        source: object
+
+    monkeypatch.setattr(layer_code_delta, "map_bodies", lambda p, f: Packet(f("source", p.source)))
+    body = pack(torch.zeros(1, 1, 32, 128).bfloat16(), bits=3, axis=2)
+    original = (Packet(body),)
+
+    def codec(packets):
+        return packets, dict(
+            enabled=True, net_active_bytes=(1 if packets[0].source.row_map is None else 999)
+        )
+
+    with use(True) as proof:
+        maybe_compact(body, torch.ones(32, dtype=torch.bool))
+        actual, _ = replace_with_codec(original, codec)
+        audit_retirement(proof)
+        assert actual is original
+        assert not proof["replacement_accepted"]
+        assert proof["saved_gpu_bytes"] == 0
+        assert proof["raw_code_saved_bytes"] > 0  # cannot be called NET savings
 
 
 def test_replacement_variants_are_isolated_and_common_parent_is_measured():

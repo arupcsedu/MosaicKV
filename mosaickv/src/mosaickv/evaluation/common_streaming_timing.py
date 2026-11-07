@@ -381,10 +381,15 @@ def request(
         )
     if code_delta:
         from mosaickv.evaluation.layer_code_delta import convert
+        from mosaickv.evaluation.source_replacement import replace_with_codec
 
-        packets, code_report = convert(packets)
-        if not code_report["enabled"]:
+        packets, code_report = replace_with_codec(packets, convert)
+        if not code_report["enabled"] and not code_report.get("source_replacement_verified"):
             raise RuntimeError("registered beneficial source codec did not reduce storage")
+        # An explicit joint replacement can choose raw compact source codes
+        # only after proving lower COMPLETE storage than the original codec.
+        # Report actual codec engagement, never merely the requested flag.
+        code_delta = code_report["enabled"]
     torch.cuda.synchronize()
     constructed_at = time.monotonic()
     from mosaickv.evaluation import prepared_patch_dispatch as patch_dispatch

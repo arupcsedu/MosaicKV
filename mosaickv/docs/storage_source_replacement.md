@@ -15,6 +15,13 @@ means integer code zero, NOT a zero decoded value. Original group headers
 and RoPE positions still apply. No requantization, weight changes, token
 eviction, or altered decode history is permitted.
 
+Replacement is deferred until all layers are available. Use the intersection
+of their removable positions so payload lengths remain aligned for the
+existing lossless cross-layer codec. Evaluate original-plus-codec and
+replacement-plus-codec, charging replay scratch in BOTH. Accept only a strict
+net saving; otherwise retain the original codec explicitly. Raw omitted-code
+bytes alone are not evidence of net storage reduction.
+
 The old code owner must die before decoding. Weak references audit original
 tensor retirement; the new payload must own separate, smaller backing storage.
 Every source tensor and map is exposed to existing physical-byte accounting.
@@ -44,7 +51,9 @@ Two isolated ablations are registered before execution:
    per-query attention-output error with that original K/V row restored,
    including the changed key score and softmax partition function. Use signed
    improvement relative to the actual parent, normalized by parent MSE, with
-   a fixed 0.25 local-utility weight. Unlike value norm or error magnitude,
+   a fixed 0.25 local-utility weight. A common +1 offset keeps the contribution
+   nonnegative and preserves the core utility equation; fixed-cardinality
+   rankings are unaffected by that constant. Unlike value norm or error magnitude,
    restoring a row can receive a negative score. This is only local evidence,
    not a certificate of model-logit or benchmark-quality benefit.
 2. **Actual-attention prototype risk.** Keep the original entropy trigger and

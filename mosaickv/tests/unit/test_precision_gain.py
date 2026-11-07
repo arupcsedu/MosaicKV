@@ -31,3 +31,22 @@ def test_zero_error_has_zero_gain_and_no_repair_risk():
     assert repair_risk(0.5, 4.0, 2.0) == 0.5
     with pytest.raises(ValueError):
         repair_risk(float("nan"), 1.0, 1.0)
+
+
+def test_signed_utility_uses_validated_core_equation_and_same_storage():
+    from test_storage_error_aware import arguments
+
+    from mosaickv.evaluation.storage_six_overlay import OverlayPolicy, _bytes, plan_layer
+
+    args, parent = arguments()
+    policy = OverlayPolicy(
+        record_phase_timings=True,
+        forecast_distribution="individual_queries",
+        prototype_representation="parent_residual_delta",
+        utility_signal="exact_restoration_gain",
+    )
+    actual = plan_layer(*args, policy, pin_residuals=False, parent_pair=parent)
+    assert _bytes(actual.gpu_tensors()) == 6713
+    report = actual.evidence["signed_restoration_gain"]
+    assert report["actual_key_change_and_softmax_normalization"]
+    assert report["offset_is_constant_at_fixed_cardinality"]
