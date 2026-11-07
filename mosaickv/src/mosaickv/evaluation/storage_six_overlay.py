@@ -52,6 +52,7 @@ class OverlayPolicy:
     repair_policy: str = "entropy"
     prototype_risk_threshold: float = 0.01
     precision_transaction: str = "none"
+    readout_control: bool = False
 
     def __post_init__(self):
         if not self.layers or tuple(sorted(set(self.layers))) != self.layers:
@@ -106,6 +107,15 @@ class OverlayPolicy:
             self.prototype_representation != "parent_residual_delta" or not self.enabled
         ):
             raise ValueError("precision transaction requires active parent-residual prototypes")
+        if type(self.readout_control) is not bool:
+            raise ValueError("explicit readout control flag required")
+        if self.readout_control and (
+            self.layers != (31,)
+            or self.provisional_tokens != 2
+            or not self.enabled
+            or self.component_mode != "full"
+        ):
+            raise ValueError("readout controls require one final layer and one provisional update")
 
 
 class _Phases:
@@ -676,7 +686,9 @@ def plan_layer(
     return overlay
 
 
-def _private_probe(original_run, args, kwargs, options, attention_observer=None):
+def _private_probe(
+    original_run, args, kwargs, options, attention_observer=None, readout_capture=None
+):
     """New thread => new request-local ContextVars, NOT nested cache bindings.
 
     A registered one-update scope retains exact per-layer engagement checks.
@@ -716,6 +728,8 @@ def _private_probe(original_run, args, kwargs, options, attention_observer=None)
                 prefetch(False),
             ):
                 with ExitStack() as hooks:
+                    if readout_capture is not None:
+                        hooks.enter_context(readout_capture.use())
                     if attention_observer is not None:
                         adapter = args[0]
                         original_decode = adapter.decode_one_token
@@ -814,6 +828,12 @@ def integrated_storage(
                 )
                 del approximation
                 report["layers"][str(index)] = overlays[index].evidence
+                if policy.readout_control:
+                    head = overlays[index].head
+                    overlays[index].readout_original = tuple(
+                        t[0, head].detach().to(device="cpu", copy=True).contiguous()
+                        for t in original
+                    )
                 if diagnostic_capture is not None:
                     # Evaluation-only export, never queried by the planner.
                     # Scratch reconstruction is released BEFORE decode. Store
@@ -866,9 +886,15 @@ def integrated_storage(
 
     def fill(layer, component):
         original_fill(layer, component)
+        if policy.readout_control:
+            from mosaickv.evaluation.exact_last_layer_readout import record_component
+
+            record_component(layer, component, parent=True)
         overlay = overlays.get(layer.attention.layer_idx)
         if overlay is not None:
             overlay.fill(component, layer.leased[0])
+        if policy.readout_control:
+            record_component(layer, component, parent=False)
 
     def cache(*args, **kwargs):
         result = original_cache(*args, **kwargs)
@@ -904,13 +930,43 @@ def integrated_storage(
                     )
 
             risk_policy = policy.repair_policy == "entropy_or_prototype_risk"
+            capture = None
+            if policy.readout_control:
+                from mosaickv.evaluation.exact_last_layer_readout import ReadoutCapture
+
+                capture = ReadoutCapture(overlays[31].head)
             before, probe_details = _private_probe(
                 original_run,
                 args,
                 probe_kwargs,
                 reader_options,
                 attention_observer=observe if risk_policy else None,
+                readout_capture=capture,
             )
+            if capture is not None:
+                from mosaickv.evaluation.exact_last_layer_readout import verify_controls
+
+                def probe():
+                    return _private_probe(original_run, args, probe_kwargs, reader_options)[0]
+
+                report["exact_last_layer_readout"] = verify_controls(
+                    adapter, capture, overlays[31], overlays[31].readout_original, before[1], probe
+                )
+                if diagnostic_capture is not None:
+                    diagnostic_capture(
+                        dict(
+                            capture_kind="last_layer_readout",
+                            layer=31,
+                            data=capture.data,
+                            original_prompt=overlays[31].readout_original,
+                            reference_logits=before[1].detach().cpu(),
+                            evidence=report["exact_last_layer_readout"],
+                            evaluation_only=True,
+                            labels_accessed=False,
+                        )
+                    )
+                overlays[31].readout_original = None
+                capture.data.clear()
             entropy = normalized_next_token_entropy(before[1])
             report["provisional_entropy"] = entropy
             report["probe_storage"] = probe_details["storage"]

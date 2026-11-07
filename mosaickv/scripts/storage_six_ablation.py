@@ -38,9 +38,33 @@ def checked(root, expected):
 
 
 def component_policies(
-    proposal_study=False, allocation_study=False, replacement_study=False, transaction_study=False
+    proposal_study=False,
+    allocation_study=False,
+    replacement_study=False,
+    transaction_study=False,
+    readout_study=False,
 ):
     base = OverlayPolicy(record_phase_timings=True)
+    if readout_study:
+        improved = replace(
+            base,
+            forecast_distribution="individual_queries",
+            prototype_representation="parent_residual_delta",
+            graph_accumulation="segmented_tensor_topk",
+            precision_transaction="prototype",
+        )
+        replaced = replace(improved, replace_source_codes=True)
+        return {
+            "full": asdict(improved),
+            "source_replaced": asdict(replaced),
+            "source_replaced_parent": asdict(
+                replace(replaced, enabled=False, precision_transaction="none")
+            ),
+            "parent_reserved": asdict(replace(replaced, component_mode="parent_reserved")),
+            "exact_members": asdict(replace(replaced, component_mode="exact_members")),
+            "forced_repair": asdict(replace(replaced, component_mode="forced_repair")),
+            "readout_control": asdict(replace(replaced, readout_control=True)),
+        }
     if transaction_study:
         improved = replace(
             base,
@@ -168,8 +192,9 @@ def prepare(
     allocation_study=False,
     replacement_study=False,
     transaction_study=False,
+    readout_study=False,
 ):
-    replacement_study = replacement_study or transaction_study
+    replacement_study = replacement_study or transaction_study or readout_study
     proposal_study = proposal_study or allocation_study or replacement_study
     if root.exists():
         raise FileExistsError("new immutable component output root required")
@@ -242,6 +267,7 @@ def prepare(
                 "mosaickv/tests/unit/test_source_hotpath.py",
                 "mosaickv/tests/unit/test_shared_source_map_accounting.py",
                 "mosaickv/tests/unit/test_precision_transaction_study.py",
+                "mosaickv/tests/unit/test_exact_last_layer_readout.py",
                 "mosaickv/tests/unit/test_opportunity_demand.py",
                 "mosaickv/tests/unit/test_bounded_probe_horizon.py",
                 "mosaickv/tests/unit/test_streaming_source_constructor.py",
@@ -289,13 +315,22 @@ def prepare(
                 "full_kv",
                 "parent",
                 *component_policies(
-                    proposal_study, allocation_study, replacement_study, transaction_study
+                    proposal_study,
+                    allocation_study,
+                    replacement_study,
+                    transaction_study,
+                    readout_study,
                 ),
             ),
             component_policies=component_policies(
-                proposal_study, allocation_study, replacement_study, transaction_study
+                proposal_study,
+                allocation_study,
+                replacement_study,
+                transaction_study,
+                readout_study,
             ),
             source_replacement_study=replacement_study,
+            exact_last_layer_readout_study=readout_study,
             storage_boundary_version="shared_initial_final_peak_v2",
             component_reference_arm=(
                 "transaction_joint_guarded"
@@ -422,19 +457,26 @@ def worker(root, expected):
                     )
 
                     def capture(payload, record=row):
+                        kind = payload.get("capture_kind")
+                        suffix = f"-{kind}" if kind else ""
                         path = (
-                            folder / f"{record['arm']}-layer-{payload['layer']}-evaluation-only.pt"
+                            folder
+                            / f"{record['arm']}{suffix}-layer-{payload['layer']}-evaluation-only.pt"
                         )
                         if path.exists():
                             raise FileExistsError("immutable routed capture already exists")
                         torch.save(payload, path)
-                        record["evaluation_capture"] = dict(path=str(path), sha256=sha(path))
+                        record["readout_capture" if kind else "evaluation_capture"] = dict(
+                            path=str(path), sha256=sha(path)
+                        )
 
                     with integrated_storage(
                         adapter,
                         policy,
                         reader_options=options,
-                        diagnostic_capture=capture if arm in ("full", "all_adaptive") else None,
+                        diagnostic_capture=capture
+                        if arm in ("full", "all_adaptive") or policy.readout_control
+                        else None,
                     ) as proof:
                         values, detail = campaign.execute(
                             adapter, inputs, transport, "mosaickv_exact", audit=False
@@ -488,6 +530,10 @@ def worker(root, expected):
                     logits_path=str(logits_path),
                     logits_sha256=sha(logits_path),
                 )
+                if arm in policies and policy.readout_control:
+                    row["readout_control_passed"] = proof["exact_last_layer_readout"]["passed"]
+                    if not row["readout_control_passed"]:
+                        errors.append("actual last-layer counterfactual numerical controls failed")
                 del values
             except Exception:
                 row["error"] = traceback.format_exc()
@@ -503,6 +549,10 @@ def worker(root, expected):
                 errors.append(
                     "preloaded exact-members control differs from forced original restoration"
                 )
+            if "readout_control" in values_by_arm and not torch.equal(
+                values_by_arm["readout_control"], values_by_arm["source_replaced"]
+            ):
+                errors.append("readout diagnostic leaked into the final decode state")
             if "individual_delta_fast_graph" in values_by_arm and not torch.equal(
                 values_by_arm["individual_delta_fast_graph"], values_by_arm["individual_delta"]
             ):
@@ -784,10 +834,16 @@ def main():
     p.add_argument("--allocation-study", action="store_true")
     p.add_argument("--replacement-study", action="store_true")
     p.add_argument("--transaction-study", action="store_true")
+    p.add_argument("--readout-study", action="store_true")
     a = p.parse_args()
     if a.action == "prepare":
         prepare(
-            a.root, a.proposal_study, a.allocation_study, a.replacement_study, a.transaction_study
+            a.root,
+            a.proposal_study,
+            a.allocation_study,
+            a.replacement_study,
+            a.transaction_study,
+            a.readout_study,
         )
     elif a.action == "worker":
         return worker(a.root, a.plan_sha)
