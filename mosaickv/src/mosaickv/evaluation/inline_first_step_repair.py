@@ -112,7 +112,8 @@ class InlineRepair:
         norm = self.adapter.model.model.language_model.norm
         head = self.adapter.model.get_output_embeddings()
         original_logits = head(norm(output)).float().reshape(-1)
-        entropy = normalized_next_token_entropy(original_logits)
+        # Identical reducer to the old probe, including threshold-edge cases.
+        entropy = normalized_next_token_entropy(original_logits.detach().cpu())
         self.report["provisional_entropy"] = entropy
         forced = self.policy.force_repair or self.policy.component_mode == "forced_repair"
         should_repair = self.policy.component_mode not in (
