@@ -6,6 +6,7 @@ remain unknown and block exact certification; a missing rule is not non-KV.
 No default runtime policy is changed and this instrumentation is not timed.
 """
 
+import time
 from contextlib import ExitStack, contextmanager
 from functools import wraps
 from unittest.mock import patch
@@ -39,7 +40,12 @@ KV_FUNCTIONS = {
     "sequential_kv_lease.py": ("_new_lease", "materialize_component"),
     "source_history.py": ("update", "_seal_tail", "_initialize_storage"),
     "native_history_reader.py": ("construct",),
+    "history_verification_workspace.py": ("verify",),
+    "dual_projection.py": ("output_slots", "materialize", "build_dual"),
+    "consolidated_history.py": ("merge_sources", "join_patches", "build_consolidated"),
+    "encoded_projection_kernel.py": ("checkpoints",),
 }
+KV_FUNCTIONS["native_history_reader.py"] += ("phase_guard", "build_chunk", "consolidate", "repair")
 STACK_RULES = tuple(
     ("/mosaickv/evaluation/" + filename, name, "kv_workspace")
     for filename, names in KV_FUNCTIONS.items()
@@ -65,6 +71,7 @@ STACK_RULES += tuple(
     ("/transformers/models/llama/modeling_llama.py", "forward", "non_kv", line)
     for line in (63, 64, 65, 66)
 )
+STACK_RULES += (("/mosaickv/evaluation/storage_runs.py", "run", "non_kv", 369),)
 
 
 def cache_tensors(cache):
@@ -78,11 +85,40 @@ class _RequestSession(CudaOwnershipSession):
     def __init__(self, result, **kwargs):
         super().__init__(**kwargs)
         self.result = result  # metadata only; never a GPU owner
+        self.source_receipts = []
+        self.decode_started_us = None
 
     def __exit__(self, kind, value, trace):
         try:
             return super().__exit__(kind, value, trace)
         finally:
+            receipts = []
+            offset = getattr(self, "clock_translation", None)
+            for receipt in self.source_receipts:
+                key = (
+                    None
+                    if offset is None
+                    else self.timeline.classify_at(
+                        receipt["address"],
+                        "kv_persistent",
+                        "all-head original source before replacement",
+                        receipt["begin_us"] - offset["maximum_offset_us"],
+                        receipt["end_us"] - offset["minimum_offset_us"],
+                    )
+                )
+                owner = self.timeline.allocations.get(key, {})
+                retired = owner.get("end_time_us")
+                receipts.append(
+                    dict(
+                        receipt,
+                        allocation_generation=key,
+                        retired_before_decode=retired is not None
+                        and self.decode_started_us is not None
+                        and retired <= self.decode_started_us - offset["maximum_offset_us"]
+                        if offset
+                        else False,
+                    )
+                )
             self.timeline.classify_stacks(STACK_RULES)
             all_classified = bool(self.timeline.allocations) and all(
                 row["role"] != "unknown" for row in self.timeline.allocations.values()
@@ -92,6 +128,7 @@ class _RequestSession(CudaOwnershipSession):
                 classification_rule_version="exact_file_function_v1",
                 unknown_allocations_not_assumed_non_KV=True,
                 timing_instrumentation_excluded=True,
+                all_head_source_retirement_receipts=receipts,
             )
 
 
@@ -99,7 +136,13 @@ class _RequestSession(CudaOwnershipSession):
 def audit_request(adapter, *, max_entries=200000):
     import torch
 
-    from mosaickv.evaluation import prefill_native_overlap, storage_runs, streaming_prefill
+    from mosaickv.evaluation import (
+        prefill_native_overlap,
+        shared_head_scope,
+        storage_runs,
+        streaming_prefill,
+        streaming_source_constructor,
+    )
 
     report = {}
     session = _RequestSession(
@@ -144,9 +187,51 @@ def audit_request(adapter, *, max_entries=200000):
 
         stack.enter_context(patch.object(streaming_prefill.RetiringLayer, "update", update))
         original_cache = storage_runs.cache_from_formats
+        original_encoder = streaming_source_constructor.StreamingDirectSource.__call__
+
+        @wraps(original_encoder)
+        def encode_source(encoder, index, attention, original, args, kwargs, output):
+            session.mark(
+                (output[1],),
+                "kv_shared_workspace",
+                "prefill attention probabilities also consumed by source planner",
+            )
+            result = original_encoder(encoder, index, attention, original, args, kwargs, output)
+            session.mark(
+                result.tensors(),
+                "kv_persistent",
+                "constructed immutable prompt packet and shared source owners",
+            )
+            return result
+
+        stack.enter_context(
+            patch.object(
+                streaming_source_constructor.StreamingDirectSource, "__call__", encode_source
+            )
+        )
+        original_prototype = shared_head_scope.construct
+
+        @wraps(original_prototype)
+        def prototype(body, *args, **kwargs):
+            begin = time.time_ns() // 1000
+            address = body.codes.untyped_storage().data_ptr()
+            end = time.time_ns() // 1000
+            session.source_receipts.append(
+                dict(
+                    address=address,
+                    begin_us=begin,
+                    end_us=end,
+                    KV_heads=kwargs["heads"],
+                    components=["key", "value"],
+                )
+            )
+            return original_prototype(body, *args, **kwargs)
+
+        stack.enter_context(patch.object(shared_head_scope, "construct", prototype))
 
         @wraps(original_cache)
         def cache(*args, **kwargs):
+            session.decode_started_us = time.time_ns() // 1000
             result = original_cache(*args, **kwargs)
             session.mark(
                 cache_tensors(result),

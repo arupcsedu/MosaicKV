@@ -77,6 +77,18 @@ Clean timing requests are unchanged. Generic Linear outputs are classified by
 actual module identity, distinguishing K/V projections from other activations.
 RMSNorm line-specific rules require the installed source file hash in the plan.
 
+The next audit revision uses explicit, ephemeral CUDA allocation beacons for
+clock calibration instead of assuming snapshot markers refer to the current
+snapshot. It intersects their measured host/allocator offset intervals and
+requires each ownership observation to fit uniquely for the entire interval.
+Allocation-generation lookups are indexed by address and time, not quadratic
+scans over repeatedly reused buffers. Physical segment release/unmap events
+also retire fully covered private-pool allocations; partial overlap fails.
+Original source receipts bind all 32 heads and both K/V components to an actual
+allocation generation and require physical retirement before decode starts.
+Constructor-owned attention probabilities are classified as shared model/planner
+workspace, rather than silently excluding their lifetime from the KV audit.
+
 A fully classified native operator transaction can certify its **bounded** peak;
 that must never be relabeled whole-request. The model capture records unresolved
 allocations and keeps its exact request certificate false until every required

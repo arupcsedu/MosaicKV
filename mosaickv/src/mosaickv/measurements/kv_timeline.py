@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import threading
 import time
+from bisect import bisect_right
 from contextlib import contextmanager
+from itertools import pairwise
 
 KV_ROLES = frozenset(("kv_persistent", "kv_workspace", "kv_shared_workspace"))
 ROLES = KV_ROLES | {"model", "non_kv", "unknown"}
@@ -24,6 +26,7 @@ class AllocationTimeline:
         self.stacks, self.stack_indices = [], {}
         self.error_details = []
         self.by_address = {}
+        self.timestamp_index = {}
 
     def seed(self, address, size, role="unknown"):
         with self.lock:
@@ -40,6 +43,7 @@ class AllocationTimeline:
         key = (address, generation)
         self.active[address] = key
         self.by_address.setdefault(address, []).append(key)
+        self.timestamp_index.pop(address, None)
         self.allocations[key] = dict(
             address=address,
             generation=generation,
@@ -83,6 +87,19 @@ class AllocationTimeline:
                         self.allocations[key]["end"] = seq
                         self.allocations[key]["end_time_us"] = trace.get("time_us")
                         del self.active[addr]
+                    elif key is not None:
+                        self.allocations[key]["free_requested_at"] = seq
+                        self.allocations[key]["free_requested_time_us"] = trace.get("time_us")
+                elif action in ("segment_free", "segment_unmap"):
+                    limit = addr + trace["size"]
+                    for address, key in tuple(self.active.items()):
+                        row = self.allocations[key]
+                        if addr <= address < limit:
+                            if address + row["bytes"] > limit:
+                                self.errors.append("partial_physical_segment_retirement")
+                                continue
+                            row.update(end=seq, end_time_us=trace.get("time_us"), retirement=action)
+                            del self.active[address]
                 elif action == "oom":
                     self.errors.append("CUDA_OOM_in_request")
 
@@ -169,15 +186,29 @@ class AllocationTimeline:
         """
         if role not in ROLES - {"unknown"} or not evidence or begin_us > end_us:
             raise ValueError("explicit valid timestamped attribution required")
+        if address not in self.timestamp_index:
+            keys = self.by_address.get(address, ())
+            starts = [
+                float("-inf")
+                if self.allocations[k]["baseline"]
+                else self.allocations[k].get("time_us")
+                for k in keys
+            ]
+            if any(v is None for v in starts) or any(a > b for a, b in pairwise(starts)):
+                self.errors.append("missing_or_nonmonotonic_allocator_timestamp")
+                return
+            self.timestamp_index[address] = starts, keys
+        starts, keys = self.timestamp_index[address]
+        position = bisect_right(starts, begin_us) - 1
         possible = []
-        for key in self.by_address.get(address, ()):
+        for index in (position - 1, position):
+            if index < 0:
+                continue
+            key = keys[index]
             row = self.allocations[key]
-            birth = float("-inf") if row["baseline"] else row.get("time_us")
             death = row.get("end_time_us")
-            if (
-                birth is not None
-                and birth <= begin_us
-                and (row["end"] is None or (death is not None and death >= end_us))
+            if starts[index] <= begin_us and (
+                row["end"] is None or (death is not None and death >= end_us)
             ):
                 possible.append(key)
         if len(possible) != 1:
@@ -190,6 +221,8 @@ class AllocationTimeline:
             return
         row["role"] = role if old == "unknown" else old
         row["evidence"].append(evidence)
+        row.setdefault("attribution_intervals_us", []).append((begin_us, end_us, role, evidence))
+        return possible[0]
 
     def report(
         self, *, complete, history_complete, opaque_workspace_classified, scope="whole_request"
@@ -241,6 +274,17 @@ class AllocationTimeline:
             events=len(self.events),
             records=rows,
             stack_table=self.stacks,
+            allocator_event_counts={
+                action: sum(e["action"] == action for e in self.events)
+                for action in (
+                    "alloc",
+                    "free_requested",
+                    "free_completed",
+                    "segment_free",
+                    "segment_unmap",
+                    "snapshot",
+                )
+            },
             time_alignment="single_device_allocator_sequence_across_all_threads_and_streams",
             includes_free_requested_until_free_completed=True,
             includes_cross_thread_allocator_events=True,
@@ -262,6 +306,7 @@ class CudaOwnershipSession:
         self.snapshot = None
         self.deferred_marks, self.clear_library_workspace = deferred_marks, clear_library_workspace
         self.marks, self.clock_checks = [], []
+        self.beacons = []
 
     def __enter__(self):
         import torch
@@ -288,7 +333,20 @@ class CudaOwnershipSession:
         self.baseline_trace_count = len(snapshot["device_traces"][self.device])
         self.cursor = self.baseline_trace_count
         self._check_clock(snapshot, begin, end)
+        if self.deferred_marks:
+            self._beacon()
         return self
+
+    def _beacon(self):
+        import torch
+
+        begin = time.time_ns() // 1000
+        tensor = torch.empty(1, device=self.device, dtype=torch.uint8)
+        address = tensor.untyped_storage().data_ptr()
+        end = time.time_ns() // 1000
+        self.beacons.append((address, begin, end))
+        # This audit allocation has no inference role and does NOT remain live.
+        del tensor
 
     def _check_clock(self, snapshot, begin, end):
         markers = [e for e in snapshot["device_traces"][self.device] if e["action"] == "snapshot"]
@@ -341,9 +399,18 @@ class CudaOwnershipSession:
 
         try:
             torch.cuda.synchronize()
+            if self.deferred_marks:
+                self._beacon()
             self.poll()
             if self.clear_library_workspace:
-                before = dict(self.timeline.active)
+                visible = {
+                    block["address"]
+                    for segment in self.snapshot["segments"]
+                    if segment["device"] == self.device
+                    for block in segment["blocks"]
+                    if block["state"] in ("active_allocated", "active_awaiting_free")
+                }
+                before = {a: key for a, key in self.timeline.active.items() if a in visible}
                 torch._C._cuda_clearCublasWorkspaces()
                 torch.cuda.synchronize()
                 self.poll()
@@ -359,11 +426,44 @@ class CudaOwnershipSession:
                         "actual_immutable_model_preserving_cuda_clearCublasWorkspaces_retirement"
                     )
             if self.deferred_marks:
-                if not all(self.clock_checks):
+                offsets = []
+                beacon_rows = []
+                for ordinal, (address, begin, end) in enumerate(self.beacons):
+                    candidates = [
+                        self.timeline.allocations[key]
+                        for key in self.timeline.by_address.get(address, ())
+                        if not self.timeline.allocations[key]["baseline"]
+                        and self.timeline.allocations[key]["bytes"] == 512
+                    ]
+                    exact = [
+                        row
+                        for row in candidates
+                        if any(
+                            filename.endswith("/mosaickv/measurements/kv_timeline.py")
+                            and name == "_beacon"
+                            for filename, name, _line in self.timeline.stacks[row["stack_id"]]
+                        )
+                    ]
+                    if not exact:
+                        continue
+                    row = exact[0] if ordinal == 0 else exact[-1]
+                    offsets.append((begin - row["time_us"], end - row["time_us"]))
+                    beacon_rows.append(row)
+                lower = max((a for a, _b in offsets), default=1)
+                upper = min((b for _a, b in offsets), default=0)
+                if len(offsets) != 2 or lower > upper:
                     self.timeline.errors.append("allocator_and_owner_clock_domains_not_verified")
                 else:
-                    for args in self.marks:
-                        self.timeline.classify_at(*args)
+                    self.clock_translation = dict(
+                        minimum_offset_us=lower, maximum_offset_us=upper, beacons=offsets
+                    )
+                    for row in beacon_rows:
+                        row["role"] = "non_kv"
+                        row["evidence"].append("explicit_ephemeral_allocator_clock_beacon")
+                    for address, role, evidence, before, after in self.marks:
+                        self.timeline.classify_at(
+                            address, role, evidence, before - upper, after - lower
+                        )
             actual = {
                 block["address"]: block["size"]
                 for segment in self.snapshot["segments"]
@@ -396,9 +496,11 @@ class CudaOwnershipSession:
         return False
 
     def report(self, *, opaque_workspace_classified=False, scope="whole_request"):
-        return self.timeline.report(
+        report = self.timeline.report(
             complete=self.finished and self.complete,
             history_complete=self.cursor < self.max_entries,
             opaque_workspace_classified=opaque_workspace_classified,
             scope=scope,
         )
+        report["clock_calibration"] = getattr(self, "clock_translation", None)
+        return report

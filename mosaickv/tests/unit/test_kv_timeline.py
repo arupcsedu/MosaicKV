@@ -151,3 +151,40 @@ def test_deferred_marks_fail_closed_at_missing_clock_and_lifetime_boundaries():
     )
     ledger.classify_at(1, "kv_persistent", "interval cannot straddle free", 190, 210)
     assert "ambiguous_deferred_owner_timestamp" in report(ledger)["blocks_exact_certification"]
+
+
+def test_physical_segment_release_retires_private_pool_allocation_generations():
+    ledger = AllocationTimeline()
+    ledger.ingest(
+        [
+            dict(event("alloc", 128, 64), time_us=100),
+            dict(event("free_requested", 128, 64), time_us=150),
+        ]
+    )
+    ledger.classify(128, "kv_workspace", "private captured reconstruction pool")
+    ledger.ingest([dict(event("segment_free", 64, 256), time_us=200)])
+    assert not ledger.active
+    assert report(ledger)["exact_KV_peak_bytes"] == 64
+    assert ledger.allocations[(128, 0)]["retirement"] == "segment_free"
+
+
+def test_partial_segment_release_never_guesses_full_owner_retirement():
+    ledger = AllocationTimeline()
+    ledger.ingest([event("alloc", 128, 256), event("segment_unmap", 128, 128)])
+    assert "partial_physical_segment_retirement" in report(ledger)["blocks_exact_certification"]
+
+
+def test_timestamp_lookup_handles_many_reuses_and_exact_boundary_ambiguity():
+    ledger = AllocationTimeline()
+    for i in range(1000):
+        ledger.ingest(
+            [
+                dict(event("alloc", 1), time_us=10 * i),
+                dict(event("free_completed", 1), time_us=10 * i + 8),
+            ]
+        )
+    for i in range(1000):
+        assert ledger.classify_at(
+            1, "kv_persistent", "metadata-only observed lifetime", 10 * i + 2, 10 * i + 3
+        ) == (1, i)
+    assert len(ledger.timestamp_index) == 1
