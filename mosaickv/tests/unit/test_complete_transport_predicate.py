@@ -33,3 +33,26 @@ def test_scope_restores_frozen_default_and_rejects_unsupported_cpu():
             fused(torch.ones(4).bfloat16(), torch.ones(4).bfloat16())
     assert (source.transport_corrections, source.assert_transport_close) == original
     assert not report["correction_calls"] and not report["verification_calls"]
+
+
+def test_componentwise_explicit_chunk_uses_registered_complete_span(monkeypatch):
+    from mosaickv.evaluation import complete_transport_predicate as module
+    from mosaickv.evaluation import shared_source_format as source
+    from mosaickv.evaluation.deferred_transport_checks import use as validation
+
+    # CPU numerical oracle substitutes the CUDA kernel, not span-policy logic.
+    monkeypatch.setattr(module, "fused", lambda x, y, **_: oracle(x, y))
+    x = torch.ones(1, 1, 8, 128, dtype=torch.bfloat16)
+    y = x.clone()
+    y.flatten()[-1] = 2
+    empty = torch.empty(0, dtype=torch.int32)
+    with use(), validation(True, coalesce_nonzero=True, full_predicate_span=True):
+        patch = source.transport_corrections((x,), (y,), empty, chunk_scalars=17)[0]
+    assert patch.indices.tolist() == [1023]
+    assert patch.values.tolist() == [1]
+    with (
+        use(),
+        validation(True, coalesce_nonzero=True, full_predicate_span=False),
+        pytest.raises(ValueError, match="full-span"),
+    ):
+        source.transport_corrections((x,), (y,), empty, chunk_scalars=17)

@@ -185,12 +185,22 @@ class Replay:
                     stream = encoded.stream
                     codes = stream.payload if stream.raw else self.scratch[role][: stream.length]
                     prepared.append((role, encoded, codes))
-                    return replace(encoded.metadata, codes=codes)
+                    return self.bind_body(role, encoded, codes)
 
                 views.append(map_bodies(packet.template, prepare))
                 bindings.append(tuple(prepared))
             self.prepared_views, self.prepared_bindings = tuple(views), tuple(bindings)
             self.descriptor_metrics["prepared_formats"] += len(views)
+
+    def bind_body(self, role, encoded, codes):
+        """Default metadata is unchanged; isolated codecs may supply owned views."""
+        return replace(encoded.metadata, codes=codes)
+
+    def prepare_metadata(self, index, *, launch):
+        """Extension boundary; ordinary packets have no compressed headers."""
+
+    def decode_metadata_for_graph(self, index):
+        """Extension boundary inside the existing key-reader CUDA graph."""
 
     def prepare_graph(self):
         """Static GPU pointers only, never execute/reorder a code transaction."""
@@ -226,6 +236,7 @@ class Replay:
             actual = decode(predecessor, stream, destination)
             if actual.data_ptr() != destination.data_ptr():
                 raise RuntimeError("captured code decode changed the charged destination")
+        self.decode_metadata_for_graph(index)
 
     def view(self, index):
         return self._view(index, launch=True)
@@ -239,6 +250,7 @@ class Replay:
             raise RuntimeError("ordered layer replay required; no skipped or shared requests")
         if index == 0:
             self.previous = {}
+        self.prepare_metadata(index, launch=launch)
         current = {}
 
         if self.prepared_views is None:
@@ -257,7 +269,7 @@ class Replay:
                     )
                 )
                 current[role] = codes
-                return replace(encoded.metadata, codes=codes)
+                return self.bind_body(role, encoded, codes)
 
             self.current = map_bodies(self.packets[index].template, body)
         else:

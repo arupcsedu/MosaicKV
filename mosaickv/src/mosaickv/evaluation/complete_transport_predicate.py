@@ -127,7 +127,7 @@ def gpu_controls():
     with validation(True, coalesce_nonzero=True, full_predicate_span=True):
         old = source.transport_corrections((x,), (y,), empty)[0]
     with use() as report, validation(True, coalesce_nonzero=True, full_predicate_span=True):
-        new = source.transport_corrections((x,), (y,), empty)[0]
+        new = source.transport_corrections((x,), (y,), empty, chunk_scalars=524288)[0]
         source.assert_transport_close(x, x.clone())
     if not all(torch.equal(a, b) for a, b in zip(old.tensors, new.tensors, strict=True)):
         raise RuntimeError("complete predicate changed canonical patch indices/values")
@@ -178,13 +178,17 @@ def use():
     )
 
     def corrections(reference, actual, protected_rows, *, chunk_scalars=None):
-        if static.enabled() or chunk_scalars is not None:
+        if static.enabled():
             raise ValueError("registered dynamic full-span correction transaction required")
+        if chunk_scalars is not None and (
+            type(chunk_scalars) is not int or chunk_scalars < 1
+        ):
+            raise ValueError("positive explicit correction chunk hint required")
         patches = []
         for expected, output in zip(reference, actual, strict=True):
             validate(expected, output)
             n = expected.numel()
-            if predicate_span(n, None, kind="corrections") != n:
+            if predicate_span(n, chunk_scalars, kind="corrections") != n:
                 raise ValueError("registered full-span validation required")
             mask = correction_mask(n, expected.device)
             if mask is None:

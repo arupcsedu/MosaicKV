@@ -21,6 +21,12 @@ from mosaickv.evaluation.fox_campaign import clean_source, sha, write_once
 SOURCE = Path(__file__).resolve().parents[2]
 PYTHON = "/scratch/djy8hg/env/mosaickv/bin/python"
 PARENT = Path("/scratch/djy8hg/runs/evicastkv/packed-prototype-history-20261108-v5")
+WORKER_WRAPPER = SOURCE / "mosaickv/slurm/header_predicate.sbatch"
+
+
+def extra_model_context(stack, arm):
+    """Default is unchanged; versioned common-codec studies bind an explicit scope."""
+    return None
 
 
 def read(path):
@@ -71,7 +77,7 @@ def submit(root, action, after=None, stage=None):
     args += [
         f"--output={root}/logs/{action}-{stage or 'none'}-%A_%a.out",
         f"--error={root}/logs/{action}-{stage or 'none'}-%A_%a.err",
-        str(SOURCE / "mosaickv/slurm/header_predicate.sbatch"),
+        str(WORKER_WRAPPER),
         str(SOURCE),
         str(root),
         sha(root / "plan.json"),
@@ -293,8 +299,9 @@ def model(root, p, folder, index):
                     )
                     tile_report = stack.enter_context(tile(rows=p["tiled_softmax_rows"]))
                     predicate_report = (
-                        stack.enter_context(complete()) if arm == "complete_predicate" else {}
+                        stack.enter_context(complete()) if arm != "control_common" else {}
                     )
+                    common_header_report = extra_model_context(stack, arm)
                     headers = stack.enter_context(capture()) if arm == "control_common" else None
                     ledger = stack.enter_context(
                         audit_request(adapter, max_entries=p["maximum_allocator_events"])
@@ -328,6 +335,7 @@ def model(root, p, folder, index):
                     ledger_sha=sha(path),
                     CPU_residual_bytes=0,
                     predicate=predicate_report,
+                    common_header=common_header_report,
                     tiled_softmax=tile_report,
                     headers_sha=sha(folder / "headers.pt") if headers is not None else None,
                     timing=dict(
@@ -458,9 +466,11 @@ def analyze(root, p):
                     with gzip.open(path, "rt") as stream:
                         if not valid_whole_request_certificate(json.load(stream)):
                             raise ValueError("independent ownership verification failed")
-                    if row["arm"] == "control_common":
-                        if sha(folder / "headers.pt") != row["headers_sha"]:
-                            raise ValueError("actual header capture changed")
+                    if (
+                        row["arm"] == "control_common"
+                        and sha(folder / "headers.pt") != row["headers_sha"]
+                    ):
+                        raise ValueError("actual header capture changed")
                 except Exception as exc:
                     errors.append(dict(input=i, arm=row["arm"], error=str(exc)))
             rows.append(dict(input=i, **row))
@@ -518,7 +528,8 @@ def analyze(root, p):
         "rounding/reserved/vendor/process HBM. Instrumented request times are not clean "
         "latency evidence. All failures retained. Header costs include actual "
         "index/palette/selector tensors and shared FP32 replay; online encoding and "
-        "whole-model header effects still require execution. Independent validation remains blocked.",
+        "whole-model header effects still require execution. "
+        "Independent validation remains blocked.",
     ]
     (folder / "report.md").write_text("\n".join(lines) + "\n")
 
