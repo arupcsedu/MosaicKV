@@ -35,6 +35,7 @@ TESTS = (
     "test_request_ownership.py",
     "test_ownership_review.py",
     "test_request_peak_coverage.py",
+    "test_packed_history_orchestrator.py",
 )
 
 
@@ -96,7 +97,7 @@ def submit(root, action, *, after=None, stage=None):
     return subprocess.check_output(args, text=True).strip()
 
 
-def prepare(root):
+def prepare(root, reuse=None):
     source = clean_source(SOURCE)
     if root.exists():
         raise FileExistsError("new write-once study root required")
@@ -126,6 +127,24 @@ def prepare(root):
         for name in ("raw.jsonl", "manifest.json", "shared_source_prototypes-audit.logits.pt"):
             path = PARENT / f"workers/{i}" / name
             p["bound_files"][str(path)] = sha(path)
+    if reuse is not None:
+        old = read(reuse / "plan.json")
+        if read(reuse / "cpu.json")["status"] != "completed":
+            raise ValueError("complete CPU feasibility evidence required for reuse")
+        for filename in (
+            "mosaickv/scripts/packed_source_feasibility.py",
+            "mosaickv/src/mosaickv/evaluation/compact_rare_source.py",
+            "mosaickv/src/mosaickv/evaluation/all_head_source_codec.py",
+        ):
+            blob = subprocess.check_output(
+                ["git", "show", f"{old['source_sha']}:{filename}"], cwd=SOURCE
+            )
+            if blob != (SOURCE / filename).read_bytes():
+                raise ValueError("CPU cost algorithm changed; cannot reuse its results")
+        path = reuse / "cpu-feasibility.json"
+        p["reuse_cpu_feasibility"] = str(path)
+        p["bound_files"][str(path)] = sha(path)
+        p["bound_files"][str(reuse / "plan.json")] = sha(reuse / "plan.json")
     root.mkdir(parents=True)
     (root / "logs").mkdir()
     write_once(root / "plan.json", p)
@@ -188,7 +207,12 @@ def cpu(root):
             raise ValueError("CPU regression gate failed")
         native = load_reader()
         result.update(native_binary=native.__file__, native_sha=sha(Path(native.__file__)))
-        run(root / "cpu-feasibility.json")
+        p = read(root / "plan.json")
+        if p.get("reuse_cpu_feasibility"):
+            write_once(root / "cpu-feasibility.json", read(p["reuse_cpu_feasibility"]))
+            result["feasibility_reused_from"] = p["reuse_cpu_feasibility"]
+        else:
+            run(root / "cpu-feasibility.json")
         result["status"] = "completed"
     except Exception:
         result["error"] = traceback.format_exc()
@@ -292,6 +316,15 @@ def operators(root, p, folder, index):
                 lambda scores=scores: probabilities(scores, rows=p["tiled_softmax_rows"]), p
             )
         del actual, expected, scores
+    write_once(
+        folder / "constructor-softmax-progress.json",
+        dict(
+            checks=checks,
+            trials=timings,
+            status="completed_partial_operator_scope",
+            INT8_unpack_not_yet_checked=True,
+        ),
+    )
     for n in (16, 32, 96):
         x = torch.randn(1, 1, n, 4096).bfloat16()
         host = pack(x, bits=8, axis=3)
@@ -664,10 +697,11 @@ def main():
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--plan-sha")
     parser.add_argument("--stage", default="none")
+    parser.add_argument("--reuse-cpu", type=Path)
     args = parser.parse_args()
     root = args.root
     if args.action == "prepare":
-        prepare(root)
+        prepare(root, args.reuse_cpu)
         return
     p = checked(root, args.plan_sha)
     if args.action == "cpu":

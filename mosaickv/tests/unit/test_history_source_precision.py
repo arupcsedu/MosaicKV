@@ -5,6 +5,15 @@ from mosaickv.evaluation.history_source_precision import join, unpack_into
 from mosaickv.evaluation.precision_tier import pack, unpack_cpu
 
 
+def test_triton_dependencies_parse_on_CPU_without_unsupported_language_API():
+    pytest.importorskip("triton")
+    from mosaickv.evaluation.history_source_precision_kernel import unpack
+    from mosaickv.evaluation.packed_prototype_kernel import copy
+
+    assert isinstance(unpack.cache_key, str) and unpack.cache_key
+    assert isinstance(copy.cache_key, str) and copy.cache_key
+
+
 def test_quantized_source_oracle_join_and_workspace_sentinels():
     torch.manual_seed(8)
     first, second = [pack(torch.randn(1, 1, n, 256).bfloat16(), bits=8, axis=3) for n in (16, 32)]
@@ -20,6 +29,36 @@ def test_quantized_source_oracle_join_and_workspace_sentinels():
         join(())
     with pytest.raises(ValueError):
         unpack_into(body, target.float())
+
+
+def test_request_and_rotary_isolation_reject_before_any_projection(monkeypatch):
+    import weakref
+
+    from mosaickv.evaluation import native_history_reader as native
+    from mosaickv.evaluation.history_source_precision import HistoryFormat
+
+    class State:
+        graphs = None
+        closed = False
+
+    owner, stranger = State(), State()
+    body = pack(torch.randn(1, 1, 16, 256).bfloat16(), bits=8, axis=3)
+    cos, sin = torch.ones(1, 16, 128).bfloat16(), torch.zeros(1, 16, 128).bfloat16()
+    packet = HistoryFormat(
+        body,
+        cos,
+        sin,
+        (1, 32, 16, 128),
+        weakref.ref(owner),
+        (native.phase_token(cos), native.phase_token(sin)),
+    )
+    monkeypatch.setattr(native, "current", lambda: stranger)
+    with pytest.raises(RuntimeError, match="cross-request"):
+        packet.fill_component(None, 0, None)
+    monkeypatch.setattr(native, "current", lambda: owner)
+    cos.add_(1)
+    with pytest.raises(RuntimeError, match="phases changed"):
+        packet.fill_component(None, 0, None)
 
 
 def test_history_transaction_preserves_recent_packet_phases_and_real_storage(monkeypatch):
@@ -80,7 +119,12 @@ def test_history_transaction_preserves_recent_packet_phases_and_real_storage(mon
 
     cache.observe = observe
     original = combined.consolidate
-    monkeypatch.setattr(native, "current", lambda: SimpleNamespace(graphs=None))
+
+    class State:
+        graphs = None
+
+    state = State()
+    monkeypatch.setattr(native, "current", lambda: state)
     newest = [layer.source_sealed[-1] for layer in layers]
     with use() as report:
         assert combined.consolidate(cache)

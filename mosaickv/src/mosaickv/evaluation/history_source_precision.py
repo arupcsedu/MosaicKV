@@ -7,6 +7,7 @@ for the deliberately approximate older source. Original native chunk checks
 remain enabled. A separate complete-horizon model guard controls admission.
 """
 
+import weakref
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from unittest.mock import patch
@@ -52,7 +53,7 @@ def unpack_into(body, target):
     if body.codes.is_cuda:
         from mosaickv.evaluation.history_source_precision_kernel import unpack
 
-        unpack[((body.codes.numel() + 255) // 256,)](
+        compiled = unpack[((body.codes.numel() + 255) // 256,)](
             body.codes,
             body.minimum,
             body.scale,
@@ -61,6 +62,8 @@ def unpack_into(body, target):
             BLOCK=256,
             enable_fp_fusion=False,
         )
+        if compiled.metadata.global_scratch_size or compiled.n_spills:
+            raise RuntimeError("INT8 source unpack introduced undeclared kernel workspace")
     else:
         value = body.codes.float().view(*body.shape[:-1], body.shape[-1] // 128, 128)
         value = value * body.scale[..., None]
@@ -74,6 +77,8 @@ class HistoryFormat:
     cos: object
     sin: object
     shape: tuple
+    owner: object = None
+    phase_versions: tuple = ()
     kind: str = "evicastkv_older_INT8_source_history_variant"
 
     def private(self):
@@ -87,13 +92,23 @@ class HistoryFormat:
 
     @torch.inference_mode()
     def fill_component(self, attention, component, target):
-        from mosaickv.evaluation.native_history_reader import current
+        from mosaickv.evaluation.native_history_reader import current, phase_token
         from mosaickv.evaluation.shared_source_kernel import rotate_native
 
         state = current()
         if state is None or state.closed or state.graphs is not None:
             raise RuntimeError("private original native history engine, graphs disabled, required")
+        if self.owner is None or self.owner() is not state:
+            raise RuntimeError("cross-request precision history is forbidden")
+        if self.phase_versions != (phase_token(self.cos), phase_token(self.sin)):
+            raise RuntimeError("original precision-history phases changed")
         n = self.shape[-2]
+        if (
+            component not in (0, 1)
+            or self.body.shape != (1, 1, n, 4096)
+            or target.shape != (1, 32, n, 128)
+        ):
+            raise ValueError("complete original 32-head history projection layout required")
         unpack_into(self.body, state.engine.source)
         state.engine.plans.execute(
             state.engine.source,
@@ -181,7 +196,15 @@ def use():
                     raise TypeError("unsupported history source format")
             body = join(bodies)
             n = body.shape[-2]
-            replacement = HistoryFormat(body, cos[:, :n], sin[:, :n], (1, 32, n, 128))
+            key_phase, value_phase = cos[:, :n], sin[:, :n]
+            replacement = HistoryFormat(
+                body,
+                key_phase,
+                value_phase,
+                (1, 32, n, 128),
+                weakref.ref(state),
+                (native.phase_token(key_phase), native.phase_token(value_phase)),
+            )
             if n + 16 != counts[0]:
                 raise RuntimeError("older/recent split lost a logical history position")
             old_private = tuple(t for packet in old for t in packet.private())

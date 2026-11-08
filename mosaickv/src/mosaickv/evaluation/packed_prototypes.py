@@ -29,7 +29,7 @@ def copy_packed(codes, retained, anchors, centers, *, rows, width, tile_words=40
     if codes.is_cuda:
         from mosaickv.evaluation.packed_prototype_kernel import copy
 
-        copy[((stored * width // 8 + 127) // 128,)](
+        compiled = copy[((stored * width // 8 + 127) // 128,)](
             codes,
             retained,
             anchors,
@@ -40,6 +40,8 @@ def copy_packed(codes, retained, anchors, centers, *, rows, width, tile_words=40
             width,
             WORDS=128,
         )
+        if compiled.metadata.global_scratch_size or compiled.n_spills:
+            raise RuntimeError("packed constructor introduced undeclared kernel workspace")
         return output
     # Same integer serializer as CUDA, with a hard workspace tile bound.
     for begin in range(0, stored * width // 8, tile_words):

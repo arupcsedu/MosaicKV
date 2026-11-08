@@ -10,6 +10,6 @@ def unpack(Codes, Minimum, Scale, Out, n, BLOCK: tl.constexpr):
     code = tl.load(Codes + i, i < n, 0).to(tl.float32)
     scale = tl.load(Scale + i // 128, i < n, 1)
     minimum = tl.load(Minimum + i // 128, i < n, 0)
-    value = tl.mul(code, scale)
-    value = tl.add(value, minimum)
+    value = code * scale
+    value = value + minimum
     tl.store(Out + i, value.to(tl.bfloat16), i < n)
