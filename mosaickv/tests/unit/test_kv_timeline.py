@@ -127,3 +127,27 @@ def test_stack_attribution_does_not_use_outer_model_frame_to_hide_KV_workspace()
 
 def test_empty_capture_cannot_certify():
     assert not report(AllocationTimeline())["exact_whole_request_KV_peak_certified"]
+
+
+def test_deferred_timestamp_marks_resolve_reused_addresses_without_live_owner_refs():
+    ledger = AllocationTimeline()
+    ledger.ingest(
+        [
+            dict(event("alloc", 1), time_us=100),
+            dict(event("free_completed", 1), time_us=200),
+            dict(event("alloc", 1), time_us=300),
+        ]
+    )
+    ledger.classify_at(1, "non_kv", "first lifetime logits", 120, 130)
+    ledger.classify_at(1, "kv_persistent", "second lifetime cache", 320, 330)
+    assert [row["role"] for row in ledger.allocations.values()] == ["non_kv", "kv_persistent"]
+    assert report(ledger)["exact_KV_peak_bytes"] == 64
+
+
+def test_deferred_marks_fail_closed_at_missing_clock_and_lifetime_boundaries():
+    ledger = AllocationTimeline()
+    ledger.ingest(
+        [dict(event("alloc", 1), time_us=100), dict(event("free_completed", 1), time_us=200)]
+    )
+    ledger.classify_at(1, "kv_persistent", "interval cannot straddle free", 190, 210)
+    assert "ambiguous_deferred_owner_timestamp" in report(ledger)["blocks_exact_certification"]

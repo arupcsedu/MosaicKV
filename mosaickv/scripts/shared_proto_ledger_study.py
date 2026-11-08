@@ -88,7 +88,7 @@ def submit(root, action, *, after=None):
     return subprocess.check_output(args, text=True).strip()
 
 
-def prepare(root):
+def prepare(root, reuse=None):
     source = clean_source(SOURCE)
     if root.exists():
         raise FileExistsError("new write-once diagnostic root required")
@@ -127,6 +127,17 @@ def prepare(root):
             )
         }
     )
+    # Rules referencing upstream line numbers/internal allocator APIs are
+    # meaningless without the exact installed source identities.
+    import torch
+    import transformers
+
+    for path in (
+        Path(torch.__file__).parent / "cuda/memory.py",
+        Path(torch.__file__).parent / "_C/__init__.pyi",
+        Path(transformers.__file__).parent / "models/llama/modeling_llama.py",
+    ):
+        bound[str(path)] = sha(path)
     p.update(
         source_sha=source,
         bound_files=bound,
@@ -140,6 +151,66 @@ def prepare(root):
         fresh_or_paper_campaign_authorized=False,
         benchmarks_not_used_to_select_proposals=True,
     )
+    if reuse is not None:
+        previous = read(reuse / "plan.json")
+        if previous.get("source_map_policy") != "first_layer_shared":
+            raise ValueError("same immutable source-map algorithm required for audit-only reuse")
+        allowed = {
+            "mosaickv/scripts/shared_proto_ledger_study.py",
+            "mosaickv/src/mosaickv/evaluation/request_ownership.py",
+            "mosaickv/src/mosaickv/measurements/kv_timeline.py",
+            "mosaickv/tests/unit/test_kv_timeline.py",
+            "mosaickv/tests/unit/test_request_ownership.py",
+            "mosaickv/docs/shared_prototype_ownership.md",
+        }
+        changed = set(
+            subprocess.check_output(
+                ["git", "diff", "--name-only", previous["source_sha"], source],
+                cwd=SOURCE,
+                text=True,
+            ).splitlines()
+        )
+        if not changed <= allowed:
+            raise ValueError("audit-only retry cannot change numerical source policy")
+        (root / "reused-canaries").mkdir()
+        for i in (0, 1):
+            folder = reuse / f"workers/{i}"
+            canaries = [
+                r
+                for r in map(json.loads, (folder / "raw.jsonl").read_text().splitlines())
+                if r["phase"] == "canary"
+            ]
+            if (
+                len(canaries) != 2
+                or any(
+                    r["status"] != "completed" or not r["numerically_admissible"] for r in canaries
+                )
+                or not read(folder / "native.json")["passed"]
+            ):
+                raise ValueError("complete native and numerical canaries required")
+            receipt = root / f"reused-canaries/{i}.json"
+            write_once(
+                receipt,
+                dict(
+                    producer_source_sha=previous["source_sha"],
+                    parent=str(reuse),
+                    rows=canaries,
+                    native=read(folder / "native.json"),
+                ),
+            )
+            for path in (
+                receipt,
+                folder / "manifest.json",
+                folder / "native.json",
+                folder / "storage_compact.logits.pt",
+                folder / "shared_source_prototypes.logits.pt",
+            ):
+                p["bound_files"][str(path)] = sha(path)
+        p.update(
+            audit_only=True,
+            reuse_canaries=str(root / "reused-canaries"),
+            canary_inference_not_repeated=True,
+        )
     write_once(root / "plan.json", p)
     array = submit(root, "worker")
     write_once(
@@ -368,6 +439,15 @@ def model(p, folder, i):
             records.append(row)
             return row
 
+        if p.get("audit_only"):
+            run("storage_compact", audit=True)
+            run("shared_source_prototypes", audit=True)
+            return dict(
+                completed=True,
+                raw_rows=len(records),
+                reused_canaries=True,
+                no_larger_campaign_authorized=True,
+            )
         control = run("storage_compact")
         candidate = run("shared_source_prototypes")
         # Always inspect accounting, even when approximation is negative; do
@@ -401,7 +481,11 @@ def worker(root, expected):
     result = dict(status="failed")
     try:
         manifest(p, expected, folder, i, gpu=True)
-        control = torch.inference_mode()(native)(folder, p["seed"] + i)
+        control = (
+            read(Path(p["reuse_canaries"]) / f"{i}.json")["native"]
+            if p.get("audit_only")
+            else torch.inference_mode()(native)(folder, p["seed"] + i)
+        )
         if not control["passed"]:
             raise ValueError(
                 "bounded native source-replacement/ownership gate failed; no model run"
@@ -419,7 +503,7 @@ def worker(root, expected):
 
 
 def analyze(root, expected):
-    check(root, expected)
+    p = check(root, expected)
     rows, failures = [], []
     for i in (0, 1):
         result = root / f"workers/{i}/result.json"
@@ -464,6 +548,18 @@ def analyze(root, expected):
                     },
                     peak_ratio_is_decode_counter_not_whole_request_certificate=True,
                 )
+            )
+        if p.get("audit_only"):
+            rows.extend(
+                dict(
+                    input=i,
+                    reused_canary=True,
+                    producer_source_sha=read(Path(p["reuse_canaries"]) / f"{i}.json")[
+                        "producer_source_sha"
+                    ],
+                    **row,
+                )
+                for row in read(Path(p["reuse_canaries"]) / f"{i}.json")["rows"]
             )
     summary = dict(
         complete=not failures,
@@ -516,9 +612,10 @@ def main():
     parser.add_argument("action", choices=("prepare", "worker", "analyze", "controller"))
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--plan-sha")
+    parser.add_argument("--reuse", type=Path)
     args = parser.parse_args()
     if args.action == "prepare":
-        prepare(args.root)
+        prepare(args.root, args.reuse)
     elif args.action == "worker":
         worker(args.root, args.plan_sha)
     elif args.action == "analyze":

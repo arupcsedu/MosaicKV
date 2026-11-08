@@ -9,6 +9,7 @@ memory.py _record_memory_history/_snapshot APIs (a pinned internal API).
 from __future__ import annotations
 
 import threading
+import time
 from contextlib import contextmanager
 
 KV_ROLES = frozenset(("kv_persistent", "kv_workspace", "kv_shared_workspace"))
@@ -21,6 +22,8 @@ class AllocationTimeline:
         self.active, self.allocations, self.events, self.errors = {}, {}, [], []
         self.generations = {}
         self.stacks, self.stack_indices = [], {}
+        self.error_details = []
+        self.by_address = {}
 
     def seed(self, address, size, role="unknown"):
         with self.lock:
@@ -36,6 +39,7 @@ class AllocationTimeline:
         self.generations[address] = generation
         key = (address, generation)
         self.active[address] = key
+        self.by_address.setdefault(address, []).append(key)
         self.allocations[key] = dict(
             address=address,
             generation=generation,
@@ -74,8 +78,10 @@ class AllocationTimeline:
                     key = self.active.get(addr)
                     if key is None:
                         self.errors.append("free_without_observed_allocation")
+                        self.error_details.append(dict(sequence=seq, **trace))
                     elif action == "free_completed":
                         self.allocations[key]["end"] = seq
+                        self.allocations[key]["end_time_us"] = trace.get("time_us")
                         del self.active[addr]
                 elif action == "oom":
                     self.errors.append("CUDA_OOM_in_request")
@@ -126,17 +132,23 @@ class AllocationTimeline:
         same allocator sequence includes all worker threads and CUDA streams.
         """
         by_sequence = {event["sequence"]: event for event in self.events}
+        cached = {}
         for row in self.allocations.values():
             if row["role"] != "unknown" or row["baseline"]:
                 continue
             frames = by_sequence[row["start"]].get("frames", ())
             found = None
             for frame in frames:
-                matches = {
-                    (suffix, name, role)
-                    for suffix, name, role in rules
-                    if frame.get("filename", "").endswith(suffix) and frame.get("name") == name
-                }
+                cache_key = frame.get("filename", ""), frame.get("name"), frame.get("line")
+                if cache_key not in cached:
+                    cached[cache_key] = {
+                        (rule[0], rule[1], rule[2])
+                        for rule in rules
+                        if cache_key[0].endswith(rule[0])
+                        and cache_key[1] == rule[1]
+                        and (len(rule) == 3 or cache_key[2] == rule[3])
+                    }
+                matches = cached[cache_key]
                 if len({role for _suffix, _name, role in matches}) > 1:
                     raise ValueError("ambiguous allocation classification rules")
                 if matches:
@@ -148,6 +160,36 @@ class AllocationTimeline:
                     raise ValueError("invalid stack classification role")
                 row["role"] = role
                 row["evidence"].append(f"reviewed_stack:{suffix}:{name}")
+
+    def classify_at(self, address, role, evidence, begin_us, end_us):
+        """Deferred live-tensor observation matched to allocator wall timestamps.
+
+        Match the entire observation interval, never guess the latest address
+        generation. The clock domain must be checked by the CUDA session.
+        """
+        if role not in ROLES - {"unknown"} or not evidence or begin_us > end_us:
+            raise ValueError("explicit valid timestamped attribution required")
+        possible = []
+        for key in self.by_address.get(address, ()):
+            row = self.allocations[key]
+            birth = float("-inf") if row["baseline"] else row.get("time_us")
+            death = row.get("end_time_us")
+            if (
+                birth is not None
+                and birth <= begin_us
+                and (row["end"] is None or (death is not None and death >= end_us))
+            ):
+                possible.append(key)
+        if len(possible) != 1:
+            self.errors.append("ambiguous_deferred_owner_timestamp")
+            return
+        row = self.allocations[possible[0]]
+        old = row["role"]
+        if old not in ("unknown", role) and not {old, role} <= KV_ROLES:
+            self.errors.append("conflicting_deferred_owner_role")
+            return
+        row["role"] = role if old == "unknown" else old
+        row["evidence"].append(evidence)
 
     def report(
         self, *, complete, history_complete, opaque_workspace_classified, scope="whole_request"
@@ -193,6 +235,7 @@ class AllocationTimeline:
             known_KV_peak_lower_bound_bytes=peak,
             KV_peak_upper_bound_including_unknown_bytes=upper_peak,
             blocks_exact_certification=blockers,
+            error_details=self.error_details[:50],
             allocation_generations=len(rows),
             unknown_allocation_generations=len(unknown),
             events=len(self.events),
@@ -209,7 +252,7 @@ class AllocationTimeline:
 class CudaOwnershipSession:
     """Audit-only capture. No GPU tensors/weights are retained by this object."""
 
-    def __init__(self, *, max_entries=200000):
+    def __init__(self, *, max_entries=200000, deferred_marks=False, clear_library_workspace=False):
         self.max_entries = max_entries
         self.timeline = AllocationTimeline()
         self.cursor = 0
@@ -217,15 +260,24 @@ class CudaOwnershipSession:
         self.complete = False
         self.finished = False
         self.snapshot = None
+        self.deferred_marks, self.clear_library_workspace = deferred_marks, clear_library_workspace
+        self.marks, self.clock_checks = [], []
 
     def __enter__(self):
         import torch
 
         torch.cuda.synchronize()
+        if self.clear_library_workspace:
+            # Real cache release, not subtraction of an arbitrary baseline.
+            # This is excluded instrumentation applied to BOTH audit arms.
+            torch._C._cuda_clearCublasWorkspaces()
+            torch.cuda.synchronize()
         torch.cuda.memory._record_memory_history(
             "all", context="all", stacks="python", max_entries=self.max_entries, clear_history=True
         )
+        begin = time.time_ns() // 1000
         snapshot = torch.cuda.memory._snapshot()
+        end = time.time_ns() // 1000
         self.device = torch.cuda.current_device()
         for segment in snapshot["segments"]:
             if segment["device"] != self.device:
@@ -235,12 +287,21 @@ class CudaOwnershipSession:
                     self.timeline.seed(block["address"], block["size"])
         self.baseline_trace_count = len(snapshot["device_traces"][self.device])
         self.cursor = self.baseline_trace_count
+        self._check_clock(snapshot, begin, end)
         return self
+
+    def _check_clock(self, snapshot, begin, end):
+        markers = [e for e in snapshot["device_traces"][self.device] if e["action"] == "snapshot"]
+        stamp = markers[-1].get("time_us") if markers else None
+        self.clock_checks.append(stamp is not None and begin <= stamp <= end)
 
     def poll(self):
         import torch
 
+        begin = time.time_ns() // 1000
         snapshot = torch.cuda.memory._snapshot()
+        end = time.time_ns() // 1000
+        self._check_clock(snapshot, begin, end)
         traces = snapshot["device_traces"][self.device]
         if len(traces) < self.cursor or len(traces) >= self.max_entries:
             raise RuntimeError("allocator history overwritten: certification refused")
@@ -251,6 +312,14 @@ class CudaOwnershipSession:
 
     def mark(self, tensors, role, evidence):
         with self.timeline.lock:
+            if self.deferred_marks:
+                before = time.time_ns() // 1000
+                pointers = {
+                    t.untyped_storage().data_ptr() for t in tensors if t.is_cuda and t.numel()
+                }
+                after = time.time_ns() // 1000
+                self.marks.extend((address, role, evidence, before, after) for address in pointers)
+                return
             self.poll()
             for tensor in tensors:
                 if tensor.is_cuda and tensor.numel():
@@ -273,6 +342,28 @@ class CudaOwnershipSession:
         try:
             torch.cuda.synchronize()
             self.poll()
+            if self.clear_library_workspace:
+                before = dict(self.timeline.active)
+                torch._C._cuda_clearCublasWorkspaces()
+                torch.cuda.synchronize()
+                self.poll()
+                for address in before.keys() - self.timeline.active.keys():
+                    row = self.timeline.allocations[before[address]]
+                    if row["role"] == "model":
+                        raise RuntimeError(
+                            "library workspace release illegally retired a model owner"
+                        )
+                    row["pre_workspace_classification_role"] = row["role"]
+                    row["role"] = "kv_shared_workspace"
+                    row["evidence"].append(
+                        "actual_immutable_model_preserving_cuda_clearCublasWorkspaces_retirement"
+                    )
+            if self.deferred_marks:
+                if not all(self.clock_checks):
+                    self.timeline.errors.append("allocator_and_owner_clock_domains_not_verified")
+                else:
+                    for args in self.marks:
+                        self.timeline.classify_at(*args)
             actual = {
                 block["address"]: block["size"]
                 for segment in self.snapshot["segments"]
@@ -286,6 +377,18 @@ class CudaOwnershipSession:
             }
             if actual != observed:
                 self.timeline.errors.append("final_live_backing_snapshot_mismatch")
+                self.timeline.error_details.append(
+                    dict(
+                        kind="snapshot_mismatch",
+                        missing=list(actual.keys() - observed.keys())[:20],
+                        unexpected=list(observed.keys() - actual.keys())[:20],
+                        sizes=[
+                            (a, actual[a], observed[a])
+                            for a in actual.keys() & observed.keys()
+                            if actual[a] != observed[a]
+                        ][:20],
+                    )
+                )
             self.complete = kind is None
             self.finished = True
         finally:

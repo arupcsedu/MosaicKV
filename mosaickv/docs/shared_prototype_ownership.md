@@ -65,6 +65,18 @@ unknown generations and opaque unclassified workspaces block certification.
 The whole-request audit starts before media loading/processor and ends after
 detokenization/retirement/synchronization. It is excluded from clean timings.
 
+The audit-only retry records tensor-owner addresses with host timestamp
+intervals, then resolves them to allocator generations using `time_us`. Snapshot
+markers must verify the clock domain; absent/ambiguous timestamps fail closed.
+No tensor is retained and no address inherits a prior generation's role. This
+avoids repeated whole-history snapshots inside each asynchronous layer.
+Release cached cuBLAS workspaces before this excluded audit; release them again
+at completion and attribute the actually retired owners to shared projection
+workspace. This is a measured lifetime transaction, not baseline subtraction.
+Clean timing requests are unchanged. Generic Linear outputs are classified by
+actual module identity, distinguishing K/V projections from other activations.
+RMSNorm line-specific rules require the installed source file hash in the plan.
+
 A fully classified native operator transaction can certify its **bounded** peak;
 that must never be relabeled whole-request. The model capture records unresolved
 allocations and keeps its exact request certificate false until every required

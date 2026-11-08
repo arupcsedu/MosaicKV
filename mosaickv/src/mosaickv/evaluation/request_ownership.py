@@ -45,6 +45,26 @@ STACK_RULES = tuple(
     for filename, names in KV_FUNCTIONS.items()
     for name in names
 )
+STACK_RULES += (
+    ("/transformers/models/llama/modeling_llama.py", "eager_attention_forward", "non_kv"),
+    ("/transformers/models/clip/modeling_clip.py", "eager_attention_forward", "non_kv"),
+    ("/transformers/models/llama/modeling_llama.py", "apply_rotary_pos_emb", "kv_shared_workspace"),
+    ("/transformers/models/llama/modeling_llama.py", "rotate_half", "kv_shared_workspace"),
+    ("/mosaickv/evaluation/exact_rotary_dispatch.py", "apply", "kv_shared_workspace"),
+    ("/mosaickv/evaluation/streaming_prefill.py", "update", "kv_workspace"),
+    ("/mosaickv/evaluation/request_precision.py", "ranked_positions", "kv_workspace"),
+    ("/mosaickv/evaluation/source_history.py", "source_input", "kv_persistent"),
+    ("/mosaickv/adapters/huggingface/base.py", "_greedy_token", "non_kv"),
+    ("/mosaickv/adapters/huggingface/base.py", "_move_model_inputs", "non_kv"),
+    ("/mosaickv/adapters/huggingface/base.py", "_decode_cache_position", "kv_workspace"),
+    ("/torch/nn/functional.py", "silu", "non_kv"),
+)
+# These exact installed lines are LlamaRMSNorm's FP32 cast/variance/rsqrt/cast,
+# not a broad "forward is non-KV" rule. Pin the file hash in each study plan.
+STACK_RULES += tuple(
+    ("/transformers/models/llama/modeling_llama.py", "forward", "non_kv", line)
+    for line in (63, 64, 65, 66)
+)
 
 
 def cache_tensors(cache):
@@ -64,7 +84,10 @@ class _RequestSession(CudaOwnershipSession):
             return super().__exit__(kind, value, trace)
         finally:
             self.timeline.classify_stacks(STACK_RULES)
-            self.result.update(self.report(opaque_workspace_classified=False))
+            all_classified = bool(self.timeline.allocations) and all(
+                row["role"] != "unknown" for row in self.timeline.allocations.values()
+            )
+            self.result.update(self.report(opaque_workspace_classified=all_classified))
             self.result.update(
                 classification_rule_version="exact_file_function_v1",
                 unknown_allocations_not_assumed_non_KV=True,
@@ -74,16 +97,42 @@ class _RequestSession(CudaOwnershipSession):
 
 @contextmanager
 def audit_request(adapter, *, max_entries=200000):
+    import torch
+
     from mosaickv.evaluation import prefill_native_overlap, storage_runs, streaming_prefill
 
     report = {}
-    session = _RequestSession(report, max_entries=max_entries)
+    session = _RequestSession(
+        report, max_entries=max_entries, deferred_marks=True, clear_library_workspace=True
+    )
     with session, ExitStack() as stack:
         session.mark(
             (*adapter.model.parameters(), *adapter.model.buffers()),
             "model",
             "pinned immutable resident model parameters/buffers",
         )
+        kv_projections = {
+            id(projection)
+            for layer in adapter._language_layers()
+            for projection in (layer.self_attn.k_proj, layer.self_attn.v_proj)
+        }
+        for module in adapter.model.modules():
+            if not isinstance(module, (torch.nn.Linear, torch.nn.Conv2d, torch.nn.Embedding)):
+                continue
+            role = "kv_workspace" if id(module) in kv_projections else "non_kv"
+
+            def output_owner(_module, _args, result, *, role=role):
+                if isinstance(result, torch.Tensor):
+                    session.mark(
+                        (result,),
+                        role,
+                        "audited module identity: K/V projection"
+                        if role == "kv_workspace"
+                        else "audited non-KV linear/convolution/embedding output",
+                    )
+
+            handle = module.register_forward_hook(output_owner)
+            stack.callback(handle.remove)
         original_update = streaming_prefill.RetiringLayer.update
 
         @wraps(original_update)
