@@ -47,3 +47,28 @@ def test_missing_operator_evidence_blocks_model_submission(tmp_path):
     assert not study.operator_analysis(tmp_path)
     record = json.loads((tmp_path / "operator-analysis.json").read_text())
     assert not record["passed"] and record["timings"] == []
+
+
+@pytest.mark.parametrize("missing", [False, True])
+def test_analysis_requires_each_registered_arm_not_only_total_rows(tmp_path, monkeypatch, missing):
+    (tmp_path / "plan.json").write_text(json.dumps(dict(predicate_span_cap=262144)))
+    common = dict(
+        status="completed", numerically_admissible=True, whole_request_certificate_valid=True
+    )
+    monkeypatch.setattr(
+        study, "reused_controls", lambda *_: [dict(common, arm=f"fixture_{i}") for i in range(3)]
+    )
+    for i in (0, 1):
+        folder = tmp_path / f"model/{i}"
+        folder.mkdir(parents=True)
+        arms = ["control_bounded_tiled", "packed_prompt_bounded_tiled"]
+        if missing and i == 1:
+            arms.pop()
+        rows = [dict(common, arm=arm) for arm in arms]
+        (folder / "raw.jsonl").write_text("\n".join(json.dumps(r) for r in rows))
+        (folder / "result.json").write_text(json.dumps(dict(status="completed", rows=len(rows))))
+    study.analyze(tmp_path)
+    result = json.loads((tmp_path / "analysis/decision.json").read_text())
+    assert result["complete"] is (not missing)
+    assert result["all_registered_component_gates_passed"] is (not missing)
+    assert not result["independent_quality_established"]

@@ -39,6 +39,7 @@ TESTS = (
     "test_history_precision_dispatch.py",
     "test_sequential_kv_lease.py",
     "test_sequential_source_history.py",
+    "test_bounded_transport_checks.py",
 )
 
 
@@ -121,9 +122,13 @@ def reused_controls(p, index):
     return [dict(r, reused=True, producer_source_sha=producer) for r in rows]
 
 
-def prepare(root, reuse=None, reuse_model=None, *, history_feature_group=128):
+def prepare(
+    root, reuse=None, reuse_model=None, *, history_feature_group=128, predicate_span_cap=None
+):
     if type(history_feature_group) is not int or history_feature_group not in (32, 128):
         raise ValueError("registered history feature group must be 32 or 128")
+    if predicate_span_cap is not None and predicate_span_cap != 262144:
+        raise ValueError("only the preregistered 262144-scalar predicate cap is admitted")
     source = clean_source(SOURCE)
     if root.exists():
         raise FileExistsError("new write-once study root required")
@@ -142,6 +147,7 @@ def prepare(root, reuse=None, reuse_model=None, *, history_feature_group=128):
         tiled_softmax_rows=2048,
         model_history_graph=False,
         history_feature_group=history_feature_group,
+        predicate_span_cap=predicate_span_cap,
         fresh_or_paper_campaign_authorized=False,
         measurement_type="consumed_packed_constructor_softmax_history_ablation",
         isolated_experimental_variant=True,
@@ -198,6 +204,8 @@ def prepare(root, reuse=None, reuse_model=None, *, history_feature_group=128):
             "mosaickv/src/mosaickv/evaluation/history_source_precision_kernel.py",
             "mosaickv/tests/unit/test_history_source_precision.py",
             "mosaickv/tests/unit/test_packed_history_orchestrator.py",
+            "mosaickv/src/mosaickv/evaluation/bounded_transport_checks.py",
+            "mosaickv/tests/unit/test_bounded_transport_checks.py",
         }
         if not changed <= allowed or not read(reuse_model / "operator-analysis.json")["passed"]:
             raise ValueError(
@@ -502,6 +510,41 @@ def model(root, p, folder, index):
         weights_only=True,
     )
     feature_group = p.get("history_feature_group", 128)
+    if p.get("predicate_span_cap"):
+        from mosaickv.evaluation.bounded_transport_checks import use as bounded
+        from mosaickv.evaluation.deferred_transport_checks import use as validation
+        from mosaickv.evaluation.shared_source_format import transport_corrections
+
+        fixture = torch.randn(1, 32, 603, 128, device="cuda").bfloat16()
+        perturbed = fixture.clone()
+        perturbed.flatten()[::127] += 0.25
+        empty = torch.empty(0, device="cuda", dtype=torch.int32)
+
+        def correction(capped):
+            with ExitStack() as stack:
+                if capped:
+                    stack.enter_context(bounded(scalars=p["predicate_span_cap"]))
+                stack.enter_context(
+                    validation(True, coalesce_nonzero=True, full_predicate_span=True)
+                )
+                return transport_corrections((fixture,), (perturbed,), empty)[0]
+
+        original_patch, bounded_patch = correction(False), correction(True)
+        same = all(
+            torch.equal(a, b)
+            for a, b in zip(original_patch.tensors, bounded_patch.tensors, strict=True)
+        )
+        result = dict(patch_words_bitwise=same, trials={})
+        if same:
+            result["trials"] = {
+                name: trials(lambda value=flag: correction(value), p)
+                for name, flag in (("full_span", False), ("bounded_span", True))
+            }
+        write_once(folder / "bounded-correction-operator.json", result)
+        if not same:
+            raise RuntimeError("bounded correction changed sparse patch words")
+        del fixture, perturbed, empty, original_patch, bounded_patch
+        torch.cuda.synchronize()
     history_arm = (
         "history_INT8_tiled" if feature_group == 128 else f"history_INT8_g{feature_group}_tiled"
     )
@@ -546,6 +589,13 @@ def model(root, p, folder, index):
     ]
     if p.get("reuse_model_controls"):
         cases = [(history_arm, True, False, True)]
+    if p.get("predicate_span_cap"):
+        # Target only the measured peak operation. Both outputs must be bitwise
+        # identical to their already bound original/prompt references.
+        cases = [
+            ("control_bounded_tiled", True, False, False),
+            ("packed_prompt_bounded_tiled", True, True, False),
+        ]
     feasibility = read(root / "cpu-feasibility.json")
     eligible = [
         r
@@ -573,6 +623,13 @@ def model(root, p, folder, index):
                 gc.collect()
                 torch.cuda.synchronize()
                 with ExitStack() as stack:
+                    bounded_report = {}
+                    if p.get("predicate_span_cap"):
+                        from mosaickv.evaluation.bounded_transport_checks import use as bounded
+
+                        bounded_report = stack.enter_context(
+                            bounded(scalars=p["predicate_span_cap"])
+                        )
                     stack.enter_context(
                         codec(
                             decoder="packed_words", encoding_policy="direct_additive_compact_rare"
@@ -619,7 +676,7 @@ def model(root, p, folder, index):
                         full_kl <= p["maximum_KL"]
                         and full_difference <= p["maximum_logit_difference"]
                     )
-                if arm == "packed_prompt_tiled":
+                if arm.startswith("packed_prompt"):
                     numeric["packed_parent_prototype_logits_bitwise"] = bool(
                         torch.equal(actual, prototype_reference)
                     )
@@ -643,6 +700,7 @@ def model(root, p, folder, index):
                     prompt=prompt_report,
                     history=history_report,
                     tiled_softmax=tile_report,
+                    bounded_transport_checks=bounded_report,
                     all_head_source_retirement=ledger["all_head_source_retirement_receipts"],
                     timing=dict(
                         decode_cuda_ms=detail["decode_cuda_ms"],
@@ -659,7 +717,7 @@ def model(root, p, folder, index):
                     legacy_tensor_result_audit_superseded=True,
                 )
                 rows.append(row)
-                if arm == "control_tiled" and not numeric["passed"]:
+                if arm in ("control_tiled", "control_bounded_tiled") and not numeric["passed"]:
                     raise RuntimeError("tiled full-model parity failed; subsequent arms blocked")
             except Exception:
                 row.update(
@@ -674,7 +732,9 @@ def model(root, p, folder, index):
                     rows.append(row)
             output.write(json.dumps(row, allow_nan=False, sort_keys=True) + "\n")
             output.flush()
-            if arm == "control_tiled" and not row.get("numerically_admissible", False):
+            if arm in ("control_tiled", "control_bounded_tiled") and not row.get(
+                "numerically_admissible", False
+            ):
                 break
             if (
                 arm == history_arm
@@ -708,7 +768,46 @@ def analyze(root):
         if not path.exists():
             failures.append(dict(input=i, error="missing worker rows"))
             continue
-        rows.extend(dict(input=i, **json.loads(line)) for line in path.read_text().splitlines())
+        worker_rows = [json.loads(line) for line in path.read_text().splitlines()]
+        summary_path = root / f"model/{i}/result.json"
+        summary = read(summary_path) if summary_path.exists() else {}
+        required = (
+            {"control_bounded_tiled", "packed_prompt_bounded_tiled"}
+            if p.get("predicate_span_cap")
+            else {
+                "history_INT8_tiled"
+                if p.get("history_feature_group", 128) == 128
+                else f"history_INT8_g{p['history_feature_group']}_tiled"
+            }
+        )
+        if not p.get("reuse_model_controls") and not p.get("predicate_span_cap"):
+            required |= {"control_original", "control_tiled", "packed_prompt_tiled"}
+        if (
+            not p.get("predicate_span_cap")
+            and any(
+                r["arm"].startswith("history_INT8") and r.get("numerically_admissible")
+                for r in worker_rows
+            )
+            and any(
+                r["arm"] == "packed_prompt_tiled" and r.get("numerically_admissible")
+                for r in [*worker_rows, *reused_controls(p, i)]
+            )
+        ):
+            required.add(
+                "combined_tiled"
+                if p.get("history_feature_group", 128) == 128
+                else f"combined_g{p['history_feature_group']}_tiled"
+            )
+        if (
+            summary.get("status") != "completed"
+            or summary.get("rows") != len(worker_rows)
+            or not required <= {r["arm"] for r in worker_rows}
+            or len({r["arm"] for r in worker_rows}) != len(worker_rows)
+        ):
+            failures.append(
+                dict(input=i, error="missing, duplicate or incomplete registered worker arms")
+            )
+        rows.extend(dict(input=i, **row) for row in worker_rows)
     for row in rows:
         if row["status"] != "completed":
             failures.append(dict(input=row["input"], arm=row["arm"], error=row.get("error")))
@@ -843,11 +942,16 @@ def main():
     parser.add_argument("--reuse-cpu", type=Path)
     parser.add_argument("--reuse-model", type=Path)
     parser.add_argument("--history-feature-group", type=int, choices=(32, 128), default=128)
+    parser.add_argument("--predicate-span-cap", type=int, choices=(262144,))
     args = parser.parse_args()
     root = args.root
     if args.action == "prepare":
         prepare(
-            root, args.reuse_cpu, args.reuse_model, history_feature_group=args.history_feature_group
+            root,
+            args.reuse_cpu,
+            args.reuse_model,
+            history_feature_group=args.history_feature_group,
+            predicate_span_cap=args.predicate_span_cap,
         )
         return
     p = checked(root, args.plan_sha)

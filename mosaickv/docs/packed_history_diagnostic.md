@@ -114,3 +114,26 @@ FP32-operation oracle and untouched workspace sentinels at 16/32/96 history rows
 Only then does it run the new history arm; its combined prompt/history arm is
 conditional on that input's numerical success. All prior negative attempts stay
 immutable. No fresh cohort or independent quality study is enabled by this retry.
+
+## Bounded common correction-workspace follow-up
+
+The saved tiled/prompt ledgers identify five simultaneous 9.42 MiB temporaries
+inside `shared_source_format.transport_corrections` at their whole-request peak.
+The next bounded COMMON-transport test limits correction/verification predicate
+spans to 262,144 scalars. It changes only scratch scheduling: identical elementwise
+legacy FP32 and actual BF16 predicates, complete coverage, the same coalesced
+nonzero mask, sorted patch indices, protected-row rejection and commit checks.
+No tolerance, source value, history policy or model weight changes. CPU tests
+compare patch words and all failure categories. Every model worker first compares
+full/bounded patch words on the GPU and records five warmups/twenty CUDA-event
+trials before any model request.
+
+`prepare --predicate-span-cap 262144 --reuse-cpu V4 --reuse-model V2` runs only
+common tiled control and packed-prompt/tiled under that cap on the SAME consumed
+inputs. Require all 128 control logits bitwise equal to frozen storage outputs,
+and all packed-prompt logits bitwise equal to frozen prototype outputs. Reuse
+the six immutable original controls as explicitly different transport ablations;
+do not represent these as an exclusive EviCastKV algorithm or byte-matched
+cross-policy comparison. The unchanged 32-token guard, all-128 token check and
+same time-aligned ownership ledger remain. This test does not expand lossy-history
+tuning, authorize independent validation, or claim clean end-to-end latency.
