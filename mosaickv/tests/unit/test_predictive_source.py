@@ -95,3 +95,26 @@ def test_additive_gpu_scope_restores_common_runtime_without_loading_weights():
     assert (runtime.encode, runtime.decode, runtime.convert) == before
     with pytest.raises(ValueError, match="explicit"), use("yes"):
         pass
+
+
+def test_direct_encoder_does_not_search_the_parent_or_invent_parent_measurements(monkeypatch):
+    import torch
+
+    from mosaickv.evaluation import all_head_source_gpu as native
+    from mosaickv.evaluation import layer_code_delta as runtime
+    from mosaickv.evaluation.predictive_source_gpu import use
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("direct encoding must not search parent formats")
+
+    monkeypatch.setattr(native, "encode_best", forbidden)
+    monkeypatch.setattr(native, "encode", lambda *args, **kwargs: None)
+    codes = torch.arange(128, dtype=torch.uint8)
+    with use(encoding_policy="direct_additive") as state:
+        packet = runtime.encode(None, codes)
+        assert packet.raw and packet.serialized_bytes == 129
+        runtime.encode(codes, codes)
+    proof = state.report()
+    assert proof["saved_source_payload_bytes"] is None
+    assert all(r["parent_bytes"] is None for r in proof["records"])
+    assert len(proof["records"]) == 2

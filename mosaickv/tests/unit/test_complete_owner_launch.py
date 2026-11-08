@@ -142,3 +142,42 @@ def test_analysis_cannot_promote_unaudited_counters_to_audited_peak(
     assert decision["complete"] == audit_valid
     assert decision["engineering_memory_and_latency_gate_passed"] == audit_valid
     assert decision["whole_request_peak_certified"] is False
+
+
+def test_direct_cpu_gate_charges_a_locally_worse_layer_instead_of_parent_minimum(
+    tmp_path, monkeypatch
+):
+    study = load()
+    monkeypatch.setattr(
+        study,
+        "checked",
+        lambda *args: dict(
+            layers=3,
+            encoding_policy="direct_additive",
+            minimum_source_stream_plus_replay_saving_fraction=0.02,
+        ),
+    )
+    monkeypatch.setattr(study, "submit", lambda root, action, after=None: action)
+    for i in (0, 1):
+        folder = tmp_path / f"cpu/{i}"
+        folder.mkdir(parents=True)
+        rows = [
+            dict(
+                layer=layer,
+                common_bytes=common,
+                additive_or_common_bytes=min(common, additive),
+                proposals=[dict(mode="delta_add", bytes=additive)],
+                source_replay_bytes=1000,
+                original_code_bits_exact=True,
+                all_shared_consumers_covered=True,
+            )
+            for layer, common, additive in ((0, 1001, 1001), (1, 400, 500), (2, 900, 700))
+        ]
+        (folder / "result.json").write_text(
+            json.dumps(dict(status="completed", errors=[], rows=rows))
+        )
+    study.follow(tmp_path, "unused")
+    decision = json.loads((tmp_path / "cpu-analysis/decision.json").read_text())
+    assert decision["CPU_source_gate_passed"]
+    assert decision["results"]["0"]["candidate_source_plus_replay_bytes"] == 3201
+    assert decision["results"]["0"]["additive_layers"] == 2

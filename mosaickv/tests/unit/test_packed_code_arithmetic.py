@@ -40,3 +40,13 @@ def test_invalid_fields_or_geometry_fail_closed():
         subtract(good, np.array([0, 1 << 24], dtype=np.uint32))
     with pytest.raises(ValueError):
         add(good, good.astype(np.int64))
+
+
+def test_packed_reader_is_explicit_and_both_common_and_new_scopes_accept_it_without_weights():
+    from mosaickv.evaluation.all_head_source_gpu import use as common
+    from mosaickv.evaluation.predictive_source_gpu import use as predictive
+
+    with common(False, decoder="packed_words") as state:
+        assert state.report()["decoder"] == "packed_words"
+    with predictive(False, decoder="packed_words") as state:
+        assert state.report()["decoder"] == "packed_words"

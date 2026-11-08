@@ -109,7 +109,7 @@ def reusable_cpu(root):
     return p
 
 
-def prepare(root, reuse_cpu=None):
+def prepare(root, reuse_cpu=None, packed_replay=False, direct_encoding=False):
     source = clean_source(SOURCE)
     if root.exists():
         raise FileExistsError("new immutable complete-owner study root required")
@@ -169,6 +169,8 @@ def prepare(root, reuse_cpu=None):
             model_controls=parent,
             layers=32,
             samples=2,
+            decoder_policy="packed_words" if packed_replay else "bitmap_prefix",
+            encoding_policy="direct_additive" if direct_encoding else "search",
             cpu_evidence_root=str(reuse_cpu or root),
             cpu_evidence_producer_sha=prior_cpu["source_sha"] if prior_cpu else source,
             native_count_policy="one_fused_parent_additive_count_and_batched_prefix_sum",
@@ -297,14 +299,30 @@ def follow(root, expected):
                 raise ValueError("complete exact source coverage failed")
             replay = max(v["source_replay_bytes"] for v in r["rows"])
             before = sum(v["common_bytes"] for v in r["rows"]) + replay
-            after = sum(v["additive_or_common_bytes"] for v in r["rows"]) + replay
+            if p.get("encoding_policy") == "direct_additive":
+                after = (
+                    sum(
+                        v["source_replay_bytes"] + 1
+                        if v["layer"] == 0
+                        else next(x["bytes"] for x in v["proposals"] if x["mode"] == "delta_add")
+                        for v in r["rows"]
+                    )
+                    + replay
+                )
+            else:
+                after = sum(v["additive_or_common_bytes"] for v in r["rows"]) + replay
             totals[str(i)] = dict(
                 parent_source_plus_replay_bytes=before,
                 candidate_source_plus_replay_bytes=after,
                 charged_replay_bytes=replay,
                 saving_fraction=1 - after / before,
                 additive_layers=sum(
-                    v["additive_or_common_bytes"] < v["common_bytes"] for v in r["rows"]
+                    v["layer"] > 0
+                    and next(x["bytes"] for x in v["proposals"] if x["mode"] == "delta_add")
+                    < v["source_replay_bytes"] + 1
+                    if p.get("encoding_policy") == "direct_additive"
+                    else v["additive_or_common_bytes"] < v["common_bytes"]
+                    for v in r["rows"]
                 ),
             )
         except Exception:
@@ -372,31 +390,49 @@ def operator_controls(p, index):
     previous, previous_cpu, records, references = None, None, [], []
     for layer in range(p["layers"]):
         current = archive[layer].cuda()
-        packet, _selected, _legacy, parent_bytes = native.encode_best(
-            previous, current, additive_candidate=True
-        )
+        direct = p.get("encoding_policy") == "direct_additive"
+        if direct:
+            from mosaickv.evaluation.lossless_code_delta_gpu import DeviceCodes
+
+            packet = (
+                native.encode(previous, current, additive=True) if previous is not None else None
+            )
+            packet = DeviceCodes(current.numel(), current) if packet is None else packet
+            parent_bytes = None
+        else:
+            packet, _selected, _legacy, parent_bytes = native.encode_best(
+                previous, current, additive_candidate=True
+            )
         selected = getattr(packet, "additive", False)
         cpu_common = common_encode(previous_cpu, archive[layer].numpy())
         cpu_additive = oracle(previous_cpu, archive[layer].numpy(), "delta_add").body
-        if (
+        if not direct and (
             packet.serialized_bytes
             != min(cpu_common.serialized_bytes, cpu_additive.serialized_bytes)
             or parent_bytes != cpu_common.serialized_bytes + 1
             or selected != (cpu_additive.serialized_bytes < cpu_common.serialized_bytes)
         ):
             raise ValueError("fused count changed the complete CPU storage choice")
+        if direct and packet.serialized_bytes != (
+            current.numel() if layer == 0 else cpu_additive.serialized_bytes
+        ):
+            raise ValueError("direct encoding changed the fixed CPU packet cost")
         if selected:
             expected = cpu_additive
             if not np.array_equal(
                 packet.payload.cpu().numpy(), expected.payload
             ) or not np.array_equal(packet.offsets.cpu().numpy().view(np.uint32), expected.offsets):
                 raise ValueError("native additive packet differs from exact CPU bytes")
-            restored = native.decode(previous, packet, implementation="bitmap_prefix")
+            restored = native.decode(
+                previous, packet, implementation=p.get("decoder_policy", "bitmap_prefix")
+            )
             if not torch.equal(restored, current):
                 raise ValueError("native source bit roundtrip failed")
             previous_snapshot = previous.clone()
             scratch = previous.clone()
-            native.decode(scratch, packet, scratch, implementation="bitmap_prefix")
+            native.decode(
+                scratch, packet, scratch, implementation=p.get("decoder_policy", "bitmap_prefix")
+            )
             if not torch.equal(scratch, current):
                 raise ValueError("in-place source replay changed original codes")
             # Equal predecessor/current is legal, but is not a changed-source
@@ -535,10 +571,15 @@ def gpu(root, expected):
                             torch.cuda.synchronize()
                             begin = perf_counter()
                             codec_scope = (
-                                replacement()
+                                replacement(
+                                    decoder=p.get("decoder_policy", "bitmap_prefix"),
+                                    encoding_policy=p.get("encoding_policy", "search"),
+                                )
                                 if arm == ARMS[1]
                                 else common_codec(
-                                    True, construction="pack_selected", decoder="bitmap_prefix"
+                                    True,
+                                    construction="pack_selected",
+                                    decoder=p.get("decoder_policy", "bitmap_prefix"),
                                 )
                             )
                             with (
@@ -762,9 +803,11 @@ def main():
     a.add_argument("--root", type=Path, required=True)
     a.add_argument("--plan-sha")
     a.add_argument("--reuse-cpu", type=Path)
+    a.add_argument("--packed-replay", action="store_true")
+    a.add_argument("--direct-encoding", action="store_true")
     args = a.parse_args()
     if args.action == "prepare":
-        return prepare(args.root, args.reuse_cpu)
+        return prepare(args.root, args.reuse_cpu, args.packed_replay, args.direct_encoding)
     if args.action == "controller":
         checked(args.root, args.plan_sha)
         return subprocess.call(

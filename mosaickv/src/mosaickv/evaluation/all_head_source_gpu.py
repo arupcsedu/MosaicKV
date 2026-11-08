@@ -180,7 +180,7 @@ def decode(previous, packet, destination=None, *, implementation="reference"):
     from mosaickv.evaluation.all_head_source_kernel import unpack
     from mosaickv.evaluation.lossless_code_delta_gpu import validate_bytes
 
-    if implementation not in ("reference", "bitmap_prefix"):
+    if implementation not in ("reference", "bitmap_prefix", "packed_words"):
         raise ValueError("explicit audited native decoder implementation required")
     if not isinstance(packet, DeviceSymbols):
         raise ValueError("native source symbol packet required")
@@ -225,8 +225,9 @@ def decode(previous, packet, destination=None, *, implementation="reference"):
         packet.offsets,
         output,
         HAS_PREVIOUS=packet.has_previous,
-        BITMAP_PREFIX=implementation == "bitmap_prefix",
+        BITMAP_PREFIX=implementation in ("bitmap_prefix", "packed_words"),
         ADDITIVE=packet.additive,
+        PACKED_PREVIOUS=implementation == "packed_words",
     )
     return output
 
@@ -267,7 +268,7 @@ def use(enabled=True, *, construction="both", decoder="reference"):
     if (
         type(enabled) is not bool
         or construction not in ("both", "pack_selected")
-        or decoder not in ("reference", "bitmap_prefix")
+        or decoder not in ("reference", "bitmap_prefix", "packed_words")
     ):
         raise ValueError("explicit activation and audited source construction required")
     state = CodecState(construction, decoder)

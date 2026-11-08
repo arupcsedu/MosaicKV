@@ -155,6 +155,7 @@ def unpack(
     HAS_PREVIOUS: tl.constexpr,
     BITMAP_PREFIX: tl.constexpr = False,
     ADDITIVE: tl.constexpr = False,
+    PACKED_PREVIOUS: tl.constexpr = False,
 ):
     group, lane = tl.program_id(0), tl.arange(0, 512)
     offset = tl.load(offsets + group).to(tl.uint32)
@@ -190,15 +191,35 @@ def unpack(
     b = tl.load(payload + literal + 1, (~raw) & flag1 & (shift > 5), other=0).to(tl.int32)
     code = ((a >> shift) | (b << (8 - shift))) & 7
     value = tl.where(flag0, tl.where(flag1, code, (mode >> 3) & 7), mode & 7)
-    if HAS_PREVIOUS and not ADDITIVE:
+    if HAS_PREVIOUS and not ADDITIVE and not PACKED_PREVIOUS:
         value ^= tl.where((mode & 64) != 0, _symbols(previous, group, lane), 0)
-    if ADDITIVE:
+    if ADDITIVE and not PACKED_PREVIOUS:
         bit = lane * 3
         low = tl.load(payload + start + bit // 8, raw, other=0).to(tl.int32)
         high = tl.load(payload + start + bit // 8 + 1, raw & (bit % 8 > 5), other=0).to(tl.int32)
         raw_value = ((low >> (bit % 8)) | (high << (8 - bit % 8))) & 7
         value = (tl.where(raw, raw_value, value) + _symbols(previous, group, lane)) & 7
     word = tl.sum(tl.reshape(value, (64, 8)) << (tl.arange(0, 8)[None, :] * 3), 1)
+    if HAS_PREVIOUS and PACKED_PREVIOUS:
+        index = group * 192 + tl.arange(0, 64) * 3
+        needed = ADDITIVE | ((~raw) & ((mode & 64) != 0))
+        old = tl.load(previous + index, needed, other=0).to(tl.int32)
+        old |= tl.load(previous + index + 1, needed, other=0).to(tl.int32) << 8
+        old |= tl.load(previous + index + 2, needed, other=0).to(tl.int32) << 16
+        if ADDITIVE:
+            literal = tl.load(payload + start + tl.arange(0, 64) * 3, raw, other=0).to(tl.int32)
+            literal |= (
+                tl.load(payload + start + tl.arange(0, 64) * 3 + 1, raw, other=0).to(tl.int32) << 8
+            )
+            literal |= (
+                tl.load(payload + start + tl.arange(0, 64) * 3 + 2, raw, other=0).to(tl.int32) << 16
+            )
+            residual = tl.where(raw, literal, word)
+            word = (
+                ((residual & 0x6DB6DB) + (old & 0x6DB6DB)) ^ ((residual ^ old) & 0x924924)
+            ) & 0xFFFFFF
+        else:
+            word ^= old
     for j in tl.static_range(3):
         index = tl.arange(0, 64) * 3 + j
         direct = tl.load(payload + start + index, raw, other=0)

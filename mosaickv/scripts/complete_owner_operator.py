@@ -70,6 +70,17 @@ def kernel_summary(trace):
     return rows
 
 
+def encode_arm(previous, current, arm, native):
+    if arm == "direct":
+        from mosaickv.evaluation.lossless_code_delta_gpu import DeviceCodes
+
+        packet = native.encode(previous, current, additive=True) if previous is not None else None
+        return DeviceCodes(current.numel(), current) if packet is None else packet
+    if arm not in ("common", "additive"):
+        raise ValueError("registered common/search/direct encoder arm required")
+    return native.encode_best(previous, current, additive_candidate=arm == "additive")[0]
+
+
 def checked(root, expected):
     if sha(root / "plan.json") != expected:
         raise ValueError("immutable operator protocol changed")
@@ -87,7 +98,7 @@ def infra():
     return shared
 
 
-def prepare(root, reuse_captures):
+def prepare(root, reuse_captures, decoder_policy="bitmap_prefix", timing_only=False):
     source = clean_source(SOURCE)
     if root.exists():
         raise FileExistsError("new operator diagnostic root required")
@@ -124,11 +135,14 @@ def prepare(root, reuse_captures):
             bound_files={str(p): sha(p) for p in paths},
             parent=parent,
             reuse_captures=str(reuse_captures),
+            decoder_policy=decoder_policy,
+            arms=["common", "additive", "direct"],
             seed=20261107,
             layers=32,
             trials=20,
             warmups=3,
-            profile_layers=[1, 16, 31],
+            profile_layers=[] if timing_only else [1, 16, 31],
+            missing_CUPTI_events_are_not_zero_kernel_cost=True,
             cold_cache_flush_bytes=64 * 2**20,
             benchmark_labels_accessed=False,
             fresh_or_paper_campaign_authorized=False,
@@ -238,10 +252,7 @@ def worker(root, expected):
         flush = torch.empty(p["cold_cache_flush_bytes"], dtype=torch.uint8, device="cuda")
         for layer, current in sorted(archives.items()):
             previous = None if layer == 0 else archives[layer - 1]
-            packets = {
-                "common": native.encode_best(previous, current)[0],
-                "additive": native.encode_best(previous, current, additive_candidate=True)[0],
-            }
+            packets = {arm: encode_arm(previous, current, arm, native) for arm in p["arms"]}
             destinations = {arm: torch.empty_like(current) for arm in packets}
             graphs = {}
 
@@ -252,7 +263,7 @@ def worker(root, expected):
                         dest if packet.has_previous else None,
                         packet,
                         dest,
-                        implementation="bitmap_prefix",
+                        implementation=p["decoder_policy"],
                     )
                 return byte_decode(dest if not packet.raw else None, packet, dest)
 
@@ -276,9 +287,10 @@ def worker(root, expected):
                 graphs[arm] = graph
             for phase in ("encoder", "decoder_captured_warm", "decoder_captured_cold"):
                 for trial in range(p["trials"]):
-                    order = ["common", "additive"]
-                    if (trial + i) % 2:
-                        order.reverse()
+                    arms = p["arms"]
+                    cycles = [arms[j:] + arms[:j] for j in range(3)]
+                    orders = [order for cycle in cycles for order in (cycle, cycle[::-1])]
+                    order = orders[(trial + 2 * i) % 6]
                     # Stable balanced ordering; no winner-dependent control changes.
                     for arm in order:
                         reset(arm, phase.endswith("cold"))
@@ -286,9 +298,7 @@ def worker(root, expected):
                         start = perf_counter()
                         begin.record()
                         if phase == "encoder":
-                            encoded = native.encode_best(
-                                previous, current, additive_candidate=arm == "additive"
-                            )[0]
+                            encoded = encode_arm(previous, current, arm, native)
                         else:
                             graphs[arm].replay()
                         end.record()
@@ -324,9 +334,7 @@ def worker(root, expected):
                             ]
                         ) as prof:
                             if phase == "encoder":
-                                encoded = native.encode_best(
-                                    previous, current, additive_candidate=arm == "additive"
-                                )[0]
+                                encoded = encode_arm(previous, current, arm, native)
                             else:
                                 graphs[arm].replay()
                             torch.cuda.synchronize()
@@ -372,7 +380,7 @@ def analyze(root, expected):
             if (
                 data["status"] != "completed"
                 or data["errors"]
-                or len(data["rows"]) != 32 * 2 * 3 * p["trials"]
+                or len(data["rows"]) != 32 * len(p["arms"]) * 3 * p["trials"]
             ):
                 raise ValueError(data.get("errors", "incomplete operator rows"))
             if sha(root / f"workers/{i}/source_codes.pt") != data["source_capture_archive_sha"]:
@@ -380,7 +388,7 @@ def analyze(root, expected):
             summary = {}
             for phase in ("encoder", "decoder_captured_warm", "decoder_captured_cold"):
                 summary[phase] = {}
-                for arm in ("common", "additive"):
+                for arm in p["arms"]:
                     rr = [r for r in data["rows"] if r["phase"] == phase and r["arm"] == arm]
                     summary[phase][arm] = dict(
                         sum_layer_mean_wall_ms=sum(
@@ -430,11 +438,15 @@ def main():
     a.add_argument("--root", type=Path, required=True)
     a.add_argument("--plan-sha")
     a.add_argument("--reuse-captures", type=Path)
+    a.add_argument(
+        "--decoder-policy", choices=("bitmap_prefix", "packed_words"), default="bitmap_prefix"
+    )
+    a.add_argument("--timing-only", action="store_true")
     args = a.parse_args()
     if args.action == "prepare":
         if args.reuse_captures is None:
             raise ValueError("retry requires verified existing captures; no new inference")
-        return prepare(args.root, args.reuse_captures)
+        return prepare(args.root, args.reuse_captures, args.decoder_policy, args.timing_only)
     if args.action == "controller":
         checked(args.root, args.plan_sha)
         return subprocess.call(

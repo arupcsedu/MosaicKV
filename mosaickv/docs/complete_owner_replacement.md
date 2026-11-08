@@ -87,3 +87,28 @@ It is excluded from timing and must reproduce every frozen logit. Distinguish
 audited decode peak, timed counters, whole-process allocator peak, and the still
 uncertified whole-request KV-only peak. None may be silently substituted for
 another. No larger or fresh quality campaign is authorized by this follow-up.
+
+## Fixed-predictor and packed-word alternatives
+
+The first partial operator attribution found redundant format search adds
+encoder work; available CUDA traces also showed the 2-D prefix scan is not free.
+Test a separately labeled fixed additive predictor with raw fallback. It omits
+the parent search entirely, including on the first raw source layer. It can lose
+some local compression versus best-of-three; compute its complete CPU cost from
+the already-saved additive proposals, not their minima with the parent. Retain
+the same 2% admission threshold. Parent costs not computed online must be null,
+never invented zero savings. Actual paired cache storage supplies the comparison.
+
+Separately test packed 24-bit predecessor arithmetic with per-three-bit carry
+guards. All 64 symbol pairs in all eight lanes and random neighboring fields
+must match exact modulo-eight arithmetic. No code format, quantizer, source
+position, projection, or storage owner changes. This decoder optimization must
+be applied to both common and additive methods in any comparison using it.
+Defaults remain unchanged and no native capability is inferred from CPU tests.
+
+Use only the verified consumed COCO source archives for the timing-only operator
+matrix (common, searched additive, direct additive; bitmap and packed decoders).
+Prior profiler activity gaps remain missing—not zero kernel cost. Do not repeat
+model inference to recapture valid archives, and do not extrapolate operator
+stream intervals into measured full-request latency. Choose any next bounded
+model verification from this engineering evidence, never benchmark answers.
