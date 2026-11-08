@@ -17,6 +17,7 @@ class DeviceSymbols:
     offsets: object
     has_previous: bool
     raw: bool = False
+    additive: bool = False
 
     def tensors(self):
         return self.payload, self.offsets
@@ -42,10 +43,12 @@ class CodecChoice:
         return self.packet.serialized_bytes + self.selector.numel()
 
 
-def encode(previous, current):
+def encode(previous, current, *, additive=False):
     from mosaickv.evaluation.all_head_source_kernel import count, pack
     from mosaickv.evaluation.lossless_code_delta_gpu import validate_bytes
 
+    if type(additive) is not bool or (additive and previous is None):
+        raise ValueError("additive coding requires an explicit original predecessor")
     validate_bytes(current)
     if current.numel() % 192:
         raise ValueError("complete original three-bit source symbol groups required")
@@ -57,7 +60,9 @@ def encode(previous, current):
     sizes = torch.empty(groups, dtype=torch.int32, device=current.device)
     modes = torch.empty_like(sizes)
     parent = previous if previous is not None else current
-    count[(groups,)](parent, current, sizes, modes, HAS_PREVIOUS=previous is not None)
+    count[(groups,)](
+        parent, current, sizes, modes, HAS_PREVIOUS=previous is not None, ADDITIVE=additive
+    )
     ends = sizes.cumsum(0, dtype=torch.int32)
     length = int(ends[-1].item())
     if length + 4 * (groups + 1) >= current.numel():
@@ -74,11 +79,12 @@ def encode(previous, current):
         offsets,
         GROUPS=groups,
         HAS_PREVIOUS=previous is not None,
+        ADDITIVE=additive,
     )
-    return DeviceSymbols(current.numel(), payload, offsets, previous is not None)
+    return DeviceSymbols(current.numel(), payload, offsets, previous is not None, additive=additive)
 
 
-def encode_best(previous, current):
+def encode_best(previous, current, *, additive_candidate=False):
     """Count both formats, synchronize once, and pack only the identical winner.
 
     This changes construction work, not serialized bytes, tie-breaking, source
@@ -90,6 +96,8 @@ def encode_best(previous, current):
     from mosaickv.evaluation.lossless_code_delta_kernel import count as byte_count
     from mosaickv.evaluation.lossless_code_delta_kernel import pack as byte_pack
 
+    if type(additive_candidate) is not bool:
+        raise ValueError("explicit additive-candidate policy required")
     validate_bytes(current)
     if current.numel() % 384:
         raise ValueError("complete source and original byte-codec groups required")
@@ -108,13 +116,31 @@ def encode_best(previous, current):
         byte_sizes = torch.empty(byte_groups, dtype=torch.int32, device=current.device)
         byte_count[(byte_groups,)](previous, current, byte_sizes)
         byte_ends = byte_sizes.cumsum(0, dtype=torch.int32)
-        length, byte_length = torch.stack((ends[-1], byte_ends[-1])).cpu().tolist()
+        if additive_candidate:
+            add_sizes = torch.empty_like(sizes)
+            add_modes = torch.empty_like(modes)
+            count[(groups,)](
+                previous, current, add_sizes, add_modes, HAS_PREVIOUS=True, ADDITIVE=True
+            )
+            add_ends = add_sizes.cumsum(0, dtype=torch.int32)
+            length, byte_length, add_length = (
+                torch.stack((ends[-1], byte_ends[-1], add_ends[-1])).cpu().tolist()
+            )
+        else:
+            length, byte_length = torch.stack((ends[-1], byte_ends[-1])).cpu().tolist()
     else:
         length, byte_length = int(ends[-1].item()), current.numel()
     symbol_bytes = length + 4 * (groups + 1)
     byte_bytes = byte_length + 4 * (byte_groups + 1)
     legacy_bytes = min(current.numel(), byte_bytes) if previous is not None else current.numel()
+    parent_bytes = min(symbol_bytes, legacy_bytes)
+    additive_selected = (
+        additive_candidate and previous is not None and add_length + 4 * (groups + 1) < parent_bytes
+    )
     selected = symbol_bytes < legacy_bytes
+    if additive_selected:
+        sizes, modes, ends, length = add_sizes, add_modes, add_ends, add_length
+        selected = True
     if selected:
         payload = torch.empty(length, dtype=torch.uint8, device=current.device)
         offsets = torch.empty(groups + 1, dtype=torch.int32, device=current.device)
@@ -128,8 +154,11 @@ def encode_best(previous, current):
             offsets,
             GROUPS=groups,
             HAS_PREVIOUS=previous is not None,
+            ADDITIVE=additive_selected,
         )
-        packet = DeviceSymbols(current.numel(), payload, offsets, previous is not None)
+        packet = DeviceSymbols(
+            current.numel(), payload, offsets, previous is not None, additive=additive_selected
+        )
     elif previous is not None and byte_bytes < current.numel():
         payload = torch.empty(byte_length, dtype=torch.uint8, device=current.device)
         offsets = torch.empty(byte_groups + 1, dtype=torch.int32, device=current.device)
@@ -139,6 +168,8 @@ def encode_best(previous, current):
         packet = DeviceCodes(current.numel(), payload, offsets)
     else:
         packet = DeviceCodes(current.numel(), current)
+    if additive_candidate:
+        return packet, selected, legacy_bytes, parent_bytes + 1
     return packet, selected, legacy_bytes
 
 
@@ -155,6 +186,8 @@ def decode(previous, packet, destination=None, *, implementation="reference"):
         or packet.length <= 0
         or packet.length % 384
         or type(packet.has_previous) is not bool
+        or type(packet.additive) is not bool
+        or (packet.additive and not packet.has_previous)
         or packet.raw is not False
         or packet.payload.device.type != "cuda"
         or packet.payload.dtype != torch.uint8
@@ -190,6 +223,7 @@ def decode(previous, packet, destination=None, *, implementation="reference"):
         output,
         HAS_PREVIOUS=packet.has_previous,
         BITMAP_PREFIX=implementation == "bitmap_prefix",
+        ADDITIVE=packet.additive,
     )
     return output
 
