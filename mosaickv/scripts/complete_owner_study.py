@@ -80,7 +80,36 @@ def submit(root, action, after=None):
     return subprocess.check_output(args, text=True).strip()
 
 
-def prepare(root):
+def reusable_cpu(root):
+    p = read(root / "plan.json")
+    d = read(root / "cpu-analysis/decision.json")
+    if not d["complete"] or d["errors"] or not d["CPU_source_gate_passed"]:
+        raise ValueError("complete positive CPU source evidence required for reuse")
+    if p["minimum_source_stream_plus_replay_saving_fraction"] != 0.02:
+        raise ValueError("reuse must retain the unchanged CPU admission threshold")
+    if (
+        p.get("source_archive_root") != str(CAPTURES)
+        or p.get("GPU_predictor") != "delta_add_only"
+        or p.get("cpu_predictors") != ["xor1", "subtract1", "xor8", "subtract8", "delta_add"]
+    ):
+        raise ValueError("CPU fixture identities or registered predictor scope changed")
+    for name in (
+        "predictive_source.py",
+        "all_head_source_codec.py",
+        "source_dictionary.py",
+        "lossless_code_delta.py",
+    ):
+        path = Path("mosaickv/src/mosaickv/evaluation") / name
+        original = subprocess.check_output(["git", "show", f"{p['source_sha']}:{path}"], cwd=SOURCE)
+        if original != (SOURCE / path).read_bytes():
+            raise ValueError("CPU codec semantics changed; old CPU evidence is incompatible")
+    for path, expected in p["bound_files"].items():
+        if sha(Path(path)) != expected:
+            raise ValueError("reused CPU evidence input changed")
+    return p
+
+
+def prepare(root, reuse_cpu=None):
     source = clean_source(SOURCE)
     if root.exists():
         raise FileExistsError("new immutable complete-owner study root required")
@@ -94,6 +123,12 @@ def prepare(root):
         SOURCE / "mosaickv/docs/complete_owner_replacement.md",
     ]
     paths += [Path(k) for k in parent["bound_files"]]
+    prior_cpu = reusable_cpu(reuse_cpu) if reuse_cpu is not None else None
+    if reuse_cpu is not None:
+        paths += [reuse_cpu / "plan.json", reuse_cpu / "cpu-analysis/decision.json"]
+        paths += [
+            reuse_cpu / f"cpu/{i}/{n}" for i in (0, 1) for n in ("manifest.json", "result.json")
+        ]
     for i in (0, 1):
         paths += [
             CAPTURES / f"workers/{i}/{n}"
@@ -112,6 +147,7 @@ def prepare(root):
                 "-o",
                 "addopts=",
                 "mosaickv/tests/unit/test_predictive_source.py",
+                "mosaickv/tests/unit/test_complete_owner_launch.py",
                 "mosaickv/tests/unit/test_all_head_source_gpu.py",
                 "mosaickv/tests/unit/test_all_head_source_codec.py",
                 "mosaickv/tests/unit/test_layer_code_delta.py",
@@ -133,6 +169,10 @@ def prepare(root):
             model_controls=parent,
             layers=32,
             samples=2,
+            cpu_evidence_root=str(reuse_cpu or root),
+            cpu_evidence_producer_sha=prior_cpu["source_sha"] if prior_cpu else source,
+            native_count_policy="one_fused_parent_additive_count_and_batched_prefix_sum",
+            excluded_audited_decode_memory_calls_per_arm=1,
             cpu_predictors=["xor1", "subtract1", "xor8", "subtract8", "delta_add"],
             GPU_predictor="delta_add_only",
             minimum_source_stream_plus_replay_saving_fraction=0.02,
@@ -150,7 +190,7 @@ def prepare(root):
             measurement_type="complete_source_owner_CPU_then_consumed_model_engineering_not_quality",
         ),
     )
-    array = submit(root, "cpu")
+    array = submit(root, "cpu") if reuse_cpu is None else None
     write_once(
         root / "submission.json",
         dict(
@@ -243,7 +283,7 @@ def follow(root, expected):
     errors, totals = [], {}
     for i in (0, 1):
         try:
-            r = read(root / f"cpu/{i}/result.json")
+            r = read(Path(p.get("cpu_evidence_root", root)) / f"cpu/{i}/result.json")
             if (
                 r["status"] != "completed"
                 or r["errors"]
@@ -322,6 +362,7 @@ def operator_controls(p, index):
 
     from mosaickv.evaluation import all_head_source_gpu as native
     from mosaickv.evaluation.predictive_source import encode as oracle
+    from mosaickv.evaluation.source_dictionary import common_encode
 
     archive = torch.load(
         Path(p["source_archive_root"]) / f"workers/{index}/source_codes.pt",
@@ -335,8 +376,17 @@ def operator_controls(p, index):
             previous, current, additive_candidate=True
         )
         selected = getattr(packet, "additive", False)
+        cpu_common = common_encode(previous_cpu, archive[layer].numpy())
+        cpu_additive = oracle(previous_cpu, archive[layer].numpy(), "delta_add").body
+        if (
+            packet.serialized_bytes
+            != min(cpu_common.serialized_bytes, cpu_additive.serialized_bytes)
+            or parent_bytes != cpu_common.serialized_bytes + 1
+            or selected != (cpu_additive.serialized_bytes < cpu_common.serialized_bytes)
+        ):
+            raise ValueError("fused count changed the complete CPU storage choice")
         if selected:
-            expected = oracle(previous_cpu, archive[layer].numpy(), "delta_add").body
+            expected = cpu_additive
             if not np.array_equal(
                 packet.payload.cpu().numpy(), expected.payload
             ) or not np.array_equal(packet.offsets.cpu().numpy().view(np.uint32), expected.offsets):
@@ -462,7 +512,11 @@ def gpu(root, expected):
         policy = OverlayPolicy(enabled=False, quality_objective="bitwise_storage_only")
         rng = random.Random(p["seed"] + i)
         with engine_scope(), (folder / "raw.jsonl").open("x") as out:
-            for phase, count in (("warmup", p["warmups"]), ("timed", p["repetitions"])):
+            for phase, count in (
+                ("warmup", p["warmups"]),
+                ("timed", p["repetitions"]),
+                ("memory_audit", 1),
+            ):
                 orders = [list(ARMS[t % 2 :] + ARMS[: t % 2]) for t in range(count)]
                 rng.shuffle(orders)
                 for trial, order in enumerate(orders):
@@ -497,13 +551,19 @@ def gpu(root, expected):
                                 ) as evidence,
                             ):
                                 logits, detail = campaign.execute(
-                                    adapter, features, transport, "mosaickv_exact", audit=False
+                                    adapter,
+                                    features,
+                                    transport,
+                                    "mosaickv_exact",
+                                    audit=phase == "memory_audit",
                                 )
                             torch.cuda.synchronize()
                             elapsed = perf_counter() - begin
                             actual = logits.cpu()
                             if not torch.equal(actual, reference):
                                 raise ValueError("128 frozen parent vocabulary vectors changed")
+                            if detail.get("used_fullkv_fallback") is not False:
+                                raise ValueError("unregistered or ambiguous FullKV fallback")
                             proof = codec.report()
                             if (
                                 not proof["all_shared_source_consumers_covered"]
@@ -522,6 +582,13 @@ def gpu(root, expected):
                                 type(detail[k]) is not int or detail[k] <= 0 for k in BOUNDARIES
                             ):
                                 raise ValueError("complete physical storage boundaries required")
+                            if (
+                                phase == "memory_audit"
+                                and not detail["peak_measurement_admissible"]
+                            ):
+                                raise ValueError(
+                                    "memory-audit call did not enable tensor-result observation"
+                                )
                             if evidence["extra_gpu_bytes"] or evidence["residual_cpu_bytes"]:
                                 raise ValueError(
                                     "storage-only path unexpectedly created overlay storage"
@@ -568,7 +635,11 @@ def analyze(root, expected):
             keyed = {(r["phase"], r["trial"], r["arm"]): r for r in rows}
             wanted = {
                 (phase, t, a)
-                for phase, n in (("warmup", p["warmups"]), ("timed", p["repetitions"]))
+                for phase, n in (
+                    ("warmup", p["warmups"]),
+                    ("timed", p["repetitions"]),
+                    ("memory_audit", 1),
+                )
                 for t in range(n)
                 for a in ARMS
             }
@@ -578,6 +649,15 @@ def analyze(root, expected):
                 r["status"] == "completed" and r["all_128_frozen_logits_bitwise"] for r in rows
             ):
                 raise ValueError("failed or numerically invalid model row")
+            if any(r["detail"].get("used_fullkv_fallback") is not False for r in rows):
+                raise ValueError("FullKV fallback cannot satisfy the compressed execution gate")
+            if not all(
+                r["detail"].get("peak_measurement_admissible") is True
+                and r["detail"].get("tensor_result_auditing") is True
+                for r in rows
+                if r["phase"] == "memory_audit"
+            ):
+                raise ValueError("independent tensor-result memory audit did not execute")
             for phase, trial, _a in wanted:
                 if any(
                     keyed[phase, trial, ARMS[1]]["detail"][k]
@@ -602,6 +682,14 @@ def analyze(root, expected):
                     comparisons=p["multiplicity_comparisons"],
                 ),
                 bitwise_parent_preservation=True,
+                audited_decode_memory={
+                    a: {k: keyed["memory_audit", 0, a]["detail"][k] for k in BOUNDARIES}
+                    for a in ARMS
+                },
+                whole_request_allocator_peaks={
+                    a: keyed["memory_audit", 0, a]["detail"]["whole_request_peak_allocated_bytes"]
+                    for a in ARMS
+                },
             )
         except Exception:
             errors.append(traceback.format_exc())
@@ -627,19 +715,23 @@ def analyze(root, expected):
         "",
         "Two consumed COCO inputs, LLaVA-1.5-7B BF16 eager, 128 predictions; "
         "five warmups and 20 paired trials.",
-        "All reported peaks below are decode-owned, not certified whole-request KV peak.",
+        "Timed counters are not peak certification. The separate tensor-result audit "
+        "is excluded from timing; its declared decode boundary excludes internal GEMM "
+        "workspace and is not a whole-request KV certificate.",
         "",
-        "| Input | Arm | Initial MiB | Final MiB | Decode-owned peak MiB | Mean request s |",
+        "| Input | Arm | Initial MiB | Final MiB | Audited decode peak MiB | Mean request s |",
         "| --- | --- | ---: | ---: | ---: | ---: |",
     ]
     for i, r in results.items():
         for a in ARMS:
             memory = [max(r["storage"][a][k]) / 2**20 for k in BOUNDARIES]
+            memory[2] = r["audited_decode_memory"][a]["reported_counter_peak_bytes"] / 2**20
             seconds = r["latency"]["original" if a == ARMS[0] else "inline"]["mean"]
             lines.append(
                 f"| {i} | {a} | {memory[0]:.4f} | {memory[1]:.4f} | "
                 f"{memory[2]:.4f} | {seconds:.4f} |"
             )
+    for i, r in results.items():
         lines += [
             "",
             f"Input {i}: new/parent mean latency ratio "
@@ -669,9 +761,10 @@ def main():
     a.add_argument("action", choices=("prepare", "cpu", "follow", "gpu", "analyze", "controller"))
     a.add_argument("--root", type=Path, required=True)
     a.add_argument("--plan-sha")
+    a.add_argument("--reuse-cpu", type=Path)
     args = a.parse_args()
     if args.action == "prepare":
-        return prepare(args.root)
+        return prepare(args.root, args.reuse_cpu)
     if args.action == "controller":
         checked(args.root, args.plan_sha)
         return subprocess.call(

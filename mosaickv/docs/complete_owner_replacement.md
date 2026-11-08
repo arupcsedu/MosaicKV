@@ -71,3 +71,19 @@ KV peak remains uncertified; construction temporaries must not be hidden behind
 decode-owned counters. A positive engineering gate is a prerequisite—not permission
 or evidence—for an independently frozen quality and whole-request memory study.
 Common coding must be available identically to compatible baseline transports.
+
+## Frozen follow-up after the first measured latency miss
+
+The first complete-owner benchmark preserved all 128 logits and saved about
+1.22--1.23 MiB per input, but was 0.27--0.29% slower. Keep that result negative
+for the strict latency gate. Do not alter source precision, selection, budgets,
+or thresholds. Fuse the parent and additive counts in one source read/kernel,
+batch their prefix sums, synchronize once, and pack only the identical winner.
+Native packet bytes must still match the CPU oracle exactly. Reuse the positive
+CPU screen only after verifying its code bytes and all bound artifacts unchanged.
+
+Add one separate tensor-result-audited decode call per arm after timed trials.
+It is excluded from timing and must reproduce every frozen logit. Distinguish
+audited decode peak, timed counters, whole-process allocator peak, and the still
+uncertified whole-request KV-only peak. None may be silently substituted for
+another. No larger or fresh quality campaign is authorized by this follow-up.

@@ -91,7 +91,7 @@ def encode_best(previous, current, *, additive_candidate=False):
     quantization or the replay decoder. Count workspaces are temporary and must
     remain visible to allocator-peak measurements.
     """
-    from mosaickv.evaluation.all_head_source_kernel import count, pack
+    from mosaickv.evaluation.all_head_source_kernel import count, count_choices, pack
     from mosaickv.evaluation.lossless_code_delta_gpu import DeviceCodes, validate_bytes
     from mosaickv.evaluation.lossless_code_delta_kernel import count as byte_count
     from mosaickv.evaluation.lossless_code_delta_kernel import pack as byte_pack
@@ -106,23 +106,26 @@ def encode_best(previous, current, *, additive_candidate=False):
         if previous.shape != current.shape or previous.device != current.device:
             raise ValueError("unchanged complete predecessor layout required")
     groups = current.numel() // 192
-    sizes = torch.empty(groups, dtype=torch.int32, device=current.device)
-    modes = torch.empty_like(sizes)
     parent = previous if previous is not None else current
-    count[(groups,)](parent, current, sizes, modes, HAS_PREVIOUS=previous is not None)
-    ends = sizes.cumsum(0, dtype=torch.int32)
+    if additive_candidate and previous is not None:
+        all_sizes = torch.empty((2, groups), dtype=torch.int32, device=current.device)
+        all_modes = torch.empty_like(all_sizes)
+        count_choices[(groups,)](previous, current, all_sizes, all_modes, GROUPS=groups)
+        all_ends = all_sizes.cumsum(1, dtype=torch.int32)
+        sizes, add_sizes = all_sizes.unbind(0)
+        modes, add_modes = all_modes.unbind(0)
+        ends, add_ends = all_ends.unbind(0)
+    else:
+        sizes = torch.empty(groups, dtype=torch.int32, device=current.device)
+        modes = torch.empty_like(sizes)
+        count[(groups,)](parent, current, sizes, modes, HAS_PREVIOUS=previous is not None)
+        ends = sizes.cumsum(0, dtype=torch.int32)
     byte_groups = current.numel() // 128
     if previous is not None:
         byte_sizes = torch.empty(byte_groups, dtype=torch.int32, device=current.device)
         byte_count[(byte_groups,)](previous, current, byte_sizes)
         byte_ends = byte_sizes.cumsum(0, dtype=torch.int32)
         if additive_candidate:
-            add_sizes = torch.empty_like(sizes)
-            add_modes = torch.empty_like(modes)
-            count[(groups,)](
-                previous, current, add_sizes, add_modes, HAS_PREVIOUS=True, ADDITIVE=True
-            )
-            add_ends = add_sizes.cumsum(0, dtype=torch.int32)
             length, byte_length, add_length = (
                 torch.stack((ends[-1], byte_ends[-1], add_ends[-1])).cpu().tolist()
             )

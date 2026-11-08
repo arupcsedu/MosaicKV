@@ -60,3 +60,85 @@ def test_gpu_progression_requires_both_complete_unchanged_cpu_gates(tmp_path, mo
     else:
         assert submitted == []
         assert not (tmp_path / "gpu-submission.json").exists()
+
+
+@pytest.mark.parametrize(
+    "invalid", ("incomplete", "failed_gate", "changed_threshold", "changed_code")
+)
+def test_reuse_rejects_incompatible_cpu_evidence(tmp_path, monkeypatch, invalid):
+    study = load()
+    (tmp_path / "plan.json").write_text(
+        json.dumps(
+            dict(
+                source_sha="fixture_sha",
+                bound_files={},
+                source_archive_root=str(study.CAPTURES),
+                GPU_predictor="delta_add_only",
+                cpu_predictors=["xor1", "subtract1", "xor8", "subtract8", "delta_add"],
+                minimum_source_stream_plus_replay_saving_fraction=0.01
+                if invalid == "changed_threshold"
+                else 0.02,
+            )
+        )
+    )
+    (tmp_path / "cpu-analysis").mkdir()
+    (tmp_path / "cpu-analysis/decision.json").write_text(
+        json.dumps(
+            dict(
+                complete=invalid != "incomplete",
+                errors=[],
+                CPU_source_gate_passed=invalid != "failed_gate",
+            )
+        )
+    )
+    monkeypatch.setattr(study.subprocess, "check_output", lambda *args, **kwargs: b"changed-code")
+    with pytest.raises(ValueError):
+        study.reusable_cpu(tmp_path)
+
+
+@pytest.mark.parametrize("audit_valid", (True, False))
+def test_analysis_cannot_promote_unaudited_counters_to_audited_peak(
+    tmp_path, monkeypatch, audit_valid
+):
+    study = load()
+    monkeypatch.setattr(
+        study,
+        "checked",
+        lambda *args: dict(
+            warmups=1, repetitions=20, seed=17, bootstrap_replicates=100, multiplicity_comparisons=2
+        ),
+    )
+    for i in (0, 1):
+        folder = tmp_path / f"gpu/{i}"
+        folder.mkdir(parents=True)
+        rows = []
+        for phase, count in (("warmup", 1), ("timed", 20), ("memory_audit", 1)):
+            for trial in range(count):
+                for a, arm in enumerate(study.ARMS):
+                    rows.append(
+                        dict(
+                            phase=phase,
+                            trial=trial,
+                            arm=arm,
+                            status="completed",
+                            sample_id=f"synthetic_fixture_{i}",
+                            all_128_frozen_logits_bitwise=True,
+                            request_wall_seconds=1.0 - a * 0.1,
+                            detail=dict(
+                                initial_encoded_bytes=100 - a,
+                                final_encoded_bytes=200 - a,
+                                reported_counter_peak_bytes=300 - a,
+                                peak_measurement_admissible=audit_valid,
+                                tensor_result_auditing=audit_valid,
+                                whole_request_peak_allocated_bytes=1000,
+                                used_fullkv_fallback=False,
+                            ),
+                        )
+                    )
+        (folder / "raw.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows))
+        (folder / "result.json").write_text(json.dumps(dict(status="completed", errors=[])))
+    study.analyze(tmp_path, "unused")
+    decision = json.loads((tmp_path / "analysis/decision.json").read_text())
+    assert decision["complete"] == audit_valid
+    assert decision["engineering_memory_and_latency_gate_passed"] == audit_valid
+    assert decision["whole_request_peak_certified"] is False

@@ -51,6 +51,23 @@ def count(
 
 
 @triton.jit
+def count_choices(previous, current, lengths, modes, GROUPS: tl.constexpr):
+    """Count parent and additive packets from one source read/launch."""
+    group, lane = tl.program_id(0), tl.arange(0, 512)
+    value, old = _symbols(current, group, lane), _symbols(previous, group, lane)
+    mode, size = _analyze(value)
+    delta_mode, delta_size = _analyze(value ^ old)
+    better = delta_size < size
+    tl.store(lengths + group, tl.minimum(tl.minimum(size, delta_size), 192))
+    chosen_size = tl.minimum(size, delta_size)
+    chosen_mode = tl.where(better, delta_mode | 64, mode)
+    tl.store(modes + group, tl.where(chosen_size >= 192, -1, chosen_mode))
+    add_mode, add_size = _analyze((value - old) & 7)
+    tl.store(lengths + GROUPS + group, tl.minimum(add_size, 192))
+    tl.store(modes + GROUPS + group, tl.where(add_size >= 192, -1, add_mode))
+
+
+@triton.jit
 def pack(
     previous,
     current,
