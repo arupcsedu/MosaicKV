@@ -21,6 +21,7 @@ TESTS = (
     "test_shared_head_prototypes.py",
     "test_shared_head_scope.py",
     "test_kv_timeline.py",
+    "test_request_ownership.py",
     "test_request_peak_coverage.py",
     "test_scratch_audit_lifetime.py",
     "test_shared_source_map_accounting.py",
@@ -130,6 +131,7 @@ def prepare(root):
         source_sha=source,
         bound_files=bound,
         group_size=8,
+        source_map_policy="first_layer_shared",
         maximum_allocator_events=500000,
         warmups=0,
         repetitions=1,
@@ -325,7 +327,10 @@ def model(p, folder, i):
                 torch.cuda.synchronize()
                 with (
                     codec(decoder="packed_words", encoding_policy="direct_additive_compact_rare"),
-                    prototype(group_size=p["group_size"])
+                    prototype(
+                        group_size=p["group_size"],
+                        map_policy=p.get("source_map_policy", "independent"),
+                    )
                     if arm == "shared_source_prototypes"
                     else nullcontext(proof) as mechanisms,
                     WholeRequestEnvelope(adapter.model) if audit else nullcontext() as envelope,
@@ -396,7 +401,7 @@ def worker(root, expected):
     result = dict(status="failed")
     try:
         manifest(p, expected, folder, i, gpu=True)
-        control = native(folder, p["seed"] + i)
+        control = torch.inference_mode()(native)(folder, p["seed"] + i)
         if not control["passed"]:
             raise ValueError(
                 "bounded native source-replacement/ownership gate failed; no model run"
@@ -426,13 +431,47 @@ def analyze(root, expected):
         if raw.exists():
             rows.extend(dict(input=i, **json.loads(line)) for line in raw.read_text().splitlines())
     canaries = [r for r in rows if r["phase"] == "canary"]
+    failures.extend(
+        dict(
+            input=r["input"],
+            arm=r["arm"],
+            phase=r["phase"],
+            error=r.get("error", "numerical gate failed"),
+        )
+        for r in rows
+        if r["status"] != "completed"
+    )
+    if len(rows) != 8:
+        failures.append(dict(error="expected eight complete canary/audit rows", observed=len(rows)))
     admitted = len(canaries) == 4 and all(
         r["status"] == "completed" and r.get("numerically_admissible") for r in canaries
     )
+    memory = []
+    for i in (0, 1):
+        selected = {r["arm"]: r for r in canaries if r["input"] == i and r["status"] == "completed"}
+        if len(selected) == 2:
+            base, candidate = selected["storage_compact"], selected["shared_source_prototypes"]
+            memory.append(
+                dict(
+                    input=i,
+                    ratios={
+                        k: candidate["detail"][k] / base["detail"][k]
+                        for k in (
+                            "initial_encoded_bytes",
+                            "final_encoded_bytes",
+                            "reported_counter_peak_bytes",
+                        )
+                    },
+                    peak_ratio_is_decode_counter_not_whole_request_certificate=True,
+                )
+            )
     summary = dict(
         complete=not failures,
         failures=failures,
         numerical_gate_passed=admitted,
+        memory_comparison=memory,
+        all_reported_cache_boundaries_smaller=len(memory) == 2
+        and all(all(value < 1 for value in record["ratios"].values()) for record in memory),
         rows=rows,
         independent_quality_established=False,
         fresh_or_paper_campaign_authorized=False,

@@ -20,6 +20,7 @@ class AllocationTimeline:
         self.lock = threading.RLock()
         self.active, self.allocations, self.events, self.errors = {}, {}, [], []
         self.generations = {}
+        self.stacks, self.stack_indices = [], {}
 
     def seed(self, address, size, role="unknown"):
         with self.lock:
@@ -55,6 +56,20 @@ class AllocationTimeline:
                 self.events.append(dict(sequence=seq, **trace))
                 if action == "alloc":
                     self._allocate(addr, trace["size"], "unknown", seq)
+                    key = self.active.get(addr)
+                    if key is not None:
+                        frames = tuple(
+                            (f.get("filename", ""), f.get("name", ""), f.get("line", -1))
+                            for f in trace.get("frames", ())
+                        )
+                        if frames not in self.stack_indices:
+                            self.stack_indices[frames] = len(self.stacks)
+                            self.stacks.append(frames)
+                        self.allocations[key].update(
+                            stack_id=self.stack_indices[frames],
+                            stream=trace.get("stream"),
+                            time_us=trace.get("time_us"),
+                        )
                 elif action in ("free_requested", "free_completed"):
                     key = self.active.get(addr)
                     if key is None:
@@ -182,6 +197,8 @@ class AllocationTimeline:
             unknown_allocation_generations=len(unknown),
             events=len(self.events),
             records=rows,
+            stack_table=self.stacks,
+            time_alignment="single_device_allocator_sequence_across_all_threads_and_streams",
             includes_free_requested_until_free_completed=True,
             includes_cross_thread_allocator_events=True,
             phase_peaks_not_added=True,

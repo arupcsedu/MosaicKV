@@ -47,6 +47,13 @@ STACK_RULES = tuple(
 )
 
 
+def cache_tensors(cache):
+    """Use the actual common-cache ownership API, not a fabricated method."""
+    if not hasattr(cache, "shared_tensors") or not hasattr(cache, "layers"):
+        raise TypeError("explicit shared-tensor/layer ownership inventory required")
+    return (*cache.shared_tensors, *(t for layer in cache.layers for t in layer.owned_tensors()))
+
+
 class _RequestSession(CudaOwnershipSession):
     def __init__(self, result, **kwargs):
         super().__init__(**kwargs)
@@ -93,7 +100,7 @@ def audit_request(adapter, *, max_entries=200000):
         def cache(*args, **kwargs):
             result = original_cache(*args, **kwargs)
             session.mark(
-                result.owned_tensors(),
+                cache_tensors(result),
                 "kv_persistent",
                 "private decode cache payload, maps, history and graph ownership",
             )

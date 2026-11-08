@@ -57,12 +57,15 @@ def choose_group(body, text, demand, size):
 
 
 @contextmanager
-def use(*, group_size=8):
+def use(*, group_size=8, map_policy="independent"):
     from mosaickv.evaluation import shared_source_format as formats
     from mosaickv.evaluation import streaming_source_constructor as constructor
 
+    if map_policy not in ("independent", "first_layer_shared"):
+        raise ValueError("explicit registered source-map policy required")
     original_encoder, original_construct = constructor.StreamingDirectSource, formats.construct
     records, planning = [], []
+    common_group, common_map = None, None
 
     class Encoder(original_encoder):
         def __call__(self, index, attention, original, args, kwargs, output):
@@ -74,25 +77,45 @@ def use(*, group_size=8):
                 _demand.reset(token)
 
     def build(normalized, original_pair, memberships, text, phases, identity, **kwargs):
+        nonlocal common_group, common_map
         packet = original_construct(
             normalized, original_pair, memberships, text, phases, identity, **kwargs
         )
         demand = _demand.get()
         if demand is None:
             raise RuntimeError("all-head prototypes require actual constructor prompt evidence")
-        group, evidence = choose_group(packet.source, text, demand, group_size)
+        if map_policy == "independent" or common_group is None:
+            group, evidence = choose_group(packet.source, text, demand, group_size)
+            common_group = group
+        else:
+            group = common_group
+            evidence = dict(
+                selection="frozen_first_layer_prompt_demand_group", no_second_prefill=True
+            )
         transaction = construct(packet.source, (group,), heads=packet.shape[1], mandatory=text)
+        if map_policy == "first_layer_shared":
+            if common_map is None:
+                common_map = transaction.body.row_map
+            elif not torch.equal(common_map, transaction.body.row_map):
+                raise RuntimeError("common source map changed physical alignment")
+            transaction.body = replace(transaction.body, row_map=common_map, row_map_shared=True)
         # The codec must be allowed to retire the NEW raw prototype codes as
         # well. Keep only CPU residuals/metadata/weak original-owner evidence.
         records.append(
             (transaction.record(), transaction.residual_codes, transaction.original_owner)
         )
         planning.append(evidence)
-        return replace(packet, source=transaction.body)
+        result = replace(packet, source=transaction.body)
+        # Construction is explicitly pinned to 32 layers; retain no hidden
+        # GPU map owner beyond the immutable packets after the last layer.
+        if len(records) == 32:
+            common_map = None
+        return result
 
     report = dict(
         variant="all_head_source_prototype_ownership_diagnostic_v1",
         group_size=group_size,
+        map_policy=map_policy,
         benchmark_labels_accessed=False,
         six_component_claim_authorized=False,
         natural_model_repair_validated=False,
@@ -104,6 +127,7 @@ def use(*, group_size=8):
         try:
             yield report
         finally:
+            common_map = None
             report["layers"] = [
                 dict(
                     metadata,

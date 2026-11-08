@@ -31,6 +31,13 @@ layer codec geometry. Compare complete encoded storage INCLUDING maps, headers,
 codec payload/offsets, replay, CPU residuals and decode workspace, not raw row
 savings. Retain storage-only when complete savings or model fidelity fail.
 
+The separately registered `first_layer_shared` diagnostic freezes the first
+layer's label-blind group for all subsequent layers and shares one actual GPU
+map owner. This preserves inter-layer source-row alignment; independently
+selected maps can enlarge the modulo-8 residual codec despite fewer raw rows.
+This is a new storage-policy diagnostic, not a reinterpretation of the first
+negative storage result. No answer/annotation influences this change.
+
 ## Registered controls
 
 Use only the same two consumed COCO identities and pinned LLaVA-1.5 checkpoint
