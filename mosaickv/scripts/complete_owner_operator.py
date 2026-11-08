@@ -9,6 +9,7 @@ import os
 import statistics
 import subprocess
 import traceback
+from contextlib import contextmanager
 from dataclasses import asdict
 from pathlib import Path
 from time import perf_counter
@@ -23,6 +24,21 @@ PARENT = Path("/scratch/djy8hg/runs/evicastkv/complete-owner-replacement-fused-2
 
 def read(path):
     return json.loads(Path(path).read_text())
+
+
+@contextmanager
+def capture_source_packets(capture):
+    """Observe the existing conversion; never change request/lease arguments."""
+    from mosaickv.evaluation import layer_code_delta as runtime
+
+    original = runtime.convert
+
+    def convert(packets):
+        capture(packets)
+        return original(packets)
+
+    with patch.object(runtime, "convert", convert):
+        yield
 
 
 def kernel_summary(trace):
@@ -127,7 +143,6 @@ def worker(root, expected):
     from mosaickv.adapters.huggingface import load_hf_adapter
     from mosaickv.config import RunConfig
     from mosaickv.evaluation import all_head_source_gpu as native
-    from mosaickv.evaluation import common_streaming_timing as stream
     from mosaickv.evaluation.component_admission import component_scope
     from mosaickv.evaluation.layer_code_delta import map_bodies
     from mosaickv.evaluation.lossless_code_delta_gpu import decode as byte_decode
@@ -208,13 +223,6 @@ def worker(root, expected):
 
                 map_bodies(packet, save)
 
-        original = stream.request
-
-        def request(*args, **kwargs):
-            if kwargs.get("input_packet_validator") is not None:
-                raise ValueError("do not override another capture")
-            return original(*args, **dict(kwargs, input_packet_validator=capture))
-
         with (
             engine_scope(),
             native.use(True, construction="pack_selected", decoder="bitmap_prefix"),
@@ -224,7 +232,7 @@ def worker(root, expected):
                 mode="storage_preservation",
                 reader_options=options,
             ),
-            patch.object(stream, "request", request),
+            capture_source_packets(capture),
         ):
             logits, detail = campaign.execute(
                 adapter, features, transport, "mosaickv_exact", audit=False
