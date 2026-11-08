@@ -75,6 +75,13 @@ def build(profiles, panel, latency, historical_rows=None):
     for name, phases, ablation in STAGES:
         effect = panel["effects"][ablation]
         values = [sum(p[k] for k in phases) for p in phase_rows] if phases else []
+        repair_check = name == "uncertainty_repair" and all(
+            "repair_policy_phase_seconds" in p for p in profiles
+        )
+        if repair_check:
+            values = [p["repair_policy_phase_seconds"] for p in profiles]
+            if any(not math.isfinite(v) or v < 0 for v in values):
+                raise ValueError("finite first-update policy check times required")
         memory = None
         if historic is not None:
             ablated_ids = {sid for arm, sid in historic if arm == ablation}
@@ -97,6 +104,9 @@ def build(profiles, panel, latency, historical_rows=None):
                 profiled_seconds=values or None,
                 mean_profiled_milliseconds=1000 * mean(values) if values else None,
                 timing_is_causal_ablation_delta=False,
+                timing_scope="first_update_policy_check_optional_recompute_excludes_snapshot"
+                if repair_check
+                else "profiled_construction_not_causal_delta",
                 separately_audited_stage_KV_bytes=None,
                 whole_overlay_storage=overhead
                 if name == "exact_prototype_residual_tiers"
@@ -175,6 +185,10 @@ def markdown(audit):
         "The repair key snapshot is a known temporary buffer, not the complete repair-stage "
         "or whole-request peak. Guard-record buffers are activations, not KV; their explicit "
         "backing and observed allocator increments remain separately recorded in audit.json.",
+        "When provided, stage-six timing is only the first-update uncertainty-policy check "
+        "plus any actual recomputation; it excludes the earlier snapshot copy. No natural "
+        "trigger means no measured restoration/re-decode latency. GPU event intervals "
+        "may include host gaps and are not pure kernel time.",
         "",
         "Negative full-minus-ablation CIDEr means the full arm scored lower. "
         "Natural repair did not occur in the historical panel; forced restoration tested "

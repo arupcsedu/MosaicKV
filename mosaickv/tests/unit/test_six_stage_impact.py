@@ -71,6 +71,28 @@ def test_known_temporary_buffers_are_not_promoted_to_stage_peak_or_kv_storage():
     assert "not stage peak" in markdown(result)
 
 
+def test_measured_repair_check_is_not_claimed_as_restoration_latency():
+    profiles, panel, latency = fixtures()
+    for i, profile in enumerate(profiles):
+        profile["repair_policy_phase_seconds"] = 0.001 * (i + 1)
+    result = build(profiles, panel, latency)
+    repair = result["stages"][-1]
+    assert repair["mean_profiled_milliseconds"] == pytest.approx(1.5)
+    assert repair["timing_scope"] == (
+        "first_update_policy_check_optional_recompute_excludes_snapshot"
+    )
+    assert "No natural trigger means no measured restoration" in markdown(result)
+    profiles[0]["repair_policy_phase_seconds"] = float("nan")
+    with pytest.raises(ValueError, match="finite first-update"):
+        build(profiles, panel, latency)
+
+
+def test_partial_repair_timing_does_not_imply_a_complete_two_input_measurement():
+    profiles, panel, latency = fixtures()
+    profiles[0]["repair_policy_phase_seconds"] = 0.001
+    assert build(profiles, panel, latency)["stages"][-1]["profiled_seconds"] is None
+
+
 def test_historical_memory_is_paired_and_not_mistaken_for_stage_peak():
     rows = [
         dict(

@@ -14,9 +14,17 @@ def main():
     p.add_argument("--output", type=Path, required=True)
     p.add_argument("--latency-root", type=Path, required=True)
     p.add_argument("--panel-root", type=Path, required=True)
+    p.add_argument("--profile-root", type=Path)
     a = p.parse_args()
     source = clean_source(Path(__file__).resolve().parents[2])
-    paths = [a.latency_root / f"workers/{i}/profile.json" for i in (0, 1)]
+    profile_root = a.profile_root or a.latency_root
+    if (
+        a.profile_root
+        and json.loads((profile_root / "analysis/decision.json").read_text())["complete"]
+        is not True
+    ):
+        raise ValueError("complete separately bound retained-path profiles required")
+    paths = [profile_root / f"workers/{i}/profile.json" for i in (0, 1)]
     paths += [a.panel_root / "analysis/panel_stopping_decision.json"]
     paths += [a.latency_root / "analysis/decision.json"]
     profiles = [json.loads(path.read_text()) for path in paths[:2]]
@@ -30,8 +38,11 @@ def main():
     )
     paths.append(historical_path)
     paths += sorted({Path(row["manifest_path"]) for row in historical_rows})
-    manifests = [a.latency_root / f"workers/{i}/manifest.json" for i in (0, 1)]
+    manifests = [profile_root / f"workers/{i}/manifest.json" for i in (0, 1)]
     paths += [a.latency_root / "plan.json", a.panel_root / "plan.json", *manifests]
+    if a.profile_root:
+        paths += [profile_root / "plan.json", profile_root / "analysis/decision.json"]
+    audit["profile_root"] = str(profile_root)
     audit["paired_profile_provenance"] = [json.loads(p.read_text()) for p in manifests]
     audit.update(analyzer_git_sha=source, input_sha256={str(path): sha(path) for path in paths})
     a.output.mkdir(parents=True, exist_ok=False)
