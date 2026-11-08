@@ -41,6 +41,17 @@ def checked(root, expected):
     return plan
 
 
+def check_retained_policy(policy):
+    # Older immutable records omit default-false flags. Do not require a raw
+    # key which the strict typed policy already defines with this default.
+    from mosaickv.evaluation.storage_six_overlay import OverlayPolicy
+
+    resolved = OverlayPolicy(**dict(policy, layers=tuple(policy["layers"])))
+    if resolved.graph_direct_metadata_key or resolved.anchor_counterfactual != "full_heads":
+        raise ValueError("retained corrected hybrid reference required")
+    return resolved
+
+
 def prepare(root):
     source = clean_source(SOURCE)
     if root.exists():
@@ -51,8 +62,7 @@ def prepare(root):
     paths = [PARENT / "plan.json", PARENT / "analysis/decision.json"]
     paths += [Path(k) for k in parent["bound_files"]]
     policy = parent["policies"]["hybrid_reference"]
-    if policy["graph_direct_metadata_key"] or policy["anchor_counterfactual"] != "full_heads":
-        raise ValueError("retained corrected hybrid reference required")
+    check_retained_policy(policy)
     root.mkdir(parents=True)
     (root / "logs").mkdir()
     with (root / "cpu.txt").open("x") as out:
@@ -65,6 +75,7 @@ def prepare(root):
                 "-o",
                 "addopts=",
                 "mosaickv/tests/unit/test_component_admission.py",
+                "mosaickv/tests/unit/test_component_admission_launch.py",
                 "mosaickv/tests/unit/test_storage_six_overlay.py",
                 "mosaickv/tests/unit/test_layer_code_delta.py",
                 "mosaickv/tests/unit/test_all_head_source_gpu.py",
