@@ -47,14 +47,17 @@ class ScratchAudit(TorchDispatchMode):
     def __torch_dispatch__(self, func: Any, types: Any, args: Any = (), kwargs: Any = None) -> Any:
         result = func(*args, **(kwargs or {}))
 
-        def remember(value: Any) -> None:
+        # A recursive local function would close over its own name AND self.
+        # That cycle retains this observer and its cache/source callback until
+        # cyclic GC, despite the tensor references themselves being weak. It
+        # can keep entire retired source archives alive during an audit.
+        pending = [result]
+        while pending:
+            value = pending.pop()
             if isinstance(value, torch.Tensor):
                 self.refs[id(value)] = weakref.ref(value)
             elif isinstance(value, (tuple, list)):
-                for item in value:
-                    remember(item)
-
-        remember(result)
+                pending.extend(value)
         live = {i: ref for i, ref in self.refs.items() if ref() is not None}
         self.refs = live
         extras = tuple(

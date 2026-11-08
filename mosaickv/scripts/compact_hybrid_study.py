@@ -259,6 +259,8 @@ def prepare_audit(root, reuse):
         "mosaickv/src/mosaickv/evaluation/prompt_graph_reader.py",
         "mosaickv/tests/unit/test_prompt_graph_reader.py",
         "mosaickv/tests/unit/test_compact_hybrid_study.py",
+        "mosaickv/src/mosaickv/evaluation/projection_cache.py",
+        "mosaickv/tests/unit/test_scratch_audit_lifetime.py",
     }
     changed = set(
         subprocess.check_output(
