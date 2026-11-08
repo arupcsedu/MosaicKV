@@ -137,3 +137,43 @@ do not represent these as an exclusive EviCastKV algorithm or byte-matched
 cross-policy comparison. The unchanged 32-token guard, all-128 token check and
 same time-aligned ownership ledger remain. This test does not expand lossy-history
 tuning, authorize independent validation, or claim clean end-to-end latency.
+
+## Completed evidence and stopping decisions (November 8)
+
+Immutable roots are under
+`/scratch/djy8hg/runs/evicastkv/packed-prototype-history-20261108-v{1,2,3,4}`.
+Each contains a source/config-bound plan, job submissions, logs, CPU records and
+available operator/model evidence. V1 preserves the unsupported Triton API
+failure; V2 preserves the explicit history-dispatch failure and six valid model
+controls; V3/V4 are numerical diagnostics, not engineering retries of failed
+quality. Their `analysis/report.md` and `decision.json` preserve all outcomes.
+
+- CPU screens cover 1/2/4/8 codec-aligned eight-row groups with a common map
+  across all 32 layers. Every case has negative GPU-plus-CPU saving when the
+  original pinned residuals are charged. These are frozen-inventory cost
+  estimates; new transport-patch changes remain unmeasured. No expanded-group
+  model execution was admitted by that screen.
+- V2 packed-constructor p50: 1.357040/1.351680 ms versus
+  10.618224/10.719104 ms for the original constructor. Its measured incremental
+  operator allocation peak is 1.539551 versus 38.627930 MiB. Operator trials
+  have five warmups and twenty CUDA-event repetitions. Code/map/residual/repair
+  equivalence and the packed-prompt model's 128-logit bitwise equivalence passed.
+- Tiled softmax uses 31.615234 versus 88.772461 MiB incremental operator peak,
+  but takes about 0.644 versus 0.237 ms. Its bits match the original operator and
+  model controls; this is a memory/latency trade-off, not a general latency win.
+- V3 group-128 INT8 history preserves all 128 greedy tokens on both inputs.
+  Input 1 nevertheless fails the unchanged longer-horizon thresholds:
+  maximum logit difference 1.1875 and KL 0.03976334011603344. The first failure
+  occurs at prediction 36, after the unchanged first-32 gate.
+- V4 group-32 also preserves all 128 tokens but is negative: input 1 has maximum
+  logit difference 3.1171875 (limit 1.0), despite KL 0.015658688731020755
+  (limit 0.02). Smaller quantizer groups did NOT guarantee downstream stability,
+  and their extra headers reduce final-storage savings. Do not tune another
+  group size on these outcomes or promote either policy to fresh validation.
+
+There is no benchmark-quality, all-baseline, strict latency, or six-component
+superiority conclusion. Approximate history remains default-off. The common
+correction-workspace follow-up is a bitwise transport test, not a remedy for
+the negative history or residual-cost results. A fresh cohort remains blocked
+until a separately frozen candidate shows meaningful storage savings with all
+controls; source-group counts must not be expanded merely because packing works.
