@@ -80,6 +80,19 @@ STACK_RULES += tuple(
 STACK_RULES += (("/mosaickv/evaluation/storage_runs.py", "run", "non_kv", 369),)
 STACK_RULES += (("/mosaickv/measurements/kv_timeline.py", "_flush_cuda_events", "non_kv"),)
 STACK_RULES += REVIEWED_STACK_RULES
+STACK_RULES += tuple(
+    ("/mosaickv/evaluation/" + filename, name, role)
+    for filename, names, role in (
+        ("packed_prototypes.py", ("construct", "selected_codes", "copy_packed"), "kv_workspace"),
+        ("tiled_softmax.py", ("attention", "probabilities"), "kv_shared_workspace"),
+        (
+            "history_source_precision.py",
+            ("consolidate", "join", "unpack_into", "fill_component"),
+            "kv_workspace",
+        ),
+    )
+    for name in names
+)
 
 
 @contextmanager
