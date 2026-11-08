@@ -75,7 +75,8 @@ def test_original_member_rotary_phases_not_anchor_phase_replicated():
     assert (value[0, 1, 3] == 2).all()
 
 
-def test_core_planner_executes_on_real_tensors_without_labels():
+@pytest.mark.parametrize("similarity_limit", [0, 128])
+def test_core_planner_executes_on_real_tensors_without_labels(similarity_limit):
     from mosaickv.adapters.huggingface.llava import Llava15Adapter
     from mosaickv.cache_state import Modality, ModalitySpan
 
@@ -102,7 +103,13 @@ def test_core_planner_executes_on_real_tensors_without_labels():
         phases,
         p,
         ((*range(7), 15),) * h,
-        OverlayPolicy(extra_exact_positions=2),
+        OverlayPolicy(
+            extra_exact_positions=2,
+            planner_similarity_limit=similarity_limit,
+            planner_host_transfer="deferred_layer_vectorized"
+            if similarity_limit
+            else "deferred_layer",
+        ),
         pin_residuals=False,
     )
     assert o.evidence["forecast_mode"] == "prompt_window"

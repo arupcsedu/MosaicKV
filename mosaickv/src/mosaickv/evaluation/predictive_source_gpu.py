@@ -14,12 +14,15 @@ class State:
     def __init__(self, common, encoding_policy):
         self.common, self.records, self.references = common, [], []
         self.encoding_policy = encoding_policy
+        self.encoding_audit = None
 
     def report(self):
         parent = self.common.report()
         return dict(
             parent,
-            variant="common_all_consumer_modulo8_source_replacement_v1"
+            variant="common_all_consumer_compact_rare_modulo8_v1"
+            if self.encoding_policy == "direct_additive_compact_rare"
+            else "common_all_consumer_modulo8_source_replacement_v1"
             if self.encoding_policy == "search"
             else "common_all_consumer_direct_modulo8_raw_v1",
             encoding_policy=self.encoding_policy,
@@ -34,23 +37,64 @@ class State:
             numerical_precision_unchanged=True,
             original_six_mechanism_design_active=False,
             whole_request_peak_certified=False,
+            source_encoding_overlap_audit=self.encoding_audit,
         )
 
 
 @contextmanager
-def use(enabled=True, *, decoder="bitmap_prefix", encoding_policy="search"):
+def use(enabled=True, *, decoder="bitmap_prefix", encoding_policy="search", audit_encoding=False):
     """One selector per layer; same existing decoder buffer for all 64 consumers."""
-    if type(enabled) is not bool or encoding_policy not in ("search", "direct_additive"):
+    if type(audit_encoding) is not bool:
+        raise ValueError("explicit source encoding audit boolean required")
+    if (
+        type(enabled) is not bool
+        or encoding_policy not in ("search", "direct_additive", "direct_additive_compact_rare")
+        or (encoding_policy == "direct_additive_compact_rare" and decoder != "packed_words")
+    ):
         raise ValueError("explicit predictive source activation required")
     with native.use(True, construction="pack_selected", decoder=decoder) as common:
         state = State(common, encoding_policy)
+        original_convert = runtime.convert
+
+        def audited_convert(packets):
+            from mosaickv.evaluation.lossless_prompt_cache import backing_bytes
+            from mosaickv.evaluation.projection_cache import ScratchAudit
+
+            original = tuple(t for packet in packets for t in packet.tensors() if t.is_cuda)
+            peak = 0
+
+            def observe(extra):
+                nonlocal peak
+                peak = max(peak, backing_bytes((*original, *(t for t in extra if t.is_cuda))))
+
+            audit = ScratchAudit(excluded=set(), observe=observe)
+            torch.cuda.synchronize()
+            observe(())
+            with audit:
+                result = original_convert(packets)
+                observe(tuple(t for packet in result[0] for t in packet.tensors() if t.is_cuda))
+            torch.cuda.synchronize()
+            state.encoding_audit = dict(
+                peak_visible_GPU_tensor_bytes=peak,
+                observed_ATen_operations=audit.operations,
+                includes_original_packets_and_coexisting_new_payloads_and_ATen_results=True,
+                original_owner_lifetime_not_extended_beyond_conversion=True,
+                opaque_prefix_scan_workspace_observed=False,
+                exact_whole_request_peak_certified=False,
+            )
+            return result
 
         def encoder(previous, current):
-            if encoding_policy == "direct_additive":
+            if encoding_policy in ("direct_additive", "direct_additive_compact_rare"):
                 from mosaickv.evaluation.lossless_code_delta_gpu import DeviceCodes
 
                 candidate = (
-                    native.encode(previous, current, additive=True)
+                    native.encode(
+                        previous,
+                        current,
+                        additive=True,
+                        compact_rare=encoding_policy == "direct_additive_compact_rare",
+                    )
                     if previous is not None
                     else None
                 )
@@ -102,5 +146,14 @@ def use(enabled=True, *, decoder="bitmap_prefix", encoding_policy="search"):
         if not enabled:
             yield state
         else:
-            with patch.object(runtime, "encode", encoder):
+            from contextlib import nullcontext
+
+            with (
+                patch.object(runtime, "encode", encoder),
+                (
+                    patch.object(runtime, "convert", audited_convert)
+                    if audit_encoding
+                    else nullcontext()
+                ),
+            ):
                 yield state

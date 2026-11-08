@@ -15,10 +15,13 @@ def _symbols(pointer, group, lane):
 
 
 @triton.jit
-def _analyze(value):
+def _analyze(value, COMPACT_RARE: tl.constexpr = False):
     first, second, best, next_best = 0, 1, -1, -1
+    support = 0
     for symbol in tl.static_range(8):
         count = tl.sum((value == symbol).to(tl.int32), 0)
+        if COMPACT_RARE:
+            support |= tl.where(count > 0, 1 << symbol, 0)
         replace = count > best
         second = tl.where(replace, first, tl.where(count > next_best, symbol, second))
         next_best = tl.where(replace, best, tl.maximum(next_best, count))
@@ -29,18 +32,36 @@ def _analyze(value):
     count = tl.sum(other.to(tl.int32), 0)
     escapes = tl.sum(rare.to(tl.int32), 0)
     length = 65 + tl.cdiv(count, 8) + tl.cdiv(escapes * 3, 8)
-    return first | (second << 3), length
+    mode = first | (second << 3)
+    if COMPACT_RARE:
+        support &= ~(1 << first) & ~(1 << second)
+        narrow_length = 67 + tl.cdiv(count, 8) + tl.cdiv(escapes * 2, 8)
+        narrow = (libdevice.popc(support) <= 4) & (narrow_length < length)
+        palette, slot = 0, 0
+        for symbol in tl.static_range(8):
+            present = (support & (1 << symbol)) != 0
+            palette |= tl.where(present, symbol << (slot * 3), 0)
+            slot += present.to(tl.int32)
+        mode |= tl.where(narrow, 128 | (palette << 8), 0)
+        length = tl.where(narrow, narrow_length, length)
+    return mode, length
 
 
 @triton.jit
 def count(
-    previous, current, lengths, modes, HAS_PREVIOUS: tl.constexpr, ADDITIVE: tl.constexpr = False
+    previous,
+    current,
+    lengths,
+    modes,
+    HAS_PREVIOUS: tl.constexpr,
+    ADDITIVE: tl.constexpr = False,
+    COMPACT_RARE: tl.constexpr = False,
 ):
     group, lane = tl.program_id(0), tl.arange(0, 512)
     value = _symbols(current, group, lane)
     if ADDITIVE:
         value = (value - _symbols(previous, group, lane)) & 7
-    mode, size = _analyze(value)
+    mode, size = _analyze(value, COMPACT_RARE=COMPACT_RARE)
     if HAS_PREVIOUS and not ADDITIVE:
         other_mode, other_size = _analyze(value ^ _symbols(previous, group, lane))
         better = other_size < size
@@ -79,6 +100,7 @@ def pack(
     GROUPS: tl.constexpr,
     HAS_PREVIOUS: tl.constexpr,
     ADDITIVE: tl.constexpr = False,
+    COMPACT_RARE: tl.constexpr = False,
 ):
     group, lane = tl.program_id(0), tl.arange(0, 512)
     mode = tl.load(modes + group)
@@ -102,30 +124,47 @@ def pack(
     if HAS_PREVIOUS and not ADDITIVE:
         value ^= tl.where((mode & 64) != 0, _symbols(previous, group, lane), 0)
     first, second = mode & 7, (mode >> 3) & 7
+    narrow = (~raw) & ((mode & 128) != 0) if COMPACT_RARE else False
+    extra = tl.where(narrow, 2, 0)
+    if COMPACT_RARE:
+        tl.store(payload + start + 1, ((mode >> 8) & 255).to(tl.uint8), narrow)
+        tl.store(payload + start + 2, ((mode >> 16) & 255).to(tl.uint8), narrow)
     other = value != first
     rare = other & (value != second)
     count = tl.sum(other.to(tl.int32), 0)
     escapes = tl.sum(rare.to(tl.int32), 0)
     bitmap0 = tl.sum(tl.reshape(other.to(tl.int32), (64, 8)) << tl.arange(0, 8)[None, :], 1)
     tl.store(payload + start, mode.to(tl.uint8), ~raw)
-    tl.store(payload + start + 1 + tl.arange(0, 64), bitmap0.to(tl.uint8), ~raw)
+    tl.store(payload + start + 1 + extra + tl.arange(0, 64), bitmap0.to(tl.uint8), ~raw)
     ordered = tl.sort(tl.where(other, lane, lane + 512), descending=False)
     ordered_rare = tl.gather(rare.to(tl.int32), ordered % 512, 0) & (lane < count)
     bitmap1 = tl.sum(tl.reshape(ordered_rare, (64, 8)) << tl.arange(0, 8)[None, :], 1)
     tl.store(
-        payload + start + 65 + tl.arange(0, 64),
+        payload + start + 65 + extra + tl.arange(0, 64),
         bitmap1.to(tl.uint8),
         (~raw) & (tl.arange(0, 64) < tl.cdiv(count, 8)),
     )
     rare_order = tl.sort(tl.where(rare, lane, lane + 512), descending=False)
     literal = tl.where(lane < escapes, tl.gather(value, rare_order % 512, 0), 0)
-    word = tl.sum(tl.reshape(literal, (64, 8)) << (tl.arange(0, 8)[None, :] * 3), 1)
+    if COMPACT_RARE:
+        palette = mode >> 8
+        encoded = tl.where(
+            literal == (palette & 7),
+            0,
+            tl.where(
+                literal == ((palette >> 3) & 7), 1, tl.where(literal == ((palette >> 6) & 7), 2, 3)
+            ),
+        )
+        literal = tl.where(narrow, tl.where(lane < escapes, encoded, 0), literal)
+    bits = tl.where(narrow, 2, 3)
+    bytes_per_word = tl.where(narrow, 2, 3)
+    word = tl.sum(tl.reshape(literal, (64, 8)) << (tl.arange(0, 8)[None, :] * bits), 1)
     for b in tl.static_range(3):
-        i = tl.arange(0, 64) * 3 + b
+        i = tl.arange(0, 64) * bytes_per_word + b
         tl.store(
-            payload + start + 65 + tl.cdiv(count, 8) + i,
+            payload + start + 65 + extra + tl.cdiv(count, 8) + i,
             (word >> (8 * b)).to(tl.uint8),
-            (~raw) & (i < tl.cdiv(escapes * 3, 8)),
+            (~raw) & (b < bytes_per_word) & (i < tl.cdiv(escapes * bits, 8)),
         )
 
 
@@ -156,16 +195,19 @@ def unpack(
     BITMAP_PREFIX: tl.constexpr = False,
     ADDITIVE: tl.constexpr = False,
     PACKED_PREVIOUS: tl.constexpr = False,
+    COMPACT_RARE: tl.constexpr = False,
 ):
     group, lane = tl.program_id(0), tl.arange(0, 512)
     offset = tl.load(offsets + group).to(tl.uint32)
     raw = (offset & 0x80000000) != 0
     start = (offset & 0x7FFFFFFF).to(tl.int32)
     mode = tl.load(payload + start, ~raw, other=0).to(tl.int32)
+    narrow = (~raw) & ((mode & 128) != 0) if COMPACT_RARE else False
+    extra = tl.where(narrow, 2, 0)
     if BITMAP_PREFIX:
-        byte0, prefix0, count = _bitmap_counts(payload, start + 1, 512, ~raw)
+        byte0, prefix0, count = _bitmap_counts(payload, start + 1 + extra, 512, ~raw)
         flag0, rank0 = _bitmap_rank(byte0, prefix0, lane)
-        byte1, prefix1, _ = _bitmap_counts(payload, start + 65, count, ~raw)
+        byte1, prefix1, _ = _bitmap_counts(payload, start + 65 + extra, count, ~raw)
         second, rank1 = _bitmap_rank(byte1, prefix1, rank0)
         flag1 = flag0 & second
     else:
@@ -185,11 +227,18 @@ def unpack(
             != 0
         )
         rank1 = tl.maximum(tl.cumsum(flag1.to(tl.int32), 0) - 1, 0)
-    bit, shift = rank1 * 3, (rank1 * 3) % 8
-    literal = start + 65 + tl.cdiv(count, 8) + bit // 8
+    literal_bits = tl.where(narrow, 2, 3)
+    bit, shift = rank1 * literal_bits, (rank1 * literal_bits) % 8
+    literal = start + 65 + extra + tl.cdiv(count, 8) + bit // 8
     a = tl.load(payload + literal, (~raw) & flag1, other=0).to(tl.int32)
-    b = tl.load(payload + literal + 1, (~raw) & flag1 & (shift > 5), other=0).to(tl.int32)
-    code = ((a >> shift) | (b << (8 - shift))) & 7
+    b = tl.load(payload + literal + 1, (~raw) & flag1 & (shift + literal_bits > 8), other=0).to(
+        tl.int32
+    )
+    code = ((a >> shift) | (b << (8 - shift))) & tl.where(narrow, 3, 7)
+    if COMPACT_RARE:
+        palette = tl.load(payload + start + 1, narrow, other=0).to(tl.int32)
+        palette |= tl.load(payload + start + 2, narrow, other=0).to(tl.int32) << 8
+        code = tl.where(narrow, (palette >> (code * 3)) & 7, code)
     value = tl.where(flag0, tl.where(flag1, code, (mode >> 3) & 7), mode & 7)
     if HAS_PREVIOUS and not ADDITIVE and not PACKED_PREVIOUS:
         value ^= tl.where((mode & 64) != 0, _symbols(previous, group, lane), 0)

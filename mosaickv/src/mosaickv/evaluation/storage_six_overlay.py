@@ -75,8 +75,37 @@ class OverlayPolicy:
     graph_structural_templates: bool = False
     graph_direct_metadata_key: bool = False
     device_guard_records: bool = False
+    planner_host_transfer: str = "deferred_layer"
+    planner_similarity_limit: int = 0
+    repair_execution: str = "legacy"
 
     def __post_init__(self):
+        if self.repair_execution not in ("legacy", "score_risk"):
+            raise ValueError("explicit legacy/score-risk repair execution required")
+        if self.repair_execution == "score_risk" and (
+            not self.enabled
+            or self.layers != (31,)
+            or self.inline_repair
+            or self.live_anchor_guard
+            or self.readout_control
+            or self.readout_selection != "none"
+            or self.repair_policy != "prototype_risk"
+        ):
+            raise ValueError(
+                "score-risk repair requires an isolated final-layer prototype-risk variant"
+            )
+        if self.planner_host_transfer not in ("deferred_layer", "deferred_layer_vectorized"):
+            raise ValueError("explicit registered planner host transfer required")
+        if type(self.planner_similarity_limit) is not int or self.planner_similarity_limit not in (
+            0,
+            64,
+            128,
+        ):
+            raise ValueError("registered full/64/128 learned-descriptor shortlist required")
+        if self.planner_similarity_limit and self.demand_weighted_coverage:
+            raise ValueError(
+                "shortlist variant cannot silently change the per-query protection scope"
+            )
         if type(self.graph_direct_metadata_key) is not bool or (
             self.graph_direct_metadata_key and not self.graph_structural_templates
         ):
@@ -194,7 +223,7 @@ class OverlayPolicy:
             raise ValueError("registered sparse edge implementation required")
         if type(self.replace_source_codes) is not bool:
             raise ValueError("explicit source replacement flag required")
-        if self.repair_policy not in ("entropy", "entropy_or_prototype_risk"):
+        if self.repair_policy not in ("entropy", "entropy_or_prototype_risk", "prototype_risk"):
             raise ValueError("registered repair policy required")
         import math
 
@@ -543,6 +572,19 @@ def plan_layer(
     from mosaickv.graph.builder import cosine_search, positional_search, spatial_search
     from mosaickv.graph.structural_templates import activate as activate_templates
 
+    planner_candidates = None
+    if policy.planner_similarity_limit:
+        # This is an explicitly labeled graph approximation, NOT a claim of
+        # edge/selection identity. Preserve all mandatory nodes and full source
+        # positions; only learned descriptors and optional optimization shrink.
+        from mosaickv.evaluation.hybrid_shortlist import shortlist
+
+        planner_candidates = shortlist(
+            prediction.detach().cpu().numpy(),
+            required,
+            policy.planner_similarity_limit,
+        )
+
     with (
         positional_search(policy.graph_positional_search),
         cosine_search(policy.graph_cosine_topk),
@@ -559,9 +601,15 @@ def plan_layer(
                 max_neighbors=4,
                 similarity_chunk_size=128,
                 edge_accumulation_mode=policy.graph_accumulation,
+                attention_host_transfer_mode=policy.planner_host_transfer,
+                candidate_descriptor_pooling=planner_candidates is not None,
+                similarity_shortlist_multiplier=0.0 if planner_candidates is None else 1.0,
+                candidate_neighbor_hops=0,
+                candidate_graph_mode="full" if planner_candidates is None else "shortlist_rerank",
             ),
             prompt_attentions=(probabilities[:, head : head + 1],),
             prompt_attention_query_window=window,
+            similarity_candidate_node_ids=planner_candidates,
         )
     timer.mark("sparse_graph")
     utility_graph = graph
@@ -646,7 +694,11 @@ def plan_layer(
         objective = DemandWeightedObjective(
             graph, utilities, selection_config, evidence, floor=0.95
         )
-    selected = lazy_greedy_select(objective, SelectionBudget(count * d * 4, BudgetUnit.BYTES))
+    selected = lazy_greedy_select(
+        objective,
+        SelectionBudget(count * d * 4, BudgetUnit.BYTES),
+        optimization_node_ids=planner_candidates,
+    )
     if policy.demand_weighted_coverage:
         selected = objective.protect_selection(selected)
     timer.mark("budgeted_selection")
@@ -741,6 +793,10 @@ def plan_layer(
         anchor_feasibility=anchor_feasibility,
         forecast_mode=forecast_mode,
         graph_nodes=len(graph.nodes),
+        planner_host_transfer=policy.planner_host_transfer,
+        planner_similarity_limit=policy.planner_similarity_limit,
+        learned_descriptor_nodes=n if planner_candidates is None else len(planner_candidates),
+        graph_approximation_explicit=planner_candidates is not None,
         graph_edges=len(graph.weights),
         graph_positional_search=policy.graph_positional_search,
         graph_cosine_topk=policy.graph_cosine_topk,
@@ -1142,6 +1198,21 @@ def integrated_storage(
             raise RuntimeError("every configured mechanism layer must have a real overlay")
         report["prompt_length"] = args[1].state.logical_sequence_length
         inline_result = None
+        predicted_selected = None
+        if overlays and policy.repair_execution == "score_risk":
+            from mosaickv.evaluation.score_risk_repair import ScoreRiskRepair
+
+            with ScoreRiskRepair(overlays[31], policy, report) as repaired:
+                inline_result = original_run(*args, **kwargs)
+            if repaired.steps != kwargs["tokens"] - 1:
+                raise RuntimeError("score-risk transaction did not observe every committed update")
+            report.update(
+                provisional_tokens=0,
+                provisional_model_updates=0,
+                probe_decode_wall_seconds=0.0,
+                probe_storage=None,
+                separate_compressed_cache_probe_performed=False,
+            )
         if overlays and policy.inline_repair:
             from mosaickv.evaluation.inline_first_step_repair import InlineRepair
 
@@ -1178,7 +1249,7 @@ def integrated_storage(
                 probe_storage=None,
                 separate_compressed_cache_probe_performed=False,
             )
-        if overlays and not policy.inline_repair:
+        if overlays and not policy.inline_repair and policy.repair_execution == "legacy":
             # A separate, disposable two-prediction cache uses the SAME prefill
             # and source packets. No nested live cache or second prefill.
             if reader_options is None:
@@ -1347,14 +1418,19 @@ def integrated_storage(
                 )
             report["provisional_first_decode_logit_sha"] = None
         after, details = original_run(*args, **kwargs) if inline_result is None else inline_result
-        if overlays and not policy.inline_repair and predicted_selected is not None:
+        if (
+            overlays
+            and not policy.inline_repair
+            and policy.repair_execution == "legacy"
+            and predicted_selected is not None
+        ):
             from mosaickv.evaluation.exact_last_layer_readout import compare_logits
 
             check = compare_logits(predicted_selected, after[1])
             report["conditional_readout_selection"]["actual_selected_logit_control"] = check
             if not check["logits_bitwise"]:
                 raise RuntimeError("selected conditional suffix differs from actual final decode")
-        if overlays and not policy.inline_repair:
+        if overlays and not policy.inline_repair and policy.repair_execution == "legacy":
             report["repair_logit_max_change"] = float((before[1] - after[1]).abs().max())
             report["repair_token_changed"] = int(before[1].argmax()) != int(after[1].argmax())
             if policy.readout_selection != "none":
@@ -1376,7 +1452,11 @@ def integrated_storage(
             * (
                 kwargs["tokens"]
                 - 1
-                + (0 if policy.inline_repair else policy.provisional_tokens - 1)
+                + (
+                    0
+                    if policy.inline_repair or policy.repair_execution == "score_risk"
+                    else policy.provisional_tokens - 1
+                )
             )
             for o in overlays.values()
         ):

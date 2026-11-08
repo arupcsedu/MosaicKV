@@ -255,9 +255,9 @@ def request(
     prepared = adapter.prepare_inputs(messages)
     prepared_at = time.monotonic()
     cache = (
-        RetiringPrefillCache(len(profile), audit=False)
+        RetiringPrefillCache(len(profile), audit=audit_decode_storage)
         if method == "mosaickv_exact"
-        else SelectedRetiringCache(len(profile), audit=False)
+        else SelectedRetiringCache(len(profile), audit=audit_decode_storage)
     )
     encoder = (
         StreamingDirectSource(

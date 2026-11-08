@@ -87,6 +87,30 @@ def test_pending_transaction_cannot_be_overwritten_or_retired():
     core.close()
 
 
+@torch.inference_mode()
+def test_repair_replays_pending_scores_then_one_value_transaction():
+    lease = torch.randn(1, 2, 17, 128).bfloat16()
+    core = Core(lease, mask_dtype=None, graph=False, frequencies={})
+    query = torch.randn_like(core.q)
+    with pytest.raises(RuntimeError, match="pending"):
+        core.replay_pending_scores(query, None, 8)
+    core.scores_for(query, None, 8)
+    lease[..., 2, :].add_(1)
+    expected = reference_scores(query, lease[..., :8, :], None, 128**-0.5)
+    assert same_words(core.replay_pending_scores(query, None, 8), expected)
+    with pytest.raises(RuntimeError, match="same-length"):
+        core.replay_pending_scores(query, None, 7)
+    with pytest.raises(ValueError, match="transaction"):
+        core.scores_for(query, None, 8)
+    value = torch.randn(1, 2, 8, 128).bfloat16()
+    lease[..., :8, :].copy_(value)
+    expected_out = torch.matmul(expected, value).transpose(1, 2).contiguous()
+    assert same_words(core.values_for(8), expected_out)
+    with pytest.raises(RuntimeError, match="matching QK"):
+        core.values_for(8)
+    core.close()
+
+
 def test_real_cuda_controls_resolve_imports_before_device_barrier(monkeypatch):
     def barrier():
         raise RuntimeError("CPU-only import boundary passed")

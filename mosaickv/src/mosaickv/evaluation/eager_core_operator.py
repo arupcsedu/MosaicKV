@@ -245,6 +245,23 @@ class Core:
         self.pending = length, use_graph
         return views.probabilities
 
+    def replay_pending_scores(self, query, mask, length):
+        """Recompute QK after an in-lease repair, before the one matching PV.
+
+        This is not another cache append or layer update. Retain the ordinary
+        transaction guard on scores_for; only an already pending, same-length
+        transaction may use this explicitly named repair API.
+        """
+        if self.closed or self.pending is None or self.pending[0] != length:
+            raise RuntimeError("repair requires a pending same-length K-to-V transaction")
+        pending = self.pending
+        self.pending = None
+        try:
+            return self.scores_for(query, mask, length)
+        except BaseException:
+            self.pending = pending
+            raise
+
     def values_for(self, length):
         if self.closed or self.pending is None or self.pending[0] != length:
             raise RuntimeError("V must follow exactly one matching QK stage on the same lease")

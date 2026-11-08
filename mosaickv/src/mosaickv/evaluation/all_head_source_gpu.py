@@ -18,6 +18,7 @@ class DeviceSymbols:
     has_previous: bool
     raw: bool = False
     additive: bool = False
+    compact_rare: bool = False
 
     def tensors(self):
         return self.payload, self.offsets
@@ -43,11 +44,16 @@ class CodecChoice:
         return self.packet.serialized_bytes + self.selector.numel()
 
 
-def encode(previous, current, *, additive=False):
+def encode(previous, current, *, additive=False, compact_rare=False):
     from mosaickv.evaluation.all_head_source_kernel import count, pack
     from mosaickv.evaluation.lossless_code_delta_gpu import validate_bytes
 
-    if type(additive) is not bool or (additive and previous is None):
+    if (
+        type(additive) is not bool
+        or (additive and previous is None)
+        or type(compact_rare) is not bool
+        or (compact_rare and not additive)
+    ):
         raise ValueError("additive coding requires an explicit original predecessor")
     validate_bytes(current)
     if current.numel() % 192:
@@ -61,7 +67,13 @@ def encode(previous, current, *, additive=False):
     modes = torch.empty_like(sizes)
     parent = previous if previous is not None else current
     count[(groups,)](
-        parent, current, sizes, modes, HAS_PREVIOUS=previous is not None, ADDITIVE=additive
+        parent,
+        current,
+        sizes,
+        modes,
+        HAS_PREVIOUS=previous is not None,
+        ADDITIVE=additive,
+        COMPACT_RARE=compact_rare,
     )
     ends = sizes.cumsum(0, dtype=torch.int32)
     length = int(ends[-1].item())
@@ -80,8 +92,16 @@ def encode(previous, current, *, additive=False):
         GROUPS=groups,
         HAS_PREVIOUS=previous is not None,
         ADDITIVE=additive,
+        COMPACT_RARE=compact_rare,
     )
-    return DeviceSymbols(current.numel(), payload, offsets, previous is not None, additive=additive)
+    return DeviceSymbols(
+        current.numel(),
+        payload,
+        offsets,
+        previous is not None,
+        additive=additive,
+        compact_rare=compact_rare,
+    )
 
 
 def encode_best(previous, current, *, additive_candidate=False):
@@ -191,6 +211,8 @@ def decode(previous, packet, destination=None, *, implementation="reference"):
         or type(packet.has_previous) is not bool
         or type(packet.additive) is not bool
         or (packet.additive and not packet.has_previous)
+        or type(packet.compact_rare) is not bool
+        or (packet.compact_rare and (not packet.additive or implementation != "packed_words"))
         or packet.raw is not False
         or packet.payload.device.type != "cuda"
         or packet.payload.dtype != torch.uint8
@@ -228,6 +250,7 @@ def decode(previous, packet, destination=None, *, implementation="reference"):
         BITMAP_PREFIX=implementation in ("bitmap_prefix", "packed_words"),
         ADDITIVE=packet.additive,
         PACKED_PREVIOUS=implementation == "packed_words",
+        COMPACT_RARE=packet.compact_rare,
     )
     return output
 
