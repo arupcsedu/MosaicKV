@@ -22,6 +22,9 @@ TESTS = (
     "test_shared_head_scope.py",
     "test_kv_timeline.py",
     "test_request_ownership.py",
+    "test_ownership_review.py",
+    "test_shared_proto_analyzer.py",
+    "test_shared_proto_review_writer.py",
     "test_request_peak_coverage.py",
     "test_scratch_audit_lifetime.py",
     "test_shared_source_map_accounting.py",
@@ -137,6 +140,11 @@ def prepare(root, reuse=None):
         Path(torch.__file__).parent / "_C/__init__.pyi",
         Path(torch.__file__).parent / "include/c10/cuda/CUDACachingAllocator.h",
         Path(transformers.__file__).parent / "models/llama/modeling_llama.py",
+        Path(transformers.__file__).parent / "models/llava/modeling_llava.py",
+        Path(transformers.__file__).parent / "models/clip/modeling_clip.py",
+        Path(transformers.__file__).parent / "masking_utils.py",
+        Path(transformers.__file__).parent / "activations.py",
+        Path(torch.__file__).parent / "nn/functional.py",
     ):
         bound[str(path)] = sha(path)
     p.update(
@@ -168,6 +176,11 @@ def prepare(root, reuse=None):
             "mosaickv/tests/unit/test_request_peak_coverage.py",
             "mosaickv/src/mosaickv/measurements/allocator_segments.py",
             "mosaickv/src/mosaickv/measurements/csrc/allocator_segments.cpp",
+            "mosaickv/src/mosaickv/measurements/ownership_review.py",
+            "mosaickv/scripts/review_shared_proto_ownership.py",
+            "mosaickv/tests/unit/test_ownership_review.py",
+            "mosaickv/tests/unit/test_shared_proto_analyzer.py",
+            "mosaickv/tests/unit/test_shared_proto_review_writer.py",
         }
         changed = set(
             subprocess.check_output(
@@ -551,6 +564,17 @@ def analyze(root, expected):
         raw = root / f"workers/{i}/raw.jsonl"
         if raw.exists():
             rows.extend(dict(input=i, **json.loads(line)) for line in raw.read_text().splitlines())
+        if p.get("audit_only"):
+            receipt = read(Path(p["reuse_canaries"]) / f"{i}.json")
+            rows.extend(
+                dict(
+                    input=i,
+                    reused_canary=True,
+                    producer_source_sha=receipt["producer_source_sha"],
+                    **row,
+                )
+                for row in receipt["rows"]
+            )
     canaries = [r for r in rows if r["phase"] == "canary"]
     failures.extend(
         dict(
@@ -585,18 +609,6 @@ def analyze(root, expected):
                     },
                     peak_ratio_is_decode_counter_not_whole_request_certificate=True,
                 )
-            )
-        if p.get("audit_only"):
-            rows.extend(
-                dict(
-                    input=i,
-                    reused_canary=True,
-                    producer_source_sha=read(Path(p["reuse_canaries"]) / f"{i}.json")[
-                        "producer_source_sha"
-                    ],
-                    **row,
-                )
-                for row in read(Path(p["reuse_canaries"]) / f"{i}.json")["rows"]
             )
     summary = dict(
         complete=not failures,

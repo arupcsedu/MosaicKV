@@ -125,3 +125,36 @@ an `afterany` analyzer. The GPU admission controller enforces the aggregate cap.
 No continuous log tailing. Main worktree, paper sources and old evidence remain
 untouched. This diagnostic cannot establish statistically independent quality
 preservation or latency superiority.
+
+## Source-bound CPU ownership review
+
+`review_shared_proto_ownership.py` derives new write-once certificates from saved
+allocator generations; it never edits predictions, original reports, lifetimes,
+or timestamps, and never submits GPU work. Supplemental rules distinguish the
+image projector/embedding/FFN/logit activations from KV representations and
+reconstruction. Language attention scores/probabilities, causal masks, RoPE and
+custom attention workspaces are conservatively charged as shared KV workspace
+for BOTH arms. Unknown sources and missing/overwritten histories still fail.
+
+An ambiguous deferred timestamp observation assigns NO role and cannot establish
+an owner identity. If every generation has independent reviewed source-stack
+attribution, the rejected observation is unused and may be superseded; its
+original blocker and error details remain in the derived record. No ambiguity
+about a source retirement receipt is tolerated. The certificate recomputes the
+maximum concurrent bytes over all allocator intervals, not phase maxima.
+
+Bind the producer plan, inputs, manifests, raw rows, logits, native-control
+receipts and exact source blobs/hashes. Additional upstream source is checked
+against the producer's package version and installed wheel RECORD; disclose
+that historical captures did not separately hash every supplemental file.
+Future preparation pins those files before capture. The numerical guard,
+source prototype policy and generation settings are unchanged.
+
+The audit-only analyzer now counts reused canaries before checking eight-row
+completeness and memory pairs; the original incomplete derived report is
+preserved. These fixes do not require rerunning numerical inference. A complete
+certificate does not mean a smaller peak: construction overlaps and retained
+workspaces can make the prototype variant's whole-request peak higher, even
+when its initial/final GPU packet is smaller. Pinned CPU residuals must be
+reported separately, and GPU-plus-CPU savings must not be inferred from GPU
+packet savings. Audit wall time cannot be used as clean latency evidence.

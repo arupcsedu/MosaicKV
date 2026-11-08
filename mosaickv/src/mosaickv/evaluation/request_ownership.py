@@ -12,6 +12,8 @@ from functools import wraps
 from unittest.mock import patch
 
 from mosaickv.measurements.kv_timeline import CudaOwnershipSession
+from mosaickv.measurements.ownership_review import RULES as REVIEWED_STACK_RULES
+from mosaickv.measurements.ownership_review import review
 
 # Allocation APIs reachable from these exact functions construct/read ONLY
 # cache representation or KV reconstruction buffers. Do NOT use broad rules
@@ -52,7 +54,11 @@ STACK_RULES = tuple(
     for name in names
 )
 STACK_RULES += (
-    ("/transformers/models/llama/modeling_llama.py", "eager_attention_forward", "non_kv"),
+    (
+        "/transformers/models/llama/modeling_llama.py",
+        "eager_attention_forward",
+        "kv_shared_workspace",
+    ),
     ("/transformers/models/clip/modeling_clip.py", "eager_attention_forward", "non_kv"),
     ("/transformers/models/llama/modeling_llama.py", "apply_rotary_pos_emb", "kv_shared_workspace"),
     ("/transformers/models/llama/modeling_llama.py", "rotate_half", "kv_shared_workspace"),
@@ -73,6 +79,7 @@ STACK_RULES += tuple(
 )
 STACK_RULES += (("/mosaickv/evaluation/storage_runs.py", "run", "non_kv", 369),)
 STACK_RULES += (("/mosaickv/measurements/kv_timeline.py", "_flush_cuda_events", "non_kv"),)
+STACK_RULES += REVIEWED_STACK_RULES
 
 
 @contextmanager
@@ -137,13 +144,17 @@ class _RequestSession(CudaOwnershipSession):
             all_classified = bool(self.timeline.allocations) and all(
                 row["role"] != "unknown" for row in self.timeline.allocations.values()
             )
-            self.result.update(self.report(opaque_workspace_classified=all_classified))
-            self.result.update(
+            classified = self.report(opaque_workspace_classified=all_classified)
+            classified.update(
                 classification_rule_version="exact_file_function_v1",
                 unknown_allocations_not_assumed_non_KV=True,
                 timing_instrumentation_excluded=True,
                 all_head_source_retirement_receipts=receipts,
             )
+            # A rejected short-lived timestamp mark assigns no owner. Complete
+            # independent source-stack attribution may supersede that mark,
+            # never a missing lifetime/history or an unclassified generation.
+            self.result.update(review(classified))
 
 
 @contextmanager
