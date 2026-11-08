@@ -78,8 +78,15 @@ class OverlayPolicy:
     planner_host_transfer: str = "deferred_layer"
     planner_similarity_limit: int = 0
     repair_execution: str = "legacy"
+    overlay_fill_backend: str = "torch"
 
     def __post_init__(self):
+        if self.overlay_fill_backend not in ("torch", "fused"):
+            raise ValueError("explicit torch/fused overlay fill required")
+        if self.overlay_fill_backend == "fused" and (
+            self.repair_execution != "score_risk" or self.component_mode != "full"
+        ):
+            raise ValueError("fused fill requires the isolated full score-risk variant")
         if self.repair_execution not in ("legacy", "score_risk"):
             raise ValueError("explicit legacy/score-risk repair execution required")
         if self.repair_execution == "score_risk" and (
@@ -340,8 +347,12 @@ class LayerOverlay:
         anchor,
         dispersion,
         evidence,
+        fill_backend="torch",
     ):
         self.head, self.anchor = head, anchor
+        if fill_backend not in ("torch", "fused"):
+            raise ValueError("explicit overlay fill backend required")
+        self.fill_backend = fill_backend
         device = prototype_pair[0].device
         self.positions = torch.tensor(positions, dtype=torch.long, device=device)
         self.exact_ids = torch.tensor(exact_ids, dtype=torch.long, device=device)
@@ -359,9 +370,13 @@ class LayerOverlay:
         self.member_keys = (
             neutral * self.cos[:-1].float() + rotate(neutral) * self.sin[:-1].float()
         ).to(prototype_pair[0].dtype)
-        self.mixed = tuple(
-            torch.empty((len(positions), t.shape[-1]), dtype=t.dtype, device=device)
-            for t in prototype_pair
+        self.mixed = (
+            ()
+            if fill_backend == "fused"
+            else tuple(
+                torch.empty((len(positions), t.shape[-1]), dtype=t.dtype, device=device)
+                for t in prototype_pair
+            )
         )
         # Actual, charged reservation. Contains no original residual values
         # until promotion; stable addresses also support the parent's replay.
@@ -400,6 +415,10 @@ class LayerOverlay:
         return _bytes(self.residual_pair)
 
     def fill(self, component, destination):
+        if self.fill_backend == "fused":
+            from mosaickv.evaluation.fused_overlay_fill import fill
+
+            return fill(self, component, destination)
         if destination.ndim != 4 or destination.shape[0] != 1:
             raise ValueError("batch-one dense reader lease required")
         if self.component_mode == "parent_reserved":
@@ -874,6 +893,7 @@ def plan_layer(
         anchor=record.anchor_logical_position,
         dispersion=dispersion,
         evidence=evidence,
+        fill_backend=policy.overlay_fill_backend,
     )
     if _bytes(overlay.gpu_tensors()) > policy.maximum_extra_gpu_bytes:
         raise RuntimeError("overlay including repair reservation exceeds hard auxiliary cap")

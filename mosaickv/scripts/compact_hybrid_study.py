@@ -307,6 +307,96 @@ def prepare_audit(root, reuse):
     print(json.dumps(launch_gpu(root, "model")), flush=True)
 
 
+def prepare_fill(root, reuse):
+    """One targeted operation change; new paired timing, same consumed inputs."""
+    from mosaickv.evaluation.storage_six_overlay import OverlayPolicy
+
+    source = clean_source(SOURCE)
+    if root.exists() or reuse is None:
+        raise ValueError("new fused-fill root and immutable parent required")
+    p = read(reuse / "plan.json")
+    if p.get("memory_only") or p["fresh_or_paper_campaign_authorized"]:
+        raise ValueError("original consumed engineering plan required")
+    base = OverlayPolicy(**dict(p["policies"]["hybrid_score_risk"], layers=(31,)))
+    arms = ("storage_compact", "hybrid_score_risk", "hybrid_fused")
+    registered, paths = (
+        {},
+        [
+            reuse / "plan.json",
+            reuse / "model-analysis/decision.json",
+            SOURCE / "mosaickv/docs/fused_overlay_fill.md",
+        ],
+    )
+    for i in (0, 1):
+        folder = reuse / f"model/{i}"
+        records = [json.loads(s) for s in (folder / "raw.jsonl").read_text().splitlines()]
+        keyed = {(r["phase"], r["arm"], r["trial"]): r for r in records}
+        wanted = [
+            (phase, a, t)
+            for phase, n in (("canary", 1), ("timed", p["repetitions"]))
+            for a in arms[:2]
+            for t in range(n)
+        ]
+        if len(keyed) != len(records) or any(
+            k not in keyed
+            or keyed[k]["status"] != "completed"
+            or not keyed[k]["numerically_admissible"]
+            for k in wanted
+        ):
+            raise ValueError("complete positive frozen controls required; no failed row reuse")
+        ref = folder / "hybrid_score_risk.logits.pt"
+        paths += [folder / n for n in ("raw.jsonl", "manifest.json", "result.json")]
+        paths.append(ref)
+        registered[str(i)] = {"hybrid_score_risk": str(ref), "hybrid_fused": str(ref)}
+    root.mkdir(parents=True)
+    (root / "logs").mkdir()
+    with (root / "cpu-tests.txt").open("x") as out:
+        result = subprocess.run(
+            [
+                PYTHON,
+                "-m",
+                "pytest",
+                "-q",
+                "-o",
+                "addopts=",
+                "mosaickv/tests/unit/test_fused_overlay_fill.py",
+                "mosaickv/tests/unit/test_storage_six_overlay.py",
+                "mosaickv/tests/unit/test_score_risk_repair.py",
+                "mosaickv/tests/unit/test_compact_hybrid_study.py",
+                "mosaickv/tests/unit/test_scratch_audit_lifetime.py",
+            ],
+            cwd=SOURCE,
+            stdout=out,
+            stderr=subprocess.STDOUT,
+        )
+    if result.returncode:
+        raise ValueError("fused policy CPU gate failed; no GPU submission")
+    paths.append(root / "cpu-tests.txt")
+    p.update(
+        source_sha=source,
+        bound_files=dict(p["bound_files"], **{str(f): sha(f) for f in paths}),
+        arms=list(arms),
+        model_arms=list(arms),
+        required_canary_arms=list(arms),
+        policies={
+            "storage_compact": p["policies"]["storage_compact"],
+            "hybrid_score_risk": asdict(base),
+            "hybrid_fused": asdict(replace(base, overlay_fill_backend="fused")),
+        },
+        registered_references=registered,
+        require_frozen_bitwise_all_arms=True,
+        require_all_parent_tokens=True,
+        force_control=False,
+        fused_fill_native_control=True,
+        comparisons=[["hybrid_score_risk", "hybrid_fused"], ["storage_compact", "hybrid_fused"]],
+        multiplicity_comparisons=4,
+        timing_rerun_reason="new_fused_operation_requires_new_paired_controls",
+        measurement_type="consumed_fused_exact_prototype_repair_fill_engineering_not_quality",
+    )
+    write_once(root / "plan.json", p)
+    print(json.dumps(launch_gpu(root, "model")), flush=True)
+
+
 def archive(p, i):
     import torch
 
@@ -526,6 +616,7 @@ def model(p, folder, i):
     from mosaickv.hf_cli import _model_kwargs
 
     controls = p["controls"]
+    active_arms = tuple(p.get("model_arms", ARMS))
     features = read(controls["inputs"])[i]
     cfg = RunConfig.from_mapping(controls["parent"]["config"])
     adapter = load_hf_adapter(
@@ -544,6 +635,10 @@ def model(p, folder, i):
     hybrid_reference = torch.load(
         controls["references"][str(i)]["hybrid"], weights_only=True, map_location="cpu"
     )
+    registered_references = {
+        a: torch.load(path, weights_only=True, map_location="cpu")
+        for a, path in p.get("registered_references", {}).get(str(i), {}).items()
+    }
     resolved = {
         a: OverlayPolicy(**dict(v, layers=tuple(v["layers"]))) for a, v in p["policies"].items()
     }
@@ -604,17 +699,23 @@ def model(p, folder, i):
                 )
                 numerical = fidelity(
                     actual,
-                    hybrid_reference if arm == ARMS[2] else reference,
-                    strict=arm in ARMS[:3],
+                    registered_references.get(
+                        arm, hybrid_reference if arm == ARMS[2] else reference
+                    ),
+                    strict=p.get("require_frozen_bitwise_all_arms", arm in ARMS[:3]),
                     p=p,
                 )
                 numerical["frozen_reference_kind"] = (
-                    "retained_hybrid" if arm == ARMS[2] else "storage_parent"
+                    "registered_unchanged_Torch_arm"
+                    if arm in registered_references
+                    else "retained_hybrid"
+                    if arm == ARMS[2]
+                    else "storage_parent"
                 )
                 numerical["parent_answer_tokens_match"] = bool(
                     torch.equal(actual.argmax(-1), reference.argmax(-1))
                 )
-                if arm in (ARMS[2], ARMS[3]):
+                if arm in (ARMS[2], ARMS[3]) or p.get("require_all_parent_tokens"):
                     numerical["passed"] = (
                         numerical["passed"] and numerical["parent_answer_tokens_match"]
                     )
@@ -669,27 +770,27 @@ def model(p, folder, i):
             return row
 
         if p.get("memory_only"):
-            for arm in ARMS:
-                row = run(arm, "memory_audit", 0, list(ARMS))
+            for arm in active_arms:
+                row = run(arm, "memory_audit", 0, list(active_arms))
                 if row["status"] != "completed" or not row["numerically_admissible"]:
                     break
             return dict(
-                passed=not errors and row_count == len(ARMS),
+                passed=not errors and row_count == len(active_arms),
                 errors=errors,
                 raw_rows=row_count,
                 memory_only=True,
                 original_timings_reused=True,
             )
-        canaries = [run(a, "canary", 0, list(ARMS)) for a in ARMS]
+        canaries = [run(a, "canary", 0, list(active_arms)) for a in active_arms]
         eligible = [
             r["arm"]
             for r in canaries
             if r.get("numerically_admissible") and r["status"] == "completed"
         ]
         # The trigger control proves mechanics, NOT natural repair or quality recovery.
-        if ARMS[4] in eligible:
+        if ARMS[4] in eligible and p.get("force_control", True):
             run(ARMS[4], "repair_control", 0, [ARMS[4]], forced=True)
-        if not all(a in eligible for a in ARMS[:2]):
+        if not all(a in eligible for a in p.get("required_canary_arms", ARMS[:2])):
             return dict(
                 passed=False,
                 eligible=eligible,
@@ -720,7 +821,7 @@ def model(p, folder, i):
         eligible=eligible,
         errors=errors,
         raw_rows=row_count,
-        canary_gate_passed_all_arms=len(eligible) == len(ARMS),
+        canary_gate_passed_all_arms=len(eligible) == len(active_arms),
         whole_request_KV_only_peak_certified=False,
     )
 
@@ -737,6 +838,10 @@ def worker(root, expected, action):
     folder.mkdir(parents=True, exist_ok=False)
     try:
         manifest(p, expected, folder, i, gpu=action != "cpu")
+        if action == "model" and p.get("fused_fill_native_control"):
+            from mosaickv.evaluation.fused_overlay_fill import native_controls
+
+            write_once(folder / "native_fill_control.json", native_controls())
         result = globals()[action](p, folder, i)
         result["status"] = "completed"
     except Exception:
@@ -780,7 +885,7 @@ def follow(root, expected, action):
                 parent_file = Path(p["timing_reuse_root"]) / f"model/{i}/raw.jsonl"
                 parent_rows = [json.loads(s) for s in parent_file.read_text().splitlines()]
                 records += [r for r in parent_rows if r["phase"] != "memory_audit"]
-            for old, new in COMPARISONS:
+            for old, new in p["comparisons"]:
                 pair = {
                     a: sorted(
                         [r for r in records if r["phase"] == "timed" and r["arm"] == a],
@@ -837,7 +942,7 @@ def follow(root, expected, action):
         )
         result["execution_gate_passed"] = result["gate_passed"]
         result["strict_latency_all_comparisons_passed"] = len(comparisons) == len(
-            COMPARISONS
+            p["comparisons"]
         ) * 2 and all(
             r.get("latency", {}).get("paired_latency_engineering_gate") is True for r in comparisons
         )
@@ -855,6 +960,7 @@ def main():
         choices=(
             "prepare",
             "prepare-audit",
+            "prepare-fill",
             "cpu",
             "native",
             "model",
@@ -873,6 +979,8 @@ def main():
         prepare(args.root)
     elif args.action == "prepare-audit":
         prepare_audit(args.root, args.reuse)
+    elif args.action == "prepare-fill":
+        prepare_fill(args.root, args.reuse)
     elif args.action.startswith("controller-"):
         checked(args.root, args.plan_sha)
         suffix = args.action.removeprefix("controller-")
