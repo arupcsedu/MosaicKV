@@ -62,3 +62,22 @@ failure must retain the current codec; do not start another quality sweep.
 If this test is negative, the justified simplification is to keep the
 validated source-only path for performance claims and the six-stage overlay
 as experimental. Do not retain overhead merely to make all six boxes active.
+
+## Bounded second use of the graph/selector idea
+
+Uniform anchors failed: all 64 source streams roundtripped, but no dictionary
+beat the actual common codec. Do not implement its native reader. A separate
+CPU-only screen uses a sparse bipartite source-to-anchor graph with at most
+16 candidate rows, and greedy facility coverage of actual residual-byte gain.
+An anchor must pay for its raw row and the first row-ID map before admission.
+This tests a physically relevant use for graph/selection rather than semantic
+coverage with no source retirement. The final complete packet still must beat
+the best byte/symbol codec. It may reject every anchor before construction.
+
+The fixed diagnostic layers are 0, 8, 16, 24 and 31 on the same two consumed
+Description/MM-Vet captures. The original adjacent layer, not the preceding
+tested layer, remains the predictor. A positive subset screen would require
+all 32 CPU layers before any GPU operator. There is no quality fitting, no
+new sample, and no automatic large experiment. The source-only hook-free
+variant is tested separately; it does not pretend these graph experiments
+establish an all-six contribution.

@@ -66,6 +66,63 @@ def _palette(row, plan, group, flag=0):
     return body
 
 
+def facility_anchors(previous, current, *, row_symbols=4096, maximum=4, candidates=16):
+    """Source-to-anchor gain graph, O(rows * bounded candidates).
+
+    Integer residual costs, not semantic similarity or value norm, define
+    coverage. An anchor must pay for its packed row and the first also pays
+    for the row-ID map. Exact final packet acceptance remains mandatory.
+    """
+    rows = _geometry(current, row_symbols, maximum)
+    if type(candidates) is not int or not maximum <= candidates <= 32:
+        raise ValueError("bounded candidate count in [maximum,32] required")
+    ids = tuple(
+        sorted(set(np.linspace(0, len(rows) - 1, min(candidates, len(rows)), dtype=int).tolist()))
+    )
+    symbols = base.symbols(rows.reshape(-1)).reshape(-1, base.SYMBOLS)
+    g = row_symbols // base.SYMBOLS
+    best = np.minimum(base._plan(symbols)[2], base.BYTES)
+    if previous is not None:
+        previous = base.validate(previous)
+        if previous.shape != current.shape:
+            raise ValueError("same original predecessor shape required")
+        delta = symbols ^ base.symbols(previous).reshape(symbols.shape)
+        best = np.minimum(best, base._plan(delta)[2])
+    gain = []
+    for candidate in ids:
+        prototype = symbols.reshape(len(rows), g, base.SYMBOLS)[candidate]
+        sizes = base._plan(symbols ^ np.tile(prototype, (len(rows), 1)))[2]
+        gain.append((best - np.minimum(best, sizes)).reshape(len(rows), g).sum(1))
+    gain = np.stack(gain)
+    covered = np.zeros(len(rows), dtype=np.int64)
+    selected, records = [], []
+    for _ in range(maximum):
+        marginal = np.maximum(gain - covered, 0).sum(1)
+        for i in selected:
+            marginal[i] = -1
+        winner = int(marginal.argmax())
+        cost = rows.shape[1] + (len(rows) if not selected else 0)
+        if marginal[winner] <= cost:
+            break
+        records.append(
+            dict(
+                anchor_row=ids[winner],
+                gross_gain_bytes=int(marginal[winner]),
+                new_dictionary_and_map_bytes=cost,
+            )
+        )
+        covered = np.maximum(covered, gain[winner])
+        selected.append(winner)
+    return tuple(sorted(ids[i] for i in selected)), dict(
+        candidate_rows=list(ids),
+        accepted_anchor_steps=records,
+        gain_graph_edges=gain.size,
+        bounded_candidates=len(ids),
+        predicted_total_group_payload_gain_bytes=int(covered.sum()),
+        actual_packet_acceptance_still_required=True,
+    )
+
+
 def encode(previous, current, *, row_symbols=4096, anchor_count=4, anchor_rows=None):
     """Keep the common codec unless actual complete dictionary storage wins.
 

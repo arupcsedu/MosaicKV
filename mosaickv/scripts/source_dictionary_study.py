@@ -60,7 +60,7 @@ def submit(root, action, after=None):
     return subprocess.check_output(cmd, text=True).strip()
 
 
-def prepare(root):
+def prepare(root, facility=False):
     source = clean_source(SOURCE)
     if root.exists():
         raise FileExistsError("new immutable CPU screen root required")
@@ -102,9 +102,11 @@ def prepare(root):
             bound_files={str(path): sha(path) for path in paths},
             parent=str(PARENT),
             samples=2,
-            layers_per_input=32,
+            layers_per_input=5 if facility else 32,
+            layers=[0, 8, 16, 24, 31] if facility else list(range(32)),
             dictionary_anchor_count=4,
-            anchor_selection="uniform_original_source_rows",
+            anchor_selection="gain_facility" if facility else "uniform_original_source_rows",
+            bounded_facility_candidates=16,
             row_symbols=4096,
             unchanged_code_bits=3,
             comparison="actual_best_of_legacy_byte_and_all_head_symbol_codec_with_selector",
@@ -134,6 +136,7 @@ def worker(root, expected, index):
         common_encode,
         decode,
         encode,
+        facility_anchors,
     )
 
     p = checked(root, expected)
@@ -173,18 +176,40 @@ def worker(root, expected, index):
     rows, errors, packets = [], [], {}
     try:
         archive = torch.load(origin / "source_codes.pt", map_location="cpu", weights_only=True)
-        if sorted(archive) != list(range(p["layers_per_input"])):
+        if sorted(archive) != list(range(32)):
             raise ValueError("all original source layers required")
-        previous = None
-        for layer, tensor in sorted(archive.items()):
+        for layer in p["layers"]:
             start = perf_counter()
-            current = tensor.numpy()
-            packet, proof = encode(
-                previous,
-                current,
-                row_symbols=p["row_symbols"],
-                anchor_count=p["dictionary_anchor_count"],
-            )
+            current = archive[layer].numpy()
+            previous = None if layer == 0 else archive[layer - 1].numpy()
+            anchors, facility = None, None
+            if p["anchor_selection"] == "gain_facility":
+                anchors, facility = facility_anchors(
+                    previous,
+                    current,
+                    row_symbols=p["row_symbols"],
+                    maximum=p["dictionary_anchor_count"],
+                    candidates=p["bounded_facility_candidates"],
+                )
+            if anchors == ():
+                packet = common_encode(previous, current)
+                proof = dict(
+                    dictionary_accepted=False,
+                    common_source_code_bytes=packet.serialized_bytes + 1,
+                    dictionary_source_code_bytes=packet.serialized_bytes + 1,
+                    dictionary_predicted_groups=0,
+                    dictionary_proposal_materialized=False,
+                    benchmark_labels_accessed=False,
+                )
+            else:
+                packet, proof = encode(
+                    previous,
+                    current,
+                    row_symbols=p["row_symbols"],
+                    anchor_count=p["dictionary_anchor_count"],
+                    anchor_rows=anchors,
+                )
+            proof["facility_anchor_evidence"] = facility
             if not np.array_equal(decode(previous, packet), current):
                 raise ValueError(f"source code changed at layer {layer}")
             if not np.array_equal(decode(previous, common_encode(previous, current)), current):
@@ -218,7 +243,6 @@ def worker(root, expected, index):
                     CPU_encode_and_controls_seconds=perf_counter() - start,
                 )
             )
-            previous = current
         torch.save(packets, folder / "packets.pt")
     except Exception:
         errors.append(traceback.format_exc())
@@ -282,7 +306,11 @@ def analyze(root, expected):
             common_storage_optimization_not_six_mechanism_quality_gain=True,
             GPU_KV_memory_latency_or_quality_superiority_established=False,
             fresh_or_paper_campaign_authorized=False,
-            action="bounded_native_operator_check_only"
+            action=(
+                "complete_all_32_CPU_layers_before_GPU"
+                if p["layers_per_input"] != 32
+                else "bounded_native_operator_check_only"
+            )
             if passed
             else "retain_common_codec_no_GPU_retry",
         ),
@@ -295,9 +323,10 @@ def main():
     a.add_argument("action", choices=("prepare", "worker", "analyze"))
     a.add_argument("--root", type=Path, required=True)
     a.add_argument("--plan-sha")
+    a.add_argument("--facility", action="store_true")
     args = a.parse_args()
     if args.action == "prepare":
-        return prepare(args.root)
+        return prepare(args.root, facility=args.facility)
     if args.action == "analyze":
         return analyze(args.root, args.plan_sha)
     import os

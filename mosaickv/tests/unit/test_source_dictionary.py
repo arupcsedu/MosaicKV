@@ -5,7 +5,7 @@ import pytest
 
 from mosaickv.evaluation import all_head_source_codec as base
 from mosaickv.evaluation import lossless_code_delta as byte_codec
-from mosaickv.evaluation.source_dictionary import DictionaryCodes, decode, encode
+from mosaickv.evaluation.source_dictionary import DictionaryCodes, decode, encode, facility_anchors
 
 
 def fixture():
@@ -93,3 +93,21 @@ def test_mixed_prediction_modes_roundtrip_and_never_inflate_selected_storage(see
         packet, proof = encode(predecessor, current)
         assert np.array_equal(decode(predecessor, packet), current)
         assert packet.serialized_bytes + 1 <= proof["common_source_code_bytes"]
+
+
+def test_cost_aware_facility_selection_uses_real_gains_and_no_dense_token_graph():
+    current = fixture()
+    selected, proof = facility_anchors(None, current)
+    assert selected == facility_anchors(None, current)[0]
+    assert 1 <= len(selected) <= 4
+    assert proof["gain_graph_edges"] == (len(current) // 1536) * 16
+    assert all(
+        r["gross_gain_bytes"] > r["new_dictionary_and_map_bytes"]
+        for r in proof["accepted_anchor_steps"]
+    )
+    packet, evidence = encode(None, current, anchor_rows=selected)
+    assert evidence["dictionary_accepted"]
+    assert np.array_equal(decode(None, packet), current)
+    selected, proof = facility_anchors(current, current)
+    assert selected == ()
+    assert proof["accepted_anchor_steps"] == []
