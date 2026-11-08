@@ -70,3 +70,22 @@ Successful execution or two consumed-input matches cannot establish benchmark
 quality preservation, equal-quality memory superiority or paper admissibility.
 Advance only after meaningful measured savings and numerical controls; then
 freeze a successor and separately preregister independent validation.
+
+## Selective transport retry
+
+The first GPU operator attempt exposed an unsupported Triton-language API; its
+failure is preserved. The corrected operators passed integer/softmax/dequantizer
+checks. Both full-model original/tiled controls and packed-prompt ablations then
+passed, but the new INT8 history reached the sequential lease's explicit
+unsupported-format guard. This is a transport integration failure, not measured
+quality degradation.
+
+The retry adds ONLY a type-specific `HistoryFormat` dispatch, retaining the
+format's request-owner, phase, layout and live-engine checks. Unknown formats
+still fail. A full-module AST fingerprint proves legacy transport identical
+after removing that exact reviewed branch/import. CPU tests cover both dispatch
+acceptance and rejection of unrelated changes. Only failed history workers are
+rerun; six completed control/prompt rows and operator evidence remain bound to
+their original producer SHA/manifests. Existing interval certificates are
+independently verified on CPU before reuse. Prior failed attempts remain linked
+and are not overwritten or relabeled as quality measurements.

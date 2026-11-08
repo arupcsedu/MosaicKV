@@ -23,8 +23,13 @@ from mosaickv.evaluation.text_source_storage import TextSourceFormat
 def fill_component(packet, attention, component, destination, *, source_workspace=None):
     if type(component) is not int or component not in (0, 1):
         raise ValueError("key or value component required")
+    from mosaickv.evaluation.history_source_precision import HistoryFormat
     from mosaickv.evaluation.lt_source_format import LTSourceFormat
     from mosaickv.evaluation.native_history_reader import NativeHistoryFormat
+
+    if isinstance(packet, HistoryFormat):
+        packet.fill_component(attention, component, destination)
+        return
 
     if isinstance(packet, NativeHistoryFormat):
         packet.fill_component(attention, component, destination)

@@ -36,6 +36,9 @@ TESTS = (
     "test_ownership_review.py",
     "test_request_peak_coverage.py",
     "test_packed_history_orchestrator.py",
+    "test_history_precision_dispatch.py",
+    "test_sequential_kv_lease.py",
+    "test_sequential_source_history.py",
 )
 
 
@@ -97,7 +100,28 @@ def submit(root, action, *, after=None, stage=None):
     return subprocess.check_output(args, text=True).strip()
 
 
-def prepare(root, reuse=None):
+def reused_controls(p, index):
+    if not p.get("reuse_model_controls"):
+        return []
+    origin = Path(p["reuse_model_controls"])
+    producer = read(origin / "plan.json")["source_sha"]
+    rows = [
+        json.loads(line) for line in (origin / f"model/{index}/raw.jsonl").read_text().splitlines()
+    ]
+    rows = [
+        r for r in rows if r["arm"] in ("control_original", "control_tiled", "packed_prompt_tiled")
+    ]
+    if len(rows) != 3 or not all(
+        r["status"] == "completed"
+        and r.get("numerically_admissible")
+        and r.get("whole_request_certificate_valid")
+        for r in rows
+    ):
+        raise ValueError("three complete valid controls per input required")
+    return [dict(r, reused=True, producer_source_sha=producer) for r in rows]
+
+
+def prepare(root, reuse=None, reuse_model=None):
     source = clean_source(SOURCE)
     if root.exists():
         raise FileExistsError("new write-once study root required")
@@ -145,6 +169,52 @@ def prepare(root, reuse=None):
         p["reuse_cpu_feasibility"] = str(path)
         p["bound_files"][str(path)] = sha(path)
         p["bound_files"][str(reuse / "plan.json")] = sha(reuse / "plan.json")
+    if reuse_model is not None:
+        from mosaickv.evaluation.legacy_dispatch_fingerprint import verify
+
+        previous = read(reuse_model / "plan.json")
+        filename = "mosaickv/src/mosaickv/evaluation/sequential_kv_lease.py"
+        old = subprocess.check_output(
+            ["git", "show", f"{previous['source_sha']}:{filename}"], cwd=SOURCE, text=True
+        )
+        verify(old, (SOURCE / filename).read_text())
+        changed = set(
+            subprocess.check_output(
+                ["git", "diff", "--name-only", previous["source_sha"], source],
+                cwd=SOURCE,
+                text=True,
+            ).splitlines()
+        )
+        allowed = {
+            filename,
+            "mosaickv/scripts/packed_history_study.py",
+            "mosaickv/src/mosaickv/evaluation/legacy_dispatch_fingerprint.py",
+            "mosaickv/tests/unit/test_history_precision_dispatch.py",
+            "mosaickv/docs/packed_history_diagnostic.md",
+        }
+        if not changed <= allowed or not read(reuse_model / "operator-analysis.json")["passed"]:
+            raise ValueError(
+                "retry must preserve all numerical/operator paths except explicit new dispatch"
+            )
+        p["reuse_model_controls"] = str(reuse_model)
+        p["legacy_dispatch_AST_identity_verified"] = True
+        for i in (0, 1):
+            controls = reused_controls(p, i)
+            for path in (
+                reuse_model / f"operator/{i}/result.json",
+                reuse_model / f"operator/{i}/manifest.json",
+                reuse_model / f"model/{i}/raw.jsonl",
+                reuse_model / f"model/{i}/manifest.json",
+            ):
+                p["bound_files"][str(path)] = sha(path)
+            for row in controls:
+                for path in (
+                    Path(row["ledger_path"]),
+                    reuse_model / f"model/{i}/{row['arm']}.logits.pt",
+                ):
+                    p["bound_files"][str(path)] = sha(path)
+        path = reuse_model / "operator-analysis.json"
+        p["bound_files"][str(path)] = sha(path)
     root.mkdir(parents=True)
     (root / "logs").mkdir()
     write_once(root / "plan.json", p)
@@ -213,6 +283,23 @@ def cpu(root):
             result["feasibility_reused_from"] = p["reuse_cpu_feasibility"]
         else:
             run(root / "cpu-feasibility.json")
+        if p.get("reuse_model_controls"):
+            from mosaickv.measurements.kv_timeline import valid_whole_request_certificate
+
+            for i in (0, 1):
+                for row in reused_controls(p, i):
+                    with gzip.open(row["ledger_path"], "rt") as stream:
+                        if not valid_whole_request_certificate(json.load(stream)):
+                            raise ValueError(
+                                "reused interval certificate failed independent verification"
+                            )
+            write_once(
+                root / "operator-analysis.json",
+                dict(
+                    read(Path(p["reuse_model_controls"]) / "operator-analysis.json"),
+                    reused_from=p["reuse_model_controls"],
+                ),
+            )
         result["status"] = "completed"
     except Exception:
         result["error"] = traceback.format_exc()
@@ -413,6 +500,8 @@ def model(root, p, folder, index):
         ("packed_prompt_tiled", True, True, False),
         ("history_INT8_tiled", True, False, True),
     ]
+    if p.get("reuse_model_controls"):
+        cases = [("history_INT8_tiled", True, False, True)]
     feasibility = read(root / "cpu-feasibility.json")
     eligible = [
         r
@@ -544,7 +633,7 @@ def model(root, p, folder, index):
                 and row.get("numerically_admissible", False)
                 and any(
                     r["arm"] == "packed_prompt_tiled" and r.get("numerically_admissible", False)
-                    for r in rows
+                    for r in [*rows, *reused_controls(p, index)]
                 )
             ):
                 cases.append(("combined_tiled", True, True, True))
@@ -560,8 +649,10 @@ def model(root, p, folder, index):
 
 
 def analyze(root):
+    p = read(root / "plan.json")
     rows, failures = [], []
     for i in (0, 1):
+        rows.extend(dict(input=i, **row) for row in reused_controls(p, i))
         path = root / f"model/{i}/raw.jsonl"
         if not path.exists():
             failures.append(dict(input=i, error="missing worker rows"))
@@ -585,6 +676,7 @@ def analyze(root):
         independent_quality_established=False,
         strict_latency_advantage_established=False,
         six_component_superiority_established=False,
+        prior_failed_transport_attempts_preserved_at=p.get("reuse_model_controls"),
     )
     folder = root / "analysis"
     folder.mkdir(exist_ok=False)
@@ -698,17 +790,18 @@ def main():
     parser.add_argument("--plan-sha")
     parser.add_argument("--stage", default="none")
     parser.add_argument("--reuse-cpu", type=Path)
+    parser.add_argument("--reuse-model", type=Path)
     args = parser.parse_args()
     root = args.root
     if args.action == "prepare":
-        prepare(root, args.reuse_cpu)
+        prepare(root, args.reuse_cpu, args.reuse_model)
         return
     p = checked(root, args.plan_sha)
     if args.action == "cpu":
         cpu(root)
     elif args.action == "after_cpu":
         if (root / "cpu.json").exists() and read(root / "cpu.json")["status"] == "completed":
-            launch(root, "operator")
+            launch(root, "model" if p.get("reuse_model_controls") else "operator")
         else:
             write_once(root / "CPU-negative.json", dict(no_GPU_submission=True))
     elif args.action == "after_operator":
