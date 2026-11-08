@@ -1,5 +1,7 @@
 import importlib.util
+from contextlib import nullcontext
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -53,3 +55,17 @@ def test_capture_preserves_conversion_and_never_adds_forbidden_request_callbacks
         assert runtime.convert(("unchanged-packets",)) == "original-result"
     assert runtime.convert is original
     assert events == [("capture", ("unchanged-packets",)), ("convert", ("unchanged-packets",))]
+
+
+def test_graph_is_replayed_before_its_outputs_are_checked():
+    events = []
+    graph = SimpleNamespace(replay=lambda: events.append("replay"))
+    fake = SimpleNamespace(
+        cuda=SimpleNamespace(
+            CUDAGraph=lambda: graph,
+            graph=lambda value: nullcontext(),
+            synchronize=lambda: events.append("synchronize"),
+        )
+    )
+    assert load().capture_and_initialize_graph(lambda: events.append("capture"), fake) is graph
+    assert events == ["capture", "replay", "synchronize"]

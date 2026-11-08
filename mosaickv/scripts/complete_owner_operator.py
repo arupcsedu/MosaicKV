@@ -41,6 +41,16 @@ def capture_source_packets(capture):
         yield
 
 
+def capture_and_initialize_graph(function, torch):
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        function()
+    # Stream capture records operations; it does not execute them.
+    graph.replay()
+    torch.cuda.synchronize()
+    return graph
+
+
 def kernel_summary(trace):
     rows = []
     for event in trace["traceEvents"]:
@@ -77,7 +87,7 @@ def infra():
     return shared
 
 
-def prepare(root):
+def prepare(root, reuse_captures):
     source = clean_source(SOURCE)
     if root.exists():
         raise FileExistsError("new operator diagnostic root required")
@@ -89,6 +99,22 @@ def prepare(root):
     paths += [Path(k) for k in parent["bound_files"]]
     for i in (0, 1):
         paths += [PARENT / f"gpu/{i}/{n}" for n in ("manifest.json", "result.json", "raw.jsonl")]
+        old = reuse_captures / f"workers/{i}"
+        c = read(old / "capture.json")
+        if (
+            c.get("all_128_logits_bitwise") is not True
+            or c.get("layers") != 32
+            or c.get("source_is_original_COCO_not_Description_fixture") is not True
+            or c["code_archive_sha"] != sha(old / "source_codes.pt")
+            or c["sample_id"] != read(PARENT / f"gpu/{i}/manifest.json")["sample_id"]
+            or read(old / "manifest.json")["model"]
+            != read(PARENT / f"gpu/{i}/manifest.json")["model"]
+        ):
+            raise ValueError("complete bitwise-verified original COCO source capture required")
+        paths += [old / n for n in ("capture.json", "source_codes.pt", "manifest.json")]
+    if read(reuse_captures / "plan.json")["parent"]["model_controls"] != parent["model_controls"]:
+        raise ValueError("capture model, inputs, and processor controls changed")
+    paths.append(reuse_captures / "plan.json")
     root.mkdir(parents=True)
     (root / "logs").mkdir()
     write_once(
@@ -97,6 +123,7 @@ def prepare(root):
             source_sha=source,
             bound_files={str(p): sha(p) for p in paths},
             parent=parent,
+            reuse_captures=str(reuse_captures),
             seed=20261107,
             layers=32,
             trials=20,
@@ -136,20 +163,13 @@ def prepare(root):
 
 
 def worker(root, expected):
-    import evicastkv_paper_precision as campaign
     import torch
     from evicastkv_campaign import environment
 
-    from mosaickv.adapters.huggingface import load_hf_adapter
     from mosaickv.config import RunConfig
     from mosaickv.evaluation import all_head_source_gpu as native
-    from mosaickv.evaluation.component_admission import component_scope
-    from mosaickv.evaluation.layer_code_delta import map_bodies
     from mosaickv.evaluation.lossless_code_delta_gpu import decode as byte_decode
     from mosaickv.evaluation.scheduler_identity import scheduler_identity
-    from mosaickv.evaluation.storage_six_overlay import OverlayPolicy
-    from mosaickv.graph.structural_templates import engine_scope
-    from mosaickv.hf_cli import _model_kwargs
     from mosaickv.measurements.telemetry import capture_gpu_environment
 
     p = checked(root, expected)
@@ -182,8 +202,9 @@ def worker(root, expected):
             cuda=torch.version.cuda,
             gpu=asdict(capture_gpu_environment(torch)),
             gpu_count=1,
-            backend="HF_eager_then_integer_CUDA_operators",
-            attention_implementation="eager",
+            backend="integer_CUDA_operators_reused_COCO_source_capture",
+            attention_implementation="not_executed_origin_HF_eager",
+            model_weights_loaded=False,
             seed=p["seed"],
             vllm="not_used",
             sglang="not_used",
@@ -194,67 +215,23 @@ def worker(root, expected):
     )
     errors, rows, profiles, captured = [], [], [], {}
     try:
-        adapter = load_hf_adapter(
-            cfg.model.id,
-            revision=cfg.model.revision,
-            model_kwargs=_model_kwargs(cfg, local_files_only=True),
-            processor_kwargs={"local_files_only": True},
-        )
-        transport = dict(controls["parent"], options=controls["options"])
-        options = campaign.request_options(
-            controls["options"]["mosaickv_exact"], transport, "mosaickv_exact", False
-        )
-
-        def capture(packets):
-            for layer, packet in enumerate(packets):
-
-                def save(role, body, *, layer=layer):
-                    if (
-                        role != "source"
-                        or body.bits != 3
-                        or body.axis != 2
-                        or body.shape[-1] != 4096
-                    ):
-                        raise ValueError("original complete full-MHA source required")
-                    if layer in captured:
-                        raise ValueError("duplicate source capture")
-                    captured[layer] = body.codes.detach().cpu().clone()
-                    return body
-
-                map_bodies(packet, save)
-
-        with (
-            engine_scope(),
-            native.use(True, construction="pack_selected", decoder="bitmap_prefix"),
-            component_scope(
-                adapter,
-                OverlayPolicy(enabled=False, quality_objective="bitwise_storage_only"),
-                mode="storage_preservation",
-                reader_options=options,
-            ),
-            capture_source_packets(capture),
-        ):
-            logits, detail = campaign.execute(
-                adapter, features, transport, "mosaickv_exact", audit=False
-            )
-        wanted = torch.load(
-            controls["references"][str(i)]["storage"], map_location="cpu", weights_only=True
-        )
-        if not torch.equal(logits.cpu(), wanted) or sorted(captured) != list(range(32)):
-            raise ValueError("source capture changed output or omitted source layers")
-        torch.save(captured, folder / "source_codes.pt")
+        origin = Path(p["reuse_captures"]) / f"workers/{i}"
+        capture = read(origin / "capture.json")
+        if capture["code_archive_sha"] != sha(origin / "source_codes.pt"):
+            raise ValueError("verified capture changed")
+        captured = torch.load(origin / "source_codes.pt", map_location="cpu", weights_only=True)
+        if sorted(captured) != list(range(32)):
+            raise ValueError("all 32 original source layers required")
+        os.link(origin / "source_codes.pt", folder / "source_codes.pt")
         write_once(
             folder / "capture.json",
             dict(
-                sample_id=features["sample_id"],
-                layers=32,
-                code_archive_sha=sha(folder / "source_codes.pt"),
-                all_128_logits_bitwise=True,
-                model_latency_measurement=False,
-                source_is_original_COCO_not_Description_fixture=True,
+                capture,
+                reused_from=str(origin),
+                reused_manifest_sha=sha(origin / "manifest.json"),
+                no_new_model_inference=True,
             ),
         )
-        del adapter, logits, detail, wanted
         gc.collect()
         torch.cuda.empty_cache()
         archives = {layer: codes.cuda() for layer, codes in captured.items()}
@@ -293,10 +270,7 @@ def worker(root, expected):
                     reset(arm)
                     replay(arm)
                 reset(arm)
-                graph = torch.cuda.CUDAGraph()
-                with torch.cuda.graph(graph):
-                    replay(arm)
-                torch.cuda.synchronize()
+                graph = capture_and_initialize_graph(lambda arm=arm: replay(arm), torch)
                 if not torch.equal(destinations[arm], current):
                     raise ValueError("captured in-place source decoder changed bits")
                 graphs[arm] = graph
@@ -455,9 +429,12 @@ def main():
     a.add_argument("action", choices=("prepare", "worker", "analyze", "controller"))
     a.add_argument("--root", type=Path, required=True)
     a.add_argument("--plan-sha")
+    a.add_argument("--reuse-captures", type=Path)
     args = a.parse_args()
     if args.action == "prepare":
-        return prepare(args.root)
+        if args.reuse_captures is None:
+            raise ValueError("retry requires verified existing captures; no new inference")
+        return prepare(args.root, args.reuse_captures)
     if args.action == "controller":
         checked(args.root, args.plan_sha)
         return subprocess.call(
