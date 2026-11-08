@@ -248,6 +248,63 @@ def prepare(root):
     print(json.dumps(receipt), flush=True)
 
 
+def prepare_audit(root, reuse):
+    """Reuse complete timings; retry only the excluded memory instrumentation."""
+    source = clean_source(SOURCE)
+    if root.exists() or reuse is None:
+        raise ValueError("new audit root and immutable completed parent required")
+    p = read(reuse / "plan.json")
+    allowed = {
+        "mosaickv/scripts/compact_hybrid_study.py",
+        "mosaickv/src/mosaickv/evaluation/prompt_graph_reader.py",
+        "mosaickv/tests/unit/test_prompt_graph_reader.py",
+        "mosaickv/tests/unit/test_compact_hybrid_study.py",
+    }
+    changed = set(
+        subprocess.check_output(
+            ["git", "diff", "--name-only", p["source_sha"], source], cwd=SOURCE, text=True
+        ).splitlines()
+    )
+    if not changed <= allowed:
+        raise ValueError("audit retry changed algorithm, codec or policy; timings cannot be reused")
+    paths = [reuse / "plan.json", reuse / "model-analysis/decision.json"]
+    for i in (0, 1):
+        folder = reuse / f"model/{i}"
+        records = [json.loads(s) for s in (folder / "raw.jsonl").read_text().splitlines()]
+        keyed = {(r["phase"], r["arm"], r["trial"]): r for r in records}
+        if len(keyed) != len(records):
+            raise ValueError("duplicate parent rows cannot be reused")
+        wanted = [
+            (phase, arm, t)
+            for phase, n in (("canary", 1), ("warmup", p["warmups"]), ("timed", p["repetitions"]))
+            for arm in ARMS
+            for t in range(n)
+        ]
+        if any(
+            k not in keyed
+            or keyed[k]["status"] != "completed"
+            or not keyed[k]["numerically_admissible"]
+            for k in wanted
+        ):
+            raise ValueError("all parent canaries, warmups and timed rows must be valid")
+        paths += [folder / n for n in ("raw.jsonl", "manifest.json", "result.json")]
+    root.mkdir(parents=True)
+    (root / "logs").mkdir()
+    timing_producer = p["source_sha"]
+    p.update(
+        source_sha=source,
+        bound_files=dict(p["bound_files"], **{str(f): sha(f) for f in paths}),
+        memory_only=True,
+        timing_reuse_root=str(reuse),
+        timing_rows_producer_SHA=timing_producer,
+        audit_rows_producer_SHA=source,
+        timing_rerun_authorized=False,
+        measurement_type="excluded_memory_audit_only_consumed_inputs_no_new_timing_or_quality",
+    )
+    write_once(root / "plan.json", p)
+    print(json.dumps(launch_gpu(root, "model")), flush=True)
+
+
 def archive(p, i):
     import torch
 
@@ -609,6 +666,18 @@ def model(p, folder, i):
             row_count += 1
             return row
 
+        if p.get("memory_only"):
+            for arm in ARMS:
+                row = run(arm, "memory_audit", 0, list(ARMS))
+                if row["status"] != "completed" or not row["numerically_admissible"]:
+                    break
+            return dict(
+                passed=not errors and row_count == len(ARMS),
+                errors=errors,
+                raw_rows=row_count,
+                memory_only=True,
+                original_timings_reused=True,
+            )
         canaries = [run(a, "canary", 0, list(ARMS)) for a in ARMS]
         eligible = [
             r["arm"]
@@ -705,6 +774,10 @@ def follow(root, expected, action):
             if not file.is_file():
                 continue
             records = [json.loads(s) for s in file.read_text().splitlines()]
+            if p.get("memory_only"):
+                parent_file = Path(p["timing_reuse_root"]) / f"model/{i}/raw.jsonl"
+                parent_rows = [json.loads(s) for s in parent_file.read_text().splitlines()]
+                records += [r for r in parent_rows if r["phase"] != "memory_audit"]
             for old, new in COMPARISONS:
                 pair = {
                     a: sorted(
@@ -760,6 +833,12 @@ def follow(root, expected, action):
         result["superiority_established"] = (
             False  # consumed engineering inputs; no independent quality test
         )
+        result["execution_gate_passed"] = result["gate_passed"]
+        result["strict_latency_all_comparisons_passed"] = len(comparisons) == len(
+            COMPARISONS
+        ) * 2 and all(
+            r.get("latency", {}).get("paired_latency_engineering_gate") is True for r in comparisons
+        )
     write_once(root / f"{action}-analysis/decision.json", result)
     if passed and action in ("cpu", "native"):
         result["submitted"] = launch_gpu(root, "native" if action == "cpu" else "model")
@@ -773,6 +852,7 @@ def main():
         "action",
         choices=(
             "prepare",
+            "prepare-audit",
             "cpu",
             "native",
             "model",
@@ -785,9 +865,12 @@ def main():
     )
     parser.add_argument("--root", required=True, type=Path)
     parser.add_argument("--plan-sha")
+    parser.add_argument("--reuse", type=Path)
     args = parser.parse_args()
     if args.action == "prepare":
         prepare(args.root)
+    elif args.action == "prepare-audit":
+        prepare_audit(args.root, args.reuse)
     elif args.action.startswith("controller-"):
         checked(args.root, args.plan_sha)
         suffix = args.action.removeprefix("controller-")

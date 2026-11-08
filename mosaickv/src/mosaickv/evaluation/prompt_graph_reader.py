@@ -43,7 +43,13 @@ def generator_metadata(before, after, additional):
         or any(v != (8, 512) for v in new.values())
         or additional != 1024
     ):
-        raise RuntimeError("only the pinned two-scalar CUDA generator metadata is admissible")
+        lost = {p: size for p, size in before.items() if p not in after}
+        raise RuntimeError(
+            "only the pinned two-scalar CUDA generator metadata is admissible: "
+            f"new={new!r}; retired={lost!r}; allocated_delta={additional}; "
+            f"new_requested_bytes={sum(v[0] for v in new.values())}; "
+            f"new_allocator_bytes={sum(v[1] for v in new.values())}"
+        )
     return tuple(new)
 
 

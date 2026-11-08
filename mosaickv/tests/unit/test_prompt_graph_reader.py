@@ -124,6 +124,13 @@ def test_only_measured_two_int64_generator_owners_are_admissible():
         generator_metadata(before, after, 0)
 
 
+def test_generator_rejection_records_retired_and_added_owners_without_weakening_guard():
+    with pytest.raises(RuntimeError, match="retired=.*allocated_delta=0") as failure:
+        generator_metadata({10: (8, 512)}, {20: (1024, 1024)}, 0)
+    assert "new_requested_bytes=1024" in str(failure.value)
+    assert "10:" in str(failure.value) and "20:" in str(failure.value)
+
+
 def test_framework_metadata_is_charged_in_peak_and_live_storage():
     cache = factory(prompt_graph_reader=True)
     old = cache.storage_record()["final_active_kv_storage_bytes"]
