@@ -22,3 +22,17 @@ def test_inventory_matches_real_cache_shared_plus_layer_owner_contract():
 def test_no_implicit_empty_cache_or_unsupported_ownership_fallback():
     with pytest.raises(TypeError):
         cache_tensors(SimpleNamespace(layers=[]))
+
+
+def test_allocator_observer_replaces_only_weakref_scans_and_restores_default():
+    from mosaickv.evaluation.projection_cache import ScratchAudit
+    from mosaickv.evaluation.request_ownership import allocator_lifetimes_only
+
+    calls = []
+    original = ScratchAudit.__torch_dispatch__
+    with allocator_lifetimes_only():
+        with ScratchAudit(excluded=set(), observe=calls.append) as mode:
+            result = torch.arange(8) + 1
+        assert result.tolist() == list(range(1, 9))
+        assert mode.operations > 0 and not mode.refs and not calls
+    assert ScratchAudit.__torch_dispatch__ is original

@@ -135,6 +135,7 @@ def prepare(root, reuse=None):
     for path in (
         Path(torch.__file__).parent / "cuda/memory.py",
         Path(torch.__file__).parent / "_C/__init__.pyi",
+        Path(torch.__file__).parent / "include/c10/cuda/CUDACachingAllocator.h",
         Path(transformers.__file__).parent / "models/llama/modeling_llama.py",
     ):
         bound[str(path)] = sha(path)
@@ -147,6 +148,7 @@ def prepare(root, reuse=None):
         warmups=0,
         repetitions=1,
         clean_latency_benchmark_authorized=False,
+        native_segment_snapshot=True,
         measurement_type="consumed_all_head_source_prototype_and_time_aligned_ownership_diagnostic",
         fresh_or_paper_campaign_authorized=False,
         benchmarks_not_used_to_select_proposals=True,
@@ -162,6 +164,10 @@ def prepare(root, reuse=None):
             "mosaickv/tests/unit/test_kv_timeline.py",
             "mosaickv/tests/unit/test_request_ownership.py",
             "mosaickv/docs/shared_prototype_ownership.md",
+            "mosaickv/src/mosaickv/evaluation/request_peak_coverage.py",
+            "mosaickv/tests/unit/test_request_peak_coverage.py",
+            "mosaickv/src/mosaickv/measurements/allocator_segments.py",
+            "mosaickv/src/mosaickv/measurements/csrc/allocator_segments.cpp",
         }
         changed = set(
             subprocess.check_output(
@@ -212,6 +218,13 @@ def prepare(root, reuse=None):
             canary_inference_not_repeated=True,
         )
     write_once(root / "plan.json", p)
+    build = submit(root, "build")
+    receipt = dict(build=build, build_analyzer=submit(root, "follow-build", after=build))
+    write_once(root / "submission.json", receipt)
+    print(json.dumps(receipt), flush=True)
+
+
+def launch_workers(root):
     array = submit(root, "worker")
     write_once(
         root / "admission.json",
@@ -232,7 +245,7 @@ def prepare(root, reuse=None):
         maximum_A100s=2,
         CPUs_per_worker=12,
     )
-    write_once(root / "submission.json", receipt)
+    write_once(root / "worker-submission.json", receipt)
     print(json.dumps(receipt), flush=True)
 
 
@@ -427,6 +440,23 @@ def model(p, folder, i):
                 if audit:
                     row["ownership_timeline"] = ledger
                     row["allocator_envelope"] = envelope.certificate
+                    # The allocator records every lifetime. Weakref-per-ATen
+                    # scans are deliberately superseded; do not mislabel their
+                    # old counters as certified measurements in these rows.
+                    detail["legacy_tensor_result_audit_superseded"] = True
+                    detail["tensor_result_auditing"] = False
+                    detail["decode_owned_peak_bytes"] = None
+                    detail["peak_measurement_admissible"] = False
+                    from mosaickv.evaluation.request_peak_coverage import coverage
+
+                    row["KV_peak_coverage"] = coverage(
+                        detail,
+                        dict(
+                            extra_gpu_bytes=0,
+                            residual_cpu_bytes=mechanisms.get("CPU_residual_bytes", 0),
+                        ),
+                        ownership_ledger=ledger,
+                    )
             except Exception:
                 row.update(
                     error=traceback.format_exc(),
@@ -472,6 +502,13 @@ def worker(root, expected):
     from compact_hybrid_study import manifest
 
     p = check(root, expected)
+    build = read(root / "build.json")
+    if (
+        build.get("status") != "completed"
+        or build.get("source_sha") != p["source_sha"]
+        or sha(Path(build["binary"])) != build["binary_sha"]
+    ):
+        raise ValueError("same-source native allocator build evidence required")
     torch.set_num_threads(1)
     torch.use_deterministic_algorithms(True)
     torch.manual_seed(p["seed"])
@@ -572,6 +609,13 @@ def analyze(root, expected):
         independent_quality_established=False,
         fresh_or_paper_campaign_authorized=False,
         strict_latency_advantage_established=False,
+        whole_request_certificate_passed=len([r for r in rows if r["phase"] == "ownership_audit"])
+        == 4
+        and all(
+            r.get("KV_peak_coverage", {}).get("exact_whole_request_KV_peak_certified")
+            for r in rows
+            if r["phase"] == "ownership_audit"
+        ),
     )
     (root / "analysis").mkdir(exist_ok=False)
     write_once(root / "analysis/decision.json", summary)
@@ -609,7 +653,9 @@ def analyze(root, expected):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=("prepare", "worker", "analyze", "controller"))
+    parser.add_argument(
+        "action", choices=("prepare", "worker", "analyze", "controller", "build", "follow-build")
+    )
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--plan-sha")
     parser.add_argument("--reuse", type=Path)
@@ -620,6 +666,34 @@ def main():
         worker(args.root, args.plan_sha)
     elif args.action == "analyze":
         analyze(args.root, args.plan_sha)
+    elif args.action == "build":
+        p = check(args.root, args.plan_sha)
+        result = dict(status="failed", source_sha=p["source_sha"], plan_sha=args.plan_sha)
+        try:
+            from mosaickv.measurements.allocator_segments import load_reader
+
+            native = load_reader()
+            result.update(
+                status="completed", binary=native.__file__, binary_sha=sha(Path(native.__file__))
+            )
+        except Exception:
+            result["error"] = traceback.format_exc()
+        write_once(args.root / "build.json", result)
+        if result["status"] != "completed":
+            raise SystemExit(1)
+    elif args.action == "follow-build":
+        check(args.root, args.plan_sha)
+        result = args.root / "build.json"
+        if result.exists() and read(result).get("status") == "completed":
+            launch_workers(args.root)
+        else:
+            write_once(
+                args.root / "build-negative.json",
+                dict(
+                    gpu_submission_blocked=True,
+                    build_result=read(result) if result.exists() else "missing",
+                ),
+            )
     else:
         check(args.root, args.plan_sha)
         subprocess.run(

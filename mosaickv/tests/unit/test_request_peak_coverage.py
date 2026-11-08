@@ -23,3 +23,18 @@ def test_missing_producer_audits_remain_separate_blockers():
     r = coverage({}, {})
     assert "prefill_encoder_tensor_results_not_observed" in r["blocks_exact_certification"]
     assert "source_codec_conversion_overlap_not_observed" in r["blocks_exact_certification"]
+
+
+def test_valid_allocator_interval_proof_can_replace_legacy_phase_peaks():
+    from mosaickv.measurements.kv_timeline import AllocationTimeline
+
+    ledger = AllocationTimeline()
+    ledger.ingest([dict(action="alloc", addr=123, size=64)])
+    ledger.classify(123, "kv_workspace", "native construction workspace")
+    report = ledger.report(complete=True, history_complete=True, opaque_workspace_classified=True)
+    result = coverage({}, {}, ownership_ledger=report)
+    assert result["exact_whole_request_KV_peak_certified"]
+    assert result["joint_whole_request_KV_peak_bytes"] == 64
+    assert result["legacy_phase_audit_diagnostics"]
+    report["exact_KV_peak_bytes"] = 63
+    assert not coverage({}, {}, ownership_ledger=report)["exact_whole_request_KV_peak_certified"]

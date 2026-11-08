@@ -8,6 +8,7 @@ memory.py _record_memory_history/_snapshot APIs (a pinned internal API).
 
 from __future__ import annotations
 
+import gc
 import threading
 import time
 from bisect import bisect_right
@@ -261,9 +262,13 @@ class AllocationTimeline:
         return dict(
             schema_version=1,
             boundary="time_aligned_PyTorch_CUDA_KV_backing_including_declared_KV_workspace",
+            accounting_unit="tensor_storage_requested_bytes",
             exact_whole_request_KV_peak_certified=certified and scope == "whole_request",
             exact_scoped_KV_peak_certified=certified,
             scope=scope,
+            complete_request=complete,
+            allocator_history_complete=history_complete,
+            opaque_workspace_classified=opaque_workspace_classified,
             exact_KV_peak_bytes=peak if certified else None,
             known_KV_peak_lower_bound_bytes=peak,
             KV_peak_upper_bound_including_unknown_bytes=upper_peak,
@@ -289,7 +294,7 @@ class AllocationTimeline:
             includes_free_requested_until_free_completed=True,
             includes_cross_thread_allocator_events=True,
             phase_peaks_not_added=True,
-            excludes="CPU_residuals_and_vendor_allocations_outside_PyTorch_allocator",
+            excludes="CPU_residuals,allocator_rounding_or_reservation,vendor_allocations_outside_PyTorch_allocator",
         )
 
 
@@ -312,11 +317,13 @@ class CudaOwnershipSession:
         import torch
 
         torch.cuda.synchronize()
+        gc.collect()
         if self.clear_library_workspace:
             # Real cache release, not subtraction of an arbitrary baseline.
             # This is excluded instrumentation applied to BOTH audit arms.
             torch._C._cuda_clearCublasWorkspaces()
             torch.cuda.synchronize()
+        self._flush_cuda_events()
         torch.cuda.memory._record_memory_history(
             "all", context="all", stacks="python", max_entries=self.max_entries, clear_history=True
         )
@@ -329,7 +336,7 @@ class CudaOwnershipSession:
                 continue
             for block in segment["blocks"]:
                 if block["state"] in ("active_allocated", "active_awaiting_free"):
-                    self.timeline.seed(block["address"], block["size"])
+                    self.timeline.seed(block["address"], block["requested_size"])
         self.baseline_trace_count = len(snapshot["device_traces"][self.device])
         self.cursor = self.baseline_trace_count
         self._check_clock(snapshot, begin, end)
@@ -347,6 +354,12 @@ class CudaOwnershipSession:
         self.beacons.append((address, begin, end))
         # This audit allocation has no inference role and does NOT remain live.
         del tensor
+
+    def _flush_cuda_events(self):
+        import torch
+
+        tensor = torch.empty(1, device=torch.cuda.current_device(), dtype=torch.uint8)
+        del tensor  # forces allocator event processing; never retains GPU state
 
     def _check_clock(self, snapshot, begin, end):
         markers = [e for e in snapshot["device_traces"][self.device] if e["action"] == "snapshot"]
@@ -399,6 +412,8 @@ class CudaOwnershipSession:
 
         try:
             torch.cuda.synchronize()
+            gc.collect()
+            torch.cuda.synchronize()
             if self.deferred_marks:
                 self._beacon()
             self.poll()
@@ -413,6 +428,7 @@ class CudaOwnershipSession:
                 before = {a: key for a, key in self.timeline.active.items() if a in visible}
                 torch._C._cuda_clearCublasWorkspaces()
                 torch.cuda.synchronize()
+                self._flush_cuda_events()
                 self.poll()
                 for address in before.keys() - self.timeline.active.keys():
                     row = self.timeline.allocations[before[address]]
@@ -433,7 +449,7 @@ class CudaOwnershipSession:
                         self.timeline.allocations[key]
                         for key in self.timeline.by_address.get(address, ())
                         if not self.timeline.allocations[key]["baseline"]
-                        and self.timeline.allocations[key]["bytes"] == 512
+                        and self.timeline.allocations[key]["bytes"] == 1
                     ]
                     exact = [
                         row
@@ -465,7 +481,7 @@ class CudaOwnershipSession:
                             address, role, evidence, before - upper, after - lower
                         )
             actual = {
-                block["address"]: block["size"]
+                block["address"]: block["requested_size"]
                 for segment in self.snapshot["segments"]
                 if segment["device"] == self.device
                 for block in segment["blocks"]
@@ -504,3 +520,67 @@ class CudaOwnershipSession:
         )
         report["clock_calibration"] = getattr(self, "clock_translation", None)
         return report
+
+
+def valid_whole_request_certificate(report):
+    """Recompute the classified interval peak; flags alone are insufficient."""
+    if not report or any(
+        report.get(key) is not True
+        for key in (
+            "exact_whole_request_KV_peak_certified",
+            "complete_request",
+            "allocator_history_complete",
+            "opaque_workspace_classified",
+            "includes_cross_thread_allocator_events",
+            "includes_free_requested_until_free_completed",
+        )
+    ):
+        return False
+    if (
+        report.get("scope") != "whole_request"
+        or report.get("blocks_exact_certification")
+        or report.get("unknown_allocation_generations") != 0
+    ):
+        return False
+    rows, count = report.get("records", ()), report.get("events", 0)
+    if (
+        not rows
+        or len(rows) != report.get("allocation_generations")
+        or type(count) is not int
+        or count < 1
+    ):
+        return False
+    seen, deltas, intervals = set(), {}, {}
+    for row in rows:
+        identity = row.get("address"), row.get("generation")
+        start, end, size = row.get("start"), row.get("end"), row.get("bytes")
+        if (
+            identity in seen
+            or row.get("role") not in ROLES - {"unknown"}
+            or type(size) is not int
+            or size < 0
+            or type(start) is not int
+            or not -1 <= start < count
+            or (end is not None and (type(end) is not int or not start < end < count))
+        ):
+            return False
+        seen.add(identity)
+        intervals.setdefault(row["address"], []).append((start, count if end is None else end))
+        if row["role"] in KV_ROLES:
+            deltas[start] = deltas.get(start, 0) + size
+            if end is not None:
+                deltas[end] = deltas.get(end, 0) - size
+    for values in intervals.values():
+        values.sort()
+        if any(first[1] > second[0] for first, second in pairwise(values)):
+            return False
+    live = peak = 0
+    for key in sorted(deltas):
+        live += deltas[key]
+        peak = max(peak, live)
+    return (
+        peak
+        == report.get("exact_KV_peak_bytes")
+        == report.get("known_KV_peak_lower_bound_bytes")
+        == report.get("KV_peak_upper_bound_including_unknown_bytes")
+    )

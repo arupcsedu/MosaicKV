@@ -72,6 +72,20 @@ STACK_RULES += tuple(
     for line in (63, 64, 65, 66)
 )
 STACK_RULES += (("/mosaickv/evaluation/storage_runs.py", "run", "non_kv", 369),)
+STACK_RULES += (("/mosaickv/measurements/kv_timeline.py", "_flush_cuda_events", "non_kv"),)
+
+
+@contextmanager
+def allocator_lifetimes_only():
+    """Replace redundant weakref scans, NOT numerical/stride/cache checks."""
+    from mosaickv.evaluation.projection_cache import ScratchAudit
+
+    def dispatch(mode, func, types, args=(), kwargs=None):
+        mode.operations += 1
+        return func(*args, **(kwargs or {}))
+
+    with patch.object(ScratchAudit, "__torch_dispatch__", dispatch):
+        yield
 
 
 def cache_tensors(cache):
@@ -138,17 +152,33 @@ def audit_request(adapter, *, max_entries=200000):
 
     from mosaickv.evaluation import (
         prefill_native_overlap,
+        prompt_graph_reader,
         shared_head_scope,
         storage_runs,
         streaming_prefill,
         streaming_source_constructor,
     )
+    from mosaickv.measurements.allocator_segments import load_reader
+
+    native = load_reader()
+    # Validate the SAME active addresses, unrounded requested bytes, and
+    # rounded allocator bytes. Numerical graph metadata guards stay intact.
+    import gc
+
+    gc.collect()
+    if prompt_graph_reader.allocator_blocks() != native.active_blocks():
+        raise RuntimeError("native segment snapshot differs from installed Python API")
 
     report = {}
     session = _RequestSession(
         report, max_entries=max_entries, deferred_marks=True, clear_library_workspace=True
     )
     with session, ExitStack() as stack:
+        stack.enter_context(allocator_lifetimes_only())
+        stack.enter_context(
+            patch.object(prompt_graph_reader, "allocator_blocks", native.active_blocks)
+        )
+        report["native_segment_snapshot_identity_verified"] = True
         session.mark(
             (*adapter.model.parameters(), *adapter.model.buffers()),
             "model",
@@ -196,6 +226,13 @@ def audit_request(adapter, *, max_entries=200000):
                 "kv_shared_workspace",
                 "prefill attention probabilities also consumed by source planner",
             )
+            hidden = kwargs.get("hidden_states", args[0] if args else None)
+            if hidden is not None:
+                session.mark(
+                    (hidden,),
+                    "kv_shared_workspace",
+                    "normalized model input also used by source construction",
+                )
             result = original_encoder(encoder, index, attention, original, args, kwargs, output)
             session.mark(
                 result.tensors(),

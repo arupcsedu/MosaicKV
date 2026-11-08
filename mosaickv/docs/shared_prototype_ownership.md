@@ -89,6 +89,31 @@ allocation generation and require physical retirement before decode starts.
 Constructor-owned attention probabilities are classified as shared model/planner
 workspace, rather than silently excluding their lifetime from the KV audit.
 
+The consolidated audit replaces only legacy weak-reference result scanning;
+numerical/stride/protection checks still run. Its old phase counters are marked
+inadmissible, not silently reused. A fully classified interval certificate is
+recomputed from serialized allocation generations before propagation to the
+request coverage record. It cannot be accepted from Boolean flags alone.
+
+CUDA trace `alloc.size` is **requested tensor-storage bytes**, not allocator
+rounding. Baseline/final snapshots therefore use `requested_size` too, matching
+the active-cache `UntypedStorage.nbytes()` convention. Allocator padding,
+reserved segments, non-PyTorch vendor workspace, and process HBM are separate;
+the conservative allocator envelope is retained. Earlier mixed-unit operator
+peak certificates are superseded, NOT upgraded; their projection/repair parity
+observations remain valid. A one-byte clock beacon is matched as one byte.
+Collect unreachable request owners and flush completed allocator events at
+audit boundaries so snapshot conversion cannot hide delayed retirement.
+
+The installed `c10/cuda/CUDACachingAllocator.h` defines `SnapshotInfo`, `SegmentInfo`
+and `BlockInfo`. The read-only C++ helper returns the identical active block
+addresses, requested sizes and rounded sizes without symbolizing unrelated
+device traces. Verify equality to `torch.cuda.memory_snapshot()` before use;
+retain the unchanged strict two-scalar graph-metadata guard. Build this helper
+on a CPU job first; compilation failure blocks GPU submission. Build products
+are content-addressed under the scratch cache, never installed into the common
+environment. No model weights, attention operators, or generation path change.
+
 A fully classified native operator transaction can certify its **bounded** peak;
 that must never be relabeled whole-request. The model capture records unresolved
 allocations and keeps its exact request certificate false until every required
