@@ -15,13 +15,44 @@ from unittest.mock import patch
 import torch
 
 from mosaickv.evaluation.lossless_prompt_cache import backing_bytes
-from mosaickv.evaluation.precision_tier import pack
+from mosaickv.evaluation.precision_tier import QuantizedBody, pack
+
+
+@torch.inference_mode()
+def pack_source(values, *, group=128):
+    """History-only feature groups; leave the established prompt quantizer alone.
+
+    Group 128 is the original implementation. Group 32 is a separately labeled
+    diagnostic: four times the header cost, smaller within-group dynamic range.
+    It is still deliberately lossy and never pretends to preserve source bits.
+    """
+    if type(group) is not int or group not in (32, 128):
+        raise ValueError("registered history feature group must be 32 or 128")
+    if group == 128:
+        return pack(values, bits=8, axis=3)
+    if (
+        values.dtype != torch.bfloat16
+        or values.ndim != 4
+        or values.shape[:2] != (1, 1)
+        or not all(values.shape)
+        or values.shape[-1] % group
+        or not bool(torch.isfinite(values).all())
+    ):
+        raise ValueError("finite nonempty BF16 row source divisible by feature group required")
+    shaped = values.float().reshape(*values.shape[:-1], -1, group)
+    minimum, maximum = shaped.amin(-1), shaped.amax(-1)
+    scale = (maximum - minimum) / 255
+    scale = torch.where(scale == 0, torch.ones_like(scale), scale)
+    shaped.sub_(minimum[..., None]).div_(scale[..., None]).round_().clamp_(0, 255)
+    codes = shaped.to(torch.uint8).flatten()
+    return QuantizedBody(tuple(values.shape), 8, 3, group, codes, minimum, scale)
 
 
 def join(bodies):
     if not bodies or any(
         b.bits != 8
         or b.axis != 3
+        or b.group != bodies[0].group
         or b.row_map is not None
         or b.shape[:2] != (1, 1)
         or b.shape[-1] != bodies[0].shape[-1]
@@ -43,8 +74,12 @@ def unpack_into(body, target):
     if (
         body.bits != 8
         or body.axis != 3
-        or body.group != 128
+        or body.group not in (32, 128)
         or body.row_map is not None
+        or body.shape[-1] % body.group
+        or body.codes.numel() != torch.Size(body.shape).numel()
+        or body.minimum.shape != (*body.shape[:-1], body.shape[-1] // body.group)
+        or body.scale.shape != body.minimum.shape
         or target.dtype != torch.bfloat16
         or not target.is_contiguous()
         or target.numel() < body.codes.numel()
@@ -59,13 +94,14 @@ def unpack_into(body, target):
             body.scale,
             target,
             body.codes.numel(),
+            GROUP=body.group,
             BLOCK=256,
             enable_fp_fusion=False,
         )
         if compiled.metadata.global_scratch_size or compiled.n_spills:
             raise RuntimeError("INT8 source unpack introduced undeclared kernel workspace")
     else:
-        value = body.codes.float().view(*body.shape[:-1], body.shape[-1] // 128, 128)
+        value = body.codes.float().view(*body.shape[:-1], body.shape[-1] // body.group, body.group)
         value = value * body.scale[..., None]
         value = value + body.minimum[..., None]
         target.flatten()[: body.codes.numel()].copy_(value.flatten().bfloat16())
@@ -129,15 +165,18 @@ class HistoryFormat:
 
 
 @contextmanager
-def use():
+def use(*, feature_group=128):
     from mosaickv.evaluation import consolidated_history as combined
     from mosaickv.evaluation import native_history_reader as native
     from mosaickv.evaluation import source_history
     from mosaickv.evaluation.exact_storage import decoded
     from mosaickv.evaluation.projection_cache import identity
 
+    if type(feature_group) is not int or feature_group not in (32, 128):
+        raise ValueError("registered history feature group must be 32 or 128")
     report = dict(
         variant="older_source_INT8_exact_recent_16",
+        feature_group=feature_group,
         conversions=0,
         epochs=0,
         latest_sealed_exact_tokens=16,
@@ -190,7 +229,7 @@ def use():
                 if isinstance(packet, HistoryFormat):
                     bodies.append(packet.body)
                 elif isinstance(packet, native.NativeHistoryFormat):
-                    bodies.append(pack(decoded(packet.archive.source), bits=8, axis=3))
+                    bodies.append(pack_source(decoded(packet.archive.source), group=feature_group))
                     report["conversions"] += 1
                 else:
                     raise TypeError("unsupported history source format")

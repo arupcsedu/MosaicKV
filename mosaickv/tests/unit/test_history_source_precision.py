@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from mosaickv.evaluation.history_source_precision import join, unpack_into
+from mosaickv.evaluation.history_source_precision import join, pack_source, unpack_into
 from mosaickv.evaluation.precision_tier import pack, unpack_cpu
 
 
@@ -29,6 +29,62 @@ def test_quantized_source_oracle_join_and_workspace_sentinels():
         join(())
     with pytest.raises(ValueError):
         unpack_into(body, target.float())
+
+
+@pytest.mark.parametrize("group", [32, 128])
+def test_history_feature_groups_match_independent_original_order_oracle(group):
+    torch.manual_seed(408)
+    source = torch.randn(1, 1, 16, 4096).bfloat16()
+    source[..., :group] = 0  # degenerate group retains the original scale-one convention
+    frozen = source.clone()
+    shaped = source.float().view(1, 1, 16, -1, group)
+    low, high = shaped.amin(-1), shaped.amax(-1)
+    scale = (high - low) / 255
+    scale = torch.where(scale == 0, torch.ones_like(scale), scale)
+    codes = ((shaped - low[..., None]) / scale[..., None]).round().clamp(0, 255)
+    expected = (codes * scale[..., None] + low[..., None]).bfloat16()
+    body = pack_source(source, group=group)
+    target = torch.full((32, 4096), -99, dtype=torch.bfloat16)
+    unpack_into(body, target)
+    assert torch.equal(source, frozen)
+    assert torch.equal(body.codes, codes.to(torch.uint8).flatten())
+    assert torch.equal(body.minimum, low) and torch.equal(body.scale, scale)
+    assert torch.equal(target[:16].flatten(), expected.flatten())
+    assert bool((target[16:] == -99).all())
+    if group == 128:
+        old = pack(source, bits=8, axis=3)
+        assert all(torch.equal(a, b) for a, b in zip(body.tensors(), old.tensors(), strict=True))
+    else:
+        old = pack_source(source)
+        # Charge all extra FP32 min/scale headers; never report code bytes alone.
+        assert sum(t.numel() * t.element_size() for t in body.tensors()) > sum(
+            t.numel() * t.element_size() for t in old.tensors()
+        )
+        with pytest.raises(ValueError):
+            join((body, old))
+
+
+@pytest.mark.parametrize("group", [True, 0, 16, 64, 256])
+def test_unregistered_history_precision_is_rejected(group):
+    from mosaickv.evaluation.history_source_precision import use
+
+    with pytest.raises(ValueError):
+        pack_source(torch.zeros(1, 1, 16, 128).bfloat16(), group=group)
+    with pytest.raises(ValueError), use(feature_group=group):
+        pass
+
+
+def test_group32_join_preserves_quantized_words_without_requantization():
+    values = [torch.randn(1, 1, n, 256).bfloat16() for n in (16, 32)]
+    bodies = [pack_source(v, group=32) for v in values]
+    joined = join(bodies)
+    expected = torch.empty((48, 256), dtype=torch.bfloat16)
+    for start, body in zip((0, 16), bodies, strict=True):
+        unpack_into(body, expected[start:])
+    actual = torch.empty_like(expected)
+    unpack_into(joined, actual)
+    assert torch.equal(actual, expected)
+    assert joined.group == 32
 
 
 def test_request_and_rotary_isolation_reject_before_any_projection(monkeypatch):

@@ -121,7 +121,9 @@ def reused_controls(p, index):
     return [dict(r, reused=True, producer_source_sha=producer) for r in rows]
 
 
-def prepare(root, reuse=None, reuse_model=None):
+def prepare(root, reuse=None, reuse_model=None, *, history_feature_group=128):
+    if type(history_feature_group) is not int or history_feature_group not in (32, 128):
+        raise ValueError("registered history feature group must be 32 or 128")
     source = clean_source(SOURCE)
     if root.exists():
         raise FileExistsError("new write-once study root required")
@@ -139,6 +141,7 @@ def prepare(root, reuse=None, reuse_model=None):
         operator_repetitions=20,
         tiled_softmax_rows=2048,
         model_history_graph=False,
+        history_feature_group=history_feature_group,
         fresh_or_paper_campaign_authorized=False,
         measurement_type="consumed_packed_constructor_softmax_history_ablation",
         isolated_experimental_variant=True,
@@ -191,6 +194,10 @@ def prepare(root, reuse=None, reuse_model=None):
             "mosaickv/src/mosaickv/evaluation/legacy_dispatch_fingerprint.py",
             "mosaickv/tests/unit/test_history_precision_dispatch.py",
             "mosaickv/docs/packed_history_diagnostic.md",
+            "mosaickv/src/mosaickv/evaluation/history_source_precision.py",
+            "mosaickv/src/mosaickv/evaluation/history_source_precision_kernel.py",
+            "mosaickv/tests/unit/test_history_source_precision.py",
+            "mosaickv/tests/unit/test_packed_history_orchestrator.py",
         }
         if not changed <= allowed or not read(reuse_model / "operator-analysis.json")["passed"]:
             raise ValueError(
@@ -494,14 +501,51 @@ def model(root, p, folder, index):
         map_location="cpu",
         weights_only=True,
     )
+    feature_group = p.get("history_feature_group", 128)
+    history_arm = (
+        "history_INT8_tiled" if feature_group == 128 else f"history_INT8_g{feature_group}_tiled"
+    )
+    if feature_group != 128:
+        # This operator check precedes any model request using the new format.
+        # Reused operator evidence certifies group 128 only, not this branch.
+        from mosaickv.evaluation.history_source_precision import pack_source, unpack_into
+
+        oracle_checks = []
+        for n in (16, 32, 96):
+            source = torch.randn(1, 1, n, 4096, device="cuda").bfloat16()
+            body = pack_source(source, group=feature_group)
+            shaped = body.codes.float().view(1, 1, n, 4096 // feature_group, feature_group)
+            oracle = (shaped * body.scale[..., None] + body.minimum[..., None]).bfloat16()
+            target = torch.full((128, 4096), -99, dtype=torch.bfloat16, device="cuda")
+            unpack_into(body, target)
+            oracle_checks.append(
+                dict(
+                    tokens=n,
+                    original_order_oracle_bitwise=bool(
+                        torch.equal(target[:n].flatten(), oracle.flatten())
+                    ),
+                    untouched_workspace_sentinel=bool((target[n:] == -99).all()),
+                )
+            )
+        write_once(
+            folder / "new-history-operator.json",
+            dict(feature_group=feature_group, checks=oracle_checks),
+        )
+        if not all(
+            r["original_order_oracle_bitwise"] and r["untouched_workspace_sentinel"]
+            for r in oracle_checks
+        ):
+            raise RuntimeError("new history-group GPU operator gate failed")
+        del source, body, shaped, oracle, target
+        torch.cuda.synchronize()
     cases = [
         ("control_original", False, False, False),
         ("control_tiled", True, False, False),
         ("packed_prompt_tiled", True, True, False),
-        ("history_INT8_tiled", True, False, True),
+        (history_arm, True, False, True),
     ]
     if p.get("reuse_model_controls"):
-        cases = [("history_INT8_tiled", True, False, True)]
+        cases = [(history_arm, True, False, True)]
     feasibility = read(root / "cpu-feasibility.json")
     eligible = [
         r
@@ -545,7 +589,11 @@ def model(root, p, folder, index):
                     prompt_report = (
                         stack.enter_context(prompt_scope(explicit_groups)) if prototype else {}
                     )
-                    history_report = stack.enter_context(precision()) if history else {}
+                    history_report = (
+                        stack.enter_context(precision(feature_group=feature_group))
+                        if history
+                        else {}
+                    )
                     ledger = stack.enter_context(
                         audit_request(adapter, max_entries=p["maximum_allocator_events"])
                     )
@@ -629,14 +677,17 @@ def model(root, p, folder, index):
             if arm == "control_tiled" and not row.get("numerically_admissible", False):
                 break
             if (
-                arm == "history_INT8_tiled"
+                arm == history_arm
                 and row.get("numerically_admissible", False)
                 and any(
                     r["arm"] == "packed_prompt_tiled" and r.get("numerically_admissible", False)
                     for r in [*rows, *reused_controls(p, index)]
                 )
             ):
-                cases.append(("combined_tiled", True, True, True))
+                combined_arm = (
+                    "combined_tiled" if feature_group == 128 else f"combined_g{feature_group}_tiled"
+                )
+                cases.append((combined_arm, True, True, True))
         # Combined policy is NOT run automatically after a component failure.
     write_once(
         folder / "result.json",
@@ -791,10 +842,13 @@ def main():
     parser.add_argument("--stage", default="none")
     parser.add_argument("--reuse-cpu", type=Path)
     parser.add_argument("--reuse-model", type=Path)
+    parser.add_argument("--history-feature-group", type=int, choices=(32, 128), default=128)
     args = parser.parse_args()
     root = args.root
     if args.action == "prepare":
-        prepare(root, args.reuse_cpu, args.reuse_model)
+        prepare(
+            root, args.reuse_cpu, args.reuse_model, history_feature_group=args.history_feature_group
+        )
         return
     p = checked(root, args.plan_sha)
     if args.action == "cpu":

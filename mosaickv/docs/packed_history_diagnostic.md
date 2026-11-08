@@ -89,3 +89,28 @@ rerun; six completed control/prompt rows and operator evidence remain bound to
 their original producer SHA/manifests. Existing interval certificates are
 independently verified on CPU before reuse. Prior failed attempts remain linked
 and are not overwritten or relabeled as quality measurements.
+
+## Separately frozen group-32 history diagnostic
+
+The completed group-128 model diagnostic preserved every greedy token, but one
+input failed the unchanged longer-horizon numerical gate: prediction 36 exceeded
+the logit limit and prediction 46 exceeded the KL limit. This is a negative
+numerical result, not an engineering failure and not permission to relax limits.
+The first 32 predictions alone would miss approximation beginning at prediction
+34. Both original and new checks are therefore retained.
+
+A follow-up on only the SAME consumed inputs uses 32-feature INT8 groups instead
+of 128. This spends four times the FP32 header storage to reduce within-group
+dynamic range. It changes neither source membership, recent-16 exact protection,
+weights, positions, thresholds nor prompts. It is still explicitly lossy, with
+no assertion that finer groups guarantee better model outputs. The established
+prompt quantizer is not modified; group 128 remains byte-identical by regression.
+Complete header and conversion workspace costs are charged by the same ledger.
+
+`prepare --history-feature-group 32 --reuse-cpu PREVIOUS --reuse-model V2`
+freezes the new choice before execution, binds the prior six control/prompt rows,
+and reruns CPU tests. Each GPU worker first validates the new dequantizer's exact
+FP32-operation oracle and untouched workspace sentinels at 16/32/96 history rows.
+Only then does it run the new history arm; its combined prompt/history arm is
+conditional on that input's numerical success. All prior negative attempts stay
+immutable. No fresh cohort or independent quality study is enabled by this retry.
