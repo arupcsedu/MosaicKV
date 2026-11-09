@@ -29,6 +29,12 @@ def extra_model_context(stack, arm):
     return None
 
 
+def assess_fidelity(actual, reference, p, arm):
+    from compact_hybrid_study import fidelity
+
+    return fidelity(actual, reference, strict=True, p=p)
+
+
 def read(path):
     return json.loads(Path(path).read_text())
 
@@ -242,7 +248,7 @@ def operators(root, p, folder, index):
 def model(root, p, folder, index):
     import evicastkv_paper_precision as campaign
     import torch
-    from compact_hybrid_study import fidelity, manifest
+    from compact_hybrid_study import manifest
 
     from mosaickv.adapters.huggingface import load_hf_adapter
     from mosaickv.config import RunConfig
@@ -311,7 +317,7 @@ def model(root, p, folder, index):
                     )
                 torch.cuda.synchronize()
                 actual = logits.cpu()
-                proof = fidelity(actual, reference, strict=True, p=p)
+                proof = assess_fidelity(actual, reference, p, arm)
                 torch.save(actual, folder / f"{arm}.logits.pt")
                 path = folder / f"{arm}.ledger.json.gz"
                 with gzip.open(path, "xt", compresslevel=1) as stream:

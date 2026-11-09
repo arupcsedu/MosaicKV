@@ -165,7 +165,7 @@ class HistoryFormat:
 
 
 @contextmanager
-def use(*, feature_group=128):
+def use(*, feature_group=128, exact_recent_tokens=16):
     from mosaickv.evaluation import consolidated_history as combined
     from mosaickv.evaluation import native_history_reader as native
     from mosaickv.evaluation import source_history
@@ -174,12 +174,15 @@ def use(*, feature_group=128):
 
     if type(feature_group) is not int or feature_group not in (32, 128):
         raise ValueError("registered history feature group must be 32 or 128")
+    if type(exact_recent_tokens) is not int or exact_recent_tokens not in (16, 64):
+        raise ValueError("registered exact recent history must be 16 or 64 tokens")
+    keep_chunks = exact_recent_tokens // 16
     report = dict(
-        variant="older_source_INT8_exact_recent_16",
+        variant=f"older_source_INT8_exact_recent_{exact_recent_tokens}",
         feature_group=feature_group,
         conversions=0,
         epochs=0,
-        latest_sealed_exact_tokens=16,
+        latest_sealed_exact_tokens=exact_recent_tokens,
         mutable_tail_exact=True,
         benchmark_labels_accessed=False,
         lossy_older_history=True,
@@ -205,6 +208,8 @@ def use(*, feature_group=128):
         counts = [sum(f.shape[-2] for f in layer.source_sealed) for layer in layers]
         if len(set(counts)) != 1 or counts[0] < 32:
             raise ValueError("complete equal-length original history required")
+        if counts[0] <= exact_recent_tokens:
+            return False
         state = native.current()
         if state is None or state.graphs is not None:
             raise NotImplementedError(
@@ -222,10 +227,13 @@ def use(*, feature_group=128):
         cache.observe()
         for layer in layers:
             old = tuple(layer.source_sealed)
-            if not isinstance(old[-1], native.NativeHistoryFormat) or old[-1].shape[-2] != 16:
-                raise ValueError("most recent sealed chunk must retain original exact source")
+            recent = old[-keep_chunks:]
+            if len(recent) != keep_chunks or any(
+                not isinstance(p, native.NativeHistoryFormat) or p.shape[-2] != 16 for p in recent
+            ):
+                raise ValueError("all most recent sealed chunks must retain original exact source")
             bodies = []
-            for packet in old[:-1]:
+            for packet in old[:-keep_chunks]:
                 if isinstance(packet, HistoryFormat):
                     bodies.append(packet.body)
                 elif isinstance(packet, native.NativeHistoryFormat):
@@ -244,11 +252,11 @@ def use(*, feature_group=128):
                 weakref.ref(state),
                 (native.phase_token(key_phase), native.phase_token(value_phase)),
             )
-            if n + 16 != counts[0]:
+            if n + exact_recent_tokens != counts[0]:
                 raise RuntimeError("older/recent split lost a logical history position")
             old_private = tuple(t for packet in old for t in packet.private())
-            new_private = (*replacement.private(), *old[-1].private())
-            layer.source_sealed = [replacement, old[-1]]
+            new_private = (*replacement.private(), *(t for p in recent for t in p.private()))
+            layer.source_sealed = [replacement, *recent]
             layer.resident_bytes += backing_bytes(new_private) - backing_bytes(old_private)
             cache.observe(old_private)
             cache.source_consolidation_layers += 1
