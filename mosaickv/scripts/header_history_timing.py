@@ -183,6 +183,7 @@ def worker(root, p, folder, i):
                     mixed_report = None
                     fused_unpack_report = None
                     paired_source_report = None
+                    verification_report = None
                     if policy.get(
                         "mixed", p.get("timing_mixed_candidate") and job["arm"] == ARMS[1]
                     ):
@@ -202,6 +203,10 @@ def worker(root, p, folder, i):
                         from mosaickv.evaluation.paired_history_source import use as paired_source
 
                         paired_source_report = stack.enter_context(paired_source())
+                    if policy.get("verification_barrier"):
+                        from mosaickv.evaluation.mixed_verification_barrier import use as barrier
+
+                        verification_report = stack.enter_context(barrier())
                     logits, details = campaign.execute(
                         adapter, sample, transport, "mosaickv_exact", audit=False
                     )
@@ -245,6 +250,7 @@ def worker(root, p, folder, i):
                     mixed_projection=mixed_report,
                     fused_unpack=fused_unpack_report,
                     paired_source=paired_source_report,
+                    verification_barrier=verification_report,
                 )
             except Exception:
                 row["error"] = traceback.format_exc()
