@@ -59,6 +59,25 @@ def workspace_buffers(device, buffers):
     return buffers if buffers[0].shape[0] == 128 else tuple(t[:128] for t in buffers)
 
 
+def unpack_source(packet, destination):
+    """Original source-only kernel; a paired fill may reuse this exact result."""
+    from mosaickv.evaluation.encoded_projection_kernel import _materialize, pointers
+
+    n, body = packet.shape[-2], packet.archive.source
+    compiled = _materialize[(triton.cdiv(n, 16), 64)](
+        *pointers(body),
+        packet.literal_checkpoints,
+        destination.view(torch.uint16),
+        n,
+        WIDTH=4096,
+        RAW=body.raw,
+        PACK_COUNTS=False,
+        num_warps=4,
+    )
+    if compiled.metadata.global_scratch_size or compiled.n_spills:
+        raise RuntimeError("lossless history unpack introduced scratch or spills")
+
+
 class Engine:
     def __init__(self, device, *, frozen=False, buffers=None):
         from mosaickv.evaluation.zero_workspace_lt import Plans
@@ -93,7 +112,6 @@ class Engine:
 
     def project(self, packet, attention, component, target, repairs=None):
         from mosaickv.evaluation.dual_projection_kernel import apply_patch
-        from mosaickv.evaluation.encoded_projection_kernel import _materialize, pointers
         from mosaickv.evaluation.shared_source_kernel import rotate_native
 
         n = packet.shape[-2]
@@ -110,19 +128,7 @@ class Engine:
             or target.dtype != torch.bfloat16
         ):
             raise ValueError("complete identity history and original strided BF16 target required")
-        body = packet.archive.source
-        compiled = _materialize[(triton.cdiv(n, 16), 64)](
-            *pointers(body),
-            packet.literal_checkpoints,
-            self.source.view(torch.uint16),
-            n,
-            WIDTH=4096,
-            RAW=body.raw,
-            PACK_COUNTS=False,
-            num_warps=4,
-        )
-        if compiled.metadata.global_scratch_size or compiled.n_spills:
-            raise RuntimeError("lossless history unpack introduced scratch or spills")
+        unpack_source(packet, self.source)
         self.plans.execute(
             self.source, (attention.k_proj, attention.v_proj)[component].weight, self.output, n
         )

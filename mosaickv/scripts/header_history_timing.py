@@ -182,6 +182,7 @@ def worker(root, p, folder, i):
                     )
                     mixed_report = None
                     fused_unpack_report = None
+                    paired_source_report = None
                     if policy.get(
                         "mixed", p.get("timing_mixed_candidate") and job["arm"] == ARMS[1]
                     ):
@@ -197,6 +198,10 @@ def worker(root, p, folder, i):
                         from mosaickv.evaluation.fused_history_unpack import use as fused_unpack
 
                         fused_unpack_report = stack.enter_context(fused_unpack())
+                    if policy.get("paired_source"):
+                        from mosaickv.evaluation.paired_history_source import use as paired_source
+
+                        paired_source_report = stack.enter_context(paired_source())
                     logits, details = campaign.execute(
                         adapter, sample, transport, "mosaickv_exact", audit=False
                     )
@@ -239,6 +244,7 @@ def worker(root, p, folder, i):
                     selective_history=history_report,
                     mixed_projection=mixed_report,
                     fused_unpack=fused_unpack_report,
+                    paired_source=paired_source_report,
                 )
             except Exception:
                 row["error"] = traceback.format_exc()
