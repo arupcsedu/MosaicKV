@@ -128,6 +128,10 @@ def bind(packet, destination, *, device_type="cuda"):
     )
 
 
+def replay(entry, arguments):
+    entry.runner(*arguments, *entry.geometry.values())
+
+
 def launch(packet, destination):
     state = _state.get()
     if state is None or destination.device.type != "cuda":
@@ -156,7 +160,7 @@ def launch(packet, destination):
             raise RuntimeError("cross-request/source workspace substitution forbidden")
         # Triton's compiled launcher still parses constexpr arguments in the
         # original Python ABI, even though they are absent from CUDA params.
-        entry.runner(*args, *entry.geometry.values())
+        replay(entry, args)
         state["reused"] += 1
 
 

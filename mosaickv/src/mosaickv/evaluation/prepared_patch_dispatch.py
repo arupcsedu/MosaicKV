@@ -31,6 +31,10 @@ def use(enabled):
             state["handles"].clear()
 
 
+def replay(runner, arguments):
+    runner(*arguments)
+
+
 def launch(kernel, grid, arguments):
     state = _state.get()
     if state is None or state is _INACTIVE:
@@ -73,7 +77,7 @@ def launch(kernel, grid, arguments):
         state["misses"] += 1
     else:
         compiled, runner = entry
-        runner(*arguments)
+        replay(runner, arguments)
         state["hits"] += 1
     return compiled
 
