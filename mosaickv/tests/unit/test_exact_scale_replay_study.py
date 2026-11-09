@@ -43,6 +43,41 @@ def test_missing_workers_never_promote_or_claim_superiority(tmp_path):
     assert not proof["six_component_superiority_established"]
 
 
+def test_uncertified_peak_remains_missing_instead_of_crashing_or_passing(tmp_path, monkeypatch):
+    monkeypatch.setattr(study, "ARMS", ["a", "b"])
+    monkeypatch.setattr(
+        "mosaickv.measurements.kv_timeline.valid_whole_request_certificate", lambda _: False
+    )
+    for i in (0, 1):
+        folder = tmp_path / f"model/{i}"
+        folder.mkdir(parents=True)
+        ledger = folder / "ledger.gz"
+        with gzip.open(ledger, "wt") as stream:
+            json.dump({}, stream)
+        rows = [
+            dict(
+                arm=arm,
+                status="completed",
+                numerically_admissible=True,
+                ledger_path=str(ledger),
+                ledger_sha=sha(ledger),
+                common_header=[dict(enabled=True)],
+                initial_GPU_KV_bytes=16,
+                final_GPU_KV_bytes=32,
+                whole_request_KV_plus_workspace_peak_bytes=None,
+            )
+            for arm in study.ARMS
+        ]
+        (folder / "raw.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+    study.analyze(tmp_path, {})
+    decision = json.loads((tmp_path / "analysis/decision.json").read_text())
+    assert not decision["complete"] and not decision["all_initial_final_peak_savings"]
+    assert all(
+        r["reductions"]["whole_request_KV_plus_workspace_peak_bytes"] is None
+        for r in decision["pairs"]
+    )
+
+
 def test_prepare_reuses_only_valid_controls_and_submits_cpu(tmp_path, monkeypatch):
     parent = tmp_path / "parent"
     parent.mkdir()

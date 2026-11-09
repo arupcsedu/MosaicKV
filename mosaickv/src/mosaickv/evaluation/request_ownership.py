@@ -98,6 +98,25 @@ STACK_RULES += tuple(
     )
     for name in names
 )
+# Exact sources audited in the saved common-header review, charged as cache
+# construction, never a broad model-forward/non-KV exemption.
+STACK_RULES += tuple(
+    ("/mosaickv/evaluation/" + filename, name, role)
+    for filename, names, role in (
+        (
+            "streaming_baselines.py",
+            ("lookm_layer", "encode_layer", "selected_pair", "_heads_pair", "__call__"),
+            "kv_workspace",
+        ),
+        ("exact_storage.py", ("decoded",), "kv_workspace"),
+        ("native_history_feasibility.py", ("workspace_buffers",), "kv_shared_workspace"),
+    )
+    for name in names
+)
+STACK_RULES += tuple(
+    ("/mosaickv/evaluation/sequential_kv_lease.py", "forward", "kv_shared_workspace", line)
+    for line in (307, 309, 310, 315)
+)
 
 
 @contextmanager

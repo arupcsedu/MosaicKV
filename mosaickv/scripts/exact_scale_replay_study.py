@@ -236,13 +236,20 @@ def analyze(root, p):
             engaged = bool(accepted and len(accepted) == 1 and accepted[0].get("enabled"))
             if not engaged:
                 errors.append(dict(input=i, error="exact header codec did not engage"))
-            reductions = {k: 1 - candidate[k] / control[k] for k in keys}
+            reductions = {
+                k: 1 - candidate[k] / control[k]
+                if isinstance(candidate.get(k), (int, float))
+                and isinstance(control.get(k), (int, float))
+                and control[k] > 0
+                else None
+                for k in keys
+            }
             pairs.append(dict(input=i, reductions=reductions, header_engaged=engaged))
     complete = len(rows) == 4 and not errors
     saving = (
         complete
         and len(pairs) == 2
-        and all(all(x > 0 for x in pair["reductions"].values()) for pair in pairs)
+        and all(all(x is not None and x > 0 for x in pair["reductions"].values()) for pair in pairs)
     )
     folder = root / "analysis"
     folder.mkdir(exist_ok=False)
