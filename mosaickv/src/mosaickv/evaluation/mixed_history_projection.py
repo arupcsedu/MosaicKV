@@ -21,6 +21,24 @@ _building = ContextVar("evicastkv_mixed_history_building", default=False)
 _profiling = ContextVar("evicastkv_mixed_history_profiling", default=None)
 
 
+def unpack_sources(packet, destination):
+    """Reference mixed-source materialization, independently replaceable at the ABI."""
+    from mosaickv.evaluation.history_source_precision import unpack_into as unpack_int8
+    from mosaickv.evaluation.lossless_bf16 import unpack_into as unpack_exact
+
+    workspace = destination.view(1, 1, -1, 4096)
+    offset = 0
+    if packet.older is not None:
+        offset = packet.older.shape[-2]
+        unpack_int8(packet.older.body, workspace[:, :, :offset])
+    for recent in packet.recent:
+        end = offset + recent.shape[-2]
+        unpack_exact(recent.archive.source, workspace[:, :, offset:end])
+        offset = end
+    if offset != packet.shape[-2]:
+        raise RuntimeError("mixed reconstruction lost a logical source position")
+
+
 class PhaseTrace:
     def __init__(self, key):
         self.key, self.values = key, []
@@ -133,8 +151,6 @@ class MixedHistory:
 
     def fill_component(self, attention, component, target):
         from mosaickv.evaluation import native_history_reader as native
-        from mosaickv.evaluation.history_source_precision import unpack_into as unpack_int8
-        from mosaickv.evaluation.lossless_bf16 import unpack_into as unpack_exact
         from mosaickv.evaluation.shared_source_kernel import rotate_native
 
         state = native.current()
@@ -147,17 +163,7 @@ class MixedHistory:
             raise ValueError("complete mixed-history component shape required")
         profiler = _profiling.get()
         mark = profiler.sample(attention, n, component, target.device) if profiler else None
-        workspace = state.engine.source.view(1, 1, -1, 4096)
-        offset = 0
-        if self.older is not None:
-            offset = self.older.shape[-2]
-            unpack_int8(self.older.body, workspace[:, :, :offset])
-        for packet in self.recent:
-            end = offset + packet.shape[-2]
-            unpack_exact(packet.archive.source, workspace[:, :, offset:end])
-            offset = end
-        if offset != n:
-            raise RuntimeError("mixed reconstruction lost a logical source position")
+        unpack_sources(self, state.engine.source)
         if mark:
             mark.next("native_projection")
         state.engine.plans.execute(

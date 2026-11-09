@@ -181,6 +181,7 @@ def worker(root, p, folder, i):
                         else None
                     )
                     mixed_report = None
+                    fused_unpack_report = None
                     if policy.get(
                         "mixed", p.get("timing_mixed_candidate") and job["arm"] == ARMS[1]
                     ):
@@ -192,6 +193,10 @@ def worker(root, p, folder, i):
                             and job["repetition"] == 0
                         )
                         mixed_report = stack.enter_context(mixed(profile=profile))
+                    if policy.get("fused_unpack"):
+                        from mosaickv.evaluation.fused_history_unpack import use as fused_unpack
+
+                        fused_unpack_report = stack.enter_context(fused_unpack())
                     logits, details = campaign.execute(
                         adapter, sample, transport, "mosaickv_exact", audit=False
                     )
@@ -233,6 +238,7 @@ def worker(root, p, folder, i):
                     ],
                     selective_history=history_report,
                     mixed_projection=mixed_report,
+                    fused_unpack=fused_unpack_report,
                 )
             except Exception:
                 row["error"] = traceback.format_exc()
