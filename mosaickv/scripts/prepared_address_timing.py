@@ -45,6 +45,12 @@ def prepare(root):
         "bitwise_and_storage_gate"
     ]:
         raise ValueError("complete address dispatch parity required")
+    global BASELINES
+    BASELINES = root.parent / "compatible-baselines"
+    if not timing.base.common.read(BASELINES / "analysis/address-baseline-decision.json")[
+        "complete"
+    ]:
+        raise ValueError("all compatible baselines must pass the same address transport")
     p = timing.base.common.read(PARENT / "paired-timing/plan.json")
     original = timing.base.common.read(ORIGINAL / "plan.json")
     p["controls"]["references"] = original["controls"]["references"]
@@ -58,6 +64,7 @@ def prepare(root):
         root.parent / "analysis/address-decision.json",
         BASELINES / "plan.json",
         BASELINES / "model-submission.json",
+        BASELINES / "analysis/address-baseline-decision.json",
     ]
     paths += [Path(v["storage"]) for v in p["controls"]["references"].values()]
     paths += [Path(v) for v in p["same_precision_references"].values()]
@@ -74,6 +81,7 @@ def prepare(root):
         profile_is_excluded_from_timed_trials=True,
         no_multiplication_of_ratios_from_separate_jobs=True,
         external_baseline_analysis_dependency=dependency,
+        external_baselines_path=str(BASELINES),
         fresh_or_paper_campaign_authorized=False,
         independent_quality_validation_authorized=False,
     )
@@ -98,7 +106,7 @@ def prepare(root):
 
 
 def cpu(root, p):
-    path = BASELINES / "analysis/decision.json"
+    path = Path(p.get("external_baselines_path", str(BASELINES))) / "analysis/decision.json"
     if not path.exists() or not timing.base.common.read(path)["complete"]:
         write_once(
             root / "cpu.json",
@@ -113,7 +121,7 @@ def cpu(root, p):
         dict(
             path=str(path),
             sha256=sha(path),
-            source_plan_sha=sha(BASELINES / "plan.json"),
+            source_plan_sha=sha(path.parent.parent / "plan.json"),
             producer_job_dependency=p["external_baseline_analysis_dependency"],
         ),
     )

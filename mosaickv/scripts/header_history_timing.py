@@ -216,7 +216,7 @@ def worker(root, p, folder, i):
                     if policy.get("prepared_addresses"):
                         from mosaickv.evaluation.prepared_address_dispatch import use as addresses
 
-                        address_report = stack.enter_context(addresses())
+                        address_report = stack.enter_context(addresses(backend="cpp"))
                     logits, details = campaign.execute(
                         adapter, sample, transport, "mosaickv_exact", audit=False
                     )

@@ -22,6 +22,7 @@ base.EXTRA_TESTS = (
     *base.EXTRA_TESTS,
     "test_prepared_address_dispatch.py",
     "test_prepared_address_study.py",
+    "test_validated_address_loader.py",
     "test_prepared_patch_dispatch.py",
     "test_fused_history_unpack.py",
     "test_mixed_history_projection.py",
@@ -43,11 +44,11 @@ def prepare(root):
         root,
         dependencies=(PARENT / "analysis/private-score-decision.json",),
         overrides=dict(
-            study="same_binary_prepared_address_transport_v1",
+            study="same_binary_bulk_validated_address_transport_v2",
             measurement_type="consumed_same_binary_argument_transport",
             arms=ARMS,
             mixed_history_projection=(
-                "same binary/geometry; live private CUDA buffers; avoid redundant pointer queries"
+                "same binary/geometry; bulk C++ validates CUDA buffers; no redundant queries"
             ),
         ),
     )
@@ -66,7 +67,7 @@ def operator(root, p, folder, i):
     from mosaickv.evaluation.prepared_address_dispatch import use as addresses
 
     manifest(p, base.sha(root / "plan.json"), folder, i, gpu=True)
-    controls = gpu_controls()
+    controls = gpu_controls(backend="cpp")
     recent = tuple(
         SimpleNamespace(
             shape=(1, 32, 16, 128),
@@ -96,7 +97,7 @@ def operator(root, p, folder, i):
         expected = target[:112].clone()
         for rep in range(-5, 20):
             for flag in rng.permutation([False, True]):
-                with addresses(bool(flag)) as report:
+                with addresses(bool(flag), backend="cpp") as report:
                     torch.cuda.synchronize()
                     begin, end = (torch.cuda.Event(enable_timing=True) for _ in range(2))
                     begin.record()
@@ -169,7 +170,7 @@ def model(root, p, folder, i):
             fused_unpack=stack.enter_context(fused()),
             paired_source=stack.enter_context(pairs()),
             private_scores=stack.enter_context(tile(rows=p["tiled_softmax_rows"], inplace=True)),
-            prepared_addresses=stack.enter_context(addresses(arm == ARMS[1])),
+            prepared_addresses=stack.enter_context(addresses(arm == ARMS[1], backend="cpp")),
         )
 
     def compare(actual, parent, plan, arm):
@@ -220,9 +221,9 @@ def analyze(root, p):
         ),
     )
     if eligible:
-        from prepared_address_timing import prepare as timing_prepare
+        from prepared_address_baselines import prepare as baseline_prepare
 
-        timing_prepare(root / "paired-timing")
+        baseline_prepare(root / "compatible-baselines")
 
 
 if __name__ == "__main__":

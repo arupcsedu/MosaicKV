@@ -46,13 +46,23 @@ def addresses(arguments, *, device_type="cuda"):
 
 
 @contextmanager
-def use(enabled=True):
+def use(enabled=True, *, backend="python"):
     from mosaickv.evaluation import fused_history_unpack as source
     from mosaickv.evaluation import prepared_patch_dispatch as patches
 
     if type(enabled) is not bool or _scope.get() is not None:
         raise ValueError("explicit nonnested prepared address policy required")
     verify_driver()
+    if backend not in ("python", "cpp"):
+        raise ValueError("explicit registered pointer validation backend required")
+    validate = addresses
+    native_record = None
+    if backend == "cpp":
+        from mosaickv.evaluation.validated_address_loader import addresses as native_addresses
+        from mosaickv.evaluation.validated_address_loader import report as native_report
+
+        validate = native_addresses
+        native_record = native_report()
     report = dict(
         enabled=enabled,
         source_replays=0,
@@ -63,13 +73,15 @@ def use(enabled=True):
         first_tensor_launch_validation_unchanged=True,
         compiled_kernel_and_geometry_unchanged=True,
         CUDA_driver_source_sha=DRIVER_SHA,
+        validation_backend=backend,
+        compiled_validation=native_record,
     )
     token = _scope.set(report)
 
     def source_replay(entry, args):
         if len(args) != 24:
             raise ValueError("complete original mixed source ABI required")
-        values = addresses(args)
+        values = validate(args)
         entry.runner(*values, *entry.geometry.values())
         report["source_replays"] += 1
         report["pointer_arguments"] += 24
@@ -77,7 +89,7 @@ def use(enabled=True):
     def patch_replay(runner, args):
         if len(args) != 8:
             raise ValueError("complete original sparse patch ABI required")
-        values = addresses(args[:3])
+        values = validate(args[:3])
         runner(*values, *args[3:])
         report["patch_replays"] += 1
         report["pointer_arguments"] += 3
@@ -95,11 +107,11 @@ def use(enabled=True):
         _scope.reset(token)
 
 
-def gpu_controls():
+def gpu_controls(*, backend="python"):
     from mosaickv.evaluation.fused_history_unpack import gpu_controls as source_controls
     from mosaickv.evaluation.prepared_patch_dispatch import gpu_controls as patch_controls
 
-    with use() as report:
+    with use(backend=backend) as report:
         sources = source_controls()
         patches = patch_controls()
     if report["source_replays"] < 10 or not report["patch_replays"]:

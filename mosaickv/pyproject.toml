@@ -48,6 +48,7 @@ include-package-data = true
 where = ["src"]
 
 [tool.setuptools.package-data]
+"mosaickv.evaluation" = ["csrc/*.cpp"]
 "mosaickv.evaluation.data" = ["*.jsonl"]
 "mosaickv.evaluation.lmms_compat" = [
   "mmstar/*",
