@@ -8,12 +8,79 @@ No extra persistent source copy or enlarged numerical tolerance is permitted.
 
 import weakref
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, replace
+from time import perf_counter
 
 import torch
 
 from mosaickv.evaluation.exact_storage import SparseBitPatch
 from mosaickv.evaluation.lossless_prompt_cache import backing_bytes
+
+_building = ContextVar("evicastkv_mixed_history_building", default=False)
+_profiling = ContextVar("evicastkv_mixed_history_profiling", default=None)
+
+
+class PhaseTrace:
+    def __init__(self, key):
+        self.key, self.values = key, []
+        self.begin("source_unpack")
+
+    def begin(self, phase):
+        self.phase, self.started = phase, perf_counter()
+        self.event = torch.cuda.Event(enable_timing=True)
+        self.event.record()
+
+    def end(self):
+        event = torch.cuda.Event(enable_timing=True)
+        event.record()
+        self.values.append((self.phase, perf_counter() - self.started, self.event, event))
+
+    def next(self, phase):
+        self.end()
+        self.begin(phase)
+
+
+class Profile:
+    def __init__(self):
+        self.seen, self.traces, self.constructors = set(), [], []
+
+    def sample(self, attention, n, component, device):
+        key = getattr(attention, "layer_idx", -1), n, component
+        if (
+            device.type != "cuda"
+            or _building.get()
+            or key in self.seen
+            or key[0] not in (0, 16, 31)
+            or n not in (32, 64, 112)
+        ):
+            return None
+        self.seen.add(key)
+        trace = PhaseTrace(key)
+        self.traces.append(trace)
+        return trace
+
+    def report(self):
+        if self.traces:
+            torch.cuda.synchronize()
+        return dict(
+            diagnostic_only=True,
+            CUDA_intervals_include_host_dispatch_gaps=True,
+            pure_kernel_time_NOT_claimed=True,
+            rows=[
+                dict(
+                    layer=trace.key[0],
+                    sealed_tokens=trace.key[1],
+                    component=trace.key[2],
+                    phase=phase,
+                    host_ms=host * 1000,
+                    CUDA_stream_ms=a.elapsed_time(b),
+                )
+                for trace in self.traces
+                for phase, host, a, b in trace.values
+            ],
+            constructor_host_rows=self.constructors,
+        )
 
 
 @dataclass(frozen=True)
@@ -78,6 +145,8 @@ class MixedHistory:
         n = self.shape[-2]
         if component not in (0, 1) or tuple(target.shape) != self.shape:
             raise ValueError("complete mixed-history component shape required")
+        profiler = _profiling.get()
+        mark = profiler.sample(attention, n, component, target.device) if profiler else None
         workspace = state.engine.source.view(1, 1, -1, 4096)
         offset = 0
         if self.older is not None:
@@ -89,15 +158,21 @@ class MixedHistory:
             offset = end
         if offset != n:
             raise RuntimeError("mixed reconstruction lost a logical source position")
+        if mark:
+            mark.next("native_projection")
         state.engine.plans.execute(
             state.engine.source,
             (attention.k_proj, attention.v_proj)[component].weight,
             state.engine.output,
             n,
         )
+        if mark:
+            mark.next("output_copy_and_RoPE")
         target[0].copy_(state.engine.output[:n].view(n, 32, 128).transpose(0, 1))
         if component == 0:
             rotate_native(target, self.cos, self.sin, 0, n)
+        if mark:
+            mark.next("numerical_corrections")
         if self.repairs:
             if target.is_cuda:
                 from mosaickv.evaluation.dual_projection_kernel import apply_patch
@@ -111,10 +186,12 @@ class MixedHistory:
                     torch.int16
                 )
         state.projections += 1
+        if mark:
+            mark.end()
 
 
 @torch.inference_mode()
-def construct(layer, cos, sin):
+def _construct(layer, cos, sin):
     from mosaickv.evaluation import native_history_reader as native
     from mosaickv.evaluation.history_source_precision import HistoryFormat
     from mosaickv.evaluation.history_verification_workspace import verify
@@ -168,8 +245,26 @@ def construct(layer, cos, sin):
     return candidate
 
 
+def construct(layer, cos, sin):
+    started = perf_counter()
+    token = _building.set(True)
+    try:
+        return _construct(layer, cos, sin)
+    finally:
+        _building.reset(token)
+        profiler = _profiling.get()
+        if profiler:
+            profiler.constructors.append(
+                dict(
+                    layer=getattr(layer.attention, "layer_idx", -1),
+                    sealed_tokens=cos.shape[1],
+                    host_seconds_including_synchronization=perf_counter() - started,
+                )
+            )
+
+
 @contextmanager
-def use():
+def use(*, profile=False):
     from unittest.mock import patch
 
     from mosaickv.evaluation import consolidated_history as combined
@@ -177,6 +272,10 @@ def use():
     from mosaickv.evaluation.history_source_precision import HistoryFormat
 
     original = combined.consolidate
+    if type(profile) is not bool:
+        raise ValueError("explicit diagnostic profiling boolean required")
+    profiler = Profile() if profile else None
+    profile_token = _profiling.set(profiler)
     report = dict(
         variant="single_projection_same_precision_history",
         mixed_constructions=0,
@@ -246,8 +345,13 @@ def use():
         cache.observe()
         return True
 
-    with patch.object(combined, "consolidate", consolidate):
-        yield report
+    try:
+        with patch.object(combined, "consolidate", consolidate):
+            yield report
+    finally:
+        _profiling.reset(profile_token)
+        if profiler:
+            report["phase_profile"] = profiler.report()
 
 
 @torch.inference_mode()

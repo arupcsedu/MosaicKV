@@ -147,3 +147,13 @@ def test_repeated_aging_preserves_64_exact_sources_and_charges_all_buffers(monke
             observe()
         assert report["mixed_constructions"] == 5
         assert report["no_extra_persistent_source_copy"]
+
+
+def test_cpu_profile_never_fabricates_cuda_intervals(monkeypatch):
+    from mosaickv.evaluation.mixed_history_projection import Profile
+
+    monkeypatch.setattr(torch.cuda, "synchronize", lambda: pytest.fail("unexpected CUDA call"))
+    profile = Profile()
+    assert profile.sample(SimpleNamespace(layer_idx=0), 32, 0, torch.device("cpu")) is None
+    result = profile.report()
+    assert not result["rows"] and result["pure_kernel_time_NOT_claimed"]

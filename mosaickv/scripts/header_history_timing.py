@@ -35,7 +35,7 @@ def schedule(seed, warmups=5, repetitions=20):
     ]
 
 
-def paired(values, *, seed, replicates=10000):
+def paired(values, *, seed, replicates=10000, family_comparisons=2):
     a, b = np.asarray(values[0], dtype=float), np.asarray(values[1], dtype=float)
     if a.shape != b.shape or a.size != 20 or not np.isfinite([a, b]).all() or (a <= 0).any():
         raise ValueError("exactly 20 complete finite paired positive trials required")
@@ -43,7 +43,10 @@ def paired(values, *, seed, replicates=10000):
     indices = rng.integers(0, len(a), size=(replicates, len(a)))
     ratios = b[indices].mean(1) / a[indices].mean(1)
     differences = (b[indices] - a[indices]).mean(1)
-    bounds = [0.0125, 0.9875]  # two consumed inputs, Bonferroni family-wise 95%.
+    if type(family_comparisons) is not int or family_comparisons < 1:
+        raise ValueError("positive preregistered comparison family required")
+    tail = 0.05 / (2 * family_comparisons)
+    bounds = [tail, 1 - tail]
     return dict(
         mean_latency_ratio=float(b.mean() / a.mean()),
         ratio_adjusted_CI=np.quantile(ratios, bounds).tolist(),
@@ -136,10 +139,16 @@ def worker(root, p, folder, i):
     reference = torch.load(
         p["controls"]["references"][str(i)]["storage"], weights_only=True, map_location="cpu"
     )
+    same_precision_reference = (
+        torch.load(p["same_precision_references"][str(i)], weights_only=True, map_location="cpu")
+        if p.get("same_precision_references")
+        else None
+    )
     start = monotonic()
     errors = 0
     with (folder / "raw.jsonl").open("x") as output:
         for job in p["timing_schedules"][str(i)]:
+            policy = p.get("arm_policies", {}).get(job["arm"], {})
             row = dict(
                 job,
                 sample_id=sample["sample_id"],
@@ -166,14 +175,23 @@ def worker(root, p, folder, i):
                     late_report = stack.enter_context(late())
                     history_report = (
                         stack.enter_context(history(feature_group=32, exact_recent_tokens=64))
-                        if p.get("timing_history_on_both") or job["arm"] == ARMS[1]
+                        if policy.get(
+                            "history", p.get("timing_history_on_both") or job["arm"] == ARMS[1]
+                        )
                         else None
                     )
                     mixed_report = None
-                    if p.get("timing_mixed_candidate") and job["arm"] == ARMS[1]:
+                    if policy.get(
+                        "mixed", p.get("timing_mixed_candidate") and job["arm"] == ARMS[1]
+                    ):
                         from mosaickv.evaluation.mixed_history_projection import use as mixed
 
-                        mixed_report = stack.enter_context(mixed())
+                        profile = bool(
+                            p.get("profile_first_warmup")
+                            and job["warmup"]
+                            and job["repetition"] == 0
+                        )
+                        mixed_report = stack.enter_context(mixed(profile=profile))
                     logits, details = campaign.execute(
                         adapter, sample, transport, "mosaickv_exact", audit=False
                     )
@@ -183,7 +201,15 @@ def worker(root, p, folder, i):
                     proof = fidelity(logits.cpu(), reference, strict=True, p=p)
                     proof["reference_is_frozen_unfused_same_precision_policy"] = True
                 else:
-                    proof = history_study.fidelity(logits.cpu(), reference, p, job["arm"])
+                    mode = (
+                        history_study.ARMS[1 if policy["history"] else 0] if policy else job["arm"]
+                    )
+                    proof = history_study.fidelity(logits.cpu(), reference, p, mode)
+                if policy.get("history") and same_precision_reference is not None:
+                    proof["frozen_same_precision_logits_bitwise"] = bool(
+                        torch.equal(logits.cpu(), same_precision_reference)
+                    )
+                    proof["passed"] &= proof["frozen_same_precision_logits_bitwise"]
                 if not proof["passed"]:
                     raise RuntimeError("unchanged complete-horizon numerical gate failed")
                 if not job["warmup"] and job["repetition"] == 0:
