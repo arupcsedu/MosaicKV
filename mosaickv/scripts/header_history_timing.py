@@ -186,6 +186,7 @@ def worker(root, p, folder, i):
                     verification_report = None
                     private_prefill_report = None
                     address_report = None
+                    value_order_report = None
                     if policy.get(
                         "mixed", p.get("timing_mixed_candidate") and job["arm"] == ARMS[1]
                     ):
@@ -217,6 +218,10 @@ def worker(root, p, folder, i):
                         from mosaickv.evaluation.prepared_address_dispatch import use as addresses
 
                         address_report = stack.enter_context(addresses(backend="cpp"))
+                    if policy.get("history_value_first"):
+                        from mosaickv.evaluation.history_value_first import use as value_order
+
+                        value_order_report = stack.enter_context(value_order())
                     logits, details = campaign.execute(
                         adapter, sample, transport, "mosaickv_exact", audit=False
                     )
@@ -263,6 +268,7 @@ def worker(root, p, folder, i):
                     verification_barrier=verification_report,
                     private_prefill_scores=private_prefill_report,
                     prepared_addresses=address_report,
+                    history_value_first=value_order_report,
                 )
             except Exception:
                 row["error"] = traceback.format_exc()
