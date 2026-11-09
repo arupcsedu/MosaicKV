@@ -25,9 +25,10 @@ def fill_component(packet, attention, component, destination, *, source_workspac
         raise ValueError("key or value component required")
     from mosaickv.evaluation.history_source_precision import HistoryFormat
     from mosaickv.evaluation.lt_source_format import LTSourceFormat
+    from mosaickv.evaluation.mixed_history_projection import MixedHistory
     from mosaickv.evaluation.native_history_reader import NativeHistoryFormat
 
-    if isinstance(packet, HistoryFormat):
+    if isinstance(packet, (HistoryFormat, MixedHistory)):
         packet.fill_component(attention, component, destination)
         return
 

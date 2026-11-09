@@ -172,7 +172,7 @@ def analyze(root, p):
     write_once(
         folder / "decision.json",
         dict(
-            complete=len(pairs) == 8 and not errors,
+        complete=len(pairs) == 2 * len(METHODS) and not errors,
             errors=errors,
             pairs=pairs,
             comparative_quality_or_latency_superiority_established=False,

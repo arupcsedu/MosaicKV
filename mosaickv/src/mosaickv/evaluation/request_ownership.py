@@ -41,6 +41,7 @@ KV_FUNCTIONS = {
     "exact_scale_replay.py": ("convert", "encode", "__init__"),
     "exact_scale_codec.py": ("to", "unpack_into"),
     "early_scale_headers.py": ("archive", "restore"),
+    "mixed_history_projection.py": ("construct", "consolidate", "fill_component", "materialize"),
     "lossless_code_delta_gpu.py": ("encode", "decode"),
     "sequential_kv_lease.py": ("_new_lease", "materialize_component"),
     "source_history.py": ("update", "_seal_tail", "_initialize_storage"),

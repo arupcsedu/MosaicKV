@@ -14,7 +14,7 @@ base.common.WORKER_WRAPPER = SOURCE / "mosaickv/slurm/early_scale_headers.sbatch
 base.EXTRA_TESTS = ("test_early_scale_headers.py", "test_async_text_handoff.py")
 
 
-def prepare(root, *, overrides=None):
+def prepare(root, *, overrides=None, dependencies=()):
     if root.exists():
         raise FileExistsError("new immutable root required")
     gate = base.common.read(PARENT / "analysis/decision.json")
@@ -35,9 +35,17 @@ def prepare(root, *, overrides=None):
         fresh_or_paper_campaign_authorized=False,
     )
     if overrides:
-        if not overrides.keys() <= {"study", "measurement_type", "arms", "selective_history"}:
+        if not overrides.keys() <= {
+            "study",
+            "measurement_type",
+            "arms",
+            "selective_history",
+            "mixed_history_projection",
+        }:
             raise ValueError("narrow consumed-study configuration overrides only")
         p.update(overrides)
+    for path in dependencies:
+        p["bound_files"][str(path)] = sha(path)
     root.mkdir()
     (root / "logs").mkdir()
     write_once(root / "plan.json", p)

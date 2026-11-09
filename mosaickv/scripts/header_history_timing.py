@@ -166,13 +166,24 @@ def worker(root, p, folder, i):
                     late_report = stack.enter_context(late())
                     history_report = (
                         stack.enter_context(history(feature_group=32, exact_recent_tokens=64))
-                        if job["arm"] == ARMS[1]
+                        if p.get("timing_history_on_both") or job["arm"] == ARMS[1]
                         else None
                     )
+                    mixed_report = None
+                    if p.get("timing_mixed_candidate") and job["arm"] == ARMS[1]:
+                        from mosaickv.evaluation.mixed_history_projection import use as mixed
+
+                        mixed_report = stack.enter_context(mixed())
                     logits, details = campaign.execute(
                         adapter, sample, transport, "mosaickv_exact", audit=False
                     )
-                proof = history_study.fidelity(logits.cpu(), reference, p, job["arm"])
+                if p.get("precision_equivalence_required"):
+                    from compact_hybrid_study import fidelity
+
+                    proof = fidelity(logits.cpu(), reference, strict=True, p=p)
+                    proof["reference_is_frozen_unfused_same_precision_policy"] = True
+                else:
+                    proof = history_study.fidelity(logits.cpu(), reference, p, job["arm"])
                 if not proof["passed"]:
                     raise RuntimeError("unchanged complete-horizon numerical gate failed")
                 if not job["warmup"] and job["repetition"] == 0:
@@ -195,6 +206,7 @@ def worker(root, p, folder, i):
                         {k: v for k, v in r.items() if k != "records"} for r in late_report
                     ],
                     selective_history=history_report,
+                    mixed_projection=mixed_report,
                 )
             except Exception:
                 row["error"] = traceback.format_exc()
