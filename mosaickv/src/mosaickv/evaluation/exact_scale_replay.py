@@ -136,13 +136,48 @@ class ScaleReplay(runtime.Replay):
             unpack_into(packet, destination)
 
 
+def header_only(packets):
+    """Keep arbitrary original code bytes, including mixed 3/8-bit baselines.
+
+    No three-bit source predictor is applied to these raw code streams. Raw
+    BF16 archives lacking affine headers retain their unchanged original form.
+    """
+    from mosaickv.evaluation.lossless_code_delta_gpu import DeviceCodes
+    from mosaickv.evaluation.precision_tier import QuantizedBody
+
+    packets = tuple(packets)
+    if any(isinstance(p, runtime.DeltaFormat) for p in packets):
+        if not all(isinstance(p, runtime.DeltaFormat) for p in packets):
+            raise ValueError("do not mix already encoded and plain packet transactions")
+        return packets, None
+    bodies = 0
+
+    def raw(role, body):
+        nonlocal bodies
+        if not isinstance(body, QuantizedBody) or body.codes.dtype != torch.uint8:
+            raise ValueError("original affine headers and serialized uint8 codes required")
+        bodies += 1
+        return runtime.EncodedBody(
+            replace(body, codes=None), DeviceCodes(body.codes.numel(), body.codes)
+        )
+
+    encoded = tuple(runtime.DeltaFormat(runtime.map_bodies(p, raw)) for p in packets)
+    if not bodies:
+        return packets, dict(enabled=False, reason="no compatible affine scale headers")
+    compact, report = convert(encoded)
+    report.update(header_only=True, original_code_bytes_unchanged=True, source_predictor_used=False)
+    return (compact if report["enabled"] else packets), report
+
+
 @contextmanager
 def use():
     """Single-threaded diagnostic scope, identically available to comparators."""
     if _active.get():
         raise RuntimeError("nonnested private exact-scale scope required")
     token = _active.set(True)
-    original = runtime.convert
+    from mosaickv.evaluation import storage_runs
+
+    original, original_builder = runtime.convert, storage_runs.cache_from_formats
     reports = []
 
     def convert_codes(packets):
@@ -160,10 +195,17 @@ def use():
             reports.append(dict(enabled=False, reason="code codec declined; no scale binding"))
         return encoded, code_report
 
+    def builder(adapter, formats, **kwargs):
+        formats, report = header_only(formats)
+        if report is not None:
+            reports.append(report)
+        return original_builder(adapter, formats, **kwargs)
+
     try:
         with (
             patch.object(runtime, "convert", convert_codes),
             patch.object(runtime, "Replay", ScaleReplay),
+            patch.object(storage_runs, "cache_from_formats", builder),
         ):
             yield reports
     finally:

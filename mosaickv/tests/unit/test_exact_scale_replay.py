@@ -122,3 +122,61 @@ def test_scope_is_default_off_and_restores_hooks(monkeypatch):
         headers.convert(bound)
     with pytest.raises(ValueError, match="repeated"):
         headers.convert(encoded)
+
+
+def test_mixed_baseline_bits_and_shapes_keep_raw_codes_and_share_scale_scratch(monkeypatch):
+    original = tuple(
+        replace(
+            p,
+            pair=tuple(
+                replace(b, bits=bits, codes=b.codes[: b.codes.numel() * bits // 8].clone())
+                for b in p.pair
+            ),
+        )
+        for index, p in enumerate(packets(monkeypatch))
+        for bits in (8 if index % 2 else 3,)
+    )
+    compact, report = headers.header_only(original)
+    assert report["enabled"] and report["header_only"]
+    assert not report["source_predictor_used"] and report["existing_code_workspace_bytes"] == 0
+    with descriptors(True):
+        replay = headers.ScaleReplay(compact)
+    bound = tuple(runtime.BoundDeltaFormat(p, replay, i) for i, p in enumerate(compact))
+    assert backing_bytes(tuple(t for p in bound for t in p.tensors())) == report["net_active_bytes"]
+    for index, packet in enumerate(original):
+        actual = replay.view(index)
+        assert all(
+            a.bits == b.bits and a.codes is b.codes and a.scale.equal(b.scale)
+            for a, b in zip(packet.pair, actual.pair, strict=True)
+        )
+        assert all(
+            a.equal(b) for a, b in zip(packet.materialize(), actual.materialize(), strict=True)
+        )
+
+
+def test_header_only_builder_is_actual_cache_inventory_and_raw_noop(monkeypatch):
+    from types import SimpleNamespace
+
+    from mosaickv.evaluation import storage_runs
+    from mosaickv.evaluation.exact_storage import ExactFormat, encode
+
+    original = packets(monkeypatch)
+    adapter = SimpleNamespace(
+        _language_layers=lambda: [
+            SimpleNamespace(self_attn=torch.nn.Linear(128, 128, bias=False).bfloat16())
+            for _ in original
+        ]
+    )
+    with headers.use() as reports, descriptors(True):
+        cache = storage_runs.cache_from_formats(
+            adapter, original, updates=1, audit=False, sealed=False, sequential_lease=True
+        )
+        assert len(reports) == 1 and reports[0]["header_only"]
+        assert cache.initial_bytes == reports[0]["net_active_bytes"]
+        assert all(
+            isinstance(layer.representation, runtime.BoundDeltaFormat) for layer in cache.layers
+        )
+    pair = tuple(encode(torch.zeros(1, 1, 8, 128, dtype=torch.bfloat16)) for _ in range(2))
+    raw = ExactFormat("kv", (1, 1, 8, 128), pair=pair)
+    untouched, report = headers.header_only((raw,))
+    assert untouched[0] is raw and not report["enabled"]

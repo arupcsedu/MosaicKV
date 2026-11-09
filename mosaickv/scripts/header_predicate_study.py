@@ -284,7 +284,7 @@ def model(root, p, folder, index):
         for arm in p["arms"]:
             row = dict(
                 arm=arm,
-                method="evicastkv_common_" + arm,
+                method=p.get("execution_methods", {}).get(arm, "evicastkv_common_" + arm),
                 sample_id=sample["sample_id"],
                 status="failed",
                 manifest_path=str(folder / "manifest.json"),
@@ -313,7 +313,11 @@ def model(root, p, folder, index):
                         audit_request(adapter, max_entries=p["maximum_allocator_events"])
                     )
                     logits, detail = campaign.execute(
-                        adapter, sample, transport, "mosaickv_exact", audit=True
+                        adapter,
+                        sample,
+                        transport,
+                        p.get("execution_methods", {}).get(arm, "mosaickv_exact"),
+                        audit=True,
                     )
                 torch.cuda.synchronize()
                 actual = logits.cpu()
