@@ -17,6 +17,7 @@ SOURCE, PYTHON = common.SOURCE, common.PYTHON
 PARENT = Path("/scratch/djy8hg/runs/evicastkv/exact-header-predicate-20261108-v1")
 common.WORKER_WRAPPER = SOURCE / "mosaickv/slurm/exact_scale_replay.sbatch"
 ARMS = ["complete_predicate", "complete_predicate_headers"]
+EXTRA_TESTS = ()
 
 
 def prepare(root):
@@ -122,6 +123,7 @@ def cpu(root, p):
         "test_layer_code_delta.py",
         "test_exact_scale_replay.py",
         "test_exact_scale_replay_study.py",
+        *EXTRA_TESTS,
     ]
     with (root / "cpu-tests.txt").open("x") as stream:
         done = subprocess.run(
@@ -226,6 +228,11 @@ def analyze(root, p):
         if len(local) == 2 and all(r["status"] == "completed" for r in local):
             control, candidate = local
             accepted = candidate.get("common_header")
+            if isinstance(accepted, dict):
+                early = accepted.get("early", {})
+                if not early.get("packed_layers") or not early.get("downstream_headers_restored"):
+                    errors.append(dict(input=i, error="early header lifetime path not complete"))
+                accepted = accepted.get("late")
             engaged = bool(accepted and len(accepted) == 1 and accepted[0].get("enabled"))
             if not engaged:
                 errors.append(dict(input=i, error="exact header codec did not engage"))
