@@ -41,3 +41,23 @@ operators and production code are unchanged. The seventh failure built the
 CPU validation extension with the node's default GCC 8.5, below PyTorch's
 minimum. The CPU test launcher now loads the same installed GCC 11.4 module
 as the registered dispatch diagnostic. No Python packages are changed.
+
+## FullKV quality-reference postprocessing recovery
+
+The separately registered MileBench FullKV-reference workers produced all 32
+complete 64-token traces, then failed the `correctness` stage's compressed-only
+`check_layout` postcheck. FullKV intentionally never calls compressed-cache
+construction, so that check has no captured representation. Both workers'
+ordinary-generation, reinjection and runtime-retention-1 controls passed with
+identical tokens and zero maximum logit difference.
+
+`evicastkv_fullkv_reference.py` derives reference scores on CPU, without
+reclassifying the original failed workers or repeating GPU inference. Admission
+requires exactly that postprocessing error, all 32 registered identities, all
+three parity controls, complete original traces, unchanged model/input/processor/
+generation/arithmetic controls and reconciled append-only tensor-storage bytes.
+It rejects truncation, fallback, transforms, repairs, padding, missing identities
+and unrelated errors. Original raw status remains failed. A new write-once
+derived gate binds the original evidence hashes and states that it is not
+fresh confirmation, latency evidence or superiority evidence. Accuracy and
+ROUGE-L remain separate. Regression tests exercise both acceptance and rejection.
