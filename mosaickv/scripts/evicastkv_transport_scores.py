@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import subprocess
 import sys
 from collections import defaultdict
@@ -28,6 +29,120 @@ ARITHMETIC = dict(
 )
 METHODS = ("prompt_attention_topk", "mosaickv_exact")
 CAPS = (16 * 2**20, 40 * 2**20)
+
+
+def quality_statistics(metric_name, statistics):
+    """Keep quality effects, never latency labels from the generic reducer."""
+    if metric_name not in {"accuracy", "rouge_l_f1"}:
+        raise ValueError("only the registered higher-is-better quality metrics are supported")
+    reference = statistics["reference_value"]
+    candidate = statistics["candidate_value"]
+    delta = statistics["difference"]
+    if (
+        any(
+            type(v) not in {int, float} or not math.isfinite(v)
+            for v in (reference, candidate, delta)
+        )
+        or not 0 <= reference <= 1
+        or not 0 <= candidate <= 1
+        or not math.isclose(delta, candidate - reference, rel_tol=1e-12, abs_tol=1e-12)
+    ):
+        raise ValueError("invalid quality point estimates or difference")
+    for name in ("ordinary_95_ci", "simultaneous_ci"):
+        bounds = statistics[name]
+        if (
+            len(bounds) != 2
+            or any(type(v) not in {int, float} or not math.isfinite(v) for v in bounds)
+            or bounds[0] > bounds[1]
+        ):
+            raise ValueError("invalid quality confidence interval")
+    result = {
+        key: value
+        for key, value in statistics.items()
+        if not key.startswith("speedup_")
+        and key not in {"percentage_reduction", "relative_difference"}
+    }
+    result.update(
+        metric_name=metric_name,
+        metric_direction="higher",
+        effect_quantity="candidate_minus_reference_quality_score",
+        relative_quality_difference=delta / abs(reference) if reference else None,
+        timing_inference_allowed=False,
+    )
+    return result
+
+
+def reexport(root, output):
+    """Correct labels on saved quality statistics without changing any result."""
+    revision = clean_source(SOURCE)
+    if output.exists():
+        raise FileExistsError("derived quality-statistics output must be new")
+    gate_path = root / "GATE_scoring.json"
+    registration_path = root / "registration.json"
+    statistics_path = root / "paired_statistics.json"
+    gate = json.loads(gate_path.read_text())
+    registration = json.loads(registration_path.read_text())
+    if (
+        gate["status"] != "passed_bounded_retrospective_scoring_not_confirmation"
+        or gate["registration_sha256"] != sha(registration_path)
+        or gate["completed"] != 128
+        or gate["expected"] != 128
+        or gate["failed"] != 0
+        or gate["official_scorer_fixtures_passed"] is not True
+        or gate["timing_inference_allowed"] is not False
+        or gate["fresh_confirmation_authorized"] is not False
+        or gate["superiority_claim_allowed"] is not False
+        or registration["expected_rows"] != 128
+    ):
+        raise ValueError("complete, passed, development-only quality scoring is required")
+    bindings = dict(registration["bindings"])
+    for path, expected in bindings.items():
+        if sha(Path(path)) != expected:
+            raise ValueError("registered original scoring evidence changed")
+    source = json.loads(statistics_path.read_text())
+    expected = {(metric, cap) for metric in ("accuracy", "rouge_l_f1") for cap in CAPS}
+    seen, corrected = set(), []
+    for contrast in source:
+        key = (contrast["metric_name"], contrast["budget_bytes"])
+        if (
+            key not in expected
+            or key in seen
+            or contrast["reference"] != METHODS[0]
+            or contrast["candidate"] != METHODS[1]
+            or contrast["unique_inputs"] != 16
+            or contrast["family_size"] != registration["statistical_family_size"]
+            or contrast["resamples"] != registration["bootstrap_resamples"]
+            or contrast["seed"] != registration["seed"]
+        ):
+            raise ValueError("unexpected, duplicated or misbound quality contrast")
+        seen.add(key)
+        corrected.append(quality_statistics(contrast["metric_name"], contrast))
+    if seen != expected:
+        raise ValueError("complete registered quality-contrast grid is required")
+    for path in (gate_path, registration_path, statistics_path):
+        bindings[str(path)] = sha(path)
+    write_once(output / "paired_quality_statistics.json", corrected)
+    write_once(
+        output / "GATE_quality_statistics.json",
+        dict(
+            status="passed_metadata_correction_consumed_development_only",
+            source_sha=revision,
+            source_scoring_root=str(root),
+            source_scoring_sha=gate["source_sha"],
+            bindings=bindings,
+            correction_script_sha256=sha(Path(__file__)),
+            contrasts=len(corrected),
+            quality_values_and_confidence_intervals_unchanged=True,
+            removed_fields="speedup_*; percentage_reduction; ambiguous relative_difference",
+            relative_effect="relative_quality_difference=(candidate-reference)/abs(reference)",
+            new_GPU_inference=0,
+            bootstrap_recomputed=False,
+            original_artifacts_preserved=True,
+            timing_inference_allowed=False,
+            fresh_confirmation_authorized=False,
+            superiority_claim_allowed=False,
+        ),
+    )
 
 
 def comparison_controls(config):
@@ -293,15 +408,18 @@ def analyze(root):
                     budget_bytes=cap,
                     reference=METHODS[0],
                     candidate=METHODS[1],
-                    **paired_scalar_statistics(
-                        values[METHODS[0]],
-                        values[METHODS[1]],
-                        {s: group_map[s] for s in task_map},
-                        task_map,
-                        resamples=reg["bootstrap_resamples"],
-                        seed=reg["seed"],
-                        hierarchy=True,
-                        family_size=reg["statistical_family_size"],
+                    **quality_statistics(
+                        metric,
+                        paired_scalar_statistics(
+                            values[METHODS[0]],
+                            values[METHODS[1]],
+                            {s: group_map[s] for s in task_map},
+                            task_map,
+                            resamples=reg["bootstrap_resamples"],
+                            seed=reg["seed"],
+                            hierarchy=True,
+                            family_size=reg["statistical_family_size"],
+                        ),
                     ),
                 )
             )
@@ -332,18 +450,23 @@ def analyze(root):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("prepare", "analyze"))
+    parser.add_argument("mode", choices=("prepare", "analyze", "reexport"))
     parser.add_argument("--root", required=True, type=Path)
     parser.add_argument("--parent", type=Path)
     parser.add_argument("--predictions", nargs="+", type=Path)
     parser.add_argument("--cpu-gate", type=Path)
+    parser.add_argument("--output", type=Path)
     args = parser.parse_args()
-    for path in (args.root, args.parent, args.cpu_gate, *(args.predictions or [])):
+    for path in (args.root, args.parent, args.cpu_gate, args.output, *(args.predictions or [])):
         if path and not path.resolve().is_relative_to(Path("/scratch/djy8hg").resolve()):
             raise ValueError("scratch-only scoring")
     if args.mode == "prepare":
         if not args.parent or not args.predictions or not args.cpu_gate:
             parser.error("prepare requires parent, predictions and cpu-gate")
         prepare(args.root, args.parent, args.predictions, args.cpu_gate)
+    elif args.mode == "reexport":
+        if args.output is None:
+            parser.error("reexport requires a new --output directory")
+        reexport(args.root, args.output)
     else:
         analyze(args.root)

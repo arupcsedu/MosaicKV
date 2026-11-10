@@ -1,0 +1,342 @@
+{
+  "schema_version": 1,
+  "assessment_date": "2026-11-09",
+  "assessment_kind": "evidence_inventory_not_new_experimental_results",
+  "base_source_sha": "df4251415c6fe96fdf519b534aebd7ec74a93562",
+  "system_name": "EviCastKV",
+  "historical_system_name": "MosaicKV",
+  "superiority_established": false,
+  "fresh_confirmation_authorized": false,
+  "scope": {
+    "retention": "Prompt-derived exact selection; original retained K/V and logical positions; append-only generation; current COCO FP16 eager study.",
+    "source": "Quantized shared-source storage and reconstruction; separate implementation/protocol and evidence stack; no graph selector in its historical evaluated configuration.",
+    "six_component_hybrid": "Separate research implementation; current exact-only evidence does not establish prototype, residual, repair or full-hybrid benefit.",
+    "current_data": "Previously consumed development inputs, not independent confirmation.",
+    "negative_history": "Original eight numerical failures and failed boundary-B FullKV controls remain negative; narrower valid controls do not retroactively pass them."
+  },
+  "authority": {
+    "automatic_progression": "User authorized finite, gate-dependent experiment progression and scoped commits; no requirement to request repeated consent.",
+    "aggregate_a100_ceiling": 6,
+    "worker_gpus": 1,
+    "worker_cpus": 12,
+    "worker_wall_time_limit": "02:00:00",
+    "caches": "/scratch/djy8hg only",
+    "forbidden_shortcuts": [
+      "Changing numerical, quality or physical-byte thresholds after observing failure without a new preregistered protocol",
+      "Relabeling consumed development data as fresh",
+      "Treating a local port as official baseline code",
+      "Treating exact-selection, shared-source and full-hybrid evidence as interchangeable",
+      "Claiming superiority from a confidence lower bound equal to zero",
+      "Claiming whole-request KV compression from active-cache endpoint accounting"
+    ]
+  },
+  "review_sources": [
+    {
+      "path": "/scratch/djy8hg/workdir/MosaicKV/mosaickv/change_request.md",
+      "sha256": "42c3bbb6a62be6ebfa56faa49910ab4fa2c19f3f313dbf92490739c54e9c7a75"
+    },
+    {
+      "path": "/scratch/djy8hg/workdir/MosaicKV/mosaickv/feedback.txt.rtf",
+      "sha256": "b58a5b919140938669fe3bb815f2a42034c447bd4fd2eb7fb9703f1e7a34e8d6"
+    },
+    {
+      "path": "/scratch/djy8hg/workdir/MosaicKV/mosaickv/evicastkv_experiment_prompts/00_MASTER.md",
+      "sha256": "65e30887393d94303efcf172d225d44731ca62fae8ea14e766ff4c75c57d4d01"
+    }
+  ],
+  "evidence": {
+    "cpu_suite": {
+      "path": "/scratch/djy8hg/runs/evicastkv/fox-review-v4-cpu-suite-fullkv-recovery-20261109/GATE_cpu_suite.json",
+      "sha256": "ea0bdd2b042d8f047bf9615c829d2b63d8d28e67661aa0bee67f7b640caae351",
+      "status": "passed",
+      "tests": 5151,
+      "failures": 0,
+      "skipped": 0,
+      "gpu_inference": 0
+    },
+    "original_correctness": {
+      "path": "/scratch/djy8hg/runs/evicastkv/fox-review-v3-discovery-20261109/analysis/correctness/GATE_correctness.json",
+      "sha256": "2cf73503becc3277c91b715eb347b1c17077e0023d9caf40d969054f5118b3e7",
+      "status": "blocked",
+      "attempted": 256,
+      "completed": 248,
+      "failed": 8
+    },
+    "coco_lock": {
+      "path": "/scratch/djy8hg/runs/evicastkv/fox-review-v4-native-coco-20261109/protocol_lock.json",
+      "sha256": "8d87bc59311c39c921cf32f7a217bf7de1f9671b16c4b0897058d9fce11169e3"
+    },
+    "coco_correctness": {
+      "path": "/scratch/djy8hg/runs/evicastkv/fox-review-v4-native-coco-20261109/analysis/correctness/GATE_correctness.json",
+      "sha256": "ca593e0522d3a9ee996fac0ce60a58b5802d35c4ff4404cdbb5799643b3439d9",
+      "status": "passed",
+      "checks": 128,
+      "kind": "hash_bound_reuse_of_complete_passing_COCO_workload_not_new_GPU_inference"
+    },
+    "coco_scoring": {
+      "path": "/scratch/djy8hg/runs/evicastkv/fox-review-v4-native-coco-20261109/analysis/scoring/GATE_scoring.json",
+      "sha256": "b095af44c2ef11655e9c68ffd720c3cb0eefab9fcdc6d98175f56a1cc48a7030",
+      "status": "passed",
+      "completed": 224,
+      "unique_inputs": 32
+    },
+    "coco_native_metrics": {
+      "path": "/scratch/djy8hg/runs/evicastkv/fox-review-v4-native-coco-20261109/analysis/scoring/native/native_metrics.json",
+      "sha256": "bc44efc7065d4cc62066a699b20a4a31240600680d0cbc4fa84e180cfdcf72e2"
+    },
+    "coco_profiling": {
+      "path": "/scratch/djy8hg/runs/evicastkv/fox-review-v4-native-coco-20261109/analysis/profiling/GATE_profiling.json",
+      "sha256": "1866a1fdd6a767c7a03513e1b6520960b1c5cabdf48caae1a22fa4a43b56d2ed",
+      "status": "passed",
+      "completed": 56,
+      "unique_inputs": 8
+    },
+    "coco_measurement": {
+      "path": "/scratch/djy8hg/runs/evicastkv/fox-review-v4-native-coco-20261109/analysis/measurement/GATE_measurement.json",
+      "sha256": "9b7873fabfaa56be2bdc1125e884b719c7c09358d143083709355c1e81d6c4f6",
+      "status": "passed",
+      "completed": 336,
+      "unique_inputs": 16,
+      "repetitions": 3,
+      "warmups": 5
+    },
+    "coco_latency": {
+      "path": "/scratch/djy8hg/runs/evicastkv/fox-review-v4-native-coco-20261109/writing/after-measurement/paired_latency.json",
+      "sha256": "2f7df78f5661dd64230e927107ae26f834e5ae26b595b7caad01b4b12b4dbf19"
+    },
+    "coco_hotspots": {
+      "path": "/scratch/djy8hg/runs/evicastkv/fox-review-v4-native-coco-20261109/writing/after-measurement/profiler_hotspots.json",
+      "sha256": "3060a5271e7d557d041501cf5d1bb5c04a20c06f596c09dfe242019de14846c6"
+    },
+    "measurement_scope": {
+      "path": "/scratch/djy8hg/runs/evicastkv/fox-review-v4-native-coco-20261109/writing/after-measurement/measurement_contract.md",
+      "sha256": "b7d29c4d218d77e042aea80da709d26fa52f093c87fd9b6df2db8c12c23d3e8f"
+    },
+    "boundary_diagnostics": {
+      "path": "/scratch/djy8hg/runs/evicastkv/fox-review-v4-native-coco-20261109/writing/after-measurement/boundary_A_B_diagnostics.json",
+      "sha256": "97497abaa8888d069836a5a32aab8ebc8ede47caf5bc90747495cfcdad7f9e4e",
+      "status": "invalid_FullKV_chunked_control_for_all_32_COCO_inputs",
+      "completed_diagnostics": 224,
+      "valid_sensitivity_claim": false
+    },
+    "mile_controls": {
+      "path": "/scratch/djy8hg/runs/evicastkv/fox-review-v4-mile-transport-controls-20261109/analysis/correctness/GATE_correctness.json",
+      "sha256": "7c24f7118da50aa5d5efd1132af5d28770dd45362b5be253c8c39afa84381206",
+      "status": "passed",
+      "checks": 8,
+      "unique_inputs": 2
+    },
+    "mile_extension": {
+      "path": "/scratch/djy8hg/runs/evicastkv/fox-review-v4-mile-transport-extension-20261109/analysis/correctness/GATE_correctness.json",
+      "sha256": "5d2e9e6a0744585ac84294bd62c037f9cd67b04760671a9417cf7bebca12b571",
+      "status": "passed",
+      "checks": 120,
+      "unique_inputs": 30
+    },
+    "mile_scoring": {
+      "path": "/scratch/djy8hg/runs/evicastkv/fox-review-v4-mile-scoring-20261109/GATE_scoring.json",
+      "sha256": "be9addf58d3bc04c64633d2eb3bc6ab64805545dc28b9e12346b2598b9669e42",
+      "status": "passed_bounded_retrospective_scoring_not_confirmation",
+      "completed": 128,
+      "failed": 0,
+      "gpu_inference": 0,
+      "lookm_fidelity_tested": false
+    },
+    "mile_fullkv_recovery": {
+      "path": "/scratch/djy8hg/runs/evicastkv/fox-review-v4-mile-reference-recovery-20261109/GATE_reference.json",
+      "sha256": "86b6fcb5e154330f110fc7bc246c36f68c7ea4d3f144af9c4cfb7218ac3f08f0",
+      "status": "passed_trace_recovery_consumed_development_only",
+      "unique_inputs": 32,
+      "kind": "CPU_recovery_of_completed_GPU_traces_not_new_inference"
+    },
+    "baseline_fidelity": {
+      "path": "/scratch/djy8hg/runs/evicastkv/fox-review-v4-native-coco-20261109/analysis/scoring/baseline_fidelity.json",
+      "sha256": "f0fa331fd9e552fa368b67d495cc9d9899c843bb12c1ef39db7b14cb3dd1e66b",
+      "status": "official_fidelity_unverified",
+      "strong_official_baseline_superiority_claim_allowed": false
+    },
+    "freshness": {
+      "path": "/scratch/djy8hg/runs/evicastkv/fox-review-v4-native-coco-20261109/exclusion_report.json",
+      "sha256": "d8c5c1682a6c7ac04829e33f3825eb410f634a4d428ff45480ada6cd73f3ec2b",
+      "status": "development_inputs_previously_consumed",
+      "fresh_confirmation_authorized": false
+    },
+    "historical_id_review": {
+      "path": "/scratch/djy8hg/runs/evicastkv/fox-review-20261028-opportunity-history-refresh-v1/review.json",
+      "sha256": "e3a0c3ceb4be09a83db6d5f6c4fc1bed22b06f7685ee2ad373529a3c8e22a6d7",
+      "status": "bounded_ID_review_not_global_media_certification",
+      "canonical_files": 314,
+      "remaining_manifest_queue": 0,
+      "exhaustive_historical_media_inventory_complete": false,
+      "historical_root_list_superseded_for_classification_by": "resolved_historical_roots"
+    },
+    "resolved_historical_roots": {
+      "path": "/scratch/djy8hg/runs/evicastkv/fox-review-20261028-provenance-reviewed-v1/root_resolutions.json",
+      "sha256": "d1505bcd7fa6feb090e558e95f9691fd49a17f8102a9e7835a7e2d3ccbfd417b",
+      "status": "three_historical_roots_resolved_for_conservative_exclusion",
+      "original_evidence_hashes_reverified": true,
+      "classification_is_not_media_freshness_certification": true
+    },
+    "coco_id_availability": {
+      "path": "/scratch/djy8hg/runs/evicastkv/fox-review-20261028-writing-closure-v2/coco_availability/report.json",
+      "sha256": "154c5f7cb9913f933c49a78c0c43d171b4b4189260f0286f23e63e35f47b5a3f",
+      "status": "blocked_global_media_provenance",
+      "validation_image_ids": 40504,
+      "recorded_consumed_coco_ids": 4096,
+      "id_only_available": 36408,
+      "unresolved_workload_roots": [],
+      "exhaustive_historical_media_inventory_complete": false,
+      "confirmation_authorized": false
+    },
+    "extraction_original_submitline": {
+      "path": "/scratch/djy8hg/runs/evicastkv/fox-review-20261028-writing-closure-v2/coco_availability/extraction_command.json",
+      "sha256": "ea31f5ae181950f2906922e39d8e820041b45158029f397d0e39dbdec86815bf",
+      "job_id": "21564774",
+      "status": "original_tar_extraction_only_submitline_verified",
+      "model_inference_command_present": false
+    },
+    "mechanism_submission": {
+      "path": "/scratch/djy8hg/runs/evicastkv/fox-review-v4-native-coco-20261109-mechanisms/jobs/mechanisms-submission.json",
+      "sha256": "8a21788314c508d231d6ba96f3ccb1045f73e6d39101348f73e7057e772d0748",
+      "array_job_id": "22742447",
+      "analysis_job_id": "22742448",
+      "array_tasks": 32,
+      "maximum_parallel_a100s": 6,
+      "status_at_assessment": "in_progress_not_analyzed",
+      "result_claims": []
+    }
+  },
+  "requirements": [
+    {
+      "id": "R01",
+      "requirement": "Executed coefficients, routing, counts and active mechanisms",
+      "implementation_status": "implemented_for_current_exact_retention_campaign",
+      "measurement_status": "current_lock_recovered_and_runtime_activity_pending_mechanism_analysis",
+      "scientific_conclusion": "Historical IDs preserved; exact retention, shared-source and full hybrid cannot share an unlabeled result row.",
+      "code": ["mosaickv/src/mosaickv/evaluation/fox_campaign.py", "mosaickv/scripts/evicastkv_campaign.py", "mosaickv/src/mosaickv/evaluation/fox_mechanisms.py"],
+      "evidence_ids": ["coco_lock", "mechanism_submission"],
+      "remaining": ["Bind actual routed IDs/counts and active edge/utility terms from completed mechanism traces."]
+    },
+    {
+      "id": "R02",
+      "requirement": "Identity, original positions, subset/source transport and first prediction",
+      "implementation_status": "exact_subset_and_valid_slot_controls_implemented_boundary_B_exists_but_control_invalid",
+      "measurement_status": "COCO_128_checks_and_MileBench_128_new_transport_checks_passed_original_eight_failures_preserved",
+      "scientific_conclusion": "Current packed subset transport is tested; boundary-B sensitivity is not validated and does not repair original negative controls.",
+      "code": ["mosaickv/src/mosaickv/evaluation/fox_numerics.py", "mosaickv/src/mosaickv/evaluation/fox_valid_slots.py", "mosaickv/src/mosaickv/evaluation/fox_boundary.py"],
+      "evidence_ids": ["original_correctness", "coco_correctness", "mile_controls", "mile_extension", "boundary_diagnostics"],
+      "remaining": ["Localize first divergent operator in chunked FullKV boundary-B control on consumed inputs before using B scores.", "Do not reuse B rows as byte-matched A/B comparisons."]
+    },
+    {
+      "id": "R03",
+      "requirement": "Faithful baselines and caption/scoring diagnostics",
+      "implementation_status": "native_scorers_and_fixture_tests_implemented_complete_caption_audit_not_yet_exported",
+      "measurement_status": "COCO_224_scoring_rows_MileBench_128_compressed_rows_and_32_recovered_FullKV_references_available",
+      "scientific_conclusion": "COCO EviCastKV versus Top-K is tied at 20 MiB and inconclusive at 40 MiB; local-port scores cannot establish official-method superiority.",
+      "code": ["mosaickv/src/mosaickv/evaluation/fox_statistics.py", "mosaickv/src/mosaickv/evaluation/fox_cider_matrix.py", "mosaickv/scripts/evicastkv_transport_scores.py"],
+      "evidence_ids": ["cpu_suite", "coco_scoring", "coco_native_metrics", "mile_scoring", "mile_fullkv_recovery", "baseline_fidelity"],
+      "remaining": ["Produce hash-bound scored-caption token/word length, EOS/limit, empty/repetition, reference-count and parsing audit from saved outputs only.", "Keep official LOOK-M unexecuted and VL-Cache local-port fidelity unresolved; audit rather than assume causes."]
+    },
+    {
+      "id": "R04",
+      "requirement": "FullKV timing, complete-path profiling and optimized construction",
+      "implementation_status": "separate_profile_and_uninstrumented_request_measurement_implemented",
+      "measurement_status": "COCO_56_profiled_requests_and_336_unprofiled_timed_requests_completed",
+      "scientific_conclusion": "FullKV timing reference and dominant exact-path ranges are measured; no new optimization speedup is established.",
+      "code": ["mosaickv/src/mosaickv/evaluation/fox_measurement.py", "mosaickv/src/mosaickv/evaluation/fox_optimization.py", "mosaickv/scripts/evicastkv_packet.py"],
+      "evidence_ids": ["coco_profiling", "coco_measurement", "coco_latency", "coco_hotspots", "measurement_scope"],
+      "remaining": ["Optimize at most two measured bottlenecks with identical selections/storage before paired timing.", "MileBench valid-slot transport needs its own controlled timing if used in latency claims."]
+    },
+    {
+      "id": "R05",
+      "requirement": "Routing, utility, edge and observation-window ablations",
+      "implementation_status": "routing_fixed_candidate_components_random_controls_and_cross_modal_removal_implemented",
+      "measurement_status": "array_22742447_in_progress_no_completed_mechanism_conclusion",
+      "scientific_conclusion": "Current 1/256 routing usefulness remains unestablished until activity and controlled results are analyzed.",
+      "code": ["mosaickv/src/mosaickv/evaluation/fox_campaign.py:registered_arms", "mosaickv/src/mosaickv/evaluation/fox_mechanisms.py", "mosaickv/scripts/evicastkv_development.py"],
+      "evidence_ids": ["mechanism_submission"],
+      "remaining": ["Analyze all registered route and fixed-quota variants, including null effects and inactive cross-modal edges.", "Pilot full routing on eight inputs only after its registered prerequisites and resource gate.", "Observation windows 8/16/32/64 are not in the current registered matrix; preregister separately before execution.", "Current value/novelty and graph/modality off variants combine terms; do not attribute their effects to one term alone.", "Recovered pooled-attention entropy is not the proposed mean per-query entropy comparator."]
+    },
+    {
+      "id": "R06",
+      "requirement": "Replay-controlled measurements",
+      "implementation_status": "historical_source_replay_implementation_separate_from_exact_campaign",
+      "measurement_status": "new_review_OFF_ON_source_comparison_not_evidenced_by_current_gates",
+      "scientific_conclusion": "Exact-only measurements do not resolve source replay attribution or optimized-native execution parity.",
+      "code": ["mosaickv/scripts/evicastkv_history_replay.py", "mosaickv/scripts/evicastkv_prepared_joint_replay.py"],
+      "evidence_ids": ["coco_lock", "measurement_scope"],
+      "remaining": ["Inventory old replay evidence before new inference; register a same-model/dtype OFF/ON comparison with capture, retirement and replay-owned workspace charged."]
+    },
+    {
+      "id": "R07",
+      "requirement": "Common-byte source comparisons and direct projected-K/V quantization controls",
+      "implementation_status": "source_storage_implementation_exists_separately_review_comparison_not_complete",
+      "measurement_status": "current_gates_measure_exact_retention_not_direct_3bit_or_source_bridge",
+      "scientific_conclusion": "Historical source and exact-retention quality/latency numbers cannot be compared as controlled configurations.",
+      "code": ["mosaickv/scripts/evicastkv_shared_source_runtime.py", "mosaickv/scripts/evicastkv_source_caption_study.py", "mosaickv/src/mosaickv/evaluation/source_replacement_controls.py"],
+      "evidence_ids": ["measurement_scope"],
+      "remaining": ["Audit direct post-projection 3-bit K/V, mandatory-only/random/attention protection controls and KIVI/KVQuant/ZipCache compatibility.", "Prepare label-free physically feasible shared-byte targets, accounting all metadata, corrections, exact regions, tails and workspace.", "A common-model/dtype bridge needs new correctness gates; do not pool old FP16 retention and BF16 source rows."]
+    },
+    {
+      "id": "R08",
+      "requirement": "Representative vision-task evaluation and cohort provenance",
+      "implementation_status": "development_manifests_and_exclusion_report_implemented_freshness_incomplete",
+      "measurement_status": "consumed_COCO_and_four_MileBench_subtasks_only_no_fresh_confirmation",
+      "scientific_conclusion": "Development quality and correctness cannot certify independent visual generalization or publication-level superiority.",
+      "code": ["mosaickv/src/mosaickv/evaluation/fox_history_control.py", "mosaickv/src/mosaickv/evaluation/fox_milebench_scope.py"],
+      "evidence_ids": ["freshness", "coco_lock", "mile_scoring", "historical_id_review", "resolved_historical_roots", "coco_id_availability", "extraction_original_submitline"],
+      "remaining": ["Do not reopen the three resolved historical-root classifications: bind their existing verified provenance instead.", "Complete a separately scoped COCO-only historical input/media inventory before confirmation; 36,408 ID-only unused images do not yet certify 256 unused underlying media groups.", "Establish the authoritative project root list and canonical input-artifact coverage; the current bounded manifest traversal explicitly reports complete_scan=false.", "Freeze a reviewed candidate, claim and contrast family before any new independent evaluation.", "Original MileBench pools cannot supply the requested fresh cohort; extra OCR/chart tasks need separately validated routes and frozen cohorts, not favorable pilot selection."]
+    },
+    {
+      "id": "R09",
+      "requirement": "Prompt length, actual GQA geometry and storage lifetimes",
+      "implementation_status": "active_backing_storage_and_allocator_telemetry_present_KV_lifetime_certification_incomplete",
+      "measurement_status": "active_cache_boundaries_and_request_allocator_peaks_measured_not_total_live_KV_owner_peak",
+      "scientific_conclusion": "Source/plan owners remain live through output construction; active published KV reduction is not whole-request KV-only reduction.",
+      "code": ["mosaickv/scripts/evicastkv_profile_lifetime.py", "mosaickv/scripts/evicastkv_source_peak_profile.py", "mosaickv/src/mosaickv/evaluation/fox_measurement.py"],
+      "evidence_ids": ["measurement_scope", "coco_measurement"],
+      "remaining": ["Time-align owner lifetimes including original source, packed cache, corrections, replay and workspace; account pointer reuse and observer blind spots.", "Register source reconstruction length scaling separately and preserve actual image/text expansion.", "Current source full-MHA support does not certify GQA; retain explicit unsupported labels until projection/RoPE/head-mapping tests pass."]
+    },
+    {
+      "id": "R10",
+      "requirement": "Recovered tables, uncertainty, qualitative evidence and manuscript consistency",
+      "implementation_status": "hash_bound_packet_native_metrics_and_paired_bootstrap_exports_implemented",
+      "measurement_status": "partial_development_writing_packet_available_no_final_confirmation_packet",
+      "scientific_conclusion": "Current evidence supports scoped development reports and limitations, not a stronger abstract or general superiority claim.",
+      "code": ["mosaickv/scripts/evicastkv_packet.py", "mosaickv/scripts/evicastkv_review_closure_v2.py", "mosaickv/src/mosaickv/evaluation/fox_statistics.py"],
+      "evidence_ids": ["coco_native_metrics", "coco_latency", "mile_fullkv_recovery", "freshness", "mechanism_submission"],
+      "remaining": ["Export all budgets and per-subtask metric families with complete denominators; preserve original and corrected-source provenance.", "Build deterministic qualitative selection rules including wins, ties and regressions; no fabricated attention overlays.", "Check labels, unfinished caption, dangling cohorts, citations and an accurate AI-assistance disclosure; do not claim author review/approval.", "Regenerate final tables after controlled mechanisms and any authorized follow-ups, retaining all negative/inconclusive results."]
+    }
+  ],
+  "bounded_execution_sequence": [
+    {"order": 1, "action": "Complete saved-output caption/parsing audit and verify every evidence hash in this matrix on CPU", "gpu_inference": false},
+    {"order": 2, "action": "Allow registered array 22742447 and its afterany analyzer 22742448 to finish; classify true activity, quality and cost without retuning", "maximum_aggregate_a100s": 6},
+    {"order": 3, "action": "Run only registered full-routing pilot if preceding gates and bounded resource estimate permit it; stop on missingness/numerical failure"},
+    {"order": 4, "action": "Use measured graph and exact-construction hotspots for at most two semantics-preserving optimizations; verify identical IDs, K/V, positions, capacities and bytes before paired timing"},
+    {"order": 5, "action": "Inventory and preregister separately missing source/replay/quantization and observation-window studies; no cross-configuration pooling"},
+    {"order": 6, "action": "Freeze only if justified by completed development evidence; require reviewed configuration, baseline-fidelity qualification and COCO media freshness before independent confirmation", "confirmation_currently_blocked": true}
+  ],
+  "coco_only_freshness_followup": {
+    "current_conclusion": "ID_only_availability_proven_under_old_bounded_scope_underlying_media_freshness_not_yet_certified",
+    "three_root_classification_repair_needed": false,
+    "existing_resolution_rebinding_possible_without_new_scan": true,
+    "existing_tooling": {
+      "mosaickv/scripts/evicastkv_evidence.py:exclusion_inventory": "Top-level exact manifest seeds plus limited linked-ledger traversal, 90-second budget, skips answer/score fields; explicitly complete_scan=false even when queue is exhausted.",
+      "mosaickv/scripts/evicastkv_history_refresh.py:refresh": "Runs that bounded inventory over runs/mosaickv and runs/evicastkv; current saved reports cover 314 canonical files without errors but do not certify all historical raw/input/media artifacts.",
+      "mosaickv/scripts/evicastkv_review_closure_v2.py:audit": "Hash-verifies 14 pinned COCO Arrow shards, projects question_id/file_name/id, requires canonical source-name equality, subtracts conservative used IDs and resolves the three roots from original evidence; deliberately preserves incomplete-media flag.",
+      "mosaickv/src/mosaickv/evaluation/identity_exclusion_scan.py": "Recursive canonical source discovery and identity projection can support new tooling, but it excludes media fields and does not certify cross-dataset image reuse; existing execution wrappers are scoped to different reviewed datasets."
+    },
+    "prerequisites_before_new_scan": [
+      "Freeze an explicit canonical list of project input/result roots, repository-ledger roots and allowed symlink targets; classify generic-name roots and referenced external input ledgers, not only coco/milebench directory names.",
+      "Register a new COCO-only scan contract and fail-closed schema projection for historical sample IDs, public canonical COCO source-image names and media SHA fields; preserve immutable provenance resolutions for missing dataset context.",
+      "Require complete source enumeration and exhausted queues, stable pre/post hashes, structured errors and required-source coverage; reject missing/ambiguous media provenance rather than converting it to absence of reuse.",
+      "Reconcile actual underlying encoded/pixel image hashes or certified canonical COCO source identities across historical non-COCO routes before declaring image freshness; a file-level Arrow shard hash is not a per-image cross-dataset duplicate certificate."
+    ],
+    "can_prove_256_media_fresh_inputs_from_current_certificate_alone": false,
+    "answers_or_outcomes_needed": false,
+    "new_identity_selection_executed": false,
+    "new_scan_executed": false,
+    "new_materialization_executed": false,
+    "fresh_confirmation_authorized": false
+  }
+}

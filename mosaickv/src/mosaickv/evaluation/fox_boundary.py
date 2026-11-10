@@ -148,6 +148,10 @@ def run_boundary_b(adapter, config, messages, request, output: Path):
         result = adapter.decode_one_token(
             token, state, capture_queries=False, capture_attentions=False
         )
+        # The current HF adapter advances its mutable state in place, but the
+        # explicit decode contract also returns the authoritative next state.
+        # Preserve that contract for independent/cache-replacing transports.
+        state = result.state
         token = result.next_token_id
         ids.append(int(token.item()))
     final_bytes = unique_storage_bytes(
