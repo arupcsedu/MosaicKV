@@ -3,14 +3,19 @@
 The FP16 native operation and weights are unchanged. A masked dummy row makes
 the prefix prefill use the original prompt's GEMM shapes; the dummy cache slot
 is then removed. During single-token forwards only language Linear and eager
-attention query dimensions are padded to that same shape. Fake rows never
-enter the KV cache or logical sequence. This expensive correctness diagnostic
-is not an online compression policy or a silent repair of historical results.
+attention query dimensions are padded to that same shape. A separately enabled
+normalization phase can also pad native language RMSNorm calls, only while
+processing the held final-prompt token. The default historical path is unchanged.
+Held-token operator padding never enters the KV cache or logical sequence. The
+temporary masked prefix-cache slot is removed before that forward. This expensive
+correctness diagnostic is not an online compression policy or a repair of
+historical results.
 """
 
 from __future__ import annotations
 
 import importlib
+import math
 from contextlib import ExitStack, contextmanager
 from dataclasses import replace
 from unittest.mock import patch
@@ -111,6 +116,114 @@ def padded_linear(original, inputs, rows):
     return original(buffer)[:, -1:, :].contiguous()
 
 
+def padded_normalization(original, inputs, rows):
+    """Run the unchanged native norm on a full-row buffer, retaining one row.
+
+    This preserves its equation, precision, weights and epsilon, not the native
+    singleton reduction's launch geometry or necessarily its bitwise result.
+    Unlike ``padded_linear``, this helper must never accept a prefill silently:
+    its caller explicitly authorizes exactly one held-token boundary phase.
+    """
+    import torch
+
+    if type(rows) is not int or not 2 <= rows <= 4096:
+        raise ValueError("registered normalization row count must be 2..4096")
+    if (
+        not isinstance(inputs, torch.Tensor)
+        or inputs.ndim != 3
+        or tuple(inputs.shape[:2]) != (1, 1)
+        or not inputs.is_floating_point()
+    ):
+        raise NotImplementedError("normalization phase requires one batch-one token")
+    buffer = inputs.new_zeros((1, rows, inputs.shape[-1]))
+    buffer[:, -1:, :].copy_(inputs)
+    output = original(buffer)
+    if (
+        not isinstance(output, torch.Tensor)
+        or output.shape != buffer.shape
+        or output.dtype != inputs.dtype
+        or output.device != inputs.device
+    ):
+        raise ValueError("native normalization changed output geometry/precision/device")
+    # A one-row slice can already be contiguous while retaining the entire
+    # padded allocation. Return only its own row-sized backing storage.
+    return output[:, -1:, :].clone(memory_format=torch.contiguous_format)
+
+
+class ShapeTransportOperations(dict):
+    """JSON-compatible counters with an explicitly scoped, single-use phase."""
+
+    def __init__(self, *, native_norm_boundary=False, norm_names=()):
+        super().__init__(linear_padded_calls=0, attention_padded_calls=0, observed_prefill_layers=0)
+        self._norm_enabled = native_norm_boundary
+        self._norm_names = tuple(norm_names)
+        self._norm_calls = dict.fromkeys(self._norm_names, 0)
+        self._norm_active = False
+        self._closed = False
+        if native_norm_boundary:
+            self.update(
+                normalization_phase_entries=0,
+                normalization_phase_completions=0,
+                normalization_padded_calls=0,
+                normalization_expected_calls=len(self._norm_names),
+                normalization_input_calls=0,
+                normalization_post_attention_calls=0,
+                normalization_final_calls=0,
+            )
+
+    @contextmanager
+    def boundary_normalization(self):
+        """Authorize only one held-token forward, never prefill/continuation."""
+        if not self._norm_enabled or self._closed:
+            raise ValueError("open opt-in boundary normalization transport required")
+        if self._norm_active or self["normalization_phase_entries"]:
+            raise ValueError("the held-token normalization phase is single-use, not nested")
+        self._norm_active = True
+        self["normalization_phase_entries"] += 1
+        try:
+            yield
+            if any(count != 1 for count in self._norm_calls.values()):
+                raise ValueError("one native normalization call per language norm is required")
+            self["normalization_phase_completions"] += 1
+        finally:
+            self._norm_active = False
+
+
+def _language_normalizations(adapter, layers, modeling):
+    """Resolve every decoder norm and the unique final norm, never vision norms."""
+    model = getattr(adapter, "model", None)
+    if model is None:
+        raise NotImplementedError("an explicit language decoder owner is required")
+    owners = [
+        module
+        for module in model.modules()
+        if getattr(module, "layers", None) is not None and tuple(module.layers) == layers
+    ]
+    if len(owners) != 1:
+        raise NotImplementedError("language decoder parent is not uniquely exposed")
+    norms = []
+    for index, layer in enumerate(layers):
+        norms.extend(
+            (f"layer.{index}.{name}", getattr(layer, name, None))
+            for name in ("input_layernorm", "post_attention_layernorm")
+        )
+    norms.append(("final_norm", getattr(owners[0], "norm", None)))
+    if len({id(norm) for _, norm in norms}) != len(norms):
+        raise NotImplementedError("distinct owned language normalization modules required")
+    for _, norm in norms:
+        if (
+            type(norm) is not modeling.MistralRMSNorm
+            or norm.training
+            or getattr(norm.forward, "__func__", None) is not modeling.MistralRMSNorm.forward
+            or norm.weight.ndim != 1
+            or norm.weight.numel() == 0
+            or not math.isfinite(norm.variance_epsilon)
+            or norm.variance_epsilon <= 0
+        ):
+            raise NotImplementedError("unchanged eval-mode native Mistral RMSNorm required")
+    return norms
+
+
 def padded_attention(original, module, query, key, value, mask, *args, rows, stride, **kwargs):
     import torch
 
@@ -136,12 +249,14 @@ def padded_attention(original, module, query, key, value, mask, *args, rows, str
 
 
 @contextmanager
-def shape_matched_transport(adapter, rows):
+def shape_matched_transport(adapter, rows, *, native_norm_boundary=False):
     """Serial owner-scoped override; restore every function even on exceptions."""
     import torch
 
     if type(rows) is not int or rows < 2 or rows > 4096:
         raise ValueError("registered shape-matched prompt length must be 2..4096")
+    if type(native_norm_boundary) is not bool:
+        raise ValueError("native_norm_boundary requires an explicit boolean")
     layers = tuple(adapter._language_layers())
     if not layers or any(
         layer.training or layer.self_attn.config._attn_implementation != "eager" for layer in layers
@@ -151,11 +266,47 @@ def shape_matched_transport(adapter, rows):
     if any(module.__name__ != "transformers.models.mistral.modeling_mistral" for module in modules):
         raise NotImplementedError("only the registered Mistral GQA decoder is audited")
     owners = {id(layer.self_attn) for layer in layers}
-    strides, counts = (
-        {},
-        dict(linear_padded_calls=0, attention_padded_calls=0, observed_prefill_layers=0),
+    norms = (
+        _language_normalizations(adapter, layers, next(iter(modules)))
+        if native_norm_boundary
+        else ()
+    )
+    strides = {}
+    counts = ShapeTransportOperations(
+        native_norm_boundary=native_norm_boundary, norm_names=[name for name, _ in norms]
     )
     with ExitStack() as stack:
+        # Closed handles cannot later activate a phase after all overrides have
+        # been restored, including when the model forward raises an exception.
+        stack.callback(setattr, counts, "_closed", True)
+        for name, norm in norms:
+            original = norm.forward
+
+            def normalization(inputs, *, _original=original, _name=name, _norm=norm):
+                if not counts._norm_active:
+                    return _original(inputs)
+                if not isinstance(inputs, torch.Tensor) or inputs.ndim != 3:
+                    raise NotImplementedError("normalization phase requires a native B,N,H tensor")
+                if inputs.dtype != _norm.weight.dtype or inputs.device != _norm.weight.device:
+                    raise ValueError("native normalization input/weight precision/device mismatch")
+                if inputs.shape[-1] != _norm.weight.numel():
+                    raise ValueError("native normalization hidden dimension changed")
+                if counts._norm_calls[_name]:
+                    raise ValueError("a second forward entered the held-token normalization phase")
+                output = padded_normalization(_original, inputs, rows)
+                counts["normalization_padded_calls"] += 1
+                counts._norm_calls[_name] += 1
+                group = (
+                    "final"
+                    if _name == "final_norm"
+                    else "post_attention"
+                    if _name.endswith("post_attention_layernorm")
+                    else "input"
+                )
+                counts[f"normalization_{group}_calls"] += 1
+                return output
+
+            stack.enter_context(patch.object(norm, "forward", normalization))
         for layer in layers:
             for module in layer.modules():
                 if not isinstance(module, torch.nn.Linear):

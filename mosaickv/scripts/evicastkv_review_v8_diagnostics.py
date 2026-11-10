@@ -43,7 +43,9 @@ def identity(value):
     return text
 
 
-def submit(root, label, mode, dependencies=(), *, gpu=False, tests=False):
+def submit(
+    root, label, mode, dependencies=(), *, gpu=False, tests=False, launcher=None, job_prefix="fox8"
+):
     if gpu and tests:
         raise ValueError("the CPU test suite must not request a GPU")
     command = [
@@ -52,7 +54,7 @@ def submit(root, label, mode, dependencies=(), *, gpu=False, tests=False):
         "--account=bii_dsc_community",
         "--nodes=1",
         "--ntasks=1",
-        f"--job-name=fox8-{label}",
+        f"--job-name={job_prefix}-{label}",
         f"--output={root}/slurm/{label}-%j.out",
         f"--error={root}/slurm/{label}-%j.err",
     ]
@@ -72,7 +74,9 @@ def submit(root, label, mode, dependencies=(), *, gpu=False, tests=False):
         command += ["--partition=bii", "--cpus-per-task=12", "--mem=16G", "--time=00:30:00"]
     if dependencies:
         command += ["--dependency=afterany:" + ":".join(identity(d) for d in dependencies)]
-    script = "evicastkv_review_closure_v2" if tests else "evicastkv_review_v8_diagnostics"
+    script = (
+        "evicastkv_review_closure_v2" if tests else launcher or "evicastkv_review_v8_diagnostics"
+    )
     command += [
         str(SOURCE / f"mosaickv/slurm/{script}.sbatch"),
         str(SOURCE),

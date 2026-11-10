@@ -11,6 +11,7 @@ from __future__ import annotations
 import gc
 import json
 import math
+from contextlib import ExitStack, nullcontext
 from pathlib import Path
 from unittest.mock import patch
 
@@ -25,7 +26,25 @@ from mosaickv.evaluation.fox_shape_transport import (
 )
 
 
-def prepare(root, parent, previous):
+def prepare(root, parent, previous, *, native_norm_boundary=False, norm_evidence=None):
+    if type(native_norm_boundary) is not bool:
+        raise ValueError("explicit boundary-native-normalization variant required")
+    norm_binding = {}
+    if native_norm_boundary:
+        if norm_evidence is None:
+            raise ValueError("saved native RMSNorm replay evidence is required")
+        norm_evidence = Path(norm_evidence)
+        finding = json.loads(norm_evidence.read_text())
+        if (
+            finding.get("complete") is not True
+            or finding.get("both_saved_shape_pairs_reproduced") is not True
+            or finding.get("full_model_parity_established") is not False
+            or finding.get("original_first_logit_tolerance_unchanged") != boundary.LOGIT_ATOL
+        ):
+            raise ValueError("complete unrelaxed native-norm replay must precede this variant")
+        norm_binding = dict(path=str(norm_evidence), sha256=sha(norm_evidence))
+    elif norm_evidence is not None:
+        raise ValueError("norm evidence cannot silently activate the historical transport")
     if root.exists():
         raise FileExistsError("new shape-control root required")
     previous_gate = previous / "boundary/GATE_boundary_linear.json"
@@ -43,7 +62,13 @@ def prepare(root, parent, previous):
             base_protocol_sha256=sha(root / "protocol.json"),
             prior_gate=str(previous_gate),
             prior_gate_sha256=sha(previous_gate),
-            transport="dummy-prefix-plus-native-shape-matched-linear-and-attention",
+            transport="dummy-prefix-native-shapes-with-boundary-only-native-RMSNorm-v2"
+            if native_norm_boundary
+            else "dummy-prefix-plus-native-shape-matched-linear-and-attention",
+            native_norm_boundary=native_norm_boundary,
+            native_norm_evidence=norm_binding,
+            ordinary_continuation_after_boundary=native_norm_boundary,
+            no_output_or_logit_patch=True,
             implementation_sha256=sha(
                 SOURCE / "mosaickv/src/mosaickv/evaluation/fox_shape_transport.py"
             ),
@@ -76,13 +101,18 @@ def cache_difference(adapter, a, b):
     return dict(bitwise_equal=equal, maximum_absolute_difference=maximum)
 
 
-def run_paths(adapter, prepared, capture):
-
+def run_paths(adapter, prepared, capture, *, native_norm_boundary=False):
+    if type(native_norm_boundary) is not bool:
+        raise ValueError("explicit boundary-native-normalization variant required")
     prefix, held = boundary.hold_back_last_text_token(prepared)
     n = prepared.logical_sequence_length
     if prefix.logical_sequence_length != n - 1:
         raise ValueError("held-token boundary changed")
-    with capture, shape_matched_transport(adapter, n) as operations:
+    with capture, ExitStack() as shape_stack:
+        # Historical default retains its original wrapper lifetime. The v2
+        # variant restores ALL forwards before the fifteen continuation steps.
+        kwargs = dict(native_norm_boundary=True) if native_norm_boundary else {}
+        operations = shape_stack.enter_context(shape_matched_transport(adapter, n, **kwargs))
         with capture.phase("A"):
             a = adapter.prefill(prepared, capture_queries=False, capture_attentions=False)
         a_first = a.logits.detach().float().cpu().clone()
@@ -93,7 +123,8 @@ def run_paths(adapter, prepared, capture):
         gc.collect()
         if b_state.active_cache_length != n - 1 or b_state.next_decode_position != n - 1:
             raise ValueError("dummy row remains physically or logically active")
-        with capture.phase("B"):
+        phase = operations.boundary_normalization() if native_norm_boundary else nullcontext()
+        with capture.phase("B"), phase:
             b = adapter.decode_one_token(
                 held, b_state, capture_queries=False, capture_attentions=False
             )
@@ -108,6 +139,8 @@ def run_paths(adapter, prepared, capture):
         ):
             raise ValueError("held token duplicated or logical position changed")
         initial_cache = cache_difference(adapter, a.state, b.state)
+        if native_norm_boundary:
+            shape_stack.close()
         a_ids, b_ids = [int(a.next_token_id.item())], [int(b.next_token_id.item())]
         differences = [float((a.logits.float() - b.logits.float()).abs().max())]
         aa, bb, token = a.state, b.state, a.next_token_id
@@ -137,6 +170,8 @@ def run_paths(adapter, prepared, capture):
             initial_cache=initial_cache,
             final_cache=final_cache,
             operation_counts=dict(operations),
+            native_norm_boundary=native_norm_boundary,
+            ordinary_continuation_after_boundary=native_norm_boundary,
         )
     return dict(
         captures=capture.records,
@@ -171,19 +206,70 @@ def validate_transport(root):
         or transport["online_default"] is not False
     ):
         raise ValueError("registered numerical scope or tolerance changed")
+    if transport.get("native_norm_boundary", False):
+        evidence = transport["native_norm_evidence"]
+        if (
+            sha(Path(evidence["path"])) != evidence["sha256"]
+            or transport.get("ordinary_continuation_after_boundary") is not True
+            or transport.get("no_output_or_logit_patch") is not True
+        ):
+            raise ValueError("boundary-native-normalization evidence or scope changed")
     return transport
 
 
+def norm_boundary_scope(continuation):
+    """Check execution scope separately from the scientific numerical verdict."""
+    counts = continuation["operation_counts"]
+    layers = counts.get("observed_prefill_layers", 0)
+    if (
+        continuation.get("native_norm_boundary") is not True
+        or continuation.get("ordinary_continuation_after_boundary") is not True
+        or type(layers) is not int
+        or layers < 1
+        or counts.get("normalization_phase_entries") != 1
+        or counts.get("normalization_phase_completions") != 1
+        or counts.get("normalization_expected_calls") != 2 * layers + 1
+        or counts.get("normalization_padded_calls") != 2 * layers + 1
+        or counts.get("normalization_input_calls") != layers
+        or counts.get("normalization_post_attention_calls") != layers
+        or counts.get("normalization_final_calls") != 1
+        or counts.get("attention_padded_calls") != layers
+        or counts.get("linear_padded_calls") != 7 * layers
+    ):
+        raise ValueError("native norm boundary incomplete or wrappers continued into decoding")
+    preserved = True
+    for name in ("initial_cache", "final_cache"):
+        record = continuation[name]
+        if (
+            type(record["bitwise_equal"]) is not bool
+            or not math.isfinite(record["maximum_absolute_difference"])
+            or record["maximum_absolute_difference"] < 0
+            or (record["bitwise_equal"] and record["maximum_absolute_difference"] != 0)
+        ):
+            raise ValueError("invalid cache parity record")
+        preserved = preserved and record["bitwise_equal"]
+    return preserved
+
+
 def worker(root):
-    validate_transport(root)
-    with patch.object(boundary, "run_paths", run_paths):
+    transport = validate_transport(root)
+
+    def paths(adapter, prepared, capture):
+        return run_paths(
+            adapter,
+            prepared,
+            capture,
+            native_norm_boundary=transport.get("native_norm_boundary", False),
+        )
+
+    with patch.object(boundary, "run_paths", paths):
         boundary.worker(root)
 
 
 def analyze(root):
     import torch
 
-    validate_transport(root)
+    transport = validate_transport(root)
     protocol = boundary._load_protocol(root)
     result = json.loads((root / "result.json").read_text())
     if (
@@ -248,6 +334,9 @@ def analyze(root):
             and continuation["maximum_logit_difference"] <= boundary.LOGIT_ATOL
             and continuation["operation_counts"]["attention_padded_calls"] > 0
         )
+        if transport.get("native_norm_boundary", False):
+            cache_passed = norm_boundary_scope(continuation)
+            passed = passed and cache_passed
         reports.append(
             dict(
                 index=item["index"],
@@ -268,6 +357,8 @@ def analyze(root):
         unchanged_tolerance=boundary.LOGIT_ATOL,
         historical_native_gate_still_negative=True,
         shared_transport_only=True,
+        native_norm_boundary=transport.get("native_norm_boundary", False),
+        ordinary_continuation_after_boundary=transport.get("native_norm_boundary", False),
         production_default_changed=False,
         quality_or_latency_claim_allowed=False,
         fresh_confirmation_authorized=False,
