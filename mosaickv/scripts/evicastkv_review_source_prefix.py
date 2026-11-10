@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import json
+import math
 import os
 import time
 from pathlib import Path
@@ -64,6 +65,27 @@ POLICY = dict(
     no_latency_claim=True,
 )
 
+# This policy concerns CPU recomputation of already-saved diagnostic reductions,
+# never model outputs, the registered GPU guard, or any experiment tolerance.
+ANALYSIS_POLICY = dict(
+    schema_version=1,
+    id="fixed_prefix_CPU_KL_reduction_verification_v1",
+    required_ATEN_CPU_CAPABILITY="avx2",
+    required_torch_cpu_capability="AVX2",
+    intraop_threads=12,
+    fp32_epsilon=2**-23,
+    fp64_epsilon=2**-52,
+    fp32_epsilon_multiplier=8,
+    fp64_epsilon_multiplier=64,
+    kl_tolerance_formula="multiplier * epsilon * max(1, abs(saved), abs(recomputed))",
+    tolerant_fields_FP32=["per_prefix_KL_FP32", "maximum_KL_FP32"],
+    tolerant_fields_FP64=["per_prefix_KL_FP64", "mean_KL_FP64"],
+    all_other_fields="identical_types_structure_and_values",
+    registered_guard_booleans="exact_match_required_no_threshold_change",
+    raw_record_values="preserved_never_replaced_by_CPU_recomputation",
+    new_GPU_inference=False,
+)
+
 
 def read(path):
     return json.loads(Path(path).read_text())
@@ -100,6 +122,99 @@ def comparisons(reference, candidate):
         same_conditioning_prefix=True,
         actual_cache_dependent_prediction_count=127,
         not_free_greedy_sequence_agreement=True,
+    )
+
+
+def verify_recomputed_diagnostics(recomputed, recorded):
+    """Verify a saved record without confusing CPU KL roundoff with logit drift.
+
+    Only the four named KL reduction fields receive finite, precision-derived
+    comparisons. Structure, token identities/agreement, logit error, first
+    divergence and all guard booleans remain exact. A guard flip always fails,
+    including when KL drift is smaller than this verification tolerance.
+    """
+    stats = dict(
+        maximum_KL_FP32_recomputation_drift=0.0,
+        maximum_KL_FP64_recomputation_drift=0.0,
+        verified_KL_FP32_values=0,
+        verified_KL_FP64_values=0,
+        changed_KL_FP32_values=0,
+        changed_KL_FP64_values=0,
+        exact_guard_booleans_checked=0,
+    )
+
+    def visit(actual, saved, path, precision=None):
+        if isinstance(actual, dict):
+            if not isinstance(saved, dict) or set(actual) != set(saved):
+                raise ValueError(f"fixed-prefix diagnostic structure changed: {path}")
+            for key in sorted(actual):
+                kind = (
+                    "FP32"
+                    if key in ANALYSIS_POLICY["tolerant_fields_FP32"]
+                    else "FP64"
+                    if key in ANALYSIS_POLICY["tolerant_fields_FP64"]
+                    else None
+                )
+                visit(actual[key], saved[key], f"{path}.{key}", kind)
+            return
+        if isinstance(actual, list):
+            if not isinstance(saved, list) or len(actual) != len(saved):
+                raise ValueError(f"fixed-prefix diagnostic list changed: {path}")
+            for index, (left, right) in enumerate(zip(actual, saved, strict=True)):
+                visit(left, right, f"{path}[{index}]", precision)
+            return
+        if precision is not None:
+            if (
+                type(actual) not in (int, float)
+                or type(saved) not in (int, float)
+                or not math.isfinite(actual)
+                or not math.isfinite(saved)
+            ):
+                raise ValueError(f"nonfinite or invalid KL diagnostic: {path}")
+            drift = abs(actual - saved)
+            prefix = precision.lower()
+            tolerance = (
+                ANALYSIS_POLICY[f"{prefix}_epsilon_multiplier"]
+                * ANALYSIS_POLICY[f"{prefix}_epsilon"]
+                * max(1.0, abs(actual), abs(saved))
+            )
+            if drift > tolerance:
+                raise ValueError(f"KL recomputation drift exceeds precision bound: {path}")
+            maximum = f"maximum_KL_{precision}_recomputation_drift"
+            stats[maximum] = max(stats[maximum], drift)
+            stats[f"verified_KL_{precision}_values"] += 1
+            stats[f"changed_KL_{precision}_values"] += int(drift != 0)
+            return
+        if type(actual) is not type(saved) or actual != saved:
+            raise ValueError(f"non-KL fixed-prefix diagnostic changed: {path}")
+        if isinstance(actual, float) and not math.isfinite(actual):
+            raise ValueError(f"nonfinite fixed-prefix diagnostic: {path}")
+        if path.endswith(".registered_guard_pass"):
+            if type(actual) is not bool:
+                raise ValueError("registered guard must be an exact boolean")
+            stats["exact_guard_booleans_checked"] += 1
+
+    visit(recomputed, recorded, "diagnostics")
+    return stats
+
+
+def analysis_cpu_controls():
+    import torch
+
+    if os.environ.get("ATEN_CPU_CAPABILITY") != ANALYSIS_POLICY["required_ATEN_CPU_CAPABILITY"]:
+        raise ValueError("set ATEN_CPU_CAPABILITY=avx2 before Python starts for CPU analysis")
+    actual = torch.backends.cpu.get_cpu_capability()
+    if actual != ANALYSIS_POLICY["required_torch_cpu_capability"]:
+        raise ValueError("actual Torch CPU dispatcher must report AVX2")
+    torch.set_num_threads(ANALYSIS_POLICY["intraop_threads"])
+    if torch.get_num_threads() != ANALYSIS_POLICY["intraop_threads"]:
+        raise ValueError("CPU diagnostic recomputation requires exactly twelve intra-op threads")
+    return dict(
+        ATEN_CPU_CAPABILITY=os.environ["ATEN_CPU_CAPABILITY"],
+        torch_cpu_capability=actual,
+        intraop_threads=torch.get_num_threads(),
+        torch_version=torch.__version__,
+        observed_cpu_reduction_policy_only=True,
     )
 
 
@@ -617,9 +732,12 @@ def prepare(root, parent=DEFAULT_PARENT):
     return dict(workers=2, expected_rows=14, plan_sha256=sha(root / "plan.json"))
 
 
-def validate(root):
+def validate(root, *, producer_source=None):
     plan = read(Path(root) / "plan.json")
-    clean_source(SOURCE, plan["source_sha"])
+    producer = SOURCE if producer_source is None else Path(producer_source).resolve(strict=True)
+    if not producer.resolve().is_relative_to(Path("/scratch/djy8hg").resolve()):
+        raise ValueError("producer source must remain under the registered scratch area")
+    clean_source(producer, plan["source_sha"])
     if plan["policy"] != POLICY or tuple(plan["arms"]) != ARMS:
         raise ValueError("source fixed-prefix policy drift")
     for path, expected in plan["bound_files"].items():
@@ -797,12 +915,14 @@ def worker(root, index):
         write_once(out / "result.json", result)
 
 
-def analyze(root):
+def analyze(root, *, producer_source=None):
     import torch
 
+    cpu_controls = analysis_cpu_controls()
+    analysis_source_sha = clean_source(SOURCE)
     root = Path(root)
-    plan = validate(root)
-    rows, failures, bindings, pairings = [], [], {}, []
+    plan = validate(root, producer_source=producer_source)
+    rows, failures, bindings, pairings, numerical_verifications = [], [], {}, [], []
     for index in range(2):
         out = root / f"workers/{index}"
         path = out / "result.json"
@@ -839,8 +959,8 @@ def analyze(root):
                 if reference is None or row["arm"] not in tensors:
                     raise ValueError("completed row lacks immutable logit evidence")
                 expected = comparisons(reference, tensors[row["arm"]])
-                if digest(expected) != digest(row["diagnostics"]):
-                    raise ValueError("reported fixed-prefix diagnostics disagree with saved logits")
+                verified = verify_recomputed_diagnostics(expected, row["diagnostics"])
+                numerical_verifications.append(dict(index=index, arm=row["arm"], **verified))
                 if row["arm"] != ARMS[0] and row["conditioning_prefix_sha256"] != digest(
                     forced_prefix(reference)
                 ):
@@ -877,6 +997,24 @@ def analyze(root):
         root / "analysis/GATE_source_fixed_prefix.json",
         dict(
             source_sha=plan["source_sha"],
+            producer_source_sha=plan["source_sha"],
+            analysis_source_sha=analysis_source_sha,
+            analysis_implementation_path=str(Path(__file__).resolve()),
+            analysis_implementation_sha256=sha(Path(__file__).resolve()),
+            analysis_policy=ANALYSIS_POLICY,
+            analysis_policy_sha256=digest(ANALYSIS_POLICY),
+            analysis_cpu_controls=cpu_controls,
+            recomputation_verifications=numerical_verifications,
+            maximum_KL_FP32_recomputation_drift=max(
+                (r["maximum_KL_FP32_recomputation_drift"] for r in numerical_verifications),
+                default=0.0,
+            ),
+            maximum_KL_FP64_recomputation_drift=max(
+                (r["maximum_KL_FP64_recomputation_drift"] for r in numerical_verifications),
+                default=0.0,
+            ),
+            raw_record_values_preserved=True,
+            registered_guard_thresholds_unchanged=POLICY["guard"],
             plan_sha256=sha(root / "plan.json"),
             complete=len(rows) == 14 and not failures,
             expected_rows=14,
@@ -919,13 +1057,16 @@ def main():
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--parent", type=Path, default=DEFAULT_PARENT)
     parser.add_argument("--index", type=int)
+    parser.add_argument("--producer-source", type=Path)
     args = parser.parse_args()
+    if args.producer_source is not None and args.mode != "analyze":
+        parser.error("--producer-source is restricted to derived CPU analysis")
     if args.mode == "prepare":
         print(json.dumps(prepare(args.root, args.parent), sort_keys=True))
     elif args.mode == "worker":
         worker(args.root, args.index)
     else:
-        analyze(args.root)
+        analyze(args.root, producer_source=args.producer_source)
 
 
 if __name__ == "__main__":
