@@ -68,6 +68,8 @@ def submit(
         command += (
             ["--mem=8G", "--time=00:20:00"]
             if mode == "rmsnorm-worker"
+            else ["--mem=64G", "--time=00:20:00"]
+            if mode == "source-length-worker"
             else ["--mem=64G", "--time=02:00:00"]
         )
     else:
