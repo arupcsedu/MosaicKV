@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Finite CPU wrapper for the V7 sharded historical-identity inventory.
 
-At most three 480-second scanner invocations run per worker. No polling,
+At most three 180-second scanner invocations run per worker. No polling,
 submission, model access, identity selection or authorization is performed.
 Incomplete/negative scans are retained explicitly, never promoted to freshness.
 """
@@ -19,7 +19,7 @@ from mosaickv.evaluation.fox_campaign import clean_source, sha, write_once
 
 SOURCE = Path(__file__).resolve().parents[2]
 MAX_INVOCATIONS = 3
-SECONDS_PER_INVOCATION = 480
+SECONDS_PER_INVOCATION = 180
 
 
 def _paths(root, index):

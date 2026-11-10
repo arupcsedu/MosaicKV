@@ -23,6 +23,12 @@ def gate(index=0, shards=8, *, terminal=False, errors=0):
     )
 
 
+def test_cpu_retry_scan_budget_is_at_most_nine_minutes_per_worker():
+    assert wrapper.MAX_INVOCATIONS == 3
+    assert wrapper.SECONDS_PER_INVOCATION == 180
+    assert wrapper.MAX_INVOCATIONS * wrapper.SECONDS_PER_INVOCATION <= 540
+
+
 def fake_run(monkeypatch, outcomes):
     calls = []
 
@@ -44,7 +50,7 @@ def test_three_invocation_bound_and_resume(configured, monkeypatch):
     result = wrapper.worker(configured, 0)
     assert len(calls) == 3
     assert [call["resume"] for call in calls] == [False, True, True]
-    assert all(call["seconds"] == 480 for call in calls)
+    assert all(call["seconds"] == 180 for call in calls)
     assert result["status"] == "incomplete_invocation_budget_exhausted"
     assert not result["fresh_confirmation_authorized"]
 

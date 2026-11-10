@@ -20,7 +20,7 @@ import time
 from collections import deque
 from pathlib import Path
 
-from evicastkv_boundary_operators import _STRING, _skip_json_value
+from evicastkv_boundary_operators import _STRING
 from evicastkv_review_freshness_audit import ROOTS, canonical_name, reviewed_evidence
 
 from mosaickv.evaluation.fox_campaign import clean_source, digest, sha, write_once
@@ -33,6 +33,8 @@ CHUNK = 2**20
 MAX_DIRECTORY_ENTRIES = 500000
 COCO = re.compile(r"COCO_(?:val|train)2014_\d{12}\.jpg")
 HASH = re.compile(r"[0-9a-f]{64}")
+SCALAR = re.compile(r"(?:true|false|null|-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?)")
+PROJECTION_CHECK_INTERVAL = 256
 STRUCTURED = {".json", ".jsonl", ".ndjson", ".parquet", ".yaml", ".yml"}
 ID_KEYS = {
     "id",
@@ -144,7 +146,11 @@ def safe_key(key):
     ) and key not in FORBIDDEN
 
 
-def identity_projection(raw):
+class ProjectionPaused(TimeoutError):
+    """The current record is incomplete; preserve it on the resume frontier."""
+
+
+def identity_projection(raw, *, budget=None, statistics=None):
     """Retain only whitelisted metadata leaves before constructing JSON objects.
 
     Unknown containers remain traversable, but unknown scalar values and every
@@ -152,18 +158,78 @@ def identity_projection(raw):
     cannot leak its value merely because it was absent from a blacklist.
     """
     text = raw.decode("utf-8") if isinstance(raw, bytes) else raw
+    work_units, scalar_matches, deadline_checks = 0, 0, 0
+
+    def deadline():
+        nonlocal deadline_checks
+        deadline_checks += 1
+        if budget is not None and time.monotonic() >= budget.deadline:
+            raise ProjectionPaused("deadline reached during lexical identity projection")
+
+    def tick():
+        nonlocal work_units
+        work_units += 1
+        if work_units % PROJECTION_CHECK_INTERVAL == 0:
+            deadline()
 
     def spaces(cursor):
         while cursor < len(text) and text[cursor].isspace():
+            tick()
             cursor += 1
         return cursor
 
+    def skip(cursor):
+        """Validate without constructing values or copying remaining suffixes."""
+        nonlocal scalar_matches
+        tick()
+        cursor = spaces(cursor)
+        if cursor >= len(text):
+            raise ValueError("truncated historical metadata value")
+        if text[cursor] == '"':
+            match = _STRING.match(text, cursor)
+            if match is None:
+                raise ValueError("invalid historical metadata string")
+            return match.end()
+        if text[cursor] in "[{":
+            is_object = text[cursor] == "{"
+            close = "}" if is_object else "]"
+            cursor = spaces(cursor + 1)
+            if cursor < len(text) and text[cursor] == close:
+                return cursor + 1
+            while cursor < len(text):
+                if is_object:
+                    match = _STRING.match(text, cursor)
+                    if match is None:
+                        raise ValueError("invalid skipped historical object key")
+                    cursor = spaces(match.end())
+                    if cursor >= len(text) or text[cursor] != ":":
+                        raise ValueError("skipped historical object lacks colon")
+                    cursor += 1
+                cursor = spaces(skip(cursor))
+                if cursor < len(text) and text[cursor] == close:
+                    return cursor + 1
+                if cursor >= len(text) or text[cursor] != ",":
+                    raise ValueError("invalid skipped historical container delimiter")
+                cursor = spaces(cursor + 1)
+                if cursor >= len(text) or text[cursor] == close:
+                    raise ValueError("trailing comma in skipped historical container")
+            raise ValueError("unterminated skipped historical container")
+        # Match against the original buffer at an offset. The former helper's
+        # re.match(pattern, text[cursor:]) copied O(N) remaining text per number,
+        # producing O(N^2) work on trace tensors and ignoring the chunk deadline.
+        match = SCALAR.match(text, cursor)
+        scalar_matches += 1
+        if match is None:
+            raise ValueError("invalid historical metadata scalar")
+        return match.end()
+
     def value(cursor, key=""):
+        tick()
         cursor = spaces(cursor)
         if cursor >= len(text):
             raise ValueError("truncated historical metadata JSON")
         if key in FORBIDDEN:
-            return "null", _skip_json_value(text, cursor)
+            return "null", skip(cursor)
         if text[cursor] == "{":
             pieces = ["{"]
             cursor = spaces(cursor + 1)
@@ -213,13 +279,25 @@ def identity_projection(raw):
                 raise ValueError("unterminated historical metadata list")
             pieces.append("]")
             return "".join(pieces), cursor + 1
-        end = _skip_json_value(text, cursor)
+        end = skip(cursor)
         return text[cursor:end] if safe_key(key) else "null", end
 
-    projected, end = value(0)
-    if spaces(end) != len(text):
-        raise ValueError("trailing historical JSON payload")
-    return json.loads(projected)
+    try:
+        deadline()
+        projected, end = value(0)
+        if spaces(end) != len(text):
+            raise ValueError("trailing historical JSON payload")
+        deadline()
+        result = json.loads(projected)
+        deadline()
+        return result
+    finally:
+        if statistics is not None:
+            statistics.update(
+                work_units=work_units,
+                scalar_matches=scalar_matches,
+                deadline_checks=deadline_checks,
+            )
 
 
 def signature(path):
@@ -375,6 +453,7 @@ def _jsonl(path, item, state, budget):
     _stat_guard(path, item["signature"])
     offset = item.get("offset", 0)
     start, hashed = offset, hashlib.sha256()
+    paused = False
     with path.open("rb") as stream:
         stream.seek(offset)
         while budget.available():
@@ -383,8 +462,6 @@ def _jsonl(path, item, state, budget):
                 item["done"] = True
                 break
             budget.bytes += len(raw)
-            hashed.update(raw)
-            item["offset"] = stream.tell()
             continuation = item.get("skipping_line", False)
             too_long = len(raw) == MAX_LINE and not raw.endswith(b"\n")
             if continuation or too_long:
@@ -398,7 +475,14 @@ def _jsonl(path, item, state, budget):
                 item["skipping_line"] = too_long
             elif raw.strip():
                 try:
-                    collect(identity_projection(raw), state, path)
+                    projected = identity_projection(raw, budget=budget)
+                    collect(projected, state, path)
+                except ProjectionPaused:
+                    # Do not commit a partially projected record to either the
+                    # source-content segments or the next-record cursor.
+                    item["offset"] = offset
+                    paused = True
+                    break
                 except (ValueError, UnicodeError, RecursionError) as exc:
                     error(
                         state,
@@ -406,12 +490,16 @@ def _jsonl(path, item, state, budget):
                         f"malformed historical JSONL: {type(exc).__name__}",
                         offset=offset,
                     )
+            hashed.update(raw)
             offset = stream.tell()
+            item["offset"] = offset
     if offset > start:
         item.setdefault("segments", []).append(
             dict(start=start, end=offset, sha256=hashed.hexdigest())
         )
     _stat_guard(path, item["signature"])
+    if paused:
+        raise ProjectionPaused("deadline reached inside JSONL identity record")
     return item.get("done", False)
 
 
@@ -501,7 +589,7 @@ def _process_file(item, state, budget):
             return True
         raw = path.read_bytes()
         budget.bytes += len(raw)
-        collect(identity_projection(raw), state, path)
+        collect(identity_projection(raw, budget=budget), state, path)
         _stat_guard(path, item["signature"])
         item["sha256"] = hashlib.sha256(raw).hexdigest()
         complete = True
@@ -648,6 +736,14 @@ def advance(state, roots, *, shard_index, shard_count, budget):
                 _directory(item, state, pending, budget, roots, shard_index, shard_count)
             elif not _process_file(item, state, budget):
                 pending.appendleft(item)
+        except ProjectionPaused as exc:
+            # This is a bounded pause, not malformed input and never a passing
+            # coverage claim. The entire unfinished record remains pending.
+            state.setdefault("projection_pauses", []).append(
+                dict(path=item["path"], reason=str(exc), offset=item.get("offset", 0))
+            )
+            pending.appendleft(item)
+            break
         except (
             ValueError,
             OSError,
@@ -811,6 +907,7 @@ def run(
         projected_records=state["projected_records"],
         pending_work_items=len(state["frontier"]),
         errors=len(state["errors"]),
+        projection_pauses=len(state.get("projection_pauses", [])),
         fresh_confirmation_authorized=False,
         materialization_authorized=False,
         complete_declared_identity_field_scope=state["traversal_complete"] and not state["errors"],
