@@ -1,4 +1,4 @@
-from copy import copy
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -65,8 +65,7 @@ def test_unsafe_geometry_or_weight_changes_rejected(fault):
     elif fault == "phase":
         packet.cos = packet.cos.float()
     elif fault == "bits":
-        packet.source = copy(packet.source)
-        packet.source.bits = 4
+        packet.source = replace(packet.source, bits=4)
     else:
         target = target.transpose(-1, -2)
     with pytest.raises(ValueError):

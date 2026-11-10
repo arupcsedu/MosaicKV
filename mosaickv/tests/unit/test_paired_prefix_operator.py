@@ -18,7 +18,9 @@ def test_window_uses_global_rows_and_separate_prefix_value_stride(monkeypatch):
     assert options["num_warps"] == 16 and options["COMPONENT"] == -1
     shared_source_kernel.project(packet, attention, targets, component=1, window=(8, 8, False))
     assert calls[1][1]["FIRST"] == 8 and calls[1][1]["V_PREFIX"] is False
-    assert calls[1][0][2][-2:] == (16, targets[0].stride(1))
+    assert calls[1][0][2][11:13] == (16, targets[0].stride(1))
+    assert calls[1][0][2][13] is packet.source.codes
+    assert calls[1][1]["SOURCE_ROWS"] == 0 and calls[1][1]["HAS_ROW_MAP"] is False
 
 
 @pytest.mark.parametrize(

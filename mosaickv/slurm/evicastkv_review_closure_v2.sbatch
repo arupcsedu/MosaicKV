@@ -9,6 +9,13 @@
 set -euo pipefail
 cd "$1"
 source mosaickv/scripts/cache_env.sh
+# PyTorch 2.8 requires GCC >=9 for the CPU address-validation extension.
+# Use the same installed compiler as the registered native dispatch diagnostic.
+if [[ "$3" == "tests" ]]; then
+    module load gcc/11.4.0
+    export CXX="$(command -v g++)"
+    export CUDA_VISIBLE_DEVICES=""
+fi
 export PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 export PYTHONPATH="$PWD/mosaickv/src:$PWD/mosaickv/scripts"
 export OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 OPENBLAS_NUM_THREADS=2

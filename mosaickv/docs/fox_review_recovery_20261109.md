@@ -29,3 +29,15 @@ configuration, baseline fidelity evidence and a reviewed freshness inventory.
 
 The latest dispatch optimization and storage/history experiments remain a
 separate stack; this recovery does not substitute them for exact selection.
+
+## Complete CPU-suite correction
+
+The initial full suite recorded 5,127 passes and seven failures. Six used a
+legacy `SimpleNamespace` source fixture without the production `row_map` field
+and expected the older kernel argument positions. The fixtures now construct
+the actual immutable `QuantizedBody`; launch assertions explicitly check the
+unchanged logical row count, strides and dense-map placeholder. Numerical
+operators and production code are unchanged. The seventh failure built the
+CPU validation extension with the node's default GCC 8.5, below PyTorch's
+minimum. The CPU test launcher now loads the same installed GCC 11.4 module
+as the registered dispatch diagnostic. No Python packages are changed.

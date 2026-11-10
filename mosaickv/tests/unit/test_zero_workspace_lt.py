@@ -157,7 +157,9 @@ def test_decode_window_preserves_original_codes_headers_and_positions(monkeypatc
     grid, args, options = kernel.calls[0]
     assert grid == (1, 4) and args[0] is packet.source.codes
     assert args[1] is packet.source.minimum and args[2] is packet.source.scale
-    assert args[5] is target and args[-3:] == (16, 8, 8)
+    assert args[5] is target and args[6:9] == (16, 8, 8)
+    assert args[9] is packet.source.codes
+    assert options["SOURCE_ROWS"] == 0 and options["HAS_ROW_MAP"] is False
     assert options["WIDTH"] == 256 and options["enable_fp_fusion"] is False
     with pytest.raises(ValueError):
         chunks.decode_slice(packet, target, 8, 129)

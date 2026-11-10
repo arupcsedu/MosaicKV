@@ -1,4 +1,5 @@
 from copy import deepcopy
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -6,6 +7,7 @@ import torch
 
 from mosaickv.evaluation import prompt_source_subphases as detail
 from mosaickv.evaluation.construction_phase_timing import PhaseTimer
+from mosaickv.evaluation.precision_tier import QuantizedBody
 from mosaickv.evaluation.reconstruction_roles import _role
 
 
@@ -84,7 +86,7 @@ def test_exclusive_leaf_aggregation_requires_windows_and_rejects_nonfinite():
 
 def projection_fixture():
     h, n, d = 2, 16, 128
-    body = SimpleNamespace(
+    body = QuantizedBody(
         shape=(1, 1, n, h * d),
         bits=3,
         axis=2,
@@ -120,7 +122,8 @@ def test_projection_arguments_checks_and_subphases_preserve_original_launch(monk
     packet, attention, targets = projection_fixture()
     shared_source_kernel.project(packet, attention, targets, component=1)
     args, options = captured[0]
-    assert args[1] == (1, 2) and args[2][-2:] == (16, targets[0].stride(1))
+    assert args[1] == (1, 2) and args[2][11:13] == (16, targets[0].stride(1))
+    assert args[2][13] is packet.source.codes
     assert options == dict(
         WIDTH=256,
         DIM=128,
@@ -134,6 +137,8 @@ def test_projection_arguments_checks_and_subphases_preserve_original_launch(monk
         FIRST=0,
         TAKE=0,
         V_PREFIX=False,
+        SOURCE_ROWS=0,
+        HAS_ROW_MAP=False,
         num_warps=4,
         num_stages=3,
         enable_fp_fusion=False,
@@ -203,7 +208,7 @@ def test_invalid_projection_metadata_still_fails_before_launch(monkeypatch, faul
     elif fault == "warps":
         packet.source_num_warps = 2
     elif fault == "bits":
-        packet.source.bits = 2
+        packet.source = replace(packet.source, bits=2)
     else:
         targets = tuple(t[..., ::2] for t in targets)
     with pytest.raises(ValueError):
