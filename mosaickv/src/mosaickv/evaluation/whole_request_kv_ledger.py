@@ -19,15 +19,28 @@ from mosaickv.evaluation.kv_allocator_ledger import AllocatorLedger, verify_owne
 
 class WholeRequestKVLedger:
     def __init__(
-        self, *, device, layer_count, source, decode_updates=127, ledger_factory=AllocatorLedger
+        self,
+        *,
+        device,
+        layer_count,
+        source,
+        decode_updates=127,
+        ledger_factory=AllocatorLedger,
+        constructor_snapshot_reuse=False,
     ):
         if type(layer_count) is not int or layer_count < 1 or type(source) is not bool:
             raise ValueError("positive layer count and explicit source boolean required")
         if type(decode_updates) is not int or decode_updates < 1:
             raise ValueError("positive integer decode_updates required")
+        if type(constructor_snapshot_reuse) is not bool:
+            raise ValueError("constructor snapshot reuse must be an explicit boolean")
         self.layers, self.source = layer_count, source
         self.decode_updates = decode_updates
-        self.ledger = ledger_factory(device=device)
+        self.ledger = (
+            ledger_factory(device=device, constructor_snapshot_reuse=True)
+            if constructor_snapshot_reuse
+            else ledger_factory(device=device)
+        )
         self.phases = []
         self.closed = False
 

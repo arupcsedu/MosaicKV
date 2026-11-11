@@ -164,6 +164,8 @@ def verify_ownership_deltas(
     peak_tensor = peak_allocator = 0
     previous_time = -1
     digest = hashlib.sha256()
+    cache_replay = None
+    cache_proof_policy = None
     fields = (
         "current_tensor_backing_bytes",
         "current_allocator_block_bytes",
@@ -247,6 +249,25 @@ def verify_ownership_deltas(
         for segment in segments.values():
             segment["blocks"].sort(key=lambda block: block["address"])
         resolved = resolve_snapshot(list(segments.values()), sorted(owners), device=device)
+        has_cache_proof = "snapshot_cache" in delta
+        if cache_proof_policy is None:
+            cache_proof_policy = has_cache_proof
+            if (
+                expected_summary is not None
+                and expected_summary.get("constructor_snapshot_reuse") is True
+                and not has_cache_proof
+            ):
+                raise ValueError("declared constructor reuse requires every resolution proof")
+        elif cache_proof_policy != has_cache_proof:
+            raise ValueError("allocator resolution proofs cannot disappear within one ledger")
+        if has_cache_proof:
+            if cache_replay is None:
+                from mosaickv.evaluation.snapshot_reuse_replay import SnapshotReuseReplay
+
+                cache_replay = SnapshotReuseReplay()
+            cache_replay.observe(
+                delta["snapshot_cache"], index=index, phase=phase, resolved=resolved
+            )
         if resolved["blocks"] != [blocks[address] for address in sorted(blocks)]:
             raise ValueError("ownership delta retains an unowned or inconsistent allocator block")
         if any(delta.get(field) != resolved[field] for field in fields):
@@ -278,6 +299,8 @@ def verify_ownership_deltas(
         observations_sha256=digest.hexdigest(),
         ownership_deltas_verified=True,
     )
+    if cache_replay is not None:
+        verified.update(constructor_snapshot_reuse=True, snapshot_cache=cache_replay.summary())
     if expected_summary is not None:
         for field in verified.keys() - {"ownership_deltas_verified"}:
             if expected_summary.get(field) != verified[field]:
@@ -290,7 +313,9 @@ def verify_ownership_deltas(
 class AllocatorLedger:
     """Actual native CUDA blocks at every explicit ownership observation."""
 
-    def __init__(self, *, device: Any, max_records: int = 64):
+    def __init__(
+        self, *, device: Any, max_records: int = 64, constructor_snapshot_reuse: bool = False
+    ):
         target = torch.device(f"cuda:{device}" if type(device) is int else device)
         if target.type != "cuda" or not torch.cuda.is_available():
             raise ValueError("allocator ledger requires an allocated CUDA device")
@@ -326,6 +351,15 @@ class AllocatorLedger:
         self._previous_blocks = {}
         self._previous_owners = set()
         self.ownership_deltas = []
+        if type(constructor_snapshot_reuse) is not bool:
+            raise ValueError("explicit constructor snapshot-reuse boolean required")
+        self.snapshot_resolver = self.snapshot_replay = None
+        if constructor_snapshot_reuse:
+            from mosaickv.evaluation.live_owner_snapshot_cache import LiveOwnerSnapshotCache
+            from mosaickv.evaluation.snapshot_reuse_replay import SnapshotReuseReplay
+
+            self.snapshot_resolver = LiveOwnerSnapshotCache(device=self.device, enabled=True)
+            self.snapshot_replay = SnapshotReuseReplay()
 
     def observe(
         self, tensors: Iterable[torch.Tensor], *, phase: str = "decode_owned"
@@ -333,15 +367,23 @@ class AllocatorLedger:
         if not isinstance(phase, str) or not phase or len(phase) > 256:
             raise ValueError("bounded nonempty ownership phase label required")
         try:
-            owners = tensor_owners(tensors, device=self.device)
             start = time.perf_counter()
-            snapshot = torch.cuda.memory_snapshot()
+            proof = None
+            if self.snapshot_resolver is None:
+                owners = tensor_owners(tensors, device=self.device)
+                snapshot = torch.cuda.memory_snapshot()
+                resolved = resolve_snapshot(snapshot, owners, device=self.device)
+                del snapshot
+            else:
+                resolved = self.snapshot_resolver.resolve(tensors, phase)
+                proof = resolved.pop("snapshot_cache")
+                self.snapshot_replay.observe(
+                    proof, index=self.observations, phase=phase, resolved=resolved
+                )
             snapshot_seconds = time.perf_counter() - start
-            resolved = resolve_snapshot(snapshot, owners, device=self.device)
         except Exception:
             self._failed = True
             raise
-        del snapshot
         observation = dict(index=self.observations, phase=phase, device=self.device, **resolved)
         encoded = json.dumps(
             observation, sort_keys=True, separators=(",", ":"), allow_nan=False
@@ -374,6 +416,8 @@ class AllocatorLedger:
                 list(owner) for owner in sorted(self._previous_owners - current_owners)
             ],
         )
+        if proof is not None:
+            delta["snapshot_cache"] = proof
         self.ownership_deltas.append(delta)
         self._previous_blocks, self._previous_owners = current_blocks, current_owners
         self.events.append(record)
@@ -392,7 +436,7 @@ class AllocatorLedger:
             raise ValueError(
                 "a decode-owned ledger cannot be summarized before its first observation"
             )
-        return dict(
+        result = dict(
             scope="declared_decode_owned_KV_explicit_ownership_observations",
             whole_request_peak_certified=False,
             construction_peak_certified=False,
@@ -418,6 +462,11 @@ class AllocatorLedger:
             ownership_deltas=list(self.ownership_deltas),
             ownership_delta_schema="initial_complete_state_then_explicit_owner_block_deltas_v1",
         )
+        if self.snapshot_replay is not None:
+            result.update(
+                constructor_snapshot_reuse=True, snapshot_cache=self.snapshot_replay.summary()
+            )
+        return result
 
 
 def selftest(*, device: Any = "cuda", observations: int = 100) -> dict[str, Any]:
