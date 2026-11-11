@@ -944,6 +944,11 @@ class HuggingFaceMultimodalAdapter(ABC):
 
         packed_validity = state.model_state.get("mosaickv_validity_masks")
         packed_all_valid = state.model_state.get("mosaickv_packed_all_valid") is True
+        internally_masked = state.model_state.get("mosaickv_internal_padding_masks") is True
+        if internally_masked and getattr(
+            state.past_key_values, "_mosaickv_internal_padding_masks", False
+        ) is not True:
+            raise ValueError("internal padding masks require an explicit owning cache transport")
         ragged = state.model_state.get("prefixkv_ragged") is True
         bounded = state.model_state.get("mosaickv_bounded_history") is True
         incremental_importance = state.model_state.get("mosaickv_history_importance") is True
@@ -953,6 +958,7 @@ class HuggingFaceMultimodalAdapter(ABC):
             state.active_cache_length != state.logical_sequence_length
             and packed_validity is None
             and not packed_all_valid
+            and not internally_masked
         ):
             raise NotImplementedError(
                 "compressed-cache decoding requires an explicit logical-position attention mask; "
@@ -965,7 +971,9 @@ class HuggingFaceMultimodalAdapter(ABC):
             raise ValueError("decode_one_token expects token_id shape [1, 1]")
         attention_mask = self._append_decode_attention_mask(state)
         model_attention_mask = (
-            None if state.model_state.get("mosaickv_cache_all_valid") is True else attention_mask
+            None
+            if state.model_state.get("mosaickv_cache_all_valid") is True or internally_masked
+            else attention_mask
         )
         cache_position = self._decode_cache_position(state, token_id.device)
         self._restore_model_state(state)
