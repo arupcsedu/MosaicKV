@@ -232,13 +232,17 @@ def build_replacement_formats(
     text_positions,
     *,
     cap_bytes,
+    prospective_row_scores=None,
+    ranking_mode="prompt_mse",
 ):
     """One fixed, label-blind allocation; its only funding is exact-text savings.
 
     Prompt demand is ``max_head(mean_query(attention))``. Multiply by decoded
     input-row MSE, sort by decreasing score then layer/original position, and
-    spend the actual residual allowance. No logits, future tokens, labels or
-    benchmark reference answers are accepted by this API.
+    spend the actual residual allowance. The optional, explicitly labeled
+    ``draft_kl_margin_gradient`` mode accepts only precomputed signed CPU score
+    vectors derived from model drafts; it never falls back to prompt MSE. No
+    raw logits, draft tokens, labels or benchmark answers enter this constructor.
     """
     packets, pairs = tuple(packets), tuple(original_pairs)
     blocks = tuple(adapter._language_layers())
@@ -257,6 +261,25 @@ def build_replacement_formats(
         raise ValueError(
             "Complete common-geometry layers, original text IDs and physical cap required"
         )
+    if ranking_mode not in ("prompt_mse", "draft_kl_margin_gradient"):
+        raise ValueError("Explicit prompt_mse or draft_kl_margin_gradient ranking required")
+    if ranking_mode == "prompt_mse":
+        if prospective_row_scores is not None:
+            raise ValueError("Prospective score vectors require the explicit draft ranking mode")
+    elif (
+        type(prospective_row_scores) is not dict
+        or any(type(layer) is not int for layer in prospective_row_scores)
+        or set(prospective_row_scores) != set(range(len(packets)))
+        or any(
+            not isinstance(scores, torch.Tensor)
+            or scores.device.type != "cpu"
+            or not scores.is_floating_point()
+            or scores.shape != (packets[layer].shape[2],)
+            or not torch.isfinite(scores).all().item()
+            for layer, scores in prospective_row_scores.items()
+        )
+    ):
+        raise ValueError("Complete CPU finite floating [N] prospective score vectors required")
     parent_bytes = backing_bytes(tuple(t for packet in packets for t in packet.tensors()))
     if parent_bytes > cap_bytes:
         raise FeasibilityDeclined(
@@ -332,10 +355,14 @@ def build_replacement_formats(
             raise FeasibilityDeclined("Text replacement does not preserve native parent K/V")
         _verify_protected(candidate, attention, packet, pair)
         text_formats.append(candidate)
-        decoded_source = _decode(packet)
-        error = (original.double() - decoded_source.double()).square().mean(-1)[0]
-        demand = window.double().mean(-2)[0].amax(0)
-        scores = (error * demand).cpu().tolist()
+        if ranking_mode == "prompt_mse":
+            decoded_source = _decode(packet)
+            error = (original.double() - decoded_source.double()).square().mean(-1)[0]
+            demand = window.double().mean(-2)[0].amax(0)
+            scores = (error * demand).cpu().tolist()
+            del decoded_source, error, demand
+        else:
+            scores = prospective_row_scores[layer].detach().tolist()
         row_cost = heads * dim * 2 + 4
         ranking.extend(
             (float(score), layer, position, row_cost)
@@ -357,7 +384,7 @@ def build_replacement_formats(
                 old_protected_KV_bitwise=True,
             )
         )
-        del reference, actual, verified, decoded_source, error, demand, scores
+        del reference, actual, verified, scores
     text_formats = tuple(text_formats)
     text_bytes = backing_bytes(tuple(t for f in text_formats for t in f.tensors()))
     if text_bytes > cap_bytes or text_bytes >= parent_bytes:
@@ -419,8 +446,13 @@ def build_replacement_formats(
         original_source_alias=False,
         old_text_owner_retirement_certified=False,
         model_weights_unchanged=True,
-        benchmark_answers_or_logits_accessed=False,
+        ranking_mode=ranking_mode,
+        model_draft_derived_scoring=ranking_mode == "draft_kl_margin_gradient",
+        constructor_raw_logits_or_labels_accessed=False,
+        benchmark_answers_accessed=False,
         quality_or_latency_improvement_guaranteed=False,
         whole_request_KV_peak_certified=False,
     )
+    if ranking_mode == "prompt_mse":
+        report["benchmark_answers_or_logits_accessed"] = False
     return text_formats, corrected, report

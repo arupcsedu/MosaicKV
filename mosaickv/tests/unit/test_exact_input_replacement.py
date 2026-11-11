@@ -55,12 +55,12 @@ def example(layer_count=2, *, perturb_text=False):
     return adapter, tuple(packets), originals, tuple(pairs), windows, text
 
 
-def build(fixture, cap=None):
+def build(fixture, cap=None, **options):
     adapter, packets, originals, pairs, windows, text = fixture
     if cap is None:
         cap = backing_bytes(tuple(t for f in packets for t in f.tensors()))
     return build_replacement_formats(
-        adapter, packets, originals, pairs, windows, text, cap_bytes=cap
+        adapter, packets, originals, pairs, windows, text, cap_bytes=cap, **options
     )
 
 
@@ -219,3 +219,157 @@ def test_text_only_original_word_patches_are_charged_and_remain_valid_after_visu
         ids = packets[0].row_positions.long()
         for value, original in zip(actual, pairs[0], strict=True):
             assert same(value[0, ids // n, ids % n], original[0, ids // n, ids % n])
+
+
+@pytest.fixture(scope="module")
+def prospective_fixture():
+    return example()
+
+
+def eligible_rows(fixture):
+    _adapter, packets, _originals, _pairs, _windows, text = fixture
+    result = []
+    for layer, packet in enumerate(packets):
+        old = set(packet.row_positions.tolist())
+        heads, length = packet.shape[1:3]
+        result.extend(
+            (layer, position)
+            for position in range(length)
+            if position not in text
+            and not all(head * length + position in old for head in range(heads))
+        )
+    return result
+
+
+def negative_scores(fixture):
+    return {
+        layer: -torch.ones(packet.shape[2], dtype=torch.float32)
+        for layer, packet in enumerate(fixture[1])
+    }
+
+
+def test_explicit_default_ranking_preserves_positions_funding_and_constructed_bits(
+    prospective_fixture,
+):
+    implicit = build(prospective_fixture)
+    explicit = build(prospective_fixture, ranking_mode="prompt_mse")
+    assert implicit[2] == explicit[2]
+    assert implicit[2]["ranking_mode"] == "prompt_mse"
+    assert not implicit[2]["model_draft_derived_scoring"]
+    assert implicit[2]["benchmark_answers_or_logits_accessed"] is False
+    for left_group, right_group in zip(implicit[:2], explicit[:2], strict=True):
+        for left, right in zip(left_group, right_group, strict=True):
+            assert all(same(a, b) for a, b in zip(left.tensors(), right.tensors(), strict=True))
+
+
+def test_signed_prospective_scores_control_order_without_changing_funding(prospective_fixture):
+    eligible = eligible_rows(prospective_fixture)
+    assert len(eligible) >= 2
+    first, second = eligible[-1], eligible[0]
+    scores = negative_scores(prospective_fixture)
+    scores[first[0]][first[1]] = 4.0
+    scores[second[0]][second[1]] = 2.0
+    _text, _corrected, report = build(
+        prospective_fixture,
+        prospective_row_scores=scores,
+        ranking_mode="draft_kl_margin_gradient",
+    )
+    selected = report["selected_original_nontext_rows"]
+    assert [(r["layer"], r["position"]) for r in selected] == [first, second]
+    assert [r["score"] for r in selected] == [4.0, 2.0]
+    assert report["model_draft_derived_scoring"]
+    assert not report["constructor_raw_logits_or_labels_accessed"]
+    assert not report["benchmark_answers_accessed"]
+    assert "benchmark_answers_or_logits_accessed" not in report
+    assert report["restored_input_row_bytes"] == sum(r["raw_row_bytes"] for r in selected)
+    assert report["corrected_initial_bytes"] <= report["parent_initial_bytes"]
+    scores[first[0]][first[1]], scores[second[0]][second[1]] = 2.0, 4.0
+    _, _, reversed_report = build(
+        prospective_fixture,
+        prospective_row_scores=scores,
+        ranking_mode="draft_kl_margin_gradient",
+    )
+    assert [
+        (r["layer"], r["position"]) for r in reversed_report["selected_original_nontext_rows"]
+    ] == [second, first]
+    assert (
+        reversed_report["exact_text_retirement_funding_bytes"]
+        == report["exact_text_retirement_funding_bytes"]
+    )
+
+
+def test_all_nonpositive_scores_never_fall_back_to_prompt_mse(prospective_fixture):
+    scores = negative_scores(prospective_fixture)
+    scores[0].zero_()
+    text, corrected, report = build(
+        prospective_fixture,
+        prospective_row_scores=scores,
+        ranking_mode="draft_kl_margin_gradient",
+    )
+    assert report["additional_input_rows"] == 0
+    assert report["selected_original_nontext_rows"] == []
+    assert report["corrected_initial_bytes"] == report["text_initial_bytes"]
+    assert (
+        report["unused_retirement_funding_bytes"] == report["exact_text_retirement_funding_bytes"]
+    )
+    assert all(left is right for left, right in zip(text, corrected, strict=True))
+
+
+def test_prospective_scores_cannot_select_text_or_fully_protected_rows(prospective_fixture):
+    scores = negative_scores(prospective_fixture)
+    eligible = set(eligible_rows(prospective_fixture))
+    for layer, values in scores.items():
+        for position in range(values.numel()):
+            if (layer, position) not in eligible:
+                values[position] = 1e20
+    _, _, report = build(
+        prospective_fixture,
+        prospective_row_scores=scores,
+        ranking_mode="draft_kl_margin_gradient",
+    )
+    assert report["additional_input_rows"] == 0
+    assert report["fully_protected_all_head_rows_excluded"]
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["none", "list", "missing", "extra", "bool_key", "integer", "matrix", "short", "nan", "inf"],
+)
+def test_invalid_prospective_score_inputs_fail_closed_before_construction(
+    prospective_fixture, case, monkeypatch
+):
+    import mosaickv.evaluation.exact_input_replacement as module
+
+    scores = negative_scores(prospective_fixture)
+    if case == "none":
+        scores = None
+    elif case == "list":
+        scores = list(scores.values())
+    elif case == "missing":
+        scores.pop(0)
+    elif case == "extra":
+        scores[2] = scores[0].clone()
+    elif case == "bool_key":
+        scores[False] = scores.pop(0)
+    elif case == "integer":
+        scores[0] = scores[0].long()
+    elif case == "matrix":
+        scores[0] = scores[0][None]
+    elif case == "short":
+        scores[0] = scores[0][:-1]
+    elif case in ("nan", "inf"):
+        scores[0][0] = float(case)
+    monkeypatch.setattr(module, "_validate", lambda *_: pytest.fail("constructed invalid input"))
+    with pytest.raises(ValueError, match="CPU finite floating"):
+        build(
+            prospective_fixture,
+            prospective_row_scores=scores,
+            ranking_mode="draft_kl_margin_gradient",
+        )
+
+
+def test_ranking_mode_and_optional_score_mismatches_fail_closed(prospective_fixture):
+    with pytest.raises(ValueError, match="explicit draft"):
+        build(prospective_fixture, prospective_row_scores=negative_scores(prospective_fixture))
+    with pytest.raises(ValueError, match="Explicit prompt_mse"):
+        build(prospective_fixture, ranking_mode="silent_fallback")
