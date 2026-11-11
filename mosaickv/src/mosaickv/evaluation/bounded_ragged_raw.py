@@ -160,6 +160,162 @@ def _scores(window, heads, length):
 
 
 @torch.inference_mode()
+def build_raw_packet_layer(
+    original_pair,
+    attention_window,
+    mandatory,
+    *,
+    layer_index,
+    total_layers,
+    target_bytes,
+    workspace,
+    workspace_observer=None,
+):
+    """Stream one native layer into its globally balanced exact raw capacity.
+
+    ``attention_window`` is the CPU H-by-N reduction of the original GPU prompt
+    window.  Its reduction must precede transfer, matching ``_scores``.  GPU
+    indices reuse the already charged head scratch; no gather tensor exists.
+    The old whole-cache builder and its semantics remain unchanged.
+    """
+    from mosaickv.evaluation.bounded_component_attention import ComponentWorkspace
+
+    if (
+        type(original_pair) is not tuple
+        or len(original_pair) != 2
+        or any(not isinstance(t, torch.Tensor) for t in original_pair)
+        or original_pair[0].ndim != 4
+        or original_pair[0].shape[0] != 1
+        or original_pair[0].shape[-1] != 128
+        or min(original_pair[0].shape) < 1
+        or any(
+            t.shape != original_pair[0].shape
+            or t.dtype != torch.bfloat16
+            or t.device != original_pair[0].device
+            for t in original_pair
+        )
+    ):
+        raise ValueError("one complete original same-device BF16 BHN128 layer pair required")
+    _, heads, length, dimension = original_pair[0].shape
+    device = original_pair[0].device
+    if (
+        type(layer_index) is not int
+        or type(total_layers) is not int
+        or not 0 <= layer_index < total_layers
+        or type(target_bytes) is not int
+        or target_bytes < 1
+        or target_bytes % 512
+    ):
+        raise ValueError("valid global layer index/count and exact 512-byte target required")
+    if (
+        type(mandatory) is not tuple
+        or any(type(p) is not int or not 0 <= p < length for p in mandatory)
+        or tuple(sorted(set(mandatory))) != mandatory
+    ):
+        raise ValueError("sorted unique original mandatory token positions required")
+    lower, remainder = divmod(target_bytes // 512, total_layers * heads)
+    capacity = lower + bool(remainder)
+    if lower < max(1, len(mandatory)) or capacity > length:
+        raise ValueError("global target cannot preserve mandatory tokens within original capacity")
+    if (
+        not isinstance(attention_window, torch.Tensor)
+        or attention_window.device.type != "cpu"
+        or attention_window.shape != (heads, length)
+    ):
+        raise ValueError("pre-reduced original CPU H-by-N attention scores required")
+    scores = _scores(attention_window, heads, length)
+    if (
+        not isinstance(workspace, ComponentWorkspace)
+        or workspace.heads != heads
+        or workspace.head_dim != dimension
+        or workspace.component.shape != (workspace.slots, heads * dimension)
+        or workspace.head.shape != (workspace.slots, dimension)
+        or workspace.component.dtype != torch.bfloat16
+        or workspace.component.device != device
+        or not workspace.component.is_contiguous()
+        or workspace.component.untyped_storage().data_ptr()
+        == workspace.head.untyped_storage().data_ptr()
+        or workspace.head.dtype != torch.bfloat16
+        or workspace.head.device != device
+        or not workspace.head.is_contiguous()
+        or workspace.head.numel() % 4
+        or workspace.head.numel() // 4 < capacity
+        or length > workspace.slots
+    ):
+        raise ValueError("compatible charged head scratch with sufficient index capacity required")
+    scratch_storage = workspace.head.untyped_storage()
+    scratch_start = scratch_storage.data_ptr()
+    scratch_stop = scratch_start + scratch_storage.nbytes()
+    for original in original_pair:
+        storage = original.untyped_storage()
+        if (
+            scratch_start < storage.data_ptr() + storage.nbytes()
+            and storage.data_ptr() < scratch_stop
+        ):
+            raise ValueError("index scratch cannot alias immutable original K/V")
+    index_pool = workspace.head.view(torch.int64).view(-1)
+    per_head, position_maps = [], []
+
+    def observe(*active):
+        if workspace_observer is not None:
+            workspace_observer(
+                (
+                    *workspace.owned_tensors(),
+                    *original_pair,
+                    *(t for pair in per_head for t in pair),
+                    *active,
+                )
+            )
+
+    observe()
+    for head in range(heads):
+        count = lower + (layer_index * heads + head < remainder)
+        logical = ranked_positions(scores[head : head + 1], count, mandatory)[0]
+        host_positions = torch.tensor(logical, dtype=torch.int64, device="cpu")
+        indices = index_pool[:count]
+        indices.copy_(host_positions)
+        owner = torch.empty((2, count, dimension), device=device, dtype=torch.bfloat16)
+        retained = owner[0], owner[1]
+        observe(*retained)
+        for source, target in zip(original_pair, retained, strict=True):
+            torch.index_select(source[0, head], 0, indices, out=target)
+        per_head.append(retained)
+        position_maps.append(host_positions)
+        observe()
+    packet = RaggedRawPacket(
+        per_head, position_maps, original_length=length, prompt_capacity=capacity
+    )
+    actual = packet.component_bytes
+    expected = 512 * sum(lower + (layer_index * heads + h < remainder) for h in range(heads))
+    if actual != expected:
+        raise RuntimeError("constructed streaming layer differs from its global exact byte share")
+    return packet, dict(
+        kind="original_BF16_streaming_ragged_exact_selection_transport_control",
+        layer_index=layer_index,
+        total_layers=total_layers,
+        global_target_bytes=target_bytes,
+        actual_raw_KV_bytes=actual,
+        expected_layer_bytes=expected,
+        prompt_lengths=list(packet.prompt_lengths),
+        workspace_prompt_capacity=capacity,
+        persistent_padding_bytes=0,
+        constructor_KV_gather_temporary_allocations=0,
+        constructor_index_workspace="charged_shared_head_scratch",
+        allocation_layout=packet.allocation_layout,
+        CPU_position_metadata_bytes=backing_bytes(tuple(position_maps)),
+        original_length=length,
+        functional_head_token_quantum=512,
+        original_KV_values_preserved=True,
+        original_positions=[p.tolist() for p in packet.original_positions],
+        position_map_sha256=hashlib.sha256(
+            b"".join(p.numpy().tobytes() for p in packet.original_positions)
+        ).hexdigest(),
+        benchmark_labels_or_reference_answers_used=False,
+        whole_request_KV_peak_certified=False,
+    )
+
+
+@torch.inference_mode()
 def build_raw_packets(adapter, pairs, attention_windows, target_bytes, mandatory):
     """Spend EXACT target bytes on balanced, functional original-K/V head rows.
 

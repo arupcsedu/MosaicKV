@@ -258,10 +258,16 @@ def construct(
     take_source_ownership=False,
     maximum_persistent_bytes=None,
     workspace_observer=None,
+    workspace=None,
+    exact_only=False,
 ):
     signature = _validate_inputs(normalized, original_pair, attention, phases)
     if type(take_source_ownership) is not bool:
         raise ValueError("Explicit source-ownership transfer flag required")
+    if type(exact_only) is not bool:
+        raise ValueError("Explicit exact-only construction flag required")
+    if exact_only and workspace is None:
+        raise ValueError("Exact-only streaming construction requires the charged workspace")
     if maximum_persistent_bytes is not None and (
         type(maximum_persistent_bytes) is not int or maximum_persistent_bytes < 1
     ):
@@ -269,21 +275,70 @@ def construct(
     shape = tuple(original_pair[0].shape)
     _, heads, length, dim = shape
     source = normalized if take_source_ownership else normalized.detach().clone().contiguous()
-    projection = torch.empty((1, length, heads, dim), dtype=torch.bfloat16, device=source.device)
-    target = projection.transpose(1, 2)
-    scratch = torch.empty((length, dim), dtype=torch.bfloat16, device=source.device)
+    if workspace is None:
+        projection = torch.empty(
+            (1, length, heads, dim), dtype=torch.bfloat16, device=source.device
+        )
+        target = projection.transpose(1, 2)
+        scratch = torch.empty((length, dim), dtype=torch.bfloat16, device=source.device)
+        workspace_owners = (projection, scratch)
+    else:
+        from mosaickv.evaluation.bounded_component_attention import ComponentWorkspace
+
+        if (
+            not isinstance(workspace, ComponentWorkspace)
+            or workspace.heads != heads
+            or workspace.head_dim != dim
+            or workspace.component.shape != (workspace.slots, heads * dim)
+            or workspace.head.shape != (workspace.slots, dim)
+            or workspace.component.device != source.device
+            or workspace.head.device != source.device
+            or any(
+                t.dtype != torch.bfloat16 or not t.is_contiguous()
+                for t in workspace.owned_tensors()
+            )
+            or owner(workspace.component) == owner(workspace.head)
+            or any(
+                owner(t) in {owner(x) for x in (source, normalized, *original_pair, *phases)}
+                for t in workspace.owned_tensors()
+            )
+            or any(
+                owner(t) in {owner(p.weight) for p in (attention.k_proj, attention.v_proj)}
+                for t in workspace.owned_tensors()
+            )
+        ):
+            raise ValueError("private compatible same-device component/head workspace required")
+        target = workspace.component_view(length)
+        projection = target.transpose(1, 2)
+        scratch = workspace.head[:length]
+        workspace_owners = workspace.owned_tensors()
+    _notify(workspace_observer, (source, *phases, *workspace_owners))
     patches = []
     for component in (0, 1):
         _project_component(source, attention, component, target, *phases, scratch)
         original = original_pair[component].transpose(1, 2)
-        patch = SparseBitPatch.build(original, projection)
-        _apply_patch(patch, target, shape)
-        if not torch.equal(original.contiguous().view(torch.int16), projection.view(torch.int16)):
-            raise RuntimeError("Native component source repair changed an original prefill word")
+        if exact_only:
+            from mosaickv.evaluation.bounded_word_equality import equal_words
+
+            if not equal_words(original_pair[component], target, scratch=workspace.head):
+                raise RuntimeError("Exact-only streaming source changed an original prefill word")
+            patch = SparseBitPatch(
+                torch.empty(0, dtype=torch.int32, device=source.device),
+                torch.empty(0, dtype=torch.bfloat16, device=source.device),
+            )
+        else:
+            patch = SparseBitPatch.build(original, projection)
+            _apply_patch(patch, target, shape)
+            if not torch.equal(
+                original.contiguous().view(torch.int16), projection.view(torch.int16)
+            ):
+                raise RuntimeError(
+                    "Native component source repair changed an original prefill word"
+                )
         patches.append(patch)
         _notify(
             workspace_observer,
-            (source, *phases, projection, scratch, *(t for p in patches for t in p.tensors)),
+            (source, *phases, *workspace_owners, *(t for p in patches for t in p.tensors)),
         )
     return OriginalComponentSourcePacket(
         source,

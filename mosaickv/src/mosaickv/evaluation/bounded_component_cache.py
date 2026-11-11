@@ -36,11 +36,21 @@ class ComponentLayer(BoundedNativeLayer):
 class ComponentCache(PromptStorageCache):
     _mosaickv_internal_padding_masks = True
 
-    def __init__(self, packets, *, updates=128, metadata=(), workspace=None, allocator_audit=False):
+    def __init__(
+        self,
+        packets,
+        *,
+        updates=128,
+        metadata=(),
+        workspace=None,
+        allocator_audit=False,
+        ownership_observer=None,
+    ):
         from mosaickv.evaluation.bounded_component_attention import ComponentWorkspace
 
         super().__init__()
         self.allocator_ledger = None
+        self.ownership_observer = ownership_observer
         self._mask_dispatch_active = False
         packets = tuple(packets)
         if not packets or any(p.shape[:2] != (1, 32) or p.shape[-1] != 128 for p in packets):
@@ -87,7 +97,7 @@ class ComponentCache(PromptStorageCache):
 
     def observe(self, extras=()):
         super().observe(extras)
-        if self.allocator_ledger is not None:
+        if self.allocator_ledger is not None or self.ownership_observer is not None:
             owners = (
                 *self.shared_tensors,
                 *(t for layer in self.layers for t in layer.owned_tensors()),
@@ -105,7 +115,10 @@ class ComponentCache(PromptStorageCache):
                 phase = (
                     "final_cache" if any(x.history_length for x in self.layers) else "initial_cache"
                 )
-            self.allocator_ledger.observe(owners, phase=phase)
+            if self.allocator_ledger is not None:
+                self.allocator_ledger.observe(owners, phase=phase)
+            if self.ownership_observer is not None:
+                self.ownership_observer(owners, f"decode:{phase}")
 
     def storage_record(self):
         record = super().storage_record()
@@ -249,6 +262,7 @@ def run(
     workspace=None,
     positions=None,
     allocator_audit=False,
+    ownership_observer=None,
 ):
     import time
 
@@ -274,6 +288,7 @@ def run(
         metadata=(positions,),
         workspace=workspace,
         allocator_audit=allocator_audit,
+        ownership_observer=ownership_observer,
     )
     model_state = {
         k: v for k, v in prefill.state.model_state.items() if not k.startswith("mosaickv_decode_")
