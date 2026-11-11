@@ -164,6 +164,27 @@ def test_resized_saved_storage_is_explicitly_unsupported_not_a_false_metric_pass
     audit.close()
 
 
+def test_dead_parameter_owner_collision_does_not_exclude_new_tensor_storage():
+    model = torch.nn.Linear(8, 8, bias=False)
+    audit = scoring._SavedTensors(model)
+    stale_owner = next(iter(audit.excluded))
+    parameter = weakref.ref(model.weight)
+    del model
+    gc.collect()
+    assert parameter() is None
+    # Deterministically simulate allocator identity reuse instead of depending
+    # on one CPU malloc sequence or the ordering of the full test suite.
+    with patch.object(scoring, "owner", lambda _tensor: stale_owner):
+        base = torch.empty(17)
+        view = audit.pack(base)
+    assert id(view) in audit.refs
+    assert audit.live_bytes == base.untyped_storage().nbytes()
+    base.resize_(4096)
+    with pytest.raises(RuntimeError, match="storage changed"):
+        audit.unpack(view)
+    audit.close()
+
+
 def test_cpu_cache_gradients_logits_scores_and_peak_are_identical_to_legacy_census():
     # Reuse the fixed random architecture fixture, never load a checkpoint/data.
     from test_draft_logit_source_scores import fixture

@@ -138,7 +138,11 @@ class _SavedTensors:
     """
 
     def __init__(self, model):
-        self.excluded = {owner(p) for p in model.parameters()}
+        # Allocation identities may be reused after a temporary model dies.
+        # A scalar owner key is therefore an exclusion only while its original
+        # parameter is alive. Weak references preserve the no-lifetime-extension
+        # contract and keep the common live-model path O(1).
+        self.excluded = {owner(p): weakref.ref(p) for p in model.parameters()}
         self.refs, self.pack_calls, self.peak = {}, 0, 0
         self.owner_counts, self.live_bytes = {}, 0
         self.closed = False
@@ -164,7 +168,8 @@ class _SavedTensors:
             if self.closed:
                 raise RuntimeError("Saved-tensor census is already closed")
             self.pack_calls += 1
-            if owner(value) in self.excluded:
+            excluded = self.excluded.get(owner(value))
+            if excluded is not None and excluded() is not None:
                 return value
             storage = value.untyped_storage()
             key = str(value.device), storage.data_ptr(), storage.nbytes()
