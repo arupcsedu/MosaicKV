@@ -8,6 +8,7 @@ bounded-reader workspace and in the explicitly separate native verifier.
 from __future__ import annotations
 
 import hashlib
+from itertools import pairwise
 
 import torch
 
@@ -46,13 +47,23 @@ class RaggedRawPacket:
                     t.dtype != torch.bfloat16 or t.device != device or not t.is_contiguous()
                     for t in pair
                 )
+                or not isinstance(logical, torch.Tensor)
                 or logical.device.type != "cpu"
                 or logical.dtype != torch.int64
                 or logical.shape != (pair[0].shape[0],)
                 or not logical.is_contiguous()
-                or bool((logical < 0).any())
-                or bool((logical >= original_length).any())
-                or bool((logical[1:] <= logical[:-1]).any())
+            ):
+                raise ValueError(
+                    "exact contiguous BF16 N128 heads and sorted CPU positions required"
+                )
+            # The maps are already required to be contiguous CPU int64. Exact
+            # Python-integer checks preserve bounds and strict monotonicity
+            # without manufacturing three Boolean tensors per head. This also
+            # avoids thousands of unrelated CPU operations entering the full
+            # GPU-owner audit; no executed ownership observation is skipped.
+            values = logical.tolist()
+            if any(not 0 <= position < original_length for position in values) or any(
+                before >= after for before, after in pairwise(values)
             ):
                 raise ValueError(
                     "exact contiguous BF16 N128 heads and sorted CPU positions required"
@@ -157,6 +168,40 @@ def _scores(window, heads, length):
     if not torch.isfinite(window).all():
         raise ValueError("finite prompt-derived attention scores required")
     return window
+
+
+def _grouped_cpu_positions(scores, lower, remainder, *, layer_index, mandatory):
+    """Exactly the old stable ranking, batched by its at most two capacities.
+
+    The global remainder gives a contiguous prefix of ``lower + 1`` heads and
+    a suffix of ``lower`` heads in any layer. Each group receives the SAME
+    independent stable score sort, mandatory priority, and source-position
+    reorder as the former one-row calls. Never truncate the already
+    source-sorted larger set to obtain a smaller-capacity head.
+    """
+    if (
+        not isinstance(scores, torch.Tensor)
+        or scores.device.type != "cpu"
+        or scores.ndim != 2
+        or scores.shape[0] < 1
+        or type(lower) is not int
+        or lower < 1
+        or type(remainder) is not int
+        or remainder < 0
+        or type(layer_index) is not int
+        or layer_index < 0
+    ):
+        raise ValueError("CPU head scores and positive global balanced-capacity metadata required")
+    heads = scores.shape[0]
+    upper_heads = min(heads, max(0, remainder - layer_index * heads))
+    if not upper_heads:
+        return ranked_positions(scores, lower, mandatory)
+    if upper_heads == heads:
+        return ranked_positions(scores, lower + 1, mandatory)
+    return (
+        *ranked_positions(scores[:upper_heads], lower + 1, mandatory),
+        *ranked_positions(scores[upper_heads:], lower, mandatory),
+    )
 
 
 @torch.inference_mode()
@@ -268,9 +313,12 @@ def build_raw_packet_layer(
             )
 
     observe()
+    logical_by_head = _grouped_cpu_positions(
+        scores, lower, remainder, layer_index=layer_index, mandatory=mandatory
+    )
     for head in range(heads):
         count = lower + (layer_index * heads + head < remainder)
-        logical = ranked_positions(scores[head : head + 1], count, mandatory)[0]
+        logical = logical_by_head[head]
         host_positions = torch.tensor(logical, dtype=torch.int64, device="cpu")
         indices = index_pool[:count]
         indices.copy_(host_positions)
@@ -301,6 +349,8 @@ def build_raw_packet_layer(
         persistent_padding_bytes=0,
         constructor_KV_gather_temporary_allocations=0,
         constructor_index_workspace="charged_shared_head_scratch",
+        CPU_ranking_policy="stable_per_head_sort_batched_by_global_lower_upper_capacity",
+        CPU_ranking_groups=(2 if 0 < remainder - layer_index * heads < heads else 1),
         allocation_layout=packet.allocation_layout,
         CPU_position_metadata_bytes=backing_bytes(tuple(position_maps)),
         original_length=length,

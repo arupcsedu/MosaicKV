@@ -192,6 +192,9 @@ def test_constructor_audit_excludes_original_probability_alias_but_charges_real_
     for layer in adapter._language_layers():
 
         def ordinary(module, args, output):
+            # Only the current layer's still-live activation is excluded.
+            # Dead earlier activations may share an address with a real clone.
+            ordinary_ids.clear()
             ordinary_ids.add(identity(output[1]))
 
         handles.append(layer.self_attn.register_forward_hook(ordinary))
