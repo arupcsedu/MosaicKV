@@ -21,7 +21,7 @@ from unittest.mock import patch
 import evicastkv_source_ownership_closure as source_ownership
 from evicastkv_source_ownership_closure import conservative_report, unknown_clusters
 from evicastkv_source_trace_codec import KIND as CODEC_KIND
-from evicastkv_source_trace_codec import decode, document_digests
+from evicastkv_source_trace_codec import decode, document_digests, explicit_limits
 
 from mosaickv.evaluation.fox_campaign import clean_source, digest, sha, write_once
 from mosaickv.measurements.kv_timeline import KV_ROLES, AllocationTimeline
@@ -52,15 +52,18 @@ RULE_KEYS = {
 }
 
 
-def load(path, *, expected_json_bytes=None, with_codec=False):
+def load(path, *, expected_json_bytes=None, with_codec=False, codec_limits=None):
+    limits = explicit_limits(codec_limits)
     path = Path(path)
     before = path.stat()
-    if before.st_size > MAX_COMPRESSED:
+    compressed_limit = min(MAX_COMPRESSED, limits["compressed_bytes"])
+    json_limit = min(MAX_JSON, limits["encoded_JSON_bytes"])
+    if before.st_size > compressed_limit:
         raise ValueError("metadata file exceeds bounded offline audit size")
     opener = gzip.open if path.suffix == ".gz" else open
     with opener(path, "rb") as stream:
-        raw = stream.read(MAX_JSON + 1)
-    if len(raw) > MAX_JSON:
+        raw = stream.read(json_limit + 1)
+    if len(raw) > json_limit:
         raise ValueError("uncompressed metadata exceeds bounded offline audit size")
     if expected_json_bytes is not None and len(raw) != expected_json_bytes:
         raise ValueError("complete archive JSON size differs from receipt")
@@ -74,7 +77,7 @@ def load(path, *, expected_json_bytes=None, with_codec=False):
         raise ValueError("immutable metadata changed during read")
     value = json.loads(raw)
     codec = value if isinstance(value, dict) and value.get("codec") == CODEC_KIND else None
-    decoded = decode(codec) if codec is not None else value
+    decoded = decode(codec, limits=limits) if codec is not None else value
     return (decoded, codec) if with_codec else decoded
 
 

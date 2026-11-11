@@ -173,6 +173,11 @@ def test_new_typed_DAG_roundtrip_preserves_all_free_events_and_final_snapshot(tm
     assert value["final_allocator_snapshot"]["device_traces"][0][-1]["action"] == "snapshot"
     assert not value["capture_metadata"]["exact_whole_request_KV_peak_certified"]
     assert receipt["complete_final_snapshot_preserved"]
+    assert receipt["metadata_codec_limits"]["semantic_JSON_bytes"] == 32 * 2**30
+    raw_receipt = study.declared.read(tmp_path / "trace_raw_receipt.json")
+    assert raw_receipt["sha256"] == study.sha(path)
+    assert raw_receipt["semantic_hashes_complete"] is False
+    assert receipt["raw_receipt_sha256"] == study.sha(tmp_path / "trace_raw_receipt.json")
     assert study.validate_bundle(value)
     corrupted = copy.deepcopy(value)
     corrupted["final_allocator_snapshot"]["device_traces"][0].pop()
@@ -182,6 +187,57 @@ def test_new_typed_DAG_roundtrip_preserves_all_free_events_and_final_snapshot(tm
     del missing["final_allocator_snapshot"]
     with pytest.raises(ValueError, match="schema"):
         study.validate_bundle(missing)
+
+
+def test_semantic_hash_failure_preserves_complete_archive_and_durable_raw_receipt(
+    tmp_path, monkeypatch
+):
+    session = synthetic_session()
+    owners = study.TypedOwners()
+    catalog = study.model_catalog(torch.nn.Linear(2, 2))
+    path = tmp_path / "trace.json.gz"
+
+    def timeout(document, paths, *, limits):
+        assert path.is_file() and (tmp_path / "trace_raw_receipt.json").is_file()
+        assert limits == study.POLICY["metadata_codec_limits"]
+        raise TimeoutError("semantic walk expired after durable raw archive")
+
+    monkeypatch.setattr(study, "document_digests", timeout)
+    with pytest.raises(TimeoutError, match="durable raw"):
+        study.archive(path, session, owners, catalog, source_sha="synthetic-source")
+    raw = study.declared.read(tmp_path / "trace_raw_receipt.json")
+    assert raw["sha256"] == study.sha(path)
+    value = study.load_metadata(
+        path,
+        expected_json_bytes=raw["encoded_JSON_bytes"],
+        codec_limits=raw["metadata_codec_limits"],
+    )
+    assert study.validate_bundle(value)
+    assert value["actual_events"][-2]["action"] == "free_completed"
+    assert value["final_allocator_snapshot"]["device_traces"][0][-1]["action"] == "snapshot"
+    with pytest.raises(ValueError, match="complete semantic receipt"):
+        study.load_bundle(path, raw)
+    assert not (tmp_path / "trace_receipt.json").exists()
+
+
+def test_altered_or_unregistered_receipt_limits_fail_closed(tmp_path):
+    session = synthetic_session()
+    path = tmp_path / "trace.json.gz"
+    receipt = study.archive(
+        path,
+        session,
+        study.TypedOwners(),
+        study.model_catalog(torch.nn.Linear(2, 2)),
+        source_sha="synthetic-source",
+    )
+    changed = copy.deepcopy(receipt)
+    changed["metadata_codec_limits"]["semantic_JSON_bytes"] *= 2
+    with pytest.raises(ValueError, match="registered limits"):
+        study.load_bundle(path, changed)
+    raw_path = tmp_path / "trace_raw_receipt.json"
+    raw_path.write_text("{}")
+    with pytest.raises(ValueError, match="raw archive receipt binding"):
+        study.load_bundle(path, receipt)
 
 
 def test_old_three_bit_ARM_trace_is_not_silently_accepted():

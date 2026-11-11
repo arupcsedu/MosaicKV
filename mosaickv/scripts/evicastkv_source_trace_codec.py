@@ -23,6 +23,26 @@ LIMITS = dict(
 )
 
 
+def explicit_limits(limits=None):
+    """Validate scoped bounds without mutating historical eight-GiB defaults.
+
+    A separately registered producer may permit up to 32 GiB of *semantic*
+    repeated metadata. Physical JSON/compressed, node/item/depth/cache bounds
+    cannot be raised. Callers must bind the chosen complete mapping in receipts.
+    """
+    if limits is None:
+        return dict(LIMITS)
+    if (
+        type(limits) is not dict
+        or set(limits) != set(LIMITS)
+        or any(type(value) is not int or value <= 0 for value in limits.values())
+        or limits["semantic_JSON_bytes"] > 32 * 2**30
+        or any(value > LIMITS[key] for key, value in limits.items() if key != "semantic_JSON_bytes")
+    ):
+        raise ValueError("complete explicitly bounded metadata codec limits required")
+    return dict(limits)
+
+
 @lru_cache(maxsize=65536)
 def _string(value):
     return json.dumps(value, ensure_ascii=True).encode()
@@ -46,9 +66,10 @@ def _scalar(value):
     return json.dumps(value, allow_nan=False).encode()
 
 
-def _frame_key(value, active=None, depth=0):
+def _frame_key(value, active=None, depth=0, *, limits=None):
+    limits = explicit_limits(limits) if depth == 0 else limits
     active = set() if active is None else active
-    if depth > LIMITS["depth"] or id(value) in active:
+    if depth > limits["depth"] or id(value) in active:
         raise ValueError("cyclic or over-deep frame metadata is forbidden")
     if isinstance(value, dict):
         active.add(id(value))
@@ -57,14 +78,15 @@ def _frame_key(value, active=None, depth=0):
         result = (
             "d",
             tuple(
-                (key, _frame_key(item, active, depth + 1)) for key, item in sorted(value.items())
+                (key, _frame_key(item, active, depth + 1, limits=limits))
+                for key, item in sorted(value.items())
             ),
         )
         active.remove(id(value))
         return result
     if isinstance(value, (list, tuple)):
         active.add(id(value))
-        result = ("l", tuple(_frame_key(item, active, depth + 1) for item in value))
+        result = ("l", tuple(_frame_key(item, active, depth + 1, limits=limits) for item in value))
         active.remove(id(value))
         return result
     _scalar(value)
@@ -84,7 +106,8 @@ def _reference(value, upper):
     return None
 
 
-def _shape(document):
+def _shape(document, *, limits=None):
+    limits = explicit_limits(limits)
     if (
         type(document) is not dict
         or set(document) != {"codec", "nodes", "root", "statistics"}
@@ -92,7 +115,7 @@ def _shape(document):
     ):
         raise ValueError("exact lossless metadata DAG schema required")
     nodes = document["nodes"]
-    if not isinstance(nodes, list) or len(nodes) > LIMITS["containers"]:
+    if not isinstance(nodes, list) or len(nodes) > limits["containers"]:
         raise ValueError("bounded metadata container count required")
     sizes, depths, uses = [], [], [0] * len(nodes)
     items = 0
@@ -106,7 +129,7 @@ def _shape(document):
             raise ValueError("explicit dictionary/list metadata node required")
         kind, children = node
         items += len(children)
-        if items > LIMITS["items"]:
+        if items > limits["items"]:
             raise ValueError("bounded metadata item count exceeded")
         size, depth, keys = 2, 1, set()
         for child in children:
@@ -130,10 +153,10 @@ def _shape(document):
                 uses[ref] += 1
                 size += sizes[ref]
                 depth = max(depth, depths[ref] + 1)
-            if size > LIMITS["semantic_JSON_bytes"] or depth > LIMITS["depth"]:
+            if size > limits["semantic_JSON_bytes"] or depth > limits["depth"]:
                 raise ValueError("bounded semantic expansion/depth exceeded")
         size += max(0, len(children) - 1)
-        if size > LIMITS["semantic_JSON_bytes"]:
+        if size > limits["semantic_JSON_bytes"]:
             raise ValueError("bounded semantic expansion exceeded")
         sizes.append(size)
         depths.append(depth)
@@ -143,20 +166,23 @@ def _shape(document):
     if any(count == 0 for count in uses[:-1]):
         raise ValueError("all metadata nodes must be reachable from the final root")
     total = sizes[ref] if ref is not None else len(_scalar(document["root"]))
+    if total > limits["semantic_JSON_bytes"]:
+        raise ValueError("bounded semantic expansion exceeded")
     expected = dict(containers=len(nodes), items=items, semantic_JSON_bytes=total)
     if document["statistics"] != expected:
         raise ValueError("lossless metadata size/count declaration differs from decoded structure")
     return sizes, uses
 
 
-def encode(value):
+def encode(value, *, limits=None):
     """Intern exact frame content and repeated container identities, never fields."""
+    limits = explicit_limits(limits)
     nodes, memo, active, frames = [], {}, set(), {}
     items = 0
 
     def visit(item, depth=0, *, frame=False):
         nonlocal items
-        if depth > LIMITS["depth"]:
+        if depth > limits["depth"]:
             raise ValueError("bounded semantic depth exceeded")
         if not isinstance(item, (dict, list, tuple)):
             _scalar(item)
@@ -166,7 +192,7 @@ def encode(value):
             raise ValueError("cyclic metadata is forbidden")
         if identity in memo:
             return {"$ref": memo[identity]}
-        key = _frame_key(item) if frame else None
+        key = _frame_key(item, limits=limits) if frame else None
         if key is not None and key in frames:
             memo[identity] = frames[key]
             return {"$ref": frames[key]}
@@ -181,7 +207,7 @@ def encode(value):
             kind = "l"
         active.remove(identity)
         items += len(children)
-        if len(nodes) >= LIMITS["containers"] or items > LIMITS["items"]:
+        if len(nodes) >= limits["containers"] or items > limits["items"]:
             raise ValueError("bounded metadata nodes/items exceeded")
         index = len(nodes)
         nodes.append([kind, children])
@@ -201,7 +227,7 @@ def encode(value):
             total += (len(_scalar(child[0])) + 1) if kind == "d" else 0
             ref = _reference(item, len(sizes))
             total += sizes[ref] if ref is not None else len(_scalar(item))
-            if total > LIMITS["semantic_JSON_bytes"]:
+            if total > limits["semantic_JSON_bytes"]:
                 raise ValueError("bounded semantic expansion exceeded")
         sizes.append(total)
     document["statistics"] = dict(
@@ -209,12 +235,12 @@ def encode(value):
         items=items,
         semantic_JSON_bytes=sizes[root["$ref"]] if isinstance(root, dict) else len(_scalar(root)),
     )
-    _shape(document)
+    _shape(document, limits=limits)
     return document
 
 
-def decode(document):
-    _shape(document)  # Reject bombs/cycles/forward refs BEFORE reconstructing data.
+def decode(document, *, limits=None):
+    _shape(document, limits=limits)  # Reject bombs/cycles/forward refs before reconstructing.
     values = []
     for kind, children in document["nodes"]:
 
@@ -231,20 +257,21 @@ def decode(document):
     return values[root["$ref"]] if isinstance(root, dict) else root
 
 
-def semantic_digest(value):
+def semantic_digest(value, *, limits=None):
     """Exact fox_campaign.digest JSON/SHA, bounded buffering of shared subtrees."""
-    document = encode(value)
-    return document_digest(document)
+    document = encode(value, limits=limits)
+    return document_digest(document, limits=limits)
 
 
-def document_digest(document, path=()):
+def document_digest(document, path=(), *, limits=None):
     """Hash exact compact legacy JSON; reused small frames avoid Python expansion."""
-    return document_digests(document, (path,))[path]
+    return document_digests(document, (path,), limits=limits)[path]
 
 
-def document_digests(document, paths):
+def document_digests(document, paths, *, limits=None):
     """Validate once for several receipt hashes, sharing bounded frame buffers."""
-    sizes, uses = _shape(document)
+    limits = explicit_limits(limits)
+    sizes, uses = _shape(document, limits=limits)
     cache, used = {}, 0
 
     def chunks(value):
@@ -274,7 +301,7 @@ def document_digests(document, paths):
         if (
             uses[index] > 1
             and sizes[index] <= 65536
-            and used + sizes[index] <= LIMITS["hash_cache_bytes"]
+            and used + sizes[index] <= limits["hash_cache_bytes"]
         ):
             cached = b"".join(body())
             cache[index] = cached

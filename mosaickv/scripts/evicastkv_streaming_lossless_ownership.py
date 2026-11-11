@@ -24,6 +24,7 @@ import evicastkv_source_ownership_closure as declared
 import evicastkv_streaming_lossless_source as streamed
 from evicastkv_source_ownership_v12 import _gzip_once
 from evicastkv_source_trace_adjudication import load as load_metadata
+from evicastkv_source_trace_codec import LIMITS as CODEC_LIMITS
 from evicastkv_source_trace_codec import document_digests, encode
 
 from mosaickv.evaluation.fox_campaign import clean_source, digest, sha, write_once
@@ -55,6 +56,8 @@ POLICY = dict(
     exact_KV_peak_certification_authorized=False,
     no_fresh_samples=True,
     no_latency_or_quality_claim=True,
+    metadata_codec_limits=dict(CODEC_LIMITS, semantic_JSON_bytes=32 * 2**30),
+    metadata_archive_before_semantic_hashing=True,
 )
 
 
@@ -340,8 +343,34 @@ def archive(path, session, owners, catalog, *, source_sha):
         installed_and_local_source_hashes=declared.stack_source_hashes(capture["stack_table"]),
     )
     validate_bundle(payload)
-    document = encode(payload)
+    limits = POLICY["metadata_codec_limits"]
+    document = encode(payload, limits=limits)
     size = _gzip_once(path, document)
+    # Publish the complete archive and a small hash-bound recovery receipt
+    # BEFORE walking its possibly multi-GiB expanded JSON for semantic hashes.
+    # A hashing timeout must never force repeating a successful GPU request.
+    path = Path(path)
+    raw_receipt_path = path.with_name("trace_raw_receipt.json")
+    raw_receipt = dict(
+        schema=KIND,
+        path=str(path),
+        sha256=sha(path),
+        encoded_JSON_bytes=size,
+        compressed_bytes=path.stat().st_size,
+        source_sha=source_sha,
+        codec_statistics=document["statistics"],
+        metadata_codec_limits=limits,
+        complete_final_snapshot_preserved=True,
+        semantic_hashes_complete=False,
+        semantic_receipt_recovery_requires_CPU_validation=True,
+        exact_whole_request_KV_peak_certified=False,
+    )
+    write_once(raw_receipt_path, raw_receipt)
+    descriptor = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
     semantic = document_digests(
         document,
         tuple(
@@ -354,15 +383,20 @@ def archive(path, session, owners, catalog, *, source_sha):
                 "baseline_model_catalog",
             )
         ),
+        limits=limits,
     )
     return dict(
         schema=KIND,
         path=str(path),
-        sha256=sha(path),
+        sha256=raw_receipt["sha256"],
         encoded_JSON_bytes=size,
         source_sha=source_sha,
         semantic_sha256={key[0]: value for key, value in semantic.items()},
         codec_statistics=document["statistics"],
+        metadata_codec_limits=limits,
+        raw_receipt_path=str(raw_receipt_path),
+        raw_receipt_sha256=sha(raw_receipt_path),
+        semantic_hashes_complete=True,
         complete_final_snapshot_preserved=True,
         exact_whole_request_KV_peak_certified=False,
     )
@@ -396,13 +430,49 @@ def validate_bundle(value):
 
 
 def load_bundle(path, receipt):
+    if (
+        receipt.get("metadata_codec_limits") != POLICY["metadata_codec_limits"]
+        or receipt.get("semantic_hashes_complete") is not True
+    ):
+        raise ValueError("Explicit registered limits and complete semantic receipt required")
+    raw_path = Path(receipt["raw_receipt_path"])
+    if (
+        raw_path.resolve() != Path(path).resolve().with_name("trace_raw_receipt.json")
+        or sha(raw_path) != receipt["raw_receipt_sha256"]
+    ):
+        raise ValueError("Durable raw archive receipt binding changed")
+    raw = declared.read(raw_path)
+    if (
+        raw.get("schema") != KIND
+        or raw.get("semantic_hashes_complete") is not False
+        or raw.get("complete_final_snapshot_preserved") is not True
+        or raw.get("compressed_bytes") != Path(path).stat().st_size
+        or any(
+            raw.get(key) != receipt[key]
+            for key in (
+                "sha256",
+                "source_sha",
+                "encoded_JSON_bytes",
+                "codec_statistics",
+                "metadata_codec_limits",
+            )
+        )
+    ):
+        raise ValueError("Complete semantic receipt differs from durable raw archive receipt")
     if sha(path) != receipt["sha256"]:
         raise ValueError("Streaming lossless trace hash changed")
     value, document = load_metadata(
-        path, expected_json_bytes=receipt["encoded_JSON_bytes"], with_codec=True
+        path,
+        expected_json_bytes=receipt["encoded_JSON_bytes"],
+        with_codec=True,
+        codec_limits=POLICY["metadata_codec_limits"],
     )
     validate_bundle(value)
-    actual = document_digests(document, tuple((key,) for key in receipt["semantic_sha256"]))
+    actual = document_digests(
+        document,
+        tuple((key,) for key in receipt["semantic_sha256"]),
+        limits=POLICY["metadata_codec_limits"],
+    )
     if (
         any(actual[(key,)] != expected for key, expected in receipt["semantic_sha256"].items())
         or value["source_sha"] != receipt["source_sha"]

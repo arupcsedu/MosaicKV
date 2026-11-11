@@ -104,6 +104,67 @@ def test_DAG_bomb_is_rejected_before_expanding_shared_references(monkeypatch):
         codec.encode(value)
 
 
+def test_registered_semantic_override_is_local_and_default_still_rejects_expansion():
+    value = ["x" * 50]
+    for _ in range(28):
+        value = [value, value]
+    limits = dict(codec.LIMITS, semantic_JSON_bytes=32 * 2**30)
+    body = dict(large=value, small=7)
+    with pytest.raises(ValueError, match="expansion"):
+        codec.encode(body)
+    document = codec.encode(body, limits=limits)
+    assert 8 * 2**30 < document["statistics"]["semantic_JSON_bytes"] < 32 * 2**30
+    restored = codec.decode(document, limits=limits)
+    assert restored["large"][0] is restored["large"][1]
+    assert codec.document_digest(document, ("small",), limits=limits) == digest(7)
+    assert codec.document_digests(document, (("small",),), limits=limits) == {("small",): digest(7)}
+    assert codec.LIMITS["semantic_JSON_bytes"] == 8 * 2**30
+    with pytest.raises(ValueError, match="expansion"):
+        codec.decode(document)
+    with pytest.raises(ValueError, match="expansion"):
+        codec.document_digest(document, ("small",))
+
+
+@pytest.mark.parametrize("defect", ["semantic", "physical", "nodes", "missing", "boolean"])
+def test_scoped_limits_cannot_unbound_other_resources(defect):
+    limits = dict(codec.LIMITS, semantic_JSON_bytes=32 * 2**30)
+    if defect == "semantic":
+        limits["semantic_JSON_bytes"] += 1
+    elif defect == "physical":
+        limits["encoded_JSON_bytes"] += 1
+    elif defect == "nodes":
+        limits["containers"] += 1
+    elif defect == "missing":
+        del limits["items"]
+    else:
+        limits["depth"] = True
+    with pytest.raises(ValueError, match="explicitly bounded"):
+        codec.encode(dict(a=[]), limits=limits)
+
+
+def test_root_scalar_also_obeys_registered_semantic_bound(monkeypatch):
+    monkeypatch.setitem(codec.LIMITS, "semantic_JSON_bytes", 4)
+    with pytest.raises(ValueError, match="expansion"):
+        codec.encode("long scalar")
+
+
+def test_scoped_offline_loader_retains_default_bomb_guard(tmp_path):
+    import gzip
+
+    value = ["x" * 50]
+    for _ in range(28):
+        value = [value, value]
+    limits = dict(codec.LIMITS, semantic_JSON_bytes=32 * 2**30)
+    document = codec.encode(value, limits=limits)
+    path = tmp_path / "scoped.json.gz"
+    with gzip.open(path, "wt") as stream:
+        json.dump(document, stream)
+    with pytest.raises(ValueError, match="expansion"):
+        adjudication.load(path)
+    result = adjudication.load(path, codec_limits=limits)
+    assert result[0] is result[1]
+
+
 def test_orphan_intermediate_node_is_rejected_even_when_root_is_final():
     document = codec.encode(dict(a=[]))
     document["nodes"][-1][1] = []
