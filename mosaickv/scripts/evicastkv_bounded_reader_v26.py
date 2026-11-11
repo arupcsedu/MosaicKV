@@ -31,7 +31,8 @@ POLICY = dict(
     workspace_single_head_scratch=True,
     projection="original_full_width_native_mm",
     raw_baseline="ragged_heads_no_stored_padding",
-    allocator_configuration="backend:native,expandable_segments:True,roundup_power2_divisions:0",
+    allocator_configuration="backend:native,expandable_segments:True",
+    GPU_canary_precedes_full_CPU_suite=True,
     raw_head_allocation="joint_KV_complete_disjoint_views",
     every_cache_observation_resolves_actual_allocator_blocks=True,
     dtype="bf16",
@@ -653,10 +654,48 @@ def launch(root):
             continuous_polling=False,
         ),
     )
-    tests = submit(root, revision, "cpu", "tests")
     op = submit(root, revision, "operator", "operator", gpu=True)
-    dispatch = submit(root, revision, "dispatch", "dispatch", dependencies=(tests, op))
-    print(json.dumps(dict(cpu=tests, operator=op, dispatch=dispatch, root=str(root))))
+    precheck_job = submit(root, revision, "precheck", "precheck", dependencies=(op,))
+    print(json.dumps(dict(operator=op, precheck=precheck_job, root=str(root))))
+
+
+def precheck(root):
+    root = Path(root)
+    plan = validate(root)
+    errors = []
+    try:
+        result = read(root / "operator/result.json")
+        if (
+            result["source_sha"] != plan["source_sha"]
+            or result["plan_sha256"] != sha(root / "plan.json")
+            or result["failures"]
+            or result["operator"]["all_bitwise_passed"] is not True
+        ):
+            raise ValueError("native operator canary failed its immutable gate")
+        allocator = result["operator"]["allocator"]
+        if (
+            allocator["snapshot_consistency_passed"] is not True
+            or allocator["overhead_budget_passed"] is not True
+        ):
+            raise ValueError("allocator canary failed mapping or bounded overhead")
+    except BaseException as exc:
+        errors.append(f"{type(exc).__name__}: {exc}")
+    cpu = callback = analysis = None
+    if errors:
+        analysis = submit(root, plan["source_sha"], "analysis", "analyze")
+    else:
+        cpu = submit(root, plan["source_sha"], "cpu", "tests")
+        callback = submit(root, plan["source_sha"], "dispatch", "dispatch", dependencies=(cpu,))
+    write_once(
+        root / "jobs/precheck-result.json",
+        dict(
+            blockers=errors,
+            cpu=cpu,
+            dispatch=callback,
+            analysis=analysis,
+            full_CPU_and_model_workers_blocked=bool(errors),
+        ),
+    )
 
 
 def dispatch(root):
@@ -699,7 +738,8 @@ def dispatch(root):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "mode", choices=("prepare", "operator", "worker", "analyze", "launch", "dispatch")
+        "mode",
+        choices=("prepare", "operator", "worker", "analyze", "launch", "dispatch", "precheck"),
     )
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--index", type=int)
@@ -716,6 +756,8 @@ def main():
         analyze(args.root)
     elif args.mode == "launch":
         launch(args.root)
+    elif args.mode == "precheck":
+        precheck(args.root)
     else:
         dispatch(args.root)
 

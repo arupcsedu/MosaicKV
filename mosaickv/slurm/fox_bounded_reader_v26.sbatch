@@ -9,7 +9,7 @@ cd "$SOURCE_ROOT"
 source mosaickv/scripts/cache_env.sh
 export PYTHONPATH="$SOURCE_ROOT/mosaickv/src:$SOURCE_ROOT/mosaickv/scripts"
 export PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
-export PYTORCH_ALLOC_CONF=backend:native,expandable_segments:True,roundup_power2_divisions:0
+export PYTORCH_ALLOC_CONF=backend:native,expandable_segments:True
 export PYTORCH_CUDA_ALLOC_CONF="$PYTORCH_ALLOC_CONF"
 export CUBLAS_WORKSPACE_CONFIG=:4096:8 ATEN_CPU_CAPABILITY=avx2
 export HF_HUB_OFFLINE=1 HF_DATASETS_OFFLINE=1

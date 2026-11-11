@@ -16,7 +16,7 @@ is not an algorithm-specific baseline penalty or dummy alignment payload.
 ## Registered allocator controls
 
 Pin BOTH allocator environment aliases before Python, identically for every
-method: `backend:native,expandable_segments:True,roundup_power2_divisions:0`.
+method: `backend:native,expandable_segments:True`.
 Require actual native backend and measured expandable segments; a string alone
 is not evidence. Unsupported environments fail closed. Reuse the SAME8.25MiB
 component workspace and logical-position buffer across the three isolated arm
@@ -32,7 +32,10 @@ Record token-update/layer/growth phases; retain replayable ownership deltas and
 independent initial/final/peak reductions. Tensor-backing and allocator-block
 bytes remain separately named.
 
-The no-weight operator canary measures100 allocator observations under a
+The no-weight operator canary runs BEFORE admitting the full CPU suite; a
+failed launch/configuration therefore cannot waste a full suite or admit model
+workers. PyTorch2.8 rejects an explicit roundup-power2 setting of zero; the
+corrected configuration leaves the native default in effect. The canary measures100 allocator observations under a
 conservative synthetic metadata load, then extrapolates to4322 observations
 times3 arms. Its registered instrumentation budget is360seconds. Only passing
 native arithmetic, block mapping, overhead and full CPU gates may release two

@@ -94,6 +94,7 @@ def cohort(tmp_path, monkeypatch, request):
         tmp_path / "operator/result.json",
         dict(
             source_sha=plan["source_sha"],
+            plan_sha256=study.sha(tmp_path / "plan.json"),
             operator=dict(
                 all_bitwise_passed=True,
                 allocator=dict(snapshot_consistency_passed=True, overhead_budget_passed=True),
@@ -229,9 +230,11 @@ def test_broadcast_dispatch_and_constant_workspace_are_preregistered_not_search_
     assert study.POLICY["workspace_single_head_scratch"] is True
     assert study.POLICY["raw_head_allocation"] == "joint_KV_complete_disjoint_views"
     assert study.POLICY["every_cache_observation_resolves_actual_allocator_blocks"] is True
-    assert study.POLICY["allocator_configuration"] == (
-        "backend:native,expandable_segments:True,roundup_power2_divisions:0"
-    )
+    assert study.POLICY["allocator_configuration"] == "backend:native,expandable_segments:True"
+    assert "roundup_power2_divisions:0" not in study.POLICY["allocator_configuration"]
+    script = study.SOURCE / "mosaickv/slurm/fox_bounded_reader_v26.sbatch"
+    assert "roundup_power2_divisions:0" not in script.read_text()
+    assert study.POLICY["allocator_configuration"] in script.read_text()
 
 
 def test_immutable_validation_rejects_a_rehashed_workspace_or_dispatch_change(cohort):
@@ -448,6 +451,58 @@ def test_dispatch_launches_only_analysis_after_failed_operator(cohort, monkeypat
     decision = study.read(cohort / "jobs/dispatch-result.json")
     assert decision["model_workers_blocked"] is True
     assert decision["workers"] is None
+
+
+def test_operator_precheck_pass_starts_cpu_suite_before_any_model_worker(cohort, monkeypatch):
+    submitted = []
+
+    def submit(root, revision, label, mode, **kwargs):
+        submitted.append((mode, kwargs))
+        return str(123 + len(submitted))
+
+    monkeypatch.setattr(study, "submit", submit)
+    study.precheck(cohort)
+    assert [mode for mode, _ in submitted] == ["tests", "dispatch"]
+    assert not any(kwargs.get("gpu", False) for _, kwargs in submitted)
+    assert submitted[1][1]["dependencies"] == ("124",)
+    assert not (cohort / "full-cpu/cpu-tests.json").exists()
+
+
+@pytest.mark.parametrize("failure", ("native", "mapping", "overhead"))
+def test_operator_precheck_failure_skips_full_cpu_and_all_model_workers(
+    cohort, monkeypatch, failure
+):
+    result = study.read(cohort / "operator/result.json")
+    if failure == "native":
+        result["operator"]["all_bitwise_passed"] = False
+    else:
+        field = "snapshot_consistency_passed" if failure == "mapping" else "overhead_budget_passed"
+        result["operator"]["allocator"][field] = False
+    write(cohort / "operator/result.json", result)
+    submitted = []
+
+    def submit(root, revision, label, mode, **kwargs):
+        submitted.append(mode)
+        return "123"
+
+    monkeypatch.setattr(study, "submit", submit)
+    study.precheck(cohort)
+    assert submitted == ["analyze"]
+
+
+def test_operator_precheck_missing_cuda_result_still_receives_cpu_failure_analysis(
+    cohort, monkeypatch
+):
+    (cohort / "operator/result.json").unlink()
+    submitted = []
+
+    def submit(root, revision, label, mode, **kwargs):
+        submitted.append(mode)
+        return "123"
+
+    monkeypatch.setattr(study, "submit", submit)
+    study.precheck(cohort)
+    assert submitted == ["analyze"]
 
 
 def test_dispatch_submits_two_workers_then_afterany_analysis_only_after_both_gates(
