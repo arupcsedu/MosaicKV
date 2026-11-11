@@ -273,6 +273,120 @@ def test_review_cannot_override_declared_KV(tmp_path):
         subject.adjudicate(trace, conservative, declared, ledger)
 
 
+@pytest.mark.parametrize("review_role", ["kv_workspace", "kv_shared_workspace"])
+def test_compatible_KV_family_rule_keeps_known_owner_role_and_actual_lifetime(
+    tmp_path, review_role
+):
+    trace, conservative, declared, ledger, file = fixture(tmp_path)
+    before = deepcopy(conservative["records"][1])
+    ledger["rules"] = [rule_for(trace, file, stack_id=0, role=review_role)]
+    result = subject.adjudicate(trace, conservative, declared, ledger)
+    actual = next(
+        row for row in result["records"] if row["address"] == 10 and row["generation"] == 0
+    )
+    for key in ("role", "address", "generation", "bytes", "start", "end", "baseline"):
+        assert actual[key] == before[key]
+    assert result["compatible_KV_rule_matches_retaining_known_owner_role"] == 1
+    assert conservative["records"][1] == before
+
+
+def model_expression_fixture(tmp_path, *, module, scope, expression, misanchor=False):
+    trace, conservative, declared, ledger, _ = fixture(tmp_path)
+    model_file = tmp_path / "transformers/models" / module / f"modeling_{module}.py"
+    model_file.parent.mkdir(parents=True)
+    class_name, method = scope.split(".")
+    body = expression + ("\n            pass" if expression.startswith("if ") else "")
+    model_file.write_text(f"class {class_name}:\n    def {method}(self):\n        {body}\n")
+    line = 2 if misanchor else 3
+    frame = [str(model_file), method, line]
+    trace["stack_table"][1] = [frame]
+    for event in trace["actual_events"]:
+        if event.get("addr") == 20 and event["action"] == "alloc":
+            event["frames"] = [dict(filename=str(model_file), name=method, line=line)]
+    trace["installed_and_local_source_hashes"][str(model_file)] = dict(
+        sha256=subject.sha(model_file), canonical_path=str(model_file.resolve())
+    )
+    proof = rule_for(trace, model_file)
+    proof["qualified_function"] = scope
+    ledger["rules"] = [proof]
+    return trace, conservative, declared, ledger
+
+
+@pytest.mark.parametrize(
+    "module,scope,expression",
+    [
+        ("llama", "LlamaDecoderLayer.forward", "hidden_states = residual + hidden_states"),
+        ("llava", "LlavaModel.forward", "inputs_embeds = self.get_input_embeddings()(input_ids)"),
+        (
+            "llava",
+            "LlavaModel.forward",
+            "image_features = torch.cat(image_features, dim=0).to("
+            "inputs_embeds.device, inputs_embeds.dtype)",
+        ),
+        (
+            "llava",
+            "LlavaModel.forward",
+            "inputs_embeds = inputs_embeds.masked_scatter(special_image_mask, image_features)",
+        ),
+        (
+            "llava",
+            "LlavaModel.get_placeholder_mask",
+            "special_image_mask = input_ids == self.config.image_token_id",
+        ),
+        ("llava", "LlavaModel.get_placeholder_mask", "n_image_tokens = special_image_mask.sum()"),
+        (
+            "llava",
+            "LlavaModel.get_placeholder_mask",
+            "if inputs_embeds[special_image_mask].numel() != image_features.numel():",
+        ),
+    ],
+)
+def test_closed_actual_operator_AST_templates_can_exclude_only_precise_nonKV_site(
+    tmp_path, module, scope, expression
+):
+    result = subject.adjudicate(
+        *model_expression_fixture(tmp_path, module=module, scope=scope, expression=expression)
+    )
+    assert result["unknown_generations_preserved"] == 0
+    assert result["exact_KV_peak_bytes"] == 100
+
+
+@pytest.mark.parametrize(
+    "expression",
+    [
+        "hidden_states = self.k_proj(hidden_states)",
+        "hidden_states = self.v_proj(hidden_states)",
+        "hidden_states = self.q_proj(hidden_states)",
+        "hidden_states = normalized_source.clone()",
+        "hidden_states = residual + key_states",
+        "hidden_states = residual - hidden_states",
+        "hidden_states = residual + hidden_states.clone()",
+    ],
+)
+def test_changed_operator_KV_projection_or_capture_is_not_a_closed_residual_proof(
+    tmp_path, expression
+):
+    with pytest.raises(ValueError, match="broad model-forward"):
+        subject.adjudicate(
+            *model_expression_fixture(
+                tmp_path, module="llama", scope="LlamaDecoderLayer.forward", expression=expression
+            )
+        )
+
+
+def test_precise_operator_on_wrong_anchor_line_is_rejected(tmp_path):
+    with pytest.raises(ValueError, match="broad model-forward"):
+        subject.adjudicate(
+            *model_expression_fixture(
+                tmp_path,
+                module="llama",
+                scope="LlamaDecoderLayer.forward",
+                expression="hidden_states = residual + hidden_states",
+                misanchor=True,
+            )
+        )
+
+
 def test_broad_model_forward_nonKV_rule_refused(tmp_path):
     trace, conservative, declared, ledger, file = fixture(tmp_path)
     file.write_text("class LlamaModel:\n    def forward(self):\n        return 2\n")

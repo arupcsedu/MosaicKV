@@ -266,3 +266,68 @@ def test_partial_file_rows_remain_valid_only_after_full_source_reverification(fi
     assert not observation["complete"] and observation["rows_hashed"] == 1
     assert observation["whole_file_sha256_before"] == observation["whole_file_sha256_after"]
     assert sum(len(row["references"]) for row in result["assets"]) == 1
+
+
+def test_lexical_scratch_style_alias_and_canonical_LFS_root_are_same_repository(fixture, tmp_path):
+    # Actual failure geometry: lexical /scratch/... snapshot, canonical
+    # /sfs/weka/scratch/... LFS target in the SAME dataset repository.
+    scratch_alias = tmp_path / "scratch-alias"
+    scratch_alias.symlink_to(fixture["hub"].parent, target_is_directory=True)
+    canonical_snapshot = fixture["snapshots"]["mmstar"]
+    lexical_snapshot = scratch_alias / canonical_snapshot.relative_to(fixture["hub"].parent)
+    assert lexical_snapshot != lexical_snapshot.resolve()
+    observed = audit.cached_files(lexical_snapshot, ["data/default-does-not-match*.parquet"])
+    assert observed == []
+    observed = audit.cached_files(lexical_snapshot, ["data/val-val-*.parquet"])
+    assert len(observed) == 1
+    target = Path(observed[0]["path"])
+    assert target.parent == canonical_snapshot.parent.parent / "blobs"
+    assert observed[0]["expected_sha256"] == target.name
+    assert audit.sha(target) == observed[0]["expected_sha256"]
+
+
+def test_cross_repository_blob_even_with_valid_SHA_name_is_rejected(fixture):
+    snapshot = fixture["snapshots"]["mmstar"]
+    alias = next((snapshot / "data").glob("*.parquet"))
+    foreign = next((fixture["snapshots"]["chartqa"] / "data").glob("*.parquet")).resolve()
+    alias.unlink()
+    alias.symlink_to(foreign)
+    with pytest.raises(ValueError, match="escapes its dataset repository"):
+        audit.cached_files(snapshot, ["data/*.parquet"])
+
+
+def test_repository_and_revision_redirects_cannot_hide_under_path_alias(fixture, tmp_path):
+    snapshot = fixture["snapshots"]["mmstar"]
+    redirect = snapshot.parent / "incorrect-revision"
+    redirect.symlink_to(snapshot, target_is_directory=True)
+    with pytest.raises(ValueError, match="exact dataset/revision"):
+        audit.cached_files(redirect, ["data/*.parquet"])
+    outside_hub = tmp_path / "other-hub"
+    outside_hub.mkdir()
+    other_repo = outside_hub / snapshot.parent.parent.name
+    other_repo.symlink_to(snapshot.parent.parent, target_is_directory=True)
+    # The fully canonical root is legitimate when only its spelling differs.
+    assert (
+        len(audit.cached_files(other_repo / "snapshots" / snapshot.name, ["data/*.parquet"])) == 1
+    )
+    wrong_repo = fixture["hub"] / "datasets--wrong--repository"
+    wrong_repo.symlink_to(snapshot.parent.parent, target_is_directory=True)
+    with pytest.raises(ValueError, match="exact dataset/revision"):
+        audit.cached_files(wrong_repo / "snapshots" / snapshot.name, ["data/*.parquet"])
+
+
+def test_broken_blob_and_nested_global_blobs_directory_remain_blocked(fixture, tmp_path):
+    snapshot = fixture["snapshots"]["mmstar"]
+    alias = next((snapshot / "data").glob("*.parquet"))
+    original = alias.resolve()
+    alias.unlink()
+    alias.symlink_to(tmp_path / "missing" / original.name)
+    with pytest.raises(FileNotFoundError):
+        audit.cached_files(snapshot, ["data/*.parquet"])
+    global_blob = tmp_path / "global-blobs" / original.name
+    global_blob.parent.mkdir()
+    global_blob.write_bytes(original.read_bytes())
+    alias.unlink()
+    alias.symlink_to(global_blob)
+    with pytest.raises(ValueError, match="escapes its dataset repository"):
+        audit.cached_files(snapshot, ["data/*.parquet"])

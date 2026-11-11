@@ -115,6 +115,61 @@ def _scope(text, function, line):
     return max(matches)[1]
 
 
+def closed_non_KV_operator(text, filename, qualified, line):
+    """Only the inspected, closed operator templates—not a forward exemption.
+
+    Caller has already checked the actual full stack, captured file hash, exact
+    source line hash and qualified scope. Match the allocation-producing AST,
+    not a substring or an arbitrary model/attention/clone/capture operation.
+    """
+    templates = {
+        ("/transformers/models/llama/modeling_llama.py", "LlamaDecoderLayer.forward"): (
+            "hidden_states = residual + hidden_states",
+        ),
+        ("/transformers/models/llava/modeling_llava.py", "LlavaModel.forward"): (
+            "inputs_embeds = self.get_input_embeddings()(input_ids)",
+            "image_features = torch.cat(image_features, dim=0).to("
+            "inputs_embeds.device, inputs_embeds.dtype)",
+            "inputs_embeds = inputs_embeds.masked_scatter(special_image_mask, image_features)",
+        ),
+        ("/transformers/models/llava/modeling_llava.py", "LlavaModel.get_placeholder_mask"): (
+            "special_image_mask = input_ids == self.config.image_token_id",
+            "n_image_tokens = special_image_mask.sum()",
+        ),
+    }
+    expected = [
+        snippet
+        for (suffix, scope), snippets in templates.items()
+        if str(filename).endswith(suffix) and scope == qualified
+        for snippet in snippets
+    ]
+    candidates = [
+        node for node in ast.walk(ast.parse(text)) if getattr(node, "lineno", None) == line
+    ]
+    allowed = {
+        ast.dump(ast.parse(snippet).body[0], include_attributes=False) for snippet in expected
+    }
+    if any(
+        isinstance(node, ast.Assign) and ast.dump(node, include_attributes=False) in allowed
+        for node in candidates
+    ):
+        return True
+    if (
+        str(filename).endswith("/transformers/models/llava/modeling_llava.py")
+        and qualified == "LlavaModel.get_placeholder_mask"
+    ):
+        predicate = ast.parse(
+            "inputs_embeds[special_image_mask].numel() != image_features.numel()", mode="eval"
+        ).body
+        return any(
+            isinstance(node, ast.If)
+            and ast.dump(node.test, include_attributes=False)
+            == ast.dump(predicate, include_attributes=False)
+            for node in candidates
+        )
+    return False
+
+
 def checked_rules(trace, ledger):
     """Require explicit exact-stack and file/line evidence, with no fallbacks."""
     if (
@@ -192,7 +247,11 @@ def checked_rules(trace, ledger):
             or ("Attention" in name and not name.startswith("CLIP"))
             for name in qualifiers
         )
-        if rule["role"] == "non_kv" and (broad or qualified == "forward"):
+        if (
+            rule["role"] == "non_kv"
+            and (broad or qualified == "forward")
+            and not closed_non_KV_operator(text, rule["filename"], qualified, line)
+        ):
             raise ValueError("broad model-forward/non-KV exemptions are forbidden")
         by_stack[index] = rule
     if any(sha(Path(filename)) != expected for filename, expected in all_files.items()):
@@ -296,15 +355,18 @@ def adjudicate(trace, conservative, declared, ledger):
     if len(stored) != len(rebuilt["records"]):
         raise ValueError("duplicate or missing conservative allocation generations")
     rules = checked_rules(trace, ledger)
-    resolved = 0
+    resolved = compatible_KV_matches = 0
     for row in rebuilt["records"]:
         identity = row["address"], row["generation"]
         if stored[identity]["role"] != row["role"]:
             raise ValueError("saved conservative attribution does not reproduce declared owners")
         rule = rules.get(row.get("stack_id"))
         if rule is not None:
-            if row["role"] not in {"unknown", rule["role"]}:
+            compatible_KV = row["role"] in KV_ROLES and rule["role"] in KV_ROLES
+            if row["role"] not in {"unknown", rule["role"]} and not compatible_KV:
                 raise ValueError("reviewed role conflicts with an actual declared/model owner")
+            if compatible_KV and row["role"] != rule["role"]:
+                compatible_KV_matches += 1
             if row["role"] == "unknown":
                 row["role"] = rule["role"]
                 row["evidence"].append(
@@ -345,6 +407,7 @@ def adjudicate(trace, conservative, declared, ledger):
         boundary=BOUNDARY,
         reviewed_rules=len(rules),
         newly_classified_generations=resolved,
+        compatible_KV_rule_matches_retaining_known_owner_role=compatible_KV_matches,
         allocator_interval_bounds_valid=valid,
         known_KV_peak_lower_bound_bytes=lower if valid else None,
         KV_peak_upper_bound_including_unknown_bytes=upper if valid else None,

@@ -118,6 +118,22 @@ def pool_description(info, config, split):
 
 
 def cached_files(snapshot, patterns):
+    # /scratch is a symlink to /sfs/weka/scratch on the cluster. Compare two
+    # canonical roots, never a canonical LFS target with a lexical /scratch
+    # prefix. Keep dataset/revision ownership exact; this is not permission
+    # to follow a snapshot, repository or blobs directory into another repo.
+    snapshot = Path(snapshot)
+    repository_name, revision = snapshot.parent.parent.name, snapshot.name
+    repository = snapshot.parent.parent.resolve(strict=True)
+    actual_snapshot = snapshot.resolve(strict=True)
+    if (
+        snapshot.parent.name != "snapshots"
+        or repository.parent != HUB.resolve(strict=True)
+        or repository.name != repository_name
+        or actual_snapshot != repository / "snapshots" / revision
+    ):
+        raise ValueError("pinned snapshot redirects outside its exact dataset/revision")
+    snapshot = actual_snapshot
     result = {}
     for pattern in patterns:
         relative = Path(pattern)
@@ -132,7 +148,7 @@ def cached_files(snapshot, patterns):
             if len(result) >= MAX_FILES:
                 raise ValueError("pinned pool exceeds finite cache-file limit")
             actual = path.resolve(strict=True)
-            if path.suffix != ".parquet" or not actual.is_relative_to(snapshot.parent.parent):
+            if path.suffix != ".parquet" or actual.parent != repository / "blobs":
                 raise ValueError("pinned cache file escapes its dataset repository")
             if not HASH.fullmatch(actual.name):
                 raise ValueError("cached Parquet source lacks a content-addressed SHA256")
