@@ -12,7 +12,7 @@ export CXX="$(command -v g++)"
 bash mosaickv/scripts/assert_clean_worktree.sh
 if [[ "$3" == "tests" ]]; then
     export CUDA_VISIBLE_DEVICES=""
-    exec /scratch/djy8hg/env/mosaickv/bin/python mosaickv/scripts/evicastkv_review_closure_v2.py tests --root "$2/full-cpu"
+    exec /scratch/djy8hg/env/mosaickv/bin/python mosaickv/scripts/evicastkv_review_closure_v2.py tests --root "$2/full-cpu" --cpu-timeout-seconds 1200
 fi
 if [[ "$3" != "worker" ]]; then
     export CUDA_VISIBLE_DEVICES=""

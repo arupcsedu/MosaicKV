@@ -71,3 +71,11 @@ export PYTHONPATH="$PWD/mosaickv/src:$PWD/mosaickv/scripts"
 
 All caches and compiler products remain in scratch. No packages or model
 weights are installed; no benchmark identity or label is accessed by this probe.
+
+The original complete CPU-suite request reached 83% without a recorded test
+failure but exceeded its 540-second runner timeout. Its negative record and
+zero-GPU-release decision are preserved. The resource-only retry registers a
+1,200-second Python test budget inside a 25-minute CPU allocation. The old
+540-second default remains available to other controllers; the complete test
+directory, offline settings, numerical environment, and GPU gates are unchanged.
+Timeouts now also produce a durable failed `cpu-tests.json`, never a pass.

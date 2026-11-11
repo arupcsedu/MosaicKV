@@ -24,6 +24,7 @@ POLICY = dict(
     scope="synthetic_native_allocator_transport_no_model_or_new_identity",
     additional_CPU_scope="678_existing_native_v4_graph_artifacts_exact_producer_proof_only",
     max_events=65536,
+    cpu_suite_timeout_seconds=1200,
     GPU_requests=1,
     aggregate_A100_limit=6,
     worker_A100s=1,
@@ -71,7 +72,7 @@ def command(root, label, mode):
         "finish",
     }:
         raise ValueError("unregistered one-shot probe mode")
-    minutes = 15 if mode.startswith("provenance-") else 10
+    minutes = 25 if mode == "tests" else 15 if mode.startswith("provenance-") else 10
     cores = 1 if mode == "provenance-worker" else 12
     return [
         "sbatch",

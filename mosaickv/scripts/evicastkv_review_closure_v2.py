@@ -563,7 +563,9 @@ def prefix_summary(root):
     write_once(root / "prefix-summary.json", record)
 
 
-def cpu_suite(root):
+def cpu_suite(root, *, timeout_seconds=540):
+    if type(timeout_seconds) is not int or not 540 <= timeout_seconds <= 1800:
+        raise ValueError("bounded complete CPU-suite timeout must be 540..1800 seconds")
     root.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ, HF_HUB_OFFLINE="1", HF_DATASETS_OFFLINE="1")
     command = [
@@ -577,15 +579,37 @@ def cpu_suite(root):
         f"--junitxml={root}/cpu-tests.xml",
     ]
     with (root / "cpu-tests.log").open("x") as stream:
-        run = subprocess.run(
-            command,
-            env=env,
-            cwd=SOURCE,
-            stdout=stream,
-            stderr=subprocess.STDOUT,
-            timeout=540,
-            check=False,
-        )
+        try:
+            run = subprocess.run(
+                command,
+                env=env,
+                cwd=SOURCE,
+                stdout=stream,
+                stderr=subprocess.STDOUT,
+                timeout=timeout_seconds,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as error:
+            stream.flush()
+            write_once(
+                root / "cpu-tests.json",
+                dict(
+                    source_sha=clean_source(SOURCE),
+                    status="failed",
+                    returncode="timeout",
+                    command=command,
+                    timeout_seconds=timeout_seconds,
+                    all_tests_completed=False,
+                    models_or_data_downloaded=False,
+                    log_sha256=sha(root / "cpu-tests.log"),
+                    junit_sha256=sha(root / "cpu-tests.xml")
+                    if (root / "cpu-tests.xml").exists()
+                    else None,
+                ),
+            )
+            raise ValueError(
+                "complete CPU suite timed out; no empirical work may proceed"
+            ) from error
     write_once(
         root / "cpu-tests.json",
         dict(
@@ -593,6 +617,7 @@ def cpu_suite(root):
             status="passed" if run.returncode == 0 else "failed",
             returncode=run.returncode,
             command=command,
+            timeout_seconds=timeout_seconds,
             models_or_data_downloaded=False,
             log_sha256=sha(root / "cpu-tests.log"),
             junit_sha256=sha(root / "cpu-tests.xml"),
@@ -698,6 +723,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--parent", type=Path)
+    parser.add_argument("--cpu-timeout-seconds", type=int, default=540)
     args = parser.parse_args()
     if not args.root.resolve().is_relative_to(Path("/scratch/djy8hg").resolve()):
         parser.error("scratch-only output")
@@ -712,7 +738,7 @@ if __name__ == "__main__":
         elif args.mode == "submit":
             submit(args.root)
         elif args.mode == "tests":
-            cpu_suite(args.root)
+            cpu_suite(args.root, timeout_seconds=args.cpu_timeout_seconds)
         elif args.mode == "reuse":
             if args.parent is None:
                 parser.error("reuse requires --parent")
