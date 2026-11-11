@@ -20,6 +20,7 @@ import sys
 import tempfile
 import time
 import traceback
+import uuid
 from pathlib import Path
 
 import audit_lookm_hf_generation_compat as transport
@@ -81,6 +82,7 @@ POLICY = {
     "no_fresh_cohort": True,
     "no_latency_or_quality_claim": True,
     "no_shared_budget_or_whole_request_peak_claim": True,
+    "gpu_uuid_normalization": "strict_bare_or_GPU_hyphenated_UUID_to_lowercase_GPU_v1",
 }
 GATE = "GATE_lookm_hf_checkpoint_compat.json"
 
@@ -382,13 +384,65 @@ def reset_request(model):
                 raise ValueError("Upstream per-request attention scores were not cleared")
 
 
+def canonical_gpu_uuid(value):
+    """Accept only a complete physical UUID, never MIG/aliases/compact forms."""
+    if not isinstance(value, str):
+        raise ValueError("GPU UUID must be an explicit string")
+    raw = value[4:] if value.startswith("GPU-") else value
+    try:
+        parsed = uuid.UUID(raw)
+    except (ValueError, AttributeError) as error:
+        raise ValueError("complete physical bare or GPU-prefixed UUID required") from error
+    if raw.lower() != str(parsed):
+        raise ValueError("complete hyphenated physical GPU UUID required")
+    return f"GPU-{parsed}"
+
+
 def assigned_isolation(snapshot, assigned_uuid, pid):
-    others = [p.pid for p in snapshot.processes if p.gpu_uuid == assigned_uuid and p.pid != pid]
-    known = any(device.uuid == assigned_uuid for device in snapshot.devices)
+    """Normalize spelling only; malformed/ambiguous telemetry remains blocking."""
+    assigned, devices, processes, errors = None, [], [], []
+    try:
+        assigned = canonical_gpu_uuid(assigned_uuid)
+        if type(pid) is not int or pid <= 0:
+            raise ValueError("concrete positive current process ID required")
+        for device in snapshot.devices:
+            devices.append(
+                dict(raw_uuid=device.uuid, canonical_uuid=canonical_gpu_uuid(device.uuid))
+            )
+        for process in snapshot.processes:
+            if type(process.pid) is not int or process.pid <= 0:
+                raise ValueError("concrete positive telemetry process IDs required")
+            processes.append(
+                dict(
+                    pid=process.pid,
+                    raw_uuid=process.gpu_uuid,
+                    canonical_uuid=canonical_gpu_uuid(process.gpu_uuid),
+                )
+            )
+        identities = [device["canonical_uuid"] for device in devices]
+        if len(identities) != len(set(identities)):
+            raise ValueError("duplicate canonical physical GPU identities are ambiguous")
+    except (ValueError, AttributeError, TypeError) as error:
+        errors.append(f"{type(error).__name__}: {error}")
+    others = sorted(
+        {p["pid"] for p in processes if p["canonical_uuid"] == assigned and p["pid"] != pid}
+    )
+    known = sum(device["canonical_uuid"] == assigned for device in devices) == 1
     return {
         "assigned_gpu_uuid": assigned_uuid,
+        "assigned_gpu_uuid_raw": assigned_uuid,
+        "assigned_gpu_uuid_canonical": assigned,
+        "gpu_uuid_normalization": dict(
+            policy=POLICY["gpu_uuid_normalization"],
+            devices=devices,
+            processes=processes,
+            errors=errors,
+        ),
         "assigned_gpu_background_pids": others,
-        "assigned_gpu_isolation_verified": known and not others and snapshot.query_error is None,
+        "assigned_gpu_isolation_verified": known
+        and not errors
+        and not others
+        and snapshot.query_error is None,
     }
 
 

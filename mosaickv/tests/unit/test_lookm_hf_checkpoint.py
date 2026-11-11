@@ -58,22 +58,75 @@ def test_unique_storage_bytes_include_backing_not_only_views():
     assert study.live_cache_bytes(((a, b.clone()),)) == 432
 
 
+GPU = "GPU-506a922c-e62d-083c-b670-407dba8907e6"
+OTHER_GPU = "GPU-11111111-2222-3333-4444-555555555555"
+
+
 def snapshot(*, error=None, other=False):
     return SimpleNamespace(
         query_error=error,
-        devices=[SimpleNamespace(uuid="GPU-A")],
-        processes=[SimpleNamespace(gpu_uuid="GPU-A", pid=10)]
-        + ([SimpleNamespace(gpu_uuid="GPU-A", pid=11)] if other else []),
+        devices=[SimpleNamespace(uuid=GPU)],
+        processes=[SimpleNamespace(gpu_uuid=GPU, pid=10)]
+        + ([SimpleNamespace(gpu_uuid=GPU, pid=11)] if other else []),
     )
 
 
 def test_assigned_gpu_isolation_rejects_unknown_or_background_processes():
-    assert study.assigned_isolation(snapshot(), "GPU-A", 10)["assigned_gpu_isolation_verified"]
+    assert study.assigned_isolation(snapshot(), GPU, 10)["assigned_gpu_isolation_verified"]
     for evidence in (snapshot(error="unknown"), snapshot(other=True)):
-        assert not study.assigned_isolation(evidence, "GPU-A", 10)[
-            "assigned_gpu_isolation_verified"
-        ]
-    assert not study.assigned_isolation(snapshot(), "GPU-B", 10)["assigned_gpu_isolation_verified"]
+        assert not study.assigned_isolation(evidence, GPU, 10)["assigned_gpu_isolation_verified"]
+    assert not study.assigned_isolation(snapshot(), OTHER_GPU, 10)[
+        "assigned_gpu_isolation_verified"
+    ]
+
+
+@pytest.mark.parametrize("assigned", [GPU, GPU[4:], GPU[4:].upper()])
+def test_bare_or_prefixed_torch_UUID_matches_NVML_without_weakening_isolation(assigned):
+    evidence = snapshot()
+    evidence.processes[0].gpu_uuid = GPU[4:]
+    result = study.assigned_isolation(evidence, assigned, 10)
+    assert result["assigned_gpu_isolation_verified"]
+    assert result["assigned_gpu_uuid_raw"] == assigned
+    assert result["assigned_gpu_uuid_canonical"] == GPU
+    assert result["gpu_uuid_normalization"]["processes"][0]["canonical_uuid"] == GPU
+    evidence.processes.append(SimpleNamespace(gpu_uuid=GPU[4:], pid=12))
+    blocked = study.assigned_isolation(evidence, assigned, 10)
+    assert not blocked["assigned_gpu_isolation_verified"]
+    assert blocked["assigned_gpu_background_pids"] == [12]
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "GPU-A",
+        "MIG-" + GPU[4:],
+        "MIG-" + GPU + "/1/0",
+        "GPU-" + GPU[4:].replace("-", ""),
+        "{" + GPU[4:] + "}",
+        "urn:uuid:" + GPU[4:],
+        " " + GPU,
+        "gpu-" + GPU[4:],
+        None,
+    ],
+)
+def test_malformed_or_MIG_UUID_is_not_accepted_as_physical_GPU(bad):
+    with pytest.raises(ValueError):
+        study.canonical_gpu_uuid(bad)
+    assert not study.assigned_isolation(snapshot(), bad, 10)["assigned_gpu_isolation_verified"]
+
+
+@pytest.mark.parametrize("source", ["device", "process", "ambiguous_device"])
+def test_ambiguous_or_malformed_telemetry_remains_blocking(source):
+    evidence = snapshot()
+    if source == "device":
+        evidence.devices[0].uuid = "malformed"
+    elif source == "process":
+        evidence.processes[0].gpu_uuid = "MIG-" + GPU[4:]
+    else:
+        evidence.devices.append(SimpleNamespace(uuid=GPU[4:]))
+    result = study.assigned_isolation(evidence, GPU[4:], 10)
+    assert not result["assigned_gpu_isolation_verified"]
+    assert result["gpu_uuid_normalization"]["errors"]
 
 
 def tensors():

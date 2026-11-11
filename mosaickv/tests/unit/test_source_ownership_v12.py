@@ -7,6 +7,8 @@ from types import SimpleNamespace
 import evicastkv_source_ownership_v12 as subject
 import pytest
 
+from mosaickv.evaluation.fox_campaign import digest
+
 
 def test_raw_trace_and_snapshot_hashes_written_before_reducer(tmp_path):
     root = tmp_path
@@ -24,11 +26,14 @@ def test_raw_trace_and_snapshot_hashes_written_before_reducer(tmp_path):
     receipt = subject.archive_before_attribution(root, capture, [], events, snapshot)
     assert receipt["attribution_not_yet_run"]
     assert receipt["new_roles_assigned"] == 0
-    assert receipt["final_allocator_snapshot_sha256"] == subject.digest(snapshot)
+    assert receipt["final_allocator_snapshot_sha256"] == digest(snapshot)
     path = root / "worker/allocator_trace_pre_attribution.json.gz"
     assert receipt["trace_sha256"] == subject.sha(path)
     with gzip.open(path, "rt") as stream:
         saved = json.load(stream)
+    from evicastkv_source_trace_codec import decode
+
+    saved = decode(saved)
     assert saved["actual_events"] == events
     assert saved["final_allocator_snapshot"] == snapshot
     assert not receipt["exact_whole_request_KV_peak_certified"]

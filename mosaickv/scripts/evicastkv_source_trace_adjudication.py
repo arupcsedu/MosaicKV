@@ -20,6 +20,8 @@ from unittest.mock import patch
 
 import evicastkv_source_ownership_closure as source_ownership
 from evicastkv_source_ownership_closure import conservative_report, unknown_clusters
+from evicastkv_source_trace_codec import KIND as CODEC_KIND
+from evicastkv_source_trace_codec import decode, document_digests
 
 from mosaickv.evaluation.fox_campaign import clean_source, digest, sha, write_once
 from mosaickv.measurements.kv_timeline import KV_ROLES, AllocationTimeline
@@ -29,7 +31,8 @@ BOUNDARY = "PyTorch_CUDA_requested_KV_backing_plus_language_attention_and_algori
 MAX_COMPRESSED = 512 * 2**20
 MAX_JSON = 2 * 2**30
 SCRATCH = Path("/scratch/djy8hg")
-TRACE_FIRST_VARIANT = "source_owner_trace_first_indexed_generation_v12"
+TRACE_FIRST_VARIANT = "source_owner_trace_first_indexed_generation_v13_lossless_metadata_DAG"
+TRACE_FIRST_VARIANTS = {TRACE_FIRST_VARIANT, "source_owner_trace_first_indexed_generation_v12"}
 RULE_KEYS = {
     "stack_id",
     "stack_sha256",
@@ -49,7 +52,7 @@ RULE_KEYS = {
 }
 
 
-def load(path, *, expected_json_bytes=None):
+def load(path, *, expected_json_bytes=None, with_codec=False):
     path = Path(path)
     before = path.stat()
     if before.st_size > MAX_COMPRESSED:
@@ -69,7 +72,10 @@ def load(path, *, expected_json_bytes=None):
         after.st_mtime_ns,
     ):
         raise ValueError("immutable metadata changed during read")
-    return json.loads(raw)
+    value = json.loads(raw)
+    codec = value if isinstance(value, dict) and value.get("codec") == CODEC_KIND else None
+    decoded = decode(codec) if codec is not None else value
+    return (decoded, codec) if with_codec else decoded
 
 
 def stack_fingerprint(frames):
@@ -462,8 +468,8 @@ def recover_trace_first(root, *, parent, cpu_gate_root):
         raise ValueError("registered producer source/evidence hash changed")
     bindings.update(protocol["bindings"])
     if (
-        receipt["observer_variant"] != TRACE_FIRST_VARIANT
-        or protocol["policy"].get("observer_variant") != TRACE_FIRST_VARIANT
+        receipt["observer_variant"] not in TRACE_FIRST_VARIANTS
+        or protocol["policy"].get("observer_variant") != receipt["observer_variant"]
         or manifest["source_sha"] != protocol["source_sha"]
         or manifest["source_dirty"] is not False
         or manifest["policy_sha256"] != digest(protocol["policy"])
@@ -479,15 +485,38 @@ def recover_trace_first(root, *, parent, cpu_gate_root):
         or not 0 < receipt["uncompressed_bytes"] <= MAX_JSON
     ):
         raise ValueError("early archive receipt differs from exact source/protocol/raw evidence")
-    trace = load(trace_path, expected_json_bytes=receipt["uncompressed_bytes"])
+    trace, codec = load(
+        trace_path, expected_json_bytes=receipt["uncompressed_bytes"], with_codec=True
+    )
+    hashes = (
+        document_digests(
+            codec,
+            tuple(
+                (key,)
+                for key in (
+                    "actual_events",
+                    "allocator_records",
+                    "final_allocator_snapshot",
+                    "capture_metadata",
+                )
+            ),
+        )
+        if codec is not None
+        else {}
+    )
+
+    def semantic_hash(key):
+        return hashes[(key,)] if codec is not None else digest(trace[key])
+
     capture, declared = trace["capture_metadata"], load(declared_path)
     if (
-        trace["observer_variant"] != TRACE_FIRST_VARIANT
-        or declared["observer_variant"] != TRACE_FIRST_VARIANT
-        or digest(trace["actual_events"]) != receipt["actual_events_sha256"]
-        or digest(trace["allocator_records"]) != receipt["allocation_records_sha256"]
-        or digest(trace["final_allocator_snapshot"]) != receipt["final_allocator_snapshot_sha256"]
-        or digest(capture) != receipt["capture_sha256"]
+        trace["observer_variant"] != receipt["observer_variant"]
+        or declared["observer_variant"] != receipt["observer_variant"]
+        or semantic_hash("actual_events") != receipt["actual_events_sha256"]
+        or semantic_hash("allocator_records") != receipt["allocation_records_sha256"]
+        or semantic_hash("final_allocator_snapshot") != receipt["final_allocator_snapshot_sha256"]
+        or semantic_hash("capture_metadata") != receipt["capture_sha256"]
+        or (codec is not None and receipt.get("archive_codec_statistics") != codec["statistics"])
         or capture["records"] != trace["allocator_records"]
         or capture["stack_table"] != trace["stack_table"]
         or capture.get("clock_calibration") != trace["clock_calibration"]
