@@ -19,13 +19,16 @@ SOURCE = Path(__file__).resolve().parents[2]
 PARENT_SHA = "008f330edbf19421f658761efe6349d4198e2487"
 PARENT = Path("/scratch/djy8hg/workdir/fox-review-v26/run-20261111-3")
 POLICY = dict(
-    id="V31_grouped_CPU_rank_whole_published_KV_diagnostic_v1",
+    id="V33_exact_cover_layer_packed_raw_whole_published_KV_diagnostic_v1",
     consumed_inputs_only=True,
     fresh_cohort_authorized=False,
     paper_campaign_authorized=False,
     native_prefill="ordinary_eager_per_layer_attention_then_retire_current_native_KV",
     source="original_normalized_BF16_zero_word_patch_or_unsupported",
-    raw="original_KV_joint_per_head_same_512_byte_lattice",
+    raw="original_KV_single_exact_cover_layer_owner_same_512_byte_lattice",
+    raw_packed_layer=True,
+    raw_layout_only_change=True,
+    raw_unfilled_packed_storage_charged_at_allocation=True,
     raw_selection="same_prompt_attention_and_mandatory_positions_as_V26",
     raw_CPU_ranking="at_most_two_equal_capacity_groups_identical_stable_order",
     raw_CPU_position_validation="exact_integer_bounds_and_strict_monotonicity",
@@ -136,6 +139,7 @@ def operator(root):
     import torch
 
     from mosaickv.evaluation.bounded_component_attention import selftest
+    from mosaickv.evaluation.bounded_ragged_raw import packed_selftest
     from mosaickv.evaluation.bounded_word_equality import selftest as word_selftest
     from mosaickv.evaluation.live_owner_snapshot_cache import selftest as reuse_selftest
     from mosaickv.evaluation.native_retirement_receipts import selftest as retirement_selftest
@@ -151,6 +155,13 @@ def operator(root):
         torch.manual_seed(13)
         report["attention"] = selftest(device="cuda")
         report["words"] = word_selftest(device="cuda")
+        report["packed_raw"] = packed_selftest(device="cuda")
+        if (
+            report["packed_raw"]["failures"] != []
+            or len(report["packed_raw"]["cases"]) != 3
+            or any(case["word_parity"] is not True for case in report["packed_raw"]["cases"])
+        ):
+            raise ValueError("exact-cover packed raw operator changed words or selected positions")
         report["snapshot_reuse"] = reuse_selftest(device="cuda")
         if (
             report["snapshot_reuse"]["all_passed"] is not True
@@ -331,6 +342,7 @@ def worker(root, index):
                 target_bytes=target if mode == "raw" else None,
                 mandatory=mandatory_positions(prepared, n),
                 retirement_tracker=retirement_tracker,
+                packed_raw=mode == "raw",
             )
         write_once(out / "prefill-lifecycle.json", lifecycle)
         if mode == "raw":

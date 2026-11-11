@@ -150,7 +150,8 @@ def test_streaming_source_preserves_real_native_prefill_and_retires_all_views():
     )
 
 
-def test_streaming_raw_matches_frozen_all_layer_positions_values_and_prefill_logits():
+@pytest.mark.parametrize("packed_raw", [False, True])
+def test_streaming_raw_matches_frozen_all_layer_positions_values_and_prefill_logits(packed_raw):
     adapter, prepared, workspace, positions = fixture()
     expected, original, windows = native(adapter, prepared)
     target = 21 * 512
@@ -163,6 +164,7 @@ def test_streaming_raw_matches_frozen_all_layer_positions_values_and_prefill_log
         positions=positions,
         target_bytes=target,
         mandatory=(0, 6),
+        packed_raw=packed_raw,
     )
     assert torch.equal(expected[:, -1], prefill.logits)
     assert report["native_layers_retired"] == 3
@@ -179,8 +181,11 @@ def test_streaming_raw_matches_frozen_all_layer_positions_values_and_prefill_log
         )
         assert all(
             torch.equal(a.view(torch.int16), b.view(torch.int16))
-            for a, b in zip(new.tensors(), old.tensors(), strict=True)
+            for new_pair, old_pair in zip(new.pair_by_head, old.pair_by_head, strict=True)
+            for a, b in zip(new_pair, old_pair, strict=True)
         )
+        assert len(new.tensors()) == (1 if packed_raw else 4)
+    assert report["packed_raw_layer_ownership"] is packed_raw
 
 
 def test_constructor_audit_excludes_original_probability_alias_but_charges_real_clone():
@@ -372,6 +377,9 @@ def test_missing_physical_retirement_receipt_fails_closed_and_cleans_hooks():
     [
         dict(mode="unknown"),
         dict(mode="raw"),
+        dict(packed_raw=True),
+        dict(packed_raw=1),
+        dict(packed_raw="true"),
         dict(target_bytes=512),
         dict(positions=torch.arange(3)),
         dict(positions=torch.arange(512) + 1),

@@ -156,6 +156,115 @@ class RaggedRawPacket:
             workspace_observer((target,))
 
 
+class PackedRaggedRawPacket(RaggedRawPacket):
+    """Opt-in exact layer owner, disjoint head/component views, no padding.
+
+    This is deliberately a separate layout: the legacy packet continues to
+    reject every cross-head shared allocation. Here one flat owner is covered
+    exactly, in head order, by each head's K rows followed by its V rows.
+    Exposing the single owner to ownership accounting avoids repeatedly
+    resolving many head allocations; it does not omit a byte or observation.
+    """
+
+    def __init__(self, owner, pairs, positions, *, original_length, prompt_capacity, mandatory=()):
+        pairs, positions = tuple(pairs), tuple(positions)
+        if (
+            not isinstance(owner, torch.Tensor)
+            or owner.dtype != torch.bfloat16
+            or owner.device.type not in ("cpu", "cuda")
+            or owner.ndim != 1
+            or not owner.is_contiguous()
+            or owner.storage_offset() != 0
+            or owner.numel() < 1
+            or owner.untyped_storage().nbytes() != owner.numel() * owner.element_size()
+            or not pairs
+            or len(pairs) != len(positions)
+            or type(original_length) is not int
+            or original_length < 1
+            or type(prompt_capacity) is not int
+            or not 1 <= prompt_capacity <= original_length
+        ):
+            raise ValueError("one exact contiguous BF16 layer owner and per-head maps required")
+        if (
+            type(mandatory) is not tuple
+            or any(type(p) is not int or not 0 <= p < original_length for p in mandatory)
+            or tuple(sorted(set(mandatory))) != mandatory
+        ):
+            raise ValueError("sorted unique original mandatory token positions required")
+        storage, cursor = owner.untyped_storage(), 0
+        for pair, logical in zip(pairs, positions, strict=True):
+            if (
+                not isinstance(pair, (tuple, list))
+                or len(pair) != 2
+                or any(not isinstance(t, torch.Tensor) for t in pair)
+                or pair[0].ndim != 2
+                or pair[0].shape != pair[1].shape
+                or pair[0].shape[-1] != 128
+                or not 1 <= pair[0].shape[0] <= prompt_capacity
+                or any(
+                    t.device != owner.device
+                    or t.dtype != owner.dtype
+                    or not t.is_contiguous()
+                    or t.untyped_storage()._cdata != storage._cdata
+                    for t in pair
+                )
+                or not isinstance(logical, torch.Tensor)
+                or logical.device.type != "cpu"
+                or logical.dtype != torch.int64
+                or logical.shape != (pair[0].shape[0],)
+                or not logical.is_contiguous()
+            ):
+                raise ValueError("exact contiguous BF16 head views and sorted CPU maps required")
+            count = pair[0].numel()
+            if (
+                pair[0].storage_offset() != cursor
+                or pair[1].storage_offset() != cursor + count
+                or cursor + 2 * count > owner.numel()
+            ):
+                raise ValueError("layer head K/V intervals must be disjoint ordered exact cover")
+            cursor += 2 * count
+            values = logical.tolist()
+            if (
+                any(not 0 <= position < original_length for position in values)
+                or any(before >= after for before, after in pairwise(values))
+                or not set(mandatory).issubset(values)
+            ):
+                raise ValueError("sorted bounded CPU positions must preserve all mandatory tokens")
+        if cursor != owner.numel():
+            raise ValueError("every layer-owner byte must be covered, without tail or padding")
+        self.owner = owner
+        self.pair_by_head, self.original_positions = pairs, positions
+        self.prompt_lengths = tuple(pair[0].shape[0] for pair in pairs)
+        self.original_length = original_length
+        self.shape = (1, len(pairs), prompt_capacity, 128)
+        self.allocation_layout = "joint_KV_layer_ragged_head_exact_cover"
+        self.allocation_layout_per_head = (self.allocation_layout,) * len(pairs)
+
+    def tensors(self):
+        return (self.owner,)
+
+    def fill_group(
+        self, attention, component, start, stop, target, *, workspace_observer=None, **kwargs
+    ):
+        if not isinstance(target, torch.Tensor) or target.device != self.owner.device:
+            raise ValueError("bounded BF16 head-group prompt workspace required")
+        storage, target_storage = self.owner.untyped_storage(), target.untyped_storage()
+        if (
+            storage.data_ptr() < target_storage.data_ptr() + target_storage.nbytes()
+            and target_storage.data_ptr() < storage.data_ptr() + storage.nbytes()
+        ):
+            raise ValueError("workspace must not alias immutable packet owners")
+        return super().fill_group(
+            attention,
+            component,
+            start,
+            stop,
+            target,
+            workspace_observer=workspace_observer,
+            **kwargs,
+        )
+
+
 def _scores(window, heads, length):
     if not isinstance(window, torch.Tensor):
         raise ValueError("prompt-derived tensor attention evidence required")
@@ -215,6 +324,7 @@ def build_raw_packet_layer(
     target_bytes,
     workspace,
     workspace_observer=None,
+    packed_layer=False,
 ):
     """Stream one native layer into its globally balanced exact raw capacity.
 
@@ -225,6 +335,8 @@ def build_raw_packet_layer(
     """
     from mosaickv.evaluation.bounded_component_attention import ComponentWorkspace
 
+    if type(packed_layer) is not bool:
+        raise ValueError("packed_layer must be an explicit Boolean layout opt-in")
     if (
         type(original_pair) is not tuple
         or len(original_pair) != 2
@@ -300,6 +412,12 @@ def build_raw_packet_layer(
             raise ValueError("index scratch cannot alias immutable original K/V")
     index_pool = workspace.head.view(torch.int64).view(-1)
     per_head, position_maps = [], []
+    counts = tuple(lower + (layer_index * heads + head < remainder) for head in range(heads))
+    packed_owner = (
+        torch.empty(2 * sum(counts) * dimension, device=device, dtype=torch.bfloat16)
+        if packed_layer
+        else None
+    )
 
     def observe(*active):
         if workspace_observer is not None:
@@ -307,7 +425,7 @@ def build_raw_packet_layer(
                 (
                     *workspace.owned_tensors(),
                     *original_pair,
-                    *(t for pair in per_head for t in pair),
+                    *((packed_owner,) if packed_layer else (t for pair in per_head for t in pair)),
                     *active,
                 )
             )
@@ -316,29 +434,52 @@ def build_raw_packet_layer(
     logical_by_head = _grouped_cpu_positions(
         scores, lower, remainder, layer_index=layer_index, mandatory=mandatory
     )
-    for head in range(heads):
-        count = lower + (layer_index * heads + head < remainder)
+    cursor = 0
+    for head, count in enumerate(counts):
         logical = logical_by_head[head]
         host_positions = torch.tensor(logical, dtype=torch.int64, device="cpu")
         indices = index_pool[:count]
         indices.copy_(host_positions)
-        owner = torch.empty((2, count, dimension), device=device, dtype=torch.bfloat16)
-        retained = owner[0], owner[1]
+        if packed_layer:
+            elements = count * dimension
+            retained = (
+                packed_owner[cursor : cursor + elements].view(count, dimension),
+                packed_owner[cursor + elements : cursor + 2 * elements].view(count, dimension),
+            )
+            cursor += 2 * elements
+        else:
+            owner = torch.empty((2, count, dimension), device=device, dtype=torch.bfloat16)
+            retained = owner[0], owner[1]
         observe(*retained)
         for source, target in zip(original_pair, retained, strict=True):
             torch.index_select(source[0, head], 0, indices, out=target)
         per_head.append(retained)
         position_maps.append(host_positions)
         observe()
-    packet = RaggedRawPacket(
-        per_head, position_maps, original_length=length, prompt_capacity=capacity
+    packet = (
+        PackedRaggedRawPacket(
+            packed_owner,
+            per_head,
+            position_maps,
+            original_length=length,
+            prompt_capacity=capacity,
+            mandatory=mandatory,
+        )
+        if packed_layer
+        else RaggedRawPacket(
+            per_head, position_maps, original_length=length, prompt_capacity=capacity
+        )
     )
     actual = packet.component_bytes
     expected = 512 * sum(lower + (layer_index * heads + h < remainder) for h in range(heads))
     if actual != expected:
         raise RuntimeError("constructed streaming layer differs from its global exact byte share")
     return packet, dict(
-        kind="original_BF16_streaming_ragged_exact_selection_transport_control",
+        kind=(
+            "original_BF16_streaming_layer_packed_exact_selection_transport_control"
+            if packed_layer
+            else "original_BF16_streaming_ragged_exact_selection_transport_control"
+        ),
         layer_index=layer_index,
         total_layers=total_layers,
         global_target_bytes=target_bytes,
@@ -362,6 +503,92 @@ def build_raw_packet_layer(
         ).hexdigest(),
         benchmark_labels_or_reference_answers_used=False,
         whole_request_KV_peak_certified=False,
+    )
+
+
+@torch.inference_mode()
+def packed_selftest(*, device="cuda"):
+    """Bounded operator-only parity fixture; no checkpoint or quality claim.
+
+    Run before model admission. The legacy path remains the independent
+    word/selection reference; no allocator equality is inferred from this
+    fixture, because the model lifecycle ledger must measure that separately.
+    """
+    from mosaickv.evaluation.bounded_component_attention import ComponentWorkspace
+
+    device = torch.device(device)
+    generator = torch.Generator(device=device).manual_seed(471)
+    heads, layers = 32, 3
+    workspace = ComponentWorkspace(device=device, heads=heads)
+    cases = []
+    for length, lower, remainder, layer, mode in (
+        (13, 6, 17, 0, "ties"),
+        (17, 7, 70, 2, "ascending"),
+        (9, 4, 0, 1, "zeros"),
+    ):
+        original = tuple(
+            torch.randn((1, heads, length, 128), device=device, generator=generator).bfloat16()
+            for _ in range(2)
+        )
+        scores = torch.arange(length, dtype=torch.float32).repeat(heads, 1)
+        if mode == "ties":
+            scores.remainder_(3)
+        elif mode == "zeros":
+            scores.zero_()
+        kwargs = dict(
+            layer_index=layer,
+            total_layers=layers,
+            target_bytes=(layers * heads * lower + remainder) * 512,
+            workspace=workspace,
+        )
+        legacy, reference = build_raw_packet_layer(original, scores, (0, length - 1), **kwargs)
+        observed_roots = []
+
+        def observe(tensors, observed_roots=observed_roots):
+            observed_roots.append(tuple(tensors))
+
+        packet, report = build_raw_packet_layer(
+            original,
+            scores,
+            (0, length - 1),
+            packed_layer=True,
+            workspace_observer=observe,
+            **kwargs,
+        )
+        if (
+            packet.prompt_lengths != legacy.prompt_lengths
+            or packet.component_bytes != legacy.component_bytes
+            or report["position_map_sha256"] != reference["position_map_sha256"]
+            or any(not any(t is packet.owner for t in row) for row in observed_roots)
+        ):
+            raise RuntimeError("packed raw operator changed selection, bytes or owner observation")
+        for actual, expected in zip(packet.pair_by_head, legacy.pair_by_head, strict=True):
+            if any(
+                not torch.equal(a.view(torch.int16), b.view(torch.int16))
+                for a, b in zip(actual, expected, strict=True)
+            ):
+                raise RuntimeError("packed raw operator changed original K/V words")
+        cases.append(
+            dict(
+                length=length,
+                layer=layer,
+                lower=lower,
+                remainder=remainder,
+                mode=mode,
+                word_parity=True,
+                position_map_sha256=report["position_map_sha256"],
+                actual_raw_KV_bytes=packet.component_bytes,
+                legacy_allocation_owners=heads,
+                packed_allocation_owners=1,
+                persistent_padding_bytes=0,
+                constructor_observations=len(observed_roots),
+            )
+        )
+    return dict(
+        device=str(device),
+        cases=cases,
+        failures=[],
+        measured_allocator_or_quality_claim=False,
     )
 
 

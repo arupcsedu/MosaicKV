@@ -73,6 +73,7 @@ class StreamingComponentPrefill:
         target_bytes=None,
         mandatory=(0,),
         retirement_tracker=None,
+        packed_raw=False,
     ):
         import transformers
         from transformers.models.llama import modeling_llama
@@ -81,6 +82,9 @@ class StreamingComponentPrefill:
         self.workspace, self.positions, self.observer = workspace, positions, observer
         self.target_bytes, self.mandatory = target_bytes, mandatory
         self.retirement_tracker = retirement_tracker
+        if type(packed_raw) is not bool or (packed_raw and mode != "raw"):
+            raise ValueError("packed raw layout requires an explicit raw-only boolean")
+        self.packed_raw = packed_raw
         self.modules = tuple(layer.self_attn for layer in adapter._language_layers())
         length = prepared.logical_sequence_length
         if (
@@ -282,6 +286,7 @@ class StreamingComponentPrefill:
                 target_bytes=self.target_bytes,
                 workspace=self.workspace,
                 workspace_observer=self._constructor_observer,
+                **({"packed_layer": True} if self.packed_raw else {}),
             )
             del scores
         return packet, report
@@ -459,6 +464,7 @@ class StreamingComponentPrefill:
             ownership_events=self.events,
             excluded_noncache_activations="ordinary_native_projection_RoPE_attention_score_probability_output_activations_only;selection_copies_and_score_buffers_included",
             raw_score_gpu_window_retained=False,
+            packed_raw_layer_ownership=self.packed_raw,
             CPU_position_metadata_bytes=(
                 backing_bytes(
                     tuple(p for packet in self.packets for p in packet.original_positions)

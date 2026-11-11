@@ -27,6 +27,28 @@ def test_reuse_is_explicit_and_no_observations_or_scientific_gates_removed(proto
     assert protocol.POLICY["paper_campaign_authorized"] is False
 
 
+def test_packed_layout_is_explicit_without_changing_frozen_selection(protocol):
+    assert protocol.POLICY["id"].startswith("V33_")
+    assert protocol.POLICY["raw_packed_layer"] is True
+    assert protocol.POLICY["raw_layout_only_change"] is True
+    assert protocol.POLICY["raw_unfilled_packed_storage_charged_at_allocation"] is True
+    assert (
+        protocol.POLICY["raw_selection"] == "same_prompt_attention_and_mandatory_positions_as_V26"
+    )
+    assert protocol.POLICY["GPU_owner_observations_skipped"] is False
+    tree = ast.parse(Path(protocol.__file__).read_text())
+    calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)]
+    prefill = [
+        node for node in calls if isinstance(node.func, ast.Name) and node.func.id == "prefill"
+    ]
+    assert len(prefill) == 1
+    flag = next(kw.value for kw in prefill[0].keywords if kw.arg == "packed_raw")
+    assert isinstance(flag, ast.Compare)
+    assert isinstance(flag.left, ast.Name) and flag.left.id == "mode"
+    assert len(flag.ops) == 1 and isinstance(flag.ops[0], ast.Eq)
+    assert len(flag.comparators) == 1 and flag.comparators[0].value == "raw"
+
+
 def test_both_model_arms_use_identical_optional_resolver_policy(protocol):
     tree = ast.parse(Path(protocol.__file__).read_text())
     calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)]
