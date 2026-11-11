@@ -18,6 +18,26 @@ def test_hash_binding_rejects_changed_evidence(tmp_path):
         review.verify_bindings({str(path): "0" * 64})
 
 
+def test_v9_binding_resolves_scratch_path_alias(tmp_path):
+    physical = tmp_path / "physical"
+    alias = tmp_path / "alias"
+    alias.symlink_to(physical, target_is_directory=True)
+    norm = physical / "norm/GATE_shape_transport.json"
+    result = {"status": "passed_new_shape_transport"}
+    review.write_once(norm, result)
+    review.write_once(
+        physical / "FINAL_report.json",
+        {
+            "errors": {},
+            "artifacts": {str(norm): {"value": result, "sha256": review.sha(norm)}},
+        },
+    )
+    assert review.verified_norm_binding(alias) == {str(norm): review.sha(norm)}
+    norm.write_text("tampered")
+    with pytest.raises(ValueError, match="provenance incomplete"):
+        review.verified_norm_binding(alias)
+
+
 def test_missing_preparation_never_contacts_slurm(tmp_path, monkeypatch):
     monkeypatch.setattr(review, "load", lambda root: {})
     monkeypatch.setattr(review.shared, "gpu_snapshot", lambda: pytest.fail("queried Slurm"))

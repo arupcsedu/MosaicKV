@@ -51,20 +51,25 @@ def validate_root(root):
     return root
 
 
+def verified_norm_binding(v9_root):
+    v9 = shared.read(v9_root / "FINAL_report.json")
+    norm = str((v9_root / "norm/GATE_shape_transport.json").resolve(strict=True))
+    artifact = v9["artifacts"].get(norm, {})
+    if (
+        v9["errors"]
+        or artifact.get("value", {}).get("status") != "passed_new_shape_transport"
+        or sha(Path(norm)) != artifact.get("sha256")
+    ):
+        raise ValueError("V9 numerical gate or provenance incomplete")
+    return {norm: artifact["sha256"]}
+
+
 def prepare(root):
     """CPU execution only, with no scheduler access."""
     revision = clean_source(SOURCE)
     verify_bindings(BINDINGS)
     cpu = shared.cpu_gate(root, revision)
-    v9 = shared.read(V9 / "FINAL_report.json")
-    norm = str(V9 / "norm/GATE_shape_transport.json")
-    if (
-        v9["errors"]
-        or v9["artifacts"][norm]["value"]["status"] != "passed_new_shape_transport"
-        or sha(Path(norm)) != v9["artifacts"][norm]["sha256"]
-    ):
-        raise ValueError("V9 numerical gate or provenance incomplete")
-    bindings = {**BINDINGS, norm: sha(Path(norm)), str(MANUSCRIPT): sha(MANUSCRIPT)}
+    bindings = {**BINDINGS, **verified_norm_binding(V9), str(MANUSCRIPT): sha(MANUSCRIPT)}
     bindings.update(
         {
             str(SOURCE / f"mosaickv/scripts/{name}.py"): sha(SOURCE / f"mosaickv/scripts/{name}.py")
