@@ -1,5 +1,6 @@
 """Random/tiny-HF CPU transport fixtures; no pretrained or paper evidence."""
 
+import hashlib
 from types import SimpleNamespace
 
 import pytest
@@ -115,8 +116,90 @@ def test_padded_or_aliasing_persistent_views_are_not_valid_packets():
     logical = torch.tensor([0, 1, 2])
     with pytest.raises(ValueError, match="exact-size backing"):
         RaggedRawPacket(((data[:3], other[:3]),), (logical,), original_length=4, prompt_capacity=3)
-    with pytest.raises(ValueError, match=r"not padded views|must not alias"):
+    with pytest.raises(ValueError, match=r"not padded views|must not alias|disjoint exact-cover"):
         RaggedRawPacket(((data, data),), (torch.arange(4),), original_length=4, prompt_capacity=4)
+
+
+def test_joint_heads_cover_one_exact_owner_and_remove_odd_component_rounding():
+    adapter, pairs, scores = fixture(layers=1, heads=2)
+    packets, report = build_raw_packets(adapter, pairs, scores, 7 * 512, (6,))
+    packet = packets[0]
+    assert packet.prompt_lengths == (4, 3)
+    assert report["allocation_layout"] == "joint_KV_per_head_2ND_exact_cover"
+    assert report["raw_KV_allocation_owner_count"] == 2
+    assert report["constructor_KV_gather_temporary_allocations"] == 0
+    assert packet.allocation_layout == report["allocation_layout"]
+    for key, value in packet.pair_by_head:
+        owner = key.untyped_storage()
+        assert owner._cdata == value.untyped_storage()._cdata
+        assert key.storage_offset() == 0
+        assert value.storage_offset() == key.numel()
+        assert key.is_contiguous() and value.is_contiguous()
+        assert owner.nbytes() == 2 * key.numel() * key.element_size()
+        assert owner.nbytes() % 512 == 0
+    assert packet.component_bytes == 7 * 512
+
+
+def test_joint_packing_has_identical_semantic_word_sha_and_positions_to_legacy_gathers():
+    adapter, pairs, scores = fixture()
+    packets, report = build_raw_packets(adapter, pairs, scores, 20 * 512, (0, 6))
+    actual, expected = [], []
+    for layer, packet in enumerate(packets):
+        legacy_pairs = []
+        for head, positions in enumerate(packet.original_positions):
+            legacy = tuple(t[0, head].index_select(0, positions) for t in pairs[layer])
+            legacy_pairs.append(legacy)
+            actual.extend(packet.pair_by_head[head])
+            expected.extend(legacy)
+        legacy_packet = RaggedRawPacket(
+            legacy_pairs, packet.original_positions, original_length=7, prompt_capacity=4
+        )
+        assert legacy_packet.allocation_layout == "separate_K_and_V_legacy_exact_cover"
+        assert legacy_packet.component_bytes == packet.component_bytes
+
+    def words_sha(tensors):
+        return hashlib.sha256(
+            b"".join(t.view(torch.int16).numpy().tobytes() for t in tensors)
+        ).hexdigest()
+
+    assert words_sha(actual) == words_sha(expected)
+    assert (
+        report["position_map_sha256"]
+        == hashlib.sha256(
+            b"".join(p.numpy().tobytes() for packet in packets for p in packet.original_positions)
+        ).hexdigest()
+    )
+
+
+@pytest.mark.parametrize("case", ("overlap", "reversed", "unused_tail", "cross_head"))
+def test_joint_exact_cover_rejects_overlap_reversal_tail_and_cross_head_sharing(case):
+    owner = torch.zeros(2, 3, 128, dtype=torch.bfloat16)
+    pairs = ((owner[0], owner[1]),)
+    maps = (torch.arange(3),)
+    if case == "overlap":
+        pairs = ((owner[0], owner[0]),)
+    elif case == "reversed":
+        pairs = ((owner[1], owner[0]),)
+    elif case == "unused_tail":
+        owner = torch.zeros(2, 4, 128, dtype=torch.bfloat16)
+        pairs = ((owner[0, :3], owner[1, :3]),)
+    else:
+        pairs, maps = pairs * 2, maps * 2
+    with pytest.raises(ValueError, match=r"disjoint exact-cover|must not alias"):
+        RaggedRawPacket(pairs, maps, original_length=7, prompt_capacity=3)
+
+
+def test_joint_and_separate_exact_cover_heads_can_coexist_without_cross_head_aliases():
+    owner = torch.zeros(2, 3, 128, dtype=torch.bfloat16)
+    separate = tuple(torch.ones(3, 128, dtype=torch.bfloat16) for _ in range(2))
+    packet = RaggedRawPacket(
+        ((owner[0], owner[1]), separate),
+        (torch.arange(3),) * 2,
+        original_length=7,
+        prompt_capacity=3,
+    )
+    assert packet.allocation_layout == "mixed_exact_cover_heads"
+    assert packet.component_bytes == 6 * 512
 
 
 class TinyAdapter(HuggingFaceMultimodalAdapter):
@@ -234,8 +317,34 @@ def test_retention_one_native_transport_matches_ordinary_original_cache_decode()
     packets, _ = build_raw_packets(adapter, pairs, scores, full_bytes, (0,))
     positions = tuple(tuple(tuple(range(7)) for _ in range(2)) for _ in range(2))
     ordinary = build_raw_formats(adapter, pairs, positions, mandatory=(0,))
-    expected, _ = old_native(adapter, prefill, ordinary, tokens=8)
-    actual, report = run_native_same_selected(adapter, prefill, packets, tokens=8)
+    expected, _ = old_native(adapter, prefill, ordinary, tokens=128)
+    actual, report = run_native_same_selected(adapter, prefill, packets, tokens=128)
     assert torch.equal(expected, actual)
+    assert actual.shape == (128, 31)
     assert report["native_verifier_padding_excluded_from_candidate_measurements"] is True
     assert prefill.state.next_decode_position == 7
+
+
+def test_joint_and_legacy_ragged_owners_have_128_prediction_native_transport_parity():
+    adapter, prefill, pairs, scores = tiny_prefill()
+    packets, _ = build_raw_packets(adapter, pairs, scores, 9 * 512, (0,))
+    legacy = tuple(
+        RaggedRawPacket(
+            tuple(tuple(t.clone() for t in pair) for pair in packet.pair_by_head),
+            tuple(p.clone() for p in packet.original_positions),
+            original_length=packet.original_length,
+            prompt_capacity=packet.shape[-2],
+        )
+        for packet in packets
+    )
+    forced = (1,) * 128
+    expected, old_report = run_native_same_selected(adapter, prefill, legacy, forced=forced)
+    actual, report = run_native_same_selected(adapter, prefill, packets, forced=forced)
+    assert torch.equal(expected, actual)
+    assert actual.shape == (128, 31)
+    assert (
+        report["original_next_decode_position"]
+        == old_report["original_next_decode_position"]
+        == 134
+    )
+    assert sum(p.component_bytes for p in legacy) == sum(p.component_bytes for p in packets)

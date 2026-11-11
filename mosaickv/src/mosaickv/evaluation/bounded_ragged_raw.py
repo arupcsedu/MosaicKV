@@ -16,7 +16,12 @@ from mosaickv.evaluation.request_precision import ranked_positions
 
 
 class RaggedRawPacket:
-    """Private contiguous ND K/V owners per head; CPU logical-position maps."""
+    """Exact-cover K/V head owners; contiguous views and CPU position maps.
+
+    A joint owner is precisely [2, N, 128]: K and V cover disjoint halves with
+    offsets zero and N*128. Legacy separate owners remain admissible only when
+    each covers its complete allocation. No allocation may span two heads.
+    """
 
     def __init__(self, pairs, positions, *, original_length, prompt_capacity):
         pairs, positions = tuple(pairs), tuple(positions)
@@ -52,19 +57,50 @@ class RaggedRawPacket:
                 raise ValueError(
                     "exact contiguous BF16 N128 heads and sorted CPU positions required"
                 )
+        owner_intervals, layouts = [], []
+        for key, value in pairs:
+            owners = tuple(t.untyped_storage() for t in (key, value))
+            same_owner = owners[0]._cdata == owners[1]._cdata
+            component_elements = key.numel()
+            component_bytes = component_elements * key.element_size()
+            if same_owner:
+                if (
+                    key.storage_offset() != 0
+                    or value.storage_offset() != component_elements
+                    or owners[0].nbytes() != 2 * component_bytes
+                ):
+                    raise ValueError(
+                        "joint K/V views must be disjoint exact-cover [2,N,128] halves"
+                    )
+                layouts.append("joint_KV_per_head_2ND_exact_cover")
+                used = owners[:1]
+            else:
+                if any(
+                    t.storage_offset() != 0 or owner.nbytes() != component_bytes
+                    for t, owner in zip((key, value), owners, strict=True)
+                ):
+                    raise ValueError("per-head owners require exact-size backing, not padded views")
+                layouts.append("separate_K_and_V_legacy_exact_cover")
+                used = owners
+            # Address-range checks additionally reject overlapping independently
+            # wrapped storages; pointer/_cdata inequality alone is insufficient.
+            for owner in used:
+                start, stop = owner.data_ptr(), owner.data_ptr() + owner.nbytes()
+                if any(
+                    start < other_stop and other_start < stop
+                    for other_start, other_stop in owner_intervals
+                ):
+                    raise ValueError("K/V owners must not alias another component or head")
+                owner_intervals.append((start, stop))
         tensors = tuple(t for pair in pairs for t in pair)
         if backing_bytes(tensors) != sum(t.numel() * t.element_size() for t in tensors):
-            raise ValueError("per-head owners must be private exact-size backing, not padded views")
-        owners = {
-            (str(t.device), t.untyped_storage().data_ptr(), t.untyped_storage()._cdata)
-            for t in tensors
-        }
-        if len(owners) != len(tensors):
-            raise ValueError("K/V head owners must not alias one another")
+            raise ValueError("all backing bytes must be used by exactly one K/V component")
         self.pair_by_head, self.original_positions = pairs, positions
         self.prompt_lengths = tuple(pair[0].shape[0] for pair in pairs)
         self.original_length = original_length
         self.shape = (1, len(pairs), prompt_capacity, 128)
+        self.allocation_layout_per_head = tuple(layouts)
+        self.allocation_layout = layouts[0] if len(set(layouts)) == 1 else "mixed_exact_cover_heads"
 
     def tensors(self):
         return tuple(t for pair in self.pair_by_head for t in pair)
@@ -171,7 +207,14 @@ def build_raw_packets(adapter, pairs, attention_windows, target_bytes, mandatory
             logical = ranked_positions(scores[head : head + 1], count, mandatory)[0]
             host_positions = torch.tensor(logical, dtype=torch.int64, device="cpu")
             indices = host_positions.to(device)
-            retained = tuple(t[0, head].index_select(0, indices).contiguous() for t in original)
+            # A head's complete K+V payload is 512*N bytes, including odd N.
+            # One functional owner eliminates per-component allocator rounding
+            # without padding or changing any selection/value. The pinned Torch
+            # index_select(out=...) writes directly into both disjoint halves.
+            owner = torch.empty((2, count, dimension), device=device, dtype=torch.bfloat16)
+            retained = owner[0], owner[1]
+            for source, target in zip(original, retained, strict=True):
+                torch.index_select(source[0, head], 0, indices, out=target)
             per_head.append(retained)
             position_maps.append(host_positions)
         packets.append(
@@ -191,6 +234,10 @@ def build_raw_packets(adapter, pairs, attention_windows, target_bytes, mandatory
         functional_head_token_quantum=quantum,
         functional_head_tokens=total_rows,
         persistent_padding_bytes=0,
+        allocation_layout="joint_KV_per_head_2ND_exact_cover",
+        raw_KV_allocation_owner_count=layers * heads,
+        every_raw_owner_bytes_multiple_512=True,
+        constructor_KV_gather_temporary_allocations=0,
         no_unused_fill=True,
         original_KV_values_preserved=True,
         mandatory_positions=list(mandatory),

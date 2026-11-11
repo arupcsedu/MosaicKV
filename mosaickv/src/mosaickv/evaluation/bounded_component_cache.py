@@ -36,15 +36,37 @@ class ComponentLayer(BoundedNativeLayer):
 class ComponentCache(PromptStorageCache):
     _mosaickv_internal_padding_masks = True
 
-    def __init__(self, packets, *, updates=128, metadata=()):
+    def __init__(self, packets, *, updates=128, metadata=(), workspace=None, allocator_audit=False):
         from mosaickv.evaluation.bounded_component_attention import ComponentWorkspace
 
         super().__init__()
+        self.allocator_ledger = None
         self._mask_dispatch_active = False
         packets = tuple(packets)
         if not packets or any(p.shape[:2] != (1, 32) or p.shape[-1] != 128 for p in packets):
             raise ValueError("complete batch-one MHA32/128 source or ragged raw packets required")
-        self.workspace = ComponentWorkspace(device=packets[0].tensors()[0].device)
+        self.workspace = (
+            ComponentWorkspace(device=packets[0].tensors()[0].device)
+            if workspace is None
+            else workspace
+        )
+        if (
+            not isinstance(self.workspace, ComponentWorkspace)
+            or self.workspace.heads != 32
+            or self.workspace.head_dim != 128
+            or self.workspace.slots != 1024
+            or self.workspace.component.shape != (1024, 4096)
+            or self.workspace.head.shape != (1024, 128)
+            or any(
+                t.dtype != torch.bfloat16
+                or not t.is_contiguous()
+                or t.device != packets[0].tensors()[0].device
+                for t in self.workspace.owned_tensors()
+            )
+            or self.workspace.component.untyped_storage().data_ptr()
+            == self.workspace.head.untyped_storage().data_ptr()
+        ):
+            raise ValueError("same-device registered reusable component workspace required")
         self.shared_tensors = (
             *metadata,
             *self.workspace.owned_tensors(),
@@ -55,7 +77,35 @@ class ComponentCache(PromptStorageCache):
             ComponentLayer(p, owner=self, observe=self.observe, updates=updates) for p in packets
         )
         self.initial_bytes = self.shared_bytes
+        if type(allocator_audit) is not bool:
+            raise ValueError("explicit allocator audit boolean required")
+        if allocator_audit:
+            from mosaickv.evaluation.kv_allocator_ledger import AllocatorLedger
+
+            self.allocator_ledger = AllocatorLedger(device=packets[0].tensors()[0].device)
         self.observe()
+
+    def observe(self, extras=()):
+        super().observe(extras)
+        if self.allocator_ledger is not None:
+            owners = (
+                *self.shared_tensors,
+                *(t for layer in self.layers for t in layer.owned_tensors()),
+                *extras,
+            )
+            active = [(i, layer) for i, layer in enumerate(self.layers) if layer.incoming]
+            if len(active) > 1:
+                raise RuntimeError("concurrent cache updates are unsupported by this ledger")
+            if active:
+                index, layer = active[0]
+                update = layer.history_length + bool(extras)
+                action = "growth_overlap" if extras else "copied_history"
+                phase = f"decode_update_{update}_layer_{index}_{action}"
+            else:
+                phase = (
+                    "final_cache" if any(x.history_length for x in self.layers) else "initial_cache"
+                )
+            self.allocator_ledger.observe(owners, phase=phase)
 
     def storage_record(self):
         record = super().storage_record()
@@ -72,6 +122,9 @@ class ComponentCache(PromptStorageCache):
             outstanding_incoming_KV=sum(bool(layer.incoming) for layer in self.layers),
             construction_peak_certified=False,
             whole_request_peak_certified=False,
+            allocator_blocks=(
+                None if self.allocator_ledger is None else self.allocator_ledger.summary()
+            ),
         )
         return record
 
@@ -186,7 +239,17 @@ class ComponentTransport:
 
 
 @torch.inference_mode()
-def run(adapter, prefill, packets, *, tokens=128, forced=None):
+def run(
+    adapter,
+    prefill,
+    packets,
+    *,
+    tokens=128,
+    forced=None,
+    workspace=None,
+    positions=None,
+    allocator_audit=False,
+):
     import time
 
     from mosaickv.adapters.huggingface.types import DecodeState
@@ -194,10 +257,24 @@ def run(adapter, prefill, packets, *, tokens=128, forced=None):
     if not 2 <= tokens <= 128 or forced is None or len(forced) != tokens:
         raise ValueError("bounded complete FullKV-generated evaluation prefix required")
     original_position = prefill.state.next_decode_position
-    positions = torch.arange(
-        max(512, original_position * 2), dtype=torch.long, device=adapter.device
+    if positions is None:
+        positions = torch.arange(
+            max(512, original_position * 2), dtype=torch.long, device=adapter.device
+        )
+    if (
+        positions.dtype != torch.long
+        or positions.device != adapter.device
+        or positions.ndim != 1
+        or positions.numel() < original_position + tokens
+    ):
+        raise ValueError("same-device complete original logical-position buffer required")
+    cache = ComponentCache(
+        packets,
+        updates=tokens,
+        metadata=(positions,),
+        workspace=workspace,
+        allocator_audit=allocator_audit,
     )
-    cache = ComponentCache(packets, updates=tokens, metadata=(positions,))
     model_state = {
         k: v for k, v in prefill.state.model_state.items() if not k.startswith("mosaickv_decode_")
     }
