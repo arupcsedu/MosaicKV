@@ -109,10 +109,13 @@ class BoundedNativeLayer(PromptStorageLayer):
 
 
 class BoundedNativeCache(PromptStorageCache):
-    def __init__(self, packets, *, updates=128, slots=2048, metadata=()):
+    def __init__(self, packets, *, updates=128, slots=2048, metadata=(), dispatch="head_group"):
         from mosaickv.evaluation.bounded_native_attention import NativeHeadWorkspace
 
         super().__init__()
+        if dispatch not in ("head_group", "broadcast32"):
+            raise ValueError("explicit registered native dispatch required")
+        self.dispatch = dispatch
         packets = tuple(packets)
         if not packets or len({p.shape for p in packets}) != 1:
             raise ValueError("uniform physical prompt geometry required")
@@ -142,6 +145,7 @@ class BoundedNativeCache(PromptStorageCache):
             whole_request_peak_certified=False,
             full_layer_KV_materializations=0,
             workspace_bytes=self.workspace.backing_bytes,
+            native_dispatch=self.dispatch,
             attention_calls_per_layer=[layer.calls for layer in self.layers],
             outstanding_incoming_KV=sum(bool(layer.incoming) for layer in self.layers),
         )
@@ -158,7 +162,10 @@ class BoundedNativeTransport:
         import transformers
         from transformers.models.llama import modeling_llama
 
-        from mosaickv.evaluation.bounded_native_attention import attention
+        if self.cache.dispatch == "broadcast32":
+            from mosaickv.evaluation.bounded_native_attention_broadcast import attention
+        else:
+            from mosaickv.evaluation.bounded_native_attention import attention
 
         if transformers.__version__ != "4.55.2":
             raise NotImplementedError("pinned Transformers 4.55.2 required")
@@ -253,7 +260,7 @@ class BoundedNativeTransport:
 
 
 @torch.inference_mode()
-def run(adapter, prefill, packets, *, tokens=128, forced=None, slots=2048):
+def run(adapter, prefill, packets, *, tokens=128, forced=None, slots=2048, dispatch="head_group"):
     import time
 
     from mosaickv.adapters.huggingface.types import DecodeState
@@ -264,7 +271,9 @@ def run(adapter, prefill, packets, *, tokens=128, forced=None, slots=2048):
     positions = torch.arange(
         max(512, original_position * 2), dtype=torch.long, device=adapter.device
     )
-    cache = BoundedNativeCache(packets, updates=tokens, slots=slots, metadata=(positions,))
+    cache = BoundedNativeCache(
+        packets, updates=tokens, slots=slots, metadata=(positions,), dispatch=dispatch
+    )
     length = packets[0].shape[-2]
     model_state = dict(prefill.state.model_state)
     # Private all-valid transport has no physical-length mask allocation.

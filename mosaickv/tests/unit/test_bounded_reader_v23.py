@@ -17,9 +17,11 @@ def write(path, value):
 
 
 @pytest.fixture
-def cohort(tmp_path, monkeypatch):
+def cohort(tmp_path, monkeypatch, request):
     """Build complete, hashed two-worker outputs with real 128-by-5 tensors."""
     monkeypatch.setenv("ATEN_CPU_CAPABILITY", "avx2")
+    prior_threads = torch.get_num_threads()
+    request.addfinalizer(lambda: torch.set_num_threads(prior_threads))
     torch.set_num_threads(12)
     assert torch.backends.cpu.get_cpu_capability() == "AVX2"
     plan = dict(
