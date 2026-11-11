@@ -101,6 +101,22 @@ def prepare(root):
 
     revision = clean_source(SOURCE)
     _, jobs, bindings = fixed._bind_parent(fixed.DEFAULT_PARENT)
+    snapshot_capture = Path(
+        "/scratch/djy8hg/workdir/fox-review-v26-snapshot/run-20261111-1/capture"
+    )
+    diagnosis = read(snapshot_capture / "diagnosis.json")
+    if (
+        not diagnosis["arithmetic_pass"]
+        or not diagnosis["violations"]
+        or any(
+            v["state"] != "inactive" or v["intersects_required_owner"]
+            for v in diagnosis["violations"]
+        )
+    ):
+        raise ValueError("captured inactive-unowned metadata diagnosis required")
+    for name in ("diagnosis.json", "snapshot.json"):
+        path = snapshot_capture / name
+        bindings[str(path)] = sha(path)
     passed = Path("/scratch/djy8hg/workdir/fox-review-v25/run-20261111-3")
     gate = read(passed / "analysis/GATE_bounded_reader_v25.json")
     if (

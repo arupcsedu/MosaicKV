@@ -91,6 +91,38 @@ def test_cpu_tensor_owners_are_explicitly_unsupported():
     assert tensor_owners((torch.empty(0),), device=0) == ()
 
 
+def test_stale_unowned_inactive_requested_size_does_not_change_charged_bytes():
+    snapshot = segment()
+    snapshot["blocks"][2]["requested_size"] = 8192
+    record = resolve_snapshot([snapshot], [(4096, 128), (4608, 900)], device=0)
+    assert record["current_tensor_backing_bytes"] == 1028
+    assert record["current_allocator_block_bytes"] == 1536
+    assert record["current_allocator_requested_bytes"] == 1028
+    assert all(block["state"] == "active_allocated" for block in record["blocks"])
+
+
+def test_stale_inactive_block_cannot_satisfy_a_required_owner():
+    snapshot = segment()
+    snapshot["blocks"][2]["requested_size"] = 8192
+    with pytest.raises(ValueError, match="active_allocated"):
+        resolve_snapshot([snapshot], [(5632, 1)], device=0)
+
+
+@pytest.mark.parametrize("state", ["active_allocated", "active_awaiting_free"])
+def test_active_oversized_requested_size_remains_a_hard_failure(state):
+    snapshot = segment()
+    snapshot["blocks"][0].update(state=state, requested_size=8192)
+    with pytest.raises(ValueError, match="exceeds physical"):
+        resolve_snapshot([snapshot], [(4608, 900)], device=0)
+
+
+def test_inactive_physical_geometry_is_not_exempted():
+    snapshot = segment()
+    snapshot["blocks"][2].update(size=8192, requested_size=8192)
+    with pytest.raises(ValueError, match="outside"):
+        resolve_snapshot([snapshot], [(4096, 128)], device=0)
+
+
 def mocked_ledger(monkeypatch, *, max_records=2):
     """Synthetic allocator boundaries, never a real GPU certification."""
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)

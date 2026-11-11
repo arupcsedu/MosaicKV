@@ -72,7 +72,11 @@ def resolve_snapshot(
             cursor = address + size
             requested = block.get("requested_size", 0)
             requested = _integer(requested, name="block requested_size")
-            if requested > size:
+            # PyTorch 2.8 alloc_found_block shrinks a free split remainder
+            # without resetting its historical requested_size. That inactive
+            # metadata is not an allocation boundary; all physical geometry
+            # and every active block/required owner remain strictly validated.
+            if block.get("state") != "inactive" and requested > size:
                 raise ValueError("allocator requested_size exceeds physical block size")
             record = dict(
                 address=address,

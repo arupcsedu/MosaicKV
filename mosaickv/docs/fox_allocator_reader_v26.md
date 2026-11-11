@@ -1,5 +1,22 @@
 # V26: actual allocator blocks, not just tensor backing
 
+## Corrective snapshot-schema evidence
+
+No-weight A100 diagnostic22820834 at1cd25eb captured an inactive free block
+with size3,473,408bytes and historical requested_size8,388,608bytes. It
+intersected **none** of the required owners. Its full snapshot and required
+owner ranges are immutable under
+`/scratch/djy8hg/workdir/fox-review-v26-snapshot/run-20261111-1/capture/`.
+PyTorch2.8's [allocator source](https://raw.githubusercontent.com/pytorch/pytorch/v2.8.0/c10/cuda/CUDACachingAllocator.cpp)
+shrinks free remainders without resetting their historical request; snapshot
+exports that field even for inactive blocks. The parser therefore ignores only
+inactive blocks' stale requested-size upper bound. Physical address/size
+geometry remains strict, required inactive owners remain rejected, and active
+requested-size/range checks remain unchanged. Five regressions preserve those
+distinctions. Never clamp a live block or infer its allocated size.
+
+## Passed foundation
+
 V25 at26a33a6 passed128/128 and bitwise logits for both consumed inputs and
 all three registered controls, and constructed source/raw initial/final/decode
 peaks matched exactly in tensor-backing bytes. Preserve that successful result.
