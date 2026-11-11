@@ -42,7 +42,10 @@ POLICY = dict(
     worker_minutes=15,
     labels_accessed=False,
     whole_request_scope="published_KV_and_all_cache_required_storage_prefill_construction_decode",
-    excludes="weights,ordinary_projection_and_attention_activations,validation_booleans,opaque_vendor_workspace,allocator_reserved",
+    excludes="weights,ordinary_projection_and_attention_activations,opaque_vendor_workspace,allocator_reserved",
+    every_ownership_observation_device_synchronized=True,
+    native_allocator_generation_FREE_COMPLETED_required=True,
+    all_constructor_ATen_temporary_owners_audited=True,
     no_latency_or_superiority_claim=True,
     disabled_mechanisms=["forecast", "graph", "utility", "selector", "prototype", "repair"],
 )
@@ -109,6 +112,7 @@ def operator(root):
 
     from mosaickv.evaluation.bounded_component_attention import selftest
     from mosaickv.evaluation.bounded_word_equality import selftest as word_selftest
+    from mosaickv.evaluation.native_retirement_receipts import selftest as retirement_selftest
 
     plan = validate(root)
     out = Path(root) / "operator"
@@ -121,11 +125,14 @@ def operator(root):
         torch.manual_seed(13)
         report["attention"] = selftest(device="cuda")
         report["words"] = word_selftest(device="cuda")
+        report["retirement"] = retirement_selftest(device="cuda")
         if (
             report["attention"]["all_bitwise_passed"] is not True
             or report["words"]["all_passed"] is not True
         ):
             raise ValueError("native arithmetic or bounded-word comparison failed")
+        if report["retirement"]["all_passed"] is not True:
+            raise ValueError("native allocator retirement generation proof failed")
     except BaseException as exc:
         errors.append(dict(error=str(exc), traceback=traceback.format_exc()))
     write_once(
@@ -154,6 +161,7 @@ def worker(root, index):
     from mosaickv.evaluation.bounded_component_cache import run as decode
     from mosaickv.evaluation.exact_selected_control import mandatory_positions
     from mosaickv.evaluation.kv_allocator_ledger import verify_ownership_deltas
+    from mosaickv.evaluation.native_retirement_receipts import CUDAFreeCompletedTracker
     from mosaickv.evaluation.streaming_component_prefill import run as prefill
     from mosaickv.evaluation.whole_request_kv_ledger import WholeRequestKVLedger
     from mosaickv.hf_cli import _model_kwargs
@@ -234,16 +242,18 @@ def worker(root, index):
         ledger.observe((*workspace.owned_tensors(), positions), "request_workspace_created")
         n = prepared.logical_sequence_length
         target = n * (len(adapter._language_layers()) * 32 * 128 * 2 + 2 * 128 * 2)
-        initial, packets, lifecycle = prefill(
-            adapter,
-            prepared,
-            mode=mode,
-            workspace=workspace,
-            positions=positions,
-            observer=ledger.observe,
-            target_bytes=target if mode == "raw" else None,
-            mandatory=mandatory_positions(prepared, n),
-        )
+        with CUDAFreeCompletedTracker(device=adapter.device) as retirement_tracker:
+            initial, packets, lifecycle = prefill(
+                adapter,
+                prepared,
+                mode=mode,
+                workspace=workspace,
+                positions=positions,
+                observer=ledger.observe,
+                target_bytes=target if mode == "raw" else None,
+                mandatory=mandatory_positions(prepared, n),
+                retirement_tracker=retirement_tracker,
+            )
         write_once(out / "prefill-lifecycle.json", lifecycle)
         if mode == "raw":
             frozen_selection = read(

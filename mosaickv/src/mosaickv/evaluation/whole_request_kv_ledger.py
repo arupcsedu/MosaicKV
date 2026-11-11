@@ -1,8 +1,8 @@
 """Published KV ownership across streaming prefill, construction and decoding.
 
 This is a KV-only accounting boundary, NOT whole-request GPU memory. Model
-weights, ordinary attention/projection activations and validation booleans are
-excluded explicitly. Every cache-required source, metadata, reconstruction
+weights and ordinary attention/projection activations are excluded explicitly.
+Constructor validation tensors are audited too. Every source, metadata, reconstruction
 pool, retained raw owner, history growth overlap and borrowed decode K/V is
 included from publication/creation to retirement. Certification requires both
 the replayable actual allocator ledger and the producer's lifecycle evidence.
@@ -11,6 +11,8 @@ the replayable actual allocator ledger and the producer's lifecycle evidence.
 from __future__ import annotations
 
 from collections import Counter
+
+import torch
 
 from mosaickv.evaluation.kv_allocator_ledger import AllocatorLedger, verify_ownership_deltas
 
@@ -34,6 +36,7 @@ class WholeRequestKVLedger:
             raise RuntimeError("whole-request ownership ledger already closed")
         if not isinstance(phase, str) or not phase or len(phase) > 250:
             raise ValueError("bounded explicit lifecycle phase required")
+        torch.cuda.synchronize(self.ledger.device)
         self.ledger.observe(tuple(tensors), phase=phase)
         self.phases.append(phase)
 
@@ -116,11 +119,38 @@ class WholeRequestKVLedger:
             or evidence.get("uses_original_fullkv_snapshot") is not False
             or evidence.get("original_logical_positions_preserved") is not True
             or evidence.get("constructor_workspace_shared_with_decode") is not True
+            or evidence.get("native_CUDA_free_completed_verified") is not True
+            or evidence.get("constructor_temporaries_audited") is not True
         ):
             raise ValueError("native owner retirement or explicit lifecycle coverage incomplete")
         for key in ("benchmark_labels_read", "fallback_used"):
             if evidence.get(key) is not False:
                 raise ValueError("labels or fallback invalidate whole-request certification")
+        from mosaickv.evaluation.native_retirement_receipts import verify_receipts
+
+        verify_receipts(evidence.get("native_retirement_receipts"), expected_layers=self.layers)
+        if evidence.get("constructor_audit_layers") != list(range(self.layers)):
+            raise ValueError("every layer constructor requires temporary-owner auditing")
+        packet_reports = evidence.get("packets")
+        if not isinstance(packet_reports, list) or len(packet_reports) != self.layers:
+            raise ValueError("complete per-layer constructor reports required")
+        for layer, report in enumerate(packet_reports):
+            operations = report.get("constructor_audit_operations")
+            publication = self.phases.index(f"prefill_layer_{layer}_KV_published")
+            construction = self.phases.index(f"prefill_layer_{layer}_packet_constructed")
+            constructor_events = [
+                i
+                for i, phase in enumerate(self.phases)
+                if phase == f"prefill_layer_{layer}_constructor_workspace"
+            ]
+            if any(not publication < i < construction for i in constructor_events):
+                raise ValueError("constructor ownership phase order violates layer transaction")
+            if (
+                type(operations) is not int
+                or operations < 1
+                or counts[f"prefill_layer_{layer}_constructor_workspace"] < operations
+            ):
+                raise ValueError("constructor operation/ownership coverage incomplete")
         summary = self.ledger.summary()
         if summary["all_required_owners_resolved"] is not True:
             raise ValueError("unresolved actual allocator owners")
@@ -149,8 +179,9 @@ class WholeRequestKVLedger:
             ],
             final_tensor_backing_bytes=summary["final_tensor_backing_bytes"],
             peak_tensor_backing_bytes=summary["peak_tensor_backing_bytes"],
-            includes="published_native_KV,source_captures,phases,retained_raw_KV,cache_metadata,constructor_and_reader_pools,history,incoming_KV,growth_overlap",
-            excludes="weights,ordinary_model_projection_and_attention_activations,validation_booleans,opaque_vendor_workspace,allocator_reserved",
+            includes="published_native_KV,source_captures,phases,retained_raw_KV,cache_metadata,constructor_and_reader_pools,constructor_ATen_temporaries,history,incoming_KV,growth_overlap",
+            excludes="weights,ordinary_model_projection_and_attention_activations,opaque_vendor_workspace,allocator_reserved",
+            every_ownership_observation_device_synchronized=True,
             evidence=evidence,
             allocator=summary,
             replay=replay,

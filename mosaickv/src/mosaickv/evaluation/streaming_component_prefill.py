@@ -137,6 +137,7 @@ class StreamingComponentPrefill:
         self.active_layer = None
         self.construction_extras = ()
         self.invoked = False
+        self.constructor_audits = []
 
     def current_owned_tensors(self):
         """Complete strong owners at this observation; returned only transiently."""
@@ -229,15 +230,7 @@ class StreamingComponentPrefill:
         finally:
             self.construction_extras = ()
 
-    def _after(self, module, args, output, *, index):
-        del args
-        if index != self.active_layer or index not in self.updated or index in self.finished:
-            raise RuntimeError("native prompt update must precede one post-attention conversion")
-        self._observe(f"prefill_layer_{index}_native_attention_complete")
-        native = self.cache.layers[index]
-        pair = native.keys, native.values
-        if any(t is None for t in pair):
-            raise RuntimeError("complete current native K/V pair required before conversion")
+    def _make_packet(self, module, pair, output, *, index):
         if self.mode == "source":
             from mosaickv.evaluation.bounded_component_source import construct
 
@@ -291,6 +284,61 @@ class StreamingComponentPrefill:
                 workspace_observer=self._constructor_observer,
             )
             del scores
+        return packet, report
+
+    def _after(self, module, args, output, *, index):
+        from mosaickv.evaluation.projection_cache import ScratchAudit, identity
+
+        del args
+        if index != self.active_layer or index not in self.updated or index in self.finished:
+            raise RuntimeError("native prompt update must precede one post-attention conversion")
+        self._observe(f"prefill_layer_{index}_native_attention_complete")
+        native = self.cache.layers[index]
+        pair = native.keys, native.values
+        if any(t is None for t in pair):
+            raise RuntimeError("complete current native K/V pair required before conversion")
+        excluded = {identity(t) for t in self.adapter.model.parameters()}
+        excluded.update(identity(t) for t in self.current_owned_tensors())
+        # Native eager output/probability owners already belong to the ordinary
+        # model invocation. Slicing/detaching them does not create cache storage.
+        # Actual cloned scoring windows and their FP32 reductions are new owners
+        # and remain visible to ScratchAudit and the explicit selection events.
+        excluded.update(identity(t) for t in output if isinstance(t, torch.Tensor))
+        peak_extra_bytes, observed_dtypes = 0, set()
+
+        def observe_constructor_results(tensors):
+            nonlocal peak_extra_bytes
+            tensors = tuple(t for t in tensors if t.device == self.workspace.component.device)
+            peak_extra_bytes = max(peak_extra_bytes, backing_bytes(tensors))
+            observed_dtypes.update(str(t.dtype) for t in tensors)
+            self._constructor_observer(tensors)
+
+        audit = ScratchAudit(excluded=excluded, observe=observe_constructor_results)
+        before_events = len(self.events)
+        with audit:
+            packet, report = self._make_packet(module, pair, output, index=index)
+        constructor_observations = sum(
+            row["phase"] == f"prefill_layer_{index}_constructor_workspace"
+            for row in self.events[before_events:]
+        )
+        if constructor_observations < audit.operations:
+            raise RuntimeError("constructor ATen results lack complete ownership observations")
+        self.constructor_audits.append(
+            dict(
+                layer=index,
+                operations=audit.operations,
+                observations=constructor_observations,
+                peak_extra_tensor_backing_bytes=peak_extra_bytes,
+                observed_same_device_dtypes=sorted(observed_dtypes),
+                weak_results_only=True,
+                includes_validation_booleans_indices_views_and_constructor_outputs=True,
+                excludes_existing_owner_aliases_and_model_weights=True,
+                excludes_ordinary_native_attention_output_aliases=True,
+                opaque_vendor_internal_workspace_not_visible_to_ATen=True,
+            )
+        )
+        report["constructor_audit_operations"] = audit.operations
+        report["constructor_audit_observations"] = constructor_observations
         self.packets.append(packet)
         self.packet_reports.append(report)
         self._observe(f"prefill_layer_{index}_packet_constructed")
@@ -402,6 +450,12 @@ class StreamingComponentPrefill:
             source_workspace_reused=True,
             prompt_packet_bytes=backing_bytes(tuple(t for p in self.packets for t in p.tensors())),
             packets=self.packet_reports,
+            constructor_temporaries_audited=(
+                len(self.constructor_audits) == layers
+                and all(row["operations"] > 0 for row in self.constructor_audits)
+            ),
+            constructor_audits=self.constructor_audits,
+            constructor_audit_layers=[row["layer"] for row in self.constructor_audits],
             ownership_events=self.events,
             excluded_noncache_activations="ordinary_native_projection_RoPE_attention_score_probability_output_activations_only;selection_copies_and_score_buffers_included",
             raw_score_gpu_window_retained=False,

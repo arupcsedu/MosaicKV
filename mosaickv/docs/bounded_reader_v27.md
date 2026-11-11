@@ -23,6 +23,11 @@ attention returns, construct its source or selected-raw packet and retire its
 native K/V owners. Never retain an all-layer original cache or copied snapshot.
 Weak references include tensor view bases: dropping a view alone is not a
 retirement proof. The raw selection must hash-identically match V26.
+CUDA retirement additionally requires the actual allocator allocation
+generation's `FREE_REQUESTED` and `FREE_COMPLETED` events after capture.
+An alias, a reused address, weak-reference death, or a free request alone
+cannot satisfy this check. A bounded native memory-history trace fails closed
+on truncation; sealed receipts are independently replayed on CPU.
 
 Source construction reuses the same full-width component pool and one-head
 scratch as decoding. It must reconstruct every original BF16 word with zero
@@ -41,9 +46,13 @@ Each actual ownership event resolves strong tensor owners against the native
 CUDA allocator snapshot. Complete ownership deltas are independently replayed
 on CPU; lifecycle validation additionally requires every layer's publication,
 construction and retirement and every one of the 127 decode updates.
+Every ownership observation is device-synchronized. A per-ATen constructor
+audit also charges finite-check predicates, selection intermediates, index
+buffers and any other live constructor outputs. These instrumented timings
+are not a performance benchmark.
 
 This is **published cache-owned KV storage**, not total GPU memory. Model
-weights, ordinary projection/RoPE/attention activations, validation booleans,
+weights, ordinary projection/RoPE/attention activations,
 opaque vendor workspace and allocator-reserved free memory are explicitly
 outside this KV boundary. The allocator-wide GPU peak is a different metric;
 the protocol does not certify it by relabeling the KV ledger.

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
 from pathlib import Path
@@ -28,6 +29,38 @@ def test_scope_is_consumed_inputs_only_and_no_superiority_claim(protocol):
     assert protocol.POLICY["maximum_A100s"] == 6
     assert protocol.POLICY["model_workers"] == 4
     assert len(protocol.POLICY["disabled_mechanisms"]) == 6
+
+
+def test_gpu_worker_wires_real_retirement_tracker_before_private_prefill(protocol):
+    tree = ast.parse(Path(protocol.__file__).read_text())
+    worker = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "worker"
+    )
+    calls = [node for node in ast.walk(worker) if isinstance(node, ast.Call)]
+    prefill = next(
+        node for node in calls if isinstance(node.func, ast.Name) and node.func.id == "prefill"
+    )
+    keywords = {item.arg: item.value for item in prefill.keywords}
+    assert isinstance(keywords["retirement_tracker"], ast.Name)
+    assert keywords["retirement_tracker"].id == "retirement_tracker"
+    assert any(
+        isinstance(node, ast.With)
+        and any(
+            isinstance(item.context_expr, ast.Call)
+            and isinstance(item.context_expr.func, ast.Name)
+            and item.context_expr.func.id == "CUDAFreeCompletedTracker"
+            and isinstance(item.optional_vars, ast.Name)
+            and item.optional_vars.id == "retirement_tracker"
+            for item in node.items
+        )
+        for node in ast.walk(worker)
+    )
+
+
+def test_retirement_proof_is_required_not_an_optional_diagnostic(protocol):
+    assert protocol.POLICY["native_allocator_generation_FREE_COMPLETED_required"] is True
+    assert protocol.POLICY["all_constructor_ATen_temporary_owners_audited"] is True
+    assert protocol.POLICY["every_ownership_observation_device_synchronized"] is True
 
 
 def test_submission_resources_and_finite_afterany_receipt(protocol, monkeypatch, tmp_path):

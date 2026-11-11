@@ -32,6 +32,7 @@ def synthetic_ledger(monkeypatch):
     monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
     monkeypatch.setattr(torch.cuda.memory, "get_allocator_backend", lambda: "native")
     monkeypatch.setattr(torch.cuda, "memory_snapshot", _snapshot)
+    monkeypatch.setattr(torch.cuda, "synchronize", lambda device=None: None)
     monkeypatch.setattr(allocator, "tensor_owners", lambda tensors, *, device: tuple(tensors))
     policy = "backend:native,expandable_segments:True"
     monkeypatch.setenv("PYTORCH_ALLOC_CONF", policy)
@@ -50,6 +51,8 @@ def synthetic_ledger(monkeypatch):
 
 
 def _evidence():
+    from test_native_retirement_receipts import synthetic_receipts
+
     return dict(
         native_layers_retired=2,
         maximum_live_native_cache_layers=1,
@@ -58,6 +61,11 @@ def _evidence():
         uses_original_fullkv_snapshot=False,
         original_logical_positions_preserved=True,
         constructor_workspace_shared_with_decode=True,
+        native_CUDA_free_completed_verified=True,
+        native_retirement_receipts=synthetic_receipts(),
+        constructor_temporaries_audited=True,
+        constructor_audit_layers=[0, 1],
+        packets=[dict(constructor_audit_operations=1), dict(constructor_audit_operations=1)],
         benchmark_labels_read=False,
         fallback_used=False,
     )
@@ -70,7 +78,12 @@ def _phases(*, source=True):
             phases.append(f"prefill_layer_{layer}_source_captured")
         phases.extend(
             f"prefill_layer_{layer}_{name}"
-            for name in ("KV_published", "packet_constructed", "native_retired")
+            for name in (
+                "KV_published",
+                "constructor_workspace",
+                "packet_constructed",
+                "native_retired",
+            )
         )
     return [
         *phases,

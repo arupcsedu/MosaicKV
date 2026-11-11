@@ -115,6 +115,16 @@ def test_streaming_source_preserves_real_native_prefill_and_retires_all_views():
     assert report["constructor_workspace_shared_with_decode"] is True
     assert report["benchmark_labels_read"] is False
     assert report["fallback_used"] is False
+    assert report["constructor_temporaries_audited"] is True
+    assert report["constructor_audit_layers"] == [0, 1, 2]
+    assert all(row["constructor_audit_operations"] > 0 for row in report["packets"])
+    assert all(
+        row["constructor_audit_observations"] >= row["constructor_audit_operations"]
+        for row in report["packets"]
+    )
+    assert all(
+        "torch.bool" in row["observed_same_device_dtypes"] for row in report["constructor_audits"]
+    )
     assert all(layer.keys is layer.values is None for layer in prefill.state.past_key_values.layers)
     assert prefill.state.logical_sequence_length == prefill.state.next_decode_position == 7
     assert len(packets) == 3
@@ -157,6 +167,8 @@ def test_streaming_raw_matches_frozen_all_layer_positions_values_and_prefill_log
     assert torch.equal(expected[:, -1], prefill.logits)
     assert report["native_layers_retired"] == 3
     assert report["raw_score_gpu_window_retained"] is False
+    assert report["constructor_temporaries_audited"] is True
+    assert report["constructor_audit_layers"] == [0, 1, 2]
     assert report["prompt_packet_bytes"] == old_report["actual_raw_KV_bytes"] == target
     assert report["raw_position_map_sha256"] == old_report["position_map_sha256"]
     for new, old in zip(packets, reference, strict=True):
@@ -169,6 +181,46 @@ def test_streaming_raw_matches_frozen_all_layer_positions_values_and_prefill_log
             torch.equal(a.view(torch.int16), b.view(torch.int16))
             for a, b in zip(new.tensors(), old.tensors(), strict=True)
         )
+
+
+def test_constructor_audit_excludes_original_probability_alias_but_charges_real_clone():
+    from mosaickv.evaluation.projection_cache import identity
+
+    adapter, prepared, workspace, positions = fixture()
+    ordinary_ids, clone_ids, forbidden_seen = set(), set(), []
+    handles = []
+    for layer in adapter._language_layers():
+
+        def ordinary(module, args, output):
+            ordinary_ids.add(identity(output[1]))
+
+        handles.append(layer.self_attn.register_forward_hook(ordinary))
+
+    def observe(tensors, phase):
+        if phase.endswith(("constructor_workspace", "selection_window")):
+            current = {identity(t) for t in tensors}
+            forbidden_seen.extend(current & ordinary_ids)
+            clone_ids.update(identity(t) for t in tensors if t.shape == (1, 2, 7, 7))
+
+    try:
+        run(
+            adapter,
+            prepared,
+            mode="raw",
+            workspace=workspace,
+            positions=positions,
+            target_bytes=21 * 512,
+            mandatory=(0, 6),
+            observer=observe,
+        )
+    finally:
+        for handle in handles:
+            handle.remove()
+    assert ordinary_ids
+    assert clone_ids
+    assert not forbidden_seen
+    # Only contemporaneous alias exclusions matter; a CPU allocator can reuse
+    # a dead earlier layer's address for a genuinely new clone in a later layer.
 
 
 def test_raw_method_specific_selection_buffers_are_charged_before_they_are_released():
