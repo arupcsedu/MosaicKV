@@ -308,7 +308,62 @@ def prove(row, roots, deadline, source_cache=None):
     )
 
 
-def prepare(root, *, cpu_gate_root, parent, parent_gate_filename=None):
+def import_previous(paths, parent, bindings, candidates):
+    """Reuse proven and terminal-attempted outcomes; never retry unchanged failures."""
+    proved, terminal, parent_bindings = {}, {}, dict(bindings)
+    for previous in paths:
+        previous = Path(previous).resolve(strict=True)
+        gate_path = previous / "GATE_derived_artifact_proofs.json"
+        gate, old = read(gate_path), read(previous / "plan.json")
+        if (
+            Path(old["parent"]).resolve() != parent
+            or old["reviewed_source_templates"] != TEMPLATES
+            or gate["source_sha"] != old["source_sha"]
+            or any(old["bindings"].get(name) != value for name, value in parent_bindings.items())
+        ):
+            raise ValueError("previous proof pass has different historical inputs/source policy")
+        overlay_path = previous / "coverage_overlay.json"
+        overlay = read(overlay_path, gate["coverage_overlay_sha256"])
+        for path in (gate_path, previous / "plan.json", overlay_path):
+            bindings[str(path)] = sha(path)
+        imported_terminal = overlay.get("terminal_unresolved", [])
+        for name, expected in gate["worker_bindings"].items():
+            result = read(name, expected)
+            if result["source_sha"] != old["source_sha"]:
+                raise ValueError("previous proof worker source differs")
+            bindings[name] = expected
+            imported_terminal.extend(result["blocked"])
+        for proof in overlay["proofs"]:
+            row = candidates.get(proof["path"])
+            if (
+                row is None
+                or row["signature"] != proof["signature"]
+                or row["original_error_sha256s"] != proof["original_error_sha256s"]
+                or proof["source_proof"]["reviewed_AST_sha256s"] != TEMPLATES
+                or proof["whole_file_sha256_before"] != proof["whole_file_sha256_after"]
+            ):
+                raise ValueError("previous artifact proof differs from original candidate")
+            if proof["path"] in terminal or (
+                proof["path"] in proved and digest(proved[proof["path"]]) != digest(proof)
+            ):
+                raise ValueError("conflicting previous artifact outcomes")
+            proved[proof["path"]] = proof
+            for name, expected in proof["bindings"].items():
+                read_bytes(name, bound=8 * 2**20, expected=expected)
+                bindings[name] = expected
+        for failure in imported_terminal:
+            row = failure["row"]
+            if (
+                row != candidates.get(row["path"])
+                or row["path"] in proved
+                or (row["path"] in terminal and terminal[row["path"]] != failure)
+            ):
+                raise ValueError("previous terminal failure conflicts with original candidate")
+            terminal[row["path"]] = failure
+    return list(proved.values()), list(terminal.values())
+
+
+def prepare(root, *, cpu_gate_root, parent, parent_gate_filename=None, previous=()):
     root, parent = Path(root).resolve(), Path(parent).resolve(strict=True)
     if root.exists() or not root.is_relative_to(Path("/scratch/djy8hg").resolve()):
         raise ValueError("new write-once scratch proof root required")
@@ -344,8 +399,8 @@ def prepare(root, *, cpu_gate_root, parent, parent_gate_filename=None):
             errors.append(error)
             if error.get("error") == PARQUET_ERROR and Path(error["path"]).name in NAMES:
                 grouped[error["path"]].append(digest(error))
-    if sorted(indices) != list(range(SHARDS)) or len(grouped) > MAX_FILES:
-        raise ValueError("incomplete states or finite artifact queue bound exceeded")
+    if sorted(indices) != list(range(SHARDS)) or len(grouped) > 10000:
+        raise ValueError("incomplete states or finite saved-metadata inventory bound exceeded")
     queue, seen = [], set()
     for name, original in sorted(grouped.items()):
         try:
@@ -365,6 +420,13 @@ def prepare(root, *, cpu_gate_root, parent, parent_gate_filename=None):
                 index=int(hashlib.sha256(str(path).encode()).hexdigest(), 16) % SHARDS,
             )
         )
+    all_candidates = {row["path"]: row for row in queue}
+    if len(all_candidates) != len(queue):
+        raise ValueError("ambiguous canonical artifact aliases")
+    imported, terminal = import_previous(previous, parent, bound, all_candidates)
+    attempted = {row["path"] for row in imported} | {row["row"]["path"] for row in terminal}
+    remaining = [row for row in queue if row["path"] not in attempted]
+    queue, deferred = remaining[:MAX_FILES], remaining[MAX_FILES:]
     write_once(root / "original_errors.json", errors)
     plan = dict(
         source_sha=revision,
@@ -375,6 +437,10 @@ def prepare(root, *, cpu_gate_root, parent, parent_gate_filename=None):
         bindings=bound,
         roots=roots,
         queue=queue,
+        deferred=deferred,
+        imported_proofs=imported,
+        imported_terminal_unresolved=terminal,
+        candidate_files=len(all_candidates),
         shard_count=SHARDS,
         seconds_per_worker=SECONDS,
         maximum_worker_bytes=MAX_WORKER_BYTES,
@@ -390,6 +456,9 @@ def prepare(root, *, cpu_gate_root, parent, parent_gate_filename=None):
     return dict(
         status="prepared_finite_derived_proof_queue",
         files=len(queue),
+        deferred_files=len(deferred),
+        imported_proofs=len(imported),
+        imported_terminal_unresolved=len(terminal),
         plan_sha256=sha(root / "plan.json"),
     )
 
@@ -465,7 +534,9 @@ def analyze(root):
     expected = {row["path"]: row for row in plan["queue"]}
     if len(expected) != len(plan["queue"]):
         raise ValueError("ambiguous canonical candidate aliases")
-    proofs, blocked, pending, missing, bindings = [], [], [], [], {}
+    proofs = list(plan.get("imported_proofs", []))
+    blocked = list(plan.get("imported_terminal_unresolved", []))
+    pending, missing, bindings = [], [], {}
     for index in range(SHARDS):
         path = root / "workers" / f"shard-{index}.json"
         if not path.exists():
@@ -512,6 +583,7 @@ def analyze(root):
         root / "coverage_overlay.json",
         dict(
             proofs=proofs,
+            terminal_unresolved=blocked,
             original_errors_preserved=True,
             original_errors_sha256=plan["original_errors_sha256"],
             worker_bindings=bindings,
@@ -519,11 +591,22 @@ def analyze(root):
         ),
     )
     report = dict(
-        status="derived_proof_queue_complete"
-        if not (missing or blocked or pending)
-        else "derived_proof_queue_incomplete",
+        status=(
+            "derived_proof_queue_incomplete"
+            if missing or pending or plan.get("deferred")
+            else "derived_evidence_queue_exhausted_with_unresolved"
+            if blocked
+            else "derived_proof_queue_complete"
+        ),
         source_sha=plan["source_sha"],
-        candidate_files=len(expected),
+        candidate_files=plan.get("candidate_files", len(expected)),
+        attempted_this_pass=len(expected)
+        - len(pending)
+        - sum(row["index"] in missing for row in plan["queue"]),
+        deferred_files=len(plan.get("deferred", [])),
+        unattempted_files=len(plan.get("deferred", []))
+        + len(pending)
+        + sum(row["index"] in missing for row in plan["queue"]),
         proved_files=len(proofs),
         resolved_original_error_hashes=len(
             {value for proof in proofs for value in proof["original_error_sha256s"]}
@@ -553,6 +636,7 @@ if __name__ == "__main__":
     parser.add_argument("--parent-gate-filename")
     parser.add_argument("--cpu-gate-root", type=Path)
     parser.add_argument("--index", type=int)
+    parser.add_argument("--previous", type=Path, action="append", default=[])
     args = parser.parse_args()
     if args.mode == "prepare":
         result = prepare(
@@ -560,6 +644,7 @@ if __name__ == "__main__":
             cpu_gate_root=args.cpu_gate_root,
             parent=args.parent,
             parent_gate_filename=args.parent_gate_filename,
+            previous=args.previous,
         )
     elif args.mode == "worker":
         result = worker(args.root, args.index)

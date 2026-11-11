@@ -367,3 +367,89 @@ def test_unacknowledged_scheduler_request_cannot_be_hidden_by_prepare_failure(
     )
     gate = completion.advance(root, 0)
     assert not gate["completed"] and "Unacknowledged" in gate["error"]
+
+
+def ownership_wrapper(campaign):
+    folder = campaign / "ownership"
+    trace = folder / "worker/allocator_trace_pre_attribution.json.gz"
+    trace.parent.mkdir(parents=True)
+    trace.write_bytes(b"synthetic complete trace bytes; not a real GPU trace")
+    protocol = dict(
+        source_sha=completion.PARENT_SHA, policy={"observer_variant": completion.OWNERSHIP_WRAPPER}
+    )
+    write_once(folder / "protocol.json", protocol)
+    inner = dict(
+        source_sha=completion.PARENT_SHA,
+        status="negative scientific result preserved",
+        source_whole_request_KV_peak_certified=False,
+    )
+    write_once(folder / "GATE_source_ownership_closure.json", inner)
+    receipt = dict(
+        source_sha=completion.PARENT_SHA,
+        observer_variant=completion.OWNERSHIP_WRAPPER,
+        protocol_sha256=completion.sha(folder / "protocol.json"),
+        trace_path=str(trace),
+        trace_sha256=completion.sha(trace),
+    )
+    write_once(folder / "worker/trace_pre_attribution_receipt.json", receipt)
+    outer = dict(
+        observer_variant=completion.OWNERSHIP_WRAPPER,
+        parent_gate_sha256=completion.sha(folder / "GATE_source_ownership_closure.json"),
+        trace_first_receipt_sha256=completion.sha(
+            folder / "worker/trace_pre_attribution_receipt.json"
+        ),
+        raw_trace_saved_before_attribution=True,
+        exact_interval_predicate_unchanged=True,
+        source_whole_request_KV_peak_certified=False,
+        whole_device_memory_certified=False,
+        source_gate=inner,
+        fresh_confirmation_authorized=False,
+        superiority_established=False,
+    )
+    write_once(folder / completion.STATIC["ownership"], outer)
+    return folder, outer
+
+
+def test_only_exact_pinned_ownership_wrapper_has_nested_provenance(tmp_path):
+    folder, outer = ownership_wrapper(tmp_path)
+    proof = completion.static_gate_provenance(tmp_path, "ownership")
+    assert proof["source_sha"] == completion.PARENT_SHA
+    assert proof["kind"] == "exact_versioned_ownership_wrapper"
+    assert proof["gate_outcome_not_promoted"]
+    assert len(proof["bindings"]) == 5
+    assert completion.read(folder / completion.STATIC["ownership"]) == outer
+    (folder / "worker/allocator_trace_pre_attribution.json.gz").write_bytes(b"changed")
+    with pytest.raises(ValueError, match="trace-first"):
+        completion.static_gate_provenance(tmp_path, "ownership")
+
+
+@pytest.mark.parametrize(
+    "mutation", ["variant", "inner_source", "extra_top_source", "credible_top_conflict", "receipt"]
+)
+def test_wrapper_mismatch_cannot_be_waived_by_a_nested_sha(tmp_path, mutation):
+    import json
+
+    folder, outer = ownership_wrapper(tmp_path)
+    if mutation == "variant":
+        outer["observer_variant"] = "unreviewed_other_wrapper"
+    elif mutation == "inner_source":
+        outer["source_gate"]["source_sha"] = "foreign"
+    elif mutation == "extra_top_source":
+        outer["source_sha"] = "foreign"
+    elif mutation == "credible_top_conflict":
+        outer["source_sha"] = completion.PARENT_SHA
+        outer["source_gate"]["source_sha"] = "foreign"
+    else:
+        outer["trace_first_receipt_sha256"] = "0" * 64
+    (folder / completion.STATIC["ownership"]).write_text(json.dumps(outer))
+    with pytest.raises(ValueError):
+        completion.static_gate_provenance(tmp_path, "ownership")
+
+
+def test_nested_producer_fallback_not_enabled_for_other_methods(tmp_path):
+    write_once(
+        tmp_path / "lookm" / completion.STATIC["lookm"],
+        dict(source_gate={"source_sha": completion.PARENT_SHA}),
+    )
+    with pytest.raises(ValueError, match="differently produced"):
+        completion.static_gate_provenance(tmp_path, "lookm")

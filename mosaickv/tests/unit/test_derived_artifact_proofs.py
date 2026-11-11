@@ -344,3 +344,83 @@ def test_arbitrary_footer_metadata_cannot_hide_identity(chain):
     rebind(chain)
     with pytest.raises(ValueError, match="unexpected diagnostic footer metadata"):
         proof(chain)
+
+
+def test_finite_queue_slices_and_imported_proofs_do_not_repeat_work(
+    prepared, tmp_path, monkeypatch
+):
+    _old, parent, _errors = prepared
+    monkeypatch.setattr(audit, "MAX_FILES", 1)
+    first, second = tmp_path / "pass-one", tmp_path / "pass-two"
+    outcome = audit.prepare(first, cpu_gate_root=tmp_path, parent=parent)
+    assert outcome["files"] == 1 and outcome["deferred_files"] == 1
+    first_queue = audit.load(first)["queue"]
+    for index in range(8):
+        audit.worker(first, index)
+    gate = audit.analyze(first)
+    assert gate["unattempted_files"] == 1 and gate["proved_files"] == 1
+    outcome = audit.prepare(second, cpu_gate_root=tmp_path, parent=parent, previous=(first,))
+    assert outcome["files"] == 1 and outcome["imported_proofs"] == 1
+    assert audit.load(second)["queue"][0]["path"] != first_queue[0]["path"]
+    for index in range(8):
+        audit.worker(second, index)
+    final = audit.analyze(second)
+    assert final["candidate_files"] == 2 and final["proved_files"] == 2
+    assert final["status"] == "derived_proof_queue_complete" and final["unattempted_files"] == 0
+
+
+def test_terminal_unsupported_attempt_is_preserved_not_retried(prepared, tmp_path, monkeypatch):
+    _old, parent, _errors = prepared
+    monkeypatch.setattr(audit, "MAX_FILES", 1)
+    first, second = tmp_path / "first-terminal", tmp_path / "remaining"
+    audit.prepare(first, cpu_gate_root=tmp_path, parent=parent)
+    original = audit.prove
+
+    def unsupported(*args):
+        raise ValueError("unsupported unchanged writer")
+
+    monkeypatch.setattr(audit, "prove", unsupported)
+    for index in range(8):
+        audit.worker(first, index)
+    gate = audit.analyze(first)
+    assert gate["blocked_files"] == 1 and gate["unattempted_files"] == 1
+    failed = audit.load(first)["queue"][0]["path"]
+    monkeypatch.setattr(audit, "prove", original)
+    outcome = audit.prepare(second, cpu_gate_root=tmp_path, parent=parent, previous=(first,))
+    assert outcome["imported_terminal_unresolved"] == 1
+    assert audit.load(second)["queue"][0]["path"] != failed
+    for index in range(8):
+        audit.worker(second, index)
+    final = audit.analyze(second)
+    assert final["status"] == "derived_evidence_queue_exhausted_with_unresolved"
+    assert final["unattempted_files"] == 0 and final["blocked_files"] == 1
+    assert not final["complete_historical_identity_coverage"]
+
+
+def test_timeout_pending_is_retryable_but_mutated_previous_overlay_is_not(
+    prepared, tmp_path, monkeypatch
+):
+    _old, parent, _errors = prepared
+    first = tmp_path / "deadline-pass"
+    audit.prepare(first, cpu_gate_root=tmp_path, parent=parent)
+    original = audit.prove
+
+    def pause(*args):
+        raise TimeoutError()
+
+    monkeypatch.setattr(audit, "prove", pause)
+    for index in range(8):
+        audit.worker(first, index)
+    assert audit.analyze(first)["unattempted_files"] == 2
+    monkeypatch.setattr(audit, "prove", original)
+    second = tmp_path / "retry-pending"
+    assert (
+        audit.prepare(second, cpu_gate_root=tmp_path, parent=parent, previous=(first,))["files"]
+        == 2
+    )
+    overlay = first / "coverage_overlay.json"
+    overlay.write_bytes(overlay.read_bytes() + b" ")
+    with pytest.raises(ValueError, match="hash changed"):
+        audit.prepare(
+            tmp_path / "must-block", cpu_gate_root=tmp_path, parent=parent, previous=(first,)
+        )

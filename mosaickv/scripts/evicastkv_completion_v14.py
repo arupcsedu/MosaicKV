@@ -65,6 +65,7 @@ STATIC = {
     "ownership": "GATE_source_ownership_v12.json",
     "providers": "GATE_historical_provider_superset.json",
 }
+OWNERSHIP_WRAPPER = "source_owner_trace_first_indexed_generation_v13_lossless_metadata_DAG"
 
 
 class DependencyResolutionError(ValueError):
@@ -201,6 +202,80 @@ def static_errors(campaign, lane):
                 raise ValueError("Recorded static-lane failure has invalid provenance shape")
             result.append(dict(path=str(path), sha256=sha(path), evidence=value))
     return result
+
+
+def static_gate_provenance(campaign, lane):
+    """Only the exact pinned ownership wrapper has a nested producer SHA.
+
+    Its inner gate, original protocol and trace-first receipt must independently
+    agree. This recognizes provenance, not numerical success or certification.
+    No other method gains a generic nested-source fallback.
+    """
+    path = campaign / lane / STATIC[lane]
+    gate = read(path)
+    wrapped_ownership = lane == "ownership" and (
+        "observer_variant" in gate or "source_gate" in gate
+    )
+    if gate.get("source_sha") == PARENT_SHA and not wrapped_ownership:
+        return dict(
+            source_sha=PARENT_SHA, kind="direct_producer_sha", bindings={str(path): sha(path)}
+        )
+    expected = {
+        "observer_variant",
+        "parent_gate_sha256",
+        "trace_first_receipt_sha256",
+        "raw_trace_saved_before_attribution",
+        "exact_interval_predicate_unchanged",
+        "source_whole_request_KV_peak_certified",
+        "whole_device_memory_certified",
+        "source_gate",
+        "fresh_confirmation_authorized",
+        "superiority_established",
+    }
+    if (
+        lane != "ownership"
+        or set(gate) != expected
+        or gate.get("observer_variant") != OWNERSHIP_WRAPPER
+        or gate.get("raw_trace_saved_before_attribution") is not True
+        or gate.get("exact_interval_predicate_unchanged") is not True
+        or any(
+            gate.get(key) is not False
+            for key in (
+                "source_whole_request_KV_peak_certified",
+                "whole_device_memory_certified",
+                "fresh_confirmation_authorized",
+                "superiority_established",
+            )
+        )
+    ):
+        raise ValueError("Missing or differently produced static lane gate")
+    folder = campaign / lane
+    innerpath = folder / "GATE_source_ownership_closure.json"
+    receiptpath = folder / "worker/trace_pre_attribution_receipt.json"
+    protocolpath = folder / "protocol.json"
+    inner, receipt, protocol = read(innerpath), read(receiptpath), read(protocolpath)
+    if (
+        gate["source_gate"] != inner
+        or gate["parent_gate_sha256"] != sha(innerpath)
+        or gate["trace_first_receipt_sha256"] != sha(receiptpath)
+        or any(value.get("source_sha") != PARENT_SHA for value in (inner, receipt, protocol))
+        or receipt.get("observer_variant") != OWNERSHIP_WRAPPER
+        or protocol.get("policy", {}).get("observer_variant") != OWNERSHIP_WRAPPER
+        or receipt.get("protocol_sha256") != sha(protocolpath)
+    ):
+        raise ValueError("Ownership wrapper inner gate/protocol/receipt provenance differs")
+    trace = folder / "worker/allocator_trace_pre_attribution.json.gz"
+    if Path(receipt["trace_path"]).resolve() != trace.resolve() or receipt["trace_sha256"] != sha(
+        trace
+    ):
+        raise ValueError("Ownership wrapper trace-first artifact binding differs")
+    paths = (path, innerpath, receiptpath, protocolpath, trace)
+    return dict(
+        source_sha=PARENT_SHA,
+        kind="exact_versioned_ownership_wrapper",
+        bindings={str(item): sha(item) for item in paths},
+        gate_outcome_not_promoted=True,
+    )
 
 
 def frontier(campaign, source):
@@ -377,6 +452,8 @@ def verify_report(campaign):
             or entry["evidence"] != read(path)
         ):
             raise ValueError("Parent report gate reference/hash/evidence differs")
+        if lane in STATIC:
+            static_gate_provenance(campaign, lane)
     actual_errors = {
         str(path.resolve()): sha(path) for path in (campaign / "errors").glob("*.json")
     }
@@ -526,15 +603,14 @@ def advance(root, hop=0):
         for path, expected in history.get("bindings", {}).items():
             if sha(Path(path)) != expected:
                 raise ValueError("History terminal evidence changed")
+        source_proofs = {}
         for lane, name in STATIC.items():
             path = campaign / lane / name
             if not path.is_file():
                 if not static_errors(campaign, lane):
                     raise ValueError("Unexplained missing static-lane gate")
                 continue
-            gate = read(path)
-            if gate.get("source_sha") != PARENT_SHA:
-                raise ValueError("Missing or differently produced static lane gate")
+            source_proofs[lane] = static_gate_provenance(campaign, lane)
         existing = (campaign / "FINAL_report.json").exists()
         report = verify_report(campaign) if existing else invoke_finish(root, campaign, source)
         gate = dict(
@@ -549,6 +625,7 @@ def advance(root, hop=0):
             original_history_submission_failures=original_failures,
             completed_with_recorded_static_failures=bool(recorded_failures),
             recorded_static_failures=recorded_failures,
+            static_gate_source_proofs=source_proofs,
             accounting_receipt=dict(
                 path=str(event / "dependency-resolution.json"),
                 sha256=sha(event / "dependency-resolution.json"),
