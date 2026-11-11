@@ -16,6 +16,10 @@ def put(path, value):
 
 @pytest.fixture
 def fixture(tmp_path, monkeypatch):
+    # Mocked scheduler fixtures must not inherit the real CPU test allocation.
+    # Individual current-callback tests install their own explicit identities.
+    monkeypatch.delenv("SLURM_JOB_ID", raising=False)
+    monkeypatch.delenv("SLURM_ARRAY_TASK_ID", raising=False)
     root, recovery, old_root = (
         tmp_path / "closure",
         tmp_path / "recovered",
