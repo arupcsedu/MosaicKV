@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 from collections.abc import Mapping
 
 import torch
@@ -51,6 +52,53 @@ def _hash_field(value, name):
     ):
         raise ValueError(f"{name} requires an explicit SHA-256")
     return value
+
+
+def trace_prefix_failure_evidence(previous, current, *, capacity, error, snapshot_sha256):
+    """Preserve both untouched raw CPU histories; do not normalize any field.
+
+    This is failure capture, not an alternative acceptance rule. Every event
+    and every differing field survives in the diagnostic for adjudication.
+    """
+    previous = json.loads(json.dumps(list(previous), allow_nan=False))
+    current = json.loads(json.dumps(list(current), allow_nan=False))
+    differences = []
+    for index, (before, after) in enumerate(zip(previous, current, strict=False)):
+        if before != after:
+            if isinstance(before, Mapping) and isinstance(after, Mapping):
+                keys = set(before) | set(after)
+                mismatch = sorted(
+                    key
+                    for key in keys
+                    if key not in before or key not in after or before[key] != after[key]
+                )
+                added, removed = sorted(set(after) - set(before)), sorted(set(before) - set(after))
+            else:
+                mismatch, added, removed = ["__event_type_or_value__"], [], []
+            differences.append(
+                dict(index=index, mismatch_keys=mismatch, added_keys=added, removed_keys=removed)
+            )
+    first_index = differences[0]["index"] if differences else None
+    return dict(
+        schema="native_allocator_strict_prefix_failure_diagnostic_v1",
+        acceptance_rule_unchanged=True,
+        source_history_fields_unmodified=True,
+        error=str(error),
+        registered_capacity=capacity,
+        previous_count=len(previous),
+        current_count=len(current),
+        previous_raw_sha256=_sha(previous),
+        current_raw_sha256=_sha(current),
+        current_snapshot_sha256=snapshot_sha256,
+        first_difference_index=first_index,
+        first_previous_event=None if first_index is None else previous[first_index],
+        first_current_event=None if first_index is None else current[first_index],
+        mismatches=differences,
+        all_mismatch_keys=sorted({key for row in differences for key in row["mismatch_keys"]}),
+        raw_previous_events=previous,
+        raw_current_events=current,
+        whole_request_KV_peak_certified=False,
+    )
 
 
 def validate_trace_prefix(previous, current, *, capacity):
@@ -333,6 +381,7 @@ class CUDAFreeCompletedTracker:
             raise ValueError("bounded history capacity cannot exceed one million events")
         self.events, self.tokens, self.receipts = [], [], []
         self._token_hashes = {}
+        self.failure_evidence = None
         self.started = self.closed = self.failed = False
         self.original_history_enabled = None
 
@@ -344,7 +393,18 @@ class CUDAFreeCompletedTracker:
         if not isinstance(traces, list) or self.index >= len(traces):
             raise RuntimeError("native snapshot did not return the declared device trace")
         current = traces[self.index]
-        validate_trace_prefix(self.events, current, capacity=self.capacity)
+        try:
+            validate_trace_prefix(self.events, current, capacity=self.capacity)
+        except BaseException as exc:
+            if self.failure_evidence is None:
+                self.failure_evidence = trace_prefix_failure_evidence(
+                    self.events,
+                    current,
+                    capacity=self.capacity,
+                    error=exc,
+                    snapshot_sha256=_sha(snapshot),
+                )
+            raise
         self.events = [dict(event) for event in current]
         return snapshot
 
@@ -500,4 +560,58 @@ def selftest(*, device="cuda"):
         history=result,
         no_model_weights_loaded=True,
         whole_request_KV_peak_certified=False,
+    )
+
+
+def trace_clock_diagnostic(*, device="cuda"):
+    """A bounded no-weight timing/re-snapshot diagnostic; no field is stripped.
+
+    Fifty observations, one thousand temporary allocations, and native BF16
+    matrix multiplication span approximately two seconds so a recalibrated
+    snapshot clock has an opportunity to expose itself. A strict-prefix
+    rejection returns the preserved evidence rather than claiming a pass.
+    """
+    target = torch.device(device)
+    started = time.monotonic()
+    tracker = CUDAFreeCompletedTracker(device=target, max_entries=20_000)
+    iterations = allocations = 0
+    failure = None
+    try:
+        with tracker:
+            left = torch.ones((256, 256), dtype=torch.bfloat16, device=target)
+            right = torch.ones_like(left)
+            output = torch.empty_like(left)
+            for _ in range(50):
+                temporary = [
+                    torch.empty(1024 + index, dtype=torch.uint8, device=target)
+                    for index in range(20)
+                ]
+                allocations += len(temporary)
+                torch.mm(left, right, out=output)
+                torch.cuda.synchronize(tracker.index)
+                del temporary
+                time.sleep(0.04)
+                tracker._read()
+                iterations += 1
+            del left, right, output
+    except BaseException as exc:
+        failure = dict(error_type=type(exc).__name__, error=str(exc))
+    return dict(
+        schema="native_snapshot_clock_strict_prefix_diagnostic_v1",
+        torch_version=torch.__version__,
+        torch_git_version=torch.version.git_version,
+        strict_prefix_passed=failure is None,
+        acceptance_rule_unchanged=True,
+        iterations_completed=iterations,
+        temporary_allocations_created=allocations,
+        registered_maximum_iterations=50,
+        registered_maximum_temporary_allocations=1000,
+        wall_seconds=time.monotonic() - started,
+        failure=failure,
+        failure_evidence=tracker.failure_evidence,
+        observed_trace_count=len(tracker.events),
+        history_restored_disabled=not torch._C._cuda_isHistoryEnabled(),
+        no_model_weights_loaded=True,
+        whole_request_KV_peak_certified=False,
+        paper_campaign_authorized=False,
     )

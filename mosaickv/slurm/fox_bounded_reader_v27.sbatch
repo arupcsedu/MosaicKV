@@ -28,7 +28,7 @@ if [[ "$MODE" == worker ]]; then
   exec /scratch/djy8hg/env/mosaickv/bin/python mosaickv/scripts/evicastkv_bounded_reader_v27.py \
     "$MODE" --root "$RUN_ROOT" --index "$SLURM_ARRAY_TASK_ID"
 fi
-if [[ "$MODE" != operator ]]; then
+if [[ "$MODE" != operator && "$MODE" != clock_probe ]]; then
   export CUDA_VISIBLE_DEVICES=""
 fi
 exec /scratch/djy8hg/env/mosaickv/bin/python mosaickv/scripts/evicastkv_bounded_reader_v27.py "$MODE" --root "$RUN_ROOT"

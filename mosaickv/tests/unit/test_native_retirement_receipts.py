@@ -376,3 +376,81 @@ def test_tracker_rejects_trace_rollover_even_if_target_free_is_visible(fake_hist
 def test_tracker_capacity_is_bounded_strict_integer(bound):
     with pytest.raises(ValueError):
         module.CUDAFreeCompletedTracker(device="cuda:0", max_entries=bound)
+
+
+def test_prefix_failure_evidence_preserves_every_raw_field_and_mismatching_key():
+    previous = [dict(event("alloc"), time_us=100), dict(event("snapshot"), time_us=120)]
+    current = deepcopy(previous)
+    current[0]["time_us"] = 101
+    current[1]["size"] = 11
+    current[1]["new_optional_field"] = "untouched"
+    captured = module.trace_prefix_failure_evidence(
+        previous,
+        current,
+        capacity=200_000,
+        error=ValueError("strict actual prefix changed"),
+        snapshot_sha256="f" * 64,
+    )
+    assert captured["acceptance_rule_unchanged"] is True
+    assert captured["source_history_fields_unmodified"] is True
+    assert captured["raw_previous_events"] == previous
+    assert captured["raw_current_events"] == current
+    assert captured["all_mismatch_keys"] == ["new_optional_field", "size", "time_us"]
+    assert captured["first_difference_index"] == 0
+    assert captured["first_previous_event"]["time_us"] == 100
+    assert captured["first_current_event"]["time_us"] == 101
+    assert captured["mismatches"][1]["added_keys"] == ["new_optional_field"]
+    current[0]["time_us"] = 999
+    assert captured["raw_current_events"][0]["time_us"] == 101
+    assert captured["whole_request_KV_peak_certified"] is False
+
+
+def test_clock_field_prefix_failure_is_captured_without_relaxing_rejection(fake_history):
+    tracker = module.CUDAFreeCompletedTracker(device="cuda:0")
+    with pytest.raises(ValueError, match="prefix"), tracker:
+        fake_history.events[0]["time_us"] = 1234
+        tracker._read()
+    assert fake_history.enabled is False
+    captured = tracker.failure_evidence
+    assert captured["all_mismatch_keys"] == ["time_us"]
+    assert captured["raw_current_events"][0]["time_us"] == 1234
+    assert "time_us" not in captured["raw_previous_events"][0]
+    assert len(captured["current_snapshot_sha256"]) == 64
+    with pytest.raises(RuntimeError, match="successful"):
+        tracker.summary()
+
+
+def test_first_failed_read_keeps_complete_evidence_across_context_cleanup(fake_history):
+    tracker = module.CUDAFreeCompletedTracker(device="cuda:0")
+    with pytest.raises(ValueError, match="prefix"), tracker:
+        fake_history.events[0]["time_us"] = 100
+        with pytest.raises(ValueError, match="prefix"):
+            tracker._read()
+        first_evidence = tracker.failure_evidence
+        fake_history.events[0]["time_us"] = 200
+        tracker._read()
+    assert tracker.failure_evidence is first_evidence
+    assert tracker.failure_evidence["raw_current_events"][0]["time_us"] == 100
+    assert tracker.closed is True
+
+
+def test_bounded_clock_diagnostic_reports_raw_failure_instead_of_claiming_pass(
+    fake_history, monkeypatch
+):
+    monkeypatch.setattr(module.torch, "ones", lambda *args, **kwargs: object())
+    monkeypatch.setattr(module.torch, "ones_like", lambda *args, **kwargs: object())
+    monkeypatch.setattr(module.torch, "empty_like", lambda *args, **kwargs: object())
+    monkeypatch.setattr(module.torch, "mm", lambda *args, **kwargs: None)
+
+    def clock_changes_during_work(_seconds):
+        fake_history.events[0]["time_us"] = 42
+
+    monkeypatch.setattr(module.time, "sleep", clock_changes_during_work)
+    report = module.trace_clock_diagnostic(device="cuda:0")
+    assert report["strict_prefix_passed"] is False
+    assert report["acceptance_rule_unchanged"] is True
+    assert report["temporary_allocations_created"] == 20
+    assert report["iterations_completed"] == 0
+    assert report["history_restored_disabled"] is True
+    assert report["failure_evidence"]["all_mismatch_keys"] == ["time_us"]
+    assert report["failure_evidence"]["raw_current_events"][0]["time_us"] == 42

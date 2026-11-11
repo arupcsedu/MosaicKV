@@ -46,6 +46,7 @@ POLICY = dict(
     every_ownership_observation_device_synchronized=True,
     native_allocator_generation_FREE_COMPLETED_required=True,
     all_constructor_ATen_temporary_owners_audited=True,
+    bounded_allocator_trace_clock_diagnostic=True,
     no_latency_or_superiority_claim=True,
     disabled_mechanisms=["forecast", "graph", "utility", "selector", "prototype", "repair"],
 )
@@ -142,6 +143,30 @@ def operator(root):
             plan_sha256=sha(Path(root) / "plan.json"),
             report=report,
             failures=errors,
+            SLURM_JOB_ID=os.environ.get("SLURM_JOB_ID"),
+        ),
+    )
+
+
+def clock_probe(root):
+    """One metadata diagnostic; no model loading, GPU inference or promotion."""
+    import torch
+
+    from mosaickv.evaluation.native_retirement_receipts import trace_clock_diagnostic
+
+    plan = validate(root)
+    if torch.cuda.device_count() != 1 or "A100" not in torch.cuda.get_device_name():
+        raise ValueError("one A100 metadata diagnostic required")
+    report = trace_clock_diagnostic(device="cuda")
+    write_once(
+        Path(root) / "trace-clock/result.json",
+        dict(
+            source_sha=plan["source_sha"],
+            plan_sha256=sha(Path(root) / "plan.json"),
+            report=report,
+            model_weights_loaded=False,
+            model_workers_authorized=False,
+            measurement_type="native_allocator_metadata_failure_diagnostic",
             SLURM_JOB_ID=os.environ.get("SLURM_JOB_ID"),
         ),
     )
@@ -549,7 +574,8 @@ def launch(root):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "mode", choices=("prepare", "operator", "worker", "analyze", "dispatch", "launch")
+        "mode",
+        choices=("prepare", "operator", "worker", "analyze", "dispatch", "launch", "clock_probe"),
     )
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--index", type=int)
