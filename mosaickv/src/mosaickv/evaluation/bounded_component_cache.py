@@ -143,7 +143,9 @@ class ComponentTransport:
                 length=layer.get_seq_length(),
                 scaling=scaling,
                 attention_mask=attention_mask,
-                prompt_lengths=getattr(layer.packet, "prompt_lengths", None),
+                prompt_lengths=getattr(
+                    layer.packet, "prompt_lengths", (layer.prompt_length,) * layer.prompt_shape[1]
+                ),
                 prompt_max_length=layer.prompt_length,
             )
             layer.calls += 1

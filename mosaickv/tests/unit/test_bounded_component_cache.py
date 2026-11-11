@@ -34,6 +34,11 @@ class SourceFixture:
     def tensors(self):
         return self.source, *self.phases
 
+    def fill_component(self, _attention, _component, target, **_kwargs):
+        # The real full-source packet also deliberately has no ragged lengths.
+        # Zero-weight model tests isolate that transport contract from GEMM.
+        target.zero_()
+
 
 def ragged_packet(length=3, *, fail=False):
     heads, positions = [], []
@@ -178,10 +183,13 @@ def adapter_for(model):
     )
 
 
-def test_internal_padding_scope_native_dispatch_and_other_requests_remain_unchanged(zero_model):
+@pytest.mark.parametrize("packet_kind", ["ragged", "full_source"])
+def test_internal_padding_scope_native_dispatch_and_other_requests_remain_unchanged(
+    zero_model, packet_kind
+):
     model = zero_model
     adapter = adapter_for(model)
-    packet = ragged_packet(3)
+    packet = ragged_packet(3) if packet_kind == "ragged" else SourceFixture(3)
     before = tuple(t.clone() for t in packet.tensors())
     cache = ComponentCache((packet,), updates=16)
     eager_before = modeling_llama.eager_attention_forward
