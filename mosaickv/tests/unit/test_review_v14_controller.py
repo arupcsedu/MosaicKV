@@ -9,6 +9,10 @@ from mosaickv.evaluation.fox_campaign import write_once
 
 @pytest.fixture
 def ready(tmp_path, monkeypatch):
+    # Synthetic scheduler tests must not inherit their real CPU test job.
+    # Tests that exercise a current callback set their own explicit job ID.
+    monkeypatch.delenv("SLURM_JOB_ID", raising=False)
+    monkeypatch.delenv("SLURM_ARRAY_TASK_ID", raising=False)
     monkeypatch.setattr(control, "load", lambda root: {"source_sha": "test"})
     return tmp_path
 
