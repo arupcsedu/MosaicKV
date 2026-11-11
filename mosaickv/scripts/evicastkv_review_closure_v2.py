@@ -563,9 +563,11 @@ def prefix_summary(root):
     write_once(root / "prefix-summary.json", record)
 
 
-def cpu_suite(root, *, timeout_seconds=540):
+def cpu_suite(root, *, timeout_seconds=540, capture_mode="fd"):
     if type(timeout_seconds) is not int or not 540 <= timeout_seconds <= 1800:
         raise ValueError("bounded complete CPU-suite timeout must be 540..1800 seconds")
+    if type(capture_mode) is not str or capture_mode not in ("fd", "sys"):
+        raise ValueError("CPU capture mode must be fd (legacy default) or sys")
     root.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ, HF_HUB_OFFLINE="1", HF_DATASETS_OFFLINE="1")
     command = [
@@ -578,6 +580,12 @@ def cpu_suite(root, *, timeout_seconds=540):
         f"cache_dir={os.environ['MOSAICKV_CACHE_ROOT']}/pytest-fox-closure-full",
         f"--junitxml={root}/cpu-tests.xml",
     ]
+    # Keep the historical default command byte-for-byte unchanged. The
+    # explicitly registered infrastructure retry replaces only global pytest
+    # capture's repeated shared-filesystem seek/read/truncate operations.
+    # Native stdout remains retained by the outer immutable CPU log.
+    if capture_mode == "sys":
+        command.append("--capture=sys")
     with (root / "cpu-tests.log").open("x") as stream:
         try:
             run = subprocess.run(
@@ -599,6 +607,7 @@ def cpu_suite(root, *, timeout_seconds=540):
                     returncode="timeout",
                     command=command,
                     timeout_seconds=timeout_seconds,
+                    capture_mode=capture_mode,
                     all_tests_completed=False,
                     models_or_data_downloaded=False,
                     log_sha256=sha(root / "cpu-tests.log"),
@@ -618,6 +627,7 @@ def cpu_suite(root, *, timeout_seconds=540):
             returncode=run.returncode,
             command=command,
             timeout_seconds=timeout_seconds,
+            capture_mode=capture_mode,
             models_or_data_downloaded=False,
             log_sha256=sha(root / "cpu-tests.log"),
             junit_sha256=sha(root / "cpu-tests.xml"),
@@ -724,6 +734,7 @@ if __name__ == "__main__":
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--parent", type=Path)
     parser.add_argument("--cpu-timeout-seconds", type=int, default=540)
+    parser.add_argument("--cpu-capture-mode", choices=("fd", "sys"), default="fd")
     args = parser.parse_args()
     if not args.root.resolve().is_relative_to(Path("/scratch/djy8hg").resolve()):
         parser.error("scratch-only output")
@@ -738,7 +749,14 @@ if __name__ == "__main__":
         elif args.mode == "submit":
             submit(args.root)
         elif args.mode == "tests":
-            cpu_suite(args.root, timeout_seconds=args.cpu_timeout_seconds)
+            if args.cpu_capture_mode == "fd":
+                cpu_suite(args.root, timeout_seconds=args.cpu_timeout_seconds)
+            else:
+                cpu_suite(
+                    args.root,
+                    timeout_seconds=args.cpu_timeout_seconds,
+                    capture_mode=args.cpu_capture_mode,
+                )
         elif args.mode == "reuse":
             if args.parent is None:
                 parser.error("reuse requires --parent")

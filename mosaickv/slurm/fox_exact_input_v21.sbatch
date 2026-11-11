@@ -51,8 +51,10 @@ root, revision = Path(sys.argv[1]), sys.argv[2]
 target = root / "focused-cpu"
 target.mkdir(exist_ok=False)
 command = [sys.executable, "-m", "pytest", "-q",
+           "--capture=sys",
            "mosaickv/tests/unit/test_exact_input_replacement.py",
            "mosaickv/tests/unit/test_exact_input_v21.py",
+           "mosaickv/tests/unit/test_cpu_capture_control.py",
            "-o", f"cache_dir={os.environ['MOSAICKV_CACHE_ROOT']}/pytest-fox-v21-focused",
            f"--junitxml={target}/cpu-tests.xml"]
 with (target / "cpu-tests.log").open("x") as stream:
@@ -64,6 +66,7 @@ with (target / "cpu-tests.log").open("x") as stream:
         code = "timeout"
 record = dict(source_sha=revision, command=command, returncode=code,
               status="passed" if code == 0 else "failed", timeout_seconds=300,
+              capture_mode="sys", capture_infrastructure_only=True,
               log_sha256=hashlib.sha256((target / "cpu-tests.log").read_bytes()).hexdigest())
 with (target / "cpu-tests.json").open("x") as stream:
     json.dump(record, stream, indent=2, sort_keys=True)
@@ -72,7 +75,7 @@ if code != 0:
     raise SystemExit("focused V21 regressions failed; empirical work remains blocked")
 PY
     exec "$PYTHON" mosaickv/scripts/evicastkv_review_closure_v2.py tests \
-      --root "$RUN_ROOT/full-cpu" --cpu-timeout-seconds 1200
+      --root "$RUN_ROOT/full-cpu" --cpu-timeout-seconds 1200 --cpu-capture-mode sys
     ;;
   prepare)
     # An afterany dependency always reaches this callback. Failed CPU tests

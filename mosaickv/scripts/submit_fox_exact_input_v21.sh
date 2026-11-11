@@ -155,9 +155,14 @@ else:
     if args.source_sha is not None:
         raise ValueError("--source-sha is reserved for the finite preparation callback")
     revision = clean_source()
+    failed_cpu = Path("/scratch/djy8hg/workdir/fox-review-v21/run-20261111-1/full-cpu/cpu-tests.json")
+    failure = read(failed_cpu)
+    if (failure.get("status") != "failed" or failure.get("returncode") != "timeout"
+            or failure.get("source_sha") != "b541c1f223d39ff1abaface40ec2b5c686a2d206"):
+        raise ValueError("this capture retry requires the immutable original V21 CPU timeout")
     # stdin Python has no source file; bind the actual checked-in shell wrapper.
     bindings = [SOURCE / "mosaickv/scripts/submit_fox_exact_input_v21.sh", SBATCH, DRIVER,
-                SOURCE / "mosaickv/env/common/requirements.lock"]
+                SOURCE / "mosaickv/env/common/requirements.lock", failed_cpu]
     for path in bindings:
         if not path.is_file():
             raise FileNotFoundError(path)
@@ -173,6 +178,7 @@ else:
         registered_GPU_workers=2, maximum_concurrent_GPU_workers=2,
         worker_resources=dict(gpus=1, cpus=12, minutes=30, reservation="bi_fox_dgx"),
         CPU_timeout_seconds=1200, analyzer_cpus=12,
+        CPU_capture_mode="sys", CPU_capture_infrastructure_only=True,
         deterministic_controls=dict(CUBLAS_WORKSPACE_CONFIG=":4096:8", ATEN_CPU_CAPABILITY="avx2"),
     ))
     cpu = submit(root, revision, "cpu", "tests")

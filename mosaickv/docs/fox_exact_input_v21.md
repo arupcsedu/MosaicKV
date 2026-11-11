@@ -55,3 +55,23 @@ The finite launcher runs complete CPU tests, two one-A100/12-CPU workers with
 30-minute limits, and `afterany` CPU verification. It does not authorize new
 identities, calibration, fresh confirmation, or a large campaign. A failed
 diagnostic is preserved and cannot be promoted by increasing sample count.
+
+## CPU infrastructure retry
+
+The first canonical V21 full suite on `udc-aw34-17c0` repeatedly entered
+uninterruptible filesystem I/O wait while progressing without assertion
+failures. Pytest's default file-descriptor capture repeatedly reads/truncates
+temporary files on shared scratch. A narrowly scoped technical retry may use
+`--cpu-capture-mode sys` to keep global Python output capture in memory; native
+stdout still reaches the immutable outer CPU log. The exact command and capture
+mode are recorded. Legacy callers retain default `fd`, the unchanged command,
+and the old default 540-second timeout.
+
+Original CPU job `22811390` timed out after its registered 1,200-second full-
+suite allowance; no GPU was admitted. The retry launch binds that immutable
+failure receipt. Its source SHA and negative artifacts remain unchanged.
+
+V21's explicit full-suite timeout remains 1,200 seconds, with identical tests,
+assertions, thread counts, AVX2 controls, model candidate, input identities,
+storage accounting, and numerical guards. The original incomplete run must be
+preserved. No GPU worker is admitted on a CPU timeout or missing receipt.
