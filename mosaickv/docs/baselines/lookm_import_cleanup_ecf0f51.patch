@@ -1,0 +1,30 @@
+diff --git a/LLaVA-mix_merge_v1/llava/model/language_model/llava_llama.py b/LLaVA-mix_merge_v1/llava/model/language_model/llava_llama.py
+--- a/LLaVA-mix_merge_v1/llava/model/language_model/llava_llama.py
++++ b/LLaVA-mix_merge_v1/llava/model/language_model/llava_llama.py
+@@ -27,7 +27,7 @@
+ from transformers.generation.utils import GenerateOutput
+ 
+ # from ..kv_token_merge.modify_llama_2 import H2OLlamaForCausalLM_drop, H2OLlamaAttention_drop, LlamaAttention_drop
+-from ..kv_token_merge.modify_llama import H2OLlamaAttention_drop, MixMerLlamaAttention_drop, \
++from ..kv_token_merge.modify_llama import H2OLlamaAttention_drop, \
+                                             PixelPrunMergeAttention, \
+                                             PixelPrunMergeDecoderLayer, \
+                                             PixelPrunMergeAttentionLeft, \
+@@ -50,7 +50,6 @@
+ from ..llava_arch import LlavaMetaModel, LlavaMetaForCausalLM
+ 
+ import math
+-import matplotlib.pyplot as plt
+ import time
+ 
+ class TimeTrack:
+@@ -73,9 +72,6 @@
+     def __init__(self, config):
+         super().__init__(config)
+ 
+-KV_DICT = {
+-    "weighted_merge": MixMerLlamaAttention_drop,
+-}
+ ## original LLaVA
+ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
+     config_class = LlavaConfig

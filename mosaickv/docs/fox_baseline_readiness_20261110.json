@@ -1,0 +1,254 @@
+{
+  "schema_version": 1,
+  "audit_date": "2026-11-10",
+  "classification": "read_only_baseline_fidelity_audit",
+  "inspected_source_base_sha": "2efa84a4a36624bb685baac68612484e377c6390",
+  "current_worktree_clean": false,
+  "scope": "Existing immutable evidence and bounded static source inspection; no benchmark answers or individual failure identities used",
+  "experiment_submission_authorized_by_this_file": false,
+  "superiority_established_by_this_file": false,
+  "variant_separation": [
+    "EviCastKV and MosaicKV are names of the same project, not competing methods.",
+    "Exact selection, the source/storage variant, bounded-history adaptations, and the full six-mechanism hybrid are distinct experimental variants.",
+    "A historical parity gate does not automatically certify a changed implementation or source-storage transport."
+  ],
+  "baseline_evidence": {
+    "prefixkv": {
+      "official_repository": "https://github.com/THU-MIG/PrefixKV",
+      "pin": "597f1ab032704951550f93bcc8a23f1454b80aa4",
+      "public_remote_head_verified": "597f1ab032704951550f93bcc8a23f1454b80aa4",
+      "verification_method": "Read-only git ls-remote HEAD and refs/heads/master on audit date",
+      "top_level_license": "MIT",
+      "license_sha256": "c2c94fa472b506e75164e1ebd62f132ca56e75e6c88e1a3bab826fe2f41c5e0e",
+      "passed_published_operating_point": {
+        "path": "/scratch/djy8hg/runs/mosaickv/prefixkv/official-profile-r050-2c7a266/official_profile_reproduction_gate.json",
+        "sha256": "bfa508516e9f8884e1cbc495e4af1379b06fca9644a833f242b49d8c2d4c0a35",
+        "implementation": "official_prefixkv",
+        "result_category": "paper_reproduction",
+        "measurement_origin": "locally_reproduced",
+        "dataset": "PrefixKV/LLaVA-Description",
+        "dataset_revision": "407c2d2f8fc13611d13f72a5e18b8c33bf9c44e6e05278bf0b4da41deeacbe6a",
+        "sample_count": 1000,
+        "retention_convention": "Official distributed 0.5 profile; nominal paper operating point, not a shared physical-byte cap",
+        "profile_sha256": "a33ec2982b7b365a7c6908ce19c1eba0d00292f0ccb8f338fdcac79e0e355bd5",
+        "profile_calibration_identity_provenance": "unverifiable_upstream_profile_ids_not_released",
+        "teacher_forced_ppl": 3.4011690876813563,
+        "nll_sum": 156550.1590423584,
+        "evaluated_token_count": 127888,
+        "published_ppl_target": 3.41,
+        "registered_absolute_tolerance": 0.25,
+        "published_ppl_tolerance_pass": true,
+        "measured_fullkv_reference_rouge_l_f1": 0.8283484824534163,
+        "published_rouge_numeric_target": null,
+        "rouge_conclusion": "Measured official-path ROUGE-L, not an additional published-numeric reproduction pass",
+        "manifest_bindings_verified_in_this_audit": {
+          "shards": 63,
+          "sample_count_sum": 1000,
+          "all_manifests_present": true,
+          "all_manifest_hashes_match": true,
+          "producer_sha": "2c7a266d05a0dd30a4a7440355148549c14baeea"
+        },
+        "scope_excludes": ["local reimplementation parity", "current source variant", "shared-byte superiority", "latency superiority"]
+      },
+      "bounded_official_local_parity": {
+        "path": "/scratch/djy8hg/runs/mosaickv/prefixkv/minimum-paper-parity-8bfd152-20261018/result/parity-gate.json",
+        "sha256": "5cdb045e4887dba890028cb88efeccafcc25382daf149c166c2319937f60f9cf",
+        "comparison_path": "/scratch/djy8hg/runs/mosaickv/prefixkv/minimum-paper-parity-8bfd152-20261018/result/comparison.json",
+        "comparison_sha256": "3a5d90f13f0cd6b1cbe50a3510d50b5b1ff881c41ed03c33403fc1cafbfc4c60",
+        "producer_sha": "8bfd152db94fc1bf5df736466e827cb56a725e6d",
+        "checked_samples": 4,
+        "passed": true,
+        "all_per_layer_lengths_equal": true,
+        "maximum_retained_byte_difference": 0,
+        "minimum_token_agreement": 1.0,
+        "corpus_ppl_both": 3.5266747950432813,
+        "mean_rouge_l_f1_both": 0.7608695602221174,
+        "manifest_paper_eligible": false,
+        "scope": "Diagnostic four-sample parity on the recorded legacy checkpoint, profile and decoder only"
+      },
+      "preserved_later_negative_parity": {
+        "path": "/scratch/djy8hg/runs/mosaickv/prefixkv/minimum-paper-parity-968b5fe-20261018/result/parity-gate.json",
+        "sha256": "fd794c90fd646930d03d72ffc4ecad80c40079c41a993b79d669bc364ed56928",
+        "producer_sha": "968b5fe4d7169b8c5c84f40f69c4933821432d4e",
+        "checked_samples": 4,
+        "passed": false,
+        "conclusion": "Do not generalize the earlier passing path to altered configurations or erase this failure"
+      },
+      "completed_large_local_campaign": {
+        "path": "/scratch/djy8hg/runs/mosaickv/prefixkv/full-campaign-e4de390-20261019-v6/analysis/recovered-20261028-dfc2c21/report.json",
+        "sha256": "4ff947a5c3137496f1bc94329a65af4cb7c9f7516457eae30dfc23cedae3e1f7",
+        "candidate_algorithm_sha": "95887454ec5428376e42b47db04269c3896913f7",
+        "execution_source_sha": "e4de39001ea8edc74630f1864636bbc924d5486a",
+        "expected_rows": 8526,
+        "completed_rows": 8526,
+        "failed_rows": 0,
+        "description_examples": 1000,
+        "mmvet_examples": 218,
+        "exact_shared_storage_match": true,
+        "passed_scope": "execution_completeness_and_compressed_storage_only",
+        "paper_superiority_claim_established": false,
+        "reuse_rule": "Preserve all compatible predictions and negative outcomes; no whole original campaign rerun"
+      },
+      "new_evidence_only_if_claimed": [
+        "Bind the exact current implementation and decode policy to the already passing official/local path, or rerun only a bounded differential parity gate after a behavior-changing modification.",
+        "Label byte-rescaled, selection-only, question-scored, bounded-history and source-storage adaptations as adaptations, not official PrefixKV.",
+        "Any new cross-method superiority claim needs matched current controls, measured initial/final/peak storage and separately passing corpus PPL and reference ROUGE-L. Existing completeness alone does not supply it."
+      ]
+    },
+    "lookm": {
+      "official_repository": "https://github.com/SUSTechBruce/LOOK-M",
+      "pin": "ecf0f51a9c416c2d85e47faf2638502f01a6d748",
+      "public_remote_head_verified": "ecf0f51a9c416c2d85e47faf2638502f01a6d748",
+      "verification_method": "Read-only git ls-remote HEAD and refs/heads/main on audit date; pinned local source AST inspection",
+      "top_level_license": "MIT",
+      "license_sha256": "27559ebfa7e5045dc8f6dc9b7473d39a89d7bec7d6b95cf8a65f4968e6eac3a7",
+      "official_operating_point_reproduced": false,
+      "new_compatible_public_head_found": false,
+      "official_history_check": {
+        "non_shallow_checkout": true,
+        "reachable_commits_inspected": 18,
+        "commits_containing_import_consumer_and_provider": 12,
+        "all_12_still_import_missing_provider_symbol": true,
+        "earlier_orphan_implementation": {
+          "sha": "10ecff72a0202e387a723687494ac4598bc462b3",
+          "path": "LLaVA-mix_merge_v1/llava/model/kv_token_merge/modify_llama copy.py",
+          "class_line": 692,
+          "class": "MixMerLlamaAttention_drop",
+          "not_the_imported_module": true,
+          "removed_in": "282491c23580c2fdcdfd30d13b7523907d9f1aad"
+        },
+        "compatible_unmodified_historical_revision_identified": false,
+        "conclusion": "The released import is broken, not necessarily the algorithm. No reason to call the baseline permanently unfixable."
+      },
+      "static_import_blocker": {
+        "consumer": "third_party/LOOK-M/LLaVA-mix_merge_v1/llava/model/language_model/llava_llama.py",
+        "consumer_sha256": "95b18b2f8df25c498bb290d9ab090bba3fd4acfcfb1d1ae8e53f3582d6e9d546",
+        "import_line": 30,
+        "missing_symbol": "MixMerLlamaAttention_drop",
+        "provider": "third_party/LOOK-M/LLaVA-mix_merge_v1/llava/model/kv_token_merge/modify_llama.py",
+        "provider_sha256": "8ae8cabe408aec6f9050f450143ac01c74ab0eda33702c1ce60e16a0dc2eefbe",
+        "ast_missing_export_verified": true,
+        "existing_dispatch_evidence": {
+          "KV_DICT_references_in_tracked_python": 1,
+          "KV_DICT_only_occurrence": "Definition at llava_llama.py:76; no internal reader found",
+          "weighted_merge_constructor": "WeightedLlamaAttention_drop at llava_llama.py:98",
+          "paper_script_mode": "text_prior_pivot_merge",
+          "paper_script_mode_constructor": "TextPivotLlamaAttention_drop at llava_llama.py:113",
+          "bounded_repair_hypothesis": "Removing the stale missing import and unused invalid dictionary may preserve the actual intended dispatch. This is an untested isolated compatibility-patch proposal, not an executed reproduction."
+        },
+        "additional_obstacles": [
+          "Global KV_DICT also refers to the missing symbol; replacing it is a patch, not an upstream execution.",
+          "workers/model_workers.py assumes an author-local absolute checkout path.",
+          "Pinned requirements use legacy torch 2.1.1+cu118 and transformers 4.37.0; no common-environment upgrade was attempted."
+        ]
+      },
+      "existing_blocker_doc": {
+        "path": "mosaickv/docs/baselines/lookm_official_execution_blocker.md",
+        "sha256": "aa693a9d002d47b805409b40a249f08b22509a85ba11846a2cde951b6c8f0ac8"
+      },
+      "narrow_patched_cpu_import_diagnostic": {
+        "classification": "patched official-path CPU import diagnostic, not unmodified official execution",
+        "status": "import_passed_only",
+        "patch_path": "mosaickv/docs/baselines/lookm_import_cleanup_ecf0f51.patch",
+        "patch_sha256": "ed8d0b2ad29472c6c298937cbb83e771cb5803d484c7f6e40935cdb31389e360",
+        "patched_consumer_sha256": "ab3af6152f6de4c713a6934f5c123eb4e306861f083d3743ee04832c2c6a4618",
+        "changes": [
+          "Remove the missing MixMerLlamaAttention_drop import, leaving actual attention classes untouched.",
+          "Remove KV_DICT, verified to have no internal reader.",
+          "Remove matplotlib.pyplot as plt, verified to have no Name reader. No plotting dependency was installed."
+        ],
+        "static_arithmetic_and_constructor_dispatch_unchanged": true,
+        "official_checkout_unchanged": true,
+        "model_weights_loaded": false,
+        "gpu_used": false,
+        "environment_changed": false,
+        "import_passed": true,
+        "wall_seconds_diagnostic_not_a_performance_claim": 7.857024997996632,
+        "focused_cpu_tests_passed": 11,
+        "synthetic_random_weight_cpu_smoke": {
+          "passed": true,
+          "attention_class": "TextPivotLlamaAttention_drop",
+          "cache_class": "TextPivotMerge_LayerWise",
+          "random_layers": 1,
+          "random_heads": 2,
+          "head_dimension": 128,
+          "prompt_positions": 584,
+          "synthetic_image_span_positions": 576,
+          "prefill_cache_positions": 116,
+          "one_token_decode_cache_positions": 117,
+          "explicit_next_logical_position": 584,
+          "all_logits_finite": true,
+          "native_generate_super_available": false,
+          "model_weights": "randomly initialized CPU-only; no pretrained checkpoint",
+          "performance_or_quality_claim": false,
+          "warning": "Installed Transformers warns that the upstream legacy classes do not inherit GenerationMixin. Inspection of the actual tiny model confirms its parent has no generate method; no mixin shim was added. Synthetic forward/cache success does not certify native generation."
+        },
+        "preserved_first_attempt": {
+          "patch_sha256": "3b63b13982827c6636fe6b155fd7aa8a9fe817d0c8cdf5ef4267661fecf7e5b6",
+          "exception_type": "ModuleNotFoundError",
+          "exception_message": "No module named 'matplotlib'",
+          "first_failing_source": "llava/model/language_model/llava_llama.py:53, import matplotlib.pyplot as plt",
+          "resolution": "Separately authorized removal of this proven-unused import, not a package installation or arithmetic port"
+        },
+        "package_versions": {"torch": "2.8.0", "transformers": "4.55.2"},
+        "no_additional_shims_or_dependency_installation": true,
+        "next_boundary": "Import plus a tiny random-model forward/cache/merge path now work with this explicit patch. Native generation API, real-checkpoint controls and the published operating point still require separate evidence; no larger campaign is justified by this synthetic success."
+      },
+      "admissible_local_label": "lookm_reimpl",
+      "new_evidence_only_if_claimed": [
+        "A separately pinned, audited and isolated compatibility patch plus differential algorithm checks is required before calling any execution a patched official-path reproduction.",
+        "Existing local MileBench measurements remain reimplementation evidence; report Accuracy and ROUGE-L separately and do not relabel consumed or source-group-unverified cohorts as fresh."
+      ]
+    },
+    "vl_cache": {
+      "paper": "https://arxiv.org/abs/2410.23317v1",
+      "official_executable_implementation_available_in_repository": false,
+      "public_source_check": "No official repository link was supplied on the inspected primary arXiv page; this is not proof that no implementation exists anywhere.",
+      "required_local_label": "vl_cache_reimpl",
+      "local_spec": {
+        "path": "mosaickv/docs/baselines/vl_cache_spec.md",
+        "sha256": "a383e1b13c3c5d5f2b2e06531db1c7f6f5099411a25d39b04355310bd78f36ef"
+      },
+      "local_choices_not_official_results": [
+        "Post-vision query scoring and sparsity-derived layer allocation are paper-derived; grouped-query reduction, recent-token interpretation, integer apportionment and dense physical-byte packing require explicit implementation labels.",
+        "Common HF execution does not reproduce the paper's specialized kernels or their reported acceleration."
+      ],
+      "preserved_local_comparison_example": {
+        "path": "/scratch/djy8hg/runs/mosaickv/coco-cross-budget-retrospective-20261022-v2/report.json",
+        "classification": "retrospective_cross_budget_analysis",
+        "cohort_count": 256,
+        "conclusion": "Existing measured reimplementation curves are not a published operating-point reproduction or fresh source-variant confirmation."
+      },
+      "new_evidence_only_if_claimed": [
+        "Compare paper-reported CIDEr/ANLS trends separately from local measurements; no exact reproduction label without matching checkpoint, dataset, prompts, generation, metric and budget convention.",
+        "Use current measured physical-byte controls for a unified local comparison; nominal 10% retention is not a 10 MiB target."
+      ]
+    }
+  },
+  "narrow_admissible_source_control": {
+    "quality_reference": "FullKV on the same actual checkpoint, processor, precision, attention implementation, inputs and generation schedule",
+    "compressed_comparators": [
+      {
+        "label": "prompt_attention_topk_raw_exact",
+        "classification": "local direct exact-selection baseline",
+        "official_paper_fidelity_claim_required": false
+      },
+      {
+        "label": "local_direct_projected_kv3",
+        "classification": "local direct projected-K/V quantization control",
+        "official_paper_fidelity_claim_required": false,
+        "prohibited_aliases": ["official KIVI", "official KVQuant", "official ZipCache"]
+      }
+    ],
+    "remaining_execution_controls": [
+      "Construct every compared cache, rather than accepting a feasibility witness or allocating dummy fill.",
+      "Preserve common mandatory policy, original logical positions, output length and exact realized comparison boundary.",
+      "Charge codes, scales, headers, protected regions, repairs, residuals, generated history and live reconstruction workspaces; distinguish persistent, decode-owned and whole-request peaks.",
+      "Pass numerical/clone/state-isolation controls before interpreting quality or latency.",
+      "Keep FullKV out of compressed-method latency ranking; source-variant results do not activate the six-mechanism hybrid.",
+      "Freeze controls and independently validate quality before any superiority statement."
+    ],
+    "bounded_next_action": "Complete current same-consumed-input construction and ownership controls first. Do not rerun historical nominal-ratio campaigns merely to satisfy a generic baseline checklist."
+  },
+  "documentation_caution": "Historical readiness and parity Markdown reports predate later artifacts; use the hash-bound gate and its explicit eligibility scope rather than stale prose."
+}

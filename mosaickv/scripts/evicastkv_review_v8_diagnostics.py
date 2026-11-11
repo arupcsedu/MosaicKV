@@ -69,7 +69,9 @@ def submit(
             ["--mem=8G", "--time=00:20:00"]
             if mode == "rmsnorm-worker"
             else ["--mem=64G", "--time=00:20:00"]
-            if mode == "source-length-worker"
+            if mode in ("source-length-worker", "causal-worker", "ownership-worker")
+            else ["--mem=64G", "--time=00:30:00"]
+            if mode == "bytes-worker"
             else ["--mem=64G", "--time=02:00:00"]
         )
     else:
