@@ -115,9 +115,14 @@ def prepare(root):
     return dict(status="prepared", source_sha=revision, expected_workers=2)
 
 
-def load(root):
+def load(root, *, producer_source=None):
     plan = read(Path(root) / "plan.json")
-    clean_source(SOURCE, plan["source_sha"])
+    producer = SOURCE if producer_source is None else Path(producer_source)
+    clean_source(producer, plan["source_sha"])
+    if producer_source is not None:
+        # A post-processing correction may inspect a different immutable
+        # producer, but must itself execute from a clean analysis snapshot.
+        clean_source(SOURCE)
     if plan["policy_sha256"] != digest(POLICY) or digest(plan["policy"]) != digest(POLICY):
         raise ValueError("frozen V22 policy changed")
     for path, expected in plan["bindings"].items():
@@ -402,13 +407,20 @@ def worker(root, index):
     return result
 
 
-def analyze(root):
+def analyze(root, *, producer_source=None, output_dir=None):
     root = Path(root)
+    output_dir = root / "analysis" if output_dir is None else Path(output_dir)
+    if (
+        not output_dir.resolve().is_relative_to(root.resolve())
+        or output_dir.resolve() == root.resolve()
+    ):
+        raise ValueError("analysis output must be a new child directory of the original run")
     observations, failures = [], []
+    plan = None
     if (root / "plan.json").is_file():
         import torch
 
-        plan = load(root)
+        plan = load(root, producer_source=producer_source)
         parent.fixed.analysis_cpu_controls()
         for index in range(2):
             try:
@@ -457,6 +469,9 @@ def analyze(root):
     else:
         failures.append(dict(error="preparation failed; no immutable plan"))
     gate = dict(
+        protocol_id=POLICY["id"],
+        producer_source_sha=plan["source_sha"] if plan is not None else "unprepared",
+        analysis_source_sha=clean_source(SOURCE) if plan is not None else "unprepared",
         complete=not failures and len(observations) == 2,
         observations=observations,
         failures=failures,
@@ -466,9 +481,10 @@ def analyze(root):
         calibration_or_paper_campaign_authorized=False,
         whole_request_KV_peak_certified=False,
         negative_V20_results_unchanged=True,
+        negative_V21_results_unchanged=True,
         no_fresh_identities=True,
     )
-    write_once(root / "analysis/GATE_exact_input_v21.json", gate)
+    write_once(output_dir / "GATE_exact_input_v22.json", gate)
     return gate
 
 
@@ -477,12 +493,21 @@ def main():
     parser.add_argument("action", choices=("prepare", "worker", "analyze"))
     parser.add_argument("--root", required=True, type=Path)
     parser.add_argument("--index", type=int)
+    parser.add_argument("--producer-source", type=Path)
+    parser.add_argument("--analysis-output", type=Path)
     args = parser.parse_args()
-    result = (
-        worker(args.root, args.index)
-        if args.action == "worker"
-        else globals()[args.action](args.root)
-    )
+    if args.action != "analyze" and (
+        args.producer_source is not None or args.analysis_output is not None
+    ):
+        parser.error("producer/output overrides are analysis-only; workers remain immutable")
+    if args.action == "analyze":
+        result = analyze(
+            args.root, producer_source=args.producer_source, output_dir=args.analysis_output
+        )
+    elif args.action == "worker":
+        result = worker(args.root, args.index)
+    else:
+        result = prepare(args.root)
     print(json.dumps(result, sort_keys=True, allow_nan=False))
     if result.get("status") == "failed" or result.get("failures"):
         raise SystemExit(1)

@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import time
 import weakref
+from threading import RLock
 
 import torch
 
@@ -122,36 +123,84 @@ def _loss(reference, candidate):
 
 
 class _SavedTensors:
-    """Weak ownership census of autograd-saved tensors, excluding model weights.
+    """Incremental weak census, with exactly the existing backing-byte boundary.
 
     This is not an allocator or whole-request KV peak certificate. Detached
     saved views have identical values and owners; the observer never retains
-    graph-bearing activations or extends their lifetime itself.
+    graph-bearing activations or extends their lifetime itself. Storage must
+    not be resized while saved, as required by this frozen-model diagnostic.
+    A changed owner/size is rejected at unpack instead of reported as a pass.
+
+    Each pack inspects its owner once. Weak callbacks decrement per-allocation
+    reference counts; neither pack nor unpack scans other saved tensors. The
+    metric key matches backing_bytes: (device, storage pointer, storage bytes).
+    Callback closures hold only a weak observer reference and scalar metadata.
     """
 
     def __init__(self, model):
         self.excluded = {owner(p) for p in model.parameters()}
         self.refs, self.pack_calls, self.peak = {}, 0, 0
+        self.owner_counts, self.live_bytes = {}, 0
+        self.closed = False
+        self._weak_self, self._lock = weakref.ref(self), RLock()
 
-    def _observe(self):
-        self.refs = {key: ref for key, ref in self.refs.items() if ref() is not None}
-        live = tuple(
-            t
-            for ref in self.refs.values()
-            if (t := ref()) is not None and owner(t) not in self.excluded
-        )
-        self.peak = max(self.peak, backing_bytes(live))
+    def _released(self, token, reference, key):
+        with self._lock:
+            entry = self.refs.get(token)
+            # A late callback must never retire a new object with a reused ID.
+            if entry is None or entry[0] is not reference:
+                return
+            del self.refs[token]
+            count = self.owner_counts[key] - 1
+            if count:
+                self.owner_counts[key] = count
+            else:
+                del self.owner_counts[key]
+                self.live_bytes -= key[-1]
 
     def pack(self, tensor):
         value = tensor.detach()
-        self.refs[id(value)] = weakref.ref(value)
-        self.pack_calls += 1
-        self._observe()
+        with self._lock:
+            if self.closed:
+                raise RuntimeError("Saved-tensor census is already closed")
+            self.pack_calls += 1
+            if owner(value) in self.excluded:
+                return value
+            storage = value.untyped_storage()
+            key = str(value.device), storage.data_ptr(), storage.nbytes()
+            token = id(value)
+
+            def released(reference, tracker=self._weak_self, token=token, key=key):
+                current = tracker()
+                if current is not None:
+                    current._released(token, reference, key)
+
+            self.refs[token] = weakref.ref(value, released), key
+            count = self.owner_counts.get(key, 0)
+            self.owner_counts[key] = count + 1
+            if not count:
+                self.live_bytes += key[-1]
+            self.peak = max(self.peak, self.live_bytes)
         return value
 
     def unpack(self, tensor):
-        self._observe()
+        with self._lock:
+            if self.closed:
+                raise RuntimeError("Saved-tensor census is already closed")
+            entry = self.refs.get(id(tensor))
+            if entry is not None:
+                storage = tensor.untyped_storage()
+                key = str(tensor.device), storage.data_ptr(), storage.nbytes()
+                if key != entry[1]:
+                    raise RuntimeError("Saved tensor storage changed while being observed")
         return tensor
+
+    def close(self):
+        with self._lock:
+            self.closed = True
+            self.refs.clear()
+            self.owner_counts.clear()
+            self.live_bytes = 0
 
 
 def _validate_inputs(adapter, prefill, packets, originals, horizon):
@@ -400,7 +449,7 @@ def draft_row_scores(adapter, prefill, parent_packets, original_pairs, *, horizo
             cache = targets = pair = None  # noqa: F841
             kl = ref_margin = source_margin = margin_shortfall = None
             leaf = gradient = delta = gain = None
-            audit.refs.clear()
+            audit.close()
             if _prefill_signature(adapter, prefill) != before_prefill:
                 raise RuntimeError(
                     "Short-horizon scoring mutated the caller's original prefill/cache"

@@ -2,6 +2,7 @@
 
 import copy
 import hashlib
+import json
 
 import evicastkv_draft_input_v22 as study
 import pytest
@@ -113,3 +114,44 @@ def test_draft_gradient_forward_must_match_native_inference_bits():
     report["original_cache_unchanged"] = False
     with pytest.raises(ValueError, match="isolation"):
         study.verify_draft(report, value, value)
+
+
+def test_report_name_matches_v22_and_preserves_old_wrong_label(tmp_path):
+    old = tmp_path / "analysis/GATE_exact_input_v21.json"
+    old.parent.mkdir()
+    old.write_text("old immutable misnamed report\n")
+    result = study.analyze(tmp_path, output_dir=tmp_path / "analysis-corrected")
+    assert result["failures"]
+    assert (tmp_path / "analysis-corrected/GATE_exact_input_v22.json").is_file()
+    assert old.read_text() == "old immutable misnamed report\n"
+
+
+def test_analysis_never_writes_outside_original_run(tmp_path):
+    with pytest.raises(ValueError, match="child directory"):
+        study.analyze(tmp_path, output_dir=tmp_path.parent)
+
+
+def test_producer_and_analysis_sources_are_separately_verified(tmp_path, monkeypatch):
+    producer, current = tmp_path / "producer", tmp_path / "current"
+    root = tmp_path / "run"
+    root.mkdir()
+    (root / "plan.json").write_text(
+        json.dumps(
+            dict(
+                source_sha="old-immutable",
+                policy=study.POLICY,
+                policy_sha256=study.digest(study.POLICY),
+                bindings={},
+            )
+        )
+    )
+    calls = []
+
+    def clean(path, expected=None):
+        calls.append((path, expected))
+        return "old-immutable" if path == producer else "new-immutable"
+
+    monkeypatch.setattr(study, "SOURCE", current)
+    monkeypatch.setattr(study, "clean_source", clean)
+    assert study.load(root, producer_source=producer)["source_sha"] == "old-immutable"
+    assert calls == [(producer, "old-immutable"), (current, None)]
