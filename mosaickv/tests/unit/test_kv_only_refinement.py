@@ -496,6 +496,14 @@ def test_end_to_end_synthetic_source_review_certifies_only_named_cache_boundarie
     monkeypatch.setattr(study, "SCRATCH", tmp_path)
     monkeypatch.setattr(study, "clean_source", lambda *a: "a" * 40)
     monkeypatch.setattr(study, "cpu_gate", lambda *a: dict(status="passed"))
+    original_digest = study.semantic_digest
+    digest_kwargs = []
+
+    def snapshot_digest(value, **kwargs):
+        digest_kwargs.append(kwargs)
+        return original_digest(value, **kwargs)
+
+    monkeypatch.setattr(study, "semantic_digest", snapshot_digest)
     monkeypatch.setattr(
         study.audit,
         "_inputs",
@@ -518,6 +526,11 @@ def test_end_to_end_synthetic_source_review_certifies_only_named_cache_boundarie
     assert not gate["whole_device_memory_certified"] and not gate["superiority_established"]
     assert not gate["numerical_or_quality_guard_promoted"]
     assert not gate["historical_KV_roles_modified"]
+    assert digest_kwargs == [{}]  # Legacy metadata retains the unmodified8GiB default.
+    assert (
+        json.loads((tmp_path / "derived/manifest.json").read_text())["metadata_codec_limits"]
+        is None
+    )
 
 
 def typed_streaming_fixture(tmp_path, monkeypatch):
@@ -530,7 +543,16 @@ def typed_streaming_fixture(tmp_path, monkeypatch):
     out = parent / "workers/0"
     out.mkdir(parents=True)
     revision = "b" * 40
-    plan = dict(source_sha=revision, policy=dict(method=study.STREAMING_KIND), bindings={})
+    plan = dict(
+        source_sha=revision,
+        source_root=str(tmp_path / "immutable_producer_source"),
+        cpu_gate=dict(source_sha=revision, status="passed", synthetic_producer_gate=True),
+        policy=dict(
+            method=study.STREAMING_KIND,
+            metadata_codec_limits=dict(streaming.POLICY["metadata_codec_limits"]),
+        ),
+        bindings={},
+    )
     plan["bindings"][str(file)] = study.sha(file)
     (parent / "protocol.json").write_text(json.dumps(plan))
     (parent / streaming.GATE).write_text(
@@ -615,7 +637,12 @@ def typed_streaming_fixture(tmp_path, monkeypatch):
         (out / "result.json").write_text(json.dumps(value))
 
     seal_outputs()
-    monkeypatch.setattr(streaming, "validate", lambda root: plan)
+
+    def validate(root, *, immutable_producer_read=False):
+        assert immutable_producer_read is True
+        return plan
+
+    monkeypatch.setattr(streaming, "validate", validate)
     monkeypatch.setattr(streaming, "load_bundle", lambda path, receipt: bundle)
     monkeypatch.setattr(
         streaming,
@@ -632,6 +659,8 @@ def test_typed_streaming_inputs_preserve_new_schema_and_do_not_auto_classify(tmp
     assert values["input_schema"] == values["producer_method"] == study.STREAMING_KIND
     assert values["producer_sha"] == plan["source_sha"]
     assert values["ownership_capture_complete"] is True
+    assert values["producer_cpu_gate"] == plan["cpu_gate"]
+    assert values["producer_source_root"] == plan["source_root"]
     assert "producer_gate" in paths and "logits.pt" in paths
     assert hashes == {name: study.sha(path) for name, path in paths.items()}
     assert (
@@ -717,8 +746,19 @@ def test_typed_streaming_run_remains_unknown_without_explicit_source_rules(
     rules = tmp_path / "typed_rules.json"
     rules.write_text(json.dumps(ledger))
     monkeypatch.setattr(study, "SCRATCH", tmp_path)
-    monkeypatch.setattr(study, "clean_source", lambda *args: plan["source_sha"])
-    monkeypatch.setattr(study, "cpu_gate", lambda *args: {"synthetic": True})
+    reader_sha = "c" * 40
+    monkeypatch.setattr(study, "clean_source", lambda *args: reader_sha)
+    monkeypatch.setattr(
+        study, "cpu_gate", lambda root, revision: {"synthetic": True, "source_sha": revision}
+    )
+    original_digest = study.semantic_digest
+    digest_limits = []
+
+    def snapshot_digest(value, **kwargs):
+        digest_limits.append(kwargs)
+        return original_digest(value, **kwargs)
+
+    monkeypatch.setattr(study, "semantic_digest", snapshot_digest)
     gate = study.run(
         tmp_path / "derived",
         parent=parent,
@@ -731,7 +771,66 @@ def test_typed_streaming_run_remains_unknown_without_explicit_source_rules(
     manifest = json.loads((tmp_path / "derived/manifest.json").read_text())
     assert manifest["input_schema"] == manifest["producer_method"] == study.STREAMING_KIND
     assert manifest["worker_index"] == 0
+    assert manifest["source_sha"] == reader_sha
+    assert manifest["producer_sha"] == plan["source_sha"] != reader_sha
+    assert manifest["reader_cpu_gate"]["source_sha"] == reader_sha
+    assert manifest["producer_cpu_gate"] == plan["cpu_gate"]
+    assert manifest["metadata_codec_limits"] == plan["policy"]["metadata_codec_limits"]
+    assert digest_limits == [{"limits": plan["policy"]["metadata_codec_limits"]}]
     assert not gate["numerical_or_quality_guard_promoted"]
+
+
+def test_actual_owner_timestamp_ambiguity_stays_raw_unresolved_and_does_not_assign_roles(
+    tmp_path, monkeypatch
+):
+    from copy import deepcopy
+
+    from mosaickv.measurements.cache_only_refinement import reduce_generations
+
+    parent, _, _, bundle, _ = typed_streaming_fixture(tmp_path, monkeypatch)
+    bundle["capture_metadata"]["blocks_exact_certification"].append(
+        "ambiguous_deferred_owner_timestamp"
+    )
+    before = deepcopy(bundle)
+    values, _, _ = study.streaming_inputs(parent, 0)
+    assert (
+        values["trace"]["capture_metadata"]["blocks_exact_certification"]
+        == before["capture_metadata"]["blocks_exact_certification"]
+    )
+    assert values["trace"]["allocator_records"] == before["allocator_records"]
+    assignments = study.checked_assignments(
+        values["trace"], values["declared"], empty_ledger([]), source_bindings={}
+    )
+    assert assignments == {}
+    result = reduce_generations(
+        values["trace"]["allocator_records"],
+        assignments,
+        complete_request=True,
+        history_complete=True,
+    )
+    assert result["unknown_generations"] == len(before["allocator_records"])
+    assert all(not metric["exact_peak_certified"] for metric in result["metrics"].values())
+
+
+@pytest.mark.parametrize(
+    "flag",
+    [
+        "free_without_observed_allocation",
+        "CUDA_OOM_in_request",
+        "allocator_and_owner_clock_domains_not_verified",
+        "arbitrary_new_unknown_flag",
+    ],
+)
+def test_accepting_owner_ambiguity_does_not_waive_any_structural_or_unregistered_flag(
+    tmp_path, monkeypatch, flag
+):
+    parent, _, _, bundle, _ = typed_streaming_fixture(tmp_path, monkeypatch)
+    bundle["capture_metadata"]["blocks_exact_certification"] += [
+        "ambiguous_deferred_owner_timestamp",
+        flag,
+    ]
+    with pytest.raises(ValueError, match="structural"):
+        study.streaming_inputs(parent, 0)
 
 
 def catalog_witness_fixture(tmp_path):

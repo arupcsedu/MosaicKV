@@ -2,6 +2,7 @@
 
 import copy
 import gc
+import json
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -271,3 +272,97 @@ def test_same_private_cache_history_and_allword_guards_cannot_be_skipped():
             study.verify_request(bad, counts)
     with pytest.raises(ValueError):
         study.verify_request(record, dict(counts, decode_updates=126))
+
+
+def producer_read_fixture(tmp_path, monkeypatch):
+    import evicastkv_review_followups as followups
+
+    producer = tmp_path / "immutable_producer_source"
+    producer.mkdir()
+    gate_root = tmp_path / "producer_run"
+    (gate_root / "full-cpu").mkdir(parents=True)
+    cpu_file = gate_root / "full-cpu/cpu-tests.json"
+    cpu_file.write_text('{"synthetic":true}')
+    revision = "a" * 40
+    gate = dict(
+        status="passed",
+        source_sha=revision,
+        cpu_suite_sha256=study.sha(cpu_file),
+        counts=dict(tests=1, failures=0, errors=0, skipped=0),
+    )
+    root = tmp_path / "ownership"
+    root.mkdir()
+    plan = dict(
+        source_sha=revision,
+        source_root=str(producer),
+        policy=study.POLICY,
+        cpu_gate=gate,
+        bindings={str(cpu_file): study.sha(cpu_file)},
+        parent="old-consumed-parent",
+    )
+    (root / "protocol.json").write_text(json.dumps(plan))
+    clean_calls = []
+    cpu_calls = []
+    monkeypatch.setattr(study, "clean_source", lambda path, rev: clean_calls.append((path, rev)))
+    monkeypatch.setattr(study.timing, "require_parent", lambda root: {})
+
+    def cpu_gate(path, rev):
+        cpu_calls.append((path, rev))
+        return gate
+
+    monkeypatch.setattr(followups, "cpu_gate", cpu_gate)
+    return root, producer, plan, clean_calls, cpu_calls
+
+
+def test_read_only_validation_uses_exact_clean_producer_root_and_separate_cpu_gate(
+    tmp_path, monkeypatch
+):
+    root, producer, plan, clean_calls, cpu_calls = producer_read_fixture(tmp_path, monkeypatch)
+    assert study.validate(root, immutable_producer_read=True) == plan
+    assert clean_calls == [(producer.resolve(), plan["source_sha"])]
+    assert cpu_calls == [(tmp_path / "producer_run", plan["source_sha"])]
+
+
+def test_default_worker_and_analyzer_validation_stays_own_source_not_old_producer(
+    tmp_path, monkeypatch
+):
+    root, _, plan, clean_calls, cpu_calls = producer_read_fixture(tmp_path, monkeypatch)
+    study.validate(root)
+    assert clean_calls == [(study.SOURCE, plan["source_sha"])]
+    assert cpu_calls == []
+
+
+@pytest.mark.parametrize(
+    "defect",
+    ["dirty_source", "binding", "cpu_source", "cpu_failed", "cpu_missing", "relative_source"],
+)
+def test_read_only_validation_rejects_changed_source_bindings_or_failed_producer_cpu(
+    tmp_path, monkeypatch, defect
+):
+    root, _, plan, _, _ = producer_read_fixture(tmp_path, monkeypatch)
+    if defect == "dirty_source":
+
+        def dirty(*args):
+            raise ValueError("dirty producer source")
+
+        monkeypatch.setattr(study, "clean_source", dirty)
+    elif defect == "binding":
+        next(iter(plan["bindings"]))
+        plan["bindings"][next(iter(plan["bindings"]))] = "0" * 64
+    elif defect == "cpu_source":
+        plan["cpu_gate"]["source_sha"] = "wrong producer"
+    elif defect == "cpu_failed":
+        plan["cpu_gate"]["status"] = "failed"
+    elif defect == "cpu_missing":
+        plan["bindings"] = {}
+    elif defect == "relative_source":
+        plan["source_root"] = "relative/source"
+    (root / "protocol.json").write_text(json.dumps(plan))
+    with pytest.raises(ValueError):
+        study.validate(root, immutable_producer_read=True)
+
+
+@pytest.mark.parametrize("value", [None, 1, "yes"])
+def test_immutable_read_mode_must_be_an_explicit_boolean(tmp_path, value):
+    with pytest.raises(ValueError, match="boolean"):
+        study.validate(tmp_path, immutable_producer_read=value)

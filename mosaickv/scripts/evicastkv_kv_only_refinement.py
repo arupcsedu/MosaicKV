@@ -458,7 +458,7 @@ def streaming_inputs(parent, index):
 
     if type(index) is not int or not 0 <= index < 2:
         raise ValueError("exactly one registered streaming ownership worker required")
-    plan = streamed.validate(parent)
+    plan = streamed.validate(parent, immutable_producer_read=True)
     gate_path = parent / streamed.GATE
     gate = audit.load(gate_path)
     if (
@@ -580,6 +580,7 @@ def streaming_inputs(parent, index):
         "unclassified_allocation_generations",
         "opaque_allocator_workspace_not_classified",
         "deferred_owner_timestamp_not_unique",
+        "ambiguous_deferred_owner_timestamp",
         "conflicting_deferred_owner_role",
     }
     errors = set(capture["blocks_exact_certification"]) - allowed_unresolved
@@ -599,6 +600,9 @@ def streaming_inputs(parent, index):
             declared=declared,
             conservative=capture,
             producer_sha=plan["source_sha"],
+            producer_source_root=plan["source_root"],
+            producer_cpu_gate=plan["cpu_gate"],
+            metadata_codec_limits=dict(plan["policy"]["metadata_codec_limits"]),
             worker_complete=True,
             ownership_capture_complete=True,
             structural_errors=[],
@@ -683,11 +687,19 @@ def run(root, *, parent, reviewed_rules, cpu_gate_root, worker_index=None):
         producer_method=values.get("producer_method", "registered_legacy_source_variant"),
         worker_index=selected_worker_index,
         cpu_gate=cpu,
+        reader_cpu_gate=cpu,
+        producer_cpu_gate=values.get("producer_cpu_gate"),
+        producer_source_root=values.get("producer_source_root"),
         parent=str(parent),
         inputs={name: dict(path=str(path), sha256=hashes[name]) for name, path in paths.items()},
         reviewed_rules_path=str(ledger_path),
         reviewed_rules_sha256=ledger_hash,
-        final_allocator_snapshot_sha256=semantic_digest(trace["final_allocator_snapshot"]),
+        final_allocator_snapshot_sha256=semantic_digest(
+            trace["final_allocator_snapshot"], limits=values["metadata_codec_limits"]
+        )
+        if typed
+        else semantic_digest(trace["final_allocator_snapshot"]),
+        metadata_codec_limits=values.get("metadata_codec_limits"),
         source_bindings=source_bindings,
         measurement_type="derived",
         result_category="unified_comparison",

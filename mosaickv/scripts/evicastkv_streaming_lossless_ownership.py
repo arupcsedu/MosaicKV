@@ -540,13 +540,42 @@ def prepare(root, *, cpu_gate_root=None, parent=timing.PARENT):
     return dict(workers=2, GPUs_per_worker=1, CPUs_per_worker=12, worker_minutes=20)
 
 
-def validate(root):
+def validate(root, *, immutable_producer_read=False):
+    """Worker defaults stay own-source; CPU readers may inspect a pinned producer."""
+    if type(immutable_producer_read) is not bool:
+        raise ValueError("explicit boolean immutable producer read mode required")
     plan = declared.read(Path(root) / "protocol.json")
-    clean_source(SOURCE, plan["source_sha"])
+    producer_source = SOURCE
+    if immutable_producer_read:
+        producer_source = Path(plan["source_root"])
+        if not producer_source.is_absolute() or not producer_source.is_dir():
+            raise ValueError("absolute existing immutable producer source required")
+        producer_source = producer_source.resolve(strict=True)
+    clean_source(producer_source, plan["source_sha"])
     if plan["policy"] != POLICY or any(
         sha(Path(path)) != expected for path, expected in plan["bindings"].items()
     ):
         raise ValueError("Lossless ownership source/configuration/evidence changed")
+    if immutable_producer_read:
+        from evicastkv_review_followups import cpu_gate
+
+        producer_cpu = plan["cpu_gate"]
+        if (
+            producer_cpu.get("status") != "passed"
+            or producer_cpu.get("source_sha") != plan["source_sha"]
+        ):
+            raise ValueError("complete CPU gate for the actual producer SHA required")
+        cpu_paths = [
+            Path(path)
+            for path, expected in plan["bindings"].items()
+            if path.endswith("/full-cpu/cpu-tests.json")
+            and expected == producer_cpu.get("cpu_suite_sha256")
+        ]
+        if (
+            len(cpu_paths) != 1
+            or cpu_gate(cpu_paths[0].parent.parent, plan["source_sha"]) != producer_cpu
+        ):
+            raise ValueError("separate complete hash-bound producer CPU gate required")
     timing.require_parent(plan["parent"])
     return plan
 
