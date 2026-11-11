@@ -18,11 +18,12 @@ import evicastkv_review_v8_diagnostics as shared
 
 from mosaickv.evaluation.fox_campaign import clean_source, sha, write_once
 from mosaickv.measurements.native_event_ledger import NativeEventLedger
+from mosaickv.measurements.snapshot_states import is_active_state, is_pending_state
 
 SOURCE = Path(__file__).resolve().parents[2]
 POLICY = dict(
     scope="synthetic_native_allocator_transport_no_model_or_new_identity",
-    additional_CPU_scope="678_existing_native_v4_graph_artifacts_exact_producer_proof_only",
+    additional_CPU_scope="verified_proof_import_and_bounded_saved_snapshot_state_audit_only",
     max_events=65536,
     cpu_suite_timeout_seconds=1200,
     GPU_requests=1,
@@ -67,13 +68,12 @@ def command(root, label, mode):
         "after-cpu",
         "worker",
         "analyze",
-        "provenance-worker",
-        "provenance-analyze",
+        "snapshot-audit",
         "finish",
     }:
         raise ValueError("unregistered one-shot probe mode")
-    minutes = 25 if mode == "tests" else 15 if mode.startswith("provenance-") else 10
-    cores = 1 if mode == "provenance-worker" else 12
+    minutes = 25 if mode == "tests" else 10
+    cores = 2 if mode == "snapshot-audit" else 12
     return [
         "sbatch",
         "--parsable",
@@ -81,12 +81,11 @@ def command(root, label, mode):
         "--nodes=1",
         "--ntasks=1",
         "--partition=bii-gpu" if gpu else "--partition=bii,standard",
-        f"--job-name=fox18-{label}",
+        f"--job-name=fox19-{label}",
         f"--cpus-per-task={cores}",
         "--mem=16G",
         f"--time=00:{minutes:02d}:00",
         *(["--gres=gpu:a100:1", "--reservation=bi_fox_dgx"] if gpu else []),
-        *(["--array=0-1%2"] if mode == "provenance-worker" else []),
         f"--output={root}/slurm/{label}-%j.out",
         f"--error={root}/slurm/{label}-%j.err",
         str(SOURCE / "mosaickv/slurm/evicastkv_allocator_transport_probe.sbatch"),
@@ -138,6 +137,10 @@ def register(root, *, execute=False):
         SOURCE / "mosaickv/src/mosaickv/measurements/native_allocator_events.py",
         SOURCE / "mosaickv/src/mosaickv/measurements/csrc/native_allocator_events.cpp",
         SOURCE / "mosaickv/scripts/evicastkv_native_v4_provenance_recovery.py",
+        SOURCE / "mosaickv/scripts/evicastkv_provenance_import.py",
+        SOURCE / "mosaickv/scripts/evicastkv_snapshot_state_audit.py",
+        SOURCE / "mosaickv/src/mosaickv/measurements/snapshot_states.py",
+        SOURCE / "mosaickv/src/mosaickv/measurements/closed_kv_owners.py",
         SOURCE / "mosaickv/env/common/requirements.lock",
         Path(
             "/scratch/djy8hg/env/mosaickv/lib/python3.11/site-packages/torch/include/c10/cuda/CUDACachingAllocator.h"
@@ -184,10 +187,10 @@ def after_cpu(root):
     running_a100s = conservative_gpu_count(queue)
     if running_a100s >= POLICY["aggregate_A100_limit"]:
         raise ValueError("aggregate A100 ceiling leaves no probe slot; do not blind resubmit")
-    import evicastkv_native_v4_provenance_recovery as recovery
+    import evicastkv_provenance_import as recovery
 
     try:
-        prepared = recovery.prepare(Path(root) / "provenance", cpu_gate_root=root)
+        prepared = recovery.import_completed(Path(root) / "provenance")
     except Exception as error:
         write_once(
             Path(root) / "errors/provenance-preparation.json",
@@ -197,38 +200,28 @@ def after_cpu(root):
             ),
         )
         return finish(root)
-    if prepared["workers"] != 2:
-        raise ValueError("registered provenance recovery worker count changed")
-    provenance = submit(root, "provenance", "provenance-worker")
-    provenance_analyzer = submit(root, "provenance-analysis", "provenance-analyze", [provenance])
+    write_once(Path(root) / "provenance-imported.json", prepared)
+    snapshot = submit(root, "snapshot-audit", "snapshot-audit")
     job = submit(root, "probe", "worker")
     dependencies = [job]
     if os.environ.get("SLURM_JOB_ID"):
         dependencies.append(os.environ["SLURM_JOB_ID"])
     analyzer = submit(root, "analysis", "analyze", dependencies)
-    final = submit(root, "finish", "finish", [analyzer, provenance_analyzer, *dependencies[1:]])
+    final = submit(root, "finish", "finish", [analyzer, snapshot, *dependencies[1:]])
     return dict(
         worker=job,
         analyzer=analyzer,
-        provenance=provenance,
-        provenance_analyzer=provenance_analyzer,
+        provenance="verified_completed_V18_CPU_proofs_imported_no_new_workers",
+        snapshot_audit=snapshot,
         final=final,
     )
 
 
-def provenance_worker(root):
-    import evicastkv_native_v4_provenance_recovery as recovery
-
-    plan = load(root)
-    shared.cpu_gate(root, plan["source_sha"])
-    return recovery.worker(Path(root) / "provenance", int(os.environ["SLURM_ARRAY_TASK_ID"]))
-
-
-def provenance_analyze(root):
-    import evicastkv_native_v4_provenance_recovery as recovery
+def snapshot_audit(root):
+    import evicastkv_snapshot_state_audit as audit
 
     load(root)
-    return recovery.analyze(Path(root) / "provenance")
+    return audit.run(Path(root) / "snapshot-state", cpu_gate_root=root)
 
 
 def finish(root):
@@ -240,6 +233,8 @@ def finish(root):
         "GATE_cpu_suite.json",
         "GATE_native_allocator_transport.json",
         "provenance/GATE_native_v4_provenance_recovery.json",
+        "provenance/reuse.json",
+        "snapshot-state/GATE_snapshot_state_compatibility.json",
     ):
         path = root / name
         try:
@@ -305,7 +300,7 @@ def snapshot_blocks(torch):
     for segment in torch.cuda.memory_snapshot():
         address = segment["address"]
         for block in segment["blocks"]:
-            if block["state"] in {"active_allocated", "active_awaiting_free"}:
+            if is_active_state(block["state"]):
                 blocks.append(
                     dict(
                         device=segment["device"],
@@ -319,7 +314,35 @@ def snapshot_blocks(torch):
     return blocks
 
 
-def run_operator():
+def tensor_witness(recorder, name, tensor, pool):
+    """Strong local owner during the complete metadata/cursor observation."""
+    import torch
+
+    from mosaickv.measurements.closed_kv_owners import live_witness
+
+    if not isinstance(tensor, torch.Tensor) or not tensor.is_cuda:
+        raise ValueError("an actual live CUDA tensor owner is required")
+    begin = recorder.cursor()
+    storage = tensor.untyped_storage()
+    value = dict(
+        name=name,
+        addr=storage.data_ptr(),
+        size=storage.nbytes(),
+        requested=storage.nbytes(),
+        device=tensor.device.index,
+        storage_cdata=storage._cdata,
+        pool=list(pool),
+        begin_cursor=begin,
+    )
+    value["end_cursor"] = recorder.cursor()
+    value["toy_primitive_witness"] = live_witness(
+        [(tensor, "persistent", f"synthetic_operator_fixture_only.{name}")],
+        recorder.cursor,
+    )
+    return value
+
+
+def run_operator(*, root=None):
     import gc
 
     import torch
@@ -353,16 +376,9 @@ def run_operator():
     with torch.cuda.use_mem_pool(pool_a):
         first = torch.zeros(1031, dtype=torch.uint8, device="cuda")
     alias = first[3:1000]
-    first_address = first.untyped_storage().data_ptr()
-    witnesses.append(
-        dict(
-            name="first_and_alias",
-            addr=first_address,
-            requested=1031,
-            pool=list(pool_a.id),
-            alias_same_backing=alias.untyped_storage().data_ptr() == first_address,
-        )
-    )
+    witnesses.append(tensor_witness(recorder, "first_and_alias", first, pool_a.id))
+    first_address = witnesses[0]["addr"]
+    witnesses[0]["alias_same_backing"] = alias.untyped_storage().data_ptr() == first_address
     stream = torch.cuda.Stream()
     stream.wait_stream(torch.cuda.current_stream())
     with torch.cuda.stream(stream):
@@ -374,9 +390,17 @@ def run_operator():
     pending_begin = recorder.cursor()
     pending = snapshot_blocks(torch)
     pending_end = recorder.cursor()
-    if not any(
-        row["addr"] == first_address and row["state"] == "active_awaiting_free" for row in pending
-    ):
+    if root is not None:
+        write_once(
+            Path(root) / "pending_snapshot.json",
+            dict(
+                blocks=pending,
+                cursor_interval=[pending_begin, pending_end],
+                first_tensor_witness=witnesses[0],
+                no_source_KV_claim=True,
+            ),
+        )
+    if not any(row["addr"] == first_address and is_pending_state(row["state"]) for row in pending):
         raise ValueError("cross-stream pending-free storage control did not engage")
     torch.cuda.synchronize()
     # The installed allocator processes deferred events outside an active
@@ -395,31 +419,37 @@ def run_operator():
         retained_b = torch.ones(2051, dtype=torch.uint8, device="cuda")
     witnesses.extend(
         [
-            dict(
-                name="retained_a",
-                addr=retained_a.untyped_storage().data_ptr(),
-                requested=1031,
-                pool=list(pool_a.id),
-            ),
-            dict(
-                name="retained_b",
-                addr=retained_b.untyped_storage().data_ptr(),
-                requested=2051,
-                pool=list(pool_b.id),
-            ),
-            dict(
-                name="ordinary",
-                addr=ordinary.untyped_storage().data_ptr(),
-                requested=17,
-                pool=[0, 0],
-            ),
+            tensor_witness(recorder, "retained_a", retained_a, pool_a.id),
+            tensor_witness(recorder, "retained_b", retained_b, pool_b.id),
+            tensor_witness(recorder, "ordinary", ordinary, (0, 0)),
         ]
     )
     torch.cuda.synchronize()
     final = snapshot_blocks(torch)
     capture = recorder.stop()
+    if root is not None:
+        # Save transport inputs BEFORE derived checks. A late CPU validation
+        # defect can then be corrected without repeating the GPU operator.
+        write_once(
+            Path(root) / "operator_capture.json",
+            dict(
+                capture=capture,
+                baseline=before,
+                final=final,
+                tensor_witnesses=witnesses,
+                pending_snapshot=pending,
+                pending_cursor_interval=[pending_begin, pending_end],
+                recorder_build=recorder.build_provenance,
+                source_KV_certified=False,
+            ),
+        )
     ledger = NativeEventLedger(before).ingest(capture)
     result = ledger.verify_snapshot(final)
+    from mosaickv.measurements.closed_kv_owners import bind_witnesses
+
+    toy_bindings = bind_witnesses(ledger.records, [w["toy_primitive_witness"] for w in witnesses])
+    if len(toy_bindings) != len(witnesses):
+        raise ValueError("toy strong-owner primitive did not bind distinct actual generations")
     for witness in witnesses:
         matching = [
             row
@@ -427,8 +457,11 @@ def run_operator():
             if row["addr"] == witness["addr"]
             and row["size"] == witness["requested"]
             and row["pool"] == witness["pool"]
+            and row["device"] == witness["device"]
+            and row["start"] < witness["begin_cursor"]
+            and (row["end"] is None or row["end"] >= witness["end_cursor"])
         ]
-        if not matching:
+        if len(matching) != 1:
             raise ValueError("actual tensor backing lacks a matching native pool event")
     repeated = [row for row in ledger.records if row["addr"] in reuse and row["generation"] > 0]
     if not witnesses[0]["alias_same_backing"] or not repeated:
@@ -458,6 +491,8 @@ def run_operator():
         pending_snapshot=pending,
         pending_snapshot_cursor_interval=[pending_begin, pending_end],
         tensor_witnesses=witnesses,
+        toy_generation_witness_binding_count=len(toy_bindings),
+        toy_roles_are_not_source_KV_classification=True,
         reuse_addresses=reuse,
         source_roles_assigned=False,
         torch_version=torch.__version__,
@@ -478,11 +513,13 @@ def worker(root):
     root = Path(root)
     started = time.monotonic()
     try:
-        output = run_operator()
+        output = run_operator(root=root)
         write_once(root / "probe.json", output)
         result = dict(status="complete", errors=[], probe_sha256=sha(root / "probe.json"))
     except Exception as error:
         result = dict(status="failed", errors=[f"{type(error).__name__}: {error}"])
+        if (root / "operator_capture.json").exists():
+            result["complete_capture_for_CPU_recovery_sha256"] = sha(root / "operator_capture.json")
         # Preserve a bounded native trace even when an operator control fails.
         # This cannot turn the failed control into a successful capability run.
         try:
@@ -560,8 +597,7 @@ def main():
             "after-cpu",
             "worker",
             "analyze",
-            "provenance-worker",
-            "provenance-analyze",
+            "snapshot-audit",
             "finish",
         ),
     )

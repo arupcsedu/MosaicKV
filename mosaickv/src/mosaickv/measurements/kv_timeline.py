@@ -15,6 +15,8 @@ from bisect import bisect_right
 from contextlib import contextmanager
 from itertools import pairwise
 
+from mosaickv.measurements.snapshot_states import is_active_state
+
 KV_ROLES = frozenset(("kv_persistent", "kv_workspace", "kv_shared_workspace"))
 ROLES = KV_ROLES | {"model", "non_kv", "unknown"}
 
@@ -335,7 +337,7 @@ class CudaOwnershipSession:
             if segment["device"] != self.device:
                 continue
             for block in segment["blocks"]:
-                if block["state"] in ("active_allocated", "active_awaiting_free"):
+                if is_active_state(block["state"]):
                     self.timeline.seed(block["address"], block["requested_size"])
         self.baseline_trace_count = len(snapshot["device_traces"][self.device])
         self.cursor = self.baseline_trace_count
@@ -423,7 +425,7 @@ class CudaOwnershipSession:
                     for segment in self.snapshot["segments"]
                     if segment["device"] == self.device
                     for block in segment["blocks"]
-                    if block["state"] in ("active_allocated", "active_awaiting_free")
+                    if is_active_state(block["state"])
                 }
                 before = {a: key for a, key in self.timeline.active.items() if a in visible}
                 torch._C._cuda_clearCublasWorkspaces()
@@ -485,7 +487,7 @@ class CudaOwnershipSession:
                 for segment in self.snapshot["segments"]
                 if segment["device"] == self.device
                 for block in segment["blocks"]
-                if block["state"] in ("active_allocated", "active_awaiting_free")
+                if is_active_state(block["state"])
             }
             observed = {
                 address: self.timeline.allocations[key]["bytes"]

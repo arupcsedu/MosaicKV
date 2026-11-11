@@ -71,6 +71,27 @@ def test_snapshot_keeps_requested_bytes_pool_identity_and_pending_storage():
     ]
 
 
+@pytest.mark.parametrize("state", ["active_pending_free", "active_awaiting_free"])
+def test_actual_native_pending_state_is_not_dropped(state):
+    from types import SimpleNamespace
+
+    segment = dict(
+        device=0,
+        address=100,
+        segment_pool_id=(0, 1),
+        blocks=[
+            dict(size=1536, requested_size=1031, state=state),
+        ],
+    )
+    torch = SimpleNamespace(cuda=SimpleNamespace(memory_snapshot=lambda: [segment]))
+    assert probe.snapshot_blocks(torch) == [
+        dict(device=0, addr=100, size=1031, pool=[0, 1], state=state),
+    ]
+    segment["blocks"][0]["state"] = "active_future_undocumented"
+    with pytest.raises(ValueError, match="unreviewed"):
+        probe.snapshot_blocks(torch)
+
+
 def test_failed_operator_keeps_native_capture_without_promoting_it(monkeypatch, tmp_path):
     from types import SimpleNamespace
 
@@ -79,7 +100,7 @@ def test_failed_operator_keeps_native_capture_without_promoting_it(monkeypatch, 
     monkeypatch.setattr(probe, "load", lambda root: dict(source_sha="synthetic"))
     monkeypatch.setattr(probe.shared, "cpu_gate", lambda *args: {})
 
-    def fail():
+    def fail(**kwargs):
         raise ValueError("pending-free control failed")
 
     monkeypatch.setattr(probe, "run_operator", fail)
@@ -115,3 +136,29 @@ def test_failed_CPU_gate_emits_terminal_report_without_releasing_work(monkeypatc
     assert not result["paper_campaign_authorized"]
     assert "CPU-gate.json" in result["controller_errors"]
     assert (tmp_path / "FINAL_diagnostics.json").exists()
+
+
+def test_late_validation_failure_preserves_complete_capture_for_CPU_recovery(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    from mosaickv.measurements import native_allocator_events
+
+    monkeypatch.setattr(probe, "load", lambda root: dict(source_sha="synthetic"))
+    monkeypatch.setattr(probe.shared, "cpu_gate", lambda *args: {})
+
+    def late_failure(*, root):
+        probe.write_once(root / "operator_capture.json", dict(capture=dict(complete=True)))
+        raise ValueError("derived check failed after recorder stop")
+
+    def stopped():
+        raise RuntimeError("already stopped")
+
+    monkeypatch.setattr(probe, "run_operator", late_failure)
+    monkeypatch.setattr(
+        native_allocator_events, "load_recorder", lambda: SimpleNamespace(stop=stopped)
+    )
+    result = probe.worker(tmp_path)
+    assert result["status"] == "failed"
+    assert result["complete_capture_for_CPU_recovery_sha256"] == probe.sha(
+        tmp_path / "operator_capture.json"
+    )

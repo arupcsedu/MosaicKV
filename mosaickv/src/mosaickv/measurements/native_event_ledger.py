@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from collections import Counter
 
+from mosaickv.measurements.snapshot_states import is_active_state, is_pending_state
+
 
 def integer(value, label, *, minimum=0):
     if type(value) is not int or value < minimum:
@@ -35,6 +37,8 @@ class NativeEventLedger:
             self._allocate(block, sequence=-1, baseline=True)
 
     def _allocate(self, event, *, sequence, baseline=False):
+        if baseline and "state" in event and not is_active_state(event["state"]):
+            raise ValueError("inactive snapshot storage cannot seed a live generation")
         device = integer(event["device"], "device")
         address = integer(event["addr"], "address", minimum=1)
         size = integer(event["size"], "requested size", minimum=1)
@@ -53,7 +57,7 @@ class NativeEventLedger:
             start=sequence,
             end=None,
             free_requested=-1
-            if baseline and event.get("state") == "active_awaiting_free"
+            if baseline and "state" in event and is_pending_state(event["state"])
             else None,
             baseline=baseline,
             semantic_role="unknown",

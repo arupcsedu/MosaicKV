@@ -17,4 +17,9 @@ fi
 if [[ "$3" != "worker" ]]; then
     export CUDA_VISIBLE_DEVICES=""
 fi
+if [[ "$3" == "snapshot-audit" ]]; then
+    # The dedicated CLI installs the bounded address-space/CPU/wall limits
+    # before reading the saved archives. No semantic DAG is expanded.
+    exec /scratch/djy8hg/env/mosaickv/bin/python mosaickv/scripts/evicastkv_snapshot_state_audit.py --root "$2/snapshot-state" --cpu-gate-root "$2"
+fi
 exec /scratch/djy8hg/env/mosaickv/bin/python mosaickv/scripts/evicastkv_allocator_transport_probe.py "$3" --root "$2"

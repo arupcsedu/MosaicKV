@@ -79,3 +79,22 @@ zero-GPU-release decision are preserved. The resource-only retry registers a
 540-second default remains available to other controllers; the complete test
 directory, offline settings, numerical environment, and GPU gates are unchanged.
 Timeouts now also produce a durable failed `cpu-tests.json`, never a pass.
+
+## Native snapshot spelling correction
+
+The 6,744-test resource retry passed, and all 678 provenance files were proved
+without errors. Its GPU operator correctly failed the pending-free gate because
+the state adapter followed stale `memory.py` documentation. The installed
+PyTorch 2.8 C++ serializer and `libtorch_python.so` use `active_pending_free`,
+not `active_awaiting_free`. Four saved native events include the 1,031-byte
+allocation and free request, with no completed free. The snapshot reports the
+corresponding 1,536 rounded active bytes. This is evidence of an adapter defect,
+not permission to waive the pending-free check.
+
+The common state helper now accepts both reviewed pending spellings, keeps
+requested bytes live until completion, and rejects unknown states. Default
+snapshots already include private pools; unioning additional pool snapshots
+would duplicate owners and mix times. The corrected control will retain its
+actual pending snapshot, strong live-owner cursor intervals, final full snapshot
+and native replay. The completed CPU provenance work is imported with its
+original producer SHA and hashes rather than executed again.
