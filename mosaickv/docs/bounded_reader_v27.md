@@ -28,6 +28,14 @@ generation's `FREE_REQUESTED` and `FREE_COMPLETED` events after capture.
 An alias, a reused address, weak-reference death, or a free request alone
 cannot satisfy this check. A bounded native memory-history trace fails closed
 on truncation; sealed receipts are independently replayed on CPU.
+PyTorch 2.8 recalibrates exported `time_us` timestamps on each snapshot. A
+no-model CUDA diagnostic (`22826836`, source `60a63a0`) preserved both raw
+traces and found that this field alone changed by 1 microsecond. Allocation
+identity therefore compares every other field exactly; timestamp presence and
+integer type remain strict, and all original timestamps/hashes are retained.
+This does not alter allocation order, generations, sizes, physical owners or
+any model-fidelity tolerance. The pinned primary implementation is
+[`CUDACachingAllocator.cpp`, lines 2023–2032 and 3459–3475](https://github.com/pytorch/pytorch/blob/a1cb3cc05d46d198467bebbb6e8fba50a325d4e7/c10/cuda/CUDACachingAllocator.cpp#L3459).
 
 Source construction reuses the same full-width component pool and one-head
 scratch as decoding. It must reconstruct every original BF16 word with zero

@@ -47,6 +47,9 @@ POLICY = dict(
     native_allocator_generation_FREE_COMPLETED_required=True,
     all_constructor_ATen_temporary_owners_audited=True,
     bounded_allocator_trace_clock_diagnostic=True,
+    allocator_event_identity=(
+        "all_fields_strict_except_recalibrated_time_us_value; presence_and_type_strict"
+    ),
     no_latency_or_superiority_claim=True,
     disabled_mechanisms=["forecast", "graph", "utility", "selector", "prototype", "repair"],
 )
@@ -82,6 +85,19 @@ def prepare(root):
     ):
         raise ValueError("passed immutable V26 evidence required")
     bindings = dict(parent_plan["bindings"])
+    clock_probe_evidence = Path(
+        "/scratch/djy8hg/workdir/fox-review-v27-trace-clock/run-20261111-1/trace-clock/result.json"
+    )
+    clock_result = read(clock_probe_evidence)
+    clock_failure = clock_result["report"]["failure_evidence"]
+    if (
+        clock_result["source_sha"] != "60a63a020cacf0781ba524b00fe5dc041fc3e6a3"
+        or clock_result["report"]["strict_prefix_passed"] is not False
+        or clock_failure["all_mismatch_keys"] != ["time_us"]
+        or clock_result["model_weights_loaded"] is not False
+    ):
+        raise ValueError("actual timestamp-only recalibration evidence required")
+    bindings[str(clock_probe_evidence)] = sha(clock_probe_evidence)
     for path in (PARENT / "plan.json", PARENT / "analysis/GATE_bounded_reader_v26.json"):
         bindings[str(path)] = sha(path)
     for index in range(2):
@@ -127,6 +143,27 @@ def operator(root):
         report["attention"] = selftest(device="cuda")
         report["words"] = word_selftest(device="cuda")
         report["retirement"] = retirement_selftest(device="cuda")
+        # A fresh process preserves each independent memory-history owner.
+        # No second GPU is allocated and this is not a latency benchmark.
+        import sys
+
+        subprocess.run(
+            [sys.executable, str(Path(__file__).resolve()), "clock_probe", "--root", str(root)],
+            check=True,
+            timeout=90,
+        )
+        clock_path = Path(root) / "trace-clock/result.json"
+        clock = read(clock_path)
+        report["clock_probe"] = dict(
+            result_sha256=sha(clock_path),
+            strict_prefix_passed=clock["report"]["strict_prefix_passed"],
+            iterations_completed=clock["report"]["iterations_completed"],
+        )
+        if (
+            clock["report"]["strict_prefix_passed"] is not True
+            or clock["report"]["iterations_completed"] != 50
+        ):
+            raise ValueError("bounded clock-recalibration replay canary failed")
         if (
             report["attention"]["all_bitwise_passed"] is not True
             or report["words"]["all_passed"] is not True
@@ -333,6 +370,27 @@ def worker(root, index):
                 arm=mode,
             )
         )
+        tracker = locals().get("retirement_tracker")
+        if tracker is not None:
+            try:
+                write_once(
+                    out / "traces/native_retirement_partial.json",
+                    dict(
+                        events=tracker.events,
+                        tokens=tracker.tokens,
+                        receipts=tracker.receipts,
+                        failure_evidence=tracker.failure_evidence,
+                        whole_request_KV_peak_certified=False,
+                    ),
+                )
+            except BaseException as trace_error:
+                errors.append(
+                    dict(
+                        error_type=type(trace_error).__name__,
+                        error=str(trace_error),
+                        stage="retirement_partial_trace",
+                    )
+                )
         if ledger is not None:
             try:
                 partial = ledger.ledger.summary()

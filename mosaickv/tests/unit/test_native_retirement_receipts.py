@@ -454,3 +454,114 @@ def test_bounded_clock_diagnostic_reports_raw_failure_instead_of_claiming_pass(
     assert report["history_restored_disabled"] is True
     assert report["failure_evidence"]["all_mismatch_keys"] == ["time_us"]
     assert report["failure_evidence"]["raw_current_events"][0]["time_us"] == 42
+
+
+def observed_clock_pair():
+    """Minimal factual pair from GPU 22826836, event 18; not a model result."""
+    before = dict(
+        action="alloc",
+        addr=12918868992,
+        size=1037,
+        stream=0,
+        time_us=1794426466675621,
+    )
+    after = dict(before, time_us=1794426466675622)
+    return before, after
+
+
+def test_only_observed_derived_clock_value_can_change_in_native_event_identity():
+    before, after = observed_clock_pair()
+    assert module.trace_identity([before]) == module.trace_identity([after])
+    assert validate_trace_prefix([before], [after, event("snapshot")], capacity=100)
+    assert before["time_us"] == 1794426466675621
+    assert after["time_us"] == 1794426466675622
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("action", "free_requested"),
+        ("addr", 12918868993),
+        ("size", 1038),
+        ("stream", 1),
+        ("frames", [{"filename": "changed.py", "line": 1, "name": "changed"}]),
+        ("compile_context", "changed"),
+        ("unknown_optional_field", "added"),
+    ],
+)
+def test_every_nonclock_field_change_still_rejects_prefix(field, value):
+    before, after = observed_clock_pair()
+    after[field] = value
+    with pytest.raises(ValueError, match="prefix"):
+        validate_trace_prefix([before], [after], capacity=100)
+
+
+@pytest.mark.parametrize("field", ["frames", "compile_context"])
+def test_existing_numerical_or_nested_metadata_is_not_coerced_or_ignored(field):
+    before, after = observed_clock_pair()
+    before[field] = [{"line": 1}] if field == "frames" else 1
+    after[field] = [{"line": True}] if field == "frames" else True
+    with pytest.raises(ValueError, match="prefix"):
+        validate_trace_prefix([before], [after], capacity=100)
+
+
+@pytest.mark.parametrize("bad", [None, True, False, -1, 1794426466675621.0, "1794426466675621"])
+def test_snapshot_time_value_requires_nonnegative_strict_integer(bad):
+    before, after = observed_clock_pair()
+    after["time_us"] = bad
+    with pytest.raises(ValueError, match="time_us"):
+        validate_trace_prefix([before], [after], capacity=100)
+
+
+@pytest.mark.parametrize("side", ["before", "after"])
+def test_clock_field_presence_is_still_part_of_native_identity(side):
+    before, after = observed_clock_pair()
+    del (before if side == "before" else after)["time_us"]
+    with pytest.raises(ValueError, match="prefix"):
+        validate_trace_prefix([before], [after], capacity=100)
+
+
+def test_v2_capture_and_replay_preserve_raw_clock_histories_separately_from_identity():
+    before = [dict(event("alloc"), time_us=100), dict(event("snapshot"), time_us=110)]
+    token = bind_generations(before, snapshot(), [(100, 48)], device=0, label="layer_0")
+    after = [
+        dict(before[0], time_us=101),
+        dict(before[1], time_us=111),
+        dict(event("free_requested"), time_us=120),
+        dict(event("free_completed"), time_us=125),
+    ]
+    receipt = verify_retired(after, token)
+    assert token["schema"] == "native_cuda_generation_retirement_token_v2"
+    assert receipt["schema"] == "native_cuda_generation_retirement_receipt_v2"
+    assert token["captured_raw_trace_events"] == before
+    assert receipt["trace_events"] == after
+    assert token["captured_raw_trace_sha256"] != module._sha(after[:2])
+    assert token["captured_trace_sha256"] == module._sha(module.trace_identity(after[:2]))
+    assert receipt["raw_trace_sha256"] == module._sha(after)
+    assert verify_receipts([receipt], expected_layers=1)["complete"] is True
+
+
+@pytest.mark.parametrize("field", ["captured_raw_trace_sha256", "captured_trace_sha256"])
+def test_v2_capture_cannot_rewrite_either_raw_or_identity_hash(field):
+    _, token, after = fixture()
+    token[field] = "a" * 64
+    with pytest.raises(ValueError, match="hash"):
+        verify_retired(after, token)
+
+
+def test_v2_raw_verification_hash_is_independently_replayed():
+    receipts = synthetic_receipts()
+    receipts[0]["raw_trace_sha256"] = "a" * 64
+    with pytest.raises(ValueError, match="independent"):
+        verify_receipts(receipts, expected_layers=2)
+
+
+def test_v2_never_reinterprets_a_v1_raw_trace_token_or_receipt():
+    _, token, after = fixture()
+    token["schema"] = "native_cuda_generation_retirement_token_v1"
+    with pytest.raises(ValueError, match="generation-bound"):
+        verify_retired(after, token)
+    receipts = synthetic_receipts()
+    receipts[0]["schema"] = "native_cuda_generation_retirement_receipt_v1"
+    with pytest.raises(ValueError, match="independent"):
+        verify_receipts(receipts, expected_layers=2)

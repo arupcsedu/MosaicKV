@@ -19,6 +19,7 @@ from mosaickv.evaluation.kv_allocator_ledger import resolve_snapshot, tensor_own
 
 _TORCH_VERSION = "2.8.0+cu128"
 _TORCH_GIT = "a1cb3cc05d46d198467bebbb6e8fba50a325d4e7"
+_IDENTITY_POLICY = "all_native_fields_exact_except_snapshot_recalibrated_time_us_value_v2"
 _ACTIONS = {
     "alloc",
     "free_requested",
@@ -82,6 +83,8 @@ def trace_prefix_failure_evidence(previous, current, *, capacity, error, snapsho
     return dict(
         schema="native_allocator_strict_prefix_failure_diagnostic_v1",
         acceptance_rule_unchanged=True,
+        acceptance_rule_scope="allocation_generation_and_numerical_guards",
+        trace_identity_policy=_IDENTITY_POLICY,
         source_history_fields_unmodified=True,
         error=str(error),
         registered_capacity=capacity,
@@ -101,6 +104,29 @@ def trace_prefix_failure_evidence(previous, current, *, capacity, error, snapsho
     )
 
 
+def trace_identity(events):
+    """Identity of pinned native events, retaining timestamp-field presence.
+
+    Torch 2.8 recalibrates ApproximateClock to Unix time for EVERY snapshot
+    (CUDACachingAllocator.cpp at a1cb3cc, makeConverter in snapshot()). Thus
+    an old event's derived ``time_us`` may change by a microsecond. The V27
+    capture-only GPU diagnostic measured that exact change, with all other
+    fields unchanged. Only its VALUE is canonicalized; malformed values,
+    missing/added fields and every other field remain strict. Raw histories
+    and raw hashes are separately retained in V2 tokens and receipts.
+    """
+    result = []
+    for event in events:
+        if not isinstance(event, Mapping):
+            raise ValueError("explicit native event mapping required")
+        item = dict(event)
+        if "time_us" in item:
+            _integer(item["time_us"], "snapshot-recalibrated time_us")
+            item["time_us"] = 0
+        result.append(item)
+    return result
+
+
 def validate_trace_prefix(previous, current, *, capacity):
     """Require an append-only, untruncated actual-device trace, not a ring tail."""
     _integer(capacity, "trace capacity", 1)
@@ -108,8 +134,11 @@ def validate_trace_prefix(previous, current, *, capacity):
         raise ValueError("explicit complete trace sequences required")
     if len(current) >= capacity:
         raise ValueError("allocator trace reached its ring capacity; completeness is unproven")
-    if len(current) < len(previous) or list(current[: len(previous)]) != list(previous):
+    if len(current) < len(previous) or _sha(trace_identity(current[: len(previous)])) != _sha(
+        trace_identity(previous)
+    ):
         raise ValueError("allocator trace prefix changed or was truncated")
+    trace_identity(current)  # Validate timestamp types even in newly appended events.
     for event in current:
         if not isinstance(event, Mapping) or event.get("action") not in _ACTIONS:
             raise ValueError("unknown/malformed native allocator history action")
@@ -119,7 +148,7 @@ def validate_trace_prefix(previous, current, *, capacity):
             _integer(event.get("addr"), "native allocation address", 1)
             _integer(event.get("size"), "native allocation requested size", 1)
             _integer(event.get("stream"), "native allocation stream")
-    return _sha(list(current))
+    return _sha(trace_identity(current))
 
 
 def allocation_generations(events):
@@ -199,11 +228,14 @@ def bind_generations(events, snapshot, owners, *, device, label):
         raise ValueError("nonempty original native K/V owners required")
     del records
     return dict(
-        schema="native_cuda_generation_retirement_token_v1",
+        schema="native_cuda_generation_retirement_token_v2",
+        trace_identity_policy=_IDENTITY_POLICY,
         label=label,
         device=device,
         captured_trace_count=len(events),
-        captured_trace_sha256=_sha(list(events)),
+        captured_trace_sha256=_sha(trace_identity(events)),
+        captured_raw_trace_sha256=_sha(list(events)),
+        captured_raw_trace_events=json.loads(json.dumps(list(events), allow_nan=False)),
         captured_snapshot_sha256=_sha(snapshot),
         allocations=allocations,
         unique_backing_bytes=resolved["current_tensor_backing_bytes"],
@@ -215,7 +247,8 @@ def verify_retired(events, token):
     """Replay one token against an intact trace, accepting only FREE_COMPLETED."""
     if (
         not isinstance(token, Mapping)
-        or token.get("schema") != "native_cuda_generation_retirement_token_v1"
+        or token.get("schema") != "native_cuda_generation_retirement_token_v2"
+        or token.get("trace_identity_policy") != _IDENTITY_POLICY
     ):
         raise ValueError("generation-bound original owner token required")
     _integer(token.get("device"), "native generation device")
@@ -224,10 +257,22 @@ def verify_retired(events, token):
         raise ValueError("bounded nonempty retirement label required")
     _hash_field(token.get("captured_snapshot_sha256"), "capture snapshot hash")
     _hash_field(token.get("captured_trace_sha256"), "capture trace hash")
+    _hash_field(token.get("captured_raw_trace_sha256"), "raw capture trace hash")
     validate_trace_prefix([], events, capacity=len(events) + 1)
     count = _integer(token.get("captured_trace_count"), "captured trace count", 1)
-    if len(events) < count or _sha(list(events[:count])) != token.get("captured_trace_sha256"):
+    captured_raw = token.get("captured_raw_trace_events")
+    if (
+        not isinstance(captured_raw, list)
+        or len(captured_raw) != count
+        or _sha(captured_raw) != token["captured_raw_trace_sha256"]
+        or _sha(trace_identity(captured_raw)) != token["captured_trace_sha256"]
+    ):
+        raise ValueError("full raw capture history differs from its sealed raw/identity hashes")
+    if len(events) < count or _sha(trace_identity(events[:count])) != token.get(
+        "captured_trace_sha256"
+    ):
         raise ValueError("retirement trace no longer contains its immutable capture prefix")
+    validate_trace_prefix(captured_raw, events, capacity=len(events) + 1)
     allocations = token.get("allocations")
     if not isinstance(allocations, list) or not allocations:
         raise ValueError("complete nonempty allocation-generation bindings required")
@@ -303,14 +348,16 @@ def verify_retired(events, token):
     ):
         raise ValueError("native capture's backing or physical byte totals disagree")
     return dict(
-        schema="native_cuda_generation_retirement_receipt_v1",
+        schema="native_cuda_generation_retirement_receipt_v2",
+        trace_identity_policy=_IDENTITY_POLICY,
         label=token["label"],
         device=token["device"],
         actual_free_completed_verified=True,
         weakref_death_is_not_free_evidence=True,
         captured_trace_count=count,
         verified_trace_count=len(events),
-        trace_sha256=_sha(list(events)),
+        trace_sha256=_sha(trace_identity(events)),
+        raw_trace_sha256=_sha(list(events)),
         token_sha256=_sha(dict(token)),
         allocations=receipts,
         source_token=json.loads(json.dumps(dict(token), allow_nan=False)),
@@ -477,7 +524,8 @@ class CUDAFreeCompletedTracker:
             raise RuntimeError("only a successful, closed bounded history can be summarized")
         complete = len(self.tokens) == len(self.receipts) and bool(self.tokens)
         return dict(
-            schema="native_cuda_generation_retirement_summary_v1",
+            schema="native_cuda_generation_retirement_summary_v2",
+            trace_identity_policy=_IDENTITY_POLICY,
             complete=complete,
             original_history_enabled=self.original_history_enabled,
             existing_history_preserved=True,
@@ -485,7 +533,8 @@ class CUDAFreeCompletedTracker:
             events=list(self.events),
             trace_count=len(self.events),
             capacity=self.capacity,
-            trace_sha256=_sha(self.events),
+            trace_sha256=_sha(trace_identity(self.events)),
+            raw_trace_sha256=_sha(self.events),
             trace_prefix_complete=True,
             no_ring_truncation=True,
             tokens=list(self.tokens),
@@ -551,6 +600,7 @@ def selftest(*, device="cuda"):
         and not torch._C._cuda_isHistoryEnabled(),
         actual_retirement_receipts=len(result["receipts"]),
         actual_free_completed_generations=replay["generations"],
+        trace_identity_policy=_IDENTITY_POLICY,
         alias_retention_correctly_rejected=alias_rejected,
         delayed_stream_free_completed_verified=second_receipt["actual_free_completed_verified"],
         native_address_reuse_observed=later_address == original_address,
@@ -597,11 +647,14 @@ def trace_clock_diagnostic(*, device="cuda"):
     except BaseException as exc:
         failure = dict(error_type=type(exc).__name__, error=str(exc))
     return dict(
-        schema="native_snapshot_clock_strict_prefix_diagnostic_v1",
+        schema="native_snapshot_clock_strict_prefix_diagnostic_v2",
         torch_version=torch.__version__,
         torch_git_version=torch.version.git_version,
         strict_prefix_passed=failure is None,
         acceptance_rule_unchanged=True,
+        acceptance_rule_scope="allocation_generation_and_numerical_guards",
+        trace_identity_policy=_IDENTITY_POLICY,
+        raw_recalibrated_timestamp_value_used_as_identity=False,
         iterations_completed=iterations,
         temporary_allocations_created=allocations,
         registered_maximum_iterations=50,
