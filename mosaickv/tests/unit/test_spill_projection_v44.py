@@ -171,6 +171,105 @@ def test_mixed_scalar_nested_escaped_and_chunk_split_fields_match_legacy(tmp_pat
         assert collected(parse(current)) == reference(raw)
 
 
+def test_learned_layout_skips_unsafe_callbacks_without_global_regex_cache(tmp_path, monkeypatch):
+    calls = 0
+    original = spill.ProjectionReader._flat_field
+
+    def counted(self, *args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(spill.ProjectionReader, "_flat_field", counted)
+    raw = json.dumps(
+        {
+            "events": [
+                dict(
+                    ph="X",
+                    cat="cpu_op",
+                    name="operator",
+                    pid=1,
+                    tid=2,
+                    ts=i * 0.5,
+                    dur=0.1,
+                    args={"External id": i, "unknown": 0},
+                )
+                for i in range(100)
+            ]
+        }
+    ).encode()
+    before_cache = len(spill.re._cache)
+    with reader(raw, tmp_path, chunk=65536) as current:
+        assert collected(parse(current)) == reference(raw)
+        assert current.stats["scalar_layout_hits"] > 150
+        assert current.stats["scalar_layout_fields"] > 800
+        assert calls < 30
+        assert current.stats["scalar_layout_entries"] <= spill.MAXIMUM_LAYOUTS
+        assert current.stats["scalar_layout_bytes"] <= spill.MAXIMUM_LAYOUT_BYTES
+    assert len(spill.re._cache) == before_cache
+
+
+@pytest.mark.parametrize(
+    "last",
+    [
+        b'{"i\\u0064":{"sample_id":"nested"},"id":"duplicate","ph":"X"}',
+        b'{"id":"duplicate","ph":"X","args":{},"i\\u0064":"again"}',
+    ],
+)
+def test_cached_layout_duplicate_checks_span_escaped_and_nested_fallback(tmp_path, last):
+    raw = b'{"events":[{"id":"learn","ph":"X"},' + last + b"]}"
+    with reader(raw, tmp_path) as current, pytest.raises(ValueError, match="duplicate"):
+        parse(current)
+    assert current.stats["scalar_layout_entries"] >= 1
+
+
+def test_cached_layout_keeps_finite_checks_for_nonessential_safe_numbers(tmp_path):
+    raw = b'{"events":[{"name":"learn","ph":"X"},{"name":1e9999,"ph":"X"}]}'
+    with reader(raw, tmp_path) as current, pytest.raises(ValueError, match="nonfinite"):
+        parse(current)
+    assert current.stats["scalar_layout_entries"] >= 1
+
+
+def test_layout_miss_and_keep_dataset_roles_preserve_legacy_scopes(tmp_path, monkeypatch):
+    original = base._decoded_scalar
+
+    def decoded(raw):
+        assert b"PRIVATE" not in raw
+        return original(raw)
+
+    monkeypatch.setattr(base, "_decoded_scalar", decoded)
+    raw = (
+        b'{"answer":[{"id":"PRIVATE_ID","ph":"PRIVATE_PH"},'
+        b'{"id":"PRIVATE_ID","ph":"PRIVATE_PH"}],'
+        b'"events":[{"name":"not-scope","path":"not-scope"},'
+        b'{"name":"second","path":"second"},'
+        b'{"ph":"X","name":{"sample_id":"nested-schema-change"}},'
+        b'{"id":"keep-id","ph":"X"},'
+        b'{"id":"keep-next-id","ph":"X"}],'
+        b'"dataset":{"name":"late-parent","path":"alternate"}}'
+    )
+    with reader(raw, tmp_path) as current:
+        result = collected(parse(current))
+        assert result == reference(raw)
+        assert result["sample_ids"] == ["keep-id", "keep-next-id", "nested-schema-change"]
+        assert ("late-parent", "", "", "keep-id") in result["scoped_identities"]
+        assert current.stats["scalar_layout_hits"] >= 3
+
+
+def test_layout_cache_caps_are_owned_and_optional(tmp_path, monkeypatch):
+    monkeypatch.setattr(spill, "MAXIMUM_LAYOUTS", 2)
+    monkeypatch.setattr(spill, "MAXIMUM_LAYOUT_BYTES", 4096)
+    raw = json.dumps(
+        {"events": [{f"unknown-{i}": i, "sample_id": str(i)} for i in range(30)]}
+    ).encode()
+    with reader(raw, tmp_path) as current:
+        assert collected(parse(current)) == reference(raw)
+        assert current.scalar_layout_count <= 2
+        assert current.scalar_layout_bytes <= 4096
+        assert current._persistent_bytes >= current.scalar_layout_bytes
+        assert current.stats["maximum_live_projected_metadata_bytes"] <= base.MAXIMUM_METADATA
+
+
 @pytest.mark.parametrize(
     "raw",
     [

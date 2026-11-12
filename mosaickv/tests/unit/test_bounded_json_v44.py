@@ -50,6 +50,13 @@ def test_complete_file_hash_and_exact_metadata_only_identity_sets(tmp_path, raw)
     assert "PRIVATE" not in json.dumps(proof)
     assert proof["hash_passes"] == 1
     assert proof["independent_second_pass_verified"] is False
+    stats = proof["statistics"]
+    assert stats["complete_source_parse_seconds"] >= 0
+    assert stats["identity_replay_and_export_seconds"] >= 0
+    assert (
+        stats["complete_source_parse_seconds"] + stats["identity_replay_and_export_seconds"]
+        <= proof["wall_seconds"]
+    )
 
 
 def test_source_signature_failure_never_opens_output(tmp_path):
@@ -62,8 +69,20 @@ def test_source_signature_failure_never_opens_output(tmp_path):
 
 
 def test_malformed_tail_does_not_publish_complete_proof(tmp_path):
-    with pytest.raises(wrapper.ProjectionFailure):
+    with pytest.raises(wrapper.ProjectionFailure) as caught:
         run(tmp_path, b'{"sample_id":"x"} broken')
+    assert caught.value.statistics["failure_phase"] == "source_parse"
+
+
+def test_replay_failure_records_phase_without_publishing_a_proof(tmp_path, monkeypatch):
+    def stop(*args, **kwargs):
+        raise TimeoutError("synthetic bounded replay deadline")
+
+    monkeypatch.setattr(wrapper.sink, "collect_to_shards", stop)
+    with pytest.raises(wrapper.ProjectionFailure) as caught:
+        run(tmp_path, b'{"sample_id":"x"}')
+    assert caught.value.statistics["failure_phase"] == "identity_replay_and_export"
+    assert caught.value.statistics["bytes_read"] == len(b'{"sample_id":"x"}')
 
 
 def test_more_than_100000_expanded_nodes_use_bounded_external_records(tmp_path):

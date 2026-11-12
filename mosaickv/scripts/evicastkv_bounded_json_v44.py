@@ -42,6 +42,7 @@ def project_file(row, roots, deadline, output_root, *, maximum_bytes=MAXIMUM_BYT
         raise ValueError("source proof workspace and outputs must stay on scratch")
     reader = None
     started = time.monotonic()
+    phase = "source_setup"
     try:
         with tempfile.TemporaryDirectory(prefix="evicastkv-json-v44-", dir=temporary) as folder:
             workspace = Path(folder)
@@ -58,13 +59,22 @@ def project_file(row, roots, deadline, output_root, *, maximum_bytes=MAXIMUM_BYT
                     workspace=workspace,
                 )
                 with reader:
+                    phase = "source_parse"
                     node = reader.value()
                     node = None if node is projection.base.DROP else node
                     reader.spaces()
                     if reader.peek() is not None:
                         raise ValueError("trailing_JSON_payload")
+                    reader.stats["complete_source_parse_seconds"] = time.monotonic() - started
+                    phase = "projection_digest"
                     root_digest = reader.descriptor_digest(node)
+                    phase = "identity_replay_and_export"
+                    replay_started = time.monotonic()
                     result = sink.collect_to_shards(node, reader, workspace, output_root)
+                    reader.stats["identity_replay_and_export_seconds"] = (
+                        time.monotonic() - replay_started
+                    )
+                    phase = "closing_source_checks"
                     reader.assert_spills_verified()
                     reader.check_deadline()
                     final = os.fstat(stream.fileno())
@@ -99,6 +109,8 @@ def project_file(row, roots, deadline, output_root, *, maximum_bytes=MAXIMUM_BYT
         stats = dict(reader.stats) if reader is not None else {}
         if reader is not None:
             stats["total_input_bytes"] = reader.budget.used
+        stats["failure_phase"] = phase
+        stats["elapsed_seconds"] = time.monotonic() - started
         category = type(error).__name__
         # Reader/sink errors carry no original scalar snippets. Only the class
         # is published; unknown parser/SQLite exceptions stay explicit negatives.

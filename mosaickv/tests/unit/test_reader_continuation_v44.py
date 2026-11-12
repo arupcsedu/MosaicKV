@@ -32,6 +32,23 @@ def test_successful_old_occurrences_never_eligible():
     assert driver.eligible(parent, data) == [1, 2]
 
 
+def test_all_completed_variant_sources_are_stat_only_checked(tmp_path, monkeypatch):
+    path = (tmp_path / "completed.json").resolve()
+    path.write_bytes(b'{"sample_id":"not-reopened"}')
+    row = dict(
+        path=str(path),
+        signature=driver.bounded.geometry(path.lstat()),
+        operation="json_stream",
+    )
+    monkeypatch.setattr(
+        driver.common.history, "read", lambda *a, **k: pytest.fail("source body read")
+    )
+    assert driver.verify_completed_source_signatures([row], [], [str(tmp_path)]) == 1
+    path.write_bytes(b"changed")
+    with pytest.raises(ValueError, match="completed source changed"):
+        driver.verify_completed_source_signatures([row], [], [str(tmp_path)])
+
+
 def test_changed_original_binding_is_not_silently_retried():
     data = rows()
     unresolved = deepcopy(data[1])

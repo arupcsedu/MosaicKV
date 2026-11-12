@@ -15,6 +15,7 @@ import sqlite3
 import stat
 import sys
 import tempfile
+from collections import OrderedDict
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -41,6 +42,7 @@ HASH_KEYS = {
 MAX_SHARD_BYTES, MAX_SHARD_NODES = 8 * 2**20, 100000
 TARGET_BYTES, MAX_REFERENCES = 256 * 2**10, 4096
 SQLITE_RESERVATION = 512 * 2**10
+HOT_CACHE_BYTES = 128 * 2**10
 
 
 def _scratch_directory(path):
@@ -78,22 +80,92 @@ def _nodes(value):
     return 1 + len(value) if isinstance(value, (tuple, list)) else 1
 
 
+class _ExactHotCache:
+    """Small exact cache; bounded generation resets never change membership."""
+
+    def __init__(self, reader, maximum=HOT_CACHE_BYTES):
+        if type(maximum) is not int or not 0 <= maximum <= HOT_CACHE_BYTES:
+            raise ValueError("identity hot cache must remain within 128 KiB")
+        self.reader, self.maximum = reader, maximum
+        self.entries = OrderedDict() if maximum >= sys.getsizeof(OrderedDict()) else None
+        self.bytes = self.nodes = self.peak_bytes = self.peak_entries = 0
+        if self.entries is not None:
+            self.bytes, self.nodes = sys.getsizeof(self.entries), 1
+            reader.acquire(self.bytes, self.nodes)
+            self.peak_bytes = self.bytes
+
+    def contains(self, kind, value):
+        if self.entries is None:
+            return False
+        key = (kind, value)
+        if key not in self.entries:
+            return False
+        self.entries.move_to_end(key)
+        return True
+
+    def add(self, kind, value):
+        if self.entries is None:
+            return
+        key = (kind, value)
+        if key in self.entries:
+            self.entries.move_to_end(key)
+            return
+        # Charge retained scalar objects even when their source tree still owns
+        # another reference: cache ownership must outlive a released spill child.
+        fields = value if isinstance(value, tuple) else (value,)
+        amount = (
+            sys.getsizeof(key)
+            + (sys.getsizeof(value) if isinstance(value, tuple) else 0)
+            + sum(sys.getsizeof(field) for field in fields)
+            + 512
+        )
+        nodes = 4 + len(fields)
+        base = sys.getsizeof(OrderedDict())
+        if amount + base > self.maximum:
+            return  # A large identity remains exclusively in the bounded database.
+        if self.bytes + amount > self.maximum:
+            # Itemwise OrderedDict eviction leaves its large native hash table
+            # allocated. Reset the generation so a subsequent large identity
+            # cannot coexist with an uncharged table-capacity high-water mark.
+            self.entries.clear()
+            current = sys.getsizeof(self.entries)
+            self.reader.release(self.bytes - current, self.nodes - 1)
+            self.bytes, self.nodes = current, 1
+        self.reader.acquire(amount, nodes)
+        self.entries[key] = (amount, nodes)
+        self.bytes += amount
+        self.nodes += nodes
+        self.peak_bytes = max(self.peak_bytes, self.bytes)
+        self.peak_entries = max(self.peak_entries, len(self.entries))
+
+    def close(self):
+        if self.entries is not None:
+            self.entries.clear()
+            self.entries = None
+            self.reader.release(self.bytes, self.nodes)
+            self.bytes = self.nodes = 0
+
+
 def _walk(node, reader, emit, context=None, key="", in_media=False):
     reader.check_deadline()
     context = {} if context is None else context
     if isinstance(node, dict):
-        local = dict(context)
+        local = None
         created = []
         for field in SCOPE_FIELDS:
             value = node.get(field)
             # Deliberately preserve bool-as-int for scope fields, but not IDs.
             if isinstance(value, (str, int)):
+                if local is None:
+                    local = dict(context)
                 converted = str(value)
                 local[field] = converted
                 if not isinstance(value, str):
                     created.append(converted)
         dataset = node.get("dataset")
         if isinstance(dataset, dict):
+            if local is None:
+                local = dict(context)
             for field in ("id", "name", "path"):
                 if isinstance(dataset.get(field), str):
                     local["dataset_id"] = dataset[field]
@@ -101,6 +173,12 @@ def _walk(node, reader, emit, context=None, key="", in_media=False):
             for field in ("split", "configuration", "config_name"):
                 if isinstance(dataset.get(field), str):
                     local[field] = dataset[field]
+        if local is None:
+            # Ordinary profiler objects do not introduce a scope. Reuse the
+            # immutable ancestor mapping rather than copying/charging it again.
+            for child_key, child in node.items():
+                _walk(child, reader, emit, context, child_key, in_media or child_key == "media")
+            return
         amount = sys.getsizeof(local) + sum(sys.getsizeof(value) for value in created)
         with _owned(reader, amount, 1 + len(created)):
             for child_key, child in node.items():
@@ -123,26 +201,33 @@ def _walk(node, reader, emit, context=None, key="", in_media=False):
         return
     if not isinstance(node, (str, int)) or isinstance(node, bool):
         return
-    value = str(node)
-    with _owned(reader, 0 if isinstance(node, str) else sys.getsizeof(value)):
-        for match in legacy.COCO.finditer(value):
-            emit("coco_ids", match.group())
-        if key in legacy.ID_KEYS:
-            emit("sample_ids", value)
-            namespace = context.get(
-                "dataset_id",
-                context.get("dataset_name", context.get("dataset", context.get("task", ""))),
-            )
-            configuration = context.get("dataset_config", context.get("configuration", ""))
-            scope = (namespace, configuration, context.get("split", ""))
-            emit("scopes", scope)
-            emit("scoped_identities", (*scope, value))
-            if key in GROUP_KEYS:
-                emit("source_group_ids", value)
-        if key in HASH_KEYS or (key == "sha256" and in_media):
-            candidate = value.removeprefix("input-media:").removeprefix("original-image:")
-            if legacy.HASH.fullmatch(candidate):
-                emit("media_hashes", candidate)
+    if isinstance(node, str):
+        _leaf(node, context, key, in_media, emit)
+    else:
+        value = str(node)
+        with _owned(reader, sys.getsizeof(value)):
+            _leaf(value, context, key, in_media, emit)
+
+
+def _leaf(value, context, key, in_media, emit):
+    for match in legacy.COCO.finditer(value):
+        emit("coco_ids", match.group())
+    if key in legacy.ID_KEYS:
+        emit("sample_ids", value)
+        namespace = context.get(
+            "dataset_id",
+            context.get("dataset_name", context.get("dataset", context.get("task", ""))),
+        )
+        configuration = context.get("dataset_config", context.get("configuration", ""))
+        scope = (namespace, configuration, context.get("split", ""))
+        emit("scopes", scope)
+        emit("scoped_identities", (*scope, value))
+        if key in GROUP_KEYS:
+            emit("source_group_ids", value)
+    if key in HASH_KEYS or (key == "sha256" and in_media):
+        candidate = value.removeprefix("input-media:").removeprefix("original-image:")
+        if legacy.HASH.fullmatch(candidate):
+            emit("media_hashes", candidate)
 
 
 class _ShardWriter:
@@ -215,7 +300,15 @@ class _ShardWriter:
         self.counts[kind] += 1
 
 
-def collect_to_shards(node, reader, workspace, output_root, *, target_bytes=TARGET_BYTES):
+def collect_to_shards(
+    node,
+    reader,
+    workspace,
+    output_root,
+    *,
+    target_bytes=TARGET_BYTES,
+    hot_cache_bytes=HOT_CACHE_BYTES,
+):
     """Replay the projected root exactly once and emit deduplicated typed shards.
 
     ``reader`` must share its 8-MiB/100k live-object accounting and 210-second,
@@ -228,8 +321,14 @@ def collect_to_shards(node, reader, workspace, output_root, *, target_bytes=TARG
     private = Path(tempfile.mkdtemp(prefix="identity-sink-", dir=workspace))
     database = private / "identities.sqlite3"
     writer = _ShardWriter(output, reader, target_bytes)
-    statistics = dict(insert_attempts=0, duplicate_identities=0, sqlite_export_bytes=0)
-    connection = None
+    statistics = dict(
+        insert_attempts=0,
+        duplicate_identities=0,
+        sqlite_export_bytes=0,
+        sqlite_insert_calls=0,
+        hot_cache_hits=0,
+    )
+    connection = cache = None
     try:
         with _owned(reader, SQLITE_RESERVATION, 16):
             connection = sqlite3.connect(database, cached_statements=8)
@@ -246,19 +345,31 @@ def collect_to_shards(node, reader, workspace, output_root, *, target_bytes=TARG
                 "CREATE TABLE ids(kind TEXT NOT NULL,value BLOB NOT NULL,nodes INTEGER NOT NULL,"
                 "PRIMARY KEY(kind,value)) WITHOUT ROWID"
             )
+            cache = _ExactHotCache(reader, hot_cache_bytes)
 
             def emit(kind, value):
                 reader.check_deadline()
                 statistics["insert_attempts"] += 1
+                if cache.contains(kind, value):
+                    statistics["hot_cache_hits"] += 1
+                    statistics["duplicate_identities"] += 1
+                    return
                 with _encoded(value, reader) as raw:
                     before = connection.total_changes
+                    statistics["sqlite_insert_calls"] += 1
                     connection.execute(
                         "INSERT OR IGNORE INTO ids(kind,value,nodes) VALUES(?,?,?)",
                         (kind, raw, _nodes(value)),
                     )
                     statistics["duplicate_identities"] += int(connection.total_changes == before)
+                cache.add(kind, value)
 
             _walk(node, reader, emit)
+            statistics.update(
+                maximum_hot_cache_bytes=cache.peak_bytes,
+                maximum_hot_cache_entries=cache.peak_entries,
+            )
+            cache.close()
             reader.assert_spills_verified()
             connection.commit()
             cursor = connection.execute("SELECT kind,value,nodes FROM ids ORDER BY kind,value")
@@ -279,6 +390,21 @@ def collect_to_shards(node, reader, workspace, output_root, *, target_bytes=TARG
         reader.check_deadline()
         raise ValueError("bounded identity sink SQL operation failed") from error
     finally:
+        statistics.update(
+            maximum_hot_cache_bytes=cache.peak_bytes if cache is not None else 0,
+            maximum_hot_cache_entries=cache.peak_entries if cache is not None else 0,
+        )
+        # Publish once, including when parsing/replay hits its unchanged deadline.
+        # The wrapper reads these counters when it constructs a failure trace.
+        reader.stats.update(
+            identity_sink_sqlite_insert_calls=statistics["sqlite_insert_calls"],
+            identity_sink_insert_attempts=statistics["insert_attempts"],
+            identity_sink_hot_cache_hits=statistics["hot_cache_hits"],
+            identity_sink_maximum_hot_cache_bytes=statistics["maximum_hot_cache_bytes"],
+            identity_sink_maximum_hot_cache_entries=statistics["maximum_hot_cache_entries"],
+        )
+        if cache is not None:
+            cache.close()
         if connection is not None:
             connection.close()
         if writer.stream is not None:

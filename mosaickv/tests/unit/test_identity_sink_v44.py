@@ -3,6 +3,7 @@
 import hashlib
 import io
 import json
+import sys
 import time
 from pathlib import Path
 
@@ -15,6 +16,7 @@ class BudgetReader:
     def __init__(self, *, maximum=2 * 2**30, metadata=8 * 2**20, nodes=100000):
         self.maximum, self.metadata_limit, self.node_limit = maximum, metadata, nodes
         self.bytes = self.live = self.nodes = self.peak = self.peak_nodes = 0
+        self.stats = {}
         self.deadline = time.monotonic() + 30
 
     def acquire(self, amount, nodes=1):
@@ -120,6 +122,128 @@ def test_bounded_many_distinct_ids_and_typed_shard_hashes(tmp_path):
         assert reference["bytes"] <= 1024
         actual = hashlib.sha256(Path(reference["path"]).read_bytes()).hexdigest()
         assert actual == reference["sha256"]
+
+
+def test_exact_hot_cache_skips_SQL_and_serialization_without_changing_identity_sets(tmp_path):
+    node = {
+        "records": [{"sample_id": f"id-{number % 16}"} for number in range(5000)],
+        "dataset_id": "synthetic",
+        "split": "train",
+    }
+    cached_root, uncached_root = tmp_path / "cached", tmp_path / "uncached"
+    cached_root.mkdir()
+    uncached_root.mkdir()
+    cached, _ = _run(node, cached_root)
+    uncached, _ = _run(node, uncached_root, hot_cache_bytes=0)
+    assert _aggregate(cached) == _aggregate(uncached) == _reference(node)
+    assert cached["stats"]["insert_attempts"] == uncached["stats"]["insert_attempts"]
+    assert cached["stats"]["duplicate_identities"] == uncached["stats"]["duplicate_identities"]
+    assert cached["stats"]["hot_cache_hits"] > 14000
+    assert cached["stats"]["sqlite_insert_calls"] < 100
+    assert uncached["stats"]["sqlite_insert_calls"] == 15000
+    assert 0 < cached["stats"]["maximum_hot_cache_bytes"] <= 128 * 2**10
+    assert uncached["stats"]["maximum_hot_cache_bytes"] == 0
+
+
+def test_cache_eviction_keeps_exact_SQL_membership_and_full_bound(tmp_path):
+    node = {"ids": [f"id-{n % 500}" for n in range(2000)], "dataset_id": "synthetic"}
+    result, reader = _run(node, tmp_path, hot_cache_bytes=2048)
+    assert _aggregate(result) == _reference(node)
+    assert result["stats"]["maximum_hot_cache_bytes"] <= 2048
+    assert result["stats"]["sqlite_insert_calls"] > 500
+    assert reader.peak <= 8 * 2**20 and reader.peak_nodes <= 100000
+
+
+def test_hot_cache_owns_references_only_within_its_charged_memory_and_releases_them():
+    reader = BudgetReader()
+    cache = sink._ExactHotCache(reader)
+    for number in range(3000):
+        identity = ("dataset", "config", "train", f"id-{number}")
+        cache.add("scoped_identities", identity)
+        assert cache.contains("scoped_identities", identity)
+        assert reader.live == cache.bytes <= 128 * 2**10
+        assert reader.nodes == cache.nodes < 100000
+    assert not cache.contains("scoped_identities", ("dataset", "config", "train", "id-0"))
+    assert not cache.contains("sample_ids", "id-2999")
+    cache.close()
+    cache.close()
+    assert reader.live == reader.nodes == 0
+
+
+def test_large_cache_key_is_not_retained_beyond_the_fixed_hot_bound():
+    reader = BudgetReader()
+    cache = sink._ExactHotCache(reader)
+    identity = "x" * (128 * 2**10)
+    cache.add("sample_ids", identity)
+    assert not cache.contains("sample_ids", identity)
+    assert cache.bytes < 1024
+    cache.close()
+    assert reader.live == reader.nodes == 0
+
+
+def test_cache_pressure_releases_native_table_capacity_before_one_large_identity():
+    reader = BudgetReader()
+    cache = sink._ExactHotCache(reader)
+    for number in range(120):
+        cache.add("sample_ids", f"id-{number}")
+    assert len(cache.entries) == 120
+    assert sys.getsizeof(cache.entries) > 1024
+    cache.add("sample_ids", "x" * 104000)
+    assert len(cache.entries) == 1
+    assert sys.getsizeof(cache.entries) <= 1024
+    actual = sys.getsizeof(cache.entries)
+    for key, metadata in cache.entries.items():
+        _kind, value = key
+        actual += sys.getsizeof(key) + sys.getsizeof(metadata)
+        actual += sum(sys.getsizeof(field) for field in metadata)
+        actual += sys.getsizeof(value)
+    assert actual <= cache.bytes <= 128 * 2**10
+    assert reader.live == cache.bytes
+    cache.close()
+    assert reader.live == reader.nodes == 0
+
+
+def test_successful_sink_publishes_final_counters_once_to_reader_stats(tmp_path):
+    node = {"ids": ["repeated"] * 100, "dataset_id": "synthetic"}
+    result, reader = _run(node, tmp_path)
+    assert (
+        reader.stats["identity_sink_sqlite_insert_calls"] == result["stats"]["sqlite_insert_calls"]
+    )
+    assert reader.stats["identity_sink_hot_cache_hits"] == result["stats"]["hot_cache_hits"]
+    assert (
+        reader.stats["identity_sink_maximum_hot_cache_bytes"]
+        == result["stats"]["maximum_hot_cache_bytes"]
+    )
+
+
+def test_sink_timeout_still_publishes_insert_and_cache_counters(tmp_path):
+    class InterruptReader(BudgetReader):
+        def __init__(self):
+            super().__init__()
+            self.checks = 0
+
+        def check_deadline(self):
+            self.checks += 1
+            if self.checks >= 100:
+                raise TimeoutError("bounded streaming metadata deadline reached")
+
+    workspace, output = tmp_path / "work", tmp_path / "shards"
+    workspace.mkdir()
+    output.mkdir()
+    reader = InterruptReader()
+    with pytest.raises(TimeoutError, match="deadline"):
+        sink.collect_to_shards({"ids": ["same"] * 1000}, reader, workspace, output)
+    assert reader.stats["identity_sink_sqlite_insert_calls"] == 3
+    assert reader.stats["identity_sink_hot_cache_hits"] > 0
+    assert 0 < reader.stats["identity_sink_maximum_hot_cache_bytes"] <= 128 * 2**10
+    assert reader.live == reader.nodes == 0
+    assert list(workspace.iterdir()) == []
+
+
+@pytest.mark.parametrize("limit", [-1, True, 1.5, 128 * 2**10 + 1])
+def test_hot_cache_cannot_expand_its_registered_128_KiB_bound(limit):
+    with pytest.raises(ValueError, match="128 KiB"):
+        sink._ExactHotCache(BudgetReader(), limit)
 
 
 @pytest.mark.parametrize("node", [None, {}, [], {"unknown": [False, None, 1.5]}])

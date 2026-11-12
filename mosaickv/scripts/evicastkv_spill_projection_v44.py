@@ -20,6 +20,7 @@ import json
 import os
 import re
 import stat
+import sys
 import tempfile
 import time
 from collections import deque
@@ -36,6 +37,10 @@ REGISTRY_BYTES = 192
 NAME = re.compile(r"array-[0-9]{8}\.jsonl\Z")
 SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 FLAT_BYTES = 16384
+MAXIMUM_LAYOUTS = 128
+MAXIMUM_LAYOUT_BYTES = 256 * 2**10
+MAXIMUM_LAYOUT_FIELDS = 64
+MAXIMUM_LAYOUTS_PER_KEY = 4
 _PLAIN = rb'"[^"\\\x00-\x1f]*"'
 _WS = rb"[ \t\r\n]*"
 _MEMBER = _PLAIN + _WS + rb":" + _WS + rb"(?:" + _PLAIN + rb"|" + base.SCALAR_PATTERN + rb")"
@@ -68,6 +73,15 @@ class SpilledArray:
     count: int
     bytes_count: int
     signature: tuple[int, int, int, int]
+
+
+@dataclass(frozen=True)
+class _ScalarLayout:
+    pattern: object
+    field_count: int
+    hashes: frozenset
+    retained: tuple
+    discarded: int
 
 
 class InputBudget:
@@ -193,6 +207,7 @@ class ProjectionReader(base.Reader):
         self.registry, self.verified_spills = {}, set()
         self._persistent_bytes, self._persistent_nodes = 0, 0
         self._spool_counter, self._closed = 0, False
+        self.scalar_layouts, self.scalar_layout_bytes, self.scalar_layout_count = {}, 0, 0
         self.stats.update(
             spill_files=0,
             spilled_array_children=0,
@@ -203,6 +218,11 @@ class ProjectionReader(base.Reader):
             flat_object_fields=0,
             scalar_member_runs=0,
             scalar_run_fields=0,
+            scalar_layout_hits=0,
+            scalar_layout_misses=0,
+            scalar_layout_fields=0,
+            scalar_layout_entries=0,
+            scalar_layout_bytes=0,
         )
 
     def check_deadline(self):
@@ -438,26 +458,146 @@ class ProjectionReader(base.Reader):
         if not retain:
             self.stats["discarded_scalar_values"] += 1
             return key, base.DROP
+        return key, self._retained_field(raw_key, key, raw_value, essential)
+
+    def _retained_field(self, raw_key, key, raw_value, essential):
         if raw_value.startswith(b'"'):
             if not essential and b"COCO_" not in raw_value:
                 self.stats["irrelevant_safe_scalars_pruned"] += 1
-                return key, base.DROP
+                return base.DROP
             value = base._decoded_scalar(raw_value)
             if not essential and base.legacy.COCO.search(value) is None:
                 self.stats["irrelevant_safe_scalars_pruned"] += 1
-                return key, base.DROP
+                return base.DROP
             self.stats["scalar_values_decoded"] += 1
         else:
             value = base._decoded_scalar(raw_value)
             self.stats["scalar_values_decoded"] += 1
             if not essential:
                 self.stats["irrelevant_safe_scalars_pruned"] += 1
-                return key, base.DROP
+                return base.DROP
             if value is None:
-                return key, base.DROP
+                return base.DROP
         self.charge(len(raw_value) + len(key))
         self.charge(len(raw_key))
-        return key, value
+        return value
+
+    def _layout_key(self, keep, dataset_object, end):
+        first = base.PLAIN_STRING.match(self.buffer, self.pos, end)
+        return None if first is None else (first.group(), keep, dataset_object)
+
+    def _remember_layout(self, start, end, *, keep, dataset_object):
+        """Learn only a run whose ordinary parser already validated every field."""
+        if not MAXIMUM_LAYOUTS or self.scalar_layout_count >= MAXIMUM_LAYOUTS:
+            return
+        if (
+            self.metadata_bytes + 2 * MAXIMUM_LAYOUT_BYTES > base.MAXIMUM_METADATA
+            or self.metadata_nodes + MAXIMUM_LAYOUT_FIELDS * 5 + 3 > base.MAXIMUM_METADATA_NODES
+        ):
+            return  # Optional compilation cannot crowd out the source tree.
+        members = list(FLAT_MEMBER.finditer(self.buffer, start, end))
+        if not 2 <= len(members) <= MAXIMUM_LAYOUT_FIELDS:
+            return
+        dispatch = (members[0].group(1), keep, dataset_object)
+        bucket = self.scalar_layouts.get(dispatch, ())
+        if len(bucket) >= MAXIMUM_LAYOUTS_PER_KEY:
+            return
+        parts, retained, hashes = [], [], set()
+        for member in members:
+            raw_key = member.group(1)
+            hashed, key, classification = self.key_info(raw_key, keep)
+            hashes.add(hashed)
+            retain = keep and key not in base.legacy.FORBIDDEN and classification[0]
+            value = rb"(?:" + _PLAIN + rb"|" + base.SCALAR_PATTERN + rb")"
+            if retain:
+                value = b"(" + value + b")"
+                essential = classification[1] or (dataset_object and key in base.DATASET_FIELDS)
+                retained.append((raw_key, key, essential))
+            parts.append(re.escape(raw_key) + _WS + rb":" + _WS + value)
+        expression = (_WS + rb"," + _WS).join(parts) + _WS + rb"(?=[,}])"
+        if len(expression) > FLAT_BYTES or self.scalar_layout_bytes >= MAXIMUM_LAYOUT_BYTES:
+            return
+        # This is the pinned CPython regex compiler, deliberately bypassing
+        # re.compile's process-global cache. Optional layouts never widen the
+        # input grammar or become a prerequisite for successful parsing.
+        compiler = getattr(re, "_compiler", None)
+        if (
+            compiler is None
+            or self.metadata_bytes + 2 * MAXIMUM_LAYOUT_BYTES > base.MAXIMUM_METADATA
+            or self.metadata_nodes + MAXIMUM_LAYOUT_FIELDS * 5 + 3 > base.MAXIMUM_METADATA_NODES
+        ):
+            return
+        with self.ownership(MAXIMUM_LAYOUT_BYTES, MAXIMUM_LAYOUT_FIELDS * 3):
+            pattern = compiler.compile(expression, 0)
+            amount = (
+                sys.getsizeof(pattern)
+                + len(expression)
+                + sum(len(member.group(1)) * 2 + 192 for member in members)
+                + 512
+            )
+            if self.scalar_layout_bytes + amount > MAXIMUM_LAYOUT_BYTES:
+                return
+            layout = _ScalarLayout(
+                pattern,
+                len(members),
+                frozenset(hashes),
+                tuple(retained),
+                len(members) - len(retained),
+            )
+            if any(existing.pattern.pattern == expression for existing in bucket):
+                return
+            self._persistent(amount, 3 + len(members) * 2)
+            self.scalar_layouts.setdefault(dispatch, []).append(layout)
+            self.scalar_layouts[dispatch].sort(key=lambda entry: -entry.field_count)
+            self.scalar_layout_bytes += amount
+            self.scalar_layout_count += 1
+            self.stats["scalar_layout_entries"] = self.scalar_layout_count
+            self.stats["scalar_layout_bytes"] = self.scalar_layout_bytes
+
+    def _cached_run(self, *, keep, dataset_object, depth, keys, result, end):
+        if not self.scalar_layout_count:
+            return False
+        dispatch = self._layout_key(keep, dataset_object, end)
+        for layout in self.scalar_layouts.get(dispatch, ()):
+            self.check_deadline()
+            match = layout.pattern.match(self.buffer, self.pos, end)
+            if match is None:
+                continue
+            if not keys.isdisjoint(layout.hashes):
+                raise ValueError("ambiguous duplicate JSON object key")
+            if depth + 1 > base.MAXIMUM_DEPTH:
+                raise ValueError("registered JSON nesting bound exceeded")
+            keys.update(layout.hashes)
+            self.active_keys += layout.field_count
+            self.stats["maximum_active_keys"] = max(
+                self.stats["maximum_active_keys"], self.active_keys
+            )
+            if self.active_keys > base.MAXIMUM_ACTIVE_KEYS:
+                raise ValueError("bounded active object-key capacity exceeded")
+            self.stats["maximum_depth"] = max(self.stats["maximum_depth"], depth + 1)
+            previous = self.work
+            self.work += layout.field_count
+            if self.work // 1024 != previous // 1024:
+                self.check()
+            for counter in (
+                "object_keys",
+                "flat_object_fields",
+                "scalar_run_fields",
+                "scalar_layout_fields",
+            ):
+                self.stats[counter] += layout.field_count
+            self.stats["discarded_scalar_values"] += layout.discarded
+            self.stats["scalar_layout_hits"] += 1
+            self.stats["scalar_member_runs"] += 1
+            for group, (raw_key, key, essential) in enumerate(layout.retained, 1):
+                child = self._retained_field(raw_key, key, match.group(group), essential)
+                if child is not base.DROP:
+                    result[key] = child
+            self.pos = match.end()
+            self.check_deadline()
+            return True
+        self.stats["scalar_layout_misses"] += 1
+        return False
 
     def object(self, *, keep, depth, dataset_object=False):
         """Accelerate complete scalar runs around ordinary nested/escaped fields.
@@ -476,18 +616,30 @@ class ProjectionReader(base.Reader):
         try:
             while True:
                 end = min(len(self.buffer), self.pos + FLAT_BYTES)
-                run = FLAT_RUN.match(self.buffer, self.pos, end)
+                cached = self._cached_run(
+                    keep=keep,
+                    dataset_object=dataset_object,
+                    depth=depth,
+                    keys=keys,
+                    result=result,
+                    end=end,
+                )
+                run = None if cached else FLAT_RUN.match(self.buffer, self.pos, end)
                 if run is not None:
                     self.check_deadline()
                     self.stats["scalar_member_runs"] += 1
+                    start = self.pos
                     for member in FLAT_MEMBER.finditer(self.buffer, self.pos, run.end()):
                         key, child = self._flat_field(
                             member, keep=keep, depth=depth, dataset_object=dataset_object, keys=keys
                         )
                         if child is not base.DROP:
                             result[key] = child
+                    self._remember_layout(
+                        start, run.end(), keep=keep, dataset_object=dataset_object
+                    )
                     self.pos = run.end()
-                else:
+                elif not cached:
                     all_flat = False
                     raw_key = self.string(True)
                     key, classification = self._object_key(raw_key, keep, keys)

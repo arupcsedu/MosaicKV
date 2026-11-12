@@ -20,11 +20,11 @@ from mosaickv.evaluation import metadata_recovery_v41 as core
 from mosaickv.evaluation.fox_campaign import clean_source, digest, sha, write_once
 
 SOURCE = Path(__file__).resolve().parents[2]
-PARENT = Path("/scratch/djy8hg/workdir/fox-review-v44/run-20261112-0d45f55-1")
+PARENT = Path("/scratch/djy8hg/workdir/fox-review-v44-bounded/run-20261112-f4a2362-1")
 BOUND = {
-    "decision.json": "8117e5650f115a2682e3749d939308fce6c96aa04822c4054d15e70d68374023",
-    "reconciled_history.json": "2a3884e4f4b4c909a8b388cba9636329006da317f8229529f49829d9093d65b1",
-    "registration.json": "bb9a298b6e7d4090bacea1b1d9a56bba7851f559703b898700e127dc18a4c2a2",
+    "decision.json": "40eb4ffe89a64a218d094d515b595a686f8daedd8e1854f0000e8eda0016ea75",
+    "reconciled_history.json": "ab03e2a49b15204f2f0bfbdc808f1651b54c5b82df58d4e565466dad02e987ed",
+    "registration.json": "aa94f0f9c0a890ba0101c79681b85bcbf08656877daa63b210eaa7c837ec893b",
 }
 SLOTS, SECONDS, BYTE_BOUND = 8, 210, 2 * 2**30
 
@@ -55,13 +55,13 @@ def verify_reused_pairs(parent, rows, targets, roots):
         for i, row in enumerate(rows)
         if row["operation"] == "json_stream"
         and i not in set(targets)
-        and any(
+        and all(
             str(common.artifact(previous.OLD.resolve(), i, phase)) in parent["source_bindings"]
             for phase in ("parse", "hash")
         )
     ]
     if len(completed) != 32:
-        raise ValueError("exactly 32 qualified old JSON pairs must remain excluded")
+        raise ValueError("exactly 32 qualified old JSON pair receipt bindings must remain excluded")
     result = {}
     for index in completed:
         row = rows[index]
@@ -113,6 +113,22 @@ def select_canaries(rows, targets):
     return result
 
 
+def verify_completed_source_signatures(rows, targets, roots):
+    """Stat every inherited JSON source without reopening any source body."""
+    retry = set(targets)
+    count = 0
+    for index, row in enumerate(rows):
+        if row["operation"] != "json_stream" or index in retry:
+            continue
+        path = bounded.common.canonical(row["path"], roots)
+        if str(path) != row["path"] or digest(bounded.geometry(path.lstat())) != digest(
+            row["signature"]
+        ):
+            raise ValueError("completed source changed; stat-only proof reuse blocked")
+        count += 1
+    return count
+
+
 def prepare(root):
     revision = clean_source(SOURCE)
     common.cpu_gate(root / "cpu", revision)
@@ -123,17 +139,28 @@ def prepare(root):
     old = common.history.read(PARENT / "registration.json", BOUND["registration.json"])
     targets = eligible(parent, old["rows"])
     if (
-        len(targets) != 1203
-        or parent["counts"]["net_unresolved_error_count"] != 1338
-        or decision["newly_resolved_JSON_occurrences"] != 26
-        or decision["source_sha"] != "0d45f555141bf6f2760cba73bef924c952a69f47"
+        len(targets) != 1202
+        or parent["counts"]["net_unresolved_error_count"] != 1337
+        or decision["newly_resolved_JSON_occurrences"] != 1
+        or decision["source_sha"] != "f4a2362009aafeb40b24b97ad0e13d5bfa27a695"
         or parent["source_sha"] != decision["source_sha"]
     ):
-        raise ValueError("exact completed V44 semantic closeout required")
+        raise ValueError("exact completed strict V44 checkpoint required")
     canaries = select_canaries(old["rows"], targets)
     bindings = dict(old["bindings"])
     bindings.update({str(PARENT / name): value for name, value in BOUND.items()})
     bindings.update(verify_reused_pairs(parent, old["rows"], targets, old["roots"]))
+    completed = verify_completed_source_signatures(old["rows"], targets, old["roots"])
+    if completed != 59:
+        raise ValueError("exactly 59 completed JSON sources must remain excluded")
+    bindings.update(
+        {
+            str(common.artifact(previous.OLD.resolve(), i, "parse")): sha(
+                common.artifact(previous.OLD.resolve(), i, "parse")
+            )
+            for i in canaries
+        }
+    )
     plan = dict(
         old,
         source_sha=revision,
@@ -151,6 +178,8 @@ def prepare(root):
         closing_hash_failure_stops_subsequent_waves=True,
         live_signature_required_at_reconciliation=True,
         inherited_qualified_JSON_pairs=32,
+        inherited_strict_bounded_JSON_pairs=1,
+        inherited_JSON_sources_signature_verified=completed,
         inherited_completed_record_JSON_proofs=26,
         inherited_record_proofs_are_unchanged_whole_file_resource_passes=False,
         qualified_old_input_bytes_reread=0,
@@ -179,17 +208,31 @@ def prepare(root):
         source_chunk_bytes=256 * 2**10,
         flat_object_bytes=bounded.projection.FLAT_BYTES,
         plain_scalar_member_runs=True,
+        learned_scalar_layouts=bounded.projection.MAXIMUM_LAYOUTS,
+        learned_scalar_layout_bytes=bounded.projection.MAXIMUM_LAYOUT_BYTES,
+        learned_scalar_layout_fields=bounded.projection.MAXIMUM_LAYOUT_FIELDS,
+        learned_scalar_layouts_per_key=bounded.projection.MAXIMUM_LAYOUTS_PER_KEY,
         identity_shard_target_bytes=identities.TARGET_BYTES,
         identity_shard_maximum_bytes=identities.MAX_SHARD_BYTES,
         identity_shard_maximum_nodes=identities.MAX_SHARD_NODES,
         maximum_shard_references=identities.MAX_REFERENCES,
         SQLite_reservation_bytes=identities.SQLITE_RESERVATION,
+        identity_hot_cache_bytes=identities.HOT_CACHE_BYTES,
+        identity_hot_cache_eviction="exact_generation_reset_with_SQL_fallback",
         independent_hash_pass=True,
         stop_after_any_unqualified_wave=True,
         whole_projection_deadline_resets=0,
         separate_fragment_deadlines_permitted=False,
     )
-    plan["config_sha"] = digest(plan["resolved_reader_policy"])
+    plan["resolved_configuration"] = dict(
+        schema="strict_historical_reader_v45",
+        reader_policy=plan["resolved_reader_policy"],
+        registered_rows_sha256=plan["rows_sha256"],
+        retry_indices=targets,
+        canary_indices=canaries,
+        immutable_parent_artifacts=BOUND,
+    )
+    plan["config_sha"] = digest(plan["resolved_configuration"])
     write_once(root / "registration.json", plan)
     return dict(retry_occurrences=len(targets), fresh_confirmation_authorized=False)
 
