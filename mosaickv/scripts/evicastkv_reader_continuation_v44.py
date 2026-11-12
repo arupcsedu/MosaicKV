@@ -20,11 +20,11 @@ from mosaickv.evaluation import metadata_recovery_v41 as core
 from mosaickv.evaluation.fox_campaign import clean_source, digest, sha, write_once
 
 SOURCE = Path(__file__).resolve().parents[2]
-PARENT = Path("/scratch/djy8hg/workdir/fox-review-v44-bounded/run-20261112-f4a2362-1")
+PARENT = Path("/scratch/djy8hg/workdir/fox-review-v45/run-20261112-7d568b2-1")
 BOUND = {
-    "decision.json": "40eb4ffe89a64a218d094d515b595a686f8daedd8e1854f0000e8eda0016ea75",
-    "reconciled_history.json": "ab03e2a49b15204f2f0bfbdc808f1651b54c5b82df58d4e565466dad02e987ed",
-    "registration.json": "aa94f0f9c0a890ba0101c79681b85bcbf08656877daa63b210eaa7c837ec893b",
+    "decision.json": "72f02a50e1258d4cf9f2156375f9283e1481fe2d6d3b29c2eab637886cf364af",
+    "reconciled_history.json": "5f5e88bac7f3cb72fc0c8e1cadf014100a7e27e9012ef70f9b7e408b845466f9",
+    "registration.json": "e49330cbbc263fceab11946b5bb4af4619dd14c84dc050edf6d67eba64df088f",
 }
 SLOTS, SECONDS, BYTE_BOUND = 8, 210, 2 * 2**30
 
@@ -139,20 +139,20 @@ def prepare(root):
     old = common.history.read(PARENT / "registration.json", BOUND["registration.json"])
     targets = eligible(parent, old["rows"])
     if (
-        len(targets) != 1202
-        or parent["counts"]["net_unresolved_error_count"] != 1337
+        len(targets) != 1201
+        or parent["counts"]["net_unresolved_error_count"] != 1336
         or decision["newly_resolved_JSON_occurrences"] != 1
-        or decision["source_sha"] != "f4a2362009aafeb40b24b97ad0e13d5bfa27a695"
+        or decision["source_sha"] != "7d568b2b7d5215ece91c658ef4702b9420a293b7"
         or parent["source_sha"] != decision["source_sha"]
     ):
-        raise ValueError("exact completed strict V44 checkpoint required")
+        raise ValueError("exact completed strict V45 checkpoint required")
     canaries = select_canaries(old["rows"], targets)
     bindings = dict(old["bindings"])
     bindings.update({str(PARENT / name): value for name, value in BOUND.items()})
     bindings.update(verify_reused_pairs(parent, old["rows"], targets, old["roots"]))
     completed = verify_completed_source_signatures(old["rows"], targets, old["roots"])
-    if completed != 59:
-        raise ValueError("exactly 59 completed JSON sources must remain excluded")
+    if completed != 60:
+        raise ValueError("exactly 60 completed JSON sources must remain excluded")
     bindings.update(
         {
             str(common.artifact(previous.OLD.resolve(), i, "parse")): sha(
@@ -167,6 +167,7 @@ def prepare(root):
         source_bridge=common.history.source_bridge(),
         bindings=bindings,
         retry_indices=targets,
+        reused_parent_source_sha=decision["source_sha"],
         json_canary_indices=canaries,
         worker_seconds=SECONDS,
         worker_maximum_bytes=BYTE_BOUND,
@@ -178,7 +179,7 @@ def prepare(root):
         closing_hash_failure_stops_subsequent_waves=True,
         live_signature_required_at_reconciliation=True,
         inherited_qualified_JSON_pairs=32,
-        inherited_strict_bounded_JSON_pairs=1,
+        inherited_strict_bounded_JSON_pairs=2,
         inherited_JSON_sources_signature_verified=completed,
         inherited_completed_record_JSON_proofs=26,
         inherited_record_proofs_are_unchanged_whole_file_resource_passes=False,
@@ -208,6 +209,10 @@ def prepare(root):
         source_chunk_bytes=256 * 2**10,
         flat_object_bytes=bounded.projection.FLAT_BYTES,
         plain_scalar_member_runs=True,
+        private_integer_id_packet_fastpath=True,
+        private_replay_chunk_bytes=bounded.projection.REPLAY_CHUNK,
+        private_scalar_maximum_bytes=bounded.projection.base.MAXIMUM_SCALAR,
+        id_only_object_scope_copy_elision=True,
         learned_scalar_layouts=bounded.projection.MAXIMUM_LAYOUTS,
         learned_scalar_layout_bytes=bounded.projection.MAXIMUM_LAYOUT_BYTES,
         learned_scalar_layout_fields=bounded.projection.MAXIMUM_LAYOUT_FIELDS,
@@ -225,7 +230,7 @@ def prepare(root):
         separate_fragment_deadlines_permitted=False,
     )
     plan["resolved_configuration"] = dict(
-        schema="strict_historical_reader_v45",
+        schema="strict_historical_reader_v46",
         reader_policy=plan["resolved_reader_policy"],
         registered_rows_sha256=plan["rows_sha256"],
         retry_indices=targets,

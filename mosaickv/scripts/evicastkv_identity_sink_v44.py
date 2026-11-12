@@ -150,6 +150,12 @@ def _walk(node, reader, emit, context=None, key="", in_media=False):
     reader.check_deadline()
     context = {} if context is None else context
     if isinstance(node, dict):
+        if type(node) is dict and len(node) == 1 and "id" in node:
+            # A plain id-only object cannot change dataset scope. Keep normal
+            # child recursion: its value may itself be a list, scoped object,
+            # boolean, or an internal array capability rather than a scalar.
+            _walk(node["id"], reader, emit, context, "id", in_media)
+            return
         local = None
         created = []
         for field in SCOPE_FIELDS:

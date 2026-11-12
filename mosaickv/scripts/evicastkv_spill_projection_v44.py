@@ -58,6 +58,7 @@ FLAT_MEMBER = re.compile(
     + base.SCALAR_PATTERN
     + rb")"
 )
+PRIVATE_ID_INTEGER = re.compile(rb'\["d",\[\["id",\["s",(-?(?:0|[1-9][0-9]*))\]\]\]\]\n')
 
 
 def _signature(info):
@@ -214,6 +215,7 @@ class ProjectionReader(base.Reader):
             auxiliary_bytes_written=0,
             auxiliary_bytes_read=0,
             completed_spill_replays=0,
+            private_id_integer_fastpath_hits=0,
             flat_objects=0,
             flat_object_fields=0,
             scalar_member_runs=0,
@@ -842,6 +844,27 @@ class _ReplayReader(base.Reader):
         self.owner.check_deadline()
         if depth > base.MAXIMUM_DEPTH:
             raise ValueError("registered JSON nesting bound exceeded")
+        # Only our canonical, complete private ID packet is accelerated. Hash,
+        # source binding, count, read limits and replay ownership remain in the
+        # enclosing iterator. Any different codec, escaped/string/float value,
+        # split packet or malformed suffix uses the unchanged strict decoder.
+        end = min(len(self.buffer), self.pos + base.MAXIMUM_SCALAR + 32)
+        packet = PRIVATE_ID_INTEGER.match(self.buffer, self.pos, end)
+        if packet is not None:
+            raw = packet.group(1)
+            if len(raw) > base.MAXIMUM_SCALAR:
+                raise ValueError("registered scalar byte bound exceeded")
+            if depth + 1 > base.MAXIMUM_DEPTH:
+                raise ValueError("registered JSON nesting bound exceeded")
+            if self.active_keys + 1 > base.MAXIMUM_ACTIVE_KEYS:
+                raise ValueError("bounded active object-key capacity exceeded")
+            value = int(raw)
+            # Exact logical cost of the ordinary scalar(id) and dict-key path:
+            # digits + len('id') at the scalar, then len('"id"') at the key.
+            self.owner.acquire(len(raw) + 6, 2)
+            self.pos = packet.end()
+            self.owner.stats["private_id_integer_fastpath_hits"] += 1
+            return {"id": value}
         self._punctuation(91)
         tag, _ = self._string()
         self._punctuation(44)

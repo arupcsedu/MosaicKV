@@ -111,6 +111,60 @@ def test_exact_legacy_scope_priority_media_bool_and_integer_semantics(tmp_path, 
     assert reader.peak <= 8 * 2**20 and reader.peak_nodes <= 100000
 
 
+@pytest.mark.parametrize(
+    "value",
+    [
+        "synthetic",
+        7,
+        True,
+        False,
+        None,
+        1.25,
+        ["one", 2, False, {"dataset_id": "inner", "id": "nested"}],
+        {"dataset_id": "nested", "dataset_config": "c", "split": True, "id": "x"},
+        {"media": {"sha256": "a" * 64}},
+        {},
+    ],
+)
+def test_single_id_fast_path_preserves_scalar_and_nested_child_semantics(tmp_path, value):
+    node = {"records": [{"id": value}], "dataset_id": "late-parent", "split": "train"}
+    result, _ = _run(node, tmp_path)
+    assert _aggregate(result) == _reference(node)
+
+
+def test_single_id_plain_object_does_not_run_scope_probes(monkeypatch):
+    class ForbiddenScopeIteration:
+        def __iter__(self):
+            pytest.fail("id-only object performed generic scope bookkeeping")
+
+    emitted = []
+    monkeypatch.setattr(sink, "SCOPE_FIELDS", ForbiddenScopeIteration())
+    sink._walk({"id": "value"}, BudgetReader(), lambda *item: emitted.append(item))
+    assert emitted == [
+        ("sample_ids", "value"),
+        ("scopes", ("", "", "")),
+        ("scoped_identities", ("", "", "", "value")),
+    ]
+
+
+def test_single_id_dictionary_subclass_still_uses_its_scope_semantics():
+    class VirtualScope(dict):
+        def get(self, key, default=None):
+            return "virtual" if key == "dataset_id" else super().get(key, default)
+
+    node = VirtualScope(id="value")
+    emitted = []
+    sink._walk(node, BudgetReader(), lambda *item: emitted.append(item))
+    assert ("scoped_identities", ("virtual", "", "", "value")) in emitted
+
+
+def test_single_id_fast_path_keeps_deadline_enforcement():
+    reader = BudgetReader()
+    reader.deadline = time.monotonic() - 1
+    with pytest.raises(TimeoutError, match="deadline"):
+        sink._walk({"id": "value"}, reader, lambda *item: pytest.fail("expired ID emitted"))
+
+
 def test_bounded_many_distinct_ids_and_typed_shard_hashes(tmp_path):
     node = {"ids": [f"identity-{number:06d}" for number in range(2000)], "dataset_id": "synthetic"}
     result, reader = _run(node, tmp_path, target_bytes=1024)

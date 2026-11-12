@@ -429,6 +429,82 @@ def test_private_codec_does_not_expand_valid_large_unicode_scalar(tmp_path, monk
         current.assert_spills_verified()
 
 
+def test_private_integer_id_packets_match_general_codec_and_owned_cost(tmp_path, monkeypatch):
+    force_spills(monkeypatch)
+    values = [0, -12, 10**1000, "string-id", True, 1.5, 77] * 8
+    raw = json.dumps({"events": [{"id": value} for value in values]}).encode()
+    with reader(raw, tmp_path) as current:
+        node = parse(current)
+        assert collected(expand(node, current)) == reference(raw)
+        current.assert_spills_verified()
+        assert current.stats["private_id_integer_fastpath_hits"] >= 30
+        assert current.stats["maximum_live_projected_metadata_bytes"] <= base.MAXIMUM_METADATA
+    raw = json.dumps({"events": [{"id": -12} for _ in range(30)]}).encode()
+    with reader(raw, tmp_path) as current:
+        descriptor = parse(current)["events"]
+        before = current.metadata_bytes, current.metadata_nodes
+        iterator = current.iter_spilled(descriptor)
+        assert next(iterator) == {"id": -12}
+        assert current.metadata_bytes - before[0] == spill.REPLAY_CHUNK + 6 + 3 + 6
+        assert current.metadata_nodes - before[1] == 2
+        iterator.close()
+        assert (current.metadata_bytes, current.metadata_nodes) == before
+
+
+@pytest.mark.parametrize("chunk", [1, 2, 7, 31, 65536])
+def test_private_integer_id_chunk_split_and_other_codec_fallback(tmp_path, monkeypatch, chunk):
+    force_spills(monkeypatch)
+    monkeypatch.setattr(spill, "REPLAY_CHUNK", chunk)
+    payload = {
+        "events": [{"id": value} for value in (0, 1, -9, "escaped-\ud800", 1.5, True)] * 8,
+        "dataset": {"name": "late-root", "split": "val"},
+    }
+    raw = json.dumps(payload).encode()
+    with reader(raw, tmp_path) as current:
+        assert collected(expand(parse(current), current)) == reference(raw)
+        current.assert_spills_verified()
+        if chunk == 1:
+            assert current.stats["private_id_integer_fastpath_hits"] == 0
+        if chunk == 65536:
+            assert current.stats["private_id_integer_fastpath_hits"] == 24
+
+
+@pytest.mark.parametrize("tamper", ["invalid-number", "malformed-tail", "valid-number"])
+def test_private_integer_packet_tamper_never_admits_partial_replay(tmp_path, monkeypatch, tamper):
+    force_spills(monkeypatch)
+    raw = json.dumps({"events": [{"id": 10} for _ in range(30)]}).encode()
+    with reader(raw, tmp_path) as current:
+        descriptor = parse(current)["events"]
+        path = current.workspace / descriptor.filename
+        original = path.read_bytes()
+        if tamper == "invalid-number":
+            changed = original.replace(b'["s",10]', b'["s",01]', 1)
+        elif tamper == "valid-number":
+            changed = original.replace(b'["s",10]', b'["s",11]', 1)
+        else:
+            changed = original[:-1] + b"x"
+        assert changed != original and len(changed) == len(original)
+        path.write_bytes(changed)
+        os.utime(path, ns=(descriptor.signature[3], descriptor.signature[3]))
+        with pytest.raises(ValueError):
+            list(current.iter_spilled(descriptor))
+        with pytest.raises(ValueError, match="incomplete"):
+            current.assert_spills_verified()
+
+
+@pytest.mark.parametrize("bound", ["MAXIMUM_DEPTH", "MAXIMUM_ACTIVE_KEYS", "MAXIMUM_SCALAR"])
+def test_private_integer_fastpath_retains_original_scalar_depth_and_key_bounds(
+    tmp_path, monkeypatch, bound
+):
+    force_spills(monkeypatch)
+    raw = json.dumps({"events": [{"id": 12} for _ in range(30)]}).encode()
+    with reader(raw, tmp_path) as current:
+        descriptor = parse(current)["events"]
+        monkeypatch.setattr(base, bound, 0 if bound != "MAXIMUM_SCALAR" else 1)
+        with pytest.raises(ValueError, match=r"bound|capacity"):
+            list(current.iter_spilled(descriptor))
+
+
 def test_seeded_recursive_spill_parity_no_real_artifacts(tmp_path, monkeypatch):
     force_spills(monkeypatch)
     rng = random.Random(44144)
