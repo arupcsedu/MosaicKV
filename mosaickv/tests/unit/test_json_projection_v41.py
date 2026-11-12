@@ -247,7 +247,7 @@ def test_repeated_profiler_events_deduplicate_with_later_parent_scope(monkeypatc
     events = [
         dict(
             name=f"operator-{i % 3}",
-            args=dict(sample_id="same-request"),
+            args=dict(sample_id=f"same-request-{i % 3}", source_media_sha256="a" * 64),
             unknown_tensor=[0.5, 1, 2],
         )
         for i in range(12000)
@@ -261,6 +261,8 @@ def test_repeated_profiler_events_deduplicate_with_later_parent_scope(monkeypatc
     assert stats["array_children_deduplicated"] == 11997
     assert stats["projected_metadata_nodes"] < 64
     assert stats["released_duplicate_metadata_nodes"] > 50000
+    assert output["identities"]["sample_ids"] == [f"same-request-{i}" for i in range(3)]
+    assert output["identities"]["media_hashes"] == ["a" * 64]
     assert stats["work_units"] > 12000
     assert output["whole_file_sha256"] == hashlib.sha256(raw).hexdigest()
 
@@ -300,3 +302,103 @@ def test_discarded_null_metadata_does_not_consume_live_capacity(monkeypatch):
     output = project(raw, chunk=4096)
     assert output["identities"] == reference(raw)
     assert output["statistics"]["projected_metadata_nodes"] == 0
+
+
+def test_semantic_projection_keeps_late_dataset_roles_media_and_escaped_coco():
+    raw = (
+        b'{"records":[{"sample_id":"x"}],'
+        b'"unknown":{"media":{"nested":{"sha256":"' + b"a" * 64 + b'"}}},'
+        b'"irrelevant_path":"not-a-COCO-path",'
+        b'"asset_path":"C\\u004fCO_val2014_000000000001.jpg",'
+        b'"dataset":{"name":"late-dataset","configuration":"cfg","split":"validation"}}'
+    )
+    output = project(raw, chunk=31)
+    assert output["identities"] == reference(raw)
+    assert ("late-dataset", "cfg", "validation", "x") in output["identities"]["scoped_identities"]
+    assert output["identities"]["media_hashes"] == ["a" * 64]
+    assert output["identities"]["coco_ids"] == ["COCO_val2014_000000000001.jpg"]
+
+
+def test_dataset_array_is_not_mistaken_for_parent_dataset_object():
+    payload = dict(records=[dict(id="x")], dataset=[dict(name="not-a-parent-namespace", id="y")])
+    raw = json.dumps(payload).encode()
+    assert project(raw)["identities"] == reference(raw)
+
+
+def test_semantic_projection_randomized_collector_parity():
+    rng = random.Random(20271143)
+    keys = [
+        "sample_id",
+        "id",
+        "dataset",
+        "dataset_id",
+        "dataset_name",
+        "task",
+        "split",
+        "dataset_config",
+        "configuration",
+        "config_name",
+        "name",
+        "path",
+        "media",
+        "sha256",
+        "source_group_ids",
+        "asset_path",
+        "arbitrary_revision",
+        "unknown",
+        "answers",
+    ]
+    leaves = [None, True, False, 0, 1, 1.5, "x", "cfg", "COCO_val2014_000000000001.jpg", "a" * 64]
+
+    def value(depth):
+        if depth == 0 or rng.random() < 0.5:
+            return rng.choice(leaves)
+        if rng.random() < 0.5:
+            return [value(depth - 1) for _ in range(rng.randrange(4))]
+        return {key: value(depth - 1) for key in rng.sample(keys, rng.randrange(5))}
+
+    for index in range(600):
+        raw = json.dumps(value(4), ensure_ascii=bool(index % 2)).encode()
+        assert project(raw, chunk=1 + index % 127)["identities"] == reference(raw)
+
+
+def test_repeated_profiler_keys_use_bounded_cache_and_prune_unused_names(monkeypatch):
+    raw = json.dumps(
+        dict(
+            events=[dict(name=f"unneeded-operator-{i}", ph="X", ts=i) for i in range(12000)],
+            dataset=dict(path="dataset-from-path", config_name="unused", split="val"),
+            sample_id="S",
+        )
+    ).encode()
+    calls = []
+    original = parser._decoded_scalar
+
+    def counted(value):
+        calls.append(value)
+        return original(value)
+
+    monkeypatch.setattr(parser, "_decoded_scalar", counted)
+    output = project(raw, chunk=65536)
+    assert output["identities"] == reference(raw)
+    assert len(calls) < 30
+    assert output["statistics"]["key_cache_hits"] > 30000
+    assert output["statistics"]["key_cache_entries"] <= parser.MAXIMUM_KEY_CACHE_ENTRIES
+    assert output["statistics"]["key_cache_bytes"] <= parser.MAXIMUM_KEY_CACHE_BYTES
+    assert output["statistics"]["irrelevant_safe_scalars_pruned"] >= 12000
+    assert output["statistics"]["projected_metadata_nodes"] < 30
+    assert output["statistics"]["in_buffer_strings"] > 1000
+
+
+def test_key_cache_capacity_limits_do_not_change_identities(monkeypatch):
+    monkeypatch.setattr(parser, "MAXIMUM_KEY_CACHE_ENTRIES", 2)
+    monkeypatch.setattr(parser, "MAXIMUM_KEY_CACHE_BYTES", 160)
+    raw = json.dumps({f"unknown-{i}": dict(sample_id=str(i)) for i in range(100)}).encode()
+    output = project(raw)
+    assert output["identities"] == reference(raw)
+    assert output["statistics"]["key_cache_entries"] <= 2
+    assert output["statistics"]["key_cache_bytes"] <= 160
+
+
+def test_nonfinite_previously_safe_scalar_still_fails_after_semantic_pruning():
+    with pytest.raises(ValueError, match="nonfinite"):
+        project(b'{"name":1e9999}')

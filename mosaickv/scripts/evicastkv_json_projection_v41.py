@@ -41,6 +41,7 @@ IDENTITIES = (
 )
 WS = re.compile(rb"[ \t\r\n]*")
 SPECIAL = re.compile(rb'["\\\x00-\x1f]')
+PLAIN_STRING = re.compile(rb'"[^"\\\x00-\x1f]*"')
 ATOM = re.compile(rb"[A-Za-z0-9+.\-]+")
 SCALAR_PATTERN = rb"(?:true|false|null|-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?)"
 SCALAR = re.compile(SCALAR_PATTERN)
@@ -57,6 +58,24 @@ ESCAPES = {
     ord("t"): 9,
 }
 DROP = object()
+SPACE_BYTES = frozenset((9, 10, 13, 32))
+SCOPE_FIELDS = frozenset(
+    ("dataset_id", "dataset_name", "dataset", "task", "split", "dataset_config")
+)
+DATASET_FIELDS = frozenset(("id", "name", "path", "split", "configuration", "config_name"))
+MEDIA_FIELDS = frozenset(
+    (
+        "media_sha256",
+        "image_sha256",
+        "content_sha256",
+        "source_media_sha256",
+        "media_group_ids",
+        "sha256",
+    )
+)
+ESSENTIAL_FIELDS = legacy.ID_KEYS | SCOPE_FIELDS | MEDIA_FIELDS
+MAXIMUM_KEY_CACHE_ENTRIES = 4096
+MAXIMUM_KEY_CACHE_BYTES = 512 * 2**10
 
 
 def _same_projection(left, right):
@@ -135,6 +154,7 @@ class Reader:
         self.hash = hashlib.sha256()
         self.utf8 = codecs.getincrementaldecoder("utf-8")("strict")
         self.work, self.active_keys, self.metadata_bytes, self.metadata_nodes = 0, 0, 0, 0
+        self.key_cache, self.key_cache_bytes = {}, 0
         self.stats = dict(
             bytes_read=0,
             read_calls=0,
@@ -153,6 +173,12 @@ class Reader:
             released_duplicate_metadata_nodes=0,
             maximum_live_projected_metadata_bytes=0,
             maximum_live_projected_metadata_nodes=0,
+            key_cache_hits=0,
+            key_cache_entries=0,
+            key_cache_bytes=0,
+            in_buffer_strings=0,
+            in_buffer_atoms=0,
+            irrelevant_safe_scalars_pruned=0,
         )
 
     def check(self):
@@ -193,21 +219,36 @@ class Reader:
         return len(self.buffer) - self.pos >= minimum
 
     def peek(self):
+        if self.pos < len(self.buffer):
+            return self.buffer[self.pos]
         return self.buffer[self.pos] if self.fill() else None
 
     def spaces(self):
-        while self.fill():
+        while self.pos < len(self.buffer) or self.fill():
+            if self.buffer[self.pos] not in SPACE_BYTES:
+                return
             end = WS.match(self.buffer, self.pos).end()
             self.pos = end
             if self.pos < len(self.buffer):
                 return
 
     def expect(self, byte):
-        if self.peek() != byte:
+        if self.pos >= len(self.buffer) and not self.fill():
+            raise ValueError("invalid JSON punctuation or truncated input")
+        if self.buffer[self.pos] != byte:
             raise ValueError("invalid JSON punctuation or truncated input")
         self.pos += 1
 
     def string(self, capture):
+        if self.pos < len(self.buffer):
+            match = PLAIN_STRING.match(self.buffer, self.pos)
+            if match is not None:
+                start, end = self.pos, match.end()
+                if end - start > MAXIMUM_SCALAR:
+                    raise ValueError("registered scalar byte bound exceeded")
+                self.pos = end
+                self.stats["in_buffer_strings"] += 1
+                return self.buffer[start:end] if capture else None
         self.expect(34)
         pieces, length = ([b'"'] if capture else None), 1
         while True:
@@ -248,29 +289,40 @@ class Reader:
             self.pos += size
             length += size
 
-    def atom(self, capture, key):
-        pieces, length = [], 0
-        while True:
-            self.tick()
-            if not self.fill():
-                break
-            match = ATOM.match(self.buffer, self.pos)
-            if match is None:
-                break
+    def atom(self, capture, key, essential):
+        match = ATOM.match(self.buffer, self.pos)
+        if match is not None and match.end() < len(self.buffer):
             raw = self.buffer[self.pos : match.end()]
-            pieces.append(raw)
-            length += len(raw)
             self.pos = match.end()
-            if length > MAXIMUM_SCALAR:
-                raise ValueError("registered scalar byte bound exceeded")
-            if self.pos < len(self.buffer):
-                break
-        raw = b"".join(pieces)
+            self.stats["in_buffer_atoms"] += 1
+        else:
+            pieces, length = [], 0
+            while True:
+                self.tick()
+                if not self.fill():
+                    break
+                match = ATOM.match(self.buffer, self.pos)
+                if match is None:
+                    break
+                raw = self.buffer[self.pos : match.end()]
+                pieces.append(raw)
+                length += len(raw)
+                self.pos = match.end()
+                if length > MAXIMUM_SCALAR:
+                    raise ValueError("registered scalar byte bound exceeded")
+                if self.pos < len(self.buffer):
+                    break
+            raw = b"".join(pieces)
+        if len(raw) > MAXIMUM_SCALAR:
+            raise ValueError("registered scalar byte bound exceeded")
         if not raw or SCALAR.fullmatch(raw) is None:
             raise ValueError("invalid JSON scalar")
         if capture:
             self.stats["scalar_values_decoded"] += 1
             value = _decoded_scalar(raw)
+            if not essential:
+                self.stats["irrelevant_safe_scalars_pruned"] += 1
+                return DROP
             if value is None:
                 return DROP
             self.charge(len(raw) + len(key))
@@ -290,7 +342,35 @@ class Reader:
         if self.metadata_bytes > MAXIMUM_METADATA or self.metadata_nodes > MAXIMUM_METADATA_NODES:
             raise ValueError("bounded projected metadata capacity exceeded")
 
-    def value(self, *, key="", keep=True, depth=0):
+    def key_info(self, raw, keep):
+        cached = self.key_cache.get(raw)
+        if cached is not None:
+            self.stats["key_cache_hits"] += 1
+            if not keep:
+                return cached[0], "", (False, False)
+            if cached[1] is not None:
+                return cached
+        hashed = cached[0] if cached is not None else _key_hash(raw)
+        if keep:
+            key = raw[1:-1].decode("utf-8") if b"\\" not in raw else _decoded_scalar(raw)
+            classification = (legacy.safe_key(key), key in ESSENTIAL_FIELDS)
+        else:
+            key, classification = None, (False, False)
+        result = (hashed, key, classification)
+        cost = len(raw) * 2 + 64
+        if (
+            len(raw) <= 4096
+            and len(self.key_cache) < MAXIMUM_KEY_CACHE_ENTRIES
+            and self.key_cache_bytes + cost <= MAXIMUM_KEY_CACHE_BYTES
+        ):
+            if cached is None:
+                self.key_cache_bytes += cost
+            self.key_cache[raw] = result
+            self.stats["key_cache_entries"] = len(self.key_cache)
+            self.stats["key_cache_bytes"] = self.key_cache_bytes
+        return (hashed, "", (False, False)) if not keep else result
+
+    def value(self, *, key="", keep=True, depth=0, classification=None, dataset_object=False):
         self.tick()
         if depth > MAXIMUM_DEPTH:
             raise ValueError("registered JSON nesting bound exceeded")
@@ -300,22 +380,34 @@ class Reader:
         if byte is None:
             raise ValueError("truncated JSON value")
         keep = keep and key not in legacy.FORBIDDEN
-        retain = keep and legacy.safe_key(key)
+        if classification is None:
+            classification = (legacy.safe_key(key), key in ESSENTIAL_FIELDS)
+        retain = keep and classification[0]
+        essential = keep and classification[1]
         if byte == 123:
-            return self.object(keep=keep, depth=depth)
+            return self.object(keep=keep, depth=depth, dataset_object=dataset_object)
         if byte == 91:
-            return self.array(key=key, keep=keep, retain=retain, depth=depth)
+            return self.array(
+                key=key, keep=keep, retain=retain, depth=depth, classification=classification
+            )
         if byte == 34:
             raw = self.string(retain)
             if retain:
+                if not essential and b"COCO_" not in raw and b"\\" not in raw:
+                    self.stats["irrelevant_safe_scalars_pruned"] += 1
+                    return DROP
+                value = _decoded_scalar(raw)
+                if not essential and legacy.COCO.search(value) is None:
+                    self.stats["irrelevant_safe_scalars_pruned"] += 1
+                    return DROP
                 self.charge(len(raw) + len(key))
                 self.stats["scalar_values_decoded"] += 1
-                return _decoded_scalar(raw)
+                return value
             self.stats["discarded_scalar_values"] += 1
             return DROP
-        return self.atom(retain, key)
+        return self.atom(retain, key, essential)
 
-    def object(self, *, keep, depth):
+    def object(self, *, keep, depth, dataset_object=False):
         self.expect(123)
         result, keys = {}, set()
         self.spaces()
@@ -325,7 +417,7 @@ class Reader:
         try:
             while True:
                 raw_key = self.string(True)
-                hashed = _key_hash(raw_key)
+                hashed, key, classification = self.key_info(raw_key, keep)
                 if hashed in keys:
                     raise ValueError("ambiguous duplicate JSON object key")
                 keys.add(hashed)
@@ -336,11 +428,17 @@ class Reader:
                 )
                 if self.active_keys > MAXIMUM_ACTIVE_KEYS:
                     raise ValueError("bounded active object-key capacity exceeded")
-                # A fully discarded subtree needs no decoded key strings.
-                key = _decoded_scalar(raw_key) if keep else ""
                 self.spaces()
                 self.expect(58)
-                child = self.value(key=key, keep=keep, depth=depth + 1)
+                if dataset_object and key in DATASET_FIELDS:
+                    classification = (classification[0], True)
+                child = self.value(
+                    key=key,
+                    keep=keep,
+                    depth=depth + 1,
+                    classification=classification,
+                    dataset_object=key == "dataset",
+                )
                 if child is not DROP:
                     self.charge(len(raw_key))
                     result[key] = child
@@ -357,7 +455,7 @@ class Reader:
         finally:
             self.active_keys -= len(keys)
 
-    def array(self, *, key, keep, retain, depth):
+    def array(self, *, key, keep, retain, depth, classification):
         self.expect(91)
         result, seen = [], {}
         self.spaces()
@@ -380,7 +478,7 @@ class Reader:
                     if self.peek() == 93:
                         raise ValueError("trailing comma in JSON array")
             before_bytes, before_nodes = self.metadata_bytes, self.metadata_nodes
-            child = self.value(key=key, keep=keep, depth=depth + 1)
+            child = self.value(key=key, keep=keep, depth=depth + 1, classification=classification)
             if child is not DROP:
                 fingerprint = digest(child)
                 matches = seen.get(fingerprint, ())
