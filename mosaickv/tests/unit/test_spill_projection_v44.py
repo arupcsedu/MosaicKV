@@ -270,6 +270,57 @@ def test_layout_cache_caps_are_owned_and_optional(tmp_path, monkeypatch):
         assert current.stats["maximum_live_projected_metadata_bytes"] <= base.MAXIMUM_METADATA
 
 
+def test_full_optional_cache_refuses_once_not_for_every_repeated_schema(tmp_path, monkeypatch):
+    monkeypatch.setattr(spill, "MAXIMUM_LAYOUT_BYTES", 8192)
+    learned = {"known-a": 1, "known-b": 2}
+    expensive = {f"uncached-field-{i}": i for i in range(20)}
+    events = [learned]
+    events.extend(dict(expensive, id=str(i)) for i in range(500))
+    events.extend(learned for _ in range(500))
+    raw = json.dumps(
+        {"events": events, "dataset": {"name": "late-parent", "split": "validation"}}
+    ).encode()
+    with reader(raw, tmp_path, chunk=65536) as current:
+        assert collected(expand(parse(current), current)) == reference(raw)
+        current.assert_spills_verified()
+        assert current.scalar_layout_count == 1
+        assert current.scalar_layout_learning_closed is True
+        assert current.stats["scalar_layout_learning_closed"] is True
+        assert current.stats["scalar_layout_byte_cap_refusals"] == 1
+        assert current.stats["scalar_layout_compilation_attempts"] == 2
+        assert current.stats["scalar_layout_hits"] >= 490
+        assert current.scalar_layout_bytes <= spill.MAXIMUM_LAYOUT_BYTES
+
+
+def test_duplicate_layout_is_identified_before_compilation(tmp_path, monkeypatch):
+    calls = 0
+    original = spill.re._compiler.compile
+
+    def compile_pattern(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(spill.re._compiler, "compile", compile_pattern)
+    with reader(b"{}", tmp_path) as current:
+        current.buffer = b'"known-a":1,"known-b":2'
+        for _ in range(3):
+            current._remember_layout(0, len(current.buffer), keep=True, dataset_object=False)
+        assert calls == 1
+        assert current.stats["scalar_layout_compilation_attempts"] == 1
+        assert current.stats["scalar_layout_duplicate_skips"] == 2
+        assert current.scalar_layout_learning_closed is False
+
+
+@pytest.mark.parametrize("bad", [b'{"name":1e9999}', b'{"id":1,"id":2}', b'{"id":01}'])
+def test_closed_optional_learning_preserves_strict_fallback_errors(tmp_path, bad):
+    raw = b'{"events":[' + bad + b"]}"
+    with reader(raw, tmp_path) as current, pytest.raises(ValueError):
+        current.scalar_layout_learning_closed = True
+        current.stats["scalar_layout_learning_closed"] = True
+        parse(current)
+
+
 @pytest.mark.parametrize(
     "raw",
     [

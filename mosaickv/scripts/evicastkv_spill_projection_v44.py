@@ -209,6 +209,7 @@ class ProjectionReader(base.Reader):
         self._persistent_bytes, self._persistent_nodes = 0, 0
         self._spool_counter, self._closed = 0, False
         self.scalar_layouts, self.scalar_layout_bytes, self.scalar_layout_count = {}, 0, 0
+        self.scalar_layout_learning_closed = False
         self.stats.update(
             spill_files=0,
             spilled_array_children=0,
@@ -225,6 +226,10 @@ class ProjectionReader(base.Reader):
             scalar_layout_fields=0,
             scalar_layout_entries=0,
             scalar_layout_bytes=0,
+            scalar_layout_compilation_attempts=0,
+            scalar_layout_byte_cap_refusals=0,
+            scalar_layout_duplicate_skips=0,
+            scalar_layout_learning_closed=False,
         )
 
     def check_deadline(self):
@@ -490,7 +495,11 @@ class ProjectionReader(base.Reader):
 
     def _remember_layout(self, start, end, *, keep, dataset_object):
         """Learn only a run whose ordinary parser already validated every field."""
-        if not MAXIMUM_LAYOUTS or self.scalar_layout_count >= MAXIMUM_LAYOUTS:
+        if (
+            self.scalar_layout_learning_closed
+            or not MAXIMUM_LAYOUTS
+            or self.scalar_layout_count >= MAXIMUM_LAYOUTS
+        ):
             return
         if (
             self.metadata_bytes + 2 * MAXIMUM_LAYOUT_BYTES > base.MAXIMUM_METADATA
@@ -519,6 +528,9 @@ class ProjectionReader(base.Reader):
         expression = (_WS + rb"," + _WS).join(parts) + _WS + rb"(?=[,}])"
         if len(expression) > FLAT_BYTES or self.scalar_layout_bytes >= MAXIMUM_LAYOUT_BYTES:
             return
+        if any(existing.pattern.pattern == expression for existing in bucket):
+            self.stats["scalar_layout_duplicate_skips"] += 1
+            return
         # This is the pinned CPython regex compiler, deliberately bypassing
         # re.compile's process-global cache. Optional layouts never widen the
         # input grammar or become a prerequisite for successful parsing.
@@ -530,6 +542,7 @@ class ProjectionReader(base.Reader):
         ):
             return
         with self.ownership(MAXIMUM_LAYOUT_BYTES, MAXIMUM_LAYOUT_FIELDS * 3):
+            self.stats["scalar_layout_compilation_attempts"] += 1
             pattern = compiler.compile(expression, 0)
             amount = (
                 sys.getsizeof(pattern)
@@ -538,6 +551,12 @@ class ProjectionReader(base.Reader):
                 + 512
             )
             if self.scalar_layout_bytes + amount > MAXIMUM_LAYOUT_BYTES:
+                # Learning is optional; after one proven refusal, repeated
+                # uncached schemas must use the exact fallback instead of
+                # rebuilding/recompiling a layout that cannot be admitted.
+                self.scalar_layout_learning_closed = True
+                self.stats["scalar_layout_byte_cap_refusals"] += 1
+                self.stats["scalar_layout_learning_closed"] = True
                 return
             layout = _ScalarLayout(
                 pattern,
@@ -546,8 +565,6 @@ class ProjectionReader(base.Reader):
                 tuple(retained),
                 len(members) - len(retained),
             )
-            if any(existing.pattern.pattern == expression for existing in bucket):
-                return
             self._persistent(amount, 3 + len(members) * 2)
             self.scalar_layouts.setdefault(dispatch, []).append(layout)
             self.scalar_layouts[dispatch].sort(key=lambda entry: -entry.field_count)
