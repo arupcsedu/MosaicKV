@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import selectors
+import stat
 import subprocess
 import time
 from collections import Counter
@@ -21,6 +22,8 @@ import evicastkv_startup_recovery_v50 as startup
 from mosaickv.evaluation.fox_campaign import clean_source, sha, write_once
 
 SOURCE = Path(__file__).resolve().parents[2]
+COMPLETED_BINDINGS = Path("/scratch/djy8hg/workdir/fox-review-v52/run-20261113-b3a8d9f-1")
+COMPLETED_BINDINGS_SHA = "e41b0be40ca048ea85d955343832c3d999791f3c23ead0f07151cee5983a4a3b"
 PARENT = Path("/scratch/djy8hg/workdir/fox-review-v51/run-20261113-96d9339-1")
 PARENT_SHA = "9d8b04fe42ee5ea487391616230eaccb3f541b1dadb7c605c94c50ec71f59411"
 WRITER = "mosaickv/scripts/evicastkv_consumed_instrumentation.py"
@@ -315,16 +318,52 @@ def gate_capsule(path, expected, budget):
     """Open only the exact, reviewed small numerical/control gate paths."""
     from mosaickv.evaluation import review_engineering_matrix_v52 as matrix
 
-    canonical = path.resolve(strict=True)
-    registered = {Path(v["path"]).resolve(strict=True) for v in matrix.KNOWN_BINDINGS.values()}
-    registered.add(Path(matrix.KNOWN_BINDINGS["coco"]["path"]).parent.parent / "plan.json")
-    if canonical not in registered or canonical.suffix != ".json":
+    def normalized(value):
+        value = Path(value)
+        # Only the already reviewed scratch-root alias is permitted. Do not
+        # resolve allowlist leaves: a substituted symlink must not rewrite scope.
+        alias = Path("/scratch/djy8hg")
+        owner = prior.HISTORY.parent
+        if value.is_relative_to(alias):
+            return owner / value.relative_to(alias)
+        if value.is_relative_to(owner):
+            return value
+        raise ValueError("gate path is outside the reviewed scratch root")
+
+    def protected(value):
+        return ".codex" in value.parts or value.name.casefold() in {
+            "auth.json",
+            "credentials.json",
+            ".env",
+            ".netrc",
+        }
+
+    path = Path(path)
+    paths = [Path(v["path"]) for v in matrix.KNOWN_BINDINGS.values()]
+    paths.append(Path(matrix.KNOWN_BINDINGS["coco"]["path"]).parent.parent / "plan.json")
+    registered = {normalized(value) for value in paths}
+    nominated = normalized(path)
+    if (
+        nominated not in registered
+        or nominated.suffix != ".json"
+        or protected(path)
+        or protected(nominated)
+    ):
         raise ValueError("gate capsule is outside the exact read-only scope")
+    if path.is_symlink():
+        raise ValueError("registered gate leaves must not be symlinks")
+    canonical = path.resolve(strict=True)
+    if (
+        canonical != nominated
+        or protected(canonical)
+        or not stat.S_ISREG(canonical.lstat().st_mode)
+    ):
+        raise ValueError("regular gate at its original canonical path required")
     before = prior.geometry(canonical)
     if before[2] > prior.LIVE_BYTES:
         raise ValueError("unchanged gate live-byte limit exceeded")
     budget.authorize(before[2] + 1)
-    fd = os.open(canonical, os.O_RDONLY | os.O_NOFOLLOW)
+    fd = os.open(canonical, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     with os.fdopen(fd, "rb") as stream:
         if prior.lexical._signature(os.fstat(stream.fileno())) != before:
             raise ValueError("gate descriptor differs")
@@ -375,6 +414,26 @@ def engineering(root):
         if prior.git_blob(source, transport, budget) != matrix.TRANSPORT_SHA:
             raise ValueError("original V9 numerical transport differs")
     result = matrix.validate_engineering_gates(raw, source_bridge=proof)
+    # This recovery already passed. Link it, rather than repeat its metadata
+    # transactions or relabel its original producer as the corrective auditor.
+    bindings = saved_json(
+        COMPLETED_BINDINGS / "recovered_bindings.json", COMPLETED_BINDINGS_SHA, budget
+    )
+    if (
+        bindings["source_sha"] != "b3a8d9fe4e3240e4766d4762d430354cdade4cdc"
+        or bindings["parquet_bodies_reopened"] != 0
+        or bindings["reused_hash_transactions"] != 134
+        or bindings["newly_resolved_occurrences"] != 0
+    ):
+        raise ValueError("complete unchanged binding-recovery receipt required")
+    result["reused_binding_recovery"] = dict(
+        path=str(COMPLETED_BINDINGS / "recovered_bindings.json"),
+        sha256=COMPLETED_BINDINGS_SHA,
+        execution_source_sha=bindings["source_sha"],
+        status_counts=bindings["status_counts"],
+        reused_hash_transactions=134,
+        new_binding_recovery_executed=False,
+    )
     result.update(
         audit_source_sha=revision,
         original_source_bridge_git_diff_sha256=hashlib.sha256(diff).hexdigest(),

@@ -33,3 +33,21 @@ and eight-worker ceilings. This finite CPU suite → recovery → afterany analy
 chain requests no GPUs. The credential fixture remains unread. Historical
 semantic exposure and media/source-group completeness are separate open gates;
 all fresh-COCO, materialization, GPU and paper-campaign permissions remain false.
+
+## Corrective reader retry
+
+The first recovery completed and reduced unbound files from 105 to 102. Its
+receipt remains at source `b3a8d9fe4e3240e4766d4762d430354cdade4cdc` with hash
+`e41b0be40ca048ea85d955343832c3d999791f3c23ead0f07151cee5983a4a3b`.
+The independent engineering reader failed because its plan allowlist retained
+the `/scratch` spelling while the opened path resolved to `/sfs/weka/scratch`.
+That failed attempt remains intact.
+
+The correction normalizes the explicitly reviewed root alias lexically for
+both gates and plan; it never resolves allowlist leaves to redefine authority.
+Credential paths, leaf symlinks, redirected ancestors and nonregular targets
+are rejected before opening. Nonblocking descriptor acquisition prevents a
+FIFO substitution from defeating the unchanged deadline. Synthetic tests cover
+the plan alias, scope confinement and unchanged read limits. The retry executes
+only the full current-source CPU suite and engineering audit. It links the
+successful original binding receipt; it does not rerun recovery or any old proof.
