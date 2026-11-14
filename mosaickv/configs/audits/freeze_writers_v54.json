@@ -1,0 +1,269 @@
+{
+  "discovery_receipts": [
+    {
+      "path": "/scratch/djy8hg/workdir/fox-review-v53/discovery-20261113-1/freeze_runtime_candidates.json",
+      "sha256": "0c0a2dad327eb5851df2b81bda428839c1356f5e7a56797f9e0394f977bc9ad4"
+    },
+    {
+      "path": "/scratch/djy8hg/workdir/fox-review-v53/discovery-20261113-1/freeze_runtime_remaining_candidates.json",
+      "sha256": "0b1ab599d367412eb1cf1673b604bda6d48d1c28dd42dfeabcb8887b1b1ce186"
+    }
+  ],
+  "maximum_combined_input_bytes": 2147483648,
+  "maximum_live_metadata_bytes": 8388608,
+  "maximum_live_metadata_nodes": 100000,
+  "maximum_worker_seconds": 210,
+  "outer_memory_bytes": 34359738368,
+  "parent_report_path": "/scratch/djy8hg/workdir/fox-review-v53/run-20261113-f9fe413-1/recovered_bindings.json",
+  "parent_report_sha256": "844d7f99f18e64fb36baab75bfd13cfd21826a24ad8281f587708f6c27c1e4e3",
+  "schema": "historical_freeze_writer_registry_v54",
+  "specs": [
+    {
+      "accounting_sha256": "17081d847ed09502412ea7993cc3c83002ccec5774e796cf6ae1f02c524098fa",
+      "batch_record_sha256": "d034ce234a3a21cb82901227d100ebfba63dab785221756ecc767a01b7df0482",
+      "entrypoint_path": "mosaickv/scripts/analyze_choice_c_v74_label_blind_calibration.py",
+      "expected_exit_code": "2:0",
+      "expected_state": "FAILED",
+      "frozen_output": "/scratch/djy8hg/runs/mosaickv/choice-c-v76-disjoint-ocr-calibration-v1/analysis/frozen_candidate.yaml",
+      "job_id": "18572260",
+      "outputs": [
+        {
+          "artifact_sha256": "199ec3b66f69cfa037b8bba3361b392fb9b225cb072b4beb8989db48bfa42a83",
+          "path": "/sfs/weka/scratch/djy8hg/runs/mosaickv/choice-c-v76-disjoint-ocr-calibration-v1/analysis/label_blind_candidate_ranking.parquet",
+          "writer_path": "mosaickv/scripts/analyze_choice_c_v74_label_blind_calibration.py",
+          "writer_sha256": "c5fe8128434025f9f964dd9fb79c7453c344a5c023600f46ca5b93d703979430"
+        }
+      ],
+      "protocol_path": "mosaickv/configs/experiments/choice_c_v76_disjoint_ocr_calibration.yaml",
+      "protocol_sha256": "b8b7a09783fb39ed58ed45c5207f2ecf4661c73dc59b8aa86969d6f8fe72b983",
+      "repository_tree_oid": "7848fe4bcda6c46063d6194866c29a665929bff5",
+      "run_root": "/scratch/djy8hg/runs/mosaickv/choice-c-v76-disjoint-ocr-calibration-v1",
+      "seal_blob_oid": "8313e4351fbdda3389cbdee3bb9957e2ef4ee991",
+      "seal_commit": "9e482f71f86f52f92f2946d24a73e3fa7de63cc9",
+      "seal_path": "mosaickv/configs/ledgers/choice_c_v76_negative_calibration_seal.yaml",
+      "seal_sha256": "69e6fa0d75e597764ff19998a54cab35017ee30b368d968d7ff8e4dea34be70e",
+      "source_blob_sha256s": {
+        "mosaickv/configs/experiments/choice_c_v76_disjoint_ocr_calibration.yaml": "b8b7a09783fb39ed58ed45c5207f2ecf4661c73dc59b8aa86969d6f8fe72b983",
+        "mosaickv/scripts/analyze_choice_c_v74_label_blind_calibration.py": "c5fe8128434025f9f964dd9fb79c7453c344a5c023600f46ca5b93d703979430",
+        "mosaickv/scripts/assert_clean_worktree.sh": "5522a24655bb8d55e4866759902462c0363bd8258429cc7e03c514d0279dd70e",
+        "mosaickv/scripts/cache_env.sh": "a471d60c076e67a10ee1ba358810a5e281d8cca89928c7b9aeda6b33dbc78c17",
+        "mosaickv/scripts/choice_c_v74_protocol.py": "59898ce61822220e52b3639441d7daf692b153de26ea7bc5eb6d6856319fd3c2",
+        "mosaickv/scripts/run_choice_c_gate.py": "7c130e0bb60b28f6fac5cf1c28b8e73ad021280aec069d6ae6606b2f21117bea",
+        "mosaickv/scripts/run_choice_c_v72_heldout_quality_memory_worker.py": "09bd0b0a273b10d4e0727ec8656044b43c4da27917c0310fa279f7da31268a16",
+        "mosaickv/slurm/choice_c_v76_freeze.sbatch": "0fd3de0d0055f335f1a5104d29987b98ad8508cd7d44b72be4043d991fc30552"
+      },
+      "source_sha": "e8d8b542a594c96b3fb819956a85e692f8a54f2f",
+      "startup_sha256": "af6e7abba98d1eb93aed5a34bd7c5728027871b109ac3f6583b426af308e074c",
+      "version": 76,
+      "wrapper_path": "mosaickv/slurm/choice_c_v76_freeze.sbatch",
+      "wrapper_sha256": "0fd3de0d0055f335f1a5104d29987b98ad8508cd7d44b72be4043d991fc30552"
+    },
+    {
+      "accounting_sha256": "e5783af6a889222228399d21f2dcdfe4dd1ac9f8b98a3392d06fcef79fbd3207",
+      "batch_record_sha256": "9913a2f27ba2abadcdd11da606140ddb4af1598485aa0fc6feb891a065a4edb1",
+      "entrypoint_path": "mosaickv/scripts/analyze_choice_c_v74_label_blind_calibration.py",
+      "expected_exit_code": "2:0",
+      "expected_state": "FAILED",
+      "frozen_output": "/scratch/djy8hg/runs/mosaickv/choice-c-v78-disjoint-visual-balance-calibration-v1/analysis/frozen_candidate.yaml",
+      "job_id": "18583439",
+      "outputs": [
+        {
+          "artifact_sha256": "f2862754d9c79ea3231f04bab28f636a385bdd7d90f130ff8d960f24c2ac0ac1",
+          "path": "/sfs/weka/scratch/djy8hg/runs/mosaickv/choice-c-v78-disjoint-visual-balance-calibration-v1/analysis/label_blind_candidate_ranking.parquet",
+          "writer_path": "mosaickv/scripts/analyze_choice_c_v74_label_blind_calibration.py",
+          "writer_sha256": "c5fe8128434025f9f964dd9fb79c7453c344a5c023600f46ca5b93d703979430"
+        }
+      ],
+      "protocol_path": "mosaickv/configs/experiments/choice_c_v78_disjoint_visual_balance_calibration.yaml",
+      "protocol_sha256": "fa851312e84b0817f19766a6a1208725b8fc16cbc85752ecbe813ad6a40f6898",
+      "repository_tree_oid": "239c9c15f6f0e4771f92397df364d522b85ff64c",
+      "run_root": "/scratch/djy8hg/runs/mosaickv/choice-c-v78-disjoint-visual-balance-calibration-v1",
+      "seal_blob_oid": "2d140d39d15a2fada7ca06efdb457e3b2afffa01",
+      "seal_commit": "9e482f71f86f52f92f2946d24a73e3fa7de63cc9",
+      "seal_path": "mosaickv/configs/ledgers/choice_c_v78_negative_calibration_seal.yaml",
+      "seal_sha256": "0ed28237618eee658672511a1e52779a64f1b20544670bc52a54d87591217401",
+      "source_blob_sha256s": {
+        "mosaickv/configs/experiments/choice_c_v78_disjoint_visual_balance_calibration.yaml": "fa851312e84b0817f19766a6a1208725b8fc16cbc85752ecbe813ad6a40f6898",
+        "mosaickv/scripts/analyze_choice_c_v74_label_blind_calibration.py": "c5fe8128434025f9f964dd9fb79c7453c344a5c023600f46ca5b93d703979430",
+        "mosaickv/scripts/assert_clean_worktree.sh": "5522a24655bb8d55e4866759902462c0363bd8258429cc7e03c514d0279dd70e",
+        "mosaickv/scripts/cache_env.sh": "a471d60c076e67a10ee1ba358810a5e281d8cca89928c7b9aeda6b33dbc78c17",
+        "mosaickv/scripts/choice_c_v74_protocol.py": "a042751ebd1e81cf21f663422a2f4edee0a9f19dce7c3d7d175027fb47a37132",
+        "mosaickv/scripts/run_choice_c_gate.py": "7c130e0bb60b28f6fac5cf1c28b8e73ad021280aec069d6ae6606b2f21117bea",
+        "mosaickv/scripts/run_choice_c_v72_heldout_quality_memory_worker.py": "09bd0b0a273b10d4e0727ec8656044b43c4da27917c0310fa279f7da31268a16",
+        "mosaickv/slurm/choice_c_v78_freeze.sbatch": "229a3377e8a48254ed88f676e85796967e58d78d6af5b5c0a01bce088f45bcf3"
+      },
+      "source_sha": "27d9caccfc07250ef9b5977e9d823f6243d7d173",
+      "startup_sha256": "71fc822ef242f4fb20f0925ed1953758175c60d466e4f77ecd88ae74cda76d1b",
+      "version": 78,
+      "wrapper_path": "mosaickv/slurm/choice_c_v78_freeze.sbatch",
+      "wrapper_sha256": "229a3377e8a48254ed88f676e85796967e58d78d6af5b5c0a01bce088f45bcf3"
+    },
+    {
+      "accounting_sha256": "69b05368ea39f063f2164d039a384a4bd601f1665e3b97bc92122ab1805b65bf",
+      "batch_record_sha256": "0f6323fa0ad2706115fa170202e7e25992563fd0a9265d6ccdb83724d31dc512",
+      "entrypoint_path": "mosaickv/scripts/analyze_choice_c_v74_label_blind_calibration.py",
+      "expected_exit_code": "2:0",
+      "expected_state": "FAILED",
+      "frozen_output": "/scratch/djy8hg/runs/mosaickv/choice-c-v79-disjoint-adaptive-swap-calibration-v1/analysis/frozen_candidate.yaml",
+      "job_id": "18584132",
+      "outputs": [
+        {
+          "artifact_sha256": "4e213bab365da9259dd886459e4eb21a5ec35bc66a4959e5d6b75af7bcb0255c",
+          "path": "/sfs/weka/scratch/djy8hg/runs/mosaickv/choice-c-v79-disjoint-adaptive-swap-calibration-v1/analysis/label_blind_candidate_ranking.parquet",
+          "writer_path": "mosaickv/scripts/analyze_choice_c_v74_label_blind_calibration.py",
+          "writer_sha256": "761e84235d1c72dd486cf7494acbcb6a5e16fcecffc675fe99378c294268c093"
+        }
+      ],
+      "protocol_path": "mosaickv/configs/experiments/choice_c_v79_disjoint_adaptive_swap_calibration.yaml",
+      "protocol_sha256": "e2acc2abd821fac6f8d31f53b751cd9f9130d6882165cfcf59785ba616bd67fe",
+      "repository_tree_oid": "944e02b54b7a5c93260f40911b92d2cd496d21a7",
+      "run_root": "/scratch/djy8hg/runs/mosaickv/choice-c-v79-disjoint-adaptive-swap-calibration-v1",
+      "seal_blob_oid": "37e4faea9d3562189537f91980515a3aacbb5e7d",
+      "seal_commit": "9e482f71f86f52f92f2946d24a73e3fa7de63cc9",
+      "seal_path": "mosaickv/configs/ledgers/choice_c_v79_negative_calibration_seal.yaml",
+      "seal_sha256": "2831888873af245209966140aae1b218bc10a5f09a8e6449990065b4a15d0f0f",
+      "source_blob_sha256s": {
+        "mosaickv/configs/experiments/choice_c_v79_disjoint_adaptive_swap_calibration.yaml": "e2acc2abd821fac6f8d31f53b751cd9f9130d6882165cfcf59785ba616bd67fe",
+        "mosaickv/scripts/analyze_choice_c_v74_label_blind_calibration.py": "761e84235d1c72dd486cf7494acbcb6a5e16fcecffc675fe99378c294268c093",
+        "mosaickv/scripts/assert_clean_worktree.sh": "5522a24655bb8d55e4866759902462c0363bd8258429cc7e03c514d0279dd70e",
+        "mosaickv/scripts/cache_env.sh": "a471d60c076e67a10ee1ba358810a5e281d8cca89928c7b9aeda6b33dbc78c17",
+        "mosaickv/scripts/choice_c_v74_protocol.py": "03db625fb42cb881eabb509593d48506377d2157ed864d0a20a7b994f57dd138",
+        "mosaickv/scripts/run_choice_c_gate.py": "7c130e0bb60b28f6fac5cf1c28b8e73ad021280aec069d6ae6606b2f21117bea",
+        "mosaickv/scripts/run_choice_c_v72_heldout_quality_memory_worker.py": "09bd0b0a273b10d4e0727ec8656044b43c4da27917c0310fa279f7da31268a16",
+        "mosaickv/slurm/choice_c_v79_freeze.sbatch": "d48d98588f21a423e1d7bebaeeb44b0f60dc48dd36784d17511fcf954041a093"
+      },
+      "source_sha": "d68a4da4098c8b868b4cc153356408351ff3a515",
+      "startup_sha256": "b4c83ca3d529c35864d43623778db9b9b45518751901c9bb74737c2448422697",
+      "version": 79,
+      "wrapper_path": "mosaickv/slurm/choice_c_v79_freeze.sbatch",
+      "wrapper_sha256": "d48d98588f21a423e1d7bebaeeb44b0f60dc48dd36784d17511fcf954041a093"
+    },
+    {
+      "accounting_sha256": "1de86a95e6fd235466058144230bf686621fbcab2f354e212055d7f51bf27b20",
+      "batch_record_sha256": "a10c53c2c5d6d269904f8c671a6c0a2107595796c0f4f7baba5a5236254661a1",
+      "entrypoint_path": "mosaickv/scripts/analyze_choice_c_v74_label_blind_calibration.py",
+      "expected_exit_code": "2:0",
+      "expected_state": "FAILED",
+      "frozen_output": "/scratch/djy8hg/runs/mosaickv/choice-c-v80-disjoint-risk-gated-swap-calibration-v1/analysis/frozen_candidate.yaml",
+      "job_id": "18587318",
+      "outputs": [
+        {
+          "artifact_sha256": "edde8026ba61f9a717214eafd45caba073450aecaa6b35e5d341e86723df490c",
+          "path": "/sfs/weka/scratch/djy8hg/runs/mosaickv/choice-c-v80-disjoint-risk-gated-swap-calibration-v1/analysis/label_blind_candidate_ranking.parquet",
+          "writer_path": "mosaickv/scripts/analyze_choice_c_v74_label_blind_calibration.py",
+          "writer_sha256": "c2fe02fa459035429415633adcdf541feca5ac264715b380340c0676a7088abf"
+        }
+      ],
+      "protocol_path": "mosaickv/configs/experiments/choice_c_v80_disjoint_risk_gated_swap_calibration.yaml",
+      "protocol_sha256": "811fb9ae12de334cd8359fa391459169423394113fba5a2ecad4decd9df9844b",
+      "repository_tree_oid": "3adcb5569ac5ce665171101b57a547432a5ffcd8",
+      "run_root": "/scratch/djy8hg/runs/mosaickv/choice-c-v80-disjoint-risk-gated-swap-calibration-v1",
+      "seal_blob_oid": "78b78735e13170f6f97c115ac9515529c5c605a3",
+      "seal_commit": "9e482f71f86f52f92f2946d24a73e3fa7de63cc9",
+      "seal_path": "mosaickv/configs/ledgers/choice_c_v80_negative_calibration_seal.yaml",
+      "seal_sha256": "5077f98bc74e7bf7d81213a459ec1f1a29d2252a90882de80df2c509900b85ee",
+      "source_blob_sha256s": {
+        "mosaickv/configs/experiments/choice_c_v80_disjoint_risk_gated_swap_calibration.yaml": "811fb9ae12de334cd8359fa391459169423394113fba5a2ecad4decd9df9844b",
+        "mosaickv/scripts/analyze_choice_c_v74_label_blind_calibration.py": "c2fe02fa459035429415633adcdf541feca5ac264715b380340c0676a7088abf",
+        "mosaickv/scripts/assert_clean_worktree.sh": "5522a24655bb8d55e4866759902462c0363bd8258429cc7e03c514d0279dd70e",
+        "mosaickv/scripts/cache_env.sh": "a471d60c076e67a10ee1ba358810a5e281d8cca89928c7b9aeda6b33dbc78c17",
+        "mosaickv/scripts/choice_c_v74_protocol.py": "21837a1ac97cbb7e4d3a1c9df5ceb2f50480be7fddef7336cb0aee18c5832cf1",
+        "mosaickv/scripts/run_choice_c_gate.py": "7c130e0bb60b28f6fac5cf1c28b8e73ad021280aec069d6ae6606b2f21117bea",
+        "mosaickv/scripts/run_choice_c_v72_heldout_quality_memory_worker.py": "09bd0b0a273b10d4e0727ec8656044b43c4da27917c0310fa279f7da31268a16",
+        "mosaickv/slurm/choice_c_v80_freeze.sbatch": "6f841b95e0ce64dd4839e4d9b6e8898b76925af685ff812a0169ea20d6015965"
+      },
+      "source_sha": "2c49897bb9468ea8faf6d7a47e14f6da22b9415e",
+      "startup_sha256": "a4743c265aadc100ac2bcd8b8ef0b682f15525af273471901f32c3d8376718b0",
+      "version": 80,
+      "wrapper_path": "mosaickv/slurm/choice_c_v80_freeze.sbatch",
+      "wrapper_sha256": "6f841b95e0ce64dd4839e4d9b6e8898b76925af685ff812a0169ea20d6015965"
+    },
+    {
+      "accounting_sha256": "35ad2eeeeee52ba504a4093a8e635bfb20c10a457aed9fb27da6b4bf1371ea75",
+      "batch_record_sha256": "c40460b2cbe9762871b098b7e8acef67caa7e7655a08c9a707bc2e9390815a09",
+      "entrypoint_path": "mosaickv/scripts/analyze_choice_c_v74_label_blind_calibration.py",
+      "expected_exit_code": "2:0",
+      "expected_state": "FAILED",
+      "frozen_output": "/scratch/djy8hg/runs/mosaickv/choice-c-v81-disjoint-exact-future-rerank-calibration-v1/analysis/frozen_candidate.yaml",
+      "job_id": "18589925",
+      "outputs": [
+        {
+          "artifact_sha256": "aeff5b4a6d341d1a4141cf4f42edf86a628eb45b97c063b883c409f88e9ce9c3",
+          "path": "/sfs/weka/scratch/djy8hg/runs/mosaickv/choice-c-v81-disjoint-exact-future-rerank-calibration-v1/analysis/label_blind_candidate_ranking.parquet",
+          "writer_path": "mosaickv/scripts/analyze_choice_c_v74_label_blind_calibration.py",
+          "writer_sha256": "69c7dcd5b4d0ac682f42b157d1dd8b481d2ff5f351f5a14cacc2f2585f4a5608"
+        }
+      ],
+      "protocol_path": "mosaickv/configs/experiments/choice_c_v81_disjoint_exact_future_rerank_calibration.yaml",
+      "protocol_sha256": "9d573a42005dec84120052cff85a7c275d557aab07b1572887737127cc348d9a",
+      "repository_tree_oid": "3f980f579ef31f55bb631570c9369e8a06150248",
+      "run_root": "/scratch/djy8hg/runs/mosaickv/choice-c-v81-disjoint-exact-future-rerank-calibration-v1",
+      "seal_blob_oid": "3327cc6ca7440a704a9b95c5b7ab6e233232b8c1",
+      "seal_commit": "9e482f71f86f52f92f2946d24a73e3fa7de63cc9",
+      "seal_path": "mosaickv/configs/ledgers/choice_c_v81_negative_calibration_seal.yaml",
+      "seal_sha256": "ea015a876040c613d924dfc806e155b53fdb7e4573f064cbbfc8275da3fec962",
+      "source_blob_sha256s": {
+        "mosaickv/configs/experiments/choice_c_v81_disjoint_exact_future_rerank_calibration.yaml": "9d573a42005dec84120052cff85a7c275d557aab07b1572887737127cc348d9a",
+        "mosaickv/scripts/analyze_choice_c_v74_label_blind_calibration.py": "69c7dcd5b4d0ac682f42b157d1dd8b481d2ff5f351f5a14cacc2f2585f4a5608",
+        "mosaickv/scripts/assert_clean_worktree.sh": "5522a24655bb8d55e4866759902462c0363bd8258429cc7e03c514d0279dd70e",
+        "mosaickv/scripts/cache_env.sh": "a471d60c076e67a10ee1ba358810a5e281d8cca89928c7b9aeda6b33dbc78c17",
+        "mosaickv/scripts/choice_c_v74_protocol.py": "d50c7a421042b821bc26d125c0e029aba017ba52f7f21585a759d96342aa34f4",
+        "mosaickv/scripts/run_choice_c_gate.py": "7c130e0bb60b28f6fac5cf1c28b8e73ad021280aec069d6ae6606b2f21117bea",
+        "mosaickv/scripts/run_choice_c_v72_heldout_quality_memory_worker.py": "09bd0b0a273b10d4e0727ec8656044b43c4da27917c0310fa279f7da31268a16",
+        "mosaickv/slurm/choice_c_v81_freeze.sbatch": "e7900702a2d9e6b0aa248858bbd5c860ab48f8784fc635f2b7e13d245cd934c2"
+      },
+      "source_sha": "db85f112e0baa9942da689cf8a7abad82ee2ee30",
+      "startup_sha256": "4b3804ea019ca19077681c8ee5e6258924b1057be1b1c1a733c47c0394f1c2ea",
+      "version": 81,
+      "wrapper_path": "mosaickv/slurm/choice_c_v81_freeze.sbatch",
+      "wrapper_sha256": "e7900702a2d9e6b0aa248858bbd5c860ab48f8784fc635f2b7e13d245cd934c2"
+    },
+    {
+      "accounting_sha256": "d296cec075fe568052dc55d59507f4cafc2611ea8bed77c991848389ed16a42c",
+      "batch_record_sha256": "d0ca0363eee523378d3c28e2bdf0c67726230a60aac665f084f3166a2a5784d9",
+      "entrypoint_path": "mosaickv/scripts/analyze_choice_c_v86_robust_fidelity.py",
+      "expected_exit_code": "0:0",
+      "expected_state": "COMPLETED",
+      "frozen_output": "/scratch/djy8hg/runs/mosaickv/choice-c-v88-initial-query-coverage-calibration-v1/analysis/frozen_candidate.yaml",
+      "job_id": "18650057",
+      "outputs": [
+        {
+          "artifact_sha256": "d03406158e45c474ba2f17f387cdce1ee4441ee465d8598f7d4be7db0496d619",
+          "path": "/sfs/weka/scratch/djy8hg/runs/mosaickv/choice-c-v88-initial-query-coverage-calibration-v1/analysis/label_blind_candidate_ranking.parquet",
+          "writer_path": "mosaickv/scripts/analyze_choice_c_v74_label_blind_calibration.py",
+          "writer_sha256": "be7693b6303b0c20bb3dcd3e19703f5df7c3e99d949a26d340371242aa27783c"
+        },
+        {
+          "artifact_sha256": "a9828c4f7bb9a8e307c2702b4d39e719ec6ff7a457dd03edd1ab15991255d9ab",
+          "path": "/sfs/weka/scratch/djy8hg/runs/mosaickv/choice-c-v88-initial-query-coverage-calibration-v1/analysis/robust_fidelity_candidate_ranking.parquet",
+          "writer_path": "mosaickv/scripts/analyze_choice_c_v86_robust_fidelity.py",
+          "writer_sha256": "51f2f04ae6376718bf1d8193605669a0f34ea35dd5ea71abd35ce2e144fb1f77"
+        }
+      ],
+      "protocol_path": "mosaickv/configs/experiments/choice_c_v88_initial_query_coverage_calibration.yaml",
+      "protocol_sha256": "f9bee74c82365ecb999ea8d34ca10b50f8402618157f92f5f153a1ae766d6efb",
+      "repository_tree_oid": "e69af26d586b9582f0b921fdbd003fbc5d9e75d4",
+      "run_root": "/scratch/djy8hg/runs/mosaickv/choice-c-v88-initial-query-coverage-calibration-v1",
+      "seal_blob_oid": "24f8fd859d9049d66a077a7f7cf2e8188eb2198d",
+      "seal_commit": "75736bbc115d2ad5d82ae7c7a3a26df41c89d8fe",
+      "seal_path": "mosaickv/configs/ledgers/choice_c_v88_negative_calibration_seal.yaml",
+      "seal_sha256": "c08b3d97576f57aa989ab6ff4e824cf7a2579ece6f481f23b7ae6274fac5e300",
+      "source_blob_sha256s": {
+        "mosaickv/configs/experiments/choice_c_v88_initial_query_coverage_calibration.yaml": "f9bee74c82365ecb999ea8d34ca10b50f8402618157f92f5f153a1ae766d6efb",
+        "mosaickv/scripts/analyze_choice_c_v74_label_blind_calibration.py": "be7693b6303b0c20bb3dcd3e19703f5df7c3e99d949a26d340371242aa27783c",
+        "mosaickv/scripts/analyze_choice_c_v86_robust_fidelity.py": "51f2f04ae6376718bf1d8193605669a0f34ea35dd5ea71abd35ce2e144fb1f77",
+        "mosaickv/scripts/assert_clean_worktree.sh": "5522a24655bb8d55e4866759902462c0363bd8258429cc7e03c514d0279dd70e",
+        "mosaickv/scripts/cache_env.sh": "a471d60c076e67a10ee1ba358810a5e281d8cca89928c7b9aeda6b33dbc78c17",
+        "mosaickv/scripts/choice_c_v74_protocol.py": "6463265eeada9feebccc1c4b592a4bb21113eef6e18894169889bc9aee4028e3",
+        "mosaickv/scripts/run_choice_c_gate.py": "7c130e0bb60b28f6fac5cf1c28b8e73ad021280aec069d6ae6606b2f21117bea",
+        "mosaickv/scripts/run_choice_c_v72_heldout_quality_memory_worker.py": "09bd0b0a273b10d4e0727ec8656044b43c4da27917c0310fa279f7da31268a16",
+        "mosaickv/slurm/choice_c_v88_freeze.sbatch": "3e7cf23d90757746d932f8b9a4f5fcaf29890abefd59027abf817a3f87eee605"
+      },
+      "source_sha": "9e482f71f86f52f92f2946d24a73e3fa7de63cc9",
+      "startup_sha256": "d80c44803ecc24c08bc94db25388a16ff0a8c441ef2a5be5548806b55ed7ae72",
+      "version": 88,
+      "wrapper_path": "mosaickv/slurm/choice_c_v88_freeze.sbatch",
+      "wrapper_sha256": "3e7cf23d90757746d932f8b9a4f5fcaf29890abefd59027abf817a3f87eee605"
+    }
+  ]
+}
