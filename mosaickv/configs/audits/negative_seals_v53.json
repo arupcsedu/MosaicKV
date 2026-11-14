@@ -1,0 +1,291 @@
+{
+  "parent_report_sha256": "e41b0be40ca048ea85d955343832c3d999791f3c23ead0f07151cee5983a4a3b",
+  "reviewed_ancestor_sha": "4b2cf0b2e9e4dfdfd82b6bc08b253cb331f9b0bf",
+  "schema": "historical_negative_seal_registry_v53",
+  "seals": [
+    {
+      "git_blob_oid": "8313e4351fbdda3389cbdee3bb9957e2ef4ee991",
+      "original_seal_commit": "9e482f71f86f52f92f2946d24a73e3fa7de63cc9",
+      "repository_path": "mosaickv/configs/ledgers/choice_c_v76_negative_calibration_seal.yaml",
+      "sha256": "69e6fa0d75e597764ff19998a54cab35017ee30b368d968d7ff8e4dea34be70e",
+      "targets": [
+        {
+          "path": "/sfs/weka/scratch/djy8hg/runs/mosaickv/choice-c-v76-disjoint-ocr-calibration-v1/analysis/label_blind_candidate_ranking.parquet",
+          "sha256": "199ec3b66f69cfa037b8bba3361b392fb9b225cb072b4beb8989db48bfa42a83"
+        }
+      ]
+    },
+    {
+      "git_blob_oid": "2d140d39d15a2fada7ca06efdb457e3b2afffa01",
+      "original_seal_commit": "9e482f71f86f52f92f2946d24a73e3fa7de63cc9",
+      "repository_path": "mosaickv/configs/ledgers/choice_c_v78_negative_calibration_seal.yaml",
+      "sha256": "0ed28237618eee658672511a1e52779a64f1b20544670bc52a54d87591217401",
+      "targets": [
+        {
+          "path": "/sfs/weka/scratch/djy8hg/runs/mosaickv/choice-c-v78-disjoint-visual-balance-calibration-v1/analysis/label_blind_candidate_ranking.parquet",
+          "sha256": "f2862754d9c79ea3231f04bab28f636a385bdd7d90f130ff8d960f24c2ac0ac1"
+        }
+      ]
+    },
+    {
+      "git_blob_oid": "37e4faea9d3562189537f91980515a3aacbb5e7d",
+      "original_seal_commit": "9e482f71f86f52f92f2946d24a73e3fa7de63cc9",
+      "repository_path": "mosaickv/configs/ledgers/choice_c_v79_negative_calibration_seal.yaml",
+      "sha256": "2831888873af245209966140aae1b218bc10a5f09a8e6449990065b4a15d0f0f",
+      "targets": [
+        {
+          "path": "/sfs/weka/scratch/djy8hg/runs/mosaickv/choice-c-v79-disjoint-adaptive-swap-calibration-v1/analysis/label_blind_candidate_ranking.parquet",
+          "sha256": "4e213bab365da9259dd886459e4eb21a5ec35bc66a4959e5d6b75af7bcb0255c"
+        }
+      ]
+    },
+    {
+      "git_blob_oid": "78b78735e13170f6f97c115ac9515529c5c605a3",
+      "original_seal_commit": "9e482f71f86f52f92f2946d24a73e3fa7de63cc9",
+      "repository_path": "mosaickv/configs/ledgers/choice_c_v80_negative_calibration_seal.yaml",
+      "sha256": "5077f98bc74e7bf7d81213a459ec1f1a29d2252a90882de80df2c509900b85ee",
+      "targets": [
+        {
+          "path": "/sfs/weka/scratch/djy8hg/runs/mosaickv/choice-c-v80-disjoint-risk-gated-swap-calibration-v1/analysis/label_blind_candidate_ranking.parquet",
+          "sha256": "edde8026ba61f9a717214eafd45caba073450aecaa6b35e5d341e86723df490c"
+        }
+      ]
+    },
+    {
+      "git_blob_oid": "3327cc6ca7440a704a9b95c5b7ab6e233232b8c1",
+      "original_seal_commit": "9e482f71f86f52f92f2946d24a73e3fa7de63cc9",
+      "repository_path": "mosaickv/configs/ledgers/choice_c_v81_negative_calibration_seal.yaml",
+      "sha256": "ea015a876040c613d924dfc806e155b53fdb7e4573f064cbbfc8275da3fec962",
+      "targets": [
+        {
+          "path": "/sfs/weka/scratch/djy8hg/runs/mosaickv/choice-c-v81-disjoint-exact-future-rerank-calibration-v1/analysis/label_blind_candidate_ranking.parquet",
+          "sha256": "aeff5b4a6d341d1a4141cf4f42edf86a628eb45b97c063b883c409f88e9ce9c3"
+        }
+      ]
+    },
+    {
+      "git_blob_oid": "ef13389d487ae2f4f62b787cd64b0b3d97c2b93a",
+      "original_seal_commit": "9e482f71f86f52f92f2946d24a73e3fa7de63cc9",
+      "repository_path": "mosaickv/configs/ledgers/choice_c_v86_negative_calibration_seal.yaml",
+      "sha256": "742329a377a946f34ef6ed9e5c63daa47b86e3b1cd61112789a618b423361c5a",
+      "targets": [
+        {
+          "path": "/sfs/weka/scratch/djy8hg/runs/mosaickv/choice-c-v86-disjoint-robust-fidelity-calibration-v1/analysis/label_blind_candidate_ranking.parquet",
+          "sha256": "4c216841cb3f33082ba590a60b2ca8f352a2683bb4a0afc72f7878f3315664f0"
+        },
+        {
+          "path": "/sfs/weka/scratch/djy8hg/runs/mosaickv/choice-c-v86-disjoint-robust-fidelity-calibration-v1/analysis/robust_fidelity_candidate_ranking.parquet",
+          "sha256": "5dfb28cb5808f321517197e0e23a56431170988d0ba450e63c6412ed0dfa0091"
+        }
+      ]
+    },
+    {
+      "git_blob_oid": "7a3916e3f90f97109950ba1dc6ba7a4d29616f8e",
+      "original_seal_commit": "9e482f71f86f52f92f2946d24a73e3fa7de63cc9",
+      "repository_path": "mosaickv/configs/ledgers/choice_c_v87_negative_calibration_seal.yaml",
+      "sha256": "60a94a4b4ca6d580c2aaa2d6683aff78e081bc998854ff728e5644dc87bf7903",
+      "targets": [
+        {
+          "path": "/sfs/weka/scratch/djy8hg/runs/mosaickv/choice-c-v87-prompt-query-coverage-calibration-v1/analysis/label_blind_candidate_ranking.parquet",
+          "sha256": "68ec9e3775f9f84055478febb7641fa57f45c004003285c354ee4c5cc7af1bde"
+        },
+        {
+          "path": "/sfs/weka/scratch/djy8hg/runs/mosaickv/choice-c-v87-prompt-query-coverage-calibration-v1/analysis/robust_fidelity_candidate_ranking.parquet",
+          "sha256": "6b5261f6adfcfab9c1e74e0fe1ec19d8bd6eb31c5f2f962b37a88de6d785320d"
+        }
+      ]
+    },
+    {
+      "git_blob_oid": "24f8fd859d9049d66a077a7f7cf2e8188eb2198d",
+      "original_seal_commit": "75736bbc115d2ad5d82ae7c7a3a26df41c89d8fe",
+      "repository_path": "mosaickv/configs/ledgers/choice_c_v88_negative_calibration_seal.yaml",
+      "sha256": "c08b3d97576f57aa989ab6ff4e824cf7a2579ece6f481f23b7ae6274fac5e300",
+      "targets": [
+        {
+          "path": "/sfs/weka/scratch/djy8hg/runs/mosaickv/choice-c-v88-initial-query-coverage-calibration-v1/analysis/label_blind_candidate_ranking.parquet",
+          "sha256": "d03406158e45c474ba2f17f387cdce1ee4441ee465d8598f7d4be7db0496d619"
+        },
+        {
+          "path": "/sfs/weka/scratch/djy8hg/runs/mosaickv/choice-c-v88-initial-query-coverage-calibration-v1/analysis/robust_fidelity_candidate_ranking.parquet",
+          "sha256": "a9828c4f7bb9a8e307c2702b4d39e719ec6ff7a457dd03edd1ab15991255d9ab"
+        }
+      ]
+    },
+    {
+      "git_blob_oid": "1172f126d2fa5d82b57d0ed2f456b52c333a964a",
+      "original_seal_commit": "75736bbc115d2ad5d82ae7c7a3a26df41c89d8fe",
+      "repository_path": "mosaickv/configs/ledgers/choice_c_v89_negative_calibration_seal.yaml",
+      "sha256": "dcbcdbb45b320696dee91de66bbf4aede175fda521d0782abc58ed52ae4befff",
+      "targets": [
+        {
+          "path": "/sfs/weka/scratch/djy8hg/runs/mosaickv/choice-c-v89-capped-cumulative-query-coverage-calibration-v1/analysis/label_blind_candidate_ranking.parquet",
+          "sha256": "b4f17bc5579bca417e11d0324c953226bba4f60348c64bded733b6d048499584"
+        },
+        {
+          "path": "/sfs/weka/scratch/djy8hg/runs/mosaickv/choice-c-v89-capped-cumulative-query-coverage-calibration-v1/analysis/robust_fidelity_candidate_ranking.parquet",
+          "sha256": "2e1887e332a173b36194c55684a322850dcccc849163cb8dfbcfd127b97027a1"
+        }
+      ]
+    },
+    {
+      "git_blob_oid": "46524ee6cedcc67e75e9498daf415fbf5dcbce17",
+      "original_seal_commit": "75736bbc115d2ad5d82ae7c7a3a26df41c89d8fe",
+      "repository_path": "mosaickv/configs/ledgers/choice_c_v90_negative_calibration_seal.yaml",
+      "sha256": "7a3f56fddde5d536ce4efe97f740445977751280d0b82ca7c841e41fd0cf6450",
+      "targets": [
+        {
+          "path": "/sfs/weka/scratch/djy8hg/runs/mosaickv/choice-c-v90-cross-head-query-byte-allocation-calibration-v1/analysis/label_blind_candidate_ranking.parquet",
+          "sha256": "10904fb26859048f78d8b701001e36e59714dbdbf0dfc409aa4c55134ddc8c54"
+        },
+        {
+          "path": "/sfs/weka/scratch/djy8hg/runs/mosaickv/choice-c-v90-cross-head-query-byte-allocation-calibration-v1/analysis/robust_fidelity_candidate_ranking.parquet",
+          "sha256": "0bee639ea47d5984b419577497d3d111cef607d1a2c62a10b17f94322a6184f5"
+        }
+      ]
+    },
+    {
+      "git_blob_oid": "d7a1ba7a148e2d34a10a41c6ca67b8576085d65a",
+      "original_seal_commit": "75736bbc115d2ad5d82ae7c7a3a26df41c89d8fe",
+      "repository_path": "mosaickv/configs/ledgers/choice_c_v91_negative_calibration_seal.yaml",
+      "sha256": "77246dbaf4f4f78512e8ee3adaa392e45277d8fbbedd5602214ab1d97675ae9b",
+      "targets": [
+        {
+          "path": "/sfs/weka/scratch/djy8hg/runs/mosaickv/choice-c-v91-conservative-cross-head-stability-calibration-v1/analysis/label_blind_candidate_ranking.parquet",
+          "sha256": "f584260a06d581f092ff3417ae8737c24dec39d52d4b360a40632129832d04c7"
+        },
+        {
+          "path": "/sfs/weka/scratch/djy8hg/runs/mosaickv/choice-c-v91-conservative-cross-head-stability-calibration-v1/analysis/robust_fidelity_candidate_ranking.parquet",
+          "sha256": "9084b95c1d62d62876c776c0a0cf8535728a4311069c3fe2a36ae87084d2abc0"
+        }
+      ]
+    },
+    {
+      "git_blob_oid": "37581d2f9257f13c6de0cbdbaff5c843ea121011",
+      "original_seal_commit": "75736bbc115d2ad5d82ae7c7a3a26df41c89d8fe",
+      "repository_path": "mosaickv/configs/ledgers/choice_c_v92_negative_calibration_seal.yaml",
+      "sha256": "50f3888f86b9bd27c2fd0d1f63fcd8fb639c140cdc32a9b9abde6b7f54297d3b",
+      "targets": [
+        {
+          "path": "/sfs/weka/scratch/djy8hg/runs/mosaickv/choice-c-v92-output-impact-stability-calibration-v1/analysis/label_blind_candidate_ranking.parquet",
+          "sha256": "b4c0385e552f6e25e01af641c0e5fd33c9cd6f1b85f5eb74158e39b6819c748a"
+        },
+        {
+          "path": "/sfs/weka/scratch/djy8hg/runs/mosaickv/choice-c-v92-output-impact-stability-calibration-v1/analysis/robust_fidelity_candidate_ranking.parquet",
+          "sha256": "014798a3742ff0b167a2c4c310b19fd195dd80d56a02651d54782aab37cde450"
+        }
+      ]
+    },
+    {
+      "git_blob_oid": "7b3c670e3c592726f84711bfcfcc9041666adb92",
+      "original_seal_commit": "75736bbc115d2ad5d82ae7c7a3a26df41c89d8fe",
+      "repository_path": "mosaickv/configs/ledgers/choice_c_v93_negative_calibration_seal.yaml",
+      "sha256": "06d2a942f6c19d87c91c7503dbc53b218e4a013883da4c2aab7e1c72818e81d9",
+      "targets": [
+        {
+          "path": "/sfs/weka/scratch/djy8hg/runs/mosaickv/choice-c-v93-output-impact-first-reservation-calibration-v1/analysis/label_blind_candidate_ranking.parquet",
+          "sha256": "617d818a4d8fd2c8c9abfac43f530ab05b7cba4834eddbdd49711ccc73b3fe5a"
+        },
+        {
+          "path": "/sfs/weka/scratch/djy8hg/runs/mosaickv/choice-c-v93-output-impact-first-reservation-calibration-v1/analysis/robust_fidelity_candidate_ranking.parquet",
+          "sha256": "db80d4369bb5a6b56079d374eb83cc1986d340b5b1911bd8871ba041b5b0bc11"
+        }
+      ]
+    },
+    {
+      "git_blob_oid": "eed5255c5f40372b2be79c5c6cba9b01f0ae66c0",
+      "original_seal_commit": "75736bbc115d2ad5d82ae7c7a3a26df41c89d8fe",
+      "repository_path": "mosaickv/configs/ledgers/choice_c_v94_negative_calibration_seal.yaml",
+      "sha256": "b4a08e5efe5064474ecd6a68ccdbf1232843be3d8a18c75c805f3e0e3b16dddb",
+      "targets": [
+        {
+          "path": "/sfs/weka/scratch/djy8hg/runs/mosaickv/choice-c-v94-coherent-layout-group-calibration-v1/analysis/label_blind_candidate_ranking.parquet",
+          "sha256": "9647a1b84c67f3599bd4169deab1c72eab987cfb36f56772bdae2ed0406daab7"
+        },
+        {
+          "path": "/sfs/weka/scratch/djy8hg/runs/mosaickv/choice-c-v94-coherent-layout-group-calibration-v1/analysis/robust_fidelity_candidate_ranking.parquet",
+          "sha256": "4e30ccc34ee7eab23c8357a8c471332eb175835aa22ab3a2e5500a1c1b9e329d"
+        }
+      ]
+    },
+    {
+      "git_blob_oid": "8a3298dbdf6dac05ea8a6830dfe122c2817f198f",
+      "original_seal_commit": "75736bbc115d2ad5d82ae7c7a3a26df41c89d8fe",
+      "repository_path": "mosaickv/configs/ledgers/choice_c_v95_negative_calibration_seal.yaml",
+      "sha256": "7408e56d9119f64245525e4ace933d5042172d6d608e101329fc1178ae9f5b2e",
+      "targets": [
+        {
+          "path": "/sfs/weka/scratch/djy8hg/runs/mosaickv/choice-c-v95-atomic-layout-risk-calibration-v1/analysis/label_blind_candidate_ranking.parquet",
+          "sha256": "1234725eacecfec963335fc68adf2b34663059dbc6a699b0e927ec9a56334a6e"
+        },
+        {
+          "path": "/sfs/weka/scratch/djy8hg/runs/mosaickv/choice-c-v95-atomic-layout-risk-calibration-v1/analysis/robust_fidelity_candidate_ranking.parquet",
+          "sha256": "ab3ddb3b75d44f05e9164581cb9e1a591c2be31c5bb0f1302068eacbcc74552e"
+        }
+      ]
+    },
+    {
+      "git_blob_oid": "516261ef90934e8f500e681273f3642a05e6ae60",
+      "original_seal_commit": "75736bbc115d2ad5d82ae7c7a3a26df41c89d8fe",
+      "repository_path": "mosaickv/configs/ledgers/choice_c_v96_negative_calibration_seal.yaml",
+      "sha256": "9dfffa6b79c50629417a53690b9dc7615779e4badaa9ec37dd02ab801f21b5b8",
+      "targets": [
+        {
+          "path": "/sfs/weka/scratch/djy8hg/runs/mosaickv/choice-c-v96-pareto-atomic-group-calibration-v1/analysis/label_blind_candidate_ranking.parquet",
+          "sha256": "5054043689794a5ca0b9d2c057c90eaa54714ab59c4c0cff96b8bc7e810bec75"
+        },
+        {
+          "path": "/sfs/weka/scratch/djy8hg/runs/mosaickv/choice-c-v96-pareto-atomic-group-calibration-v1/analysis/robust_fidelity_candidate_ranking.parquet",
+          "sha256": "b75e0757cb5786dcf769b94cfbd038a6b53dd5b8164704408bc93fcb351c7bcb"
+        }
+      ]
+    },
+    {
+      "git_blob_oid": "a4da10f8623f86517920e67dd0107b339db0f53e",
+      "original_seal_commit": "75736bbc115d2ad5d82ae7c7a3a26df41c89d8fe",
+      "repository_path": "mosaickv/configs/ledgers/choice_c_v97_negative_calibration_seal.yaml",
+      "sha256": "7426236a66ff7958026954c10c3d55e58f89780dabfc754b4534a98f12ba1534",
+      "targets": [
+        {
+          "path": "/sfs/weka/scratch/djy8hg/runs/mosaickv/choice-c-v97-joint-group-donor-calibration-v1/analysis/label_blind_candidate_ranking.parquet",
+          "sha256": "1617f5e14a997b67c66bccf79eab3525b5ef62c6b01ac36db7fd39294fb7c19d"
+        },
+        {
+          "path": "/sfs/weka/scratch/djy8hg/runs/mosaickv/choice-c-v97-joint-group-donor-calibration-v1/analysis/robust_fidelity_candidate_ranking.parquet",
+          "sha256": "7217f1d35cd9f3961981626b07dd5ab60c63f51c83636298201fe7b6e17ed031"
+        }
+      ]
+    },
+    {
+      "git_blob_oid": "a91e9dc820776ef45a32a3ee119cd9bbccebcf78",
+      "original_seal_commit": "75736bbc115d2ad5d82ae7c7a3a26df41c89d8fe",
+      "repository_path": "mosaickv/configs/ledgers/choice_c_v98_negative_calibration_seal.yaml",
+      "sha256": "fa7d10faf6c4ecdcc734c64a888f909ce4261a1af87170697c003a3bf90ca20f",
+      "targets": [
+        {
+          "path": "/sfs/weka/scratch/djy8hg/runs/mosaickv/choice-c-v98-short-horizon-logit-calibration-v1-retry1/analysis/label_blind_candidate_ranking.parquet",
+          "sha256": "e6713d87f2dd910b455fa02a014d1f7b53ae4aed8d2c80b97721910414b13008"
+        },
+        {
+          "path": "/sfs/weka/scratch/djy8hg/runs/mosaickv/choice-c-v98-short-horizon-logit-calibration-v1-retry1/analysis/robust_fidelity_candidate_ranking.parquet",
+          "sha256": "42c10b7a9df90731b37b64a7cb2548ad60f796eaa647ab54424b6c798db40073"
+        }
+      ]
+    },
+    {
+      "git_blob_oid": "a87239399be9256421f0dd7fc2d3bcdf4199a68b",
+      "original_seal_commit": "75736bbc115d2ad5d82ae7c7a3a26df41c89d8fe",
+      "repository_path": "mosaickv/configs/ledgers/choice_c_v99_negative_calibration_seal.yaml",
+      "sha256": "8b2ae167c4a50d1b1671ee23a445a6064024849533f9e3ba260c35cb640437f0",
+      "targets": [
+        {
+          "path": "/sfs/weka/scratch/djy8hg/runs/mosaickv/choice-c-v99-progressive-logit-safe-eviction-calibration-v1-retry2/analysis/label_blind_candidate_ranking.parquet",
+          "sha256": "193a3f4e44106c489318edb04077fd7c9b1e6a6793aff3a26a7e57eb5a4321f1"
+        },
+        {
+          "path": "/sfs/weka/scratch/djy8hg/runs/mosaickv/choice-c-v99-progressive-logit-safe-eviction-calibration-v1-retry2/analysis/robust_fidelity_candidate_ranking.parquet",
+          "sha256": "24841048bc300e88bada4bcb7b588dd20a783005b43142a2b904629c977be8ba"
+        }
+      ]
+    }
+  ]
+}
