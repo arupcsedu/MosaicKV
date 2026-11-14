@@ -48,6 +48,58 @@ def test_bitwise_readout_and_malformed_inputs():
             logit_diagnostics(ref, actual)
 
 
+def _stage_observation():
+    return dict(
+        shared_prefix_mean_kl=0.0,
+        maximum_logit_difference=0.0,
+        token_agreement=1.0,
+        fixed_prefix_for_entire_horizon=True,
+        evaluated_predictions=32,
+    )
+
+
+@pytest.mark.parametrize("side", (0, 1))
+@pytest.mark.parametrize(
+    "field", ("shared_prefix_mean_kl", "maximum_logit_difference", "token_agreement")
+)
+@pytest.mark.parametrize(
+    "bad", (True, False, "0", None, float("nan"), float("inf"), -float("inf"), 10**400)
+)
+def test_stage_effect_rejects_nonplain_or_nonfinite_observations(side, field, bad):
+    rows = [_stage_observation(), _stage_observation()]
+    rows[side][field] = bad
+    with pytest.raises(ValueError):
+        stage_effect(*rows)
+
+
+@pytest.mark.parametrize("side", (0, 1))
+@pytest.mark.parametrize("bad", (1, 0, "false", "true", None, 0.0))
+def test_stage_effect_requires_literal_support_booleans(side, bad):
+    rows = [_stage_observation(), _stage_observation()]
+    rows[side]["fixed_prefix_for_entire_horizon"] = bad
+    with pytest.raises(ValueError):
+        stage_effect(*rows)
+
+
+@pytest.mark.parametrize("side", (0, 1))
+@pytest.mark.parametrize("bad", (True, False, 0, -1, 1.0, "1", None))
+def test_stage_effect_requires_positive_plain_integer_horizons(side, bad):
+    rows = [_stage_observation(), _stage_observation()]
+    rows[side]["evaluated_predictions"] = bad
+    with pytest.raises(ValueError):
+        stage_effect(*rows)
+
+
+def test_stage_effect_preserves_plain_integer_and_float_observations():
+    full = _stage_observation()
+    ablated = dict(full, shared_prefix_mean_kl=0, maximum_logit_difference=0, token_agreement=1)
+    assert stage_effect(full, ablated) == stage_effect(full, full)
+    unequal = dict(ablated, evaluated_predictions=16)
+    result = stage_effect(full, unequal)
+    assert result["equal_shared_prefix_support"] is False
+    assert result["ablated_minus_full_shared_prefix_mean_kl"] is None
+
+
 def test_actual_backing_boundaries_not_nominal_cap():
     row = dict(
         status="completed",
@@ -171,6 +223,46 @@ def test_precision_decomposition_preserves_input_and_marks_non_quality_evidence(
     assert (parent[1][4] == 2).all()
     with pytest.raises(ValueError):
         precision_evidence(dict(payload, labels_accessed=True))
+
+
+@pytest.fixture
+def precision_payload():
+    original = (torch.zeros(8, 8), torch.ones(8, 8))
+    return dict(
+        original_pair=original,
+        parent_pair=tuple(t.clone() for t in original),
+        prompt_queries=torch.ones(4, 8),
+        evidence=dict(selected_extra=[4], prototype_members=[2, 3]),
+        overlay=dict(member_keys=torch.zeros(2, 8), prototype_value=torch.ones(1, 8)),
+        evaluation_only=True,
+        labels_accessed=False,
+    )
+
+
+@pytest.mark.parametrize("bad", (1, 0, 1.0, "false", "true", None, [], {}))
+def test_precision_evidence_requires_explicit_true_evaluation_only(precision_payload, bad):
+    from mosaickv.evaluation.storage_component_gate import precision_evidence
+
+    with pytest.raises(ValueError):
+        precision_evidence(dict(precision_payload, evaluation_only=bad))
+
+
+@pytest.mark.parametrize("field", ("member_keys", "prototype_value"))
+@pytest.mark.parametrize("bad", (float("nan"), float("inf"), -float("inf")))
+def test_precision_evidence_rejects_nonfinite_overlay_before_attention(
+    precision_payload, field, bad, monkeypatch
+):
+    from mosaickv.evaluation.storage_component_gate import precision_evidence
+
+    overlay = dict(precision_payload["overlay"])
+    overlay[field] = torch.full_like(overlay[field], bad)
+
+    def unexpected_attention(*args, **kwargs):
+        pytest.fail("malformed overlay reached attention arithmetic")
+
+    monkeypatch.setattr(torch.Tensor, "softmax", unexpected_attention)
+    with pytest.raises(ValueError, match="finite CPU overlay"):
+        precision_evidence(dict(precision_payload, overlay=overlay))
 
 
 def test_cpu_analyzer_handles_native_fullkv_and_structured_caption_records(tmp_path, monkeypatch):

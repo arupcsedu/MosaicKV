@@ -259,6 +259,201 @@ def test_nan_timings_missing_storage_and_violated_positions_fail():
     assert not all_pass({}) and not all_pass({"a": 1})
 
 
+@pytest.mark.parametrize(
+    "field",
+    [
+        "prefill",
+        "forecast",
+        "graph",
+        "cross_modal_edges",
+        "utility",
+        "planner",
+        "selector",
+        "prototype_members",
+        "repair",
+    ],
+)
+@pytest.mark.parametrize("value", [True, False, "1", 1.0, float("inf"), float("nan"), -1, 0, None])
+def test_executed_counts_require_positive_plain_integers(field, value):
+    trace, ops = fixture_evidence()
+    ops[field] = value
+    checks = validate_evidence(trace, ops, controlled=True)
+    assert all(type(result) is bool for result in checks.values())
+    assert not all_pass(checks)
+
+
+@pytest.mark.parametrize(
+    "field", ["decode_checks", "rope_position_checks", "promoted_kv_exact_checks"]
+)
+@pytest.mark.parametrize(
+    "value",
+    [
+        "false",
+        [1],
+        [True, "false"],
+        [True, None],
+        {"passed": True},
+        True,
+        None,
+        [],
+        ("false",),
+        [float("nan")],
+    ],
+)
+def test_observation_lists_require_literal_true_not_truthiness(field, value):
+    trace, ops = fixture_evidence()
+    ops[field] = value
+    assert not all_pass(validate_evidence(trace, ops, controlled=True))
+
+
+@pytest.mark.parametrize("sequence", [[True], (True, True)])
+def test_typed_true_observation_sequences_remain_valid(sequence):
+    trace, ops = fixture_evidence()
+    for field in ("decode_checks", "rope_position_checks", "promoted_kv_exact_checks"):
+        ops[field] = sequence
+    assert all_pass(validate_evidence(trace, ops, controlled=True))
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "forecast",
+        "graph",
+        "utility_and_selection",
+        "tier_construction",
+        "cache_packing",
+        "decode",
+        "total",
+    ],
+)
+@pytest.mark.parametrize(
+    "value",
+    [True, False, "0.1", float("inf"), float("-inf"), float("nan"), -0.1, None],
+)
+def test_phase_measurements_reject_boolean_string_and_nonfinite_values(field, value):
+    trace, ops = fixture_evidence()
+    trace["timing_breakdown"][field] = value
+    assert not all_pass(validate_evidence(trace, ops, controlled=True))
+
+
+@pytest.mark.parametrize("value", [0, 0.0, 1, 0.1])
+def test_finite_nonnegative_integer_and_float_timings_preserve_threshold(value):
+    trace, ops = fixture_evidence()
+    trace["timing_breakdown"] = dict.fromkeys(trace["timing_breakdown"], value)
+    assert all_pass(validate_evidence(trace, ops, controlled=True))
+
+
+@pytest.mark.parametrize("field", ["graph_edges", "prototypes", "selected_blocks"])
+@pytest.mark.parametrize("count", [True, "1", 1.0, float("inf"), float("nan"), None, [], {}, -1])
+def test_compact_catalog_count_is_not_coerced_from_ambiguous_metadata(field, count):
+    trace, ops = fixture_evidence()
+    trace[field] = {"record_count": count}
+    assert not all_pass(validate_evidence(trace, ops, controlled=True))
+
+
+def test_compact_catalogs_with_plain_positive_counts_remain_valid():
+    trace, ops = fixture_evidence()
+    for field in ("graph_edges", "prototypes", "selected_blocks"):
+        trace[field] = {"record_count": 1}
+    assert all_pass(validate_evidence(trace, ops, controlled=True))
+
+
+@pytest.mark.parametrize(
+    "field", ["exact_active_bytes", "prototype_active_bytes", "residual_cpu_bytes"]
+)
+@pytest.mark.parametrize("value", [True, "8", 8.0, float("inf"), float("nan"), None])
+def test_tier_bytes_require_plain_integer_observations(field, value):
+    trace, ops = fixture_evidence()
+    trace["tier_storage_accounting"][field] = value
+    assert not all_pass(validate_evidence(trace, ops, controlled=True))
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("triggered", "true"),
+        ("triggered", 1),
+        ("triggered", None),
+        ("restored_bytes", True),
+        ("restored_bytes", "8"),
+        ("restored_bytes", 8.0),
+        ("restored_bytes", float("inf")),
+        ("restored_bytes", -1),
+        ("re_decode_count", True),
+        ("re_decode_count", "1"),
+        ("re_decode_count", 1.0),
+        ("re_decode_count", float("inf")),
+        ("re_decode_count", -1),
+        ("restored_block_ids", "1"),
+        ("restored_block_ids", [True]),
+        ("restored_block_ids", ["1"]),
+        ("restored_block_ids", [1.0]),
+        ("restored_block_ids", [-1]),
+        ("restored_block_ids", [1, 1]),
+        ("restored_block_ids", None),
+        ("transfer_was_asynchronous", "true"),
+        ("transfer_was_asynchronous", 1),
+    ],
+)
+def test_repair_event_fields_are_typed_before_trigger_selection(field, value):
+    trace, ops = fixture_evidence()
+    trace["repair_events"][0][field] = value
+    assert not all_pass(validate_evidence(trace, ops, controlled=True))
+
+
+def test_valid_nontriggered_events_preserve_controller_vs_controlled_repair_distinction():
+    trace, ops = fixture_evidence()
+    trace["repair_events"] = [
+        dict(
+            triggered=False,
+            restored_bytes=0,
+            restored_block_ids=[],
+            re_decode_count=0,
+            transfer_was_asynchronous=False,
+        )
+    ]
+    assert all_pass(validate_evidence(trace, ops))
+    assert not all_pass(validate_evidence(trace, ops, controlled=True))
+
+
+@pytest.mark.parametrize("field", ["completed_draft_steps", "lambda_v", "maximum"])
+@pytest.mark.parametrize("value", [True, "1", float("inf"), float("nan"), None])
+def test_forecast_and_utility_evidence_reject_typed_ambiguity(field, value):
+    trace, ops = fixture_evidence()
+    if field == "completed_draft_steps":
+        trace["forecast_statistics"]["provenance"][field] = value
+    else:
+        section = "weights" if field == "lambda_v" else "value_contribution"
+        trace["utility_diagnostics"][section][field] = value
+    assert not all_pass(validate_evidence(trace, ops, controlled=True))
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "forecast_statistics",
+        "utility_diagnostics",
+        "tier_storage_accounting",
+        "residual_configuration",
+        "repair_events",
+        "request_KV_ownership",
+        "timing_breakdown",
+    ],
+)
+@pytest.mark.parametrize("value", [None, "false", True, [True]])
+def test_malformed_nested_evidence_fails_closed_without_truthiness(field, value):
+    trace, ops = fixture_evidence()
+    trace[field] = value
+    assert not all_pass(validate_evidence(trace, ops, controlled=True))
+
+
+@pytest.mark.parametrize("value", [None, "true", 1])
+def test_controlled_repair_scope_requires_explicit_boolean(value):
+    trace, ops = fixture_evidence()
+    with pytest.raises(ValueError, match="boolean controlled"):
+        validate_evidence(trace, ops, controlled=value)
+
+
 def test_routed_bounded_prototype_plan_and_actual_cpu_promotion():
     # Real component execution on synthetic CPU tensors; not checkpoint evidence.
     rng = np.random.default_rng(17)

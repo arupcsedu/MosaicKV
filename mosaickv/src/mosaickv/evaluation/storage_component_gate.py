@@ -72,11 +72,27 @@ def storage_match(rows):
     )
 
 
+def _finite_plain_number(value):
+    if type(value) not in (int, float):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
+
+
 def stage_effect(full, ablated):
     """Positive means full's readout is closer; never a paper-quality gate."""
     keys = ("shared_prefix_mean_kl", "maximum_logit_difference", "token_agreement")
-    if any(not math.isfinite(float(row[k])) for row in (full, ablated) for k in keys):
-        raise ValueError("finite paired readout observations required")
+    if any(not _finite_plain_number(row.get(k)) for row in (full, ablated) for k in keys):
+        raise ValueError("plain finite numerical paired readout observations required")
+    if any(
+        type(row.get("fixed_prefix_for_entire_horizon")) is not bool
+        or type(row.get("evaluated_predictions")) is not int
+        or row["evaluated_predictions"] < 1
+        for row in (full, ablated)
+    ):
+        raise ValueError("literal support booleans and positive integer horizons required")
     comparable = (
         full["fixed_prefix_for_entire_horizon"]
         and ablated["fixed_prefix_for_entire_horizon"]
@@ -102,8 +118,17 @@ def precision_evidence(payload):
     logical positions remain. Prefix holdout statistics are diagnostics, not an
     independent sample split, next-token evidence, or a source-retirement proof.
     """
-    if not payload.get("evaluation_only") or payload.get("labels_accessed") is not False:
+    if payload.get("evaluation_only") is not True or payload.get("labels_accessed") is not False:
         raise ValueError("explicit label-free evaluation-only capture required")
+    overlay = tuple(payload["overlay"][field] for field in ("member_keys", "prototype_value"))
+    if any(
+        not isinstance(t, torch.Tensor)
+        or t.device.type != "cpu"
+        or not bool(torch.isfinite(t).all())
+        for t in overlay
+    ):
+        raise ValueError("finite CPU overlay tensors required before attention arithmetic")
+    overlay = tuple(t.double() for t in overlay)
     original = tuple(t.double() for t in payload["original_pair"])
     parent = tuple(t.double() for t in payload["parent_pair"])
     queries = payload["prompt_queries"].double()
@@ -140,8 +165,7 @@ def precision_evidence(payload):
             for t, source in zip(pair, original, strict=True):
                 t[ids] = source[ids]
         if proto:
-            keys = payload["overlay"]["member_keys"].double()
-            values = payload["overlay"]["prototype_value"].double()
+            keys, values = overlay
             if payload["evidence"].get("prototype_representation") == "parent_residual_delta":
                 keys = (parent[0][members] + keys).to(torch.bfloat16).double()
                 values = (parent[1][members] + values).to(torch.bfloat16).double()

@@ -189,61 +189,116 @@ def catalog_count(value: Any) -> int:
     if isinstance(value, list):
         return len(value)
     if isinstance(value, dict):
-        return int(value.get("record_count", -1))
+        count = value.get("record_count")
+        return count if type(count) is int and count >= 0 else -1
     return -1
+
+
+def _mapping(value: Any) -> Mapping[str, Any]:
+    return value if isinstance(value, Mapping) else {}
+
+
+def _positive_int(value: Any) -> bool:
+    return type(value) is int and value > 0
+
+
+def _finite_number(value: Any) -> bool:
+    return type(value) is int or (type(value) is float and math.isfinite(value))
+
+
+def _true_checks(value: Any) -> bool:
+    return isinstance(value, (list, tuple)) and bool(value) and all(item is True for item in value)
+
+
+def _block_ids(value: Any) -> bool:
+    return (
+        isinstance(value, (list, tuple))
+        and all(type(item) is int and item >= 0 for item in value)
+        and len(set(value)) == len(value)
+    )
+
+
+def _repair_events(value: Any) -> bool:
+    return (
+        isinstance(value, (list, tuple))
+        and bool(value)
+        and all(
+            isinstance(event, Mapping)
+            and type(event.get("triggered")) is bool
+            and type(event.get("restored_bytes")) is int
+            and event["restored_bytes"] >= 0
+            and type(event.get("re_decode_count")) is int
+            and event["re_decode_count"] >= 0
+            and _block_ids(event.get("restored_block_ids"))
+            and type(event.get("transfer_was_asynchronous")) is bool
+            for event in value
+        )
+    )
 
 
 def validate_evidence(
     trace: Mapping[str, Any], operations: Mapping[str, Any], *, controlled: bool = False
 ) -> dict[str, bool]:
-    """Require executed work, real state transitions, and finite measured fields."""
-    forecast = trace.get("forecast_statistics", {}).get("provenance", {})
-    utility = trace.get("utility_diagnostics", {})
-    tier = trace.get("tier_storage_accounting", {})
-    residual = trace.get("residual_configuration", {}) or {}
+    """Require typed executed work, state checks, and finite measured fields.
+
+    Plain integer counters/bytes and literal boolean observations are required;
+    Python truthiness, bool-as-int equality and numeric string coercion are not
+    evidence. These checks do not change the registered numerical thresholds.
+    """
+    if not isinstance(trace, Mapping) or not isinstance(operations, Mapping):
+        raise ValueError("explicit trace and executed-operation mappings required")
+    if type(controlled) is not bool:
+        raise ValueError("explicit boolean controlled-repair scope required")
+    forecast = _mapping(_mapping(trace.get("forecast_statistics")).get("provenance"))
+    utility = _mapping(trace.get("utility_diagnostics"))
+    weight = _mapping(utility.get("weights")).get("lambda_v")
+    maximum = _mapping(utility.get("value_contribution")).get("maximum")
+    tier = _mapping(trace.get("tier_storage_accounting"))
+    residual = _mapping(trace.get("residual_configuration"))
     events = trace.get("repair_events", [])
+    valid_events = _repair_events(events)
+    timings = _mapping(trace.get("timing_breakdown"))
     checks = {
         "completed": trace.get("status") == "completed",
-        "one_original_prefill": operations.get("prefill") == 1,
+        "one_original_prefill": type(operations.get("prefill")) is int
+        and operations["prefill"] == 1,
         "no_exact_or_fullkv_fallback": trace.get("tier_mode") == "three_tier"
         and trace.get("effective_method") == "mosaickv_full",
         "hybrid_forecast_executed": forecast.get("mode") == "hybrid"
-        and forecast.get("completed_draft_steps", 0) >= 1
+        and _positive_int(forecast.get("completed_draft_steps"))
         and forecast.get("reused_original_prefill") is True
         and forecast.get("draft_cache_isolated") is True
-        and operations.get("forecast", 0) > 0,
-        "cross_modal_graph_executed": operations.get("graph", 0) > 0
-        and operations.get("cross_modal_edges", 0) > 0
+        and _positive_int(operations.get("forecast")),
+        "cross_modal_graph_executed": _positive_int(operations.get("graph"))
+        and _positive_int(operations.get("cross_modal_edges"))
         and catalog_count(trace.get("graph_edges")) > 0,
-        "value_aware_utility_executed": operations.get("utility", 0) > 0
-        and utility.get("weights", {}).get("lambda_v", 0) != 0
-        and utility.get("value_contribution", {}).get("maximum", 0) > 0,
-        "budgeted_selection_executed": operations.get("planner", 0) > 0
-        and operations.get("selector", 0) > 0
+        "value_aware_utility_executed": _positive_int(operations.get("utility"))
+        and _finite_number(weight)
+        and weight != 0
+        and _finite_number(maximum)
+        and maximum > 0,
+        "budgeted_selection_executed": _positive_int(operations.get("planner"))
+        and _positive_int(operations.get("selector"))
         and catalog_count(trace.get("selected_blocks")) > 0,
-        "three_real_tiers": operations.get("prototype_members", 0) > 0
+        "three_real_tiers": _positive_int(operations.get("prototype_members"))
         and catalog_count(trace.get("prototypes")) > 0
-        and tier.get("exact_active_bytes", 0) > 0
-        and tier.get("prototype_active_bytes", 0) > 0
-        and tier.get("residual_cpu_bytes", 0) > 0,
+        and _positive_int(tier.get("exact_active_bytes"))
+        and _positive_int(tier.get("prototype_active_bytes"))
+        and _positive_int(tier.get("residual_cpu_bytes")),
         "lossless_pinned_residuals": residual.get("storage_dtype") == "lossless"
         and residual.get("all_payloads_pinned") is True,
-        "repair_controller_executed": operations.get("repair", 0) > 0 and bool(events),
-        "logical_positions_and_finite_logits": bool(operations.get("decode_checks"))
-        and all(operations["decode_checks"]),
-        "actual_rope_positions_preserved": bool(operations.get("rope_position_checks"))
-        and all(operations["rope_position_checks"]),
-        "inactive_source_accounting_present": trace.get("request_KV_ownership", {}).get(
+        "repair_controller_executed": _positive_int(operations.get("repair")) and valid_events,
+        "logical_positions_and_finite_logits": _true_checks(operations.get("decode_checks")),
+        "actual_rope_positions_preserved": _true_checks(operations.get("rope_position_checks")),
+        "inactive_source_accounting_present": _mapping(trace.get("request_KV_ownership")).get(
             "includes_registered_inactive_source_and_transient_KV"
         )
         is True,
         "mandatory_and_storage_invariants": operations.get("plan_invariants") is True
         and operations.get("packed_storage_checks") is True,
-        "finite_phase_measurements": bool(trace.get("timing_breakdown"))
+        "finite_phase_measurements": bool(timings)
         and all(
-            isinstance(trace["timing_breakdown"].get(k), (int, float))
-            and math.isfinite(trace["timing_breakdown"][k])
-            and trace["timing_breakdown"][k] >= 0
+            _finite_number(timings.get(k)) and timings[k] >= 0
             for k in (
                 "forecast",
                 "graph",
@@ -256,20 +311,22 @@ def validate_evidence(
         ),
     }
     if controlled:
-        triggered = [event for event in events if event.get("triggered")]
+        triggered = (
+            [event for event in events if event["triggered"] is True] if valid_events else []
+        )
         checks["controlled_real_promotion_and_redecode"] = bool(triggered) and all(
-            event.get("restored_bytes", 0) > 0
-            and event.get("restored_block_ids")
-            and event.get("re_decode_count") == 1
+            _positive_int(event["restored_bytes"])
+            and bool(event["restored_block_ids"])
+            and event["re_decode_count"] == 1
             for event in triggered
         )
         checks["controlled_gpu_transfer"] = bool(triggered) and all(
             event.get("transfer_was_asynchronous") is True for event in triggered
         )
         checks["controlled_physical_cap"] = operations.get("repair_physical_cap_checks") is True
-        checks["promoted_original_kv_exact"] = bool(
+        checks["promoted_original_kv_exact"] = _true_checks(
             operations.get("promoted_kv_exact_checks")
-        ) and all(operations["promoted_kv_exact_checks"])
+        )
     return checks
 
 
