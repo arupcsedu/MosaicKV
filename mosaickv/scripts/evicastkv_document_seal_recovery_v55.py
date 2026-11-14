@@ -31,6 +31,11 @@ SOURCE = Path(__file__).resolve().parents[2]
 PARENT = Path("/scratch/djy8hg/workdir/fox-review-v54/run-20261114-be8ce21-1")
 PARENT_SHA = "d269af08516beabc45dc2cb0f7b6df8e0e5ba4fb3b5d18f95d8bb7a3c505b788"
 PARENT_SOURCE = "be8ce216cdf7c57247f05c6c4bf1136d1be74f52"
+COMPLETED_ROOT = Path("/scratch/djy8hg/workdir/fox-review-v55/run-20261114-36a5783-1")
+COMPLETED_SOURCE = Path("/scratch/djy8hg/workdir/fox-review-v55-followup-code")
+COMPLETED_SOURCE_SHA = "36a5783b39a3412d1fad49ca3833f1ccf8038a6d"
+COMPLETED_REPORT_SHA = "896c548d51863545badc16965c3ed890779b69b23960d99dafc6388e988da277"
+ANALYSIS_OUTPUT_BASE = Path("/scratch/djy8hg/workdir/fox-review-v55")
 
 
 def original_document(revision, budget):
@@ -169,17 +174,24 @@ def recover(root):
 def analyze(root):
     revision = clean_source(SOURCE)
     packets.prior.resume.reader.common.cpu_gate(root / "cpu", revision)
-    path = root / "recovered_bindings.json"
-    if not path.exists():
+    return _analyze_report(root, revision, revision)
+
+
+def _analyze_report(root, execution_revision, analysis_revision, *, expected_report_sha=None):
+    report_path = root / "recovered_bindings.json"
+    if not report_path.exists():
+        if expected_report_sha is not None:
+            raise ValueError("the registered completed recovery report is required")
         return dict(
-            source_sha=revision,
+            source_sha=execution_revision,
+            analysis_source_sha=analysis_revision,
             status="document_link_validation_failed_or_incomplete",
             GPU_jobs=0,
             fresh_confirmation_authorized=False,
             paper_campaign_authorized=False,
         )
     budget = packets.prior.Budget()
-    report = packets.saved_json(path, None, budget, output_root=root)
+    report = packets.saved_json(report_path, expected_report_sha, budget, output_root=root)
     parent = packets.saved_json(
         PARENT / "recovered_bindings.json", PARENT_SHA, budget, output_root=PARENT
     )
@@ -269,7 +281,7 @@ def analyze(root):
         ):
             raise ValueError("complete original document claim and development scope required")
     if (
-        report["source_sha"] != revision
+        report["source_sha"] != execution_revision
         or type(report.get("other_rows_verbatim")) is not int
         or report["other_rows_verbatim"] != 132
         or type(report["reused_hash_transactions"]) is not int
@@ -304,8 +316,10 @@ def analyze(root):
     ):
         raise ValueError("unchanged proof reuse and semantic boundaries required")
     return dict(
-        source_sha=revision,
-        report_sha256=packets.saved_sha(path, budget),
+        source_sha=execution_revision,
+        analysis_source_sha=analysis_revision,
+        report_path=str(report_path),
+        report_sha256=packets.saved_sha(report_path, budget),
         status_counts=report["status_counts"],
         document_links_recovered=2,
         all_134_hashes_and_signatures_unchanged=True,
@@ -319,18 +333,50 @@ def analyze(root):
     )
 
 
+def analyze_completed(root):
+    """Derive only a new decision from the one registered completed execution."""
+    root = root.resolve()
+    if not root.is_relative_to(ANALYSIS_OUTPUT_BASE.resolve()) or root.is_relative_to(
+        COMPLETED_ROOT.resolve()
+    ):
+        raise ValueError("new derived output outside the completed run is required")
+    if (root / "decision.json").exists():
+        raise FileExistsError("preserve the existing derived decision")
+    analysis_revision = clean_source(SOURCE)
+    clean_source(COMPLETED_SOURCE, COMPLETED_SOURCE_SHA)
+    packets.prior.resume.reader.common.cpu_gate(COMPLETED_ROOT / "cpu", COMPLETED_SOURCE_SHA)
+    result = _analyze_report(
+        COMPLETED_ROOT,
+        COMPLETED_SOURCE_SHA,
+        analysis_revision,
+        expected_report_sha=COMPLETED_REPORT_SHA,
+    )
+    result.update(
+        classification="CPU_derived_decision_from_completed_recovery_only",
+        reused_CPU_source_sha=COMPLETED_SOURCE_SHA,
+        CPU_suite_rerun=False,
+        recovery_reexecuted=False,
+        original_failure_preserved=True,
+    )
+    write_once(root / "decision.json", result)
+    return result
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("cpu", "recover", "analyze"))
+    parser.add_argument("mode", choices=("cpu", "recover", "analyze", "analyze-completed"))
     parser.add_argument("--root", type=Path, required=True)
     args = parser.parse_args()
     root = args.root.resolve()
     if not root.is_relative_to(Path("/scratch/djy8hg/workdir").resolve()):
         raise ValueError("scratch-only immutable output required")
     try:
-        result = (
-            packets.prior.resume.cpu(root) if args.mode == "cpu" else globals()[args.mode](root)
-        )
+        if args.mode == "cpu":
+            result = packets.prior.resume.cpu(root)
+        elif args.mode == "analyze-completed":
+            result = analyze_completed(root)
+        else:
+            result = globals()[args.mode](root)
         if args.mode == "analyze":
             write_once(root / "decision.json", result)
     except Exception as error:

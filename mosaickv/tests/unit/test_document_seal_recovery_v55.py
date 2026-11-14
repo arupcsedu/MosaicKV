@@ -261,12 +261,125 @@ def test_analysis_rechecks_scientific_boundaries_and_all_preserved_rows(
         "saved_json",
         lambda path, *a, **k: deepcopy(parent if path.parent == runner.PARENT else report),
     )
-    monkeypatch.setattr(runner.packets, "saved_sha", lambda *a: "c" * 64)
+    # A constant mock previously hid the loop shadowing the report-path local.
+    # There is deliberately no cached digest for any original Parquet path.
+    monkeypatch.setattr(
+        runner.packets,
+        "saved_sha",
+        lambda path, budget: {tmp_path / "recovered_bindings.json": "c" * 64}[path],
+    )
     if change is None:
         result = runner.analyze(tmp_path)
         assert result["other_132_rows_verbatim"] is True
         assert result["document_links_recovered"] == 2
         assert result["fresh_confirmation_authorized"] is False
+        assert result["report_path"] == str(tmp_path / "recovered_bindings.json")
+        assert result["report_sha256"] == "c" * 64
     else:
         with pytest.raises(ValueError):
             runner.analyze(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        None,
+        "wrong_source",
+        "wrong_CPU",
+        "wrong_hash",
+        "missing_report",
+        "existing_decision",
+        "inside_original",
+        "outside_scope",
+    ],
+)
+def test_completed_analysis_reuses_pinned_execution_without_recovery_or_proof_replay(
+    monkeypatch, tmp_path, case
+):
+    report, parent = coordinator_report(monkeypatch, tmp_path)
+    report["source_sha"] = runner.COMPLETED_SOURCE_SHA
+    original = tmp_path / "original"
+    output = tmp_path / "derived"
+    monkeypatch.setattr(runner, "COMPLETED_ROOT", original)
+    monkeypatch.setattr(runner, "ANALYSIS_OUTPUT_BASE", tmp_path)
+    if case == "inside_original":
+        output = original / "derived"
+    elif case == "outside_scope":
+        output = tmp_path.parent / "outside"
+    clean_calls, CPU_calls, read_calls, written = [], [], [], {}
+
+    def clean(path, expected=None):
+        clean_calls.append((path, expected))
+        if path == runner.COMPLETED_SOURCE:
+            assert expected == runner.COMPLETED_SOURCE_SHA
+            if case == "wrong_source":
+                raise ValueError("registered original source changed")
+            return expected
+        assert path == runner.SOURCE and expected is None
+        return "d" * 40
+
+    def CPU_gate(path, revision):
+        CPU_calls.append((path, revision))
+        assert (path, revision) == (original / "cpu", runner.COMPLETED_SOURCE_SHA)
+        if case == "wrong_CPU":
+            raise ValueError("original CPU certificate differs")
+
+    def saved(path, expected, budget, **kwargs):
+        read_calls.append((path, expected, kwargs["output_root"]))
+        if path == original / "recovered_bindings.json":
+            assert expected == runner.COMPLETED_REPORT_SHA
+            assert kwargs["output_root"] == original
+            if case == "wrong_hash":
+                raise ValueError("completed report digest differs")
+            return deepcopy(report)
+        assert path == runner.PARENT / "recovered_bindings.json"
+        assert expected == runner.PARENT_SHA
+        return deepcopy(parent)
+
+    def exists(path):
+        if path == original / "recovered_bindings.json":
+            return case != "missing_report"
+        return path == output / "decision.json" and case == "existing_decision"
+
+    monkeypatch.setattr(runner, "clean_source", clean)
+    monkeypatch.setattr(runner.packets.prior.resume.reader.common, "cpu_gate", CPU_gate)
+    monkeypatch.setattr(runner.packets, "saved_json", saved)
+    monkeypatch.setattr(Path, "exists", exists)
+    monkeypatch.setattr(
+        runner.packets,
+        "saved_sha",
+        lambda path, budget: {original / "recovered_bindings.json": runner.COMPLETED_REPORT_SHA}[
+            path
+        ],
+    )
+    monkeypatch.setattr(runner, "write_once", lambda path, value: written.update({path: value}))
+    for owner, attribute in (
+        (runner, "recover"),
+        (runner, "original_document"),
+        (runner.packets.prior, "geometry"),
+        (runner.packets.startup, "reused_transaction"),
+        (runner.packets.prior.resume, "cpu"),
+    ):
+        monkeypatch.setattr(
+            owner, attribute, lambda *a, **k: pytest.fail("completed work must not be rerun")
+        )
+    if case is not None:
+        with pytest.raises((ValueError, FileExistsError)):
+            runner.analyze_completed(output)
+        assert not written
+    else:
+        result = runner.analyze_completed(output)
+        assert clean_calls == [
+            (runner.SOURCE, None),
+            (runner.COMPLETED_SOURCE, runner.COMPLETED_SOURCE_SHA),
+        ]
+        assert CPU_calls == [(original / "cpu", runner.COMPLETED_SOURCE_SHA)]
+        assert len(read_calls) == 2
+        assert written == {output / "decision.json": result}
+        assert result["source_sha"] == runner.COMPLETED_SOURCE_SHA
+        assert result["analysis_source_sha"] == "d" * 40
+        assert result["CPU_suite_rerun"] is False
+        assert result["recovery_reexecuted"] is False
+        assert result["original_failure_preserved"] is True
+        assert result["fresh_confirmation_authorized"] is False
+        assert result["GPU_jobs"] == 0
