@@ -12,6 +12,7 @@ import gc
 import threading
 import time
 from bisect import bisect_right
+from collections.abc import Mapping
 from contextlib import contextmanager
 from itertools import pairwise
 
@@ -526,7 +527,7 @@ class CudaOwnershipSession:
 
 def valid_whole_request_certificate(report):
     """Recompute the classified interval peak; flags alone are insufficient."""
-    if not report or any(
+    if not isinstance(report, Mapping) or any(
         report.get(key) is not True
         for key in (
             "exact_whole_request_KV_peak_certified",
@@ -538,27 +539,58 @@ def valid_whole_request_certificate(report):
         )
     ):
         return False
-    if (
-        report.get("scope") != "whole_request"
-        or report.get("blocks_exact_certification")
-        or report.get("unknown_allocation_generations") != 0
+    count_fields = ("allocation_generations", "unknown_allocation_generations", "events")
+    peak_fields = (
+        "exact_KV_peak_bytes",
+        "known_KV_peak_lower_bound_bytes",
+        "KV_peak_upper_bound_including_unknown_bytes",
+    )
+    # AllocationTimeline.report emits integer counts/bytes, including a valid
+    # zero KV peak when every classified allocation is non-KV. Numeric equality
+    # must not turn Boolean or float substitutes into serialized proof fields.
+    if any(
+        type(report.get(key)) is not int or report[key] < 0 for key in (*count_fields, *peak_fields)
     ):
         return False
-    rows, count = report.get("records", ()), report.get("events", 0)
+    blockers = report.get("blocks_exact_certification")
     if (
-        not rows
-        or len(rows) != report.get("allocation_generations")
-        or type(count) is not int
+        report.get("scope") != "whole_request"
+        or not isinstance(blockers, (list, tuple))
+        or blockers
+        or report["unknown_allocation_generations"] != 0
+    ):
+        return False
+    rows, count = report.get("records"), report["events"]
+    if (
+        not isinstance(rows, (list, tuple))
+        or not rows
+        or len(rows) != report["allocation_generations"]
         or count < 1
     ):
         return False
     seen, deltas, intervals = set(), {}, {}
     for row in rows:
-        identity = row.get("address"), row.get("generation")
+        if not isinstance(row, Mapping):
+            return False
+        address, generation = row.get("address"), row.get("generation")
+        evidence = row.get("evidence")
+        role = row.get("role")
+        if (
+            type(address) is not int
+            or address <= 0
+            or type(generation) is not int
+            or generation < 0
+            or not isinstance(evidence, (list, tuple))
+            or not evidence
+            or any(not isinstance(item, str) or not item.strip() for item in evidence)
+            or not isinstance(role, str)
+        ):
+            return False
+        identity = address, generation
         start, end, size = row.get("start"), row.get("end"), row.get("bytes")
         if (
             identity in seen
-            or row.get("role") not in ROLES - {"unknown"}
+            or role not in ROLES - {"unknown"}
             or type(size) is not int
             or size < 0
             or type(start) is not int
@@ -567,8 +599,8 @@ def valid_whole_request_certificate(report):
         ):
             return False
         seen.add(identity)
-        intervals.setdefault(row["address"], []).append((start, count if end is None else end))
-        if row["role"] in KV_ROLES:
+        intervals.setdefault(address, []).append((start, count if end is None else end))
+        if role in KV_ROLES:
             deltas[start] = deltas.get(start, 0) + size
             if end is not None:
                 deltas[end] = deltas.get(end, 0) - size

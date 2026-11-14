@@ -48,7 +48,8 @@ def evaluate(scope, history, candidates):
         or history.get("media_scope_complete") is not True
     ):
         errors.append("declared historical identity/media scope incomplete")
-    if history.get("unresolved_sources"):
+    unresolved = history.get("unresolved_sources")
+    if type(unresolved) is not list or unresolved:
         errors.append("unresolved historical sources remain")
     bindings = history.get("bound_artifacts", {})
     if not bindings or any(

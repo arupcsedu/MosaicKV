@@ -1,45 +1,130 @@
-"""Paired complete-request summaries. No output scores enter a selector."""
+"""Paired complete-request summaries. No output scores enter a selector.
 
+These ordinary 95% paired summaries are not a new paper-admission contract;
+the existing comparison scope and no-slower threshold remain unchanged.
+"""
+
+import math
+from collections.abc import Mapping
 from typing import Any
 
 import numpy as np
+
+STORAGE_FIELDS = (
+    "initial_active_kv_storage_bytes",
+    "final_active_kv_storage_bytes",
+    "peak_active_kv_storage_bytes",
+)
+MAXIMUM_REPRESENTABLE_BYTES = int(np.iinfo(np.int64).max)
+
+
+def _indexed(rows: Any) -> dict[str, Mapping[str, Any]]:
+    if not isinstance(rows, (list, tuple)):
+        raise ValueError("complete unique paired request identities required")
+    indexed = {}
+    for row in rows:
+        if not isinstance(row, Mapping):
+            raise ValueError("explicit complete-request observation mappings required")
+        sample = row.get("sample_id")
+        if not isinstance(sample, str) or not sample.strip() or sample in indexed:
+            raise ValueError("complete unique paired request identities required")
+        indexed[sample] = row
+    return indexed
+
+
+def _seconds(value: Any) -> float:
+    if type(value) not in (int, float):
+        raise ValueError("positive finite numeric complete-request latency required")
+    try:
+        seconds = float(value)
+    except (OverflowError, ValueError):
+        raise ValueError("positive finite numeric complete-request latency required") from None
+    if not math.isfinite(seconds) or seconds <= 0:
+        raise ValueError("positive finite numeric complete-request latency required")
+    return seconds
+
+
+def _bytes(value: Any) -> int:
+    if type(value) is not int or not 0 < value <= MAXIMUM_REPRESENTABLE_BYTES:
+        raise ValueError("positive plain-integer representable measured storage bytes required")
+    return value
+
+
+def _observations(
+    rows: Mapping[str, Mapping[str, Any]], ids: list[str]
+) -> tuple[Any, dict[str, Any], Any]:
+    seconds: list[float] = []
+    peak: list[int] = []
+    storage: dict[str, list[int]] = {field: [] for field in STORAGE_FIELDS}
+    for sample in ids:
+        row = rows[sample]
+        seconds.append(_seconds(row.get("end_to_end_seconds")))
+        measured = row.get("storage")
+        if not isinstance(measured, Mapping):
+            raise ValueError("explicit measured backing-storage fieldmap required")
+        for field in STORAGE_FIELDS:
+            storage[field].append(_bytes(measured.get(field)))
+        peak.append(_bytes(row.get("whole_request_peak_allocated_bytes")))
+    return (
+        np.asarray(seconds, dtype=float),
+        {field: np.asarray(values, dtype=np.int64) for field, values in storage.items()},
+        np.asarray(peak, dtype=np.int64),
+    )
 
 
 def compare_requests(
     candidate: list[dict[str, Any]], baseline: list[dict[str, Any]], *, resamples: int, seed: int
 ) -> dict[str, Any]:
-    left = {r["sample_id"]: r for r in candidate}
-    right = {r["sample_id"]: r for r in baseline}
-    if (
-        len(left) != len(candidate)
-        or len(right) != len(baseline)
-        or set(left) != set(right)
-        or len(left) < 2
-        or resamples < 1
-    ):
+    """Validate raw observations before any numeric coercion or bootstrap draw."""
+    if type(resamples) is not int or resamples < 1:
+        raise ValueError("positive plain-integer bootstrap resamples required")
+    if type(seed) is not int or seed < 0:
+        raise ValueError("nonnegative plain-integer bootstrap seed required")
+    left, right = _indexed(candidate), _indexed(baseline)
+    if set(left) != set(right) or len(left) < 2:
         raise ValueError("complete unique paired request identities required")
     ids = sorted(left)
-    draws = np.random.default_rng(seed).integers(0, len(ids), (resamples, len(ids)))
+    c, candidate_storage, candidate_peak = _observations(left, ids)
+    b, baseline_storage, baseline_peak = _observations(right, ids)
+    try:
+        with np.errstate(over="raise", invalid="raise", divide="raise"):
+            return _summarize(
+                c,
+                b,
+                candidate_storage,
+                baseline_storage,
+                candidate_peak,
+                baseline_peak,
+                resamples=resamples,
+                seed=seed,
+            )
+    except FloatingPointError:
+        raise ValueError("finite representable paired statistics required") from None
+
+
+def _summarize(
+    c: Any,
+    b: Any,
+    candidate_storage: Mapping[str, Any],
+    baseline_storage: Mapping[str, Any],
+    candidate_peak: Any,
+    baseline_peak: Any,
+    *,
+    resamples: int,
+    seed: int,
+) -> dict[str, Any]:
+    draws = np.random.default_rng(seed).integers(0, len(c), (resamples, len(c)))
 
     def interval(values: Any) -> list[float]:
+        if not np.isfinite(values).all():
+            raise ValueError("finite representable bootstrap distribution required")
         return [float(v) for v in np.quantile(values, [0.025, 0.975])]
 
-    c = np.asarray([left[i]["end_to_end_seconds"] for i in ids], dtype=float)
-    b = np.asarray([right[i]["end_to_end_seconds"] for i in ids], dtype=float)
-    if not np.isfinite(c).all() or not np.isfinite(b).all() or min(c.min(), b.min()) <= 0:
-        raise ValueError("positive finite complete-request latency required")
     ratio = c.mean() / b.mean()
     ratio_ci = interval(c[draws].mean(1) / b[draws].mean(1))
     memory = {}
-    for field in (
-        "initial_active_kv_storage_bytes",
-        "final_active_kv_storage_bytes",
-        "peak_active_kv_storage_bytes",
-    ):
-        a = np.asarray([left[i]["storage"][field] for i in ids], dtype=np.int64)
-        z = np.asarray([right[i]["storage"][field] for i in ids], dtype=np.int64)
-        if min(a.min(), z.min()) <= 0:
-            raise ValueError("positive measured backing storage required")
+    for field in STORAGE_FIELDS:
+        a, z = candidate_storage[field], baseline_storage[field]
         memory[field] = dict(
             candidate_mean_bytes=float(a.mean()),
             baseline_mean_bytes=float(z.mean()),
@@ -48,10 +133,9 @@ def compare_requests(
             smaller_input_count=int((a < z).sum()),
             paired_reduction_ci95=interval(1 - a[draws].mean(1) / z[draws].mean(1)),
         )
-    a = np.asarray([left[i]["whole_request_peak_allocated_bytes"] for i in ids], dtype=float)
-    z = np.asarray([right[i]["whole_request_peak_allocated_bytes"] for i in ids], dtype=float)
+    a, z = candidate_peak, baseline_peak
     return dict(
-        unique_sample_count=len(ids),
+        unique_sample_count=len(c),
         mean_latency_ratio=float(ratio),
         paired_mean_latency_ratio_ci95=ratio_ci,
         paired_latency_delta_seconds=float((c - b).mean()),

@@ -567,6 +567,16 @@ def materialize_cohort(parent, root):
     return sha(root / "plan.json")
 
 
+def _valid_request_timings(timings):
+    """Check raw observations without numeric-string or bool-as-int coercion."""
+    if any(type(value) not in (int, float) for value in timings):
+        return False
+    try:
+        return all(math.isfinite(value) and value > 0 for value in timings)
+    except OverflowError:
+        return False
+
+
 def analyze(root, expected):
     import numpy as np
     import pandas as pd
@@ -600,6 +610,10 @@ def analyze(root, expected):
         * plan.get("timed_repetitions", 1)
     )
     keys = {(r["sample_id"], r["method"], r["precision"], r["trial"]) for r in scored}
+    # Failed requests may have no measurement; preserve their negative records.
+    timings = tuple(r.get("end_to_end_seconds") for r in scored if r.get("status") == "completed")
+    if not _valid_request_timings(timings):
+        raise ValueError("request timings require positive finite plain numbers")
     complete = len(keys) == expected_rows and len(scored) == expected_rows and not failures
     quality_guard = []
     if any(r.get("audit_enabled") is True for r in scored):

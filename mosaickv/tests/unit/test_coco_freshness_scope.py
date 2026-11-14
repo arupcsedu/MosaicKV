@@ -65,6 +65,25 @@ def test_actual_historical_gaps_block_certificate(evidence, field, value):
     assert not result["eligible_for_preregistered_image_identity_cohort"]
 
 
+def test_missing_unresolved_sources_does_not_certify_history(evidence):
+    contract, history, candidates = copy.deepcopy(evidence)
+    del history["unresolved_sources"]
+    result = scope.evaluate(contract, history, candidates)
+    assert not result["scope_certified"]
+    assert not result["eligible_for_preregistered_image_identity_cohort"]
+    assert result["errors"] == ["unresolved historical sources remain"]
+
+
+@pytest.mark.parametrize("value", [None, False, 0, 0.0, "", {}, ()])
+def test_invalid_falsey_unresolved_sources_does_not_certify_history(evidence, value):
+    contract, history, candidates = copy.deepcopy(evidence)
+    history["unresolved_sources"] = value
+    result = scope.evaluate(contract, history, candidates)
+    assert not result["scope_certified"]
+    assert not result["eligible_for_preregistered_image_identity_cohort"]
+    assert result["errors"] == ["unresolved historical sources remain"]
+
+
 def test_missing_candidate_hashes_are_not_fresh_by_absence(evidence):
     contract, history, candidates = copy.deepcopy(evidence)
     del candidates[0]["pixel_sha256"]
