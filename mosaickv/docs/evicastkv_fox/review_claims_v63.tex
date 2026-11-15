@@ -1,0 +1,229 @@
+\documentclass[10pt]{article}
+\usepackage[margin=0.85in]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage{longtable,array}
+\usepackage{xurl}
+\usepackage[hidelinks,breaklinks]{hyperref}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{0.45em}
+\newcommand{\scopepass}{\textsc{supported in scope}}
+\newcommand{\notrun}{\textsc{planned, not run}}
+\title{EviCastKV: bounded response to Prof. Fox's R01--R10\\
+\large Private claim--evidence packet, V63}
+\author{Project review working document; author approval not asserted}
+\date{14 November 2026}
+\begin{document}
+\maketitle
+
+\textbf{Readiness conclusion.} The current evidence supports scoped engineering
+statements, not a general quality/latency superiority claim or paper admission.
+No new experiment, GPU execution, cohort selection, exclusion scan, materialization
+or historical proof replay was performed for this response. The main manuscript
+and the user's paper files are untouched. The accompanying
+\path{review_claims_v63.json} is the machine-readable claim matrix and full
+path/SHA-256 evidence ledger. R01--R10 retain the existing repository review
+numbering; they are not the numbered experiment prompts.
+
+\section*{What can currently be stated}
+
+The pinned V58 source passed \textbf{10,761 CPU tests}, with zero failures,
+errors or skips [E1]. This is CPU regression verification, not a new empirical
+quality, latency or memory result.
+
+The V52 saved-gate readout [E2] verifies \textbf{two consumed BF16 MHA inputs},
+four constructed source/raw arms, and \textbf{128 predictions per input} with
+bitwise agreement in the registered lossless source/raw control; the maximum logit difference
+is zero. Initial, final and peak tensor-backing and allocator-block bytes match
+within each source/raw pair. The independent storage certificate covers
+\emph{published KV plus all cache-required storage through prefill, construction
+and decode}. It is not a whole-device/process HBM certificate or evidence of
+a memory advantage.
+
+The same saved readout verifies \textbf{two consumed FP16 GQA COCO inputs} with
+128 predictions per input under the corrected, shape-matched \emph{FullKV
+evaluation-boundary control}. This does \textbf{not} validate GQA source
+reconstruction. The unchanged absolute tolerance is $10^{-4}$; earlier failed
+native/lossy controls remain preserved negative results. These consumed-input
+controls are not independent confirmation or a power/generalization guarantee.
+
+\section*{Method and comparison boundaries}
+
+\textbf{Exact selection} means prompt-observed selection of unchanged retained
+K/V, original logical positions, and append-only generation.
+\textbf{Storage-only} refers here to the registered lossless BF16 MHA source
+representation against the same-selected raw representation. Neither scope
+establishes the benefit of the full six-component method: future-query
+forecasting; sparse cross-modal graph construction; value-aware utility;
+budgeted submodular selection; exact/prototype/residual tiers; and
+uncertainty-guided residual repair. In particular, the master exact-selection
+campaign excludes prototypes and repair. No row may silently move between
+these method scopes.
+
+FullKV remains an uncompressed quality/timing reference, not a matched-byte
+compressed competitor. Paper-reported results remain a separately attributed
+protocol/hardware stratum. A local port or reimplementation must be explicitly
+labeled as such, with adaptation and unverified fidelity disclosed; it is not
+an official upstream reproduction. No official-baseline superiority follows
+from the existence of a port or its scores.
+
+\section*{Response and claim--evidence matrix}
+
+\small
+\begin{longtable}{@{}p{0.07\linewidth}p{0.19\linewidth}p{0.65\linewidth}@{}}
+\textbf{ID} & \textbf{Current status} & \textbf{Response and required next action}\\
+\hline
+\endfirsthead
+\textbf{ID} & \textbf{Current status} & \textbf{Response and required next action}\\
+\hline
+\endhead
+R01 & Inconclusive &
+Configuration/activity is not proved by a method label or a CPU pass [E1,E2].
+Bind actual coefficients, routed IDs/counts, active edges/terms, quotas and
+source/configuration identities from admissible original records. Do not claim
+that all six mechanisms executed or helped.\\[0.6em]
+R02 & Supported in scope &
+The two-input BF16 MHA source/raw controls and corrected FP16 GQA FullKV
+evaluation boundary pass only their registered scope [E2]. Preserve earlier
+failures; do not extend this to GQA source reconstruction, lossy variants,
+all geometries, or task-quality equivalence. Any extension needs its own
+applicable structural/numerical gate before dependent measurements.\\[0.6em]
+R03 & Inconclusive &
+Keep corpus CIDEr, Accuracy and ROUGE-L distinct, with scoring/parsing failures
+and denominators retained. Native upstream fidelity, shared-byte local ports
+and paper-reported results answer different questions. Qualify saved scoring
+and native-fidelity evidence before stronger claims; this packet establishes
+neither official LOOK-M/VL-Cache fidelity nor official-method superiority.\\[0.6em]
+R04 & Inconclusive &
+No complete-request latency superiority follows from CPU tests, selector-only
+diagnostics, source parity or storage certificates [E1,E2]. Any authorized
+timing must recompute complete unprofiled requests, aggregate repeats by input,
+and preserve failures. The adjusted upper candidate/competitor latency-ratio
+bound must be $\leq1.00$ for equal-or-faster acceptance; $1.05$ is only a
+reported trade-off.\\[0.6em]
+R05 & Inconclusive &
+Graph, routing, individual utility, prototype and repair benefits are not
+established [E2]. First qualify saved fixed-candidate/fixed-quota mechanism
+exports, including inactive edges and null/negative effects. Combined-term
+ablations cannot isolate a single term; random seeds do not increase task $N$.
+Missing contrasts remain untested, not completed ablations.\\[0.6em]
+R06 & Not tested &
+The registered source/raw representation comparison is not a same-model
+OFF/ON replay quality or latency comparison [E2]. Replay attribution requires
+an applicable controlled contract that charges capture, retirement and
+replay-owned workspace. No such new experiment is authorized here.\\[0.6em]
+R07 & Not tested &
+Lossless BF16 MHA parity does not validate direct projected 3-bit K/V,
+quantization-family fidelity, protection controls or an FP16/GQA source bridge
+[E2]. Keep incompatible model/dtype/representation strata separate; require
+applicable correctness and complete physical-byte accounting before a claim.\\[0.6em]
+R08 & Blocked &
+Consumed-input controls do not establish fresh visual generalization. The
+135 semantic/exposure gaps remain distinct from artifact/source binding gaps
+[E2--E6]. Obtain the original missing records and media/source-group evidence;
+ID availability or a negative backup search cannot certify no prior exposure.
+No new exclusion scan, fresh selection or materialization is authorized.\\[0.6em]
+R09 & Supported in scope &
+The registered certificate covers published KV and cache-required storage
+through the request, including matched initial/final/peak backing/block bytes
+[E2]. It does not certify whole-device GPU peak, process-memory advantage,
+all source lengths or GQA source reconstruction. Preserve ownership,
+lifetime/workspace and geometry boundaries exactly.\\[0.6em]
+R10 & Blocked &
+This is a hash-linked private engineering/limitations response, not a completed
+independent-confirmation or publication-admission packet [E1--E6]. Preserve
+actual attempted/completed/scored/paired counts, filters, failures and metric
+families. The author must review the scoped text; do not strengthen the
+abstract, invent missing outcomes, or treat proposed counts as observations.\\
+\hline
+\end{longtable}
+\normalsize
+
+\section*{Unresolved provenance is not a numerical result}
+
+The authoritative 134-artifact ledger contains 20 runtime-verified bindings,
+47 partial bindings (35 artifact-only, eight committed snapshots, three dirty
+archives and one ad-hoc generator), and 67 unrecovered bindings [E3]. All
+\textbf{134 completed opaque proofs are reused}; none was replayed for this
+packet. Artifact identity is not semantic/exposure closure.
+
+The V61 target ledger joins all 114 non-runtime targets [E4]. Its registration
+digests are audit-lineage identifiers, not original output or runtime bindings.
+Thirteen exact original commits remain missing and affect 26 artifact-only
+targets [E5]. The V62 existing-backup search recovered zero of those 13 within
+its explicit filename/depth/prune scope [E6]; it is not proof of global absence.
+Restoring source would still require validation, not automatic scientific
+admission. The separate \textbf{135 semantic/exposure gaps} remain unresolved.
+
+\section*{Prospective counts: planned, not run}
+
+The current COCO-only proposal is \notrun{} and blocked, not an experiment
+result or an authorization. Its proposed 256 inputs would imply 1,792 primary
+request evaluations (FullKV once per input plus three compressed methods at
+two budgets), with at most 512 additional fixed-mechanism evaluations, for at
+most 2,304 core requests. Repeated timing, development and diagnostics are
+additional. No model/source geometry, GQA source support, power or completion
+is assumed; exact protocol/candidate/quota equality is required for any row
+reuse. Historical exposure/media gaps, a reviewed frozen configuration,
+applicable gates and separate execution authority must first be resolved.
+
+The prompt README's original \emph{two-workload} 3,584-primary / at-most-4,608-core
+matrix is a \textbf{historical proposed design, not the current COCO-only plan
+and not an observed fresh result}. Optional complete-path batching remains
+\textsc{not run}. No fresh MileBench cohort or substitute task mix is inferred.
+
+No strict quality benefit may be claimed without the prespecified applicable
+multiplicity-adjusted interval strictly above zero; an interval crossing zero
+does not prove equality or noninferiority. The original six-quality-contrast
+two-workload family must not silently become the analysis family for a future
+COCO-only plan. No family may be chosen or reduced after inspecting outcomes.
+
+\section*{Qualified saved evidence ledger}
+
+These are local saved capsule identities, not links to newly opened raw data.
+E1 and E2 were read through the protected bounded metadata reader for this
+response. E3--E6 reuse previously qualified records and the current journal.
+The JSON companion also records the underlying V33/V34 gate identities and
+versioned master/scoring/profiling/mechanism/statistics/export instructions.
+
+\textbf{E1: V58 CPU-only review decision.}\\
+\path{/scratch/djy8hg/workdir/fox-review-v58/run-20261114-5494e68-1/review_decision.json}\\
+\texttt{61c680c73f244e0c79ef84d0fdc7de42}\\
+\texttt{dc7f08e05c4ce495875fbc053aa70ef9}
+
+\textbf{E2: V52 bounded saved engineering-gate readout.}\\
+\path{/scratch/djy8hg/workdir/fox-review-v52/run-20261113-4b2cf0b-engineering-retry1/engineering_review.json}\\
+\texttt{9237f9f562f29e814d7cdd637a214195}\\
+\texttt{8034eb471e0f17b3b975b6d4dac8dc4d}
+
+\textbf{E3: authoritative V55 binding ledger.}\\
+\path{/scratch/djy8hg/workdir/fox-review-v55/run-20261114-36a5783-1/recovered_bindings.json}\\
+\texttt{896c548d51863545badc16965c3ed890}\\
+\texttt{779b69b23960d99dafc6388e988da277}
+
+\textbf{E4: V61 all-target resolution ledger.}\\
+\path{/scratch/djy8hg/workdir/fox-review-v61/discovery-20261114-1/target_resolution_ledger.json}\\
+\texttt{e18f8e6937443b43975f57f741a4c9ee}\\
+\texttt{38b7f089fa2768156bc7b7fd53c39925}
+
+\textbf{E5: exact original-source restoration requests.}\\
+\path{/scratch/djy8hg/workdir/fox-review-v61/discovery-20261114-1/original_source_restore_requests.json}\\
+\texttt{260656e2f3cb4ea9b48c200a18fd5fb3}\\
+\texttt{9cf7aaabd6c4376cd91304add6c58041}
+
+\textbf{E6: V62 scoped existing-backup search summary.}\\
+\path{/scratch/djy8hg/workdir/fox-review-v62/discovery-20261114-1/followup_summary.json}\\
+\texttt{cbe1eba4fff185292ff25080e5d3de24}\\
+\texttt{052f9f9af6bfcb76105f96ccf38e9b6d}
+
+\section*{Packet limitations and action boundary}
+
+No raw trajectory, Parquet, historical log, model, dataset, exclusion ledger or
+credential fixture was opened. No algorithm, threshold, historical result or
+main-paper file was changed. All execution/admission authorizations in the
+JSON are false. The standalone TeX build status is reported in a separate
+generated receipt; compilation is an engineering build check, not scientific
+evidence. No self-referential PDF hash is embedded in this source. No package
+installation or network retrieval was used. This document supplies neither
+author approval nor permission to proceed past an unresolved gate.
+
+\end{document}

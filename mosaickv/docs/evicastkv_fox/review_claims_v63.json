@@ -1,0 +1,194 @@
+{
+  "schema": "fox_review_claims_v63",
+  "as_of": "2026-11-14",
+  "source_base_sha": "5494e684aab0c1ca5e6d60e32ac8c3e237fdb7b3",
+  "classification": "private_review_response_and_claim_matrix_not_new_empirical_evidence",
+  "overall_status": "blocked",
+  "status_vocabulary": ["supported_in_scope", "inconclusive", "blocked", "not_tested"],
+  "authorization": {
+    "exclusion_scan_authorized": false,
+    "materialization_authorized": false,
+    "fresh_confirmation_authorized": false,
+    "GPU_execution_authorized": false,
+    "experiment_submission_authorized": false,
+    "paper_admission_authorized": false
+  },
+  "method_taxonomy": {
+    "exact_selection": "Prompt-observed selection of unchanged retained K/V entries, original logical positions, and append-only generation. Exact-selection evidence does not establish the full six-component method.",
+    "storage_only": "The registered lossless BF16 MHA source representation versus the same-selected raw representation. Its numerical/storage controls do not establish a selector-quality effect, replay benefit, GQA source reconstruction, or device-memory advantage.",
+    "six_component": {
+      "mechanisms": ["future-query forecasting", "sparse cross-modal evidence graph construction", "value-aware block utility", "budgeted submodular selection", "exact/prototype/residual cache tiers", "uncertainty-guided residual repair"],
+      "benefit_established": false,
+      "scope_note": "No exact-selection or storage-only row is relabeled as evidence that all six mechanisms executed or improved quality/latency. The master exact-selection campaign excludes prototypes and repair."
+    }
+  },
+  "current_verified_scope": {
+    "CPU_regression": {"tests": 10761, "failures": 0, "errors": 0, "skipped": 0, "evidence_id": "v58_cpu", "new_empirical_experiment": false},
+    "BF16_MHA_source_raw": {"consumed_inputs": 2, "constructed_arms": 4, "predictions_per_input": 128, "maximum_logit_difference": 0.0, "status": "supported_in_scope", "evidence_id": "v52_engineering"},
+    "published_KV_required_storage": {"status": "supported_in_scope", "scope": "published_KV_and_all_cache_required_storage_prefill_construction_decode", "initial_final_peak_bytes_matched": true, "whole_device_GPU_peak_certified": false, "memory_advantage_established": false, "evidence_id": "v52_engineering"},
+    "FP16_GQA_COCO": {"consumed_inputs": 2, "predictions_per_input": 128, "status": "supported_in_scope", "scope": "FullKV_evaluation_only_corrected_shape_matched_boundary_control", "source_reconstruction_validated": false, "unchanged_absolute_tolerance": 0.0001, "evidence_id": "v52_engineering"}
+  },
+  "historical_binding_gaps": {
+    "total_artifacts": 134,
+    "runtime_verified": 20,
+    "partial_total": 47,
+    "partial_components": {"artifact_only": 35, "committed_snapshot": 8, "dirty_archive": 3, "ad_hoc_generator": 1},
+    "unrecovered": 67,
+    "missing_original_commits": 13,
+    "targets_affected_by_missing_commits": 26,
+    "semantic_exposure_unresolved": 135,
+    "semantic_gaps_are_separate_from_artifact_counts": true,
+    "completed_opaque_hash_transactions_reused": 134,
+    "completed_proofs_replayed_this_task": 0,
+    "new_binding_promotions_this_task": 0,
+    "registration_digest_is_not_an_original_output_or_runtime_binding": true,
+    "backup_search_is_scoped_not_global_absence_proof": true,
+    "evidence_ids": ["v55_bindings", "v61_resolution", "v61_restore_requests", "v62_backup_followup"]
+  },
+  "baseline_reporting": {
+    "paper_reported": "Literature/paper-reported numbers remain a separately attributed protocol/hardware stratum; they are not reproduced here.",
+    "official": "An official label requires the pinned upstream execution path and applicable native-fidelity validation; availability of source code or a local port is insufficient.",
+    "local_reimplementation": "Identify local ports as reimplementations (internal *_reimpl or explicit (R) label), disclose byte adaptation and unverified fidelity, and never claim official-baseline superiority from those rows.",
+    "FullKV": "Uncompressed quality/timing reference, not a matched-compressed-byte competitor."
+  },
+  "requirements": [
+    {
+      "id": "R01",
+      "title": "Executed configuration and mechanism activity",
+      "status": "inconclusive",
+      "response": "The repository contract distinguishes exact selection, storage representation, and the full hybrid method. Current engineering certificates do not demonstrate execution or benefit of all six components.",
+      "supported_claims": [{"scope": "CPU regression checks for the pinned source", "status": "supported_in_scope", "evidence_ids": ["v58_cpu"]}],
+      "unsupported_claims": ["All six components executed in a quality comparison", "Graph/routing coefficients or activity inferred from a method name"],
+      "required_next_action": "For an already admissible comparison, bind its actual resolved coefficients, routed IDs/counts, active edges/terms, quotas and source/config hashes. Missing runtime records remain blockers; do not generate replacement attestations.",
+      "evidence_ids": ["v58_cpu", "v52_engineering", "protocol_master"]
+    },
+    {
+      "id": "R02",
+      "title": "Numerical identity, positions and boundary correctness",
+      "status": "supported_in_scope",
+      "response": "Saved readout verifies bitwise agreement on two consumed BF16 MHA inputs with four source/raw arms, 128 predictions per input and zero maximum logit difference. Two consumed FP16 GQA COCO inputs pass the corrected FullKV evaluation-boundary control, not GQA source reconstruction. Earlier failed lossy/native controls remain negative.",
+      "supported_claims": [{"scope": "Registered lossless BF16 MHA source/raw controls and corrected FP16 GQA FullKV evaluation-only boundary", "status": "supported_in_scope", "evidence_ids": ["v52_engineering", "v33_source_gate", "v34_coco_gate"]}],
+      "unsupported_claims": ["General source reconstruction correctness on GQA", "All models, dtypes, positions or lossy variants validated", "Representation agreement implies task-quality equivalence"],
+      "required_next_action": "Retain exact model/dtype/boundary scope and failures. Any new geometry or representation needs separately registered structural and numerical controls before dependent measurements; no run is authorized by this response.",
+      "evidence_ids": ["v52_engineering", "v33_source_gate", "v34_coco_gate"]
+    },
+    {
+      "id": "R03",
+      "title": "Baseline fidelity and native scoring",
+      "status": "inconclusive",
+      "response": "Keep corpus CIDEr, Accuracy and ROUGE-L separate, preserve failed/unparseable denominators, and distinguish native fidelity from the shared-byte port comparison. This packet does not rerun scorers or establish official LOOK-M/VL-Cache fidelity or superiority.",
+      "supported_claims": [{"scope": "Reporting/stratification contract only, not new scores", "status": "supported_in_scope", "evidence_ids": ["protocol_scoring", "protocol_statistics"]}],
+      "unsupported_claims": ["Local reimplementation equals official upstream behavior", "Paper-reported and locally measured results form one controlled comparison"],
+      "required_next_action": "Use qualified saved score/parser exports and applicable pinned native-fidelity evidence; otherwise label the port unverified and retain paper-reported numbers separately. Do not infer a cause for baseline degradation.",
+      "evidence_ids": ["protocol_scoring", "protocol_statistics", "v52_engineering"]
+    },
+    {
+      "id": "R04",
+      "title": "Complete-request latency, profiling and optimization",
+      "status": "inconclusive",
+      "response": "Existing development profiling/timing is not fresh confirmation. CPU passes, a selector-only diagnostic, a storage certificate, or a source/raw parity control cannot establish a complete-request speedup.",
+      "supported_claims": [{"scope": "Pinned CPU regression and explicit measurement boundaries", "status": "supported_in_scope", "evidence_ids": ["v58_cpu", "protocol_profile"]}],
+      "unsupported_claims": ["Latency superiority established", "Profiler-contaminated or cached-prefill time is headline E2E", "A 1.05 latency ratio is an acceptance pass"],
+      "required_next_action": "Before any authorized timing, require valid fixed configuration, shared-runtime controls, full request recomputation, repeat aggregation by input, and the declared multiplicity family. Equal-or-faster acceptance requires an adjusted upper candidate/competitor latency-ratio bound <=1.00; preserve regressions.",
+      "evidence_ids": ["v58_cpu", "v52_engineering", "protocol_profile", "protocol_statistics"]
+    },
+    {
+      "id": "R05",
+      "title": "Routing, utility, cross-modal and observation ablations",
+      "status": "inconclusive",
+      "response": "The exact-selection campaign and storage-only controls do not establish graph, routing, individual utility, prototype or repair benefit. Combined-term ablations cannot identify a single mechanism, and inactive edges cannot support an inter-modal claim.",
+      "supported_claims": [{"scope": "Fixed-candidate/fixed-quota and actual-activity requirements are specified, not newly executed", "status": "supported_in_scope", "evidence_ids": ["protocol_mechanisms"]}],
+      "unsupported_claims": ["Six-component benefit established", "Random routing seeds are independent task examples", "An unexecuted route/window sweep is a completed result"],
+      "required_next_action": "First qualify any saved controlled mechanism exports, retaining null/negative effects and activity counts. Missing contrasts remain NOT_TESTED; a future design must freeze candidates, quotas, controls and analysis before execution.",
+      "evidence_ids": ["v52_engineering", "protocol_mechanisms", "protocol_master"]
+    },
+    {
+      "id": "R06",
+      "title": "Replay-controlled attribution",
+      "status": "not_tested",
+      "response": "The saved source/raw control certifies its registered construction and representation scope, not a same-model OFF/ON replay quality or latency advantage. Exact-only results do not answer replay attribution.",
+      "supported_claims": [{"scope": "Constructed source versus same-selected raw parity only", "status": "supported_in_scope", "evidence_ids": ["v52_engineering"]}],
+      "unsupported_claims": ["Replay improves complete-request latency or quality", "Capture, retirement and replay workspace can be excluded from timing/memory"],
+      "required_next_action": "Require an admissible same-model/dtype OFF/ON contract with identical output policy and charged capture/retirement/workspace. Reuse qualified saved records first; this packet authorizes no new comparison.",
+      "evidence_ids": ["v52_engineering", "protocol_profile", "protocol_master"]
+    },
+    {
+      "id": "R07",
+      "title": "Common-byte source and direct quantization controls",
+      "status": "not_tested",
+      "response": "Lossless BF16 MHA storage/source parity is narrow evidence. It does not validate direct projected 3-bit K/V, all protection controls, a quantization-family implementation, or a common-model FP16/GQA source bridge.",
+      "supported_claims": [{"scope": "Registered BF16 MHA source/raw byte matching", "status": "supported_in_scope", "evidence_ids": ["v52_engineering"]}],
+      "unsupported_claims": ["Direct 3-bit projected K/V certified by the lossless source control", "FP16 exact-retention and BF16 source rows are controlled counterparts"],
+      "required_next_action": "Keep incompatible model/dtype/representation strata separate. Any proposed quantization/protection comparison requires applicable correctness, full metadata/workspace accounting and baseline qualification before scientific claims.",
+      "evidence_ids": ["v52_engineering", "protocol_master"]
+    },
+    {
+      "id": "R08",
+      "title": "Vision evaluation, historical exclusion and fresh cohorts",
+      "status": "blocked",
+      "response": "Consumed-input correctness is not fresh visual generalization. There remain 135 semantic/exposure gaps, separately from 67 unbound and 47 partial artifact/source bindings. ID availability or a negative backup search cannot certify media/source-group freshness.",
+      "supported_claims": [{"scope": "Explicit unresolved counts and target-specific restoration requests", "status": "supported_in_scope", "evidence_ids": ["v55_bindings", "v61_resolution", "v61_restore_requests", "v62_backup_followup"]}],
+      "unsupported_claims": ["Fresh COCO or MileBench confirmation completed", "Missing historical records mean no prior exposure", "Restoring a commit automatically grants fresh-cohort admission"],
+      "required_next_action": "Obtain original missing output/runtime/source and media/source-group records. Preserve fail-closed exclusion coverage and author-reviewed frozen scope. Do not scan exclusions, materialize, select fresh data or launch GPU work under this packet.",
+      "evidence_ids": ["v52_engineering", "v55_bindings", "v61_resolution", "v61_restore_requests", "v62_backup_followup"]
+    },
+    {
+      "id": "R09",
+      "title": "Storage lifetimes, peak accounting and GQA geometry",
+      "status": "supported_in_scope",
+      "response": "Initial/final/peak tensor-backing and allocator-block bytes match for the two constructed BF16 MHA source/raw pairs. The independent certificate covers published KV plus all cache-required storage through prefill, construction and decode, not whole-device/process HBM, a memory advantage, or GQA source reconstruction.",
+      "supported_claims": [{"scope": "Registered published_KV_and_all_cache_required_storage_prefill_construction_decode certificate", "status": "supported_in_scope", "evidence_ids": ["v52_engineering", "v34_whole_KV_gate"]}],
+      "unsupported_claims": ["Whole-device GPU peak certified", "Published KV reduction proves total-process memory reduction", "GQA FullKV boundary checks certify a GQA source representation"],
+      "required_next_action": "Retain ownership, lifetime and workspace boundaries exactly. New source lengths, layouts, GQA reconstruction or device-memory claims need their own applicable evidence; zero-KV and large integer peaks must not be coerced or relabeled.",
+      "evidence_ids": ["v52_engineering", "v34_whole_KV_gate", "v58_cpu"]
+    },
+    {
+      "id": "R10",
+      "title": "Reproducible exports and manuscript consistency",
+      "status": "blocked",
+      "response": "This private writing packet maps claims to hash-qualified saved capsules without replaying raw results. All 134 opaque proofs are reused, not new writer closures. The current gap counts and negative searches prevent a complete independent-confirmation or superiority packet.",
+      "supported_claims": [{"scope": "Bounded engineering readout, current CPU verification and explicit limitations", "status": "supported_in_scope", "evidence_ids": ["v58_cpu", "v52_engineering", "v55_bindings", "v61_resolution", "v62_backup_followup"]}],
+      "unsupported_claims": ["Paper admission approved", "Author review/approval supplied by this document", "A planned experiment count is an observed completed denominator"],
+      "required_next_action": "Keep the main manuscript untouched; have the author review the scoped response. Any future admissible table must retain actual attempted/completed/scored/paired denominators, failures, metric families, filters and intervals. Do not invent missing outcomes or strengthen the abstract.",
+      "evidence_ids": ["v58_cpu", "v52_engineering", "v55_bindings", "v61_resolution", "v62_backup_followup", "protocol_statistics", "protocol_final_audit"]
+    }
+  ],
+  "prospective_design_not_results": {
+    "current_COCO_only": {"status": "PLANNED_NOT_RUN", "execution_authorized": false, "proposed_inputs": 256, "main_request_evaluations": 1792, "additional_fixed_mechanism_request_evaluations_at_most": 512, "maximum_core_request_evaluations": 2304, "additional_repeated_timing_development_diagnostics_not_included": true, "model_source_geometry_assumed": false, "prerequisites": ["Resolve applicable historical exclusion/media/source-group gaps", "Freeze author-reviewed source/config/model/dtype/boundary/baseline/analysis scope", "Satisfy relevant correctness/scoring/storage gates", "Obtain separate execution authorization"], "count_note": "Counts describe a proposed 256-input one-workload matrix, not completed work, power or a commitment to run. FullKV once per input plus three compressed methods at two budgets; at most two tight-budget fixed-mechanism arms per input. Row reuse requires the entire protocol/candidate/quota contract, not method-name equality."},
+    "original_two_workload_prompt_design": {"status": "HISTORICAL_PROPOSED_NOT_RUN_AS_FRESH_MATRIX", "main_request_evaluations": 3584, "maximum_core_request_evaluations": 4608, "current_plan": false, "note": "README proposal for COCO plus MileBench, excluding additional repeat/development/diagnostic work; not the current COCO-only proposal or observed outcomes."},
+    "optional_batching": {"status": "NOT_RUN", "reason": "No complete-path batching evidence or authority is supplied by this packet."}
+  },
+  "statistical_claim_rules": {
+    "no_superiority_established": true,
+    "quality": "No strict benefit without the prespecified applicable multiplicity-adjusted interval strictly above zero; an interval crossing zero is not equality/noninferiority. Do not choose or shrink a family after results.",
+    "latency": "Use complete unprofiled paired requests; aggregate repeated timings per input before resampling. Equal-or-faster requires the applicable adjusted upper candidate/competitor ratio bound <=1.00; <=1.05 is only a trade-off.",
+    "metric_families": "CIDEr, Accuracy and ROUGE-L remain separate. The original six-quality-contrast two-workload family is a historical protocol, not an automatically chosen future COCO-only family.",
+    "missingness": "Preserve every prespecified failure, timeout and denominator; no favorable survivor-only complete-cohort claim."
+  },
+  "evidence": {
+    "v58_cpu": {"path": "/scratch/djy8hg/workdir/fox-review-v58/run-20261114-5494e68-1/review_decision.json", "sha256": "61c680c73f244e0c79ef84d0fdc7de42dc7f08e05c4ce495875fbc053aa70ef9", "kind": "qualified_saved_metadata_read_this_task", "qualification_scope": "CPU regression verification only; source5494e68, independent reviewer02b359d. CPU suite receipt9170994bda37a2919d6e738d85cf0e91acc37bad319c8dd406d8dd760083b39b."},
+    "v52_engineering": {"path": "/scratch/djy8hg/workdir/fox-review-v52/run-20261113-4b2cf0b-engineering-retry1/engineering_review.json", "sha256": "9237f9f562f29e814d7cdd637a2141958034eb471e0f17b3b975b6d4dac8dc4d", "kind": "qualified_saved_metadata_read_this_task", "qualification_scope": "Bounded current saved-gate readout, not new GPU execution or raw replay. Audit source4b2cf0b; actual source execution422a6799; numerical source8b8db8cb."},
+    "v55_bindings": {"path": "/scratch/djy8hg/workdir/fox-review-v55/run-20261114-36a5783-1/recovered_bindings.json", "sha256": "896c548d51863545badc16965c3ed890779b69b23960d99dafc6388e988da277", "kind": "previously_qualified_saved_report_reused", "qualification_scope": "Authoritative134artifact binding classifications; not semantic/exposure closure."},
+    "v61_resolution": {"path": "/scratch/djy8hg/workdir/fox-review-v61/discovery-20261114-1/target_resolution_ledger.json", "sha256": "e18f8e6937443b43975f57f741a4c9ee38b7f089fa2768156bc7b7fd53c39925", "kind": "previously_qualified_derived_target_ledger_reused", "qualification_scope": "All114 non-runtime targets joined; audit lineage alone does not establish original output/runtime identity."},
+    "v61_restore_requests": {"path": "/scratch/djy8hg/workdir/fox-review-v61/discovery-20261114-1/original_source_restore_requests.json", "sha256": "260656e2f3cb4ea9b48c200a18fd5fb39cf7aaabd6c4376cd91304add6c58041", "kind": "previously_qualified_derived_restore_requests_reused", "qualification_scope": "13exact original commits affecting26targets; restoration would need validation, not automatic gate admission."},
+    "v62_backup_followup": {"path": "/scratch/djy8hg/workdir/fox-review-v62/discovery-20261114-1/followup_summary.json", "sha256": "cbe1eba4fff185292ff25080e5d3de24052f9f9af6bfcb76105f96ccf38e9b6d", "kind": "previously_qualified_derived_backup_summary_reused", "qualification_scope": "Scoped metadata-only backup search recovered0of13commits; no global absence proof and no archive/body evidence."},
+    "v33_source_gate": {"path": "/scratch/djy8hg/workdir/fox-review-v33/run-20261111-1/analysis/GATE_bounded_reader_v28.json", "sha256": "c05c0626c56f91ffb89c0b73f793ab9faceda6fc1d7ccac68f1543aa78d46ac6", "kind": "original_gate_identity_reused_via_v52_no_original_reopen", "qualification_scope": "Registered BF16 MHA lossless source/raw controls only."},
+    "v34_whole_KV_gate": {"path": "/scratch/djy8hg/workdir/fox-review-v34/run-20261111-1/whole-replay/GATE_bounded_reader_v27.json", "sha256": "49a2762f961a744162182fa892f5db7eb28ddefeb97d6ef255941ecfef6ee7d0", "kind": "original_gate_identity_reused_via_v52_no_original_reopen", "qualification_scope": "Independent published KV plus all cache-required storage certificate, not whole-device GPU peak or memory advantage."},
+    "v34_coco_gate": {"path": "/scratch/djy8hg/workdir/fox-review-v34/run-20261111-1/coco/analysis/GATE_coco_boundary_v28.json", "sha256": "b3562f04514157619ce2f0162a2ff3b5f78e8e732028b5d2f8cabfa83d7afabf", "kind": "original_gate_identity_reused_via_v52_no_original_reopen", "qualification_scope": "FP16 GQA COCO FullKV evaluation-only corrected-boundary control; not GQA source reconstruction."},
+    "protocol_master": {"path": "mosaickv/evicastkv_experiment_prompts/00_MASTER.md", "source_sha": "5494e684aab0c1ca5e6d60e32ac8c3e237fdb7b3", "kind": "versioned_instruction_not_measured_result"},
+    "protocol_scoring": {"path": "mosaickv/evicastkv_experiment_prompts/03_SCORING_AND_BOUNDARY.md", "source_sha": "5494e684aab0c1ca5e6d60e32ac8c3e237fdb7b3", "kind": "versioned_instruction_not_measured_result"},
+    "protocol_profile": {"path": "mosaickv/evicastkv_experiment_prompts/04_PROFILE_AND_MEASURE.md", "source_sha": "5494e684aab0c1ca5e6d60e32ac8c3e237fdb7b3", "kind": "versioned_instruction_not_measured_result"},
+    "protocol_mechanisms": {"path": "mosaickv/evicastkv_experiment_prompts/06_MECHANISM_ABLATIONS.md", "source_sha": "5494e684aab0c1ca5e6d60e32ac8c3e237fdb7b3", "kind": "versioned_instruction_not_measured_result"},
+    "protocol_statistics": {"path": "mosaickv/evicastkv_experiment_prompts/09_STATISTICS_AND_EXPORT.md", "source_sha": "5494e684aab0c1ca5e6d60e32ac8c3e237fdb7b3", "kind": "versioned_instruction_not_measured_result"},
+    "protocol_final_audit": {"path": "mosaickv/evicastkv_experiment_prompts/10_FINAL_REPRODUCTION_AUDIT.md", "source_sha": "5494e684aab0c1ca5e6d60e32ac8c3e237fdb7b3", "kind": "versioned_instruction_not_measured_result"}
+  },
+  "document_scope": {
+    "R01_R10_mapping": "Existing repository reviewer numbering in mosaickv/docs/fox_review_status_20261109.json, not the numbering of proposed experiment prompts. Older execution-status text is not reused as current status.",
+    "main_manuscript_modified": false,
+    "author_approval_claimed": false,
+    "original_raw_Parquet_log_model_credential_exclusion_data_read": false,
+    "new_experiments": 0,
+    "TeX_compile_status": "BUILD_STATUS_REPORTED_IN_SEPARATE_GENERATED_RECEIPT",
+    "TeX_compile_note": "Compilation is an engineering build check, not scientific evidence. See the separate generated build receipt; no self-referential PDF hash is embedded in this source."
+  }
+}

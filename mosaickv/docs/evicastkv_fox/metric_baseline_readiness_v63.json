@@ -1,0 +1,293 @@
+{
+  "schema": "metric_baseline_readiness_v63",
+  "schema_version": 1,
+  "audit_date": "2026-11-14",
+  "audit_kind": "source_only_no_new_measurements",
+  "reviewed_source_sha": "5494e684aab0c1ca5e6d60e32ac8c3e237fdb7b3",
+  "classification": "versioned_readiness_matrix_not_experiment_result_or_paper_admission",
+  "status_vocabulary": {
+    "implemented": "The named source implementation exists; this is not an empirical pass.",
+    "source_audited": "The stated source contract was inspected; this does not establish installed-environment fidelity or benchmark quality.",
+    "historical_evidence_only": "A saved audit or certificate documents a result in its original scope; underlying experiment artifacts were not reopened.",
+    "current_variant_fidelity_pending": "The exact modified variant and its declared controls still require a bound differential or empirical gate before the corresponding claim."
+  },
+  "sources": [
+    {
+      "id": "historical_baseline_audit",
+      "path": "mosaickv/docs/fox_baseline_readiness_20261110.json",
+      "sha256": "a9d5342591627f83dee72d29bf2e8d584bc4c4a399a73f8815300aace8dc8217",
+      "scope": "Saved read-only audit; its inspected base and dirty-worktree field describe that historical audit, not the current worktree. No remote verification was repeated."
+    },
+    {
+      "id": "prompt03",
+      "path": "mosaickv/evicastkv_experiment_prompts/03_SCORING_AND_BOUNDARY.md",
+      "sha256": "188b9b48964788791a1fb09d037d09030343c8db54eaed96116e93622c217786"
+    },
+    {
+      "id": "metric_registry",
+      "path": "mosaickv/src/mosaickv/evaluation/metrics/registry.py",
+      "sha256": "d8a19e424bf7dbbd0a59986984dcc607fa41f0b93084d834542c96f8489a1937"
+    },
+    {
+      "id": "metric_scorers",
+      "path": "mosaickv/src/mosaickv/evaluation/metrics/scorers.py",
+      "sha256": "37f076ac35b5043fab723a69502fa218d18295722decc1af8581bf7d6377cb0f"
+    },
+    {
+      "id": "paired_metric_statistics",
+      "path": "mosaickv/src/mosaickv/evaluation/metrics/statistics.py",
+      "sha256": "2396af114cd9039aec3d48e3556ea04115416e2219e8a5532a957819944c54d7"
+    },
+    {
+      "id": "coco_corpus_reducer",
+      "path": "mosaickv/src/mosaickv/evaluation/coco_shared_bytes.py",
+      "sha256": "408da9567a37a7fb4cf635800c87750da153b490924c2bee5367d9cbebd90069"
+    },
+    {
+      "id": "cider_draw_specific_acceleration",
+      "path": "mosaickv/src/mosaickv/evaluation/cider_resampling.py",
+      "sha256": "65cb792d15541580660e6f58a6aee13db3e71a12d76cb2c3ebe07e90313b0653"
+    },
+    {
+      "id": "metric_export",
+      "path": "mosaickv/src/mosaickv/evaluation/metric_export.py",
+      "sha256": "89391de4a5d184ccab211eac30776921838ae74572ca3b8bfb7204b610f6ae81"
+    },
+    {
+      "id": "prefixkv_metrics",
+      "path": "mosaickv/src/mosaickv/evaluation/prefixkv_metrics.py",
+      "sha256": "3b960b28b08bd79914ad6d9844981b765e70fb48db7c1a0946140a470287a283"
+    },
+    {
+      "id": "milebench_metrics",
+      "path": "mosaickv/src/mosaickv/evaluation/milebench.py",
+      "sha256": "d6d980934c056a0e2701ece5046a75e6aa505311ef8b6e4dbb1e42b3c9c1620c"
+    },
+    {
+      "id": "prefixkv_local_source",
+      "path": "mosaickv/src/mosaickv/baselines/prefixkv.py",
+      "sha256": "027286232da4904f2e6ac1a72b3803b2714d04576b950c0c40596ccacf2c48d1"
+    },
+    {
+      "id": "vl_cache_local_source",
+      "path": "mosaickv/src/mosaickv/baselines/vl_cache.py",
+      "sha256": "6f469eacd0ff0802ca1a0613661fe4a6911a7f9a34174eaa25b527df163ff8cb"
+    },
+    {
+      "id": "lookm_local_source",
+      "path": "mosaickv/src/mosaickv/baselines/lookm.py",
+      "sha256": "3c8cf6b2b72942c3ae83d720707f3414efd8dc454a80a6111cb235b3212c2214"
+    }
+  ],
+  "reused_certificates": [
+    {
+      "id": "v58_cpu_regression_context",
+      "path": "/scratch/djy8hg/workdir/fox-review-v58/run-20261114-5494e68-1/review_decision.json",
+      "sha256": "61c680c73f244e0c79ef84d0fdc7de42dc7f08e05c4ce495875fbc053aa70ef9",
+      "status": "historical_evidence_only",
+      "actual_schema_context": {
+        "classification": "CPU_regression_verification_only",
+        "CPU": {
+          "source_sha": "5494e684aab0c1ca5e6d60e32ac8c3e237fdb7b3",
+          "status": "passed",
+          "counts": {"tests": 10761, "failures": 0, "errors": 0, "skipped": 0},
+          "cpu_suite_sha256": "9170994bda37a2919d6e738d85cf0e91acc37bad319c8dd406d8dd760083b39b"
+        }
+      },
+      "scope": "Reused CPU correctness evidence for the reviewed base only; no tests were rerun for this matrix and no new metric, checkpoint, quality, latency, or paper-admission pass follows."
+    },
+    {
+      "id": "v52_scoped_engineering_context",
+      "path": "/scratch/djy8hg/workdir/fox-review-v52/run-20261113-4b2cf0b-engineering-retry1/engineering_review.json",
+      "sha256": "9237f9f562f29e814d7cdd637a2141958034eb471e0f17b3b975b6d4dac8dc4d",
+      "status": "historical_evidence_only",
+      "scope": "Saved certificate reports lossless BF16/MHA source/raw controls on two consumed inputs, exact initial/final/peak physical-byte matching and published-KV-plus-required-storage coverage; separate FP16/GQA FullKV evaluation-boundary controls passed. These do not establish GQA source reconstruction, whole-device GPU peak, independent quality, latency superiority, or six-component benefit.",
+      "original_raw_evidence_replayed": false
+    }
+  ],
+  "metric_readiness": [
+    {
+      "metric": "cider",
+      "status": "source_audited",
+      "implemented": true,
+      "source_ids": ["metric_registry", "metric_scorers", "coco_corpus_reducer", "cider_draw_specific_acceleration", "metric_export"],
+      "contract": {
+        "implementation": "lmms_eval.coco_cap.PTBTokenizer+Cider_x100@0.7.2",
+        "scorer_dependency": "pycocoevalcap==1.2",
+        "unit": "score_points",
+        "reduction": "Whole selected corpus; never the mean of shard CIDEr or frozen per-image CIDEr scores.",
+        "tokenization": "PTB tokens may be cached for exact prediction/reference pairs; changed pairs are rejected by TokenizedCider.",
+        "document_frequency": "Rebuilt for every paired bootstrap draw; repeated identities receive fresh evaluator-local occurrence IDs and count repeatedly.",
+        "accelerated_reducer": "ResampledCider rebuilds draw-specific DF/IDF, norms and clipped similarities; validate_official compares complete resampled corpora to the official reducer.",
+        "input_integrity": "Raw completed predictions and all reference captions are required; source-cohort IDs must be unique and paired across points."
+      },
+      "existing_test_sources": ["mosaickv/tests/unit/test_cider_resampling.py", "mosaickv/tests/unit/test_coco_shared_bytes.py"],
+      "current_measured_quality_pass_established": false,
+      "pending_gate_ids": ["scoring_fixture_and_parse_audit", "current_bound_metric_readout", "paired_inference_and_multiplicity"]
+    },
+    {
+      "metric": "accuracy",
+      "status": "source_audited",
+      "implemented": true,
+      "source_ids": ["metric_registry", "metric_export", "milebench_metrics"],
+      "contract": "Task-owned parser/scorer; MileBench dispatch distinguishes multiple-choice, token-needle and substring-needle routes. Dataset-level Accuracy and ROUGE-L follow their own hierarchy and are not mixed into a generic macro-score. MathVista percentage points are not interchangeable with fraction-valued Accuracy.",
+      "current_measured_quality_pass_established": false,
+      "pending_gate_ids": ["scoring_fixture_and_parse_audit", "current_bound_metric_readout"]
+    },
+    {
+      "metric": "anls",
+      "status": "source_audited",
+      "implemented": true,
+      "source_ids": ["metric_registry", "metric_scorers", "metric_export"],
+      "contract": "Pinned lmms-eval==0.7.2 ANLS, sample-level fraction and mean reduction; retain multiple references and the registered threshold. Do not substitute exact-match Accuracy or CIDEr.",
+      "current_measured_quality_pass_established": false,
+      "pending_gate_ids": ["scoring_fixture_and_parse_audit", "current_bound_metric_readout"]
+    },
+    {
+      "metric": "rouge_l_f1",
+      "status": "source_audited",
+      "implemented": true,
+      "source_ids": ["metric_registry", "metric_scorers", "prefixkv_metrics", "milebench_metrics"],
+      "contract": "Pinned rouge==1.0.1 ROUGE-L F1; PrefixKV uses a hash-bound deterministic FullKV output reference artifact, while MileBench applies its dataset-specific normalization/routing. Report these scopes separately and never call a measured ROUGE value a published-numeric reproduction pass without a registered target.",
+      "current_measured_quality_pass_established": false,
+      "pending_gate_ids": ["scoring_fixture_and_parse_audit", "current_bound_metric_readout"]
+    },
+    {
+      "metric": "teacher_forced_ppl",
+      "status": "source_audited",
+      "implemented": true,
+      "source_ids": ["metric_registry", "metric_scorers", "prefixkv_metrics"],
+      "contract": "Corpus PPL is exp(sum token NLL / sum evaluated tokens), not a mean of per-sample PPL. Exact teacher-forcing targets and FullKV output references have separate hashes; generated-reference ROUGE-L is a different metric. Generic metric export refuses to invent PPL from task_score.",
+      "current_measured_quality_pass_established": false,
+      "pending_gate_ids": ["current_bound_metric_readout", "prefixkv_current_path_fidelity"]
+    },
+    {
+      "metric": "paired_metric_bootstrap",
+      "status": "source_audited",
+      "implemented": true,
+      "source_ids": ["paired_metric_statistics", "coco_corpus_reducer", "cider_draw_specific_acceleration", "milebench_metrics"],
+      "contract": "Pair identical sample IDs and preserve metric-specific corpus or hierarchy reduction for each draw. Ordinary percentile intervals are diagnostic unless the preregistered family and multiplicity procedure separately justify a confirmatory claim. Metric confidence intervals are not adjusted latency-ratio certificates.",
+      "current_measured_quality_pass_established": false,
+      "pending_gate_ids": ["paired_inference_and_multiplicity"]
+    }
+  ],
+  "baseline_readiness": [
+    {
+      "baseline": "prefixkv",
+      "status": "current_variant_fidelity_pending",
+      "implementation_status": "implemented",
+      "source_ids": ["historical_baseline_audit", "prefixkv_local_source", "prefixkv_metrics"],
+      "upstream_pin_from_saved_audit": "597f1ab032704951550f93bcc8a23f1454b80aa4",
+      "historical_evidence_status": "historical_evidence_only",
+      "historical_evidence": "The pinned source audit documents an official published-PPL operating-point pass and a separate bounded official/local diagnostic pass; it also preserves a later negative parity gate. This matrix does not reopen those artifacts, repeat their values, or certify current modified-variant parity.",
+      "label_rules": [
+        "Official upstream execution, faithful local prefixkv_reimpl, and current byte-adapted comparisons are separate categories.",
+        "Question-scored selection-only, byte-rescaled, bounded-history, generalized-model and source-storage adaptations must disclose their exact labels and deviations.",
+        "Preserve compatible historical predictions and negative outcomes; no blanket rerun of the historical nominal-ratio campaign."
+      ],
+      "official_current_variant_reproduction_established": false,
+      "pending_gate_ids": ["prefixkv_current_path_fidelity", "current_bound_metric_readout", "shared_runtime_controls"]
+    },
+    {
+      "baseline": "vl_cache_reimpl",
+      "status": "current_variant_fidelity_pending",
+      "implementation_status": "implemented",
+      "source_ids": ["historical_baseline_audit", "vl_cache_local_source"],
+      "specification_path": "mosaickv/docs/baselines/vl_cache_spec.md",
+      "identity": "Local paper-derived reimplementation of ICLR VL-Cache, not official author software and not the similarly named recurring-image reuse system.",
+      "historical_evidence_status": "historical_evidence_only",
+      "historical_evidence": "The source audit documents local retrospective measurements, not a current-variant fresh confirmation or published-operating-point reproduction.",
+      "disclosures_required": ["grouped-query reduction", "recent-token interpretation", "integer budget apportionment", "dense physical-byte packing", "common HF execution rather than specialized paper kernels"],
+      "official_code_claim": false,
+      "official_current_variant_reproduction_established": false,
+      "pending_gate_ids": ["local_baseline_current_path_fidelity", "current_bound_metric_readout", "shared_runtime_controls"]
+    },
+    {
+      "baseline": "lookm_reimpl",
+      "status": "current_variant_fidelity_pending",
+      "implementation_status": "implemented",
+      "source_ids": ["historical_baseline_audit", "lookm_local_source", "milebench_metrics"],
+      "upstream_pin_from_saved_audit": "ecf0f51a9c416c2d85e47faf2638502f01a6d748",
+      "historical_evidence_status": "historical_evidence_only",
+      "historical_evidence": "The pinned source audit documents a patched official-path CPU import/random-model diagnostic, not GPU reproduction of a published operating point. Later compatibility or checkpoint diagnostics, if cited elsewhere, retain their own scope and do not become current baseline-quality evidence through this matrix.",
+      "label_rules": ["Local execution is lookm_reimpl; compatibility patches remain separately pinned and labeled.", "Do not infer the cause of degradation without a matched differential test.", "Representative MileBench subsets are not the complete benchmark; report Accuracy and ROUGE-L separately."],
+      "official_code_claim": false,
+      "official_current_variant_reproduction_established": false,
+      "pending_gate_ids": ["local_baseline_current_path_fidelity", "current_bound_metric_readout", "shared_runtime_controls"]
+    }
+  ],
+  "remaining_empirical_gates": [
+    {
+      "id": "scoring_fixture_and_parse_audit",
+      "status": "current_variant_fidelity_pending",
+      "requirement": "Bind current scorer/parser versions to prompt03's fixed validation subset and explicit empty/whitespace/option-label/answer-prefix/EOS-padding/multiple-reference fixtures. Retain raw and parsed outputs, invalid-output counts and inclusion rules; existing source tests are not a newly executed complete scoring gate.",
+      "deliverables": ["scoring_fixtures.json", "parsing_audit.csv", "GATE_scoring.json"]
+    },
+    {
+      "id": "prefixkv_current_path_fidelity",
+      "status": "current_variant_fidelity_pending",
+      "requirement": "Either prove the exact current implementation/decode controls unchanged from the bounded passing path, or, when separately authorized, run only a bounded differential gate on prompt03's first fixed validation inputs or representative saved attention fixtures. Compare scoring, quotas, mandatory/recent windows, retained IDs, cache lengths and relevant tensors; preserve the recorded negative path."
+    },
+    {
+      "id": "local_baseline_current_path_fidelity",
+      "status": "current_variant_fidelity_pending",
+      "requirement": "Bind exact current local baseline source/configuration and fixtures to the paper-derived spec or available pinned upstream path; for LOOK-M include merged tensors. Unavailable upstream execution remains fidelity_unverified, never official_reproduced. This is distinct from byte-adapted quality comparisons."
+    },
+    {
+      "id": "shared_runtime_controls",
+      "status": "current_variant_fidelity_pending",
+      "requirement": "For the intended comparison, require identical prompts/media/processor/tokenization/generation/output length/precision/HF backend/attention and cache accounting. Require retention-1 FullKV equivalence, clone/state isolation, actual constructed caches and equal measured initial/final/peak live backing bytes including padding/preallocation and required storage. Reuse passed controls only within their exact certified variant/input boundary; no universal whole-device memory claim."
+    },
+    {
+      "id": "boundary_sensitivity",
+      "status": "current_variant_fidelity_pending",
+      "requirement": "Apply prompt03's separately labeled A/B protocol only on adapter-valid inputs, with independent FullKV chunked-prefill controls, original logical positions, no duplicate held-back token, common available-prefix observations and matched representable allocation. Preserve blocked inputs and separate unequal-capacity strata. Corrected FP16/GQA FullKV transport certificates do not establish all compressed variants' first-answer sensitivity.",
+      "deliverables": ["predictions.jsonl", "first_token_sensitivity.csv", "boundary_protocols.yaml", "baseline_fidelity.md"]
+    },
+    {
+      "id": "current_bound_metric_readout",
+      "status": "current_variant_fidelity_pending",
+      "requirement": "Before new quality claims, bind the frozen exact variant, immutable cohort/media/reference ledgers, evaluator/runtime identities and complete paired predictions; recompute the correct cohort-level reducer and preserve failures. Any correction affecting scores must cover all affected methods on the same inputs while retaining invalidated pre-fix history. Fresh confirmation remains separately blocked."
+    },
+    {
+      "id": "paired_inference_and_multiplicity",
+      "status": "current_variant_fidelity_pending",
+      "requirement": "Preregister the metric-specific paired analysis, confidence level, tested family and multiplicity handling. A strict compressed-method latency claim requires the adjusted upper ratio bound <=1.00 against measured eligible competitors; <=1.05 is a tradeoff, not acceptance. FullKV is a quality reference, excluded from compressed-method latency ranking. No metric-source or CPU-suite pass establishes quality, latency, or six-component benefits."
+    }
+  ],
+  "execution_scope": {
+    "intended_lane": "COCO shared Hugging Face runtime",
+    "hardware_engine_reproduction_required_for_this_lane": false,
+    "scope_note": "vLLM/SGLang or specialized-kernel reproduction is not a prerequisite for a narrowly labeled HF comparison. Claims about those engines or published acceleration would need separate evidence.",
+    "existing_protocol_files_do_not_grant_new_authority": true,
+    "historical_results_rerun_requested": false
+  },
+  "authorization": {
+    "exclusion_scan_authorized": false,
+    "fresh_confirmation_authorized": false,
+    "GPU_execution_authorized": false,
+    "materialization_authorized": false,
+    "experiment_submission_authorized": false,
+    "paper_admission_authorized": false
+  },
+  "conclusions": {
+    "paper_ready": false,
+    "current_variant_baseline_fidelity_certified": false,
+    "independent_quality_confirmation": false,
+    "latency_superiority_established": false,
+    "six_component_benefit_established": false,
+    "globally_fresh": false,
+    "historical_media_exposure_resolved": false
+  },
+  "activity": {
+    "new_empirical_measurements": 0,
+    "new_tests_run": 0,
+    "GPU_jobs": 0,
+    "jobs_submitted": 0,
+    "original_results_or_metric_raw_records_reopened": 0,
+    "Parquet_bodies_opened": 0,
+    "archive_or_log_bodies_opened": 0,
+    "completed_proofs_replayed": 0,
+    "credential_fixture_read": false
+  }
+}
