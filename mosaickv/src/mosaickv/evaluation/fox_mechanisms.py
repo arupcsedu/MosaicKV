@@ -223,6 +223,10 @@ def validate_mechanism_contract(rows):
     for row in rows:
         if row["status"] != "completed":
             raise ValueError("incomplete mechanism experiment")
+        key = (row["workload"], row["sample_id"], row["budget_bytes"])
+        variant = row["variant"]
+        if variant in by_input[key]:
+            raise ValueError(f"duplicate mechanism experiment: {key}/{variant}")
         path = Path(row["mechanism_audit_path"])
         if sha(path) != row.get("mechanism_audit_sha256"):
             raise ValueError("mechanism activity artifact changed or is not hash-bound")
@@ -230,10 +234,9 @@ def validate_mechanism_contract(rows):
         for path, expected in activity.get("raw_terms", {}).items():
             if sha(Path(path)) != expected:
                 raise ValueError("mechanism term artifacts changed")
-        by_input[(row["workload"], row["sample_id"], row["budget_bytes"])][row["variant"]] = (
-            row,
-            activity,
-        )
+        by_input[key][variant] = (row, activity)
+    if not by_input:
+        raise ValueError("empty mechanism experiment")
     report = []
     for key, variants in sorted(by_input.items()):
         fixed = (
@@ -243,8 +246,24 @@ def validate_mechanism_contract(rows):
             "value-off",
             "cross-modal-off",
         )
-        if not set(fixed).issubset(variants):
+        required = (*fixed, "route-0", "route-zero-control")
+        if not set(required).issubset(variants):
             raise ValueError("missing prespecified mechanism condition")
+        # Bind the actual input/processor/runtime/scorer identity exported by
+        # the worker, not merely its display sample ID. These fields are not a
+        # claim that unrecorded query tensors or original KV were fingerprinted.
+        for field in ("input_sha", "processor_sha", "source_sha", "manifest_sha256", "scorer_sha"):
+            expected_length = 40 if field == "source_sha" else 64
+            values = [variants[v][0].get(field) for v in variants]
+            if any(
+                not isinstance(value, str)
+                or len(value) != expected_length
+                or any(char not in "0123456789abcdef" for char in value)
+                for value in values
+            ):
+                raise ValueError(f"missing or invalid mechanism source binding: {key}/{field}")
+            if len(set(values)) != 1:
+                raise ValueError(f"controlled mechanism source differs: {key}/{field}")
         for field in (
             "candidate_universe_sha256",
             "shortlist_sha256",
@@ -252,7 +271,10 @@ def validate_mechanism_contract(rows):
             "descriptors_sha256",
             "optimization_node_ids_sha256",
             "planner_routes",
+            "graph_routes",
         ):
+            if any(field not in variants[v][1] for v in fixed):
+                raise ValueError(f"missing controlled mechanism domain: {key}/{field}")
             fingerprints = {digest(variants[v][1][field]) for v in fixed}
             if len(fingerprints) != 1:
                 raise ValueError(f"controlled mechanism domain differs: {key}/{field}")
@@ -267,6 +289,8 @@ def validate_mechanism_contract(rows):
         anchor = set(complete["selected_source_ids"])
         for variant, (row, activity) in sorted(variants.items()):
             chosen = set(activity["selected_source_ids"])
+            if not chosen or len(chosen) != len(activity["selected_source_ids"]):
+                raise ValueError(f"empty or duplicate selected source IDs: {key}/{variant}")
             report.append(
                 dict(
                     workload=key[0],

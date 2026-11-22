@@ -207,6 +207,7 @@ def test_mechanism_contract_rejects_different_candidates(tmp_path):
             descriptors_sha256="same",
             optimization_node_ids_sha256="same",
             planner_routes=[[0, 0]],
+            graph_routes=[[0, 0]],
             selected_source_ids=[0, 1],
             zero_route_equivalence_passed=True,
         )
@@ -226,7 +227,141 @@ def test_mechanism_contract_rejects_different_candidates(tmp_path):
                 token_ids=[1, 2],
                 score=None,
                 subtask=None,
+                input_sha="a" * 64,
+                processor_sha="b" * 64,
+                source_sha="c" * 40,
+                manifest_sha256="d" * 64,
+                scorer_sha="e" * 64,
             )
         )
     with pytest.raises(ValueError, match="domain differs"):
         validate_mechanism_contract(copy.deepcopy(rows))
+
+
+def _controlled_rows(tmp_path, *, activity_change=None, row_change=None):
+    from mosaickv.evaluation.fox_campaign import sha, write_once
+
+    rows = []
+    for variant in (
+        "mechanism-complete",
+        "routed-prompt",
+        "coverage-off",
+        "value-off",
+        "cross-modal-off",
+        "route-0",
+        "route-zero-control",
+    ):
+        activity = dict(
+            candidate_universe_sha256="a" * 64,
+            shortlist_sha256="b" * 64,
+            quota_sha256="c" * 64,
+            descriptors_sha256="d" * 64,
+            optimization_node_ids_sha256="e" * 64,
+            planner_routes=[[0, 0]],
+            graph_routes=[[0, 0]],
+            selected_source_ids=[0, 1],
+            zero_route_equivalence_passed=True,
+        )
+        if activity_change and variant == "value-off":
+            activity_change(activity)
+        path = tmp_path / f"{variant}.json"
+        write_once(path, activity)
+        row = dict(
+            workload="fixture",
+            sample_id="x",
+            budget_bytes=2,
+            variant=variant,
+            mechanism_audit_path=str(path),
+            mechanism_audit_sha256=sha(path),
+            status="completed",
+            token_ids=[1, 2],
+            score=None,
+            subtask=None,
+            input_sha="a" * 64,
+            processor_sha="b" * 64,
+            source_sha="c" * 40,
+            manifest_sha256="d" * 64,
+            scorer_sha="e" * 64,
+        )
+        if row_change and variant == "value-off":
+            row_change(row)
+        rows.append(row)
+    return rows
+
+
+def test_mechanism_contract_accepts_bound_controlled_rows(tmp_path):
+    from mosaickv.evaluation.fox_mechanisms import validate_mechanism_contract
+
+    result = validate_mechanism_contract(_controlled_rows(tmp_path))
+    assert len(result) == 7
+    assert all(row["selected_jaccard"] == 1.0 for row in result)
+
+
+def test_mechanism_contract_rejects_duplicate_before_reading_duplicate_artifact(tmp_path):
+    import pytest
+
+    from mosaickv.evaluation.fox_mechanisms import validate_mechanism_contract
+
+    rows = _controlled_rows(tmp_path)
+    duplicate = dict(rows[0], mechanism_audit_path=str(tmp_path / "does-not-exist.json"))
+    with pytest.raises(ValueError, match="duplicate mechanism"):
+        validate_mechanism_contract([*rows, duplicate])
+
+
+def test_mechanism_contract_rejects_empty_or_missing_control(tmp_path):
+    import pytest
+
+    from mosaickv.evaluation.fox_mechanisms import validate_mechanism_contract
+
+    with pytest.raises(ValueError, match="empty mechanism"):
+        validate_mechanism_contract([])
+    with pytest.raises(ValueError, match="missing prespecified"):
+        validate_mechanism_contract(_controlled_rows(tmp_path)[:-1])
+
+
+def test_mechanism_contract_rejects_changed_or_unknown_graph_routes(tmp_path):
+    import pytest
+
+    from mosaickv.evaluation.fox_mechanisms import validate_mechanism_contract
+
+    for case in ("changed", "missing"):
+        directory = tmp_path / case
+        change = (
+            (lambda a: a.update(graph_routes=[[1, 0]]))
+            if case == "changed"
+            else (lambda a: a.pop("graph_routes"))
+        )
+        with pytest.raises(ValueError, match="mechanism domain"):
+            validate_mechanism_contract(_controlled_rows(directory, activity_change=change))
+
+
+def test_mechanism_contract_rejects_changed_or_unknown_source_bindings(tmp_path):
+    import pytest
+
+    from mosaickv.evaluation.fox_mechanisms import validate_mechanism_contract
+
+    for field in ("input_sha", "processor_sha", "source_sha", "manifest_sha256", "scorer_sha"):
+        for case in ("changed", "missing"):
+            directory = tmp_path / field / case
+            change = (
+                (lambda r, f=field: r.update({f: "f" * (40 if f == "source_sha" else 64)}))
+                if case == "changed"
+                else (lambda r, f=field: r.pop(f))
+            )
+            with pytest.raises(ValueError, match="mechanism source"):
+                validate_mechanism_contract(_controlled_rows(directory, row_change=change))
+
+
+def test_mechanism_contract_rejects_duplicate_or_empty_selection(tmp_path):
+    import pytest
+
+    from mosaickv.evaluation.fox_mechanisms import validate_mechanism_contract
+
+    for case, selected in (("empty", []), ("duplicate", [0, 0])):
+        with pytest.raises(ValueError, match="selected source IDs"):
+            validate_mechanism_contract(
+                _controlled_rows(
+                    tmp_path / case,
+                    activity_change=lambda a, s=selected: a.update(selected_source_ids=s),
+                )
+            )
