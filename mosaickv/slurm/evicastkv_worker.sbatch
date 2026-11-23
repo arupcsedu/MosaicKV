@@ -4,7 +4,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=12
 #SBATCH --gres=gpu:a100:1
-#SBATCH --mem=64G
+#SBATCH --mem=32G
 #SBATCH --time=02:00:00
 #SBATCH --partition=bii-gpu
 #SBATCH --reservation=bi_fox_dgx

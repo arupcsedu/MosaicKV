@@ -370,6 +370,10 @@ def resolved_config(lock, workload, method, cap, *, variant="complete"):
 
 
 def jobs_for(lock, stage):
+    if stage == "confirmation":
+        from evicastkv_confirmation_dependencies import confirmation_jobs
+
+        return confirmation_jobs()
     jobs = []
     if stage in {"smoke", "representation_canary"}:
         return [
@@ -426,7 +430,14 @@ def worker_time_limit(resources):
 
 
 def submit(root, stage, dependency=None):
+    if stage == "confirmation":
+        raise ValueError(
+            "development auto-submitter cannot launch confirmation; a separately reviewed "
+            "immutable specification and registered shared scheduler controller are required"
+        )
     lock = load_lock(root)
+    if any("confirmation" in subsets for subsets in lock.get("cohorts", {}).values()):
+        raise ValueError("development submission cannot consume a confirmation cohort")
     time_limit = worker_time_limit(lock["resources"])
     jobs = jobs_for(lock, stage)
     spec = root / "jobs" / f"{stage}.json"
@@ -557,6 +568,8 @@ def main(argv=None):
     parser.add_argument("--strict-fp16-reductions", action="store_true")
     parser.add_argument("--workloads", nargs="+", choices=tuple(BUDGETS))
     parser.add_argument("--scope-registration", type=Path)
+    parser.add_argument("--dependency-request")
+    parser.add_argument("--dependency-request-sha256")
     args = parser.parse_args(argv)
     if args.stage in custom_worker_stages and args.mode != "worker":
         parser.error("registered custom stages are worker-only; use their scope-bound controller")
@@ -576,9 +589,21 @@ def main(argv=None):
 
         analyze(args.root, args.stage)
     elif args.mode == "confirmation":
-        raise SystemExit(
-            "BLOCKED: exhaustive freshness inventory and human-reviewed selected_config.json "
-            "required"
+        if not args.dependency_request or not args.dependency_request_sha256:
+            parser.error(
+                "confirmation preparation requires an explicit dependency request and SHA256"
+            )
+        from evicastkv_confirmation_dependencies import main as prepare_confirmation
+
+        return prepare_confirmation(
+            [
+                "--root",
+                str(args.root),
+                "--request",
+                args.dependency_request,
+                "--request-sha256",
+                args.dependency_request_sha256,
+            ]
         )
     elif args.mode in ("dry-run", "validate"):
         lock = load_lock(args.root)

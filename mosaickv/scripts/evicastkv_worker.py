@@ -180,6 +180,16 @@ def check_layout(adapter, capture, token_ids):
 
 
 def run_worker(root: Path, stage: str, index: int, spec_sha: str):
+    confirmation = None
+    if stage == "confirmation":
+        from evicastkv_confirmation_dependencies import admit_confirmation_worker
+
+        # Missing prerequisites/activation fail before Torch, adapters or data.
+        confirmation = admit_confirmation_worker(root, spec_sha, index)
+    else:
+        from evicastkv_confirmation_dependencies import reject_confirmation_relabel
+
+        reject_confirmation_relabel(root, stage, spec_sha, index)
     import torch
 
     from mosaickv.adapters.huggingface import (
@@ -242,6 +252,11 @@ def run_worker(root: Path, stage: str, index: int, spec_sha: str):
             task=default_task_registry().resolve(task),
             dataset_revision=cfg.dataset.revision,
         )
+        if (
+            confirmation is not None
+            and [s.sample_id for s in ledger.samples] != cohort["sample_ids"]
+        ):
+            raise ValueError("actual ordered ledger identities differ from reviewed confirmation")
         samples = [ledger.samples[i] for i in job["indices"]]
         load_start = time.perf_counter()
         adapter = load_hf_adapter(
@@ -269,7 +284,12 @@ def run_worker(root: Path, stage: str, index: int, spec_sha: str):
                 "or mixed parameter precision"
             )
         summary["model_parameter_devices"] = parameter_devices
-        processor_sha = digest(processor_signature(adapter.processor))
+        actual_processor_signature = processor_signature(adapter.processor)
+        if confirmation is not None:
+            from mosaickv.evaluation.fox_confirmation_inputs import assert_runtime_processor_matches
+
+            assert_runtime_processor_matches(confirmation["inputs"], actual_processor_signature)
+        processor_sha = digest(actual_processor_signature)
         gpu = asdict(capture_gpu_environment(torch))
         visible = [x for x in gpu["devices"] if x["visible_to_process"]]
         if len(visible) != 1 or "A100" not in visible[0]["name"]:
@@ -296,7 +316,9 @@ def run_worker(root: Path, stage: str, index: int, spec_sha: str):
                     allow_tf32=torch.backends.cuda.matmul.allow_tf32,
                 ),
                 seed=lock["seed"],
-                measurement_type="measured_development",
+                measurement_type=(
+                    "measured_confirmation" if confirmation else "measured_development"
+                ),
                 slurm_job_id=os.environ["SLURM_JOB_ID"],
                 cpus_per_task=os.environ.get("SLURM_CPUS_PER_TASK"),
                 vllm="not_used",
@@ -405,7 +427,7 @@ def run_worker(root: Path, stage: str, index: int, spec_sha: str):
         if "arms" in job:
             arms = [tuple(a) for a in job["arms"]]
         # Five full-request warmups per arm on its actual shape regime; no prefills shared.
-        if stage in {"measurement", "optimization"}:
+        if stage in {"measurement", "optimization", "confirmation"}:
             for method, cap, variant in arms:
                 current = resolved_config(lock, workload, method, cap, variant=variant)
                 warmup_arm = (
@@ -436,7 +458,13 @@ def run_worker(root: Path, stage: str, index: int, spec_sha: str):
                 del runtime
         repeats = lock["repeats"] if stage in {"measurement", "optimization"} else 1
         for position, sample in enumerate(samples):
-            for repeat in range(repeats):
+            sample_repeats = (
+                lock["repeats"]
+                if confirmation is not None
+                and sample.sample_id in lock["confirmation_timing_sample_ids"]
+                else repeats
+            )
+            for repeat in range(sample_repeats):
                 offset = (job["indices"][position] + repeat) % len(arms)
                 ordered = arms[offset:] + arms[:offset]
                 if stage == "optimization":
@@ -475,6 +503,9 @@ def run_worker(root: Path, stage: str, index: int, spec_sha: str):
                         attempt=attempt,
                         repeat=repeat,
                         status="failed",
+                        measurement_type=(
+                            "measured_confirmation" if confirmation else "measured_development"
+                        ),
                         gpu_uuid=gpu_uuid,
                         slurm_job_id=os.environ["SLURM_JOB_ID"],
                     )

@@ -1,0 +1,108 @@
+Fox review: CPU dependency preparation and guarded confirmation dispatch
+=======================================================================
+
+Scope
+-----
+This extends the existing COCO-only review protocol. It does not change the
+candidate algorithm, evidence thresholds, sample-count proposal, permissions,
+or historical artifacts. The registered original exact-selection default is
+not a new opportunity/storage/six-component variant. Prototype, draft and
+repair paths remain disabled in this campaign. MileBench stays development-only.
+
+Candidate binding
+-----------------
+fox_confirmation_candidate.resolve_candidate_dependency binds both the exact
+registered configuration's file SHA256 and its canonical parsed contents. It
+exports the recovered coefficients, route policy, graph, forecast, selection
+and physical-capacity controls without declaring them newly qualified.
+
+A supplied freeze must be the existing V36 reviewed-original-default schema.
+Its delegated review, source, scientific contract and four engineering proof
+bindings must match. Correctness, metric, constructed byte matching and
+baseline fidelity are prerequisites to parameter qualification; history/media
+remain separate confirmation gates. Positive development p-values are NOT
+required to freeze this registered default. Failed successor policies cannot
+enter through this adapter. Old-source/different-geometry certificates do not
+automatically transfer to current source. No selected_config.json is synthesized.
+
+Dataset and processor binding
+-----------------------------
+The source-derived route is coco_caption / coco2014_cap_val,
+lmms-lab/COCO-Caption at c3213b54e173ae86517d481de17f31439d6f8c72,
+configuration default, split val. The pinned evaluator omits dataset_name;
+the existing local lmms adapter explicitly normalizes that omission to default.
+The route is not a dataset-completeness, media-provenance or freshness proof.
+The existing RunConfig schema is unchanged; config_name lives in this binding.
+
+Model and processor are llava-hf/llava-v1.6-mistral-7b-hf at
+2424fdd47412fccc66d91719126b420e9fbd7065, FP16/HF eager. Missing actual
+processor settings must not be guessed from the model name or asset presence.
+A reviewed evicastkv_reviewed_processor_fingerprints_v1 descriptor stores
+the whole original processor-signature hash plus component hashes and capture
+provenance. It does not store the tokenizer vocabulary in a metadata capsule.
+At runtime assert_runtime_processor_matches compares the actual object with
+that descriptor before generation. No AutoProcessor or dataset call occurs
+in CPU dependency preparation. Descriptor ingestion retains existing bounds.
+
+CPU entrypoint
+--------------
+Use the common environment and an explicit request containing path/SHA256
+references to small JSON capsules. Optional capsules are review, frozen,
+processor, the six qualified proofs, confirmation_evidence and saved readiness.
+Only explicitly registered bounded metadata is read. Raw-evidence links and
+the prospective sample ledger are NOT followed during preparation.
+
+source mosaickv/scripts/cache_env.sh
+export PYTHONDONTWRITEBYTECODE=1
+export PYTHONPATH="$PWD/mosaickv/src:$PWD/mosaickv/scripts"
+/scratch/djy8hg/env/mosaickv/bin/python mosaickv/scripts/evicastkv_campaign.py \
+  confirmation --root NEW_OUTPUT_DIRECTORY \
+  --dependency-request REQUEST_JSON_PATH \
+  --dependency-request-sha256 REQUEST_FILE_SHA256
+
+This writes confirmation_dependencies.json once. Status is
+BLOCKED_DEPENDENCIES or METADATA_READY_EXECUTION_DISABLED. Neither is a
+scientific quality result or execution authorization. Dirty source is allowed
+only for explicitly classified CPU preparation; it blocks canonical execution.
+Proposed main-matrix counts are 256 inputs and 1,792 requests, not measured
+counts. The six-test statistical family, 10,000 corpus bootstrap draws,
+64 predictions/63 appends and strict adjusted latency bound remain unchanged.
+
+Guarded worker boundary
+-----------------------
+The existing worker now checks confirmation admission BEFORE importing Torch,
+adapters or loading any model/data. A renamed development stage cannot use a
+confirmation cohort. Admission rebuilds the dependency decision from its
+explicit bounded/hash-bound metadata and checks immutable source, review,
+qualified proofs, processor, ordered cohort IDs, runtime-lock hash and a
+separate source/packet-bound confirmation-only execution scope. Preparation
+never creates that execution scope. Paper-admission and automatic follow-up
+remain false even in a separately enabled execution scope.
+
+The exact reviewed runtime-lock SHA256 protects arithmetic, tolerances and
+other recorded execution controls from post-registration drift. Additional
+checks enforce seed, warmups, repeats, sole COCO cohort/template, source-config
+allowlist and matching ledger identity order. Each shard owns eight inputs;
+all seven method/budget arms stay together. Only the 32 registered timing IDs
+receive three repetitions, after five warmups. Rows explicitly say
+measured_confirmation, not measured_development. Resources are one A100,
+12 CPUs, at most 32 GiB RAM and two hours per worker; aggregate ceiling six.
+
+The generic DEVELOPMENT auto-submitter refuses confirmation. Eventual launch
+still needs the registered shared scheduler controller and explicit verified
+scope/specification; this patch does not activate or submit it. The CPU plan
+does not certify GPU runtime behavior or supply missing cohort/proof records.
+
+Evidence boundaries
+-------------------
+Completed capsules are reused, not re-executed. Saved readiness is context,
+never a substitute for applicable FP16/GQA source correctness, actual constructed
+byte matching, native scorer/baseline evidence, historical identity/media
+closure, or independent power/cohort registration. Benchmark quality and
+latency superiority are outcomes to measure, not circular prerequisites for
+conducting confirmation. They remain unknown until independent execution.
+
+All new verification uses synthetic CPU fixtures. No fresh data was accessed,
+no GPU job submitted, no historical JSON/Parquet proof replayed, no home cache
+used and no credential fixture read. Missing proof and processor capsules stay
+missing; the code does not fabricate reviewed evidence to clear dependencies.
