@@ -26,6 +26,23 @@ def inputs():
         (ROOT / "configs/experiments/evicastkv_fox/coco/mosaickv_exact.json").read_text()
     )
     source = "a" * 40
+    instruction = "Synthetic unit-fixture delegation; not a real execution authorization."
+    delegation = capsule(
+        "/synthetic/authorization.json",
+        dict(
+            schema=candidate.AUTH_SCHEMA,
+            instruction_origin="user_current_turn",
+            user_instruction_text=instruction,
+            user_instruction_sha256=hashlib.sha256(instruction.encode()).hexdigest(),
+            delegated_original_default_review_authorized=True,
+            review_actor="codex_agent",
+            reviewed_by_user=False,
+            candidate_config_sha256=candidate.CONFIG_SHA256,
+            scientific_gates_unchanged=True,
+            failed_successors_remain_ineligible=True,
+            confirmation_ids_known_at_review=False,
+        ),
+    )
     review = dict(
         schema=candidate.REVIEW_SCHEMA,
         source_sha=source,
@@ -38,8 +55,8 @@ def inputs():
         positive_development_selection_claimed=False,
         confirmation_ids_known_at_review=False,
         selection_basis="original_registered_complete_default_not_favorable_successor_outcomes",
-        authorization_instruction_sha256="c" * 64,
-        authorization_binding=dict(path="/synthetic/authorization.json", sha256="e" * 64),
+        authorization_instruction_sha256=delegation["record"]["user_instruction_sha256"],
+        authorization_binding={k: delegation[k] for k in ("path", "sha256")},
         materialization_authorized=False,
         fresh_confirmation_authorized=False,
         paper_claim_allowed=False,
@@ -94,6 +111,7 @@ def inputs():
         config_file_sha256=candidate.CONFIG_SHA256,
         frozen=frozen,
         review=review,
+        delegation=delegation,
         proof_capsules={k: proofs[k] for k in candidate.CORE_PROOFS},
         expected_source_sha=source,
     ), proofs
@@ -106,6 +124,7 @@ def test_static_contract_exactly_matches_existing_v36_default():
     assert candidate.SCIENTIFIC_CONTRACT == original.SCIENTIFIC_CONTRACT
     assert candidate.FREEZE_SCHEMA == original.FREEZE_SCHEMA
     assert candidate.CORE_PROOFS == original.CANDIDATE_PROOFS
+    assert candidate.AUTH_SCHEMA == original.AUTH_SCHEMA
 
 
 def test_reference_binding_recovers_policy_but_is_not_selection_or_qualification(inputs):
@@ -142,7 +161,7 @@ def test_synthetic_qualified_default_needs_no_positive_development_pvalue(inputs
     assert result["unresolved"] == ["history_media_cohort_and_confirmation_admission_required"]
 
 
-@pytest.mark.parametrize("missing", ("review", "proof_capsules"))
+@pytest.mark.parametrize("missing", ("review", "proof_capsules", "delegation"))
 def test_missing_capsules_never_qualify(inputs, missing):
     args, _ = inputs
     args[missing] = None
@@ -233,4 +252,82 @@ def test_proof_links_are_not_opened_or_treated_as_new_attestations(inputs):
     args, _ = inputs
     args["proof_capsules"]["metric"]["record"]["evidence_files"] = []
     with pytest.raises(ValueError, match="actual completed evidence"):
+        candidate.resolve_candidate_dependency(**args)
+
+
+def test_missing_delegation_record_is_explicitly_unqualified(inputs):
+    args, _ = inputs
+    args["delegation"] = None
+    result = candidate.resolve_candidate_dependency(**args)
+    assert result["qualified"] is False
+    assert result["unresolved"] == ["reviewed_delegation_capsule_required"]
+    assert result["selected_config"] is None
+    assert not any(result["authorization"].values())
+
+
+def test_loaded_delegation_matches_exact_existing_v36_contract(inputs, monkeypatch):
+    import evicastkv_original_complete_admission_v36 as original
+
+    args, _ = inputs
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("pure delegation validation opened a file or scheduled a process")
+
+    monkeypatch.setattr(Path, "open", forbidden)
+    original.validate_authorization(args["delegation"]["record"])
+    result = candidate.validate_delegation(
+        args["delegation"], args["review"]["record"], args["frozen"]
+    )
+    assert result == {k: args["delegation"][k] for k in ("path", "sha256")}
+    selected = candidate.resolve_candidate_dependency(**args)["selected_config"]
+    assert selected["delegation"] == result
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("schema", "unreviewed_authority"),
+        ("instruction_origin", "generated_guess"),
+        ("user_instruction_text", " "),
+        ("user_instruction_sha256", "0" * 64),
+        ("delegated_original_default_review_authorized", False),
+        ("delegated_original_default_review_authorized", 1),
+        ("review_actor", "human_user"),
+        ("reviewed_by_user", True),
+        ("reviewed_by_user", 0),
+        ("candidate_config_sha256", "0" * 64),
+        ("scientific_gates_unchanged", False),
+        ("failed_successors_remain_ineligible", False),
+        ("confirmation_ids_known_at_review", True),
+    ],
+)
+def test_changed_delegation_scope_or_fabricated_human_review_is_rejected(inputs, field, value):
+    import evicastkv_original_complete_admission_v36 as original
+
+    args, _ = inputs
+    args["delegation"]["record"][field] = value
+    with pytest.raises(ValueError):
+        original.validate_authorization(args["delegation"]["record"])
+    with pytest.raises(ValueError, match="delegated review"):
+        candidate.resolve_candidate_dependency(**args)
+
+
+@pytest.mark.parametrize(
+    "field,value", [("path", "/synthetic/different.json"), ("sha256", "f" * 64)]
+)
+def test_valid_but_differently_bound_delegation_cannot_qualify(inputs, field, value):
+    args, _ = inputs
+    args["delegation"][field] = value
+    with pytest.raises(ValueError, match="delegation differs"):
+        candidate.resolve_candidate_dependency(**args)
+
+
+def test_instruction_text_hash_must_bind_review_and_freeze(inputs):
+    args, _ = inputs
+    text = "A different synthetic instruction; not the reviewed authorization."
+    args["delegation"]["record"]["user_instruction_text"] = text
+    args["delegation"]["record"]["user_instruction_sha256"] = hashlib.sha256(
+        text.encode()
+    ).hexdigest()
+    with pytest.raises(ValueError, match="delegation differs"):
         candidate.resolve_candidate_dependency(**args)

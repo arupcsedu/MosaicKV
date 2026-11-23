@@ -29,6 +29,10 @@ OPTIONAL_CAPSULES = (
     "processor",
     "confirmation_evidence",
     "readiness_capsule",
+    "delegation",
+    "power_registration",
+    "power_analysis",
+    "cohort_disjointness",
 )
 PREPARATION_SOURCE_FILES = (
     "mosaickv/scripts/evicastkv_confirmation_dependencies.py",
@@ -135,6 +139,7 @@ def resolve_request(reader, request, *, source_sha, source_clean):
         config_file_sha256=config["sha256"],
         frozen=optional["frozen"]["record"] if optional["frozen"] else None,
         review=optional["review"],
+        delegation=optional["delegation"],
         proof_capsules={
             k: v
             for k, v in proofs.items()
@@ -151,6 +156,11 @@ def resolve_request(reader, request, *, source_sha, source_clean):
     if evidence:
         evidence = dict(
             evidence["record"], proof_capsules=proofs, review_capsule=optional["review"]
+        )
+        evidence.update(
+            power_registration_capsule=optional["power_registration"],
+            power_analysis_capsule=optional["power_analysis"],
+            cohort_disjointness_capsule=optional["cohort_disjointness"],
         )
     plan = build_confirmation_plan(
         protocol["record"],

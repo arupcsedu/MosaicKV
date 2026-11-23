@@ -7,8 +7,10 @@ is not a substitute for original scientific evidence or execution authority.
 
 from __future__ import annotations
 
+import math
 from pathlib import PurePosixPath
 
+from mosaickv.evaluation.fox_campaign import digest
 from mosaickv.evaluation.paper_readiness_v63 import AUTHORIZATION_KEYS, disabled_authorization
 
 PROOF_KINDS = {
@@ -177,6 +179,141 @@ def _sample_ids(values, count, label):
     return set(values)
 
 
+def _metadata_binding(value, label):
+    if not isinstance(value, dict) or set(value) != {"path", "sha256"}:
+        raise ValueError(f"{label}: metadata path/hash binding required")
+    path = value["path"]
+    if (
+        not isinstance(path, str)
+        or not path
+        or "\x00" in path
+        or ".." in PurePosixPath(path).parts
+        or PurePosixPath(path).suffix != ".json"
+        or any(term in path.lower() for term in (".codex", "credential", "secret", ".ssh"))
+        or not _hash(value["sha256"])
+        or value["sha256"] == "0" * 64
+    ):
+        raise ValueError(f"{label}: safe metadata path and immutable hash required")
+    return dict(value)
+
+
+def _capsule(evidence, key, schema, common):
+    """Validate a caller-read capsule without opening any linked raw evidence."""
+    value = evidence.get(key)
+    if not isinstance(value, dict) or set(value) != {"path", "sha256", "record"}:
+        raise ValueError(f"{key}: explicit hash-bound metadata capsule required")
+    bound = _metadata_binding({name: value[name] for name in ("path", "sha256")}, key)
+    _exact(value["record"], dict(schema=schema, **common), key)
+    return value["record"], bound
+
+
+def _registration_capsules(evidence, candidate, inputs, source_sha, cohort, proofs):
+    """Require actual power and cohort reports, not unverifiable PASS hashes.
+
+    This validates saved receipt semantics, NOT the analysis itself. In
+    particular no additive/normal power model is invented for corpus CIDEr.
+    """
+    common = dict(
+        source_sha=source_sha,
+        candidate_config_file_sha256=candidate["candidate_config_file_sha256"],
+        input_binding_sha256=inputs["binding_sha256"],
+        ledger_sha256=cohort["ledger_sha256"],
+    )
+    statistics = dict(
+        sample_size=256,
+        family_size=6,
+        familywise_alpha=0.05,
+        bootstrap_replicates=10000,
+        bootstrap_seed=20271014,
+    )
+    registration, registered_binding = _capsule(
+        evidence,
+        "power_registration_capsule",
+        "fox_confirmation_power_registration_v1",
+        dict(
+            common,
+            **statistics,
+            reviewed=True,
+            independently_registered=True,
+            outcome_blind=True,
+            no_confirmation_outcomes_used=True,
+        ),
+    )
+    if evidence["power"].get("registration_sha256") != registered_binding["sha256"]:
+        raise ValueError("power registration: capsule hash differs from registered hash")
+    analysis, analysis_binding = _capsule(
+        evidence,
+        "power_analysis_capsule",
+        "fox_confirmation_power_analysis_v1",
+        dict(
+            common,
+            **statistics,
+            complete=True,
+            evidence_scope="source_development_only",
+            no_confirmation_outcomes_used=True,
+            procedure="corpus_CIDEr_cluster_resampling",
+        ),
+    )
+    if registration.get("analysis_binding") != analysis_binding:
+        raise ValueError("power registration: linked analysis capsule differs")
+    target, lower, effect = (
+        registration.get("target_power"),
+        analysis.get("estimated_power_lower_bound"),
+        analysis.get("assumed_effect_cider"),
+    )
+    if (
+        any(type(v) not in (int, float) or not math.isfinite(v) for v in (target, lower, effect))
+        or not 0 < target < 1
+        or not target <= lower <= 1
+        or effect <= 0
+        or type(analysis.get("target_power")) is not type(target)
+        or analysis["target_power"] != target
+        or not isinstance(analysis.get("assumptions"), str)
+        or not analysis["assumptions"].strip()
+    ):
+        raise ValueError(
+            "power analysis: finite preregistered assumptions and adequate bound required"
+        )
+    files = analysis.get("evidence_files")
+    if not isinstance(files, list) or not files:
+        raise ValueError("power analysis: actual development evidence bindings required")
+    paths = []
+    for item in files:
+        # Bind references only; the reusable proof's raw evidence is not replayed.
+        if not isinstance(item, dict) or set(item) != {"path", "sha256"}:
+            raise ValueError("power analysis: development evidence path/hash required")
+        bound = _metadata_binding(item, "power analysis development evidence")
+        paths.append(bound["path"])
+    if len(paths) != len(set(paths)):
+        raise ValueError("power analysis: duplicate development evidence path")
+    inventory = cohort.get("input_media_source_group_inventory_sha256")
+    if not _hash(inventory) or inventory == "0" * 64:
+        raise ValueError("cohort: independently bound input media/source-group inventory required")
+    _, disjoint_binding = _capsule(
+        evidence,
+        "cohort_disjointness_capsule",
+        "fox_confirmation_cohort_disjointness_v1",
+        dict(
+            common,
+            reviewed=True,
+            complete=True,
+            outcome_blind=True,
+            no_confirmation_outcomes_used=True,
+            sample_count=256,
+            checked_sample_count=256,
+            sample_ids_sha256=digest(cohort["sample_ids"]),
+            input_media_source_group_inventory_sha256=inventory,
+            history_proof=proofs["history"],
+            media_proof=proofs["media"],
+            identity_intersections=0,
+            media_intersections=0,
+            source_group_intersections=0,
+        ),
+    )
+    if cohort.get("disjointness_report_sha256") != disjoint_binding["sha256"]:
+        raise ValueError("cohort: disjointness report hash differs")
+
+
 def _evidence(evidence, candidate, inputs, source_sha):
     _exact(
         evidence,
@@ -245,6 +382,7 @@ def _evidence(evidence, candidate, inputs, source_sha):
     _exact(power, {"independently_registered": True, "sample_size": 256}, "power registration")
     if not _hash(power.get("registration_sha256")):
         raise ValueError("power registration: hash-bound independent registration required")
+    _registration_capsules(evidence, candidate, inputs, source_sha, cohort, proofs)
     _exact(
         evidence.get("measurement"),
         {

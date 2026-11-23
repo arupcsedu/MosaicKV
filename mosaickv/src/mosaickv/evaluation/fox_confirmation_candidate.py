@@ -20,6 +20,7 @@ CONFIG_SHA256 = "389b80ff6529df2072c2a1839469f4be3687be0ec45e38bc124cd834273004c
 CANONICAL_CONFIG_SHA256 = "52b2cc02506a631e1263c5e9e2ce378a86325c783eeee78d0199b0c9a8148727"
 FREEZE_SCHEMA = "evicastkv_original_complete_freeze_v36"
 REVIEW_SCHEMA = "evicastkv_original_complete_prospective_review_v36"
+AUTH_SCHEMA = "evicastkv_original_complete_delegated_review_authorization_v36"
 CORE_PROOFS = ("correctness", "metric", "byte_matching", "baseline_fidelity")
 CONTROLS = dict(
     model_id="llava-hf/llava-v1.6-mistral-7b-hf",
@@ -125,6 +126,43 @@ def _binding(value):
     return {"path": path, "sha256": _hash(value["sha256"])}
 
 
+def validate_delegation(capsule, review_record, frozen_record):
+    """Validate the explicitly loaded V36 delegation, never follow its path.
+
+    The caller has already bound the record's bytes with CapsuleReader. This
+    check neither infers human approval nor grants experiment authorization.
+    """
+    if not isinstance(review_record, dict) or not isinstance(frozen_record, dict):
+        raise ValueError("review and freeze objects required for delegation binding")
+    binding = _binding(capsule)
+    record = capsule["record"]
+    text = record.get("user_instruction_text")
+    if (
+        record.get("schema") != AUTH_SCHEMA
+        or record.get("instruction_origin") != "user_current_turn"
+        or not isinstance(text, str)
+        or not text.strip()
+        or record.get("user_instruction_sha256") != hashlib.sha256(text.encode()).hexdigest()
+        or record.get("delegated_original_default_review_authorized") is not True
+        or record.get("review_actor") != "codex_agent"
+        or record.get("reviewed_by_user") is not False
+        or record.get("candidate_config_sha256") != CONFIG_SHA256
+        or record.get("scientific_gates_unchanged") is not True
+        or record.get("failed_successors_remain_ineligible") is not True
+        or record.get("confirmation_ids_known_at_review") is not False
+    ):
+        raise ValueError("exact hash-bound delegated review required; no invented human approval")
+    if (
+        review_record.get("authorization_binding") != binding
+        or review_record.get("authorization_instruction_sha256")
+        != record["user_instruction_sha256"]
+        or frozen_record.get("authorization_instruction_sha256")
+        != record["user_instruction_sha256"]
+    ):
+        raise ValueError("loaded delegation differs from the reviewed freeze binding")
+    return binding
+
+
 def validate_qualified_proof(kind, capsule, review_record, *, expected_source_sha):
     """Validate V36 metadata semantics; do NOT reopen its evidence-file links."""
     if kind not in PROOF_FIELDS:
@@ -183,6 +221,7 @@ def resolve_candidate_dependency(
     config_file_sha256,
     frozen=None,
     review=None,
+    delegation=None,
     proof_capsules=None,
     expected_source_sha=None,
 ):
@@ -239,6 +278,9 @@ def resolve_candidate_dependency(
     if review is None or proof_capsules is None:
         result["unresolved"] = ["review_and_four_qualified_proof_capsules_required"]
         return result
+    if delegation is None:
+        result["unresolved"] = ["reviewed_delegation_capsule_required"]
+        return result
     review_binding = _binding(review)
     reviewed = review["record"]
     source = _hash(frozen.get("source_sha"), 40)
@@ -279,6 +321,7 @@ def resolve_candidate_dependency(
     if not isinstance(authority, dict) or set(authority) != {"path", "sha256"}:
         raise ValueError("original delegated-review authorization binding required")
     _binding(dict(authority, record={}))
+    delegation_binding = validate_delegation(delegation, reviewed, frozen)
     for record in (frozen, reviewed):
         for name in (
             "materialization_authorized",
@@ -320,6 +363,7 @@ def resolve_candidate_dependency(
             "source_sha": source,
             "candidate_config_sha256": CONFIG_SHA256,
             "review": review_binding,
+            "delegation": delegation_binding,
             "proofs": bindings,
             "scientific_contract": deepcopy(SCIENTIFIC_CONTRACT),
         },

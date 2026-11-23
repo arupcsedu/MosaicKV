@@ -65,6 +65,24 @@ def test_current_unqualified_inputs_produce_blocked_plan_without_model_imports(
     assert len(result["evidence_bindings"]) == 2
 
 
+@pytest.mark.parametrize(
+    "field", ["delegation", "power_registration", "power_analysis", "cohort_disjointness"]
+)
+def test_explicit_additional_capsules_are_hash_checked_not_followed(tmp_path, dep_request, field):
+    body = {"classification": "synthetic_parser_test_only", "raw_link": "/never/raw.parquet"}
+    dep_request[field] = put(tmp_path, f"{field}.json", body)
+    result = cli.resolve_request(
+        CapsuleReader(tmp_path), dep_request, source_sha="a" * 40, source_clean=False
+    )
+    assert result["plan"]["prerequisite_metadata_validated"] is False
+    assert len(result["evidence_bindings"]) == 3
+    (tmp_path / f"{field}.json").write_text('{"changed":true}')
+    with pytest.raises(ValueError, match="hash differs"):
+        cli.resolve_request(
+            CapsuleReader(tmp_path), dep_request, source_sha="a" * 40, source_clean=False
+        )
+
+
 def test_preparation_is_write_once_and_explicitly_exploratory_when_dirty(
     tmp_path, dep_request, monkeypatch
 ):

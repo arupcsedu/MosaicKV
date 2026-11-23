@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from mosaickv.evaluation.fox_campaign import digest
 from mosaickv.evaluation.fox_confirmation_candidate import CONFIG_SHA256, CONTROLS, PROOF_FIELDS
 from mosaickv.evaluation.fox_confirmation_plan import build_confirmation_plan
 from mosaickv.evaluation.paper_readiness_v63 import AUTHORIZATION_KEYS
@@ -113,6 +114,80 @@ def inputs():
             repetitions=3,
         ),
     )
+    common = dict(
+        source_sha=source,
+        candidate_config_file_sha256=CONFIG_SHA256,
+        input_binding_sha256="b" * 64,
+        ledger_sha256=evidence["cohort"]["ledger_sha256"],
+    )
+    statistics = dict(
+        sample_size=256,
+        family_size=6,
+        familywise_alpha=0.05,
+        bootstrap_replicates=10000,
+        bootstrap_seed=20271014,
+    )
+    analysis = capsule(
+        "synthetic/power-analysis.json",
+        dict(
+            schema="fox_confirmation_power_analysis_v1",
+            **common,
+            **statistics,
+            complete=True,
+            evidence_scope="source_development_only",
+            no_confirmation_outcomes_used=True,
+            procedure="corpus_CIDEr_cluster_resampling",
+            assumptions="Synthetic fixture only: registered cluster-resampling alternative.",
+            assumed_effect_cider=2.0,
+            target_power=0.8,
+            estimated_power_lower_bound=0.85,
+            evidence_files=[
+                dict(path="synthetic/closed-development-analysis.json", sha256="7" * 64)
+            ],
+        ),
+    )
+    registration = capsule(
+        "synthetic/power-registration.json",
+        dict(
+            schema="fox_confirmation_power_registration_v1",
+            **common,
+            **statistics,
+            reviewed=True,
+            independently_registered=True,
+            outcome_blind=True,
+            no_confirmation_outcomes_used=True,
+            target_power=0.8,
+            analysis_binding={k: analysis[k] for k in ("path", "sha256")},
+        ),
+    )
+    evidence["cohort"]["input_media_source_group_inventory_sha256"] = "6" * 64
+    disjoint = capsule(
+        "synthetic/cohort-disjointness.json",
+        dict(
+            schema="fox_confirmation_cohort_disjointness_v1",
+            **common,
+            reviewed=True,
+            complete=True,
+            outcome_blind=True,
+            no_confirmation_outcomes_used=True,
+            sample_count=256,
+            checked_sample_count=256,
+            sample_ids_sha256=digest(ids),
+            input_media_source_group_inventory_sha256="6" * 64,
+            history_proof=evidence["gate_proofs"]["history"],
+            media_proof=evidence["gate_proofs"]["media"],
+            identity_intersections=0,
+            media_intersections=0,
+            source_group_intersections=0,
+        ),
+    )
+    evidence.update(
+        power_registration_capsule=registration,
+        power_analysis_capsule=analysis,
+        cohort_disjointness_capsule=disjoint,
+    )
+    evidence["power"]["registration_sha256"] = registration["sha256"]
+    evidence["cohort"]["disjointness_report_sha256"] = disjoint["sha256"]
     return dict(
         protocol=protocol,
         candidate_binding=candidate,
@@ -296,4 +371,113 @@ def test_missing_runtime_lock_hash_cannot_authorize_late_runtime_resolution(inpu
 def test_closure_identity_power_and_measurement_must_be_bound(inputs, section, field, value):
     inputs["confirmation_evidence"][section][field] = value
     with pytest.raises(ValueError):
+        build_confirmation_plan(**inputs)
+
+
+@pytest.mark.parametrize(
+    "field", ["power_registration_capsule", "power_analysis_capsule", "cohort_disjointness_capsule"]
+)
+def test_bare_hash_cannot_replace_explicit_registration_or_report_capsule(inputs, field):
+    del inputs["confirmation_evidence"][field]
+    with pytest.raises(ValueError, match="capsule required"):
+        build_confirmation_plan(**inputs)
+
+
+def test_nonexistent_arbitrary_power_registration_hash_is_rejected(inputs):
+    inputs["confirmation_evidence"]["power"]["registration_sha256"] = "f" * 64
+    with pytest.raises(ValueError, match="capsule hash differs"):
+        build_confirmation_plan(**inputs)
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("source_sha", "c" * 40),
+        ("candidate_config_file_sha256", "c" * 64),
+        ("input_binding_sha256", "c" * 64),
+        ("ledger_sha256", "c" * 64),
+        ("sample_size", 512),
+        ("family_size", 2),
+        ("familywise_alpha", 0.1),
+        ("bootstrap_replicates", 9999),
+        ("bootstrap_seed", 1),
+        ("no_confirmation_outcomes_used", False),
+    ],
+)
+def test_power_registration_must_match_frozen_controls(inputs, field, value):
+    inputs["confirmation_evidence"]["power_registration_capsule"]["record"][field] = value
+    with pytest.raises(ValueError):
+        build_confirmation_plan(**inputs)
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("estimated_power_lower_bound", 0.79),
+        ("estimated_power_lower_bound", float("nan")),
+        ("estimated_power_lower_bound", float("inf")),
+        ("estimated_power_lower_bound", True),
+        ("assumed_effect_cider", 0.0),
+        ("target_power", 0.1),
+        ("assumptions", " "),
+        ("evidence_files", []),
+        ("procedure", "normal_approximation_of_mean_shard_CIDEr"),
+        ("evidence_scope", "confirmation_outputs"),
+        ("complete", 1),
+    ],
+)
+def test_actual_development_power_analysis_is_required_without_inventing_a_normal_model(
+    inputs, field, value
+):
+    inputs["confirmation_evidence"]["power_analysis_capsule"]["record"][field] = value
+    with pytest.raises(ValueError):
+        build_confirmation_plan(**inputs)
+
+
+def test_power_analysis_receipt_must_match_registration_binding(inputs):
+    inputs["confirmation_evidence"]["power_registration_capsule"]["record"]["analysis_binding"] = {
+        "path": "synthetic/other-analysis.json",
+        "sha256": "d" * 64,
+    }
+    with pytest.raises(ValueError, match="linked analysis"):
+        build_confirmation_plan(**inputs)
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("identity_intersections", 1),
+        ("media_intersections", 1),
+        ("source_group_intersections", 1),
+        ("identity_intersections", False),
+        ("checked_sample_count", 255),
+        ("complete", False),
+        ("source_sha", "c" * 40),
+        ("ledger_sha256", "c" * 64),
+        ("input_media_source_group_inventory_sha256", "c" * 64),
+    ],
+)
+def test_reused_consumed_or_partially_checked_cohort_cannot_pass_disjointness(inputs, field, value):
+    inputs["confirmation_evidence"]["cohort_disjointness_capsule"]["record"][field] = value
+    with pytest.raises(ValueError):
+        build_confirmation_plan(**inputs)
+
+
+def test_cohort_order_is_bound_to_disjointness_report(inputs):
+    ids = inputs["confirmation_evidence"]["cohort"]["sample_ids"]
+    ids[0], ids[1] = ids[1], ids[0]
+    with pytest.raises(ValueError, match="sample_ids_sha256"):
+        build_confirmation_plan(**inputs)
+
+
+def test_source_group_inventory_must_be_bound_independently_in_cohort(inputs):
+    del inputs["confirmation_evidence"]["cohort"]["input_media_source_group_inventory_sha256"]
+    with pytest.raises(ValueError, match="independently bound"):
+        build_confirmation_plan(**inputs)
+
+
+def test_disjointness_proof_hash_and_history_media_links_must_agree(inputs):
+    report = inputs["confirmation_evidence"]["cohort_disjointness_capsule"]["record"]
+    report["history_proof"] = dict(path="synthetic/other-history.json", sha256="a" * 64)
+    with pytest.raises(ValueError, match="history_proof"):
         build_confirmation_plan(**inputs)

@@ -18,7 +18,10 @@ and physical-capacity controls without declaring them newly qualified.
 
 A supplied freeze must be the existing V36 reviewed-original-default schema.
 Its delegated review, source, scientific contract and four engineering proof
-bindings must match. Correctness, metric, constructed byte matching and
+bindings must match. The actual delegation-ledger capsule must be supplied,
+hash-verified and checked against the original V36 authorization contract and
+instruction text; a path/hash assertion in the review is not sufficient.
+Correctness, metric, constructed byte matching and
 baseline fidelity are prerequisites to parameter qualification; history/media
 remain separate confirmation gates. Positive development p-values are NOT
 required to freeze this registered default. Failed successor policies cannot
@@ -48,7 +51,8 @@ CPU entrypoint
 --------------
 Use the common environment and an explicit request containing path/SHA256
 references to small JSON capsules. Optional capsules are review, frozen,
-processor, the six qualified proofs, confirmation_evidence and saved readiness.
+delegation, processor, the six qualified proofs, confirmation_evidence,
+power_registration, power_analysis, cohort_disjointness and saved readiness.
 Only explicitly registered bounded metadata is read. Raw-evidence links and
 the prospective sample ledger are NOT followed during preparation.
 
@@ -101,6 +105,16 @@ byte matching, native scorer/baseline evidence, historical identity/media
 closure, or independent power/cohort registration. Benchmark quality and
 latency superiority are outcomes to measure, not circular prerequisites for
 conducting confirmation. They remain unknown until independent execution.
+
+Power registration must link an explicit hash-bound completed development-only
+power-analysis capsule with matching source/config/input/ledger, sample count,
+statistical family, assumptions and declared target. An arbitrary hash or bare
+adequate-power flag is rejected. No normal approximation is substituted for
+corpus CIDEr. Global history/media closure also does not establish the new
+cohort's disjointness: an independent report must bind its exact ordered IDs,
+ledger and media/source-group inventory to those history proofs, with complete
+outcome-blind coverage and zero intersections. Preparation never invents the
+missing analysis, report, delegation or original historical evidence.
 
 All new verification uses synthetic CPU fixtures. No fresh data was accessed,
 no GPU job submitted, no historical JSON/Parquet proof replayed, no home cache
